@@ -11,7 +11,9 @@ available.
 
 from __future__ import annotations
 
+import inspect
 import logging
+import math
 import os
 from typing import Any, Dict, Optional
 
@@ -51,6 +53,26 @@ _MEGA_MOE_NVCC_TMPDIR_ENV = "MEGA_MOE_NVCC_TMPDIR"
 _PRE_KERNEL_BARRIER_ENV = "MEGA_MOE_PRE_KERNEL_BARRIER"
 _PRE_KERNEL_BARRIER_VERBOSE_ENV = "MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
+
+
+def situ_kwargs(kernel, gate_beta, up_beta):
+    if gate_beta is None or not math.isfinite(gate_beta) or gate_beta <= 0:
+        raise ValueError("SiTU requires a finite positive gate beta")
+    if up_beta is not None and (not math.isfinite(up_beta) or up_beta <= 0):
+        raise ValueError("SiTU up beta must be finite and positive, or None")
+    parameters = inspect.signature(kernel).parameters
+    if {"situ_beta", "situ_linear_beta"}.issubset(parameters):
+        # main's kernel computes beta*tanh(gate/beta)*sigmoid(gate),
+        # multiplied by linear_beta*tanh(up/linear_beta).
+        if up_beta is None:
+            raise RuntimeError(
+                "This DeepGEMM SiTU backend requires a saturated up branch"
+            )
+        return dict(situ_beta=gate_beta, situ_linear_beta=up_beta)
+    if {"activation_alpha", "activation_beta"}.issubset(parameters):
+        # The reference K3 backend calls the gate scale alpha and up scale beta.
+        return dict(activation_alpha=gate_beta, activation_beta=up_beta or 0.0)
+    raise RuntimeError("K3 requires a DeepGEMM backend with SiTU support")
 
 
 def _mega_output_capacity(buf, requested_capacity: int) -> int:
@@ -158,6 +180,8 @@ def _get_validated_world_ep_group(cfg, dist):
 
 
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
+    supports_situ = True
+
     execute_empty_inputs = True
 
     @property
@@ -167,7 +191,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         )
         return (
             self._input_packer.name == "fused"
-            and pack_impl == "optimized"
+            and pack_impl in ("optimized", "fast_finite")
             and 1 <= self.cfg.n_activated_experts <= 32
         )
 
@@ -207,6 +231,16 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         from rtp_llm.utils.model_weight import W
 
         cfg = self.cfg
+        self._activation = getattr(cfg, "expert_activation", "swiglu")
+        self._activation_kwargs = {}
+        if self._activation == "situ":
+            self._activation_kwargs = situ_kwargs(
+                deep_gemm.fp8_fp4_mega_moe,
+                cfg.activation_beta,
+                cfg.activation_linear_beta,
+            )
+        elif self._activation != "swiglu":
+            raise ValueError(f"Unsupported MegaMoE activation {self._activation!r}")
         E = cfg.n_local_experts
         D = cfg.dim
         inter = cfg.moe_inter_dim
@@ -220,13 +254,17 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_w1_layout,
         )
         device = w13.device
-        s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
+        s13_int = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw, 2 * inter, D, E, backend=deep_gemm
+        )
         del s13_raw
         torch.cuda.empty_cache()
 
         w2 = layer_weights.pop(W.moe_w2)
         s2_raw = layer_weights.pop(W.moe_s2)
-        s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
+        s2_int = prepare_fp4_weight_scale_for_deepgemm(
+            s2_raw, D, inter, E, backend=deep_gemm
+        )
         del s2_raw
         torch.cuda.empty_cache()
 
@@ -235,6 +273,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         (l1_w, l1_sf), (l2_w, l2_sf) = deep_gemm.transform_weights_for_mega_moe(
             (w13, s13_int),
             (w2, s2_int),
+            **({"activation": "situ"} if self._activation == "situ" else {}),
         )
         del w13, s13_int, w2, s2_int
         torch.cuda.empty_cache()
@@ -266,7 +305,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             hidden=D,
             intermediate_hidden=inter,
             use_fp8_dispatch=True,
-            activation="swiglu",
+            activation=self._activation,
         )
         # Single-layer staging output. All MoE layers execute sequentially, so one
         # process-local buffer is enough and avoids O(layers) persistent memory.
@@ -327,6 +366,8 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             cfg.moe_inter_dim,
             max_tokens_per_rank,
             cfg.swiglu_limit,
+            self._activation,
+            tuple(self._activation_kwargs.items()),
             cfg.route_scale,
             num_sms,
             tuple(token_counts),
@@ -463,11 +504,12 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             (self._mega_l2_w, self._mega_l2_sf),
             self._mega_buf,
             recipe=(1, 1, FP4_BLOCK),
-            activation="swiglu",
+            activation=self._activation,
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             fast_math=True,
+            **self._activation_kwargs,
         )
 
     def forward(

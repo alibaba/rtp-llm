@@ -213,6 +213,8 @@ void CacheConfig::setGroupBlockLayout(const std::vector<std::string>& group_tags
 
 std::shared_ptr<CacheConfig>
 CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num) {
+    RTP_LLM_CHECK_WITH_INFO(local_kv_cache_sharded == propose_config.local_kv_cache_sharded,
+                            "target and MTP must use the same local KV cache layout");
     RTP_LLM_CHECK_WITH_INFO(groupNums() > 0, "CacheConfig::mergeMTPModule requires destination topology");
     RTP_LLM_CHECK_WITH_INFO(propose_config.groupNums() > 0, "CacheConfig::mergeMTPModule requires propose topology");
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
@@ -511,6 +513,7 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Block Configuration:\n";
     OUTPUT_FIELD(seq_size_per_block);
+    OUTPUT_FIELD_EXPR("local_kv_cache_sharded", (local_kv_cache_sharded ? "true" : "false"));
     os << "\n";
 
     os << indent1 << "# Block Sizing Information:\n";

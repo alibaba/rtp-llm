@@ -10,6 +10,10 @@ __all__ = [
     "LinearFactory",
     "AttnImplFactory",
     "FMHAImplBase",
+    "KdaMetadata",
+    "KdaBase",
+    "KdaPrefill",
+    "KdaDecode",
 ]
 
 _EXPORT_MODULES = {
@@ -17,6 +21,10 @@ _EXPORT_MODULES = {
     "LinearFactory": ".linear",
     "AttnImplFactory": ".attention",
     "FMHAImplBase": ".attention",
+    "KdaMetadata": ".attention.kda_impl",
+    "KdaBase": ".attention.kda_impl",
+    "KdaPrefill": ".attention.kda_impl",
+    "KdaDecode": ".attention.kda_impl",
 }
 
 

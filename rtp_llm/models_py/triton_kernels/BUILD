@@ -31,8 +31,8 @@ genrule(
 )
 
 py_library(
-    name = "kimi_kda",
-    srcs = glob(["kimi_kda/*.py"]),
+    name = "kda",
+    srcs = glob(["kda/*.py"]),
     deps = [
         ":autotune_cache",
         ":common",
@@ -57,6 +57,10 @@ py_library(
 py_library(
     name = "common",
     srcs = glob(["common/*.py"]),
+    deps = [
+        "//rtp_llm/models_py:utils",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
     visibility = ["//visibility:public"]
 )
 
@@ -67,16 +71,23 @@ py_library(
 )
 
 py_library(
+    name = "mla",
+    srcs = glob(["mla/*.py"]),
+    visibility = ["//visibility:public"],
+)
+
+py_library(
     name = "triton_kernels",
     srcs = ["legacy_fp8_indexer_score.py"],
     deps = [
         ":autotune_cache",
         ":fla",
-        ":kimi_kda",
+        ":kda",
         ":causal_conv1d",
         ":moe",
         ":common",
         ":sparse_mla",
+        ":mla",
     ],
     visibility = ["//visibility:public"]
 )

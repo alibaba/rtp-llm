@@ -26,6 +26,28 @@ void invokeMtpSpecDecodeTokensMetadataPrepare(const std::vector<torch::Tensor>& 
                                               int32_t                           tokens_per_batch,
                                               cudaStream_t                      stream);
 
+// Shift each packed Prefill request left by one token and append the sampled
+// token from its final sample column. All tensors are contiguous CUDA int32.
+void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
+                                 const torch::Tensor& input_lengths,
+                                 const torch::Tensor& batch_offsets,
+                                 const torch::Tensor& new_all_token_ids,
+                                 torch::Tensor&       combo_tokens_out,
+                                 int32_t              token_stride,
+                                 cudaStream_t         stream);
+
+// For default one-dimensional positions, the sampled token keeps the final
+// input position. Other position styles must use their stream policy.
+void invokeMtpPrefillShiftAppend(const torch::Tensor& combo_tokens_in,
+                                 const torch::Tensor& input_lengths,
+                                 const torch::Tensor& batch_offsets,
+                                 const torch::Tensor& new_all_token_ids,
+                                 torch::Tensor&       combo_tokens_out,
+                                 const torch::Tensor& position_ids_in,
+                                 torch::Tensor&       position_ids_out,
+                                 int32_t              token_stride,
+                                 cudaStream_t         stream);
+
 // Fused kernel for dispatchDecodeAsync per-stream state publishing.
 // Computes: next_seq_len[i] = prev_seq_len[i] + accept_len[i]  (int32)
 //           hidden_idx[i]   = accept_len[i] - 1                 (int64)

@@ -25,10 +25,15 @@ __all__ = [
     "LinearFactory",
     "AttnImplFactory",
     "FMHAImplBase",
+    "KdaMetadata",
+    "KdaBase",
+    "KdaPrefill",
+    "KdaDecode",
     # Hybrid modules
     "CausalAttention",
     "MlaAttention",
     "DenseMLP",
+    "KdaAttention",
     # MoE gating ops
     "SigmoidGateScaleAdd",
     # Multimodal modules
@@ -42,8 +47,12 @@ _FACTORY_EXPORTS = {
     "LinearFactory",
     "AttnImplFactory",
     "FMHAImplBase",
+    "KdaMetadata",
+    "KdaBase",
+    "KdaPrefill",
+    "KdaDecode",
 }
-_HYBRID_EXPORTS = {"CausalAttention", "MlaAttention", "DenseMLP"}
+_HYBRID_EXPORTS = {"CausalAttention", "MlaAttention", "DenseMLP", "KdaAttention"}
 
 
 def __getattr__(name: str):

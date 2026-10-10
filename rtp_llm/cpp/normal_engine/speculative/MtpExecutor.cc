@@ -368,7 +368,7 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_ou
                                                        ModelBase&       source,
                                                        int64_t          hidden_rows) {
     if (model_output.mtp_target_hidden_states.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(hidden_rows < 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
+        RTP_LLM_CHECK_WITH_INFO(hidden_rows <= 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
                                 "MTP target hidden output rows mismatch: got %ld, expected %ld",
                                 model_output.mtp_target_hidden_states.size(0),
                                 hidden_rows);
@@ -1803,10 +1803,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         rejection_event->record(cuda_graph::graphGetCurrentStream());
     }
 
-    // DSpARK commit input was bound from the explicit target-forward output
-    // above. Re-reading mutable Python model state here is both redundant and
-    // invalid for CUDA graph replay, where Python is not executed.
-    if (!is_dspark_) {
+    // Preserve explicit target-forward features, including graph-instance
+    // outputs. Only legacy models without that output need the Python buffer.
+    if (!is_dspark_ && !model_output.mtp_target_hidden_states.defined()) {
         maybeOverrideLastHiddenWithMtpBuffer(model_input, *model_);
     }
     broadcastPostRejectionInputs(model_input);
@@ -1999,11 +1998,23 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     if (!useAsyncPrepare()) {
         return;
     }
+    // Host rejection sampling compacts draft input rows to accepted lengths.
+    // Its pre-rejection metadata therefore cannot be reused by the forward.
+    // Let PyWrappedModel prepare from the final compact inputs instead.
+    // DSpARK and device-state MTP retain the fixed verify geometry.
+    if (!is_dspark_ && !useStreamAsync() && !useAsyncDeviceState()) {
+        return;
+    }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     auto  model_input_copy    = model_input;
+    if (!is_dspark_) {
+        // Prepare the draft-update phase independently of scheduling mode.
+        model_input_copy.is_target_verify    = false;
+        model_input_copy.is_mtp_draft_update = true;
+    }
     applyCacheStrideToModelInput(model_input_copy, mtp_cache_cfg);
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -2308,6 +2319,11 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
 
 GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_forward)");
+    // Set the phase on every TP rank, also when Graph is disabled. Ordinary
+    // prompt prefill never calls this post-verify modeling entry point.
+    if (!is_dspark_) {
+        model_input.is_mtp_draft_update = true;
+    }
     maybePrintModelInput(model_input, "decode post draft model");
     model_input.is_target_verify = is_dspark_;
     ensureModelInputsOnCuda(model_input, "decode.draft_prefill_forward");

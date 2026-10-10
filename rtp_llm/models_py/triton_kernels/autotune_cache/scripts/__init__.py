@@ -10,4 +10,4 @@
 #
 # Usage:
 #   python -m rtp_llm.models_py.triton_kernels.autotune_cache.scripts.extract \
-#       --init-default --op kda
+#       --extract-once --triton-cache-dir ~/.triton/cache

@@ -7,10 +7,12 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
@@ -1244,6 +1246,60 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     model_input.last_hidden_states = model_output.all_hidden_states;
     const auto& new_all_token_ids  = sampler_output.token_ids;
 
+    const bool has_multimodal =
+        model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
+    // The default one-dimensional position policy reuses the final input
+    // position for the sampled token. Other styles keep the stream policy below.
+    const bool shift_default_positions =
+        model_input.combo_position_ids.defined()
+        && model_input_gatherer_config_.mm_position_ids_style == PositionIdsStyle::DEFAULT
+        && model_input_gatherer_config_.position_id_len_factor == 1;
+    // Multimodal batches also need the mask and feature shifts on the full path.
+    if (!has_multimodal && (!model_input.combo_position_ids.defined() || shift_default_positions)) {
+        const int64_t token_stride = new_all_token_ids.size(1);
+        RTP_LLM_CHECK_WITH_INFO(token_stride > 0 && token_stride <= std::numeric_limits<int32_t>::max(),
+                                "invalid MTP Prefill sample stride: %ld",
+                                token_stride);
+        auto input_lengths_d = toCudaInt32(model_input.input_lengths, host_holder).contiguous();
+        auto combo_tokens_d  = toCudaInt32(model_input.combo_tokens, host_holder).contiguous();
+        auto sampled_d = new_all_token_ids.is_cuda() ? new_all_token_ids : toCudaInt32(new_all_token_ids, host_holder);
+        if (sampled_d.scalar_type() != torch::kInt32) {
+            sampled_d = sampled_d.to(torch::kInt32);
+        }
+        sampled_d      = sampled_d.contiguous();
+        auto offsets_d = input_lengths_d.cumsum(0).to(torch::kInt32);
+        auto shifted_d = torch::empty_like(combo_tokens_d);
+#if USING_CUDA
+        if (shift_default_positions) {
+            auto positions_d         = toCudaInt32(model_input.combo_position_ids, host_holder).contiguous();
+            auto shifted_positions_d = torch::empty_like(positions_d);
+            invokeMtpPrefillShiftAppend(combo_tokens_d,
+                                        input_lengths_d,
+                                        offsets_d,
+                                        sampled_d,
+                                        shifted_d,
+                                        positions_d,
+                                        shifted_positions_d,
+                                        static_cast<int32_t>(token_stride),
+                                        cuda_graph::graphGetCurrentStream().stream());
+            model_input.combo_position_ids = shifted_positions_d;
+        } else {
+            invokeMtpPrefillShiftAppend(combo_tokens_d,
+                                        input_lengths_d,
+                                        offsets_d,
+                                        sampled_d,
+                                        shifted_d,
+                                        static_cast<int32_t>(token_stride),
+                                        cuda_graph::graphGetCurrentStream().stream());
+        }
+#else
+        RTP_LLM_CHECK_WITH_INFO(false, "MTP Prefill CUDA shift requires CUDA");
+#endif
+        model_input.input_lengths = input_lengths_d;
+        model_input.combo_tokens  = shifted_d;
+        return;
+    }
+
     // set model_input.combo_tokens
     const size_t batch_size   = new_all_token_ids.size(0);
     const size_t token_stride = new_all_token_ids.size(1);
@@ -1256,8 +1312,6 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     torch::Tensor combo_tokens_cpu =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
 
-    const bool has_multimodal =
-        model_input.multimodal_features.has_value() && !model_input.multimodal_features->empty();
     if (has_multimodal) {
         model_input.text_tokens_mask = shiftedMtpTokenField(model_input.text_tokens_mask, input_lengths_cpu, 1);
         model_input.combo_tokens_type_ids =
@@ -1492,6 +1546,7 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     model_input.is_target_verify = false;
+    model_input.is_mtp_draft_update = true;
     if (!useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
@@ -1561,11 +1616,20 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
         return;
     }
 
-    // Keep dense accept_tokens for CUDA graph reuse; lm_output_indexes selects
-    // only the last accepted position. All outputs stay on CUDA so the next
-    // stream-async step can prepare without waiting for worker D2H.
+    // Keep the target's B x Q geometry for paged MTP update in both sync and
+    // device-state scheduling. Candidate rows beyond accept_len are overwritten
+    // next round; only accepted positions advance the stream's logical cache.
     model_input.is_target_verify = false;
-    int total_tokens             = (propose_step_ + 1) * batch_size;
+    model_input.is_mtp_draft_update = true;
+    const int64_t width             = propose_step_ + 1;
+    const int64_t total_tokens      = width * static_cast<int64_t>(batch_size);
+    RTP_LLM_CHECK_WITH_INFO(speculative_sampler_output.accept_tokens.numel() == total_tokens
+                                && speculative_sampler_output.accept_len.numel() == static_cast<int64_t>(batch_size),
+                            "MTP update requires B x Q accepted-token slots");
+    RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined()
+                                && model_output.all_hidden_states.size(0) == total_tokens,
+                            "MTP update requires one target hidden row per physical token");
+    // Input lengths, position IDs and cache tables retain the target-verify layout.
     model_input.combo_tokens =
         toCudaInt32(speculative_sampler_output.accept_tokens.reshape({(int64_t)total_tokens}), host_holder);
     auto accept_len_d = toCudaInt32(speculative_sampler_output.accept_len, host_holder);
@@ -1716,7 +1780,9 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        spec_update_infos.push_back({new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)});
+        StreamSpecUpdateInfo update_info{
+            new_tokens, 1, -1, std::move(last_hidden_states), std::move(propose_all_probs)};
+        spec_update_infos.push_back(std::move(update_info));
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -1777,9 +1843,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         }
         spec_update_infos.push_back(std::move(spec_update_info));
 
-        // Draft hidden layout differs per mode: the device-state path keeps a
-        // dense (propose_step_+1) rows/stream layout, while the default sync
-        // path compacts draft inputs (and thus hidden rows) to accept_len.
+        // Device-state updates retain Q rows per request; the host path
+        // compacts those rows to the accepted length.
         token_offset += useMtpDeviceState() ? (propose_step_ + 1) : cur_accept_len;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;

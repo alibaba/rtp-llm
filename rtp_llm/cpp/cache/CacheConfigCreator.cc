@@ -302,6 +302,16 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.cache_min_replay_tokens = std::max(1, model_config.cache_min_replay_tokens);
     config.cache_key_hash_seed     = model_config.cache_key_hash_seed;
 
+    const auto& cp = parallelism_config.prefill_cp_config;
+    // Existing models retain Query-CP Prefill sharding and replicated Decode.
+    // Models that declare a local layout select it independently of Query CP.
+    const bool legacy_local_sharding =
+        cp.kv_cache_sharded && cp.is_enabled() && parallelism_config.role_type != RoleType::DECODE;
+    config.local_kv_cache_sharded =
+        parallelism_config.tp_size > 1 && model_config.local_kv_cache_sharded.value_or(legacy_local_sharding);
+    RTP_LLM_CHECK_WITH_INFO(!config.local_kv_cache_sharded || cp.kv_cache_sharded,
+                            "local PageRR allocation requires kv_cache_sharded transport metadata");
+
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
@@ -392,8 +402,8 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config,
                                              const ModelConfig*                               draft_model_config,
-                                             bool                                             is_mtp,
-                                             bool                                             is_eagle) {
+                                             bool                                             /*is_mtp*/,
+                                             bool                                             /*is_eagle*/) {
     RTP_LLM_CHECK_WITH_INFO(draft_model_config == nullptr || sp_config.has_value(),
                             "draft cache configuration requires speculative execution configuration");
     RTP_LLM_CHECK_WITH_INFO(
@@ -404,7 +414,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        // The executor currently reuses module 0 for every proposal step.
+        // gen_num_per_cycle controls proposal depth, not active module count.
+        const int num_mtp_modules = 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {

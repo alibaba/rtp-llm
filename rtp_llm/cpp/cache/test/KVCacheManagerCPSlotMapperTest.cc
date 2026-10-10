@@ -15,14 +15,99 @@
 namespace rtp_llm {
 namespace test {
 
-static CacheConfig makeTestConfig(int block_num = 20, int seq_size_per_block = 4) {
-    return makeSimpleMhaCacheConfig(
+static CacheConfig makeTestConfig(int block_num = 20, int seq_size_per_block = 4, bool local_sharding = false) {
+    auto config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2,
         block_num,
         /*tokens_per_block=*/static_cast<size_t>(seq_size_per_block),
         rtp_llm::DataType::TYPE_FP16,
         /*local_head_num_kv=*/1,
         /*size_per_head=*/16);
+    config.local_kv_cache_sharded = local_sharding;
+    return config;
+}
+
+static ModelConfig makePageRrModelConfig() {
+    ModelConfig model;
+    model.num_layers                          = 1;
+    model.data_type                           = DataType::TYPE_BF16;
+    model.attn_config.use_mla                  = true;
+    model.attn_config.kv_lora_rank             = 16;
+    model.attn_config.rope_head_dim            = 8;
+    model.attn_config.tokens_per_block        = 4096;
+    model.attn_config.kernel_tokens_per_block = 128;
+    KVCacheSpecDesc desc;
+    desc.tag                = "full";
+    desc.cache_type         = KVCacheSpecType::MultiHeadLatentAttention;
+    model.kv_cache_spec_descs = {{desc}};
+    return model;
+}
+
+TEST(CacheConfigLocalShardingTest, ResolvesExplicitLayoutAndPreservesLegacyDefaults) {
+    struct Case {
+        RoleType            role;
+        CPRotateMethod      method;
+        size_t              tp_size;
+        bool                upstream_sharded;
+        std::optional<bool> local_sharded;
+        bool                expected;
+    };
+    const std::vector<Case> cases = {
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, true, std::nullopt, true},
+        {RoleType::PREFILL, CPRotateMethod::DISABLED, 8, true, std::nullopt, false},
+        {RoleType::DECODE, CPRotateMethod::ALL_GATHER, 4, true, std::nullopt, false},
+        {RoleType::DECODE, CPRotateMethod::PREFILL_CP, 4, true, std::nullopt, false},
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, false, std::nullopt, false},
+        {RoleType::PREFILL, CPRotateMethod::DISABLED, 8, true, true, true},
+        {RoleType::DECODE, CPRotateMethod::DISABLED, 4, true, true, true},
+        {RoleType::PREFILL, CPRotateMethod::ALL_GATHER, 8, true, false, false},
+        {RoleType::DECODE, CPRotateMethod::DISABLED, 4, true, false, false},
+        {RoleType::PREFILL, CPRotateMethod::DISABLED, 1, true, true, false},
+    };
+    for (size_t i = 0; i < cases.size(); ++i) {
+        SCOPED_TRACE(i);
+        const auto& c     = cases[i];
+        auto        model = makePageRrModelConfig();
+        model.local_kv_cache_sharded = c.local_sharded;
+        ParallelismConfig par;
+        par.role_type                         = c.role;
+        par.tp_size                           = c.tp_size;
+        par.prefill_cp_config.method          = c.method;
+        par.prefill_cp_config.kv_cache_sharded = c.upstream_sharded;
+        par.prefill_cp_config.prefill_cp_size  = 8;
+        const auto config = CacheConfigCreator::createWarmupConfig(model, par, 0);
+        EXPECT_EQ(config.local_kv_cache_sharded, c.expected);
+    }
+}
+
+TEST(CacheConfigLocalShardingTest, ExplicitPageRrRequiresTransportMetadata) {
+    auto model = makePageRrModelConfig();
+    model.local_kv_cache_sharded = true;
+    ParallelismConfig par;
+    par.tp_size   = 4;
+    par.role_type = RoleType::DECODE;
+    ASSERT_FALSE(par.prefill_cp_config.kv_cache_sharded);
+    EXPECT_ANY_THROW(CacheConfigCreator::createConfig(model, par, {}));
+}
+
+TEST(CacheConfigLocalShardingTest, TargetAndDraftShareOneLocalLayout) {
+    auto target = makePageRrModelConfig();
+    target.local_kv_cache_sharded = true;
+    auto draft = target;
+    ParallelismConfig par;
+    par.role_type                         = RoleType::DECODE;
+    par.tp_size                           = 4;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    par.prefill_cp_config.prefill_cp_size  = 8;
+    SpeculativeExecutionConfig sp;
+    sp.gen_num_per_cycle = 3;
+    const auto config = CacheConfigCreator::createConfig(target, par, {}, sp, &draft);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_TRUE(config.local_kv_cache_sharded);
+    EXPECT_TRUE(config.mtp_sub_configs[0]->local_kv_cache_sharded);
+
+    draft.local_kv_cache_sharded = false;
+    EXPECT_ANY_THROW(CacheConfigCreator::createConfig(target, par, {}, sp, &draft));
 }
 
 static CompleteTokenIdsPtr makeTokenIds(int batch_size, int seq_len, int block_size) {
@@ -52,6 +137,40 @@ protected:
         createDevice();
     }
 };
+
+TEST_F(KVCacheManagerCPSlotMapperTest, ExplicitCompactPrefillTp8AndDecodeTp4AllocateOwnedPages) {
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        const size_t tp_size = role == RoleType::PREFILL ? 8 : 4;
+        for (size_t rank = 0; rank < tp_size; ++rank) {
+            SCOPED_TRACE(rank);
+            auto model = makePageRrModelConfig();
+            model.local_kv_cache_sharded = true;
+            ParallelismConfig par;
+            par.role_type                         = role;
+            par.tp_size                           = tp_size;
+            par.tp_rank                           = rank;
+            par.prefill_cp_config.method          = CPRotateMethod::DISABLED;
+            par.prefill_cp_config.kv_cache_sharded = true;
+            par.prefill_cp_config.prefill_cp_size  = 8;
+            auto config = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
+            PDSepConfig pd;
+            pd.role_type = role;
+            auto manager = std::make_shared<KVCacheManager>(
+                config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
+            ASSERT_TRUE(manager->init());
+            ASSERT_NE(manager->cpSlotMapper(), nullptr);
+            EXPECT_EQ(manager->cpSlotMapper()->cpRank(), rank);
+            EXPECT_EQ(manager->cpSlotMapper()->cpSize(), tp_size);
+            // Thirteen global pages, including a partial last page. The mapper
+            // reserves uniform compact capacity, including safe tail padding.
+            auto resource = makeResource(1, config);
+            auto tokens   = makeTokenIds(1, 13 * 4096 - 17, 4096);
+            ASSERT_TRUE(manager->malloc(MallocInfo{resource, tokens}).success);
+            EXPECT_EQ(resource->blocksNum(0, "full"), role == RoleType::PREFILL ? 2u : 4u);
+            manager->free(FreeInfo{resource, tokens});
+        }
+    }
+}
 
 TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCpShardsThem) {
     ModelConfig model;
@@ -156,7 +275,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
 // When kv_cache_sharded is true and tp_size > 1, cpSlotMapper() should return a valid mapper.
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block, /*local_sharding=*/true);
 
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
@@ -181,7 +300,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
 
 TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block, /*local_sharding=*/true);
 
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
@@ -236,7 +355,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
 // Keep this pre-existing multi-rank case disabled pending its dedicated harness.
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCount) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block, /*local_sharding=*/true);
 
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
@@ -297,7 +416,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
 // Keep this pre-existing multi-rank case disabled pending its dedicated harness.
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
+    auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block, /*local_sharding=*/true);
 
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
@@ -332,7 +451,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
 // DISABLED: same reason as above (multi-rank harness needed).
 TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     const int seq_size_per_block = 4;
-    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
+    auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block, /*local_sharding=*/true);
 
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;

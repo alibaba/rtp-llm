@@ -1801,6 +1801,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("v_head_dim", &AttentionConfigs::v_head_dim)
         .def_readwrite("softmax_extra_scale", &AttentionConfigs::softmax_extra_scale)
         .def_readwrite("kv_cache_dtype", &AttentionConfigs::kv_cache_dtype)
+        .def_readwrite("mla_fp8_compute", &AttentionConfigs::mla_fp8_compute)
         .def_readwrite("need_rope_kv_cache", &AttentionConfigs::need_rope_kv_cache)
         .def_readwrite("is_sparse", &AttentionConfigs::is_sparse)
         .def_readwrite("indexer_head_dim", &AttentionConfigs::indexer_head_dim)
@@ -2063,6 +2064,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
         .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
+        .def_readwrite("local_kv_cache_sharded", &ModelConfig::local_kv_cache_sharded)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)
         .def_readwrite("tokenizer_path", &ModelConfig::tokenizer_path)
