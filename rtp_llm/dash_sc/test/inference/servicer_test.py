@@ -585,6 +585,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     async def test_long_dsv4_default_thinking_budget_respects_explicit_budget(self) -> None:
         tok = _dsv4_tokenizer()
         env_cfg = _GenerateEnvCfg()
+        env_cfg.max_thinking_tokens = 32000
         for model_type, budget, expected in [
             ("deepseek_v4", None, 384000),
             ("deepseek_v4", 2048, 2048),
