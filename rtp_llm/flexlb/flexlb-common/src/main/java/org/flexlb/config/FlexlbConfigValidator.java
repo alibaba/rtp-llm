@@ -1,15 +1,12 @@
 package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.flexlb.balance.prediction.DecodeCostFormula;
 import org.flexlb.balance.prediction.PrefillTimeFormula;
 import org.flexlb.config.RoutingConfig.CacheAffinityConfig;
-import org.flexlb.config.RoutingConfig.CandidateChoiceConfig;
-import org.flexlb.config.RoutingConfig.CandidateChoiceType;
-import org.flexlb.config.RoutingConfig.CandidatePoolConfig;
-import org.flexlb.config.RoutingConfig.CandidatePoolType;
 import org.flexlb.config.RoutingConfig.DecodeAvailabilityConfig;
+import org.flexlb.config.RoutingConfig.DecodeCostEstimatorConfig;
 import org.flexlb.config.RoutingConfig.EstimatorType;
-import org.flexlb.config.RoutingConfig.OutlierRejectionConfig;
 import org.flexlb.config.RoutingConfig.PrefillConfig;
 import org.flexlb.util.PriorityNormalizer;
 
@@ -32,21 +29,20 @@ final class FlexlbConfigValidator {
 
         JsonNode dispatcher = document.path("dispatcher");
         if (dispatcher.isObject()) {
-            String type = dispatcher.path("type").asText("BATCH");
-            if ("BATCH".equals(type)) {
-                rejectFieldsExcept(dispatcher, "dispatcher", "type",
-                        "maxInflightBatchesPerPrefillWorker",
-                        "enqueueRpcTimeoutMs");
-            } else if ("NON_BATCH".equals(type)) {
-                rejectFieldsExcept(dispatcher, "dispatcher", "type",
-                        "maxInflightRequestsPerPrefillWorker");
-            }
+            rejectFieldsExcept(dispatcher, "dispatcher", "type", "maxInflightPerPrefillWorker",
+                    "fetchAttachTimeoutMs");
+        }
+
+        JsonNode decodeCostEstimator = document.path("router").path("roles")
+                .path("decode").path("costEstimator");
+        if (decodeCostEstimator.isObject() && decodeCostEstimator.has("expression")) {
+            require(decodeCostEstimator.path("expression").isTextual(),
+                    "router.roles.decode.costEstimator.expression", "must be a string");
         }
 
         JsonNode prefill = document.path("router").path("roles").path("prefill");
         if (prefill.isObject()) {
             validateEstimatorShape(prefill.path("executionTimeEstimator"));
-            validateCandidateChoiceShape(prefill.path("candidateChoice"));
         }
     }
 
@@ -64,39 +60,6 @@ final class FlexlbConfigValidator {
         }
     }
 
-    private static void validateCandidateChoiceShape(JsonNode choice) {
-        if (!choice.isObject()) {
-            return;
-        }
-        String type = choice.path("type").asText("RANDOM_WITHIN_TOLERANCE");
-        if ("BEST_ONLY".equals(type)) {
-            rejectFieldsExcept(choice, "router.roles.prefill.candidateChoice",
-                    "type", "outlierRejection");
-        } else if ("RANDOM_WITHIN_TOLERANCE".equals(type)) {
-            rejectFieldsExcept(choice, "router.roles.prefill.candidateChoice",
-                    "type", "relativeTolerance", "minimumToleranceMs",
-                    "outlierRejection");
-        } else if ("LEAST_RECENTLY_USED_IN_POOL".equals(type)) {
-            rejectFieldsExcept(choice, "router.roles.prefill.candidateChoice",
-                    "type", "pool");
-            validateCandidatePoolShape(choice.path("pool"));
-        }
-    }
-
-    private static void validateCandidatePoolShape(JsonNode pool) {
-        if (!pool.isObject()) {
-            return;
-        }
-        String type = pool.path("type").asText("RATIO");
-        if ("RATIO".equals(type)) {
-            rejectFieldsExcept(pool, "router.roles.prefill.candidateChoice.pool",
-                    "type", "ratio", "minimumWorkers");
-        } else if ("FIXED".equals(type)) {
-            rejectFieldsExcept(pool, "router.roles.prefill.candidateChoice.pool",
-                    "type", "workers");
-        }
-    }
-
     private static void validateOrderingShape(JsonNode ordering) {
         if (!ordering.isObject()) {
             return;
@@ -107,7 +70,22 @@ final class FlexlbConfigValidator {
         } else if ("PRIORITY".equals(type)) {
             rejectFieldsExcept(ordering, "scheduler.ordering", "type",
                     "defaultPriority", "preemption");
+            validatePreemptionShape(ordering.path("preemption"));
         }
+    }
+
+    private static void validatePreemptionShape(JsonNode preemption) {
+        if (!preemption.isObject() || !preemption.has("timeoutMs") || !preemption.has("allowedVictimStages")) {
+            return;
+        }
+        for (JsonNode stage : preemption.path("allowedVictimStages")) {
+            if (VictimStage.DECODE_ENGINE_OWNED.name().equals(stage.asText())) {
+                return;
+            }
+        }
+        throw new ConfigValidationException(
+                "scheduler.ordering.preemption.timeoutMs",
+                "is supported only when DECODE_ENGINE_OWNED is enabled");
     }
 
     private static void validateDecisionShape(JsonNode decision) {
@@ -140,6 +118,7 @@ final class FlexlbConfigValidator {
         require(config.getSchemaVersion() == FlexlbConfig.CURRENT_SCHEMA_VERSION,
                 "schemaVersion", "must equal " + FlexlbConfig.CURRENT_SCHEMA_VERSION);
         require(config.getScheduler() != null, "scheduler", "is required");
+        require(config.getScheduler().getType() != null, "scheduler.type", "is required");
         require(config.getDispatcher() != null, "dispatcher", "is required");
         require(config.getRouter() != null, "router", "is required");
         require(config.getWorkerRegistry() != null, "workerRegistry", "is required");
@@ -149,22 +128,28 @@ final class FlexlbConfigValidator {
             validateQueue(config.queueScheduler());
         }
         config.getDispatcher().validateFor(config.getScheduler());
+        validateRequestLifecycle(config.getRequestLifecycle());
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
+        FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
+        require(grpc != null, "grpcServer", "is required");
+        nonNegative(grpc.getExecutorCoreSize(), "grpcServer.executorCoreSize");
+        positive(grpc.getExecutorMaxSize(), "grpcServer.executorMaxSize");
+        positive(grpc.getExecutorQueueSize(), "grpcServer.executorQueueSize");
+        positive(grpc.getShutdownQuietPeriodMs(), "grpcServer.shutdownQuietPeriodMs");
+        require(grpc.getExecutorMaxSize() >= grpc.getExecutorCoreSize(),
+                "grpcServer.executorMaxSize", "must be at least executorCoreSize");
     }
 
     private static void validateQueue(SchedulerConfig queue) {
         positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
+        require(Double.isFinite(queue.getScanBudgetMultiplier()) && queue.getScanBudgetMultiplier() >= 1.0,
+                "scheduler.scanBudgetMultiplier", "must be finite and at least 1.0");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
         require(queue.getDecision() != null, "scheduler.decision", "is required for QUEUE");
-        require(queue.getCapacity() != null, "scheduler.capacity", "is required for QUEUE");
-        require(queue.getLifecycle() != null, "scheduler.lifecycle", "is required for QUEUE");
-        positive(queue.getCapacity().getMaxOutstandingRequestsGlobal(),
-                "scheduler.capacity.maxOutstandingRequestsGlobal");
-        positive(queue.getCapacity().getMaxWaitingRequestsPerPrefillWorker(),
-                "scheduler.capacity.maxWaitingRequestsPerPrefillWorker");
         DecisionPolicyConfig decision = queue.getDecision();
+        require(decision.getType() != null, "scheduler.decision.type", "is required");
         if (decision.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW) {
             positive(decision.getMaxRequests(),
                     "scheduler.decision.maxRequests");
@@ -182,13 +167,8 @@ final class FlexlbConfigValidator {
                     "scheduler.decision",
                     "fixed-window fields are supported only with FIXED_WINDOW");
         }
-        positive(queue.getLifecycle().getStaleInflightTimeoutMs(),
-                "scheduler.lifecycle.staleInflightTimeoutMs");
-        positive(queue.getLifecycle().getDeliveredNotAcceptedTimeoutMs(),
-                "scheduler.lifecycle.deliveredNotAcceptedTimeoutMs");
-        positive(queue.getLifecycle().getMaxDeliveredNotAcceptedRequestsGlobal(),
-                "scheduler.lifecycle.maxDeliveredNotAcceptedRequestsGlobal");
         QueueOrderingConfig ordering = queue.getOrdering();
+        require(ordering.getType() != null, "scheduler.ordering.type", "is required");
         if (ordering.getType() == QueueOrderingConfig.Type.PRIORITY) {
             range(ordering.getDefaultPriority(),
                     PriorityNormalizer.MIN_PRIORITY,
@@ -200,22 +180,8 @@ final class FlexlbConfigValidator {
                                 && !preemption.getAllowedVictimStages().isEmpty(),
                         "scheduler.ordering.preemption.allowedVictimStages",
                         "must contain at least one stage when preemption is configured");
-                boolean cancelsEngineOwned = preemption.getAllowedVictimStages()
-                        .contains(VictimStage.DECODE_ENGINE_OWNED);
-                EngineCancellationConfig cancellation = preemption.getEngineCancellation();
-                if (cancelsEngineOwned) {
-                    require(cancellation != null,
-                            "scheduler.ordering.preemption.engineCancellation",
-                            "is required when DECODE_ENGINE_OWNED is allowed");
-                    positive(cancellation.getAckTimeoutMs(),
-                            "scheduler.ordering.preemption.engineCancellation.ackTimeoutMs");
-                    positive(cancellation.getCompletionTimeoutMs(),
-                            "scheduler.ordering.preemption.engineCancellation.completionTimeoutMs");
-                } else {
-                    require(cancellation == null,
-                            "scheduler.ordering.preemption.engineCancellation",
-                            "is allowed only when DECODE_ENGINE_OWNED is allowed");
-                }
+                positive(preemption.getTimeoutMs(),
+                        "scheduler.ordering.preemption.timeoutMs");
             }
         } else {
             require(ordering.getPreemption() == null,
@@ -245,39 +211,6 @@ final class FlexlbConfigValidator {
                         "contains an invalid formula: " + error.getMessage(), error);
             }
         }
-        CandidateChoiceConfig choice =
-                prefill.getCandidateChoice();
-        require(choice != null,
-                "router.roles.prefill.candidateChoice", "is required");
-        require(choice.getType() != null,
-                "router.roles.prefill.candidateChoice.type",
-                "is required");
-        if (choice.getType() == CandidateChoiceType.RANDOM_WITHIN_TOLERANCE) {
-            validatePrefillOutlierRejection(choice.getOutlierRejection());
-            range(choice.getRelativeTolerance(), 0, 1,
-                    "router.roles.prefill.candidateChoice.relativeTolerance");
-            nonNegative(choice.getMinimumToleranceMs(),
-                    "router.roles.prefill.candidateChoice.minimumToleranceMs");
-        } else if (choice.getType() == CandidateChoiceType.BEST_ONLY) {
-            validatePrefillOutlierRejection(choice.getOutlierRejection());
-        } else {
-            CandidatePoolConfig pool = choice.getPool();
-            require(pool != null,
-                    "router.roles.prefill.candidateChoice.pool", "is required");
-            require(pool.getType() != null,
-                    "router.roles.prefill.candidateChoice.pool.type",
-                    "is required");
-            if (pool.getType() == CandidatePoolType.RATIO) {
-                require(pool.getRatio() > 0 && pool.getRatio() <= 1,
-                        "router.roles.prefill.candidateChoice.pool.ratio",
-                        "must be in (0, 1]");
-                positive(pool.getMinimumWorkers(),
-                        "router.roles.prefill.candidateChoice.pool.minimumWorkers");
-            } else {
-                positive(pool.getWorkers(),
-                        "router.roles.prefill.candidateChoice.pool.workers");
-            }
-        }
         CacheAffinityConfig affinity = prefill.getCacheAffinity();
         if (affinity != null) {
             nonNegative(affinity.getMaxExtraTtftMs(),
@@ -289,51 +222,53 @@ final class FlexlbConfigValidator {
 
         require(routing.getRoles().getDecode() != null,
                 "router.roles.decode", "is required");
+        DecodeCostEstimatorConfig costEstimator = routing.getRoles().getDecode().getCostEstimator();
+        require(costEstimator != null, "router.roles.decode.costEstimator", "is required");
+        require(costEstimator.getExpression() != null && !costEstimator.getExpression().isBlank(),
+                "router.roles.decode.costEstimator.expression", "must not be blank");
+        DecodeCostFormula costFormula;
+        try {
+            costFormula = costEstimator.compiledFormula();
+        } catch (IllegalArgumentException error) {
+            throw new ConfigValidationException(
+                    "router.roles.decode.costEstimator.expression",
+                    "contains an invalid formula: " + error.getMessage(), error);
+        }
         DecodeAvailabilityConfig decodeAvailability =
                 routing.getRoles().getDecode().getAvailability();
         require(decodeAvailability != null,
                 "router.roles.decode.availability", "is required");
-        range(decodeAvailability.getMaxKvUsagePercent(), 0,
+        if (costFormula.requiresMaxRunningSize()) {
+            require(decodeAvailability.getMaxEngineRequests() != null,
+                    "router.roles.decode.availability.maxEngineRequests",
+                    "is required when costEstimator.expression uses max_running_size");
+        }
+        range(decodeAvailability.getMaxKvUsagePercent(), 1,
                 RoutingConfig.PERCENTAGE_SCALE,
                 "router.roles.decode.availability.maxKvUsagePercent");
         if (decodeAvailability.getMaxEngineRequests() != null) {
             positive(decodeAvailability.getMaxEngineRequests(),
                     "router.roles.decode.availability.maxEngineRequests");
         }
-        require(routing.getRoles().getDecode().getKvReservation() != null,
-                "router.roles.decode.kvReservation", "is required");
-        Long maxOutput = routing.getRoles().getDecode().getKvReservation()
-                .getMaxOutputTokensForEstimate();
-        if (maxOutput != null) {
-            positive(maxOutput, "router.roles.decode.kvReservation.maxOutputTokensForEstimate");
-        }
-        var decode = routing.getRoles().getDecode();
-        nonNegative(decode.getDecayPerToken(),
-                "router.roles.decode.decayPerToken");
-        nonNegative(decode.getLoadDecayPerRequest(),
-                "router.roles.decode.loadDecayPerRequest");
-        if (decode.getOutlierRejection() != null) {
-            positive(decode.getOutlierRejection().getMaxEngineLoadVsAverageMultiplier(),
-                    "router.roles.decode.outlierRejection.maxEngineLoadVsAverageMultiplier");
-            positive(decode.getOutlierRejection().getMaxKvUsedVsAverageMultiplier(),
-                    "router.roles.decode.outlierRejection.maxKvUsedVsAverageMultiplier");
-        }
         if (routing.getGroupSelector() != null) {
             TrafficPolicyConfig.validate(routing.getGroupSelector());
         }
     }
 
-    private static void validatePrefillOutlierRejection(
-            OutlierRejectionConfig outlierRejection) {
-        if (outlierRejection == null) {
-            return;
-        }
-        positive(outlierRejection.getMaxPendingVsAverageMultiplier(),
-                "router.roles.prefill.candidateChoice.outlierRejection"
-                        + ".maxPendingVsAverageMultiplier");
-        positive(outlierRejection.getMaxProjectedDrainVsAverageMultiplier(),
-                "router.roles.prefill.candidateChoice.outlierRejection"
-                        + ".maxProjectedDrainVsAverageMultiplier");
+    private static void validateRequestLifecycle(RequestLifecycleConfig lifecycle) {
+        require(lifecycle != null, "requestLifecycle", "is required");
+        require(lifecycle.getRequest() != null, "requestLifecycle.request", "is required");
+        requiredPositive(lifecycle.getRequest().getTimeoutMs(), "requestLifecycle.request.timeoutMs");
+        require(lifecycle.getDecision() != null, "requestLifecycle.decision", "is required");
+        Double lifetime = lifecycle.getDecision().getLifetime();
+        require(lifetime != null, "requestLifecycle.decision.lifetime", "is required");
+        require(Double.isFinite(lifetime) && lifetime >= 1.0,
+                "requestLifecycle.decision.lifetime", "must be finite and at least 1");
+    }
+
+    private static void requiredPositive(Long value, String field) {
+        require(value != null, field, "is required");
+        positive(value, field);
     }
 
     private static void validateWorkerRegistry(WorkerRegistryConfig workers) {
@@ -342,6 +277,8 @@ final class FlexlbConfigValidator {
                 "workerRegistry.health.statusPollIntervalMs");
         positive(workers.getHealth().getStatusRpcTimeoutMs(),
                 "workerRegistry.health.statusRpcTimeoutMs");
+        positive(workers.getHealth().getCleanupIntervalMs(),
+                "workerRegistry.health.cleanupIntervalMs");
         require(workers.getHealth().getStatusRpcTimeoutMs()
                         <= workers.getHealth().getStatusStaleAfterMs()
                                 / MIN_STALE_TIMEOUT_TO_RPC_TIMEOUT_RATIO,
@@ -380,18 +317,8 @@ final class FlexlbConfigValidator {
         require(value > 0, field, "must be greater than zero");
     }
 
-    private static void positive(double value, String field) {
-        require(Double.isFinite(value) && value > 0, field,
-                "must be finite and greater than zero");
-    }
-
     private static void nonNegative(long value, String field) {
         require(value >= 0, field, "must be non-negative");
-    }
-
-    private static void nonNegative(double value, String field) {
-        require(Double.isFinite(value) && value >= 0, field,
-                "must be finite and non-negative");
     }
 
     private static void range(long value, long minimum, long maximum, String field) {

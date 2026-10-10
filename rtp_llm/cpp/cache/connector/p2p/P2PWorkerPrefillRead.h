@@ -147,9 +147,6 @@ private:
     static int releaseNotStartedTaskStates(const std::vector<std::shared_ptr<AsyncSendTaskState>>& task_states);
 
 private:
-    // IMPORTANT: Declaration order determines initialization order in the constructor
-    // initializer list. config_ MUST be declared before asymmetric_tp_util_ because
-    // the constructor reads config_.tp_size/tp_rank to initialize asymmetric_tp_util_.
     P2PConnectorWorkerConfig                                            config_;
     std::shared_ptr<LayerBlockConverter>                                layer_block_converter_;
     kmonitor::MetricsReporterPtr                                        metrics_reporter_;

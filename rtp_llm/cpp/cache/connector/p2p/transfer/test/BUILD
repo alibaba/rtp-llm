@@ -13,13 +13,14 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
+    tags = ["H20_CU13"],
 )
 
 cc_test(
@@ -29,11 +30,12 @@ cc_test(
         "main.cc",
     ],
     copts = test_copts,
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/utils:time_util",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "@com_google_googletest//:gtest",
     ] + device_impl_target(),
+    tags = ["H20_CU13"],
 )

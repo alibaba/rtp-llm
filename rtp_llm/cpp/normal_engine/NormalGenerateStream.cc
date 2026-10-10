@@ -138,6 +138,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.loss = loss_;
             }
         }
+        if (custom_output_.defined()) {
+            generate_output.custom_output =
+                custom_output_.size(0) == 1 ? custom_output_ : custom_output_.narrow(0, i, 1);
+        }
 
         if (update_info.prompt_logits.has_value()) {
             generate_output.prompt_logits = update_info.prompt_logits;
@@ -231,6 +235,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         setLoss(update_info.loss);
     }
 
+    if (update_info.custom_output.defined()) {
+        // Dispatcher already staged to CPU; clone to release its shared pinned buffer.
+        custom_output_ = update_info.custom_output.clone();
+    }
+
     // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
     if (needReturnHiddenStates() && update_info.all_hidden_states.defined()) {
         last_hidden_states_ = update_info.all_hidden_states;
@@ -270,7 +279,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             }
             side_data.generation_prefill_cuda_graph_status =
                 static_cast<uint32_t>(generation_prefill_cuda_graph_status_);
-            side_data.prefill_use_independent_block_pools = rc.cache_manager->cacheConfig().use_independent_block_pools;
+            side_data.prefill_use_independent_block_pools = true;
             side_data.total_reuse_len  = reuseLength();
             side_data.local_reuse_len  = localReuseLength();
             side_data.remote_reuse_len = remoteReuseLength();

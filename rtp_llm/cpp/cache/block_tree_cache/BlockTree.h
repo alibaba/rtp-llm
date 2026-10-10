@@ -3,6 +3,8 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -22,7 +24,7 @@ struct ReusableGroupLocation {
     size_t member_group_id{0};
 };
 
-using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
+using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
 
 struct BlockTreeInsertResult {
     std::vector<TreeNode*>                                 path;
@@ -65,7 +67,7 @@ public:
     const std::vector<GroupSetPtr>& groupSets() const {
         return group_sets_;
     }
-    const ReusableGroupLocation* reusableGroupLocation(size_t group_id) const;
+    const ReusableGroupLocation* reusableGroupLocation(std::string_view group_tag) const;
     size_t                       reusableGroupCount() const {
         return reusable_group_locations_.size();
     }
@@ -82,7 +84,7 @@ public:
 
     // All publication operations require the owning BlockTreeCache mutex.
     // Only complete, matchable DEVICE values in every required group are advertised.
-    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
     void            refreshPublishedState(const TreeNode* node);
 

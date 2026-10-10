@@ -29,8 +29,8 @@ cc_library(
     tags = ["manual"],
     deps = [
         ":tree_workload_generator",
-        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )
@@ -41,23 +41,23 @@ cc_library(
         "BenchmarkJsonWriter.cc",
         "CommonBenchmarkOptions.cc",
         "ModelProfile.cc",
-        "TreeBenchmarkOptions.cc",
         "TransferBenchmarkOptions.cc",
+        "TreeBenchmarkOptions.cc",
     ],
     hdrs = [
         "BenchmarkArgumentParser.h",
         "BenchmarkJsonWriter.h",
         "CommonBenchmarkOptions.h",
         "ModelProfile.h",
-        "TreeBenchmarkOptions.h",
         "TransferBenchmarkOptions.h",
+        "TreeBenchmarkOptions.h",
     ],
     copts = copts(),
     tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "@boringssl//:crypto",
-        "@rapidjson//:rapidjson",
+        "@rapidjson",
     ],
 )
 
@@ -75,13 +75,13 @@ cc_library(
     deps = [
         ":benchmark_common",
         ":tree_workload_generator",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager_hdr",
+        "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
-        "//rtp_llm/cpp/cache:cache_types",
-        "//rtp_llm/cpp/cache:cache_config",
-        "//rtp_llm/cpp/cache:kv_cache_specs",
-        "//rtp_llm/cpp/cache:kv_cache_allocator_hdr",
-        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/utils:core_utils",
     ] + select({
         "@//:using_cuda": [
@@ -109,8 +109,8 @@ cc_library(
         ":benchmark_fixture",
         ":online_tree_scheduler",
         ":tree_workload_generator",
-        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache:cache_types",
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )
@@ -130,10 +130,10 @@ cc_library(
         ":benchmark_common",
         ":benchmark_fixture",
         ":transfer_benchmark_workload",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
-        "//rtp_llm/cpp/cache:cache_types",
-        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/utils:core_utils",
     ] + select({
         "@//:using_cuda": [
@@ -159,12 +159,12 @@ cc_test(
 cc_test(
     name = "online_tree_scheduler_test",
     target_compatible_with = CUDA_ONLY,
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = ["OnlineTreeSchedulerTest.cc"],
     copts = copts() + ["-fno-access-control"],
     deps = [
-        ":online_tree_scheduler",
         ":benchmark_fixture",
+        ":online_tree_scheduler",
         ":tree_benchmark_runner",
         ":tree_workload_generator",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
@@ -174,6 +174,7 @@ cc_test(
         "@//:using_cuda": ["//3rdparty:cuda_driver"],
         "//conditions:default": [],
     }),
+    tags = ["A10_CU13"],
 )
 
 cc_binary(
@@ -183,8 +184,13 @@ cc_binary(
         "BlockTreeCacheBenchmarkMain.cc",
     ],
     copts = copts(),
-    tags = ["manual", "local", "no-remote"],
-    exec_properties = {"gpu": "H20"},
+    tags = [
+        "H20_CU13",
+        "local",
+        "manual",
+        "no-remote",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
     deps = [
         ":benchmark_cli",
         ":transfer_benchmark_runner",
@@ -219,8 +225,8 @@ py_test(
     data = [
         "docs/benchmark_cases.md",
         "docs/nsys_collection_guide.md",
-        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
         "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
     ],
 )
 
@@ -228,8 +234,8 @@ py_binary(
     name = "block_tree_cache_benchmark_driver",
     target_compatible_with = CUDA_ONLY,
     srcs = [
-        "run_block_tree_cache_benchmark.py",
         "benchmark_cases.py",
+        "run_block_tree_cache_benchmark.py",
     ],
     main = "run_block_tree_cache_benchmark.py",
     tags = ["manual"],
@@ -246,13 +252,18 @@ py_test(
     srcs = ["run_block_tree_cache_benchmark_smoke_test.py"],
     main = "run_block_tree_cache_benchmark_smoke_test.py",
     data = [
-        ":block_tree_cache_gpu_benchmark",
         "benchmark_cases.py",
         "run_block_tree_cache_benchmark.py",
+        ":block_tree_cache_gpu_benchmark",
         "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
     ],
     # Runs the CUDA benchmark binary; keep on GPU machines and off remote exec.
-    tags = ["gpu", "local", "exclusive", "manual"],
+    tags = [
+        "exclusive",
+        "gpu",
+        "local",
+        "manual",
+    ],
     timeout = "moderate",
 )
 
@@ -279,7 +290,10 @@ cc_test(
     srcs = ["BenchmarkCliTest.cc"],
     copts = copts(),
     data = ["//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1"],
-    deps = [":benchmark_cli", "@com_google_googletest//:gtest_main"],
+    deps = [
+        ":benchmark_cli",
+        "@com_google_googletest//:gtest_main",
+    ],
 )
 
 cc_test(
@@ -287,8 +301,11 @@ cc_test(
     srcs = ["ModelProfileTest.cc"],
     copts = copts(),
     data = [
-        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
         "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_flash_fp8_tp1_cp1_tpb1024",
+        "//rtp_llm/cpp/cache/block_tree_cache/benchmark/profiles:deepseek_v4_pro_fp8_tp1_cp1",
     ],
-    deps = [":benchmark_common", "@com_google_googletest//:gtest_main"],
+    deps = [
+        ":benchmark_common",
+        "@com_google_googletest//:gtest_main",
+    ],
 )

@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -130,17 +131,17 @@ public:
                   bool                                              is_resident);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
-    int evictForGroup(size_t group_id, size_t num_blocks);
+    int evictForGroup(std::string_view group_tag, size_t num_blocks);
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot() const;
-    void            setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<int>& required_group_ids);
+    void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
-    bool                                      abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    bool            abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
 
-    BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
+    BlockIndicesType matchedBlocksForGroup(std::string_view                      group_tag,
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     bool executeTransfer(TransferTask task);

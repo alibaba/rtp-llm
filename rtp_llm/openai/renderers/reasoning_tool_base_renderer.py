@@ -354,7 +354,9 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     def _should_yield_stream_response(
         self, response: StreamResponseObject, is_final: bool = False
     ) -> bool:
-        if is_final:
+        # EOS may have no text but still carry the requested cached logits or
+        # other final tensors. Dropping it leaves callers with an earlier step.
+        if is_final or response.extra_outputs is not None:
             return True
 
         for choice in response.choices:

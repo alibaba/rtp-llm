@@ -68,11 +68,6 @@ public class GeneralHttpNettyService {
         return this.doRequest(request, uri, path, null, responseClz);
     }
 
-    public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
-
-        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
-    }
-
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
         return Mono.just(request)
                 .map(ctx -> HttpNettyChannelContext.<Result>builder()

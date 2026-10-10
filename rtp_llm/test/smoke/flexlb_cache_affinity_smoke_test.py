@@ -366,6 +366,12 @@ class CacheAffinitySmoke:
         decode_ports: Sequence[int],
     ) -> ManagedProcess:
         env = os.environ.copy()
+        env.pop("FLEXLB_MONITOR_METRIC_WHITELIST", None)
+        route = self._flexlb_route()
+        route["hosts"] = {
+            PREFILL_DOMAIN: [f"127.0.0.1:{port}" for port in prefill_ports],
+            DECODE_DOMAIN: [f"127.0.0.1:{port}" for port in decode_ports],
+        }
         env.update(
             {
                 "JAVA_HOME": str(Path(java).resolve().parent.parent),
@@ -374,13 +380,8 @@ class CacheAffinitySmoke:
                 "FLEXLB_CONFIG": json.dumps(
                     self._flexlb_config(), separators=(",", ":")
                 ),
-                "MODEL_SERVICE_CONFIG": json.dumps(
-                    self._flexlb_route(), separators=(",", ":")
-                ),
+                "MODEL_SERVICE_CONFIG": json.dumps(route, separators=(",", ":")),
                 "FLEXLB_SYNC_CONSISTENCY_CONFIG": '{"needConsistency":false}',
-                f"DOMAIN_ADDRESS:{PREFILL_DOMAIN}": self._addresses(prefill_ports),
-                f"DOMAIN_ADDRESS:{DECODE_DOMAIN}": self._addresses(decode_ports),
-                "FLEXLB_MONITOR_METRIC_WHITELIST": "flexlb_",
                 "RTP_LLM_TRACE_CONFIG": '{"enabled":false}',
             }
         )
@@ -396,6 +397,7 @@ class CacheAffinitySmoke:
             f"--server.port={http_port}",
             f"--management.server.port={management_port}",
             "--spring.profiles.active=test",
+            "--flexlb.monitor.metric-whitelist=flexlb_",
         ]
         return self._spawn("flexlb-process", command, env, cwd=self.log_dir)
 
@@ -953,21 +955,7 @@ class CacheAffinitySmoke:
         return route
 
     def _flexlb_config(self) -> Dict[str, object]:
-        candidate_choice: Dict[str, object]
-        if self.args.strategy == "ShortestTtft":
-            candidate_choice = {
-                "type": "LEAST_RECENTLY_USED_IN_POOL",
-                "pool": {"type": "RATIO", "ratio": 0.3, "minimumWorkers": 1},
-            }
-        else:
-            candidate_choice = {
-                "type": "RANDOM_WITHIN_TOLERANCE",
-                "relativeTolerance": 0.1,
-                "minimumToleranceMs": 20,
-            }
-
         prefill: Dict[str, object] = {
-            "candidateChoice": candidate_choice,
             "cacheAffinity": {
                 "maxExtraTtftMs": self.args.max_extra_ttft_ms,
                 "minPrefixHitPercent": 5,
@@ -980,7 +968,12 @@ class CacheAffinitySmoke:
             }
 
         return {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
+            "requestLifecycle": {
+                "request": {
+                    "timeoutMs": max(1, math.ceil(self.args.timeout_seconds * 1000))
+                },
+            },
             "scheduler": {"type": "DIRECT"},
             "dispatcher": {"type": "NON_BATCH"},
             "router": {"roles": {"prefill": prefill}},

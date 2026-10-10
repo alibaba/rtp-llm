@@ -5,6 +5,20 @@ namespace th = torch;
 
 namespace rtp_llm {
 
+grpc::Status EmbeddingRpcServiceImpl::StartProfile(grpc::ServerContext*         context,
+                                                   const StartProfileRequestPB* request,
+                                                   EmptyPB*                     response) {
+    try {
+        embedding_engine_->startTimelineProfiling(
+            request->trace_name(), request->start_step(), request->num_steps(), request->enable_all_rank());
+        return grpc::Status::OK;
+    } catch (const std::invalid_argument& e) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INTERNAL, e.what());
+    }
+}
+
 grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
                                                 const EmbeddingInputPB* request,
                                                 EmbeddingOutputPB*      response) {

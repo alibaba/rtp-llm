@@ -1,4 +1,5 @@
 #include <unordered_set>
+#include "autil/Scope.h"
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
@@ -182,6 +183,7 @@ void PrefillRpcServer::batchContextCleanupTick() {
                 if (stream && (stream->hasError() || stream->getStatus() == StreamState::FINISHED)) {
                     finished_handles.push_back(cancel_registry_->find(entry.context->request_id));
                     entry.reserved = false;
+                    entry.context->markRpcHandlingCompleted();
                     completed.push_back(std::move(entry.context));
                 }
             }
@@ -271,6 +273,12 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     OnflightScope onflight_scope(this, request_id);
     auto          generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), server_context, metrics_reporter_, meta_);
+    const int uncaught_exceptions = std::uncaught_exceptions();
+    autil::ScopeGuard rpc_completion_guard([&generate_context, uncaught_exceptions] {
+        if (std::uncaught_exceptions() == uncaught_exceptions) {
+            generate_context.markRpcHandlingCompleted();
+        }
+    });
     auto input                 = QueryConverter::transQuery(request);
     input->request_deadline_ms = local_deadline;
     if (local_deadline <= currentTimeMs() || server_context->IsCancelled()) {

@@ -13,7 +13,7 @@ py_library(
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
 )
 
@@ -23,10 +23,10 @@ py_test(
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
-    tags = ["A10"],
-    exec_properties = {'gpu': 'A10'},
+    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "A10_CU13"},
 )
 
 py_test(
@@ -35,9 +35,10 @@ py_test(
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -46,9 +47,10 @@ py_test(
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -57,9 +59,10 @@ py_test(
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -68,8 +71,11 @@ py_test(
     deps = py_test_deps + [":cp_test_utils"] + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
-        "//conditions:default": []
+        "//conditions:default": [],
     }),
-    tags = ["manual"],
-    exec_properties = {'gpu': 'H20'},
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )

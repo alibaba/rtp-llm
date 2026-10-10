@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 
@@ -15,8 +14,6 @@ final class GlobalQueueEntry {
     final String routingGroup;
     long sequence;
     volatile boolean removed;
-    volatile PlacementKey blockedKey;
-    volatile WorkerEndpoint blockedEndpoint;
     GlobalQueueEntry previous;
     GlobalQueueEntry next;
     boolean linked;

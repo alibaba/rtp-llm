@@ -7,7 +7,7 @@ from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, barrier
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
-from rtp_llm.ops.compute_ops import KVCache, rtp_llm_ops
+from rtp_llm.ops.compute_ops import LayerKVCache, rtp_llm_ops
 
 # Try to import CUDA dependencies, but don't fail if running on CPU
 try:
@@ -21,6 +21,68 @@ try:
 except Exception as e:
     print(f"Warning: Failed to import flashinfer.rope (likely running on CPU): {e}")
     rope = None
+
+
+_paged_mqa_context_lens_dim: Optional[int] = None
+
+
+def _fp8_paged_mqa_logits_compat(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    block_kv: int,
+    max_context_len: int,
+) -> torch.Tensor:
+    """Call paged MQA with the context shape accepted by DeepGEMM.
+
+    DeepGEMM releases before the NextN interface consume ``[batch]`` while
+    newer releases require ``[batch, next_n]``. Decode uses ``next_n == 1``,
+    so both layouts describe the same data. Probe once and cache the accepted
+    rank only after the complete logits call succeeds, instead of coupling
+    RTP-LLM to a vendor package version string.
+    """
+    global _paged_mqa_context_lens_dim
+
+    # Keep this call's probing decision stable if another call populates the cache.
+    cached_dim = _paged_mqa_context_lens_dim
+    flat_context_lens = context_lens.reshape(-1).contiguous()
+    candidates = (cached_dim,) if cached_dim is not None else (2, 1)
+    first_error: Optional[Exception] = None
+    for context_lens_dim in candidates:
+        adapted_context_lens = (
+            flat_context_lens.view(-1, 1)
+            if context_lens_dim == 2
+            else flat_context_lens
+        )
+        try:
+            schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
+                adapted_context_lens,
+                block_kv,
+                deep_gemm.get_num_sms(),
+            )
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                q,
+                kv_cache,
+                weights,
+                adapted_context_lens,
+                block_table,
+                schedule_metadata,
+                max_context_len,
+                clean_logits=False,
+            )
+        except (AssertionError, RuntimeError) as error:
+            if cached_dim is not None:
+                raise
+            if first_error is None:
+                first_error = error
+                continue
+            raise first_error from error
+        _paged_mqa_context_lens_dim = context_lens_dim
+        return logits
+
+    raise RuntimeError("DeepGEMM paged MQA context-lens probing failed")
 
 
 def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
@@ -104,6 +166,29 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+
+    def _indexer_cache_view(self, kv_cache: LayerKVCache) -> torch.Tensor:
+        entry_elems = self.index_head_dim + self.index_head_dim // self.block_size * 4
+        if kv_cache.seq_size_per_block != self.blocksize:
+            raise RuntimeError(
+                "indexer cache page geometry mismatch: "
+                f"cache page={kv_cache.seq_size_per_block}, kernel page={self.blocksize}"
+            )
+
+        cache = kv_cache.kv_cache_base
+        expected_page_elems = self.blocksize * entry_elems
+        if (
+            cache.dtype != torch.uint8
+            or not cache.is_contiguous()
+            or cache.dim() != 2
+            or cache.size(1) != expected_page_elems
+        ):
+            raise RuntimeError(
+                "indexer cache kernel-page layout mismatch: expected contiguous uint8 "
+                f"[pages, {expected_page_elems}], got dtype={cache.dtype}, "
+                f"shape={tuple(cache.shape)}"
+            )
+        return cache.view(cache.size(0), self.blocksize, entry_elems)
 
     def apply_rope_and_rotate_q_k(
         self,
@@ -225,7 +310,7 @@ class IndexerOp(nn.Module):
     def quant_k_only(
         self,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
     ) -> None:
         """
@@ -233,13 +318,13 @@ class IndexerOp(nn.Module):
 
         Args:
             key: Key tensor in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache: KV cache object with kv_scale_base
+            kv_cache: Opaque indexer cache for the current layer
             slot_mapping: Physical slot indices [num_tokens]
         """
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._indexer_cache_view(kv_cache),
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -249,7 +334,7 @@ class IndexerOp(nn.Module):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -286,7 +371,7 @@ class IndexerOp(nn.Module):
         assert kv_cache is not None, "kv_cache is required"
         rtp_llm_ops.indexer_k_quant_and_cache(
             key,  # Original key in BF16/FP16 [num_tokens, index_head_dim]
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._indexer_cache_view(kv_cache),
             slot_mapping,  # [num_tokens] physical slot indices
             self.block_size,  # quantization block size (128)
             self.scale_fmt,  # "ue8m0" for power-of-2 scaling
@@ -298,7 +383,7 @@ class IndexerOp(nn.Module):
         self,
         query: torch.Tensor,
         key: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         slot_mapping: torch.Tensor,
         kv_restore_unpad_indices: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -327,7 +412,7 @@ class IndexerOp(nn.Module):
 
         rtp_llm_ops.indexer_k_quant_and_cache(
             restored_key,
-            kv_cache.kv_scale_base,
+            self._indexer_cache_view(kv_cache),
             slot_mapping,
             self.block_size,
             self.scale_fmt,
@@ -351,7 +436,7 @@ class IndexerOp(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
     ) -> torch.Tensor:
@@ -371,7 +456,7 @@ class IndexerOp(nn.Module):
         from rtp_llm.models_py.kernels.cuda.fast_topk import fast_topk_transform_fused
 
         weights = weights.view(-1, self.index_n_heads)
-        kv_cache_fp8 = kv_cache.kv_scale_base
+        kv_cache_fp8 = self._indexer_cache_view(kv_cache)
 
         num_heads_kv = 1
         head_dim_with_sf = (
@@ -379,27 +464,20 @@ class IndexerOp(nn.Module):
         )
         kv_cache_fp8 = kv_cache_fp8.view(
             kv_cache_fp8.shape[0], self.blocksize, num_heads_kv, head_dim_with_sf
-        ).view(dtype=torch.uint8)
+        )
 
         max_seq_len = (
             attention_inputs.kv_cache_kernel_block_id_device.shape[1] * self.blocksize
         )
 
-        schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
-            self.blocksize,
-            deep_gemm.get_num_sms(),
-        )
-
-        logits = deep_gemm.fp8_paged_mqa_logits(
+        logits = _fp8_paged_mqa_logits_compat(
             q_fp8.unsqueeze(1),
             kv_cache_fp8.view(dtype=torch.uint8),
             weights,
             fmha_params.kvlen_d,
             attention_inputs.kv_cache_kernel_block_id_device,
-            schedule_metadata,
+            self.blocksize,
             max_seq_len,
-            clean_logits=False,
         )
 
         assert (
@@ -423,7 +501,7 @@ class IndexerOp(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
     ) -> torch.Tensor:
@@ -459,7 +537,7 @@ class IndexerOp(nn.Module):
         )
 
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,  # [num_blocks, block_size, cache_stride]
+            self._indexer_cache_view(kv_cache),
             k_fp8,  # output [num_tokens, index_head_dim]
             k_scale,  # output [num_tokens, scale_size]
             attention_inputs.kv_cache_kernel_block_id_device,  # [batch_size, num_blocks]
@@ -468,7 +546,7 @@ class IndexerOp(nn.Module):
 
         # Compute logits
         weights = weights.squeeze(-1)
-        kv_fp8 = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8 = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         assert (
             fmha_params.ks is not None and fmha_params.ke is not None
@@ -507,7 +585,7 @@ class IndexerOp(nn.Module):
         self,
         q_fp8: torch.Tensor,
         weights: torch.Tensor,
-        kv_cache: KVCache,
+        kv_cache: LayerKVCache,
         fmha_params: Any,
         attention_inputs: Any,
         total_local_ids: torch.Tensor,
@@ -569,13 +647,13 @@ class IndexerOp(nn.Module):
             device=device,
         )
         rtp_llm_ops.cp_gather_indexer_k_quant_cache(
-            kv_cache.kv_scale_base,
+            self._indexer_cache_view(kv_cache),
             k_fp8,
             k_scale,
             attention_inputs.kv_cache_kernel_block_id_device,
             cu_kv_seqlens_global,
         )
-        kv_fp8_full = (k_fp8, k_scale.view(torch.float32))
+        kv_fp8_full = (k_fp8, k_scale.view(torch.float32).view(-1))
 
         def run_part_logits_topk(
             q_part: torch.Tensor,
@@ -603,9 +681,12 @@ class IndexerOp(nn.Module):
 
         if total_local_ids.size(0) > 0:
             topk = run_part_logits_topk(
-                q0, weights_sq0,
-                precomputed_ks, precomputed_ke,
-                precomputed_lengths, precomputed_topk_off,
+                q0,
+                weights_sq0,
+                precomputed_ks,
+                precomputed_ke,
+                precomputed_lengths,
+                precomputed_topk_off,
             )
         else:
             topk = None

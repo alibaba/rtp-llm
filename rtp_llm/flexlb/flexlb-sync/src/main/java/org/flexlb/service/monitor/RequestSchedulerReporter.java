@@ -128,7 +128,7 @@ public class RequestSchedulerReporter {
      * {@code auto_tpm.eviction_plan.count}.
      *
      * @param priority incoming request priority
-     * @param evCase   eviction case label (e.g. prefill_queue_full)
+     * @param evCase   eviction case label (e.g. decode_kv_full)
      * @param result   plan result label (feasible / infeasible)
      */
     public void reportEvictionPlan(int priority, String evCase, String result) {
@@ -141,7 +141,7 @@ public class RequestSchedulerReporter {
      * {@code auto_tpm.eviction_commit.count}.
      *
      * @param priority incoming request priority
-     * @param evCase   eviction case label (e.g. prefill_queue_full)
+     * @param evCase   eviction case label (e.g. decode_kv_full)
      * @param result   commit result label (success / version_mismatch / partial_failure)
      */
     public void reportEvictionCommit(int priority, String evCase, String result) {
@@ -155,7 +155,7 @@ public class RequestSchedulerReporter {
      * @param victimPriority   priority of the evicted request
      * @param incomingPriority priority of the request that displaced it
      * @param stage            victim scheduling stage (e.g. prefill_queued)
-     * @param evCase           eviction case label (e.g. prefill_queue_full)
+     * @param evCase           eviction case label (e.g. decode_kv_full)
      */
     public void reportVictim(int victimPriority, int incomingPriority, String stage, String evCase) {
         monitor.report(AUTO_TPM_VICTIM_COUNT,

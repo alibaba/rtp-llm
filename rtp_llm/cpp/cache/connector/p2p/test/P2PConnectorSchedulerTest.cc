@@ -9,7 +9,7 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
@@ -30,7 +30,7 @@ class P2PConnectorSchedulerTest: public ::testing::Test {
 protected:
     struct AllocatedConnectorResource {
         CacheConfig                                 config;
-        std::shared_ptr<SingleTypeKVCacheAllocator> allocator;
+        std::shared_ptr<CoordinatorCacheManager> allocator;
         KVCacheResourcePtr                          resource;
         BlockIdList                                 blocks;
         size_t                                      free_blocks_before{0};
@@ -69,7 +69,7 @@ protected:
         prefill_server_.reset();
     }
 
-    // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
+    // Create a resource with one tagged group per layer.
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto             resource = std::make_shared<KVCacheResource>();
         std::vector<std::vector<int>> layer_group_ids;
@@ -81,7 +81,7 @@ protected:
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds("group" + std::to_string(layer_id)).add({i});
             }
         }
 
@@ -112,10 +112,10 @@ protected:
         AllocatedConnectorResource result;
         result.config = test::makeSimpleMhaCacheConfig(
             /*layer_num=*/2, /*block_num=*/8, /*tokens_per_block=*/1, DataType::TYPE_FP16);
-        result.allocator = std::make_shared<SingleTypeKVCacheAllocator>(result.config, AllocationType::HOST);
+        result.allocator = std::make_shared<CoordinatorCacheManager>(result.config, AllocationType::HOST);
         EXPECT_TRUE(result.allocator->init());
 
-        auto block_pool = result.allocator->getDeviceBlockPool();
+        auto block_pool = result.allocator->groupBlockPools().front();
         EXPECT_NE(block_pool, nullptr);
         result.free_blocks_before = result.allocator->freeBlocksNum();
         result.blocks             = block_pool->malloc(2).value();
@@ -125,7 +125,7 @@ protected:
         KVCacheResource source;
         source.initGroups(result.config.topologyPtr());
         source.cacheKeys() = {101, 102};
-        source.mutableBlockIds(0).assign(result.blocks);
+        source.mutableBlockIds(source.groupTags().at(0)).assign(result.blocks);
         result.resource = result.allocator->incrKVCacheRef(source, source.cacheKeys(), /*is_connector=*/true);
         block_pool->decRef(result.blocks);
         EXPECT_NE(result.resource, nullptr);
@@ -137,7 +137,7 @@ protected:
     }
 
     bool allBlockRefsEqual(const AllocatedConnectorResource& allocated, uint32_t expected) const {
-        const auto block_pool = allocated.allocator->getDeviceBlockPool();
+        const auto block_pool = allocated.allocator->groupBlockPools().front();
         // refCount() rejects reclaimed blocks; refCountNoCheck() reports the raw
         // count under the pool lock so released blocks can still be observed.
         return std::all_of(allocated.blocks.begin(), allocated.blocks.end(), [&](BlockIdxType block) {
@@ -200,12 +200,7 @@ protected:
         group.tag                       = "group0";
         group.spec                      = spec;
         group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
         group.block_num                 = 16;
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
-        group.kv_block_stride_bytes     = spec->block_size_bytes();
-        group.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
         return CacheTopology::create({std::move(group)}, {{0, {"group0"}}});
     }
 
@@ -359,8 +354,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
         2, 2, {{0}, {1}}, /*kernel_blocks_per_kv_block=*/1, {CacheGroupType::FULL, CacheGroupType::LINEAR});
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(topology);
-    resource->mutableBlockIds(0).assign({10, 11, 12, 13});
-    resource->mutableBlockIds(1).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
+    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10, 11, 12, 13});
+    resource->mutableBlockIds(resource->groupTags().at(1)).assign({NULL_BLOCK_IDX, 21, NULL_BLOCK_IDX, 25});
     resource->cacheKeys() = {1000, 1001, 1002, 1003};
 
     auto converted = LayerCacheBufferUtil::convert(*resource, *topology);
@@ -702,7 +697,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsEachWorkerItsRoundRobinKeys) {
 
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeSingleMlaTopology());
-    resource->mutableBlockIds(0).assign({10, 11});
+    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10, 11});
     resource->cacheKeys() = {100, 101, 102, 103};
     auto meta = createMockMeta(2012, "test_async_read_cp", currentTimeMs() + 5000);
     meta->setPrefillTpSize(2);
@@ -748,7 +743,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpRejectsDifferentSourceCpSize) {
 
     auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(makeSingleMlaTopology());
-    resource->mutableBlockIds(0).assign({10});
+    resource->mutableBlockIds(resource->groupTags().at(0)).assign({10});
     resource->cacheKeys() = {100, 101};
     auto meta = createMockMeta(2013, "test_async_read_cp_mismatch", currentTimeMs() + 5000);
     // TP happens to match Decode, but effective KV-cache CP does not.
@@ -1495,13 +1490,8 @@ namespace rtp_llm {
 TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRanks) {
     GroupBase group;
     group.spec                           = test::makeResolvedMlaSpec(DataType::TYPE_FP16, 16, 8, 1);
-    group.kv_block_stride_bytes          = group.spec->block_size_bytes();
-    group.kv_scale_stride_bytes          = group.spec->scale_block_size_bytes();
     group.policy                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                      = {0};
     group.block_num                      = 16;
-    group.seq_size_per_block             = 1;
-    group.kernel_seq_size_per_block      = 1;
     auto                        topology = test::makeIndexedTestTopology({group});
     P2PConnectorSchedulerConfig prefill_config;
     prefill_config.topology                   = topology;

@@ -15,6 +15,15 @@ namespace rtp_llm {
 
 namespace {
 
+std::shared_ptr<const HostBlockPoolConfig>
+validateHostBlockPoolConfig(const std::shared_ptr<const HostBlockPoolConfig>& config) {
+    RTP_LLM_CHECK(config != nullptr);
+    RTP_LLM_CHECK_WITH_INFO(config->physical_block_count > 1,
+                            "host block pool [%s] physical_block_count must be > 1",
+                            config->pool_name.c_str());
+    return config;
+}
+
 // Exclude the host block pool backing from core dumps (mirrors the removed legacy pool
 // behavior). Best-effort: failures and the absence of MADV_DONTDUMP only warn and never
 // fail initialization.
@@ -62,7 +71,8 @@ void markHostBlockPoolDontDump(const char* pool_name, void* ptr, size_t size) {
 
 }  // namespace
 
-HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config): IBlockPool(config) {
+HostBlockPool::HostBlockPool(std::shared_ptr<const HostBlockPoolConfig> config):
+    IBlockPool(validateHostBlockPoolConfig(config)) {
     RTP_LLM_CHECK(config != nullptr);
     RTP_LLM_CHECK(config->pool_type == BlockPoolType::HOST);
 }

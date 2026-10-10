@@ -194,7 +194,7 @@ struct KVCacheConfig {
     // contiguous shared cache pool.
     std::string ssm_state_dtype           = "auto";
     int64_t     kv_cache_mem_mb           = -1;
-    int         seq_size_per_block        = 64;
+    int         seq_size_per_block        = 0;
     int         kernel_seq_size_per_block = 0;
     int         test_block_num            = 0;
     int         use_block_cache           = -1;  // -1 means not set, use Optional<int> equivalent
@@ -370,6 +370,7 @@ struct SpeculativeExecutionConfig {
     // one conditioning anchor followed by gamma prediction rows.
     bool        sp_dspark_sample_from_anchor = true;
     std::string to_string() const;
+    size_t      speculativeReserveStep() const;
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
@@ -495,6 +496,8 @@ struct RuntimeConfig {
     bool    warm_up                = false;
     bool    warm_up_with_loss      = false;
     bool    model_warm_up          = true;
+
+    int output_dispatcher_worker_count = 0;
 
     // Scheduler configuration
     bool                       use_batch_decode_scheduler = false;
@@ -659,7 +662,7 @@ struct GrpcMapsConfig {
 struct GrpcConfig: GrpcMapsConfig {
     /// If > 0, passed to gRPC sync server as ``MAX_POLLERS`` (per completion queue).
     int max_server_pollers = 0;
-    GrpcConfig() {};
+    GrpcConfig(){};
     GrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -668,7 +671,7 @@ struct GrpcConfig: GrpcMapsConfig {
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
     int max_server_workers = 4;
-    DashScGrpcConfig() {};
+    DashScGrpcConfig(){};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;
     void        from_json(const std::string& json_str);
@@ -692,8 +695,7 @@ enum class HybridAttentionType {
 };
 
 struct HybridAttentionConfig {
-    bool                             enable_hybrid_attention           = false;
-    bool                             enable_independent_kv_cache_pools = false;
+    bool                             enable_hybrid_attention = false;
     std::vector<HybridAttentionType> hybrid_attention_types;
     std::string                      to_string() const;
 };

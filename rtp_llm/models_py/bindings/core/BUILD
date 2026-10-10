@@ -110,14 +110,6 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "exec_ops_srcs",
-    srcs = [
-        "ExecOps.cc",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 # Test-only library for ExecOps.cc.
 # Use this for tests that already link cuda_impl.
 cc_library(
@@ -197,7 +189,7 @@ filegroup(
 # lives in exactly ONE .so.
 #
 # exec_ctx_state: ExecOps.cc
-#   Defines the non-inline globalRuntime() singleton + comm op callbacks.
+#   Defines process-global runtime and Python callback state.
 #   Linked ONLY into librtp_compute_ops.so (via th_compute_lib).
 #
 # exec_ctx_ops: CudaOps.cc + sample ops
@@ -340,6 +332,23 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     alwayslink = 1,
+)
+
+# Isolate CudaSampleOp.cc from GPU-only dependencies so the generic PyTorch
+# fallback remains compile- and testable under --config=cpu.
+cc_library(
+    name = "generic_sampler_fallback_test_lib",
+    srcs = ["CudaSampleOp.cc"],
+    deps = [
+        ":common_defines",
+        ":op_data",
+    ] + torch_deps(),
+    copts = copts(),
+    target_compatible_with = select({
+        "@//:using_cpu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//rtp_llm/models_py/bindings/core/test:__pkg__"],
 )
 
 # Combined target for backward compatibility — pulls in both state + ops.

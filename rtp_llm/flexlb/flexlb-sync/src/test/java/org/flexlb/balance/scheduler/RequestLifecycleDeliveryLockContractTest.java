@@ -3,18 +3,26 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.eviction.EngineCancelChannel;
+import org.flexlb.balance.endpoint.PrefillState;
+import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
+import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -32,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.eq;
@@ -54,8 +63,7 @@ class RequestLifecycleDeliveryLockContractTest {
         lifecycle = new RequestRegistry(
                 configService,
                 mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class),
-                mock(EngineCancelChannel.class));
+                mock(RequestSchedulerReporter.class));
     }
 
     @AfterEach
@@ -72,8 +80,8 @@ class RequestLifecycleDeliveryLockContractTest {
             throws Exception {
         Registered registered = registerItem(101L);
         RequestSlot slot = lifecycle.requestSlot(registered.item().requestId());
-        AdmissionMutation admission =
-                lifecycle.claimAdmissionMutation(
+        AdmissionHandle admission =
+                lifecycle.claimAdmissionHandle(
                         registered.item().requestId(), registered.future());
         assertNotNull(admission);
         CountDownLatch actionEntered = new CountDownLatch(1);
@@ -107,9 +115,7 @@ class RequestLifecycleDeliveryLockContractTest {
             synchronized (slot) {
                 assertSame(registered.item(), slot.activeItem());
             }
-            assertTrue(lifecycle.prepareIfOwned(
-                            registered.item(), () -> Boolean.TRUE)
-                    .orElseThrow(),
+            assertTrue(RequestLifecycleTestSupport.prepareMember(lifecycle, registered.item()),
                     "queue publication must never expose an unready slot");
 
             releaseAction.countDown();
@@ -125,7 +131,7 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     @Test
-    void itemPublicationRequiresAnExactAdmissionMutation() {
+    void itemPublicationRequiresAnExactAdmissionHandle() {
         Registered registered = registerItem(106L);
         boolean[] publicationCalled = new boolean[1];
 
@@ -142,8 +148,8 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered registered = registerItem(111L);
         RequestSlot slot = lifecycle.requestSlot(registered.item().requestId());
 
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
@@ -162,8 +168,8 @@ class RequestLifecycleDeliveryLockContractTest {
         IllegalStateException expected =
                 new IllegalStateException("queue publication failed");
 
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
@@ -185,23 +191,19 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered registered = registerItem(131L);
         boolean[] preparedBeforeResolution = new boolean[1];
 
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
             assertTrue(lifecycle.commitItemForPublication(
                     registered.item(), () -> {
-                        preparedBeforeResolution[0] = lifecycle.prepareIfOwned(
-                                registered.item(), () -> Boolean.TRUE)
-                                .isPresent();
+                        preparedBeforeResolution[0] = RequestLifecycleTestSupport.prepareMember(lifecycle, registered.item());
                         return true;
                     }));
             assertTrue(preparedBeforeResolution[0],
                     "a queue-visible item must never race an unready slot");
-            assertTrue(lifecycle.prepareIfOwned(
-                            registered.item(), () -> Boolean.TRUE)
-                    .orElseThrow());
+            assertTrue(RequestLifecycleTestSupport.prepareMember(lifecycle, registered.item()));
         }
     }
 
@@ -213,8 +215,8 @@ class RequestLifecycleDeliveryLockContractTest {
         CountDownLatch releasePublication = new CountDownLatch(1);
         ExecutorService operations = Executors.newFixedThreadPool(2);
 
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
@@ -263,8 +265,8 @@ class RequestLifecycleDeliveryLockContractTest {
         CountDownLatch returnFromPublication = new CountDownLatch(1);
         ExecutorService operations = Executors.newFixedThreadPool(2);
 
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
@@ -303,8 +305,8 @@ class RequestLifecycleDeliveryLockContractTest {
     void deliveryClaimKeepsEndpointHandoffAndSlotClaimAtomic()
             throws Exception {
         Registered registered = registerItem(201L);
-        try (AdmissionMutation admission =
-                     lifecycle.claimAdmissionMutation(
+        try (AdmissionHandle admission =
+                     lifecycle.claimAdmissionHandle(
                              registered.item().requestId(),
                              registered.future())) {
             assertNotNull(admission);
@@ -325,8 +327,8 @@ class RequestLifecycleDeliveryLockContractTest {
         }, "try-commit-slot-contender");
 
         try {
-            Future<RequestRegistry.DeliveryClaim> committed = owner.submit(() ->
-                    lifecycle.tryClaimRouteDelivery(
+            Future<DeliveryClaim> committed = owner.submit(() ->
+                    RequestLifecycleTestSupport.claimRouteWithoutPrediction(lifecycle,
                             registered.item(),
                             () -> {
                                 assertTrue(Thread.holdsLock(slot));
@@ -346,14 +348,14 @@ class RequestLifecycleDeliveryLockContractTest {
                     "another slot operation must not enter during endpoint transfer");
 
             releaseTransfer.countDown();
-            RequestRegistry.DeliveryClaim claim = committed.get(5, TimeUnit.SECONDS);
+            DeliveryClaim claim = committed.get(5, TimeUnit.SECONDS);
             assertNotNull(claim);
             contender.join(TimeUnit.SECONDS.toMillis(5));
             assertFalse(contender.isAlive());
             assertEquals(0L, contenderEntered.getCount());
 
-            lifecycle.complete(
-                    claim, DeliveryResult.delivered());
+            lifecycle.publishRoute(claim,
+                    new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             assertTrue(registered.future().get(5, TimeUnit.SECONDS).isSuccess());
         } finally {
             releaseTransfer.countDown();
@@ -367,7 +369,7 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered rejected = registerItem(202L);
         bind(lifecycle, rejected);
 
-        assertThrows(IllegalStateException.class, () -> lifecycle.tryClaimRouteDelivery(
+        assertThrows(IllegalStateException.class, () -> RequestLifecycleTestSupport.claimRoute(lifecycle,
                 rejected.item(),
                 () -> false));
         assertQueuedWithoutClaim(rejected.item().requestId());
@@ -377,7 +379,7 @@ class RequestLifecycleDeliveryLockContractTest {
         IllegalStateException expected = new IllegalStateException(
                 "synthetic endpoint failure");
         assertSame(expected, assertThrows(IllegalStateException.class,
-                () -> lifecycle.tryClaimRouteDelivery(
+                () -> RequestLifecycleTestSupport.claimRoute(lifecycle,
                         failed.item(),
                         () -> {
                             throw expected;
@@ -390,7 +392,7 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered registered = registerItem(204L);
         bind(lifecycle, registered);
 
-        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle,
                 registered.item(),
                 701L,
                 () -> true);
@@ -402,8 +404,79 @@ class RequestLifecycleDeliveryLockContractTest {
         assertEquals(DeliveryClaimKind.BATCH_ENQUEUE,
                 snapshot.deliveryClaimKind());
         assertEquals(701L, snapshot.batchId());
-        assertTrue(lifecycle.requestSlot(registered.item().requestId())
-                .getBatchEnqueueStartedAtMs() > 0L);
+        assertTrue(((Long) org.springframework.test.util.ReflectionTestUtils.getField(
+                lifecycle.requestSlot(registered.item().requestId()), "batchEnqueueStartedAtMs")) > 0L);
+    }
+
+    @Test
+    void terminalEngineEvidenceMakesLateDeliveryCallbacksHarmless() throws Exception {
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        Registered registered = registerItem(207L, endpoint);
+        bind(lifecycle, registered);
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(
+                lifecycle, registered.item(), 703L, () -> true);
+        assertNotNull(claim);
+        RequestSlot original = lifecycle.requestSlot(207L);
+
+        new EndpointEventProjector(lifecycle).onPrefillStatus(endpoint, RoleType.PDFUSION,
+                List.of(PrefillState.WorkerStatusFact.terminal(
+                        registered.item(), PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)));
+        Response terminal = registered.future().get(5L, TimeUnit.SECONDS);
+        assertTrue(terminal.isSuccess());
+
+        lifecycle.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        claim.complete(DeliveryResult.delivered());
+        assertSame(terminal, registered.future().join());
+        assertTrue(lifecycle.removeExactTerminalRecord(original, Long.MAX_VALUE));
+
+        Registered replacement = registerItem(207L, endpoint);
+        bind(lifecycle, replacement);
+        lifecycle.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L), 30_000L);
+        claim.complete(DeliveryResult.notSent(new IllegalStateException("late RPC failure")));
+        assertFalse(replacement.future().isDone());
+        assertQueuedWithoutClaim(207L);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void deliveryStartReconcilesEarlyDecodeAcceptanceWithoutFabricatingBatchAck(
+            boolean batch, boolean acceptanceBeforeClaim)
+            throws Exception {
+        if (!batch) {
+            SchedulingTestConfig.useNonBatchDispatcher(config);
+        }
+        DecodeEndpoint decode = mock(DecodeEndpoint.class);
+        DecodeEndpoint.ReservationHandle reservation = new DecodeEndpoint.ReservationHandle(1L, 208L, 1L);
+        when(decode.isAcceptedByEngine(reservation)).thenReturn(true);
+        BalanceContext context = context(208L);
+        CompletableFuture<Response> future = lifecycle.register(context);
+        ScheduledRequest item = new ScheduledRequest(context, future, new Response(), null, null,
+                null, decode, reservation, System.currentTimeMillis());
+        bind(lifecycle, new Registered(item, future));
+        if (acceptanceBeforeClaim) {
+            lifecycle.confirmDecodeAcceptance(decode, reservation);
+        }
+        DeliveryClaim claim = batch
+                ? RequestLifecycleTestSupport.claimBatchWithoutPrediction(lifecycle, item, 704L, () -> true)
+                : RequestLifecycleTestSupport.claimRouteWithoutPrediction(lifecycle, item, () -> true);
+        assertNotNull(claim);
+        WorkSnapshot precedingWork = new WorkSnapshot(System.currentTimeMillis(), java.util.List.of(), java.util.List.of(), 0L);
+
+        if (batch) {
+            lifecycle.setDeliveryPrediction(claim, precedingWork, 30_000L);
+            assertFalse(future.isDone(), "Decode acceptance cannot replace the EnqueueBatch ACK");
+        } else {
+            lifecycle.publishRoute(claim, precedingWork, 30_000L);
+        }
+        RequestSlot slot = lifecycle.requestSlot(208L);
+        synchronized (slot) {
+            assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
+            assertTrue(slot.decisionDeadlineAtMs().isEmpty(), "accepted Decode needs no observation deadline");
+        }
+        if (batch) {
+            claim.complete(DeliveryResult.delivered());
+        }
+        assertTrue(future.get(5L, TimeUnit.SECONDS).isSuccess());
     }
 
     @Test
@@ -411,7 +484,7 @@ class RequestLifecycleDeliveryLockContractTest {
         Registered registered = registerItem(206L);
         bind(lifecycle, registered);
 
-        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimBatchDelivery(
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimBatch(lifecycle,
                 registered.item(),
                 702L,
                 () -> true);
@@ -424,29 +497,40 @@ class RequestLifecycleDeliveryLockContractTest {
         assertEquals(RequestState.Phase.DISPATCHING, afterDeadline.state(),
                 "the committed delivery claim must own the deadline race");
 
-        lifecycle.complete(
-                claim, DeliveryResult.delivered());
+        claim.complete(DeliveryResult.delivered());
+        assertTrue(registered.future().join().isSuccess());
+        assertThrows(IllegalStateException.class,
+                () -> claim.complete(DeliveryResult.notSent(new IllegalStateException("duplicate callback"))));
         assertTrue(registered.future().join().isSuccess());
     }
 
     @Test
-    void acknowledgedDeliveryArmsDecodeAcceptanceDeadline()
+    void acknowledgedDeliveryKeepsDecisionObservationDeadline()
             throws Exception {
         Registered registered = registerItem(
                 205L, null, mock(DecodeEndpoint.class));
-        bindRoute(lifecycle, registered, 1, 10L);
+        bindRoute(lifecycle, registered);
 
-        RequestRegistry.DeliveryClaim claim = lifecycle.tryClaimRouteDelivery(
+        DeliveryClaim claim = RequestLifecycleTestSupport.claimRouteWithoutPrediction(lifecycle,
                 registered.item(),
                 () -> true);
         assertNotNull(claim);
-        lifecycle.complete(
-                claim, DeliveryResult.delivered());
+        assertThrows(IllegalArgumentException.class, () -> claim.complete(DeliveryResult.delivered()));
+        assertFalse(registered.future().isDone(), "a batch callback cannot publish a route");
+        WorkSnapshot precedingWork = new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L);
+        lifecycle.publishRoute(claim, precedingWork, 10L);
+        assertThrows(IllegalStateException.class, () -> lifecycle.publishRoute(claim, precedingWork, 10L));
 
         assertTrue(registered.future().join().isSuccess());
         assertEquals(RequestState.Phase.ACKNOWLEDGED,
                 lifecycle.getRequestState(205L, 0L).state());
-        awaitCondition(() -> lifecycle.decodeAcceptanceCount() == 0);
+        // The observation window includes the 10-second handoff grace and is
+        // independent of worker-status RPC timing and request inactivity.
+        assertTimeoutPreemptively(Duration.ofSeconds(15), () -> {
+            while (!lifecycle.getRequestState(205L, 0L).detail().contains("SUSPECTED_LOST")) {
+                Thread.sleep(5L);
+            }
+        });
     }
 
     private void assertQueuedWithoutClaim(long requestId) {
@@ -471,7 +555,7 @@ class RequestLifecycleDeliveryLockContractTest {
             PrefillEndpoint prefillEndpoint,
             DecodeEndpoint decodeEndpoint) {
         BalanceContext context = context(requestId);
-        CompletableFuture<Response> future = lifecycle.register(context, 8);
+        CompletableFuture<Response> future = lifecycle.register(context);
         ScheduledRequest item = new ScheduledRequest(
                 context,
                 future,

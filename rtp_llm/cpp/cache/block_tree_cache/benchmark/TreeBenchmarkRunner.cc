@@ -81,7 +81,10 @@ public:
     void materializeRequestBlocks(MatchOutcome& outcome) override {
         for (const MultiNodeResource& resource : outcome.matched_device_resources) {
             for (const auto& [_, blocks] : resource.node_blocks) {
-                appendRequestBlocks(cache_.groupSets()[resource.group_set_id], blocks, outcome.request_blocks);
+                appendRequestBlocks(cache_.groupSets()[resource.group_set_id],
+                                    blocks,
+                                    outcome.request_blocks,
+                                    outcome.request_group_tags);
             }
         }
         outcome.matched_device_resources.clear();
@@ -91,12 +94,16 @@ public:
             for (size_t desc_index = 0; desc_index < descs.size(); ++desc_index) {
                 const TransferDescriptor& desc = descs[desc_index];
                 if (joined[desc_index]) {
-                    appendRequestBlocks(
-                        cache_.groupSets()[desc.group_set_id], desc.target_blocks, outcome.request_blocks);
+                    appendRequestBlocks(cache_.groupSets()[desc.group_set_id],
+                                        desc.target_blocks,
+                                        outcome.request_blocks,
+                                        outcome.request_group_tags);
                     outcome.joined_target_block_count += desc.target_blocks.size();
                 } else if (desc.source_tier == Tier::DEVICE) {
-                    appendRequestBlocks(
-                        cache_.groupSets()[desc.group_set_id], desc.source_blocks, outcome.request_blocks);
+                    appendRequestBlocks(cache_.groupSets()[desc.group_set_id],
+                                        desc.source_blocks,
+                                        outcome.request_blocks,
+                                        outcome.request_group_tags);
                 }
             }
         }
@@ -192,7 +199,9 @@ public:
     void publishInsert(const PathKeys&                path,
                        size_t                         actual_matched_depth,
                        PreparedRequestResources&      out,
-                       std::vector<BlockIndicesType>& request_blocks) override {
+                       std::vector<BlockIndicesType>& request_blocks,
+                       std::vector<std::string>&      request_group_tags) override {
+        requestPools(request_blocks, request_group_tags);
         const auto&                                group_sets = cache_.groupSets();
         std::vector<std::vector<GroupSetResource>> resources(path.size(),
                                                              std::vector<GroupSetResource>(group_sets.size()));
@@ -207,30 +216,27 @@ public:
         cache_.insert(path, resources, Tier::DEVICE);
         // Blocks accepted by the tree keep BLOCK_CACHE ownership; rejected ones
         // return to the pool after their REQUEST reference is released.
-        releaseRequestBlocks(request_blocks);
+        releaseRequestBlocks(request_blocks, request_group_tags);
         releasePrepared(out);
     }
 
-    void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks) override {
-        const auto& group_sets = cache_.groupSets();
-        for (const GroupSetPtr& group_set : group_sets) {
-            const auto& group_ids = group_set->groupIds();
-            const auto& pools     = group_set->devicePools();
-            RTP_LLM_CHECK(group_ids.size() == pools.size());
-            for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
-                const size_t group_id = group_ids[member_index];
-                if (group_id >= blocks.size() || blocks[group_id].empty()) {
-                    continue;
-                }
-                pools[member_index]->decRef(blocks[group_id]);
+    void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks, std::vector<std::string>& tags) override {
+        const auto pools = requestPools(blocks, tags);
+        for (size_t row = 0; row < blocks.size(); ++row) {
+            if (!blocks[row].empty()) {
+                pools[row]->decRef(blocks[row]);
             }
         }
         blocks.clear();
+        tags.clear();
     }
 
-    void rollback(PreparedRequestResources& out, std::vector<BlockIndicesType>& request_blocks) override {
+    void rollback(PreparedRequestResources&      out,
+                  std::vector<BlockIndicesType>& request_blocks,
+                  std::vector<std::string>&      request_group_tags) override {
+        requestPools(request_blocks, request_group_tags);
         releasePrepared(out);
-        releaseRequestBlocks(request_blocks);
+        releaseRequestBlocks(request_blocks, request_group_tags);
     }
 
     // Bounded drain for setup/warmup/measured/finalize with a configurable deadline.
@@ -245,17 +251,63 @@ public:
     }
 
 private:
+    std::vector<DeviceBlockPoolPtr> requestPools(const std::vector<BlockIndicesType>& blocks,
+                                                 const std::vector<std::string>&      tags) const {
+        RTP_LLM_CHECK(blocks.size() == tags.size());
+        std::unordered_set<std::string> seen;
+        std::vector<DeviceBlockPoolPtr> pools;
+        pools.reserve(tags.size());
+        // Resolve the complete ledger before changing any reference counts.
+        for (const auto& tag : tags) {
+            RTP_LLM_CHECK(!tag.empty() && seen.insert(tag).second);
+            DeviceBlockPoolPtr pool;
+            bool               known_tag = false;
+            for (const auto& group_set : cache_.groupSets()) {
+                const auto& topology_tags = group_set->topologyPtr()->groupTags();
+                known_tag |= std::find(topology_tags.begin(), topology_tags.end(), tag) != topology_tags.end();
+                const auto& members      = group_set->groupTags();
+                const auto& member_pools = group_set->devicePools();
+                RTP_LLM_CHECK(members.size() == member_pools.size());
+                const auto found = std::find(members.begin(), members.end(), tag);
+                if (found != members.end()) {
+                    RTP_LLM_CHECK(pool == nullptr);
+                    pool = member_pools[std::distance(members.begin(), found)];
+                }
+            }
+            RTP_LLM_CHECK(known_tag);
+            RTP_LLM_CHECK(pool != nullptr || blocks[pools.size()].empty());
+            pools.push_back(std::move(pool));
+        }
+        return pools;
+    }
+
     static void appendRequestBlocks(const GroupSetPtr&             group_set,
                                     const BlockIndicesType&        blocks,
-                                    std::vector<BlockIndicesType>& request_blocks) {
-        const auto& group_ids = group_set->groupIds();
-        RTP_LLM_CHECK(group_ids.size() == blocks.size());
-        for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
-            const size_t group_id = group_ids[member_index];
-            if (request_blocks.size() <= group_id) {
-                request_blocks.resize(group_id + 1);
+                                    std::vector<BlockIndicesType>& request_blocks,
+                                    std::vector<std::string>&      request_group_tags) {
+        const auto& group_tags = group_set->groupTags();
+        RTP_LLM_CHECK(group_tags.size() == blocks.size());
+        RTP_LLM_CHECK(request_group_tags.size() == request_blocks.size());
+        for (size_t member = 0; member < group_tags.size(); ++member) {
+            const auto& tag   = group_tags[member];
+            auto        found = std::find(request_group_tags.begin(), request_group_tags.end(), tag);
+            if (found == request_group_tags.end()) {
+                // Preserve leading empty rows from the topology order, without
+                // interpreting another group's private index as ledger identity.
+                for (const auto& topology_tag : group_set->topologyPtr()->groupTags()) {
+                    if (std::find(request_group_tags.begin(), request_group_tags.end(), topology_tag)
+                        == request_group_tags.end()) {
+                        request_group_tags.push_back(topology_tag);
+                        request_blocks.emplace_back();
+                    }
+                    if (topology_tag == tag) {
+                        break;
+                    }
+                }
+                found = std::find(request_group_tags.begin(), request_group_tags.end(), tag);
+                RTP_LLM_CHECK(found != request_group_tags.end());
             }
-            request_blocks[group_id].push_back(blocks[member_index]);
+            request_blocks[std::distance(request_group_tags.begin(), found)].push_back(blocks[member]);
         }
     }
 
@@ -417,7 +469,7 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
                                                               profile_.tokens_per_block);
         auto host_pool   = BenchmarkFixture::createHostPool(
             group_payloads[gs_idx], config.host_pool_blocks, "host_" + profile_.group_sets[gs_idx].name);
-        const std::vector<size_t> group_ids = {gs_idx};
+        const std::vector<std::string> group_tags = {profile_.group_sets[gs_idx].name};
 
         if (profile_.group_sets[gs_idx].group_type == benchmark::CacheGroupType::SWA) {
             group_sets.push_back(BenchmarkFixture::createSWAGroupSet({device_pool},
@@ -425,12 +477,12 @@ std::unique_ptr<BlockTreeCache> TreeBenchmarkRunner::buildTreeCache(const Online
                                                                      nullptr,
                                                                      gs_idx,
                                                                      topology,
-                                                                     group_ids,
+                                                                     group_tags,
                                                                      profile_.group_sets[gs_idx].sliding_window_size,
                                                                      profile_.tokens_per_block));
         } else {
             group_sets.push_back(
-                BenchmarkFixture::createFullGroupSet({device_pool}, host_pool, nullptr, gs_idx, topology, group_ids));
+                BenchmarkFixture::createFullGroupSet({device_pool}, host_pool, nullptr, gs_idx, topology, group_tags));
         }
     }
 

@@ -21,14 +21,12 @@ public final class SelectedRole implements AutoCloseable {
     private WorkerEndpoint.GenerationPin generationPin;
     private final ServerStatus serverStatus;
     private final long prefillWorkMs;
-    private final long decodeTotalKv;
     private final long placementVersion;
 
     private SelectedRole(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long decodeTotalKv,
             long placementVersion) {
         this.generationPin = generationPin;
         this.serverStatus = serverStatus;
@@ -54,14 +52,12 @@ public final class SelectedRole implements AutoCloseable {
             throw new IllegalArgumentException(
                     "Prefill selection requires a Prefill endpoint role");
         }
-        if (decodeTotalKv >= 0L
-                && (!(endpoint instanceof DecodeEndpoint)
-                        || serverStatus.getRole() != RoleType.DECODE)) {
+        if (serverStatus.getRole() == RoleType.DECODE
+                && !(endpoint instanceof DecodeEndpoint)) {
             throw new IllegalArgumentException(
                     "Decode selection requires a Decode endpoint role");
         }
         this.prefillWorkMs = prefillWorkMs;
-        this.decodeTotalKv = decodeTotalKv;
         if (placementVersion < 0L) {
             throw new IllegalArgumentException(
                     "placementVersion must be non-negative");
@@ -91,34 +87,36 @@ public final class SelectedRole implements AutoCloseable {
                     "Prefill work must be non-negative");
         }
         return createOwned(
-                generationPin, serverStatus, prefillWorkMs, -1L,
+                generationPin, serverStatus, prefillWorkMs,
                 placementVersion);
     }
 
     public static SelectedRole decode(
             WorkerEndpoint.GenerationPin generationPin,
-            ServerStatus serverStatus,
-            long decodeTotalKv) {
+            ServerStatus serverStatus) {
         return decode(
-                generationPin, serverStatus, decodeTotalKv,
+                generationPin, serverStatus,
                 endpointPlacementVersion(generationPin));
     }
 
     public static SelectedRole decode(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
-            long decodeTotalKv,
             long placementVersion) {
-        return createOwned(
-                generationPin, serverStatus, -1L,
-                Math.max(0L, decodeTotalKv), placementVersion);
+        if (serverStatus == null || serverStatus.getRole() != RoleType.DECODE) {
+            if (generationPin != null) {
+                generationPin.close();
+            }
+            throw new IllegalArgumentException("Decode selection requires Decode metadata");
+        }
+        return createOwned(generationPin, serverStatus, -1L, placementVersion);
     }
 
     public static SelectedRole stateless(
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus) {
         return createOwned(
-                generationPin, serverStatus, -1L, -1L, 0L);
+                generationPin, serverStatus, -1L, 0L);
     }
 
     /** Calling a factory consumes the pin, including every validation failure. */
@@ -126,11 +124,10 @@ public final class SelectedRole implements AutoCloseable {
             WorkerEndpoint.GenerationPin generationPin,
             ServerStatus serverStatus,
             long prefillWorkMs,
-            long decodeTotalKv,
             long placementVersion) {
         try {
             return new SelectedRole(
-                    generationPin, serverStatus, prefillWorkMs, decodeTotalKv,
+                    generationPin, serverStatus, prefillWorkMs,
                     placementVersion);
         } catch (RuntimeException | Error failure) {
             if (generationPin != null) {
@@ -150,14 +147,6 @@ public final class SelectedRole implements AutoCloseable {
                     "selection does not carry Prefill work");
         }
         return prefillWorkMs;
-    }
-
-    public long decodeTotalKv() {
-        if (decodeTotalKv < 0L) {
-            throw new IllegalStateException(
-                    "selection does not carry Decode capacity");
-        }
-        return decodeTotalKv;
     }
 
     public long placementVersion() {

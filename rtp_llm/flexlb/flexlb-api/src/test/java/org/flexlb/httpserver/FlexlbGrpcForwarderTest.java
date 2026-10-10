@@ -38,7 +38,7 @@ import static org.mockito.Mockito.when;
 class FlexlbGrpcForwarderTest {
 
     @Test
-    void missingMasterIsTheOnlyLocalFallbackCase() {
+    void missingMasterDoesNotAttemptRpc() {
         LBStatusConsistencyService consistency = mock(LBStatusConsistencyService.class);
         EngineHealthReporter reporter = mock(EngineHealthReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
@@ -87,7 +87,8 @@ class FlexlbGrpcForwarderTest {
 
         assertTrue(result.masterFound());
         assertEquals("DEADLINE_EXCEEDED", result.failure());
-        assertNull(callOptions.getValue().getDeadline());
+        assertNull(callOptions.getValue().getDeadline(), "the inbound Context owns the request deadline");
+        assertEquals(Status.Code.DEADLINE_EXCEEDED, Status.fromThrowable(result.error()).getCode());
         assertSame(channel, channels(forwarder).get("10.0.0.2:7003"));
         verify(channel, never()).shutdownNow();
         verify(reporter).reportForwardToMasterResult("10.0.0.2", "GRPC_FAILED");

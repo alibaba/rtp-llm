@@ -156,10 +156,10 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
     }
     const auto group = std::find_if(
         topology.groups().begin(), topology.groups().end(), [&](const auto& entry) { return entry.tag == cache_tag; });
-    if (group == topology.groups().end() || group->layer_ids.empty()) {
+    if (group == topology.groups().end() || topology.layerIdsForGroup(cache_tag).empty()) {
         return conversionError("tag=" + cache_tag + ": non-empty route has no topology layers");
     }
-    for (int layer_id : group->layer_ids) {
+    for (int layer_id : topology.layerIdsForGroup(cache_tag)) {
         auto buffer = convertLayerTagForRoute(resource, *group, layer_id, positions, cp_rank, cp_size);
         if (!buffer.ok()) {
             return buffer.status();

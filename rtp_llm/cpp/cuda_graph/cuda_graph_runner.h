@@ -27,6 +27,8 @@ class MetricsReporter;
 
 namespace rtp_llm {
 
+struct CacheTopology;
+
 class DirtyCudaGraphCaptureError: public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
@@ -39,6 +41,14 @@ public:
 
 class CudaGraphRunner: public GraphBase {
 public:
+    // Stateless capture-side width helpers. They borrow the current model
+    // topology but never store page geometry in GraphParams or the runner.
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
+                                                size_t               max_seq_len,
+                                                size_t               max_reserved_step);
+    static int64_t captureKernelBlockTableWidth(const CacheTopology& topology,
+                                                size_t               fake_physical_block_count);
+
     CudaGraphRunner(const GraphParams&                         graph_params,
                     py::object                                 py_instance,
                     const char*                                forward_method_name = "forward",
@@ -52,12 +62,9 @@ public:
         enable_cuda_graph_debug_mode_(graph_params.enable_cuda_graph_debug_mode),
         num_tokens_per_bs_(graph_params.num_tokens_per_bs),
         max_seq_len_(graph_params.max_seq_len),
-        seq_size_per_block_(graph_params.tokens_per_block),
-        kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
         input_hidden_size_(graph_params.input_hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
-        sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         position_encoding_(graph_params.position_encoding),
@@ -73,9 +80,10 @@ public:
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
         }
-        if (kernel_seq_size_per_block_ <= 0) {
-            throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
-        }
+        RTP_LLM_CHECK_WITH_INFO(graph_params.max_seq_len > 0, "CUDA graph max sequence length must be positive");
+        max_kernel_block_table_width_ = graph_params.kernel_block_table_width;
+        RTP_LLM_CHECK_WITH_INFO(max_kernel_block_table_width_ > 0,
+                                "CUDA graph requires a positive kernel block table width");
         max_bs_ = graph_params.max_context_batch_size;
         if (role_ == CudaGraphRole::AUTO) {
             role_ = is_target_verify_ ? CudaGraphRole::TARGET_VERIFY :
@@ -111,13 +119,13 @@ public:
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
-            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
+            enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
             hidden_size_: %d, input_hidden_size_: %zu, num_tokens_per_bs_: %d, role_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
                          max_seq_len_,
-                         kernel_seq_size_per_block_,
+                         static_cast<long long>(max_kernel_block_table_width_),
                          hidden_size_,
                          input_hidden_size_,
                          num_tokens_per_bs_,
@@ -235,13 +243,11 @@ private:
     size_t                  max_bs_{1};
     int                     num_tokens_per_bs_{1};
     int                     max_num_token_{1};
+    int64_t                 max_kernel_block_table_width_{0};
     int                     max_seq_len_{0};
-    int                     seq_size_per_block_{0};
-    int                     kernel_seq_size_per_block_{0};
     int                     hidden_size_{0};
     size_t                  input_hidden_size_{0};
     int                     hc_mult_{1};
-    int                     sp_steps_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

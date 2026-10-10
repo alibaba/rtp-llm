@@ -1527,8 +1527,13 @@ class Qwen3NextModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
-        impls = super().prepare_fmha_impl(inputs, is_cuda_graph)
+    def prepare_fmha_impl(
+        self,
+        inputs: PyModelInputs,
+        is_cuda_graph: bool = False,
+        cuda_graph_selection_mode: Optional[str] = None,
+    ):
+        impls = super().prepare_fmha_impl(inputs, is_cuda_graph, cuda_graph_selection_mode)
         if torch.version.hip is None:
             return impls
         attention_inputs = get_attention_inputs_value(inputs)

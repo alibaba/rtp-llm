@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include "absl/status/status.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -57,6 +58,11 @@ private:
     void                            loop();
     void                            normalizeSystemPromptCacheConfig();
     void                            initCacheManager(std::optional<WarmUpResult> warm_up_result);
+    static void                     initializeAndPublishCacheManager(ResourceContext&                            resource_context,
+                                                                     int&                                        kv_cache_group_num,
+                                                                     RoleType                                    role_type,
+                                                                     std::shared_ptr<KVCacheManager>             cache_manager,
+                                                                     const std::function<bool(KVCacheManager&)>& initializer);
     absl::Status                    initSystemPrompt();
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
@@ -74,6 +80,7 @@ private:
     std::atomic<bool>                             running_{false};
     std::unique_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
+    py::object                                    custom_output_selector_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
     EPLBConfig                                    eplb_config;

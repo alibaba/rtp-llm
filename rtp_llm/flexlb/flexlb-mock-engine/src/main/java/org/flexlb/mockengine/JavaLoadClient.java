@@ -987,20 +987,9 @@ public final class JavaLoadClient {
         return addrs.get(idx);
     }
 
-    /**
-     * Loads fallback engine addresses from endpoints.json (parity with Python
-     * _load_fallback_endpoints): prefers DOMAIN_ADDRESS:{domain} env entries
-     * (HTTP port + 1 = gRPC port), falls back to the "engines" array.
-     */
+    /** Loads fallback gRPC addresses from the mock cluster's endpoint records. */
     void loadFallbackEndpoints(String path) throws IOException {
         JsonNode data = MAPPER.readTree(Path.of(path).toFile());
-        String prefillDomain = data.path("prefill_domain").asText("");
-        String decodeDomain = data.path("decode_domain").asText("");
-        JsonNode env = data.path("env");
-
-        parseDomainAddrs(env, "DOMAIN_ADDRESS:" + prefillDomain, fallbackPrefillAddrs);
-        parseDomainAddrs(env, "DOMAIN_ADDRESS:" + decodeDomain, fallbackDecodeAddrs);
-
         if (fallbackPrefillAddrs.isEmpty()) {
             for (JsonNode e : data.path("engines")) {
                 if ("prefill".equals(e.path("role").asText())
@@ -1023,32 +1012,6 @@ public final class JavaLoadClient {
         }
         if (!fallbackDecodeAddrs.isEmpty()) {
             System.out.println("fallback decode addrs: " + fallbackDecodeAddrs);
-        }
-    }
-
-    private static void parseDomainAddrs(JsonNode env, String key, List<String> out) {
-        JsonNode node = env.path(key);
-        if (node.isMissingNode() || node.asText("").isEmpty()) {
-            return;
-        }
-        for (String part : node.asText().split(",")) {
-            String addr = part.trim();
-            if (addr.isEmpty()) {
-                continue;
-            }
-            try {
-                int colon = addr.lastIndexOf(':');
-                if (colon <= 0 || colon == addr.length() - 1) {
-                    throw new IllegalArgumentException("expected host:port");
-                }
-                // DOMAIN_ADDRESS holds the HTTP port; gRPC port = HTTP port + 1.
-                out.add(addr.substring(0, colon) + ":"
-                        + (Integer.parseInt(addr.substring(colon + 1)) + 1));
-            } catch (RuntimeException e) {
-                // One malformed entry must not abort the whole replay.
-                System.err.println("WARNING: skipping malformed DOMAIN_ADDRESS entry '"
-                        + addr + "' for " + key + ": " + e);
-            }
         }
     }
 

@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <vector>
+#include <unordered_set>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <cstdlib>
@@ -400,6 +401,16 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                             "kv_cache_kernel_block_id must be [batch, blocks] or [group, batch, blocks]");
 
     if (inputs.kv_cache_kernel_block_id.dim() == 2) {
+        RTP_LLM_CHECK_WITH_INFO(!kv_cache_layer_layout_.has_value()
+                                    || kv_cache_layer_layout_->topology().hasSingleGlobalGroup(),
+                                "2-D KV block tables require a single global cache group");
+        if (!inputs.kv_cache_group_tags.empty()) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_group_tags.size() == 1
+                                        && !inputs.kv_cache_group_tags.front().empty()
+                                        && kv_cache_layer_layout_.has_value(),
+                                    "tagged 2-D KV block tables require one known cache group");
+            kv_cache_layer_layout_->topology().group(inputs.kv_cache_group_tags.front());
+        }
         py_attn_inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id;
         py_attn_inputs.kv_cache_kernel_block_id_device =
             tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_kernel_block_id);
@@ -422,21 +433,39 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
     const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
     RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
                             "tagged attention inputs require the current model cache layout");
-    const auto& group_tags = kv_cache_layer_layout_->topology().groupTagsSnapshot();
-    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_count,
-                            "KV block table group count=%zu does not match topology tag count=%zu",
-                            group_count,
-                            group_tags.size());
-    RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined() || inputs.kv_cache_block_id.dim() == 3,
-                            "physical kv_cache_block_id must be 3-D for tagged inputs");
+    const auto& group_tags   = inputs.kv_cache_group_tags;
+    const auto& model_groups = kv_cache_layer_layout_->topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(group_count > 0 && group_tags.size() == group_count && !model_groups.empty(),
+                            "KV block table group count=%zu must match payload tags; model groups must not be empty",
+                            group_count);
+    std::unordered_set<std::string> seen_tags;
+    for (const auto& tag : group_tags) {
+        RTP_LLM_CHECK_WITH_INFO(
+            !tag.empty() && seen_tags.insert(tag).second, "empty or duplicate KV payload group tag=%s", tag.c_str());
+    }
+    for (const auto& group : model_groups) {
+        RTP_LLM_CHECK_WITH_INFO(
+            seen_tags.count(group.tag) != 0, "KV payload is missing model cache group tag=%s", group.tag.c_str());
+    }
+    RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_group_types.defined()
+                                || (inputs.kv_cache_group_types.dim() == 1
+                                    && inputs.kv_cache_group_types.size(0) == static_cast<int64_t>(group_count)),
+                            "KV group types must have one entry per payload group (groups=%zu)",
+                            group_count);
+    RTP_LLM_CHECK_WITH_INFO(!inputs.kv_cache_block_id.defined()
+                                || (inputs.kv_cache_block_id.dim() == 3
+                                    && inputs.kv_cache_block_id.size(0) == static_cast<int64_t>(group_count)
+                                    && inputs.kv_cache_block_id.size(1) == inputs.kv_cache_kernel_block_id.size(1)),
+                            "physical KV block table must match kernel table group and batch dimensions");
 
     torch_ext::AttentionInputsByTag by_tag;
-    for (size_t group_id = 0; group_id < group_count; ++group_id) {
-        auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[group_id];
+    for (const auto& group : model_groups) {
+        const auto payload_row  = std::find(group_tags.begin(), group_tags.end(), group.tag) - group_tags.begin();
+        auto       group_inputs = py_attn_inputs;
+        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[payload_row];
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
+            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[payload_row];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
                 group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
@@ -444,15 +473,13 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                                                             group_inputs.kv_cache_block_id;
             }
         }
-        const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
-        (void)it;
-        RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate attention input tag=%s", group_tags[group_id].c_str());
+        by_tag.emplace(group.tag, std::move(group_inputs));
     }
 
-    // A single global group keeps the direct fast path. Multiple groups are
-    // exposed only through the outer tag mapping.
-    py_attn_inputs = by_tag.at(group_tags.front());
-    if (group_count == 1) {
+    // The model topology, including placeholders, determines the input shape;
+    // extra rows in a shared target payload do not make a single-group model tagged.
+    py_attn_inputs = by_tag.at(model_groups.front().tag);
+    if (model_groups.size() == 1) {
         return {};
     }
     return by_tag;
@@ -510,6 +537,46 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              inputs,
                              torch::Tensor(),
                              skip_final_layernorm);
+}
+
+torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) {
+    const auto  decode_batch_size  = inputs.sequence_lengths.size(0);
+    const auto  context_batch_size = inputs.input_lengths.size(0) - decode_batch_size;
+    const auto& indexes            = inputs.custom_output_indexes;
+    TORCH_CHECK(indexes.defined() && indexes.dim() == 1 && indexes.size(0) <= context_batch_size,
+                "custom output indexes must contain at most one row per context sequence");
+    // Device-input staging is optional. Retain CPU indexes for async H2D;
+    // already-staged CUDA indexes require no host retention or additional copy.
+    buffer_holder_.hold_host(indexes);
+    return indexes.to(torch::kCUDA, /*non_blocking=*/true);
+}
+
+void PyWrappedModel::initializeCustomOutput() {
+    const auto handler = py_model_.attr("custom_output_handler");
+    TORCH_CHECK(py::cast<std::vector<std::string>>(handler.attr("extend_forward_args")())
+                    == std::vector<std::string>{"selected_hidden_states"},
+                "custom output handler must request selected_hidden_states");
+    TORCH_CHECK(weights_.lm_head, "custom output requires a model with lm_head");
+    // CP does not retain arbitrary token rows for postprocessing.
+    TORCH_CHECK(!device_props_.enable_prefill_cp, "custom output does not support context parallel yet");
+    custom_output_enabled_ = true;
+    RTP_LLM_LOG_INFO("custom output initialized");
+}
+
+torch::Tensor PyWrappedModel::runCustomOutput(const torch::Tensor& rows) {
+    py::gil_scoped_acquire gil;
+    auto                   output = py_model_.attr("custom_output_handler")
+                      .attr("extend_forward")(py::arg("selected_hidden_states") = rows)
+                      .cast<torch::Tensor>();
+    TORCH_CHECK(output.defined() && (output.dim() == 1 || output.dim() == 2) && output.numel() > 0,
+                "custom output must be a nonempty [batch] or [batch, width] tensor");
+    TORCH_CHECK(output.size(0) == rows.size(0), "custom output must return one row per selected context sequence");
+    TORCH_CHECK(output.device() == rows.device(), "custom output must remain on the input CUDA device");
+    const auto dtype = output.scalar_type();
+    TORCH_CHECK(dtype == torch::kFloat32 || dtype == torch::kFloat16 || dtype == torch::kBFloat16
+                    || dtype == torch::kInt32,
+                "custom output dtype must be float32, float16, bfloat16 or int32 for RPC serialization");
+    return output;
 }
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
@@ -1023,7 +1090,17 @@ sliceKvCacheBlockIdByBatch(const torch::Tensor& kv_cache_block_id, size_t batch_
     }
     if (kv_cache_block_id.dim() == 3) {
         // [group, batch, max_blocks] → narrow on dim 1
-        return kv_cache_block_id.narrow(1, batch_offset, batch_size).contiguous();
+        auto sliced = kv_cache_block_id.narrow(1, batch_offset, batch_size);
+        if (sliced.is_contiguous()) {
+            return sliced;
+        }
+        if (sliced.device().is_cpu() && kv_cache_block_id.is_pinned()) {
+            // Materialization must preserve the fused host-to-device copy contract.
+            auto result = torch::empty(sliced.sizes(), sliced.options().pinned_memory(true));
+            result.copy_(sliced);
+            return result;
+        }
+        return sliced.contiguous();
     }
     return kv_cache_block_id;
 }
@@ -1162,6 +1239,21 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                 logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
             }
         }
+
+        GptModelOutputs outputs;
+        // Internal warmup/system-prefix requests have no selected token and do not score.
+        if (custom_output_enabled_ && has_context_request && inputs.custom_output_indexes.defined()
+            && inputs.custom_output_indexes.numel() > 0) {
+            try {
+                auto context_rows = torch::index_select(hidden, 0, customOutputIndexes(inputs));
+                // C++ RMSNorm may promote hidden to FP32; heads use the model
+                // activation dtype. Cast only selected rows, leaving LM logits unchanged.
+                outputs.custom_output = runCustomOutput(context_rows.to(dataTypeToTorchType(description_.data_type)));
+            } catch (const std::exception& error) {
+                outputs.custom_output_error = error.what();
+                RTP_LLM_LOG_ERROR("custom output processor failed: %s", outputs.custom_output_error.c_str());
+            }
+        }
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
@@ -1179,17 +1271,17 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
         }
-        torch::Tensor softmax_result_t;
+        outputs.logits            = logits;
+        outputs.hidden_states     = last_hidden;
+        outputs.all_hidden_states = hidden;
         if (need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(need_all_logits_index)");
-            auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
-            return {last_logits, last_hidden, hidden, logits, softmax_result_t};
+            outputs.all_logits = logits;
+            outputs.logits     = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+        } else if (merged_eagle3_hidden.defined()) {
+            outputs.all_hidden_states = merged_eagle3_hidden;
         }
-
-        if (merged_eagle3_hidden.defined()) {
-            hidden = merged_eagle3_hidden;
-        }
-        return {logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
+        return outputs;
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }

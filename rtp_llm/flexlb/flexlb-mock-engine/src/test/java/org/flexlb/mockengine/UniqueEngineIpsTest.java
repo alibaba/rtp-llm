@@ -20,7 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * engineIp Prometheus label had a single variant and per-engine gauge series
  * overwrote each other. These tests pin the derivation formula, the CLI
  * switch (both space-separated and glued {@code =false} forms), and the
- * discovery-file wiring (DOMAIN_ADDRESS / endpoints.json keep the HTTP port
+ * discovery-file wiring (discovery.json / endpoints.json keep the HTTP port
  * convention grpcPort-1 with a unique host per engine).
  */
 class UniqueEngineIpsTest {
@@ -121,14 +121,9 @@ class UniqueEngineIpsTest {
         assertEquals("127.1.2.1:64002", engines.get(2).get("grpc_addr").asText());
         assertEquals("127.1.3.1:64003", engines.get(3).get("grpc_addr").asText());
 
-        // DOMAIN_ADDRESS keeps the HTTP-port convention (grpcPort - 1); the
-        // master-side http-protocol conversion and JavaLoadClient add +1 back.
-        String prefillEnv = payload.get("env")
-                .get("DOMAIN_ADDRESS:mock.prefill.hosts.address").asText();
-        assertEquals("127.1.0.1:63999,127.1.1.1:64000", prefillEnv);
-        String decodeEnv = payload.get("env")
-                .get("DOMAIN_ADDRESS:mock.decode.hosts.address").asText();
-        assertEquals("127.1.2.1:64001,127.1.3.1:64002", decodeEnv);
+        JsonNode service = MAPPER.readTree(payload.get("env").get("MODEL_SERVICE_CONFIG").asText());
+        assertEquals(tempDir.resolve("discovery.json").toString(), service.get("discovery_file").asText());
+        assertEquals(1, payload.get("env").size());
     }
 
     @Test
@@ -141,9 +136,7 @@ class UniqueEngineIpsTest {
         assertEquals("127.0.0.1", engines.get(0).get("ip").asText());
         assertEquals("127.0.0.1:64000", engines.get(0).get("grpc_addr").asText());
         assertEquals("127.0.0.1:63999", engines.get(0).get("http_addr").asText());
-        String prefillEnv = payload.get("env")
-                .get("DOMAIN_ADDRESS:mock.prefill.hosts.address").asText();
-        assertEquals("127.0.0.1:63999,127.0.0.1:64000", prefillEnv);
+
     }
 
     private JsonNode writeDiscovery(String... extra) throws Exception {

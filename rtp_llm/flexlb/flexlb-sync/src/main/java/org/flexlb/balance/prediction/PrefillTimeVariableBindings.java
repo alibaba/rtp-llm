@@ -71,6 +71,28 @@ final class PrefillTimeVariableBindings {
         return ctx.evaluationVariables;
     }
 
+    static final class AppendBindings {
+        final double[] batch = new double[PrefillTimeFormula.VAR_COUNT];
+        final double[] item = new double[PrefillTimeFormula.VAR_COUNT];
+        private long totalInput, totalHit, maxInput, maxCompute;
+        private int count;
+
+        void append(long seqLen, long hitCache) {
+            if (seqLen < 0 || hitCache < 0 || hitCache > seqLen) {
+                throw new IllegalArgumentException("Invalid request token counts");
+            }
+            fillRequestVars(item, seqLen, hitCache);
+            long input = (long) item[PrefillTimeFormula.IDX_INPUT_TOKENS];
+            long hit = (long) item[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
+            totalInput += input;
+            totalHit += hit;
+            maxInput = Math.max(maxInput, input);
+            maxCompute = Math.max(maxCompute, input - hit);
+            batch[PrefillTimeFormula.IDX_BATCH_SIZE] = ++count;
+            fillBatchVars(batch, totalInput, totalHit, maxInput, maxCompute);
+        }
+    }
+
     private static void fillBatchVars(double[] vars,
                                       long totalInputTokens,
                                       long totalHitCacheTokens,

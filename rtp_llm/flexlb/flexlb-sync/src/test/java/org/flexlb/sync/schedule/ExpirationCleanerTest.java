@@ -9,6 +9,10 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
+import org.springframework.scheduling.config.FixedRateTask;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -16,13 +20,39 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ExpirationCleanerTest {
+
+    @Test
+    void springSchedulesWorkerCleanupAtTheConfiguredInterval() {
+        FlexlbConfig config = ConfigService.parse("""
+                {"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "workerRegistry":{"health":{"cleanupIntervalMs":1250}}}
+                """);
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean("configService", ConfigService.class, () -> configService);
+            context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));
+            context.registerBean(WorkerDirectory.class, () -> mock(WorkerDirectory.class));
+            context.registerBean(TaskScheduler.class, () -> mock(TaskScheduler.class));
+            context.registerBean(ScheduledAnnotationBeanPostProcessor.class);
+            context.registerBean(ExpirationCleaner.class);
+            context.refresh();
+            var tasks = context.getBean(ScheduledAnnotationBeanPostProcessor.class).getScheduledTasks();
+            assertEquals(1, tasks.size());
+            FixedRateTask task = assertInstanceOf(FixedRateTask.class, tasks.iterator().next().getTask());
+            assertEquals(1250L, task.getInterval());
+            assertEquals(10000L, config.getWorkerRegistry().getHealth().getStatusStaleAfterMs());
+        }
+    }
 
     @Test
     void detachesEveryExpiredWorkerBeforeAwaitingAnyRetirement()
@@ -57,7 +87,7 @@ class ExpirationCleanerTest {
         }).when(firstDetached).retireAndAwait();
 
         ConfigService configService = mock(ConfigService.class);
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
         config.getWorkerRegistry().getHealth().setStatusStaleAfterMs(0L);
         when(configService.loadBalanceConfig()).thenReturn(config);
         ExpirationCleaner cleaner = new ExpirationCleaner(

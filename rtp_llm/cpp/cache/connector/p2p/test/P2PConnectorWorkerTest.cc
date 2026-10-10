@@ -13,6 +13,7 @@
 #include <vector>
 #include <chrono>
 #include <map>
+#include <tuple>
 
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorPrefill.h"
@@ -28,7 +29,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 namespace rtp_llm {
 
@@ -53,6 +54,40 @@ P2PWorkerRoutePlan makeReadPlan(const std::vector<std::shared_ptr<LayerCacheBuff
         route->layer_buffers.push_back(layer_buffer);
     }
     return plan;
+}
+
+class RecordingLayerBlockConverter: public LayerBlockConverter {
+public:
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
+        calls.emplace_back(layer_id, tag, block_id, partition_count, partition_id);
+        BlockInfo info;
+        info.addr       = reinterpret_cast<void*>(static_cast<uintptr_t>(block_id + 1));
+        info.size_bytes = static_cast<size_t>(block_id + 4);
+        return {info};
+    }
+
+    std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        return {};
+    }
+
+    mutable std::vector<std::tuple<int, std::string, int, int, int>> calls;
+};
+
+TEST(P2PKeyUtilTest, BufferConversionCarriesLayerTagAndBlockIdentity) {
+    auto converter = std::make_shared<RecordingLayerBlockConverter>();
+    auto buffer    = std::make_shared<LayerCacheBuffer>(/*layer_id=*/3, "linear");
+    buffer->addBlockId(/*cache_key=*/101, /*block_id=*/7);
+
+    const auto infos =
+        LayerCacheBufferUtil::buildKeyBlockInfos(converter, buffer, /*partition_count=*/2, /*partition_id=*/1);
+
+    ASSERT_EQ(converter->calls.size(), 1u);
+    EXPECT_EQ(converter->calls.front(), std::make_tuple(3, std::string("linear"), 7, 2, 1));
+    ASSERT_TRUE(infos.ok()) << infos.status().ToString();
+    ASSERT_EQ(infos.value().size(), 1u);
+    ASSERT_EQ(infos.value().at(101)->blocks.size(), 1u);
+    EXPECT_EQ(infos.value().at(101)->blocks.front().addr, reinterpret_cast<void*>(8));
 }
 
 // Mock LayerBlockConverter for testing
@@ -489,7 +524,7 @@ protected:
         for (int i = 0; i < layer_num; ++i) {
             if (i == layer_id) {
                 for (int j = 0; j < num_blocks; ++j) {
-                    resource->mutableBlockIds(i).add({j});
+                    resource->mutableBlockIds("group" + std::to_string(i)).add({j});
                 }
             }
         }
@@ -2404,7 +2439,7 @@ protected:
         resource->initGroups(topology_);
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer).add({i});
+                resource->mutableBlockIds("group" + std::to_string(layer)).add({i});
             }
         }
         for (int i = 0; i < blocks_per_layer; ++i) {

@@ -753,3 +753,11 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
             p.total_bm,
             BLOCK_SIZE=p.BLOCK_SIZE,
         )
+        if self.need_rope_kv_cache:
+            # The fused kernel above refreshes TRT-LLM metadata but not the
+            # separate CUDA buffer captured by the RoPE op.
+            self.rope_params.sequence_lengths = (
+                self.rope_kvcache_impl.refresh_sequence_lengths(
+                    attn_inputs, forbid_reallocation=True
+                )
+            )

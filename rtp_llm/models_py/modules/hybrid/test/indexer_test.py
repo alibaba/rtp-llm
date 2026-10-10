@@ -1,6 +1,7 @@
 import random
+from types import SimpleNamespace
 from typing import Dict, Optional
-from unittest import SkipTest, TestCase, main, skipIf
+from unittest import SkipTest, TestCase, main, mock, skipIf
 
 import torch
 
@@ -26,6 +27,7 @@ SKIP_REASON = "CUDA version must be >= 12.9 for this test"
 CUDA_VERSION_OK = False
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.models_py.modules.base.cuda import indexer_op as indexer_op_module
 from rtp_llm.ops.compute_ops import PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
@@ -36,6 +38,105 @@ if CUDA_VERSION_OK:
         IndexerRef,
         _ref_torch_transform_ragged_impl,
     )
+
+
+class PagedMqaContextLensCompatibilityTest(TestCase):
+    def setUp(self):
+        indexer_op_module._paged_mqa_context_lens_dim = None
+
+    def tearDown(self):
+        indexer_op_module._paged_mqa_context_lens_dim = None
+
+    def _fake_deep_gemm(self, expected_dim: int):
+        metadata_calls = []
+        logits_calls = []
+
+        def get_metadata(context_lens, block_kv, num_sms):
+            metadata_calls.append(context_lens.dim())
+            return torch.tensor([context_lens.dim(), block_kv, num_sms])
+
+        def paged_logits(
+            q,
+            kv_cache,
+            weights,
+            context_lens,
+            block_table,
+            schedule_metadata,
+            max_context_len,
+            clean_logits,
+        ):
+            logits_calls.append(context_lens.dim())
+            if context_lens.dim() != expected_dim:
+                raise RuntimeError(f"expected {expected_dim}D context_lens")
+            return torch.tensor([context_lens.dim(), max_context_len])
+
+        return SimpleNamespace(
+            get_num_sms=lambda: 80,
+            get_paged_mqa_logits_metadata=get_metadata,
+            fp8_paged_mqa_logits=paged_logits,
+            metadata_calls=metadata_calls,
+            logits_calls=logits_calls,
+        )
+
+    def _run_compat(self):
+        return indexer_op_module._fp8_paged_mqa_logits_compat(
+            q=torch.empty(0),
+            kv_cache=torch.empty(0),
+            weights=torch.empty(0),
+            context_lens=torch.tensor([7, 11], dtype=torch.int32),
+            block_table=torch.empty(0),
+            block_kv=64,
+            max_context_len=4096,
+        )
+
+    def test_new_deep_gemm_uses_2d_context_lens(self):
+        fake_deep_gemm = self._fake_deep_gemm(expected_dim=2)
+        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+            logits = self._run_compat()
+
+        self.assertEqual(logits.tolist(), [2, 4096])
+        self.assertEqual(fake_deep_gemm.metadata_calls, [2])
+        self.assertEqual(fake_deep_gemm.logits_calls, [2])
+
+    def test_old_deep_gemm_falls_back_to_1d_and_caches_layout(self):
+        fake_deep_gemm = self._fake_deep_gemm(expected_dim=1)
+        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+            first_logits = self._run_compat()
+            second_logits = self._run_compat()
+
+        self.assertEqual(first_logits.tolist(), [1, 4096])
+        self.assertEqual(second_logits.tolist(), [1, 4096])
+        self.assertEqual(fake_deep_gemm.metadata_calls, [2, 1, 1])
+        self.assertEqual(fake_deep_gemm.logits_calls, [2, 1, 1])
+
+    def test_cache_update_during_probe_does_not_prevent_fallback(self):
+        fake_deep_gemm = self._fake_deep_gemm(expected_dim=1)
+        get_metadata = fake_deep_gemm.get_paged_mqa_logits_metadata
+
+        def get_metadata_with_cache_update(context_lens, block_kv, num_sms):
+            # Simulate another call caching its successful 1D layout mid-probe.
+            indexer_op_module._paged_mqa_context_lens_dim = 1
+            return get_metadata(context_lens, block_kv, num_sms)
+
+        fake_deep_gemm.get_paged_mqa_logits_metadata = get_metadata_with_cache_update
+        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+            logits = self._run_compat()
+
+        self.assertEqual(logits.tolist(), [1, 4096])
+        self.assertEqual(fake_deep_gemm.metadata_calls, [2, 1])
+        self.assertEqual(fake_deep_gemm.logits_calls, [2, 1])
+        self.assertEqual(indexer_op_module._paged_mqa_context_lens_dim, 1)
+
+    def test_cached_layout_error_is_propagated_without_probing(self):
+        fake_deep_gemm = self._fake_deep_gemm(expected_dim=1)
+        indexer_op_module._paged_mqa_context_lens_dim = 2
+        with mock.patch.object(indexer_op_module, "deep_gemm", fake_deep_gemm):
+            with self.assertRaisesRegex(RuntimeError, "expected 1D context_lens"):
+                self._run_compat()
+
+        self.assertEqual(fake_deep_gemm.metadata_calls, [2])
+        self.assertEqual(fake_deep_gemm.logits_calls, [2])
+        self.assertEqual(indexer_op_module._paged_mqa_context_lens_dim, 2)
 
 
 def set_seed(seed: int):
@@ -329,7 +430,7 @@ class IndexerTest(TestCase):
             attn_inputs, config.attn_config.tokens_per_block
         )
         fmha_params.schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-            fmha_params.kvlen_d,
+            fmha_params.kvlen_d.view(-1, 1),
             config.attn_config.tokens_per_block,
             deep_gemm.get_num_sms(),
         )

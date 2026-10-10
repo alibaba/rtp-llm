@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include <algorithm>
 #include <cstdint>
@@ -82,8 +82,8 @@ inline bool isSingleDeviceGenerationPrefillCudaGraphConfig(const ParallelismConf
 // routing their padding rows to the reserved block 0 has not been validated.
 // Keep the initial contract deliberately narrow until those topologies define
 // and test their own graph-padding behavior.
-inline bool supportsGenerationPrefillCudaGraphCacheTopology(const std::vector<CacheGroupType>& group_types) {
-    return group_types.size() == 1 && group_types.front() == CacheGroupType::FULL;
+inline bool supportsGenerationPrefillCudaGraphCacheTopology(const std::vector<GroupBase>& groups) {
+    return groups.size() == 1 && groups.front().policy.group_type == CacheGroupType::FULL;
 }
 
 // The CUDA 12.9 open-source image currently packages DeepGEMM 2.1.1. Its

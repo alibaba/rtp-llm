@@ -15,7 +15,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
@@ -36,6 +36,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -284,6 +285,10 @@ protected:
                                                           SpeculativeExecutionConfig{},
                                                           pd_sep_config);
         ASSERT_TRUE(cache_manager_->init());
+        size_t expected_free_blocks = 0;
+        for (const auto& group : cache_manager_->cacheConfig().topology().groups()) {
+            expected_free_blocks += group.block_num - 1;
+        }
         ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_free_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
@@ -323,13 +328,16 @@ protected:
         if (block_matches) {
             backend->blockMatches();
         }
-        cache_manager_->allocator_->block_tree_cache_.reset();
+        cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
-        auto cache = createBlockTreeCache(
-            cache_manager_->cacheConfig(), kv_cache_config, cache_manager_->allocator_, ParallelismConfig{}, backend);
+        auto cache = createBlockTreeCache(cache_manager_->cacheConfig(),
+                                          kv_cache_config,
+                                          cache_manager_->coordinator_manager_,
+                                          ParallelismConfig{},
+                                          backend);
         EXPECT_NE(cache, nullptr);
         cache_manager_->block_tree_cache_ = cache;
-        cache_manager_->allocator_->attachBlockTreeCache(cache);
+        cache_manager_->coordinator_manager_->attachBlockTreeCache(cache);
 
         if (seed_host) {
             auto& resource = stream_->streamCacheResource();
@@ -359,7 +367,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, "default").size(), inner_size);
         }
     };
 
@@ -411,6 +419,33 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
     stream_->fakeInitKVBlock(2);
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
+}
+
+TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReordering) {
+    for (const bool reversed : {false, true}) {
+        auto config = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+        ResourceContext context;
+        context.cache_manager = std::make_shared<KVCacheManager>(config);
+        StreamCacheResource resource(nullptr, context, /*need_release_resource=*/false);
+        resource.init(1);
+        if (reversed) {
+            auto groups = config.topology().groups();
+            std::reverse(groups.begin(), groups.end());
+            config.setTopology(std::move(groups), config.topology().layers());
+        }
+        auto& batch = resource.kvCacheMutable();
+        // Only the resource order changes; the manager keeps its original topology.
+        batch.initGroups(config.topologyPtr());
+        for (const auto& group : config.topology().groups()) {
+            batch.mutableBlockIds(0, group.tag).assign({2, 5});
+        }
+        resource.swapLinearBlocks(0, 0, 1);
+        for (const auto& group : config.topology().groups()) {
+            EXPECT_EQ(batch.blocks(0, group.tag),
+                      group.policy.group_type == CacheGroupType::LINEAR ? (BlockIndicesType{5, 2}) :
+                                                                          (BlockIndicesType{2, 5}));
+        }
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
@@ -724,8 +759,8 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     stream_->generate_input_->generate_config->enable_device_cache = true;
     resource.resource_context_.enable_device_cache                 = true;
 
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
 
     testing::InSequence seq;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
@@ -742,7 +777,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             EXPECT_FALSE(info.enable_cache_lookup);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, "linear");
                 block_ids.assign(BlockIndicesType{/*block=*/1});
             }
             return {true, 0};
@@ -1126,8 +1161,8 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessCommitsCompleteReuse) {
 
     auto load_context =
         makeAllocatorLoadContext(/*matched_blocks=*/3, {Tier::DEVICE, Tier::HOST, Tier::DISK}, /*commit=*/false);
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1152,9 +1187,9 @@ TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext
     prepareResource(/*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
-    auto context               = std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto context   = std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1165,18 +1200,21 @@ TEST_F(StreamCacheResourceTest, testInitRejectsSuccessfulNonLoadAllocatorContext
 }
 
 TEST_F(StreamCacheResourceTest, testAllocatorLoadSuccessUsesCpGroupPolicyReuseUnit) {
-    auto cache_config = init_config();
-    auto policies     = cache_config.groupPoliciesSnapshot();
+    auto                          cache_config = init_config();
+    std::vector<CacheGroupPolicy> policies;
+    for (const auto& group : cache_config.topology().groups()) {
+        policies.push_back(group.policy);
+    }
     ASSERT_EQ(policies.size(), 1u);
     policies.front().cp_mapping = CpBlockMappingMode::NONE;
-    cache_config.setGroupPolicies(policies);
+    test::setTestGroupPolicies(cache_config, policies);
     prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::PREFILL);
     auto& resource = stream_->streamCacheResource();
 
     cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/2);
     auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/2, {Tier::DEVICE, Tier::HOST}, /*commit=*/false);
-    auto allocator    = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/2, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1202,9 +1240,9 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadPendingPublishesZeroDeviceReady
     stream_->setHostReuseLength(2);
     stream_->setDiskReuseLength(2);
 
-    auto load_context          = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto load_context = makeAllocatorLoadContext(/*matched_blocks=*/1, {Tier::HOST}, /*commit=*/false);
+    auto allocator    = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Return(MallocResult{true, /*reuse_len=*/0, 0, load_context}));
     EXPECT_CALL(*allocator, incrMalloc(testing::_)).WillOnce(testing::Return(MallocResult{true, 0}));
@@ -1270,11 +1308,12 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
             return true;
         },
         [counts](LoadAsyncContext&) { ++counts->aborts; });
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -1303,8 +1342,8 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
     EXPECT_EQ(counts->commits, 0u);
     EXPECT_EQ(counts->aborts, 1u);
 
-    auto allocator             = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
-    cache_manager_->allocator_ = allocator;
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
             EXPECT_FALSE(info.verbose);
@@ -1312,7 +1351,7 @@ TEST_F(StreamCacheResourceTest, testPrefillMaterializationShortfallRearmsAllocat
         }));
     EXPECT_CALL(*allocator, incrMalloc(testing::_))
         .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
-            info.batch_kv_cache_resource->mutableBlockIds(0, /*group_id=*/0).assign({1});
+            info.batch_kv_cache_resource->mutableBlockIds(0, "default").assign({1});
             return {true, 0};
         }));
 
@@ -1330,11 +1369,12 @@ TEST_F(StreamCacheResourceTest, testPrefillPermanentMaterializationFailureTermin
 
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{5678}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED};
+    });
 
     resource.allocator_load_context_ = context;
     stream_->reportEvent(StreamEvents::CanRun);
@@ -1357,7 +1397,7 @@ TEST_F(StreamCacheResourceTest, testPrefillCoordinatorCommitFailureTerminates) {
 
     auto coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return false; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{/*group_id=*/0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{9012}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, /*matched_blocks=*/0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
     context->setMatchCallback([](LoadAsyncContext& current, size_t) { return current.commit(); });
@@ -1863,11 +1903,12 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadPreservesRetryableMaterializati
     auto& resource    = stream_->streamCacheResource();
     auto  coordinator = std::make_shared<LoadContextCoordinator>(
         [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, [](LoadAsyncContext&) {});
-    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{0, NULL_BLOCK_IDX}}}};
+    StorageRequest request{std::make_shared<CacheKeysType>(CacheKeysType{1234}), {{{"default", NULL_BLOCK_IDX}}}};
     auto           context = coordinator->create({}, {}, 0, backend, std::move(request));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback(
-        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
+    context->setMatchCallback([](LoadAsyncContext&, size_t) {
+        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
+    });
     resource.allocator_load_context_ = context;
     EXPECT_FALSE(resource.pollAllocatorLoad().has_value());
     context->startBackendMatch();

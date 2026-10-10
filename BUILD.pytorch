@@ -113,7 +113,7 @@ cc_library(
             "-lcudnn",
             "-lnvToolsExt",
         ],
-        "@//:using_cu12_9_or_13_x86": [
+        "@//:using_cuda12_9_x86": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
@@ -121,6 +121,14 @@ cc_library(
             "-lnccl",
             "-lcudnn",
             "-lnvtx3interop",
+        ],
+        "@//:using_cuda13_x86": [
+            "-L/usr/local/cuda/lib64",
+            "-L/usr/local/cuda/extras/CUPTI/lib64",
+            "-lcupti",
+            "-lcudart",
+            "-lnccl",
+            "-lcudnn",
         ],
         "//conditions:default": [],
     }),

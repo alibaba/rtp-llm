@@ -1,11 +1,12 @@
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "gmock/gmock.h"
 
 #define private public
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -168,9 +169,7 @@ CacheConfig makeSingleBlockWriteConfig(const std::string& tag,
                                                    /*layer_num=*/1,
                                                    /*block_num=*/static_cast<int>(kBlockNum));
     config.use_opaque_kv_cache_store = use_opaque_kv_cache_store;
-    config.kv_block_stride_bytes     = kv_stride;
-    config.kv_scale_stride_bytes     = kv_scale_stride;
-    config.setGroupBlockLayout({kBlockNum}, {kv_stride}, {kv_scale_stride});
+    rtp_llm::test::setGroupBlockLayout(config, {tag}, {kBlockNum}, {kv_stride}, {kv_scale_stride});
     return config;
 }
 
@@ -187,11 +186,13 @@ torch_ext::PyCacheStoreInputs makeDsv4WriteInputs(int64_t                       
     inputs.request_id            = torch::tensor({request_id}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
     inputs.cache_keys            = torch::from_blob(const_cast<CacheKeyType*>(cache_keys.data()),
-                                                    {1, (int64_t)cache_keys.size()},
+                                         {1, (int64_t)cache_keys.size()},
                                          torch::TensorOptions(torch::kInt64))
                             .clone();
     return inputs;
 }
+
+// Collect holders in the resource's own order, retaining their shared ownership.
 
 }  // namespace
 
@@ -231,7 +232,9 @@ protected:
             ratios.push_back((i % 2 == 0) ? 4 : 128);
         }
         ratios.push_back(0);  // MTP tail marker.
-        mc.attn_config.layer_compress_ratios = ratios;
+        mc.attn_config.layer_compress_ratios   = ratios;
+        mc.attn_config.tokens_per_block        = seq_size_per_block;
+        mc.attn_config.kernel_tokens_per_block = kernel_seq_size_per_blk;
         // The 7 DSV4 pools are now declared as per-layer specs keyed by tag
         // (csa_kv / hca_kv / indexer_kv / indexer_state / csa_state / hca_state / swa_kv).
         test::setDsv4KvCacheSpecs(mc, ratios);
@@ -243,10 +246,9 @@ protected:
         KVCacheConfig     kv_config;
         kv_config.seq_size_per_block        = seq_size_per_block;
         kv_config.kernel_seq_size_per_block = kernel_seq_size_per_blk;
-        auto config                         = HybridPoolConfigCreator::createConfig(mc, pc, kv_config, false, 0);
-        // KVCacheManager::init() calls finalizeBlockNums(block_num), which fans the
-        // global block count out to every group according to its capacity policy.
-        config.block_num = block_num;
+        auto config                         = CacheConfigCreator::createWarmupConfig(mc, pc, kv_config, 0);
+        // Publish fixture capacity before consumers inspect the group layout.
+        config.finalizeBlockNums(block_num, RuntimeConfig{});
         return config;
     }
 
@@ -306,6 +308,61 @@ protected:
     std::shared_ptr<KVCacheManager>       cache_manager_;
     size_t                                initial_free_blocks_ = 0;
 };
+
+TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnecting) {
+    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
+    EngineInitParams params;
+    DecodeRpcServer  server;
+    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
+    server.resource_.workers      = {"decode-0"};
+    server.resource_.grpc_workers = {"127.0.0.1:1"};
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
+    decode_context.peer_addrs = {"prefill-0"};
+    // An uninitialized resource has no rows/tags. The request-only builders may
+    // accept this, but the asynchronous dispatch entry must reject it locally.
+    KVCacheResource                     resource;
+    DecodeRpcServer::LoadKVCacheContext load_context(
+        42, "missing-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
+    ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+    EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, load_context));
+    EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+}
+
+TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnecting) {
+    auto             manager = std::make_shared<KVCacheManager>(makeConfig(), /*warmup=*/false, nullptr);
+    EngineInitParams params;
+    DecodeRpcServer  server;
+    server.engine_                = std::make_shared<MinimalEngine>(params, manager);
+    server.resource_.workers      = {"decode-0"};
+    server.resource_.grpc_workers = {"127.0.0.1:1"};
+    grpc::ServerContext          server_context;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode_context(rpc_context, 1000, &server_context, reporter, nullptr);
+    decode_context.peer_addrs = {"prefill-0"};
+    KVCacheResource resource;
+    resource.initGroups(manager->cacheConfig().topologyPtr());
+    auto                             holder = std::make_shared<BlockIds>();
+    const auto                       tag    = manager->cacheConfig().groupTags().front();
+    const std::vector<GroupBlockIds> malformed{{{}, {holder}},
+                                               {{{tag, 0}, {"extra", 0}}, {holder, holder}},
+                                               {{{tag, 1}}, {holder}},
+                                               {{{tag, 0}, {"extra", 2}}, {holder, holder}},
+                                               {{{tag, 0}}, {nullptr}}};
+    for (const auto& blocks : malformed) {
+        DecodeRpcServer::LoadKVCacheContext context(
+            42, "malformed-identity", {"prefill-0"}, {}, resource.groupBlockIds(), 0, 1000, 1, 0, &server_context);
+        // Fault injection proves dispatch revalidates even after constructor validation.
+        // Production only receives the const complete object.
+        const_cast<GroupBlockIds&>(context.groupBlockIds()) = blocks;
+        ASSERT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+        EXPECT_ANY_THROW(server.loadCacheAsyncForTp(decode_context, context));
+        EXPECT_TRUE(server.resource_.rpc_pool.connection_pool_.empty());
+    }
+}
 
 // =============================================================================
 // Test 1: Normal release without PD sep hold
@@ -401,11 +458,10 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4PDSepPrefillReleaseInsertsSevenGroupDevi
     auto& resource = stream_->streamCacheResource();
     ASSERT_EQ(resource.kvCache().groupNums(), kDsv4PoolNum);
     ASSERT_GT(resource.curBlocksNum(), 0);
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        const auto& tag = config.tagForGroup(static_cast<size_t>(gid));
-        ASSERT_EQ(resource.kvCache().blocksNum(0, gid), 4) << "group " << tag;
-        const auto&  blocks = resource.kvCache().blocks(0, gid);
-        const size_t tail   = static_cast<size_t>(config.policyForGroup(static_cast<size_t>(gid)).active_tail_blocks);
+    for (const auto& tag : config.groupTags()) {
+        ASSERT_EQ(resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
+        const auto&  blocks = resource.kvCache().blocks(0, tag);
+        const size_t tail   = static_cast<size_t>(config.group(tag).policy.active_tail_blocks);
         if (tail == 0) {
             // Paged group: every logical block is materialized from position 0.
             EXPECT_FALSE(isNullBlockIdx(blocks[0])) << "paged group " << tag;
@@ -493,8 +549,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecodeFirstMallocBypassesLocalDeviceReus
     EXPECT_EQ(decode_stream->reuseLength(), 0)
         << "Hybrid DSV4 decode first malloc must not consume local device-cache reuse; PD load owns reuse.";
     EXPECT_EQ(decode_resource.kvCache().groupNums(), kDsv4PoolNum);
-    for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
-        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, gid), 4) << "group " << gid;
+    for (const auto& tag : cache_manager_->cacheConfig().groupTags()) {
+        EXPECT_EQ(decode_resource.kvCache().blocksNum(0, tag), 4) << "group " << tag;
     }
 
     decode_stream->releaseResource();
@@ -527,13 +583,13 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // Fill KV cache blocks with a known pattern so MemoryBackedCacheStore can
     // verify the transfer.
-    auto layout = manager->getMainModelCacheLayerLayout();
+    auto layout = manager->getMainModelGroupedCacheLayerLayout();
     for (int layer_id = 0; layer_id < 3; ++layer_id) {
         auto buf = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         ASSERT_TRUE(buf.defined());
         for (int b = 0; b < block_num; ++b) {
-            auto bid       = resource->blocks(0, 0)[b];
-            auto kv_stride = config.kv_block_stride_bytes;
+            auto bid       = resource->blocks(0, "default")[b];
+            auto kv_stride = config.topology().groups()[0].kvBlockStrideBytes();
             ASSERT_FALSE(isNullBlockIdx(bid));
             auto device_slice = torch::from_blob((uint8_t*)buf.data_ptr() + bid * kv_stride,
                                                  {(int64_t)kv_stride},
@@ -566,8 +622,8 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
 
     // --- Call runtimeWriteCacheStore (event->synchronize() inside) ---
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
-    auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, 0).data()),
-                                        {1, (int64_t)resource->blocks(0, 0).size()},
+    auto block_ids   = torch::from_blob(const_cast<int*>(resource->blocks(0, "default").data()),
+                                      {1, (int64_t)resource->blocks(0, "default").size()},
                                       torch::kInt32)
                          .clone();
 
@@ -584,7 +640,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreWithPinnedHostMetadataAndEven
         layer_cache.kv_cache_base      = layout.at(static_cast<size_t>(layer_id)).kv_addr;
         layer_cache.seq_size_per_block = spb;
         layer_cache.layer_id           = layer_id;
-        layer_cache.group_id           = 0;
         layer_cache.tag                = "default";
 
         runtimeWriteCacheStore(inputs,
@@ -632,7 +687,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvBuffe
     layer_cache.kv_cache_base      = kv_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "csa_state";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
@@ -679,7 +733,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuSplitKv
     layer_cache.kv_cache_base      = kv_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();
@@ -735,7 +788,6 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     layer_cache.kv_scale_base      = kv_scale_buffer;
     layer_cache.seq_size_per_block = spb;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "csa_state";
 
     auto cache_store = std::make_shared<MemoryBackedCacheStore>();

@@ -87,7 +87,10 @@ public:
             total_sampler_batch_size_in_ +=
                 !use_mtp_snapshot && stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
-            max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
+            max_blocks_num_ =
+                std::max(max_blocks_num_,
+                         use_mtp_snapshot ? static_cast<size_t>(mtp_state.next_kv_cache_block_id_gpu.size(2)) :
+                                            stream->curBlocksNum());
             // cache_keys are context/CacheStore metadata and are not consumed
             // by a decode-only model input.  Avoid traversing them while the
             // speculative worker updates the corresponding token history.

@@ -160,26 +160,34 @@ class DeepGemmMaskedExecutorV2CudaGraphTest(unittest.TestCase):
         torch.cuda.synchronize()
 
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            graph_output = self.fused_moe(static_hidden, static_weights, static_ids)
+        graph_output = None
+        try:
+            with torch.cuda.graph(graph):
+                graph_output = self.fused_moe(static_hidden, static_weights, static_ids)
 
-        replay_hidden, replay_weights, replay_ids = self._make_inputs(
-            offset=2, skewed_routing=True
-        )
-        self.assertEqual(
-            torch.bincount(replay_ids.flatten(), minlength=self.NUM_EXPERTS)
-            .cpu()
-            .tolist(),
-            [48, 64, 16, 0],
-        )
-        static_hidden.copy_(replay_hidden)
-        static_weights.copy_(replay_weights)
-        static_ids.copy_(replay_ids)
-        graph.replay()
-        captured = graph_output.clone()
+            replay_hidden, replay_weights, replay_ids = self._make_inputs(
+                offset=2, skewed_routing=True
+            )
+            self.assertEqual(
+                torch.bincount(replay_ids.flatten(), minlength=self.NUM_EXPERTS)
+                .cpu()
+                .tolist(),
+                [48, 64, 16, 0],
+            )
+            static_hidden.copy_(replay_hidden)
+            static_weights.copy_(replay_weights)
+            static_ids.copy_(replay_ids)
+            graph.replay()
+            captured = graph_output.clone()
 
-        eager = self.fused_moe(static_hidden, static_weights, static_ids)
-        torch.testing.assert_close(captured, eager, rtol=2e-2, atol=2e-2)
+            eager = self.fused_moe(static_hidden, static_weights, static_ids)
+            torch.testing.assert_close(captured, eager, rtol=2e-2, atol=2e-2)
+        finally:
+            torch.cuda.synchronize()
+            del graph_output
+            graph.reset()
+            del graph
+            torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.projection.WorkSnapshot;
 
 import java.util.List;
 
@@ -30,14 +31,15 @@ final class WorkerBatcherTestSupport {
             }
 
             @Override
-            public void commitUnderLock() {
+            public WorkSnapshot commitUnderLock() {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot commit");
             }
 
             @Override
             public void handoff(
-                    String decisionReason, int remainingQueueDepth) {
+                    String decisionReason, int remainingQueueDepth,
+                    WorkSnapshot precedingWork) {
                 throw new IllegalStateException(
                         "boundary-only preparation cannot hand off");
             }

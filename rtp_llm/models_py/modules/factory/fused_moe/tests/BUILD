@@ -6,7 +6,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -23,7 +24,10 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    tags = ["open_skip", "H20"],
+    tags = [
+        "H20_CU13",
+        "open_skip",
+    ],
     # Back on H20 after measuring on sm86: 42 tests run, 4 fail on
     # assertTrue(strategy.can_handle(config)). The test mocks has_deep_gemm but
     # not the capability gate, and DeepGemmMaskedExecutorV2.check_conditions has
@@ -32,7 +36,7 @@ py_test(
     # sm90. Staying on H20 by decision, not as a TODO: the test is correct about
     # what the executor does, and mocking the capability gate to relocate it would
     # make it assert something the hardware does not do.
-    exec_properties = {'gpu':'H20'},
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test(
@@ -45,15 +49,15 @@ py_test(
     # exclude this target and it runs there while being dispatched to an H20
     # worker -- leaking sm8x work onto the pool smoke needs. Keeping upstream's
     # H20 choice, just making the routing agree with it.
-    tags = ["H20"],
-    exec_properties = {'gpu':'H20'},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 dsv4_py_test(
     name = "test_strategy_select",
     deps = [
-        "//rtp_llm/models_py:modules",
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
     ],
     visibility = ["//visibility:public"],
 )

@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
@@ -47,7 +48,7 @@ public:
 
     // The caller must hold the shared BlockTreeCache mutex.
     BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys);
-    BlockIndicesType     matchedBlocksForGroup(size_t                                group_id,
+    BlockIndicesType     matchedBlocksForGroup(std::string_view                      group_tag,
                                                const std::vector<MultiNodeResource>& matched_resources) const;
     bool                 abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     void                 shutdown();

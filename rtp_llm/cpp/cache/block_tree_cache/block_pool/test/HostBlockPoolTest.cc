@@ -39,6 +39,10 @@ TEST(HostBlockPoolTest, InitAllocatesHostBuffersAndSkipsBlockZero) {
     EXPECT_NE(*block, 0);
 }
 
+TEST(HostBlockPoolTest, RejectsSentinelOnlyPhysicalCount) {
+    EXPECT_ANY_THROW(HostBlockPool(makeConfig(/*physical_block_count=*/1)));
+}
+
 TEST(HostBlockPoolTest, InitWithDontDumpKeepsBufferUsable) {
     // madvise(MADV_DONTDUMP) must not corrupt or unmap the backing.
     auto          config = makeConfig(/*physical_block_count=*/4,

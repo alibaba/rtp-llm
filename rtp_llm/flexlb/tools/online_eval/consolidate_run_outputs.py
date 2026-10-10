@@ -93,7 +93,7 @@ PROMETHEUS_SAMPLE_RE = re.compile(
     r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?P<labels>\{[^}]*\})?\s+"
     r"(?P<value>[-+\deE.]+)(\s+\d+)?\s*$"
 )
-# flexlb_env.txt lines look like:   'DOMAIN_ADDRESS:mock.prefill.hosts.address=host:1,host:2' \
+# flexlb_env.txt lines look like:   "MODEL_SERVICE_CONFIG='{}'" \
 ENV_FILE_LINE_RE = re.compile(r"^\s*'?([^=']+=[^']*)'?\s*\\?\s*$")
 # Separator comment the per-second pollers prefix each sample with.
 PROM_GROUP_TS_RE = re.compile(r"^#\s*ts=(\d+)\s*$")

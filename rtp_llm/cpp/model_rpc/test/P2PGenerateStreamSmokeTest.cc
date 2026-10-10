@@ -168,7 +168,7 @@ public:
         if (pd.role_type == RoleType::DECODE) {
             for (int layer = 0; layer < kLayers; ++layer) {
                 for (int block = 1; block < kBlocks; ++block) {
-                    for (const auto& info : getCacheManager()->convertIndexToBufferByTag(block, layer, "default")) {
+                    for (const auto& info : getCacheManager()->convertIndexToBuffer(layer, "default", block)) {
                         writeBytes(info, std::vector<uint8_t>(info.size_bytes, 0xff));
                     }
                 }
@@ -245,7 +245,7 @@ public:
 
     uint64_t blockRefs() const {
         // The target already enables -fno-access-control for test observations.
-        const auto pool = getCacheManager()->allocator_->getDeviceBlockPool();
+        const auto pool = getCacheManager()->coordinator_manager_->groupBlockPools().front();
         // Snapshot under the pool lock: refCount() rejects unallocated blocks,
         // and checking isAllocated() separately would race with reclamation.
         std::lock_guard<std::mutex> lock(pool->mutex_);
@@ -289,7 +289,7 @@ private:
             require(ids.size() >= prompt_blocks && (!prefill || resource.cacheKeys().size() >= prompt_blocks),
                     "missing allocated prompt blocks/cache keys");
             for (size_t block = 0; block < prompt_blocks; ++block) {
-                const auto buffers = getCacheManager()->convertIndexToBufferByTag(ids[block], layer, "default");
+                const auto buffers = getCacheManager()->convertIndexToBuffer(layer, "default", ids[block]);
                 require(!buffers.empty(), "empty cache block buffer list");
                 for (size_t buffer = 0; buffer < buffers.size(); ++buffer) {
                     auto expected = payload(stream->streamId(), layer, block, buffer, buffers[buffer].size_bytes);
@@ -1107,7 +1107,7 @@ protected:
             EXPECT_EQ(prefill.published_layers, requests * kLayers);
             EXPECT_EQ(decode_engine_->checked_requests.load(), requests);
             EXPECT_GT(decode_engine_->checked_bytes.load(), 0u);
-            expected_bytes += ((prompt_length + kTokensPerBlock - 1) / kTokensPerBlock) * cache_config.block_size_bytes;
+            expected_bytes += ((prompt_length + kTokensPerBlock - 1) / kTokensPerBlock) * cache_config.totalGroupBlockSizeBytes();
             EXPECT_EQ(decode_engine_->checked_bytes.load(), expected_bytes);
             EXPECT_EQ(prefill.published_bytes, decode_engine_->checked_bytes.load());
             EXPECT_TRUE(std::string(prefill.failure).empty()) << std::string(prefill.failure);

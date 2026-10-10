@@ -31,7 +31,7 @@
 
 #include "autil/NetUtil.h"
 #include "autil/LockFreeThreadPool.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
@@ -205,14 +205,14 @@ private:
 
 class Converter: public LayerBlockConverter {
 public:
-    explicit Converter(std::shared_ptr<SingleTypeKVCacheAllocator> allocator): allocator_(std::move(allocator)) {}
+    explicit Converter(std::shared_ptr<CoordinatorCacheManager> allocator): allocator_(std::move(allocator)) {}
     std::vector<BlockInfo> convertIndexToBuffer(int layer, const std::string& tag, int block,
                                                int partitions, int partition) const override {
-        return allocator_->convertIndexToBufferByTag(layer, tag, block, partitions, partition);
+        return allocator_->convertIndexToBuffer(layer, tag, block, partitions, partition);
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override { return {}; } // TCP needs no MR.
 private:
-    std::shared_ptr<SingleTypeKVCacheAllocator> allocator_;
+    std::shared_ptr<CoordinatorCacheManager> allocator_;
 };
 
 class KickoffGate {
@@ -295,7 +295,7 @@ class Rank {
 public:
     explicit Rank(const std::string& host):
         config(test::makeSimpleMhaCacheConfig(kLayers, kBlocks, 4, DataType::TYPE_FP16, 2, 16)),
-        allocator(std::make_shared<SingleTypeKVCacheAllocator>(config, AllocationType::DEVICE)) {
+        allocator(std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE)) {
         check(allocator->init(), "allocator init failed");
         baseline = allocator->freeBlocksNum();
         grpc::ServerBuilder builder;
@@ -346,13 +346,13 @@ public:
         service.connector = connector.get();
     }
     KVCacheResourcePtr allocate(size_t count) {
-        const auto pool = allocator->getDeviceBlockPool();
+        const auto pool = allocator->groupBlockPools().front();
         const auto blocks = pool->malloc(count);
         check(blocks.has_value(), "GPU pool allocation failed");
         pool->incRef(*blocks);
         KVCacheResource source;
         source.initGroups(config.topologyPtr());
-        source.mutableBlockIds(0).assign(*blocks);
+        source.mutableBlockIds(source.groupTags().at(0)).assign(*blocks);
         for (size_t i = 0; i < count; ++i) source.cacheKeys().push_back(1000 + i);
         auto ref = allocator->incrKVCacheRef(source, source.cacheKeys(), true);
         pool->decRef(*blocks);
@@ -364,8 +364,8 @@ public:
     }
     void fill(const KVCacheResource& resource, int64_t id, int rank, bool poison = false) {
         for (int l = 0; l < kLayers; ++l) {
-            for (size_t b = 0; b < resource.blocks(0).size(); ++b) {
-                for (const auto& info : allocator->convertIndexToBuffer(l, resource.blocks(0)[b])) {
+            for (size_t b = 0; b < resource.blocks(resource.groupTags().at(0)).size(); ++b) {
+                for (const auto& info : allocator->convertIndexToBuffer(l, resource.blocks(resource.groupTags().at(0))[b])) {
                     std::vector<uint8_t> bytes(info.size_bytes);
                     for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = poison ? 0xff : value(id, rank, l, b, i);
                     checkCuda(cudaMemcpy(info.addr, bytes.data(), bytes.size(), cudaMemcpyHostToDevice));
@@ -376,8 +376,8 @@ public:
     }
     void verify(const KVCacheResource& resource, int64_t id, int rank) {
         for (int l = 0; l < kLayers; ++l) {
-            for (size_t b = 0; b < resource.blocks(0).size(); ++b) {
-                for (const auto& info : allocator->convertIndexToBuffer(l, resource.blocks(0)[b])) {
+            for (size_t b = 0; b < resource.blocks(resource.groupTags().at(0)).size(); ++b) {
+                for (const auto& info : allocator->convertIndexToBuffer(l, resource.blocks(resource.groupTags().at(0))[b])) {
                     std::vector<uint8_t> bytes(info.size_bytes);
                     checkCuda(cudaMemcpy(bytes.data(), info.addr, bytes.size(), cudaMemcpyDeviceToHost));
                     for (size_t i = 0; i < bytes.size(); ++i) {
@@ -466,7 +466,7 @@ public:
             "sender threads did not drain");
     }
     CacheConfig config;
-    std::shared_ptr<SingleTypeKVCacheAllocator> allocator;
+    std::shared_ptr<CoordinatorCacheManager> allocator;
     KVCacheResourcePtr resource;
     size_t baseline = 0;
     int grpc_port = 0, transfer_port = 0;
@@ -723,7 +723,7 @@ protected:
             ranks_[r]->resource = ranks_[r]->allocate(2);
             ranks_[r]->fill(*ranks_[r]->resource, id_, r, true);
         }
-        check(ranks_[0]->resource->blocks(0) == ranks_[1]->resource->blocks(0), "rank block IDs must match");
+        check(ranks_[0]->resource->blocks(ranks_[0]->resource->groupTags().at(0)) == ranks_[1]->resource->blocks(ranks_[1]->resource->groupTags().at(0)), "rank block IDs must match");
     }
     void start(bool registered = true) {
         if (registered) { command('R'); command('P'); }
@@ -804,7 +804,7 @@ protected:
             return ranks_[0]->service.cancels.load() > 0 && ranks_[1]->service.cancels.load() > 0;
         }));
         ASSERT_TRUE(context_->resourceHoldPending());
-        const auto old = ranks_[1]->resource->blocks(0);
+        const auto old = ranks_[1]->resource->blocks(ranks_[1]->resource->groupTags().at(0));
         for (const auto& rank : ranks_) rank->resource.reset();
         // Simulate the caller abandoning a failed request. A test-owned context
         // would itself retain all blocks and hide a broken checker lease hold.
@@ -819,7 +819,7 @@ protected:
         }
         // Exhaust the remaining pool: neither old target can be allocated to B.
         auto b = ranks_[1]->allocate(ranks_[1]->baseline - old.size());
-        for (auto block : old) EXPECT_EQ(std::count(b->blocks(0).begin(), b->blocks(0).end(), block), 0);
+        for (auto block : old) EXPECT_EQ(std::count(b->blocks(b->groupTags().at(0)).begin(), b->blocks(b->groupTags().at(0)).end(), block), 0);
         EXPECT_EQ(ranks_[1]->allocator->freeBlocksNum(), 0);
         ranks_[1]->fill(*b, 900, 1);
         gate_->release();
@@ -829,7 +829,7 @@ protected:
         // exactly A's former target blocks available for reuse.
         ASSERT_TRUE(until([&] { return ranks_[1]->allocator->freeBlocksNum() == old.size(); }));
         auto reused = ranks_[1]->allocate(old.size());
-        for (auto block : old) EXPECT_EQ(std::count(reused->blocks(0).begin(), reused->blocks(0).end(), block), 1);
+        for (auto block : old) EXPECT_EQ(std::count(reused->blocks(reused->groupTags().at(0)).begin(), reused->blocks(reused->groupTags().at(0)).end(), block), 1);
         ranks_[1]->fill(*reused, 901, 1);
         ranks_[1]->verify(*reused, 901, 1);
         reused.reset();
@@ -868,7 +868,7 @@ protected:
                 ranks_[rank]->fill(*resource, request.id, rank, true);
                 request.resources.push_back(std::move(resource));
             }
-            ASSERT_EQ(request.resources[0]->blocks(0), request.resources[1]->blocks(0));
+            ASSERT_EQ(request.resources[0]->blocks(resources[0]->groupTags().at(0)), request.resources[1]->blocks(resources[1]->groupTags().at(0)));
             batch_.push_back(std::move(request));
         }
         auto& scheduler = ranks_[0]->connector->decode_->scheduler_;

@@ -1,6 +1,6 @@
 load("//:def.bzl", "copts")
 
-load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
+load("//bazel:device_defs.bzl", "device_impl_target")
 
 test_copts = [
     "-fno-access-control",
@@ -46,17 +46,18 @@ cc_test(
         "PrefillResultStoreTest.cc",
     ],
     deps = [
-        ":test_rpc_server",
         ":mock_generate_stream",
+        ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:components",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -66,17 +67,18 @@ cc_test(
         "main.cc",
     ],
     deps = [
-        ":test_rpc_server",
         ":mock_generate_stream",
+        ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "//rtp_llm/cpp/engine_base/stream:stream",
-        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/engine_base/stream",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -88,18 +90,19 @@ cc_test(
         "main.cc",
     ],
     deps = [
-        ":test_rpc_server",
         ":mock_generate_stream",
+        ":test_rpc_server",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -112,11 +115,12 @@ cc_test(
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
-        "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
+        "@com_google_googletest//:gtest",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
 )
 
 cc_test(
@@ -129,11 +133,11 @@ cc_test(
     deps = [
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
-        "//rtp_llm/cpp/cache:kv_cache_allocator",
+        "//rtp_llm/cpp/cache:coordinator_cache_manager",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "//rtp_llm/cpp/testing:device_test_utils",
     ] + device_impl_target(),
     copts = test_copts,
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "A10"},
 )

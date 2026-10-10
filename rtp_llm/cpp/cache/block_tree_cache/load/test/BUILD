@@ -27,34 +27,40 @@ test_deps = [
 
 cc_test(
     name = "block_tree_loader_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = ["BlockTreeLoaderTest.cc"],
     copts = test_copts,
-    tags = ["exclusive-if-local"],
+    tags = [
+        "A10_CU13",
+        "exclusive-if-local",
+    ],
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )
 
 cc_test(
     name = "load_async_context_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = ["LoadAsyncContextTest.cc"],
     copts = test_copts,
     deps = test_deps,
+    tags = ["A10_CU13"],
 )
 
 cc_test(
     name = "load_task_runner_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = ["LoadTaskRunnerTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    tags = ["A10_CU13"],
 )
 
 cc_test(
     name = "load_join_registry_test",
-    exec_properties = {"gpu": "A10"},
+    exec_properties = {"gpu": "A10_CU13"},
     srcs = ["LoadJoinRegistryTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    tags = ["A10_CU13"],
 )
