@@ -33,7 +33,7 @@ class PreparedNativeEmbedding(torch.nn.Module):
 
 def cache_values(owner, cache, tables, tag, count):
     # A consumer's SWA belongs to itself; compressed/index state belongs to its
-    # source. All seven owners use the same native tagged-cache allocation.
+    # source. All retained owners use the same native tagged-cache allocation.
     if tag != "swa_kv":
         source = (
             owner.index_source_layer_id
@@ -169,6 +169,8 @@ def reconstruct_native(
     token_map,
     recipe,
     kernel,
+    *,
+    layers=NUM_LAYERS,
 ):
     from rtp_llm.models_py.modules.base.cuda.norm import RMSNorm
     from rtp_llm.models_py.modules.dsv4.engram import (
@@ -180,9 +182,15 @@ def reconstruct_native(
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
         compressor_bf16,
     )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_decode_tilelang_reference import (
+        decode_tilelang_reference,
+    )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
         engram_gate_reference,
         engram_projection_reference,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_collapse_reference import (
+        mhc_collapse_reference,
     )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
         fp32_mhc_prenorm,
@@ -208,9 +216,7 @@ def reconstruct_native(
     from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
     from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
 
-    owners = [
-        native_attention(args, config, reader, layer) for layer in range(NUM_LAYERS)
-    ]
+    owners = [native_attention(args, config, reader, layer) for layer in range(layers)]
     shared = {"layers": {owner.layer_id: owner for owner in owners}}
     for owner in owners:
         owner._shared_attention = shared
@@ -227,7 +233,7 @@ def reconstruct_native(
     previous = None
     layout = EngramLayout(config)
     hasher = NgramHashState(layout, token_map=token_map, device="cuda")
-    for layer in range(NUM_LAYERS):
+    for layer in range(layers):
         layer_hcs, layer_norms = [], []
         for kind in ("attn", "ffn"):
             unit = DelayedHCUnit(
@@ -292,6 +298,10 @@ def reconstruct_native(
         recipe["output_projection_reference"], kernel=kernel
     ), sparse_prefill_reference(
         recipe["sparse_prefill_reference"]
+    ), mhc_collapse_reference(
+        recipe.get("mhc_collapse_reference", False)
+    ), decode_tilelang_reference(
+        recipe.get("decode_tilelang_reference", False)
     ), patch.object(
         v41_prenorm, "prenorm", record_prenorm
     ):
@@ -319,7 +329,7 @@ def reconstruct_native(
             pre_mix = torch.zeros(hidden.shape[:-1], device="cuda", dtype=torch.float32)
             pre_mix[..., 0] = 1
             step_captures, step_mhc, step_inputs = [], [], []
-            for layer in range(NUM_LAYERS):
+            for layer in range(layers):
                 internal = {"layer_input": hidden.clone()}
                 owner = owners[layer]
                 attn_hc, ffn_hc = hcs[layer]
@@ -376,7 +386,7 @@ def reconstruct_native(
                     collapsed
                 )
                 internal["ffn_norm"] = ffn_input.clone()
-                if layer + 1 < NUM_LAYERS:
+                if layer + 1 < layers:
                     ffn_output = (
                         trace["tensors"][f"layer{layer:02d}.ffn.output"]
                         .cuda()
@@ -396,7 +406,7 @@ def reconstruct_native(
     # reconstruction drift before interpreting the new internal boundaries.
     boundaries = {}
     for step, trace in enumerate(traces):
-        for layer in range(NUM_LAYERS):
+        for layer in range(layers):
             label = f"native.step{step}.layer{layer:02d}.ffn.input"
             boundaries[label] = require_exact(
                 trace["tensors"][f"layer{layer:02d}.ffn.input"],

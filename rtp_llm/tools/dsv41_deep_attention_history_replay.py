@@ -148,11 +148,20 @@ def cpu_tree(value):
 
 
 def reconstruct_official(
-    module, converter, args, layout, reader, traces, identities, hashes
+    module,
+    converter,
+    args,
+    layout,
+    reader,
+    traces,
+    identities,
+    hashes,
+    *,
+    layers=NUM_LAYERS,
 ):
     shards = [
         official_attention(module, converter, args, reader, layer)
-        for layer in range(NUM_LAYERS)
+        for layer in range(layers)
     ]
     block = SimpleNamespace(
         norm_eps=args.norm_eps,
@@ -179,7 +188,7 @@ def reconstruct_official(
         )
         pre_mix = module.make_identity_pre_mix(hidden, args.hc_mult)
         inputs, references, selected, mhc = [], [], {}, []
-        for layer in range(NUM_LAYERS):
+        for layer in range(layers):
             captured = {"layer_input": hidden.clone()}
             if layer in layout.layer_ids:
                 ids = step_hashes[:, :, layout.layer_ids.index(layer), :]
@@ -253,7 +262,7 @@ def reconstruct_official(
             )
             inputs.append(x[0].clone())
             references.append(reference)
-            if layer + 1 < NUM_LAYERS:
+            if layer + 1 < layers:
                 ffn_output = (
                     trace["tensors"][f"layer{layer:02d}.ffn.output"]
                     .cuda()

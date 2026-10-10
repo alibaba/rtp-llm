@@ -120,6 +120,19 @@ py_library(
         ":dsv41_attention_replay",
         ":dsv41_sparse_prefill_owner_replay",
         "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_deep_history_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_decode_tilelang_reference_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
+    name = "dsv41_corrected_history_replay",
+    testonly = True,
+    srcs = ["dsv41_corrected_history_replay.py"],
+    deps = [
+        ":dsv41_deep_attention_history_replay",
         "//rtp_llm:torch",
         "//rtp_llm:transformers",
     ],
