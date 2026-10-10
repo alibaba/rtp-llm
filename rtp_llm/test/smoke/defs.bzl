@@ -149,7 +149,7 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
                kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
-               test_envs={}):
+               test_envs={}, deps=[]):
     gpu = _require_single_gpu_type("smoke_test", name, gpu_type)
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
@@ -215,7 +215,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         srcs = all_srcs,
         timeout = "eternal",
         imports = [".."] if has_entry else ["../../../../rtp_llm/test", ".."],
-        deps = SMOKE_FRAMEWORK_DEPS + extra_deps + select({
+        deps = SMOKE_FRAMEWORK_DEPS + extra_deps + deps + select({
             "//conditions:default": [],
         }),
         data = data + [

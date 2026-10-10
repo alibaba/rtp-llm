@@ -476,9 +476,7 @@ class SeparatedCaseRunner(CaseRunner):
                 self.remote_kvcm_server = self._start_remote_kvcm_server()
                 assert self.remote_kvcm_server is not None
                 for role in backend_roles[:2]:
-                    envs[role][
-                        "RECO_SERVER_ADDRESS"
-                    ] = self.remote_kvcm_server.address()
+                    envs[role].update(self.remote_kvcm_server.client_env())
             server_managers, states = self.start_servers_parallel(configs)
             managers.update(
                 (role, manager)
@@ -611,8 +609,8 @@ class DpSeperationCaseRunner(CaseRunner):
         if enable_remote_cache:
             self.remote_kvcm_server = self._start_remote_kvcm_server()
             assert self.remote_kvcm_server is not None, "remote kvcm shoule not be None"
-            prefill_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
-            decode_envs["RECO_SERVER_ADDRESS"] = self.remote_kvcm_server.address()
+            prefill_envs.update(self.remote_kvcm_server.client_env())
+            decode_envs.update(self.remote_kvcm_server.client_env())
         prefill_gpu_size = int(prefill_envs["WORLD_SIZE"])
         decode_gpu_size = int(decode_envs["WORLD_SIZE"])
         share_gpu = _consume_pd_share_gpu(prefill_envs, decode_envs)
