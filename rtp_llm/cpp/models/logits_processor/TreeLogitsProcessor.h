@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/DFAUtil.h"
+#include "rtp_llm/cpp/models/logits_processor/ConstraintTreeCsr.h"
 
 namespace rtp_llm {
 
@@ -11,7 +12,15 @@ struct StreamTreeInfo {
     int32_t                                    current_output_length;
     bool                                       is_beam_search;
     std::shared_ptr<TreeDFA<std::string, int>> dfa_ptr;
+    ConstraintTreeCsrSnapshotPtr csr_snapshot;
+    int32_t csr_state = 0;
     StreamTreeInfo() = default;
+    StreamTreeInfo(bool mode, int32_t input, int32_t output, bool beam, ConstraintTreeCsrSnapshotPtr snapshot):
+        in_tree_mode(mode), input_length(input), current_output_length(output), is_beam_search(beam),
+        csr_snapshot(std::move(snapshot)) {}
+    bool isFinishedCsrBeam() const { return csr_snapshot && csr_state == -1; }
+    int32_t maskState() const { return isFinishedCsrBeam() ? csr_snapshot->terminalMaskState() : csr_state; }
+
     StreamTreeInfo(bool                                       in_tree_mode,
                    int32_t                                    input_length,
                    int32_t                                    output_length,
@@ -28,6 +37,8 @@ struct StreamTreeInfo {
         tree_info.input_length          = input_length;
         tree_info.current_output_length = current_output_length;
         tree_info.is_beam_search        = is_beam_search;
+        tree_info.csr_snapshot = csr_snapshot;
+        tree_info.csr_state = csr_state;
         if (dfa_ptr) {
             tree_info.dfa_ptr = std::make_shared<TreeDFA<std::string, int>>(*dfa_ptr);
         }
@@ -44,6 +55,8 @@ public:
 public:
     static std::shared_ptr<TreeLogitsProcessor> fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
                                                                   int32_t                        num);
+    static std::shared_ptr<TreeLogitsProcessor> fromGenerateInput(
+        std::shared_ptr<GenerateInput> generate_input, int32_t num, ConstraintTreeCsrSnapshotPtr snapshot);
 
 public:
     std::optional<ErrorInfo> process(const SamplerInputs& inputs, size_t start_idx, size_t finish_idx) override;
@@ -51,6 +64,14 @@ public:
     std::optional<ErrorInfo> updateStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens) override;
 
 public:
+    static std::string validateCsrRequest(const ConstraintTreeCsrSnapshotPtr& snapshot,
+                                         const GenerateConfig& config, bool required);
+    std::optional<ErrorInfo> validateBeamScores(const torch::Tensor& scores, size_t count) const;
+    bool isStateful() const override { return !tree_infos_.empty() && tree_infos_.front().csr_snapshot != nullptr; }
+    std::optional<int64_t> committedOutputLen() const override {
+        return tree_infos_.empty() || !tree_infos_.front().csr_snapshot ? std::nullopt :
+            std::optional<int64_t>(tree_infos_.front().current_output_length);
+    }
     std::vector<std::string> getStatus();
     size_t                   size() {
         return tree_infos_.size();
@@ -63,6 +84,7 @@ public:
 
 private:
     std::vector<StreamTreeInfo> tree_infos_;
+    torch::Tensor csr_host_states_;
 };
 typedef std::shared_ptr<TreeLogitsProcessor> TreeLogitsProcessorPtr;
 

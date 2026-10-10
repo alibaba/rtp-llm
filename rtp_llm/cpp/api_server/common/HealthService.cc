@@ -5,6 +5,12 @@ namespace rtp_llm {
 
 void HealthService::healthCheck(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                 const http_server::HttpRequest&                         request) {
+    respond(writer, true, R"("ok")");
+}
+
+void HealthService::respond(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                            bool                                                    require_ready,
+                            const std::string&                                      body) {
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
     writer->AddHeader("Content-Type", "application/json");
 
@@ -14,21 +20,23 @@ void HealthService::healthCheck(const std::unique_ptr<http_server::HttpResponseW
         writer->Write(R"({"detail":"this server has been shutdown"})");
         return;
     }
-    writer->Write(R"("ok")");
+    if (require_ready && ready_ && !ready_()) {
+        writer->SetStatus(503, "Service Unavailable");
+        writer->Write(R"({"detail":"inference service is not ready"})");
+        return;
+    }
+    writer->Write(body);
 }
 
 void HealthService::healthCheck2(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                  const http_server::HttpRequest&                         request) {
 
-    writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);
-    writer->AddHeader("Content-Type", "application/json");
-    if (is_stopped_.load()) {
-        RTP_LLM_LOG_WARNING("called root route, but server has been shutdown");
-        writer->SetStatus(503, "Service Unavailable");
-        writer->Write(R"({"detail":"this server has been shutdown"})");
-        return;
-    }
-    writer->Write(R"({"status":"home"})");
+    respond(writer, true, R"({"status":"home"})");
+}
+
+void HealthService::liveCheck(const std::unique_ptr<http_server::HttpResponseWriter>& writer,
+                              const http_server::HttpRequest&                         request) {
+    respond(writer, false, R"("ok")");
 }
 
 void HealthService::stop() {
@@ -46,7 +54,12 @@ bool registerHealthServiceStatic(http_server::HttpServer& http_server, std::shar
         health_service->healthCheck2(writer, request);
     };
 
-    return http_server.RegisterRoute("GET", "/health", raw_resp_callback)
+    auto live_callback = [health_service](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                          const http_server::HttpRequest&                  request) {
+        health_service->liveCheck(writer, request);
+    };
+    return http_server.RegisterRoute("GET", "/live", live_callback)
+           && http_server.RegisterRoute("GET", "/health", raw_resp_callback)
            && http_server.RegisterRoute("POST", "/health", raw_resp_callback)
            && http_server.RegisterRoute("GET", "/GraphService/cm2_status", raw_resp_callback)
            && http_server.RegisterRoute("POST", "/GraphService/cm2_status", raw_resp_callback)

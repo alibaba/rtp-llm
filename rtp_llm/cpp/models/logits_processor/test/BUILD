@@ -119,3 +119,12 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "runtime_constraint_tree_test",
+    srcs = ["RuntimeConstraintTreeTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"TEST_USING_DEVICE": "CUDA"},
+    exec_properties = {"gpu": "H20"},
+)

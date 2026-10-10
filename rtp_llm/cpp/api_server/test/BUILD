@@ -13,6 +13,16 @@ cc_library(
     ]),
 )
 
+cc_import(
+    name = "cuda13_torch_nvshmem",
+    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+)
+
+cuda13_torch_link_deps = select({
+    "@//:using_cuda13_x86": [":cuda13_torch_nvshmem"],
+    "//conditions:default": [],
+})
+
 test_deps = [
     "//rtp_llm/cpp/models:models",
     "//rtp_llm/cpp/config:config_modules",
@@ -111,4 +121,42 @@ filegroup(
         "mock/MockTokenizer.h",
     ],
     visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "constraint_tree_service_test",
+    srcs = ["ConstraintTreeServiceTest.cc", "mock/MockHttpResponseWriter.h"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/api_server:constraint_tree_service",
+        "//rtp_llm/cpp/api_server:http_client",
+        "//rtp_llm/cpp/api_server/common:common_service",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps + device_impl_target() + select({
+        "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],
+        "//conditions:default": ["//rtp_llm/models_py/bindings/core:exec_ops_test_lib"],
+    }),
+)
+cc_binary(
+    name = "constraint_tree_test_server",
+    srcs = ["ConstraintTreeTestServer.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/api_server:constraint_tree_service",
+        "//rtp_llm/cpp/api_server/common:common_service",
+    ] + cuda13_torch_link_deps,
+)
+cc_binary(
+    name = "tokenizer_sid_mapping_test_lib.so",
+    srcs = ["TokenizerSidMappingTestBinding.cc"],
+    linkshared = 1,
+    deps = ["//rtp_llm/cpp/api_server:tokenizer"],
+)
+py_test(
+    name = "tokenizer_sid_mapping_test",
+    srcs = ["tokenizer_sid_mapping_test.py"],
+    imports = ["."],
+    data = [":tokenizer_sid_mapping_test_lib.so", "//rtp_llm:frontend"],
+    deps = ["//rtp_llm:testlib"],
 )

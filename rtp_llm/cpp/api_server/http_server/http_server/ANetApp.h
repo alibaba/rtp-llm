@@ -1,6 +1,8 @@
 #ifndef HTTP_SERVER_ANET_APP_H
 #define HTTP_SERVER_ANET_APP_H
 
+#include <cstddef>
+
 #include "aios/network/anet/anet.h"
 #include "autil/Log.h"
 
@@ -21,6 +23,7 @@ public:
 
     bool                  StartPrivateTransport();
     bool                  StopPrivateTransport();
+    void                  SetPackageLimit(size_t packageLimit);
     anet::IPacketFactory* GetPacketFactory() {
         return &_factory;
     }

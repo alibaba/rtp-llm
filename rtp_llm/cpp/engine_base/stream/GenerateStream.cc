@@ -16,6 +16,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/MultiSeqLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/CodebookLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
@@ -1245,6 +1246,15 @@ std::optional<ErrorInfo> GenerateStream::updateNormalLogitProcessorStatus(const 
     updateLogitProcessorMultiSeqStatus(update_info.src_batch_indices);
     RTP_LLM_CHECK(update_info.new_tokens.size(0) == currentBatchSize());
     return updateLogitProcessorStatus(update_info.new_tokens, update_info.num_new_tokens);
+}
+
+std::optional<ErrorInfo> GenerateStream::validateConstraintBeamScores(const torch::Tensor& scores, size_t count) const {
+    for (const auto& processor : logits_processor_list_) {
+        if (auto tree = std::dynamic_pointer_cast<TreeLogitsProcessor>(processor)) {
+            if (auto error = tree->validateBeamScores(scores, count)) { return error; }
+        }
+    }
+    return std::nullopt;
 }
 
 std::optional<ErrorInfo> GenerateStream::updateLogitProcessorStatus(const torch::Tensor& new_tokens,

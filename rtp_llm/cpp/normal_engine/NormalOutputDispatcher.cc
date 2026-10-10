@@ -375,6 +375,13 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
 
     auto          error_info = collectStreamSamplerError(sampler_output, success_cpu, batch_idx_in, cur_batch_size);
+    if (!error_info.has_value()) {
+        error_info = stream->validateConstraintBeamScores(batch_cum_log_probs, next_batch_size);
+    }
+    if (error_info.has_value()) {
+        stream->reportError(error_info->code(), error_info->ToString());
+        return;
+    }
     torch::Tensor current_softmax_result;
     if (!error_info.has_value() && stream->calculateSoftmaxProbs()) {
         // Validate compact IDs before using them as probability indices. A bad

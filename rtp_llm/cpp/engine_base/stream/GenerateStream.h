@@ -234,6 +234,8 @@ public:
 
     bool                 isContextStream() const;
     const torch::Tensor& cumLogProbs() const;
+    // Validate sampler beam scores before the output dispatcher commits tokens.
+    std::optional<ErrorInfo> validateConstraintBeamScores(const torch::Tensor& scores, size_t count) const;
 
     torch::Tensor                     completeTokenIds();
     std::shared_ptr<CompleteTokenIds> completeTokenIdsPtr() const {
