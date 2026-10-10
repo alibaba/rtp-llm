@@ -138,3 +138,14 @@ class RetryDecoratorTest(unittest.TestCase):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     unittest.main()
+
+
+class NfsManagerPrivPrefixTest(unittest.TestCase):
+    def test_priv_prefix_depends_on_euid(self):
+        manager = fuser.NfsManager()
+        # Root does not need the sudo escalation (CI worker containers may
+        # not even ship a usable sudo).
+        with patch("rtp_llm.utils.fuser.os.geteuid", return_value=0):
+            self.assertEqual(manager._priv_prefix(), "")
+        with patch("rtp_llm.utils.fuser.os.geteuid", return_value=1000):
+            self.assertEqual(manager._priv_prefix(), "sudo ")

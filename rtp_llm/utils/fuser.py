@@ -237,18 +237,26 @@ class NfsManager:
         self._nfs_info_map: Dict[str, MountInfo] = {}  # nfs address -> MountInfo
         self._lock = threading.RLock()
 
+    @staticmethod
+    def _priv_prefix() -> str:
+        # Some CI worker containers already run as root without a usable
+        # sudo; only prefix the escalation when it is actually needed.
+        return "" if os.geteuid() == 0 else "sudo "
+
     def _do_mount_nfs(self, nfs_address: str, mount_root: str):
-        check_call(f"sudo mkdir -p {mount_root}", shell=True)
+        prefix = self._priv_prefix()
+        check_call(f"{prefix}mkdir -p {mount_root}", shell=True)
         check_call(
-            f"sudo mount -t nfs -o vers=4,minorversion=0,noresvport {nfs_address}:/ {mount_root}",
+            f"{prefix}mount -t nfs -o vers=4,minorversion=0,noresvport {nfs_address}:/ {mount_root}",
             shell=True,
         )
         logging.info(f"successfully mounted nfs path {nfs_address} to {mount_root}")
         self._nfs_info_map[mount_root] = MountInfo()
 
     def _do_unmount_nfs(self, mount_root: str):
-        check_call(f"sudo umount {mount_root}", shell=True)
-        check_call(f"sudo rm -rf {mount_root}", shell=True)
+        prefix = self._priv_prefix()
+        check_call(f"{prefix}umount {mount_root}", shell=True)
+        check_call(f"{prefix}rm -rf {mount_root}", shell=True)
         logging.info(f"successfully unmounted nfs path {mount_root}")
         del self._nfs_info_map[mount_root]
 
