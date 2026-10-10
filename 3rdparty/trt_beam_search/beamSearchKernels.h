@@ -21,9 +21,12 @@
 #include <curand_kernel.h>
 #endif
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 #include "common.h"
 #include "decodingCommon.h"
 #include "topkLastDim.h" // Air TopK
+
+#include <cstdlib>
 
 #define BEAM_SEARCH_DEBUG 0
 
@@ -31,6 +34,30 @@ namespace tensorrt_llm
 {
 namespace kernels
 {
+// Runtime rollback switch for the V2 top-k radix routing (see topkLastDim.h for the
+// path legend): 0/unset = auto route, 1 = force multi-block, 2 = force one-block.
+// Anything else is rejected with a warning and falls back to 0, since a stray value
+// would silently select the multi-block route. Cached so the workspace-size query
+// and the run always agree on the path.
+inline int beamTopkForcePath()
+{
+    static int const force_path = [] {
+        char const* env = std::getenv("RTP_LLM_BEAM_TOPK_FORCE_PATH");
+        if (env == nullptr)
+        {
+            return 0;
+        }
+        char* end = nullptr;
+        long const v = std::strtol(env, &end, 10);
+        if (end != env && *end == '\0' && v >= 0 && v <= 2)
+        {
+            return static_cast<int>(v);
+        }
+        RTP_LLM_LOG_WARNING("invalid RTP_LLM_BEAM_TOPK_FORCE_PATH='%s' (want 0/1/2), falling back to 0", env);
+        return 0;
+    }();
+    return force_path;
+}
 static size_t constexpr kMaxBeamWidth = 1024;           // Max beam width supported in TRT-LLM now
 static size_t constexpr kMaxBeamWidthForV1 = 8;         // Max beam width for V1 workflow (V2 for larger)
 static size_t constexpr kMaxBeamWidthArrayLength = 8;   // Max length of beam width array of a request
