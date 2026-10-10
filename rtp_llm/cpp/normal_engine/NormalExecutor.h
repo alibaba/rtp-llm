@@ -60,8 +60,8 @@ protected:
     bool useStreamAsync() const;
 
     // Skip the front-loaded previous-worker sync when DROP_BROAD_SYNC=1.
-    // Host stream state may still be mutating; NormalAsyncDeviceState only
-    // covers sampled token and seq_len for batch-1 decode.
+    // Host stream state may still be mutating; eligible decode streams use
+    // one published token/length epoch through grouping and model gather.
     bool useDropBroadSync() const;
 
     // Stream-async dispatch. Records sampler_event on the main stream after
@@ -74,12 +74,7 @@ protected:
                                      std::function<void()>         profile_step_finish = nullptr);
 
     void publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output);
-    void prepareGrpcNormalDeviceState(const StreamGroups& stream_groups);
-
-    // Mirror the use_normal_device_state condition in processDecodeStreams.
-    // When false, gather falls back to host accessors still mutated by the
-    // worker, so callers must sync before gather.
-    bool gatherCanUseDeviceState(const StreamGroups& stream_groups) const;
+    void prepareGrpcNormalDeviceState(const std::list<GenerateStreamPtr>& streams);
 
     // Env-gated path that moves metadata tensors to CUDA before tpSyncModelInputs.
     // This routes them through one GPU packed-buffer broadcast instead of CPU

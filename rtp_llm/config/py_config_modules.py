@@ -377,6 +377,7 @@ class VitConfig:
         self.disable_access_log: bool = False
         self.use_local_preprocess: bool = False
         self.vit_proxy_load_balance_strategy: str = "round_robin"
+        self.vit_proxy_min_healthy_workers: int = 0
         self.output_transport = MMTransportConfig()
         # Cross-request GPU batching is inferred from gpu_max_batch_size alone:
         # == 1 -> serial (one request per forward, no wait window); > 1 -> merge
@@ -463,6 +464,7 @@ class VitConfig:
             f"disable_access_log: {self.disable_access_log}\n"
             f"use_local_preprocess: {self.use_local_preprocess}\n"
             f"vit_proxy_load_balance_strategy: {self.vit_proxy_load_balance_strategy}\n"
+            f"vit_proxy_min_healthy_workers: {self.vit_proxy_min_healthy_workers}\n"
             f"mm_transport_mode: {transport.mode}\n"
             f"mm_rdma_bind_ip: {rdma.bind_ip}\n"
             f"mm_rdma_port: {rdma.port}\n"
@@ -544,9 +546,14 @@ class QuantizationConfig:
     def __init__(self):
         self.int8_mode: int = 0
         self.quantization: str = ""
+        self.w8a8_quant_chunk_rows: int = 1024
 
     def to_string(self):
-        return f"int8_mode: {self.int8_mode}\n" f"quantization: {self.quantization}"
+        return (
+            f"int8_mode: {self.int8_mode}\n"
+            f"quantization: {self.quantization}\n"
+            f"w8a8_quant_chunk_rows: {self.w8a8_quant_chunk_rows}"
+        )
 
     def get_quantization(self):
         """Get quantization string with compatibility logic.
@@ -555,12 +562,21 @@ class QuantizationConfig:
         or weight_type is INT8 (from environment variable).
         """
         if self.quantization:
+            if self.quantization.upper() == "W8A8_INT8_PER_CHANNEL":
+                weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
+                if self.int8_mode == 1 or weight_type == "INT8":
+                    conflict = (
+                        "INT8_MODE=1" if self.int8_mode == 1 else "WEIGHT_TYPE=INT8"
+                    )
+                    raise ValueError(
+                        "QUANTIZATION=W8A8_INT8_PER_CHANNEL conflicts with "
+                        f"{conflict}; clear the legacy INT8 setting before "
+                        "requesting online W8A8 quantization"
+                    )
             return self.quantization
         if self.int8_mode == 1:
             return "INT8"
         # Check weight_type from environment variable (compatibility logic)
-        import os
-
         weight_type = os.environ.get("WEIGHT_TYPE", "").upper()
         if weight_type == "INT8":
             return "INT8"
@@ -737,6 +753,13 @@ class PyEnvConfigs:
         # override reach those implementations without changing the default
         # behavior of servers that do not configure the switch.
         self.ft_disable_custom_ar_override: Optional[bool] = None
+        # Explicit --max_generate_batch_size override (tri-state like the
+        # field above). None = not provided: EngineConfig.create keeps deriving
+        # max_generate_batch_size from concurrency_limit. A positive int = an
+        # explicit scheduler-side decode running-batch cap: excess streams queue
+        # in the scheduler instead of being rejected at the HTTP frontend the
+        # way concurrency_limit does.
+        self.max_generate_batch_size_override: Optional[int] = None
         self.sp_config = SpeculativeExecutionConfig()
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
