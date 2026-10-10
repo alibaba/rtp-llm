@@ -1,4 +1,4 @@
-from rtp_llm.utils.import_util import has_internal_source
+from rtp_llm.utils.import_util import import_optional_internal_source_entrypoint
 
 from .base_multimodal_mixin import (
     BaseMultiModalDeployWeightInfo,
@@ -18,5 +18,4 @@ from .qwen3_vl_mixin import Qwen3_VLMixin
 from .qwen4_exp_mixin import Qwen4ExpMixin
 from .qwen_vl.qwen_vl_mixin import QwenVLMixin
 
-if has_internal_source():
-    import internal_source.rtp_llm.multimodal_mixins.internal_init
+import_optional_internal_source_entrypoint("multimodal_mixins.internal_init")
