@@ -2,7 +2,9 @@
 
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <cstdint>
@@ -72,6 +74,32 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Upper-layer request preparation has run the existing hash utility.
+    // The flag also preserves the first-attempt-only metric event on retries.
+    bool cache_keys_prepared = false;
+    bool cache_keys_initialized_now = false;
+    // Per-malloc attempt start in currentTimeUs() microseconds, captured before
+    // upper-layer key hashing. Zero lets direct/legacy manager callers keep
+    // their original manager-entry timestamp. Copied by value across async work.
+    int64_t malloc_begin_time_us = 0;
+
+    // Immutable global request snapshot. Deferred loads retain it through
+    // MallocInfo's by-value callback capture; cache derives local mappings.
+    struct RequestLayout {
+        CacheKeysType match_keys;  // full global cumulative hashes
+        // Immutable global token lengths for this malloc attempt. Deferred
+        // materialization must not reread a stream's mutable token cursor.
+        int request_seq_len = 0;
+        int request_incr_seq_len = 0;
+        int request_common_seq_len = 0;
+        int request_total_seq_len = 0;
+        int request_reserve_step   = 0;
+        // First prefill-key initialization only: the old recent/theory metric
+        // drops an unaligned final key in every batch before CP sampling.
+        // An empty vector is still a valid snapshot, hence optional.
+        std::optional<std::vector<CacheKeysType>> theory_window_keys;
+    };
+    std::shared_ptr<const RequestLayout> request_layout;
 
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;

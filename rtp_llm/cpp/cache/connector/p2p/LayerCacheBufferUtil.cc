@@ -14,8 +14,8 @@ struct TransferWindow {
     const CacheKeysType*    cache_keys;
     size_t                  begin;
     size_t                  count;
-    size_t                  cp_rank;
-    size_t                  cp_size;
+    size_t                  key_first;
+    size_t                  key_stride;
 };
 
 std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
@@ -23,10 +23,9 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
                                                 const std::string&     cache_tag,
                                                 int                    start_block_idx,
                                                 int                    block_count,
-                                                int                    cp_rank,
-                                                int                    cp_size) {
-    if (start_block_idx < 0 || block_count == 0 || block_count < -1 || cp_size < 1 || cp_rank < 0
-        || cp_rank >= cp_size) {
+                                                size_t                 key_first,
+                                                size_t                 key_stride) {
+    if (start_block_idx < 0 || block_count == 0 || block_count < -1 || key_stride == 0 || key_first >= key_stride) {
         RTP_LLM_LOG_WARNING(
             "invalid tagged cache conversion arguments for layer=%d tag=%s", layer_id, cache_tag.c_str());
         return std::nullopt;
@@ -34,13 +33,8 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
 
     const auto& cache_keys                = resource.cacheKeys();
     const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag);
-    const auto  rank                      = static_cast<size_t>(cp_rank);
-    const auto  world_size                = static_cast<size_t>(cp_size);
-    size_t      max_local_blocks_for_keys = cache_keys.size();
-    if (world_size > 1) {
-        max_local_blocks_for_keys =
-            cache_keys.size() > rank ? (cache_keys.size() - rank + world_size - 1) / world_size : 0;
-    }
+    const size_t max_local_blocks_for_keys =
+        cache_keys.size() > key_first ? 1 + (cache_keys.size() - 1 - key_first) / key_stride : 0;
     const size_t actual_block_count = std::min(block_ids.size(), max_local_blocks_for_keys);
     const auto   begin              = static_cast<size_t>(start_block_idx);
     if (begin >= actual_block_count) {
@@ -52,19 +46,19 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
     if (count == 0) {
         return std::nullopt;
     }
-    return TransferWindow{&block_ids, &cache_keys, begin, count, rank, world_size};
+    return TransferWindow{&block_ids, &cache_keys, begin, count, key_first, key_stride};
 }
 
 }  // namespace
 
 std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
-    KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, int cp_rank, int cp_size) {
+    KVCacheResource& resource, int batch_id, int start_block_idx, int block_count, size_t key_first, size_t key_stride) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
         for (const auto& tag : resource.groupTagsForLayer(layer_id)) {
             auto buffer =
-                convertLayer(resource, batch_id, layer_id, tag, start_block_idx, block_count, cp_rank, cp_size);
+                convertLayer(resource, batch_id, layer_id, tag, start_block_idx, block_count, key_first, key_stride);
             if (buffer) {
                 layer_cache_buffers.push_back(std::move(buffer));
             }
@@ -78,16 +72,16 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
                                                                      int              layer_id,
                                                                      int              start_block_idx,
                                                                      int              block_count,
-                                                                     int              cp_rank,
-                                                                     int              cp_size) {
+                                                                     size_t           key_first,
+                                                                     size_t           key_stride) {
     return convertLayer(resource,
                         batch_id,
                         layer_id,
                         resource.soleGroupTagForLayer(layer_id),
                         start_block_idx,
                         block_count,
-                        cp_rank,
-                        cp_size);
+                        key_first,
+                        key_stride);
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource&   resource,
@@ -96,11 +90,11 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
                                                                      const std::string& cache_tag,
                                                                      int                start_block_idx,
                                                                      int                block_count,
-                                                                     int                cp_rank,
-                                                                     int                cp_size) {
+                                                                     size_t             key_first,
+                                                                     size_t             key_stride) {
     (void)batch_id;
     const auto window =
-        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size);
+        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, key_first, key_stride);
     if (!window.has_value()) {
         return nullptr;
     }
@@ -108,7 +102,7 @@ std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheReso
     auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
     for (size_t i = 0; i < window->count; ++i) {
         const size_t local_idx   = window->begin + i;
-        const size_t logical_idx = window->cp_rank + local_idx * window->cp_size;
+        const size_t logical_idx = window->key_first + local_idx * window->key_stride;
         if (logical_idx >= window->cache_keys->size()) {
             break;
         }
@@ -125,16 +119,16 @@ bool LayerCacheBufferUtil::hasTransferableBlocks(const KVCacheResource& resource
                                                  const std::string&     cache_tag,
                                                  int                    start_block_idx,
                                                  int                    block_count,
-                                                 int                    cp_rank,
-                                                 int                    cp_size) {
+                                                 size_t                 key_first,
+                                                 size_t                 key_stride) {
     const auto window =
-        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size);
+        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, key_first, key_stride);
     if (!window.has_value()) {
         return false;
     }
     for (size_t i = 0; i < window->count; ++i) {
         const size_t local_idx   = window->begin + i;
-        const size_t logical_idx = window->cp_rank + local_idx * window->cp_size;
+        const size_t logical_idx = window->key_first + local_idx * window->key_stride;
         if (logical_idx >= window->cache_keys->size()) {
             break;
         }

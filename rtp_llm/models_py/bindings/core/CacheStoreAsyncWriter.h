@@ -36,7 +36,10 @@ public:
         std::shared_ptr<KVCacheManager>          cache_manager          = nullptr,
         size_t                                   cache_model_id         = 0,
         std::optional<int>                       mtp_cache_config_index = std::nullopt,
-        std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt);
+        std::optional<std::chrono::milliseconds> store_completion_timeout = std::nullopt,
+        // Producer rank and size, resolved by the model's parallelism config.
+        // Required when the main cache config has an external CP projection.
+        std::optional<std::pair<int, int>>       producer_cp_topology = std::nullopt);
     ~CacheStoreAsyncWriter() override;
 
     void init(bool track_store_completions = false);

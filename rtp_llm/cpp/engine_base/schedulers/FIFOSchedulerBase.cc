@@ -6,7 +6,6 @@
 #include <unordered_set>
 #include <sstream>
 
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -131,7 +130,6 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
     }
 
     const auto& cache_config = cache_manager_->cacheConfig();
-    const auto  cp_mapper    = cache_manager_->cpSlotMapper();
     const bool  reuse_cache  = stream->streamCacheResource().reuseCache();
     const int64_t seq_length = stream->seqLength();
     const int64_t rows       = stream->currentBatchSize();
@@ -144,7 +142,7 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
             if (cache_config.linear_step != 1) {
                 error_msg = "[chunked_prefill] requires linear_step=1, got "
                             + std::to_string(cache_config.linear_step);
-            } else if (cp_mapper && cp_mapper->isSharded() && group.policy.group_type != CacheGroupType::FULL
+            } else if (cache_config.storage_cp_size > 1 && group.policy.group_type != CacheGroupType::FULL
                        && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag
                             + "] does not support BLOCK_ROUND_ROBIN with CP cache sharding";

@@ -809,6 +809,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
     }
 
+    // Target and draft writers share the same physical producer cache. Warmup
+    // uses a temporary unsharded cache even when the live cache is CP-sharded.
+    const bool producer_sharded =
+        !warm_up_ && cache_manager && cache_manager->cacheConfig().request_projection_required;
+    const auto producer_cp_topology = producer_sharded ?
+                                          std::make_pair(static_cast<int>(params.parallelism_config.tp_rank),
+                                                         static_cast<int>(params.parallelism_config.tp_size)) :
+                                          std::make_pair(0, 1);
+
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -828,6 +837,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.cache_store_producer_cp_topology = producer_cp_topology;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
     model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
@@ -905,6 +915,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
         model_params.metrics_reporter = metrics_reporter_;
+        model_params.cache_store_producer_cp_topology = producer_cp_topology;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
                                              role_type_,

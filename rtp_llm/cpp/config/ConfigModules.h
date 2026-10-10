@@ -39,7 +39,7 @@ struct PrefillCPConfig {
     size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
     // When true + tp_size > 1, KV cache uses page-level round-robin sharding
     // across the CP (== TP) group. Each rank physically holds only owned blocks
-    // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
+    // (block_idx % cp_size == cp_rank); the external cache layout resolves it.
     bool kv_cache_sharded = false;
     // Explicit prefill CP size for decode-side fixed/SWA ring sizing; 0 = unset.
     int64_t prefill_cp_size = 0;

@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -17,7 +18,6 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -26,6 +26,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
@@ -69,10 +70,15 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                               "linear");
     auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
 
+    auto linear_policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    auto second_policy = defaultCacheGroupPolicy(second_type);
+    second_policy.cp_mapping = second_type == CacheGroupType::SWA ? CpBlockMappingMode::COMPACT_LAST_RANK :
+                                                                    CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     config.fromGroupedSpecs({linear_spec, full_spec},
                             {{0, 1}, {2, 3}},
                             {CacheGroupType::LINEAR, second_type},
-                            {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"});
+                            {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"},
+                            {linear_policy, second_policy});
 
     const auto linear_stride = linear_spec->block_size_bytes();
     const auto full_stride   = full_spec->block_size_bytes();
@@ -98,6 +104,8 @@ static CacheConfig makeTinyFullSwaMultiPoolHybridConfig(uint32_t full_block_num 
     auto swa_spec                  = makeResolvedMhaSpec(config.dtype, 1, 1, 4, "swa");
     auto full_policy               = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    full_policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    swa_policy.cp_mapping          = CpBlockMappingMode::COMPACT_LAST_RANK;
     swa_policy.enable_prefix_reuse = true;
     swa_policy.sliding_window_size = 8;
     config.fromGroupedSpecs({full_spec, swa_spec},
@@ -313,12 +321,20 @@ static ModelConfig makeProModelConfig() {
     return mc;
 }
 
+static CacheConfig createResolvedDsv4WarmupConfig(const ModelConfig& mc, const ParallelismConfig& pc) {
+    const KVCacheConfig options;
+    return CacheConfigCreator::createWarmupConfig(mc, pc, options);
+}
+
 // Build a DSV4 7-pool CacheConfig with independent groups.
-static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
+static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200, int cp_size = 1) {
     auto mc                                            = makeProModelConfig();
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    pc.tp_size                            = cp_size;
+    pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
+    auto config                           = cp_size > 1 ? CacheConfigCreator::createConfig(mc, pc, KVCacheConfig{}) :
+                                                          createResolvedDsv4WarmupConfig(mc, pc);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -326,7 +342,7 @@ static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
 static CacheConfig makeTinyDSV4HybridPoolConfig(uint32_t block_num = 8) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto              config = createResolvedDsv4WarmupConfig(mc, pc);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
     return config;
 }
@@ -605,31 +621,51 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, RecomputePreservesCompactCpReadyPr
     context.kernel_tokens_per_block = 128;
     context.parallelism_config      = &parallelism;
     context.gen_num_per_cycle       = 1;
-
     for (const int cp_size : {2, 4}) {
         SCOPED_TRACE(cp_size);
         parallelism.tp_size                 = cp_size;
         const int device_ready_reuse_length = context.seq_size_per_block * cp_size;
         for (const std::string tag : {"swa_kv", "csa_state"}) {
             SCOPED_TRACE(tag);
-            const auto  desc = makeDsv4Desc(tag, "state", 4, DataType::TYPE_FP32);
-            const auto  spec = SpecBuilder::build(desc, context);
+            const auto desc = makeDsv4Desc(tag, "state", 4, DataType::TYPE_FP32);
+            const std::vector<std::vector<KVCacheSpecDesc>> descs{{desc}};
+            const auto state_layouts = FixedStateCacheSpec::resolveEntryLayouts(
+                descs,
+                parallelism,
+                context.seq_size_per_block,
+                context.gen_num_per_cycle,
+                context.kernel_tokens_per_block);
+            const auto swa_layouts = FixedStateCacheSpec::resolveSwaByteLayouts(
+                descs,
+                parallelism,
+                context.seq_size_per_block,
+                context.gen_num_per_cycle,
+                context.kernel_tokens_per_block);
+            const RequiredSpecProjectionTags projection_tags{tag};
+            auto resolved_context = context;
+            resolved_context.state_entry_layouts = &state_layouts;
+            resolved_context.swa_byte_layouts = &swa_layouts;
+            resolved_context.required_spec_projection_tags = &projection_tags;
+            const auto spec = SpecBuilder::build(desc, resolved_context);
+            auto policy = SpecBuilder::groupPolicy(desc);
+            policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+            policy.cp_slice   = desc.cp->slice.value_or(policy.cp_slice);
             CacheConfig config;
             config.dtype     = context.dtype;
             config.layer_num = 1;
             config.seq_size_per_block               = context.seq_size_per_block;
-            config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {SpecBuilder::groupPolicy(desc)});
+            config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::SWA}, {tag}, {policy});
             config.setGroupBlockLayout({tag}, {8}, {spec->block_size_bytes()}, {0});
             ASSERT_EQ(config.group(tag).seqSizePerBlock(), device_ready_reuse_length);
-            auto mapper = std::make_shared<CPSlotMapper>(0, cp_size, context.seq_size_per_block);
-            ASSERT_TRUE(mapper->compactLastRankGroup(config, tag));
+            config.finalizeStorageLayout(parallelism);
+            ASSERT_EQ(config.group(tag).policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
             auto allocator = makeAllocator(config, RoleType::PREFILL);
             ASSERT_TRUE(allocator->init());
-            allocator->setCPSlotMapper(mapper);
             auto       resource = makeBatchResource(1, config);
             auto       tokens   = makeCompleteTokenIds(1, 2 * device_ready_reuse_length, context.seq_size_per_block);
             MallocInfo malloc_info{resource, tokens};
             malloc_info.enable_cache_lookup = false;
+            malloc_info.request_layout      = snapshotGlobalCacheRequest(*resource, *tokens);
             ASSERT_TRUE(allocator->malloc(malloc_info).success);
             const auto original = resource->blocks(0, tag);
             ASSERT_EQ(original.size(), 2u);
@@ -707,14 +743,20 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, ResidentInsertProtectsAllReusableG
     block_tree_cache_test::releaseRequestRefsForTest(*cache, match.matched_device_resources);
 }
 
-static void runStorageRoundTrip(const CacheConfig&                           config,
+static void runStorageRoundTrip(CacheConfig                                  config,
                                 const CacheKeysType&                         writer_keys,
                                 int                                          writer_seq_len,
                                 const CacheKeysType&                         reader_keys,
                                 int                                          reader_seq_len,
-                                const std::shared_ptr<CPSlotMapper>&         cp_mapper,
+                                int                                          cp_size,
                                 const std::vector<std::vector<std::string>>& expected_write_groups,
                                 const std::vector<std::vector<std::string>>& expected_read_groups) {
+    if (cp_size > 1) {
+        ParallelismConfig parallelism;
+        parallelism.tp_size = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        config.finalizeStorageLayout(parallelism);
+    }
     auto          state          = std::make_shared<MemoryStorageState>();
     auto          writer_backend = std::make_shared<PolicyMemoryStorageBackend>(state);
     auto          writer         = makeAllocator(config);
@@ -723,20 +765,25 @@ static void runStorageRoundTrip(const CacheConfig&                           con
     writer->setBlockTreeCacheConfigForTest(remote_config);
     writer->setStorageBackendForTest(writer_backend);
     ASSERT_TRUE(writer->init());
-    writer->setCPSlotMapper(cp_mapper);
 
     auto writer_resource = makeBatchResource(/*batch_size=*/1, config);
     writer_resource->setBatchCacheKeys(0, writer_keys);
+    if (cp_size > 1) {
+        writer_resource->setLastBlockAligned(true);
+    }
     auto       writer_tokens = makeCompleteTokenIds(/*batch_size=*/1, writer_seq_len, config.seq_size_per_block);
     MallocInfo writer_malloc{writer_resource, writer_tokens};
     writer_malloc.enable_cache_lookup          = false;
     writer_malloc.reuse_cache                  = true;
     writer_malloc.enable_remove_skipped_blocks = false;
+    if (cp_size > 1) {
+        writer_malloc.request_layout = snapshotGlobalCacheRequest(*writer_resource, *writer_tokens);
+    }
     ASSERT_TRUE(writer->malloc(writer_malloc).success);
     {
         size_t resident_prefix_length = 0;
-        writer->insertIntoCache(InsertInfo{writer_resource, writer_tokens, /*is_resident=*/false},
-                                resident_prefix_length);
+        InsertInfo insert_info{writer_resource, writer_tokens, /*is_resident=*/false};
+        writer->insertIntoCache(insert_info, resident_prefix_length);
     }
     EXPECT_EQ(writer_backend->writeGroupTags(), expected_write_groups);
 
@@ -745,7 +792,6 @@ static void runStorageRoundTrip(const CacheConfig&                           con
     reader->setBlockTreeCacheConfigForTest(remote_config);
     reader->setStorageBackendForTest(reader_backend);
     ASSERT_TRUE(reader->init());
-    reader->setCPSlotMapper(cp_mapper);
 
     auto reader_resource = makeBatchResource(/*batch_size=*/1, config);
     reader_resource->setBatchCacheKeys(0, reader_keys);
@@ -754,6 +800,9 @@ static void runStorageRoundTrip(const CacheConfig&                           con
     reader_malloc.enable_cache_lookup          = true;
     reader_malloc.reuse_cache                  = true;
     reader_malloc.enable_remove_skipped_blocks = false;
+    if (cp_size > 1) {
+        reader_malloc.request_layout = snapshotGlobalCacheRequest(*reader_resource, *reader_tokens);
+    }
     auto result                                = reader->malloc(reader_malloc);
     ASSERT_TRUE(result.success);
     ASSERT_NE(result.async_context, nullptr);
@@ -782,7 +831,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripUsesSparseFullLine
                         /*writer_seq_len=*/16,
                         request_keys,
                         /*reader_seq_len=*/21,
-                        nullptr,
+                        1,
                         {{"full"}, {"linear", "full"}, {"full"}, {"linear", "full"}},
                         {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
 }
@@ -796,7 +845,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripUsesFullSwaWindowS
                         /*writer_seq_len=*/16,
                         request_keys,
                         /*reader_seq_len=*/21,
-                        nullptr,
+                        1,
                         {{"full"}, {"full", "swa"}, {"full", "swa"}, {"full", "swa"}},
                         {{"full"}, {"full"}, {"full", "swa"}, {"full", "swa"}});
 }
@@ -805,13 +854,12 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, StorageRoundTripMapsCpCanonicalFul
     const auto          config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/16, /*full_block_num=*/16);
     const CacheKeysType stored_keys{300, 301, 302, 303, 304, 305, 306, 307};
     const CacheKeysType request_keys{300, 301, 302, 303, 304, 305, 306, 307, 308, 309};
-    auto                cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
     runStorageRoundTrip(config,
                         stored_keys,
                         /*writer_seq_len=*/32,
                         request_keys,
                         /*reader_seq_len=*/41,
-                        cp_mapper,
+                        2,
                         {{"linear", "full"}, {"linear", "full"}, {"linear", "full"}, {"linear", "full"}},
                         {{"full"}, {"full"}, {"full"}, {"linear", "full"}});
 }
@@ -972,12 +1020,16 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsUseCPVirtualBlockS
     EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 4u);
     EXPECT_EQ(allocator->availableTokensNum(), 7u * 4u);
 
-    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
-
-    EXPECT_EQ(allocator->maxAvailableTokensNum(), 7u * 8u);
-    EXPECT_EQ(allocator->availableTokensNum(), 7u * 8u);
-    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).total_tokens, 7u * 8u);
-    EXPECT_EQ(allocator->tokenCapacity(config.seq_size_per_block).available_tokens, 7u * 8u);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    config.finalizeStorageLayout(parallelism);
+    auto cp_allocator = makeAllocator(config);
+    ASSERT_TRUE(cp_allocator->init());
+    EXPECT_EQ(cp_allocator->maxAvailableTokensNum(), 7u * 8u);
+    EXPECT_EQ(cp_allocator->availableTokensNum(), 7u * 8u);
+    EXPECT_EQ(cp_allocator->tokenCapacity(config.seq_size_per_block).total_tokens, 7u * 8u);
+    EXPECT_EQ(cp_allocator->tokenCapacity(config.seq_size_per_block).available_tokens, 7u * 8u);
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsFallBackToGlobalSeqSize) {
@@ -1583,17 +1635,21 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, NonReservableOnlyPoolsHaveDivision
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/20, /*full_block_num=*/6);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    config.finalizeStorageLayout(parallelism);
     auto allocator = makeAllocator(config, RoleType::PDFUSION, /*reserve_block_ratio=*/1);
     ASSERT_TRUE(allocator->init());
 
     auto batch_res = makeBatchResource(/*batch_size=*/1, config);
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107});
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
-    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     MallocInfo malloc_info{batch_res, token_ids};
     malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
+    malloc_info.request_layout      = snapshotGlobalCacheRequest(*batch_res, *token_ids);
 
     auto result = allocator->malloc(malloc_info);
     ASSERT_TRUE(result.success);
@@ -1605,6 +1661,10 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, ReserveBlocksUseCPShardedFullGroup
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, PreparedSWALoadReserveRejectsPoolLocalShortfall) {
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/8, /*swa_block_num=*/4);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    config.finalizeStorageLayout(parallelism);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
     allocator->setReserveBlocksNum(1);
@@ -2174,7 +2234,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, TokenAggregatorsIgnoreSmallHCAStat
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4ConfigUsesGroupOwnedBytesForPagedBlockSize) {
     auto              mc = makeTinyDSV4ModelConfig();
     ParallelismConfig pc;
-    auto              config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto              config = createResolvedDsv4WarmupConfig(mc, pc);
 
     ASSERT_EQ(config.groupNums(), 7);
 
@@ -2297,7 +2357,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4StateSwaPoolsWithoutExplicitBl
     mc.hybrid_attention_config.enable_hybrid_attention = true;
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config        = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto config        = createResolvedDsv4WarmupConfig(mc, pc);
     config.linear_step = 4;
 
     RuntimeConfig rt;
@@ -2406,7 +2466,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4AllLayerCacheBaseHasPerGroupTe
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePrefix) {
-    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64, /*cp_size=*/2);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -2420,21 +2480,18 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePr
     CacheKeysType request_keys = full_keys;
     request_keys.push_back(2000);  // partial tail key present on the incoming request.
 
-    auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, spb);
-    allocator->setCPSlotMapper(cp_mapper);
-
     auto seed_res = makeBatchResource(/*batch_size=*/1, config);
     seed_res->setBatchCacheKeys(0, full_keys);
+    seed_res->setLastBlockAligned(true);
     auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
     seed_malloc.enable_cache_lookup = false;
-    allocator->setCPSlotMapper(cp_mapper);
+    seed_malloc.request_layout      = snapshotGlobalCacheRequest(*seed_res, *seed_tokens);
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
-    allocator->setCPSlotMapper(cp_mapper);
     {
         size_t resident_prefix_length = 0;
         allocator->insertIntoCache(insert_info, resident_prefix_length);
@@ -2450,7 +2507,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePr
     MallocInfo hit_malloc{hit_res, hit_tokens};
     hit_malloc.reuse_cache         = true;
     hit_malloc.enable_cache_lookup = true;
-    allocator->setCPSlotMapper(cp_mapper);
+    hit_malloc.request_layout      = snapshotGlobalCacheRequest(*hit_res, *hit_tokens);
     auto result = allocator->malloc(hit_malloc);
 
     ASSERT_TRUE(result.success);
@@ -2464,7 +2521,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedInsertThenReuseSamePr
 }
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromFullToLowerPriorityGroups) {
-    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64);
+    auto config    = makeDSV4HybridPoolConfig(/*block_num=*/64, /*cp_size=*/2);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
 
@@ -2476,16 +2533,15 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromF
         full_keys.push_back(1000 + i);
     }
 
-    auto cp_mapper = std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, spb);
-    allocator->setCPSlotMapper(cp_mapper);
-
     auto seed_res = makeBatchResource(/*batch_size=*/1, config);
     seed_res->setBatchCacheKeys(0, full_keys);
+    seed_res->setLastBlockAligned(true);
     auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, seq_len, spb);
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
     seed_malloc.enable_cache_lookup = false;
+    seed_malloc.request_layout      = snapshotGlobalCacheRequest(*seed_res, *seed_tokens);
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};
@@ -2500,9 +2556,7 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, DSV4CPShardedEvictionCascadesFromF
     FreeInfo seed_free{seed_res, seed_tokens};
     allocator->free(seed_free);
 
-    KVCacheResource canonical_source;
-    canonical_source.setCacheKeys(full_keys);
-    const auto expected_canonical = canonical_source.localCacheKeys(cp_mapper->cpSize() - 1, cp_mapper->cpSize());
+    const CacheKeysType expected_canonical = {1001, 1003, 1005, 1007, 1009};
     const auto before             = allocator->blockTreeCacheOwner()->getKeySnapshot();
     EXPECT_EQ(before.keys, expected_canonical);
 

@@ -72,13 +72,6 @@ double theoryHitRatio(int64_t hit_count, int64_t total_count) {
     return total_count > 0 ? static_cast<double>(hit_count) / static_cast<double>(total_count) : 0.0;
 }
 
-int64_t theoryBlockTokens(int seq_size_per_block, const std::shared_ptr<CPSlotMapper>& cp_mapper) {
-    if (cp_mapper && cp_mapper->isSharded()) {
-        return static_cast<int64_t>(cp_mapper->virtualBlockSize());
-    }
-    return static_cast<int64_t>(std::max(seq_size_per_block, 0));
-}
-
 int64_t theoryHitTokens(int64_t hit_key_count, int64_t input_token_count, int64_t block_tokens) {
     if (hit_key_count <= 0 || input_token_count <= 0 || block_tokens <= 0) {
         return 0;
@@ -274,44 +267,36 @@ PrefillCacheHitMetricsReporter::PrefillCacheHitMetricsReporter(kmonitor::Metrics
 
 PrefillCacheHitMetricsReporter::~PrefillCacheHitMetricsReporter() = default;
 
-CacheKeysType buildPrefillTheoryWindowKeys(const BatchKVCacheResource&          resource,
-                                           const std::shared_ptr<CPSlotMapper>& cp_mapper) {
+CacheKeysType buildPrefillTheoryWindowKeys(const BatchKVCacheResource& resource) {
     CacheKeysType theory_keys;
-    const int     cp_size   = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
-    const int     cp_offset = cp_size - 1;
-
     for (int batch_id = 0; batch_id < resource.batchSize(); ++batch_id) {
         CacheKeysType full_keys = resource.cacheKeys(batch_id);
         if (!resource.lastBlockAligned() && !full_keys.empty()) {
             full_keys.pop_back();
         }
 
-        if (cp_size <= 1) {
-            theory_keys.insert(theory_keys.end(), full_keys.begin(), full_keys.end());
-            continue;
-        }
-
-        for (int i = cp_offset; i < static_cast<int>(full_keys.size()); i += cp_size) {
-            theory_keys.push_back(full_keys[static_cast<size_t>(i)]);
-        }
+        theory_keys.insert(theory_keys.end(), full_keys.begin(), full_keys.end());
     }
     return theory_keys;
 }
 
 void PrefillCacheHitMetricsReporter::record(const BatchKVCacheResource&          resource,
-                                            const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                             int64_t                              request_id,
                                             int64_t                              token_num,
-                                            int                                  seq_size_per_block) {
+                                            int                                  seq_size_per_block,
+                                            const CacheKeysType*                 resolved_theory_keys,
+                                            int64_t                              resolved_block_tokens) {
     if (!enabled()) {
         return;
     }
 
-    const auto    cache_keys        = buildPrefillTheoryWindowKeys(resource, cp_mapper);
+    const auto cache_keys = resolved_theory_keys ? *resolved_theory_keys : buildPrefillTheoryWindowKeys(resource);
     auto          snapshot          = recent_window_.record(cache_keys);
     const int64_t input_token_count = std::max<int64_t>(token_num, 0);
-    const int64_t hit_token_count   = theoryHitTokens(
-        snapshot.request_hit_occurrences, input_token_count, theoryBlockTokens(seq_size_per_block, cp_mapper));
+    const int64_t block_tokens = resolved_block_tokens > 0 ? resolved_block_tokens :
+                                                             static_cast<int64_t>(std::max(seq_size_per_block, 0));
+    const int64_t hit_token_count =
+        theoryHitTokens(snapshot.request_hit_occurrences, input_token_count, block_tokens);
     auto theory_snapshot = theory_stats_->record(hit_token_count, input_token_count);
     if (theory_snapshot.request_total_count > 0) {
         appendPrefillTheoryHitLogLine(

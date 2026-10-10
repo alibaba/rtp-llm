@@ -29,4 +29,25 @@ struct ResourceContext {
     void initCacheConfig(const KVCacheConfig& kv_cache_config);
 };
 
+// Temporarily bind the warmup cache. Destruction restores the production
+// manager even when preRun throws.
+class ScopedWarmUpCacheManagerBinding {
+public:
+    ScopedWarmUpCacheManagerBinding(ResourceContext& resource_context, std::shared_ptr<KVCacheManager> manager):
+        resource_context_(resource_context), previous_manager_(resource_context.cache_manager) {
+        resource_context_.cache_manager = std::move(manager);
+    }
+
+    ~ScopedWarmUpCacheManagerBinding() {
+        resource_context_.cache_manager = std::move(previous_manager_);
+    }
+
+    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
+    ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
+
+private:
+    ResourceContext& resource_context_;
+    std::shared_ptr<KVCacheManager> previous_manager_;
+};
+
 }  // namespace rtp_llm

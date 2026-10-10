@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
@@ -80,6 +83,51 @@ struct KVCacheSpecDesc {
     std::optional<CacheCpPolicyDesc>       cp;
 };
 
+// Cache-internal physical entry resolution during synchronous spec building.
+// The descriptor above remains a model declaration.
+struct ResolvedStateEntryLayout {
+    uint32_t seq_size_per_block = 0;  // original tokens per physical STATE block
+    uint32_t full_entries       = 0;  // aligned entries in the complete ring
+    uint32_t local_entry_begin  = 0;  // first complete-ring entry on this prefill rank
+    uint32_t local_entries      = 0;  // physical entries in this process's block
+    size_t   entry_bytes        = 0;
+};
+using ResolvedStateEntryLayouts = std::unordered_map<std::string, ResolvedStateEntryLayout>;
+
+// Physical packed-byte projection for BLOCK_STRIDE fixed regions. Unlike a
+// STATE entry slice, a rank boundary may fall inside an FP8 data/scale row.
+struct ResolvedSwaByteLayout {
+    uint32_t seq_size_per_block = 0;  // original tokens per physical SWA block
+    uint32_t full_entries       = 0;  // complete logical ring, before byte slicing
+    size_t   full_payload_bytes = 0;  // data and scale, excluding trailing padding
+    size_t   full_stride_bytes  = 0;  // data, scale and trailing padding
+    size_t   local_byte_begin   = 0;  // offset in the complete packed block
+    size_t   local_stride_bytes = 0;  // rank-local allocated bytes
+};
+using ResolvedSwaByteLayouts = std::unordered_map<std::string, ResolvedSwaByteLayout>;
+
+// Physical span and per-kernel-page entries after cache CP resolution.
+// Borrowed only while building specs; it does not own any cache resources.
+struct ResolvedCompressedLayout {
+    uint32_t seq_size_per_block       = 0;  // original tokens per physical OpaqueKV block
+    uint32_t entries_per_kernel_block = 0;  // complete entries in each kernel page before physical aggregation
+};
+using ResolvedCompressedLayouts = std::unordered_map<std::string, ResolvedCompressedLayout>;
+
+// Cache build requirements. A tag here must have one of the physical
+// projections above. Borrowed only during synchronous spec construction.
+using RequiredSpecProjectionTags = std::unordered_set<std::string>;
+
+// One plain execution-policy overlay per descriptor, indexed by layer and
+// descriptor position. Keeping the positions preserves cross-layer policy
+// consistency checks in CacheConfigCreator.
+struct ResolvedCpGroupPolicy {
+    CpBlockMappingMode mapping = CpBlockMappingMode::NONE;
+    CpBlockSliceMode   slice   = CpBlockSliceMode::NONE;
+    bool uses_physical_projection = false;
+};
+using ResolvedCpGroupPolicies = std::vector<std::vector<ResolvedCpGroupPolicy>>;
+
 struct SpecBuildContext {
     DataType                     dtype                   = DataType::TYPE_INVALID;
     uint32_t                     seq_size_per_block      = 0;  // tokens/base cache-key block before group projection
@@ -88,6 +136,12 @@ struct SpecBuildContext {
     const LinearAttentionConfig* linear_attention_config = nullptr;
     const ParallelismConfig*     parallelism_config      = nullptr;
     uint32_t                     gen_num_per_cycle       = 0;
+    const ResolvedStateEntryLayouts* state_entry_layouts = nullptr;
+    const ResolvedSwaByteLayouts*    swa_byte_layouts    = nullptr;
+    // CacheConfigCreator supplies this map during synchronous spec building.
+    // SpecBuilder embeds the values in the constructed spec.
+    const ResolvedCompressedLayouts* compressed_layouts = nullptr;
+    const RequiredSpecProjectionTags* required_spec_projection_tags = nullptr;
 };
 
 class SpecBuilder {

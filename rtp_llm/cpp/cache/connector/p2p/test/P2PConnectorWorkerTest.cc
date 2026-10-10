@@ -76,8 +76,11 @@ public:
     }
 
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        ++get_all_buffers_calls;
         return {};
     }
+
+    mutable int get_all_buffers_calls = 0;
 };
 
 // Mock IKVCacheSender for testing (replaces old TransferClient mock)
@@ -463,6 +466,78 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayerCountsOnlyTransferableSparseGroups) {
     ASSERT_NE(computed_buffer, nullptr);
     ASSERT_TRUE(computed_buffer->expectedBufferCount().has_value());
     EXPECT_EQ(*computed_buffer->expectedBufferCount(), 2u);
+}
+
+TEST_F(P2PConnectorWorkerTest, DirectShardedConfigFailsBeforeBackendInitializationWithoutKeyCoordinates) {
+    worker_config_.kv_cache_sharded = true;
+    worker_config_.cp_rank = 1;
+    worker_config_.cp_size = 2;
+    worker_config_.cache_key_coordinates.reset();
+    EXPECT_THROW((void)P2PConnectorWorker(worker_config_, mock_layer_block_converter_, nullptr),
+                 std::invalid_argument);
+    auto converter = std::dynamic_pointer_cast<MockLayerBlockConverter>(mock_layer_block_converter_);
+    ASSERT_NE(converter, nullptr);
+    EXPECT_EQ(converter->get_all_buffers_calls, 0);
+}
+
+TEST_F(P2PConnectorWorkerTest, PrefillWorkerUsesFixedP1P2P4KeyAndCompletionVectors) {
+    const std::vector<std::tuple<int, int, std::map<int64_t, int>>> cases = {
+        {1, 0, {{1000, 10}, {1001, 11}, {1002, 12}}},
+        {2, 1, {{1001, 10}, {1003, 11}, {1005, 12}}},
+        {4, 3, {{1003, 10}, {1007, 11}}},
+    };
+    int64_t request_id = 1100;
+    for (const auto& [cp_size, cp_rank, expected] : cases) {
+        SCOPED_TRACE("P=" + std::to_string(cp_size));
+        prefill_.reset();
+        worker_config_.layer_all_num = 1;
+        worker_config_.kv_cache_sharded = cp_size > 1;
+        worker_config_.cp_rank = cp_rank;
+        worker_config_.cp_size = cp_size;
+        worker_config_.cache_key_coordinates = std::pair<size_t, size_t>{static_cast<size_t>(cp_rank),
+                                                                          static_cast<size_t>(cp_size)};
+        prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+            worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+        ASSERT_TRUE(prefill_->init(10 * 1000));
+        computed_buffers_ = prefill_->getComputedBuffersStore();
+
+        auto resource = createKVCacheResource(/*layer_id=*/0, /*num_blocks=*/3);
+        resource->mutableBlockIds("group0").assign({10, 11, 12});
+        resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009};
+        ASSERT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt));
+        auto computed = computed_buffers_->getBuffer(request_id);
+        ASSERT_NE(computed, nullptr);
+        ASSERT_EQ(computed->expectedBufferCount(), std::optional<size_t>(1));
+        computed->waitChange(0, 3000);
+        const auto [completed, buffers] = computed->getBuffers({0});
+        ASSERT_EQ(completed, 1);
+        ASSERT_EQ(buffers.size(), 1u);
+        EXPECT_EQ(buffers.front()->blockIdMap(), expected);
+        ++request_id;
+    }
+}
+
+TEST_F(P2PConnectorWorkerTest, PrefillWorkerDoesNotExpectPaddedOrNullTail) {
+    prefill_.reset();
+    worker_config_.layer_all_num = 1;
+    worker_config_.kv_cache_sharded = true;
+    worker_config_.cp_rank = 3;
+    worker_config_.cp_size = 4;
+    worker_config_.cache_key_coordinates = std::pair<size_t, size_t>{3, 4};
+    prefill_ = std::make_unique<P2PConnectorWorkerPrefill>(
+        worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    ASSERT_TRUE(prefill_->init(10 * 1000));
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    auto resource = createKVCacheResource(/*layer_id=*/0, /*num_blocks=*/2);
+    resource->mutableBlockIds("group0").assign({NULL_BLOCK_IDX, 11});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004};
+    constexpr int64_t request_id = 1104;
+    ASSERT_TRUE(prefill_->writeByLayer(0, resource, request_id, std::nullopt));
+    auto computed = computed_buffers_->getBuffer(request_id);
+    ASSERT_NE(computed, nullptr);
+    ASSERT_EQ(computed->expectedBufferCount(), std::optional<size_t>(0));
+    EXPECT_EQ(computed->getBuffers({0}).first, 0);
 }
 
 // ==================== sendKVCache 测试 (Prefill 端) ====================
@@ -1280,6 +1355,48 @@ TEST_F(LayerCacheBufferUtilTest, HasTransferableBlocksHonorsCpKeyBoundsAndValida
 
     resource->mutableBlockIds("group" + std::to_string(0)).setAt(0, 9);
     EXPECT_TRUE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 0, 2));
+}
+
+TEST_F(LayerCacheBufferUtilTest, ResolvedKeyCoordinatesPreserveFixedP1P2P4AndWindowVectors) {
+    auto resource = createResource(/*num_layers=*/1, /*blocks_per_layer=*/3);
+    resource->mutableBlockIds("group0").assign({10, 11, 12});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009};
+    const auto& tag = resource->soleGroupTagForLayer(0);
+
+    const std::vector<std::tuple<size_t, size_t, std::map<int64_t, int>>> cases = {
+        {0, 1, {{1000, 10}, {1001, 11}, {1002, 12}}},
+        {1, 2, {{1001, 10}, {1003, 11}, {1005, 12}}},
+        {3, 4, {{1003, 10}, {1007, 11}}},
+    };
+    for (const auto& [first, stride, expected] : cases) {
+        auto buffer = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, tag, 0, -1, first, stride);
+        ASSERT_NE(buffer, nullptr);
+        EXPECT_EQ(buffer->blockIdMap(), expected);
+        EXPECT_TRUE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, first, stride));
+    }
+
+    auto middle = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, tag, 1, 1, 1, 2);
+    ASSERT_NE(middle, nullptr);
+    EXPECT_EQ(middle->blockIdMap(), (std::map<int64_t, int>{{1003, 11}}));
+    EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 2, -1, 3, 4));
+}
+
+TEST_F(LayerCacheBufferUtilTest, ResolvedKeyCoordinatesKeepShortTailAndNullBlockRules) {
+    auto resource = createResource(/*num_layers=*/1, /*blocks_per_layer=*/3);
+    resource->mutableBlockIds("group0").assign({10, NULL_BLOCK_IDX, 12});
+    resource->cacheKeys() = {1000, 1001, 1002, 1003, 1004};
+    const auto& tag = resource->soleGroupTagForLayer(0);
+
+    auto buffer = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, tag, 0, -1, 3, 4);
+    ASSERT_NE(buffer, nullptr);
+    EXPECT_EQ(buffer->blockIdMap(), (std::map<int64_t, int>{{1003, 10}}));
+    EXPECT_TRUE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 3, 4));
+    EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 1, -1, 3, 4));
+
+    resource->mutableBlockIds("group0").setAt(0, NULL_BLOCK_IDX);
+    EXPECT_EQ(LayerCacheBufferUtil::convertLayer(*resource, 0, 0, tag, 0, -1, 3, 4), nullptr);
+    EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(*resource, 0, tag, 0, -1, 3, 4));
+    EXPECT_EQ(LayerCacheBufferUtil::convertLayer(*resource, 0, 0, tag, 0, -1, 4, 4), nullptr);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {

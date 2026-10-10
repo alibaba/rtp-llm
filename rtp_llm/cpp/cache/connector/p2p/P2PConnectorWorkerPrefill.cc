@@ -26,7 +26,9 @@ P2PConnectorWorkerPrefill::P2PConnectorWorkerPrefill(P2PConnectorWorkerConfig   
     // Note: config_ is already initialized (declared before asymmetric_tp_util_ in the class),
     // so reading config_.tp_size/tp_rank here is safe.
     asymmetric_tp_util_(std::make_shared<AsymmetricTpUtil>(config_.tp_size, config_.tp_rank)),
-    computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {}
+    computed_buffers_(std::make_shared<ComputedLayerCacheBufferStore>()) {
+    (void)config_.resolvedCacheKeyCoordinates();
+}
 
 P2PConnectorWorkerPrefill::~P2PConnectorWorkerPrefill() {
     if (cleanup_thread_) {
@@ -60,13 +62,14 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
                             resource->layerNum(),
                             config_.layer_all_num);
     const int64_t deadline_ms     = currentTimeMs() + store_wait_timeout_ms_;
+    const auto [key_first, key_stride] = config_.resolvedCacheKeyCoordinates();
     auto          computed_buffer = computed_buffers_->addBuffer(request_id, nullptr, deadline_ms);
     if (!computed_buffer->expectedBufferCount().has_value()) {
         size_t expected_buffer_count = 0;
         for (int expected_layer = 0; expected_layer < resource->layerNum(); ++expected_layer) {
             for (const auto& expected_tag : resource->groupTagsForLayer(expected_layer)) {
                 expected_buffer_count += LayerCacheBufferUtil::hasTransferableBlocks(
-                    *resource, expected_layer, expected_tag, 0, -1, config_.cp_rank, config_.cp_size);
+                    *resource, expected_layer, expected_tag, 0, -1, key_first, key_stride);
             }
         }
         computed_buffer->setExpectedBufferCount(expected_buffer_count);
@@ -75,7 +78,7 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& cache_tag : resource->groupTagsForLayer(layer_id)) {
         auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(
-            *resource, 0, layer_id, cache_tag, 0, -1, config_.cp_rank, config_.cp_size);
+            *resource, 0, layer_id, cache_tag, 0, -1, key_first, key_stride);
         if (layer_cache_buffer) {
             collector->total_block_count += layer_cache_buffer->blockIdMap().size();
             layer_cache_buffers.push_back(std::move(layer_cache_buffer));

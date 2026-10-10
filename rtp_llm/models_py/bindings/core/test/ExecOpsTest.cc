@@ -4,16 +4,19 @@
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/context_parallel/CpTransferProjection.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <tuple>
@@ -157,6 +160,12 @@ static std::shared_ptr<KVCacheSpec> makeTestSpec(const std::string& tag, size_t 
     spec->seq_size_per_block          = static_cast<uint32_t>(tokens_per_block);
     spec->kernel_seq_size_per_block   = static_cast<uint32_t>(tokens_per_block);
     return spec;
+}
+
+static CacheGroupPolicy resolvedCpFullPolicy() {
+    auto policy       = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    return policy;
 }
 
 static CacheConfig makeCacheConfig(size_t             tokens_per_block,
@@ -331,6 +340,10 @@ TEST_F(ExecOpsTest, testNoBlockCopy) {
     auto       src = torch::randn({32}, torch::kCUDA);
     auto       dst = torch::empty({32}, torch::kCUDA);
     CopyParams params{dst, src};
+#if USING_CUDA
+    // The copy uses a separate CUDA stream; finish src initialization first.
+    at::cuda::getCurrentCUDAStream(src.get_device()).synchronize();
+#endif
     ASSERT_NO_THROW(execNoBlockCopy(params));
     runtimeSyncAndCheck();
     ASSERT_TRUE(torch::equal(src, dst));
@@ -880,6 +893,98 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     }
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreHybridCpStateAndPackedSwaReconstructMarkedPhysicalRows) {
+    constexpr size_t base_tokens = 4;
+    constexpr size_t key_count   = 9;  // CP4 has an incomplete third bundle.
+    for (int cp_size : {1, 2, 4}) {
+        for (const auto slice_mode : {CpBlockSliceMode::PAYLOAD_BYTES, CpBlockSliceMode::EQUAL_BYTES}) {
+            const bool   packed_swa   = slice_mode == CpBlockSliceMode::EQUAL_BYTES;
+            const size_t local_bytes  = packed_swa ? 20 : 16;
+            const size_t full_bytes           = local_bytes * static_cast<size_t>(cp_size);
+            const size_t slots        = (key_count + cp_size - 1) / cp_size;
+            const auto   tag          = packed_swa ? "swa_kv" : "csa_state";
+            auto policy               = defaultCacheGroupPolicy(CacheGroupType::SWA);
+            policy.cp_slice           = slice_mode;
+            policy.active_tail_blocks = 2;
+            auto config = makeCacheConfig(base_tokens * cp_size,
+                                          local_bytes,
+                                          /*physical_scale_stride=*/0,
+                                          slots + 1,
+                                          tag,
+                                          /*layer_id=*/1,
+                                          policy,
+                                          /*add_dummy_group=*/true,
+                                          /*mla_cache=*/false,
+                                          /*transfer_kv_bytes=*/local_bytes,
+                                          /*transfer_scale_bytes=*/0,
+                                          /*opaque_store=*/true);
+            config.seq_size_per_block = base_tokens;
+            auto inputs = makePyCacheStoreInputs(base_tokens, key_count);
+            inputs.host_kv_cache_offset =
+                torch::arange(static_cast<int64_t>(slots + 1), torch::kInt32).reshape({1, -1});
+
+            std::vector<std::vector<uint8_t>> rebuilt(slots + 1, std::vector<uint8_t>(full_bytes, 0));
+            for (int rank = 0; rank < cp_size; ++rank) {
+                auto cache_store = std::make_shared<MockCacheStore>();
+                torch_ext::LayerKVCache layer_cache;
+                layer_cache.kv_cache_base =
+                    torch::empty({static_cast<int64_t>(slots + 1), static_cast<int64_t>(local_bytes)}, torch::kUInt8);
+                layer_cache.seq_size_per_block = base_tokens * cp_size;
+                layer_cache.layer_id           = 1;
+                layer_cache.tag                = tag;
+                auto* source = layer_cache.kv_cache_base.data_ptr<uint8_t>();
+                for (size_t slot = 0; slot < slots + 1; ++slot) {
+                    for (size_t byte = 0; byte < local_bytes; ++byte) {
+                        source[slot * local_bytes + byte] =
+                            static_cast<uint8_t>(20 + rank * 40 + slot * 3 + byte % 11);
+                    }
+                }
+                ASSERT_NO_THROW(runtimeWriteCacheStore(inputs,
+                                                       layer_cache,
+                                                       config,
+                                                       cache_store,
+                                                       /*cache_model_id=*/0,
+                                                       rank,
+                                                       cp_size,
+                                                       nullptr));
+                ASSERT_EQ(cache_store->records.size(), 1u);
+                const auto& stored = cache_store->records.front().blocks;
+                const auto  decoded = selectLoadTransferPages(policy,
+                                                             slots,
+                                                             slots + 1,
+                                                             /*first_page_after_reuse=*/0,
+                                                             /*use_hybrid=*/true,
+                                                             /*compact_tail=*/false,
+                                                             cp_size,
+                                                             cp_size,
+                                                             rank);
+                ASSERT_EQ(decoded.logical_pages.size(), std::min<size_t>(2, slots));
+                for (size_t logical_page : decoded.logical_pages) {
+                    const size_t key_index = std::min((logical_page + 1) * static_cast<size_t>(cp_size), key_count) - 1;
+                    const auto   key       = "kv_" + cacheKeyAt(inputs, key_index, 1, tag);
+                    const auto it  = stored.find(key);
+                    ASSERT_NE(it, stored.end()) << "missing rank=" << rank << " tag=" << tag << " key=" << key;
+                    ASSERT_EQ(it->second.len, local_bytes);
+                    std::memcpy(rebuilt[logical_page].data() + static_cast<size_t>(rank) * local_bytes,
+                                it->second.addr,
+                                local_bytes);
+                }
+            }
+            for (size_t slot = slots - std::min<size_t>(2, slots); slot < slots; ++slot) {
+                for (int rank = 0; rank < cp_size; ++rank) {
+                    for (size_t byte = 0; byte < local_bytes; ++byte) {
+                        EXPECT_EQ(rebuilt[slot][static_cast<size_t>(rank) * local_bytes + byte],
+                                  static_cast<uint8_t>(20 + rank * 40 + slot * 3 + byte % 11));
+                    }
+                }
+            }
+            EXPECT_TRUE(std::all_of(rebuilt.back().begin(), rebuilt.back().end(), [](uint8_t value) {
+                return value == 0;
+            })) << "speculative reserve slot must not receive a transfer";
+        }
+    }
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreCpSingleTokenBlocksUseCanonicalKeys) {
     constexpr size_t tokens_per_block = 1;
     constexpr size_t row_stride       = 16;
@@ -894,7 +999,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpSingleTokenBlocksUseCanonicalKeys) {
                                   local_block_num,
                                   "default",
                                   /*layer_id=*/0,
-                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  resolvedCpFullPolicy(),
                                   /*add_dummy_group=*/false,
                                   /*mla_cache=*/true);
 
@@ -977,7 +1082,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesRealRequestKeyCount) {
                                   local_block_num,
                                   "default",
                                   /*layer_id=*/0,
-                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  resolvedCpFullPolicy(),
                                   /*add_dummy_group=*/false,
                                   /*mla_cache=*/true);
 
@@ -1008,6 +1113,54 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesRealRequestKeyCount) {
     }
 }
 
+// Five real B=4 pages form one complete P=4 bundle and one incomplete bundle.
+// The physical table has two slots on every rank, but only rank zero owns a
+// real page in the second bundle. Never publish a key for its padded peers.
+TEST_F(ExecOpsTest, testWriteCacheStoreCpFourPartialBundleSkipsPaddedSlots) {
+    constexpr size_t tokens_per_block = 4;
+    constexpr size_t row_stride       = 16;
+    constexpr size_t cache_key_count  = 5;
+    constexpr size_t local_block_num  = 2;
+    auto             inputs           = makePyCacheStoreInputs(tokens_per_block, cache_key_count);
+    inputs.host_kv_cache_offset       = torch::arange(2, torch::kInt32).reshape({1, -1});
+    auto                    config    = makeCacheConfig(tokens_per_block,
+                                  row_stride,
+                                  /*physical_scale_stride=*/0,
+                                  local_block_num,
+                                  "default",
+                                  /*layer_id=*/0,
+                                  resolvedCpFullPolicy(),
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({2, 16}, torch::kUInt8);
+    layer_cache.seq_size_per_block = tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+    const auto base_addr           = reinterpret_cast<uintptr_t>(layer_cache.kv_cache_base.data_ptr());
+
+    for (int cp_rank = 0; cp_rank < 4; ++cp_rank) {
+        auto cache_store = std::make_shared<MockCacheStore>();
+        ASSERT_NO_THROW(runtimeWriteCacheStore(
+            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/4, nullptr));
+        ASSERT_EQ(cache_store->records.size(), 1u);
+        const auto& record = cache_store->records.front();
+        ASSERT_EQ(record.blocks.size(), cp_rank == 0 ? 2u : 1u);
+        const auto first_key = "kv_" + cacheKeyAt(inputs, static_cast<size_t>(cp_rank), 0);
+        const auto first_it  = record.blocks.find(first_key);
+        ASSERT_NE(first_it, record.blocks.end());
+        EXPECT_EQ(reinterpret_cast<uintptr_t>(first_it->second.addr), base_addr);
+        EXPECT_EQ(first_it->second.len, row_stride);
+        if (cp_rank == 0) {
+            const auto second_key = "kv_" + cacheKeyAt(inputs, 4, 0);
+            const auto second_it  = record.blocks.find(second_key);
+            ASSERT_NE(second_it, record.blocks.end());
+            EXPECT_EQ(reinterpret_cast<uintptr_t>(second_it->second.addr), base_addr + row_stride);
+            EXPECT_EQ(second_it->second.len, row_stride);
+        }
+    }
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinIgnoresPaddedBatchKeys) {
     constexpr size_t tokens_per_block = 4;
     constexpr size_t row_stride       = 16;
@@ -1027,7 +1180,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinIgnoresPaddedBatchKeys) {
                                   local_block_num,
                                   "default",
                                   /*layer_id=*/0,
-                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  resolvedCpFullPolicy(),
                                   /*add_dummy_group=*/false,
                                   /*mla_cache=*/true);
 
@@ -1050,6 +1203,48 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinIgnoresPaddedBatchKeys) {
     for (const auto key : {200, 202, 204}) {
         EXPECT_NE(cache_store->records[1].blocks.find("kv_" + makeCacheKey(0, std::to_string(key), 0, "default")),
                   cache_store->records[1].blocks.end());
+    }
+}
+
+TEST_F(ExecOpsTest, testWriteCacheStoreCpUnshardedFullKeepsAllSourceSlots) {
+    constexpr size_t tokens_per_block = 4;
+    constexpr size_t row_stride       = 16;
+    constexpr size_t cache_key_count  = 3;
+    auto             policy           = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.cp_mapping                 = CpBlockMappingMode::NONE;
+    auto config                       = makeCacheConfig(tokens_per_block,
+                                  row_stride,
+                                  /*physical_scale_stride=*/0,
+                                  /*block_num=*/3,
+                                  "default",
+                                  /*layer_id=*/0,
+                                  policy,
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+    auto inputs                 = makePyCacheStoreInputs(tokens_per_block, cache_key_count);
+    inputs.host_kv_cache_offset = torch::tensor({{0, 1, 2}}, torch::kInt32);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({3, 16}, torch::kUInt8);
+    layer_cache.seq_size_per_block = tokens_per_block;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+    const auto base_addr           = reinterpret_cast<uintptr_t>(layer_cache.kv_cache_base.data_ptr());
+
+    for (int cp_rank = 0; cp_rank < 2; ++cp_rank) {
+        auto cache_store = std::make_shared<MockCacheStore>();
+        ASSERT_NO_THROW(runtimeWriteCacheStore(
+            inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, cp_rank, /*cp_size=*/2, nullptr));
+        ASSERT_EQ(cache_store->records.size(), 1u);
+        const auto& record = cache_store->records.front();
+        ASSERT_EQ(record.blocks.size(), cache_key_count);
+        for (size_t page = 0; page < cache_key_count; ++page) {
+            const auto key = "kv_" + cacheKeyAt(inputs, page, 0);
+            const auto it  = record.blocks.find(key);
+            ASSERT_NE(it, record.blocks.end());
+            EXPECT_EQ(reinterpret_cast<uintptr_t>(it->second.addr), base_addr + page * row_stride);
+            EXPECT_EQ(it->second.len, row_stride);
+        }
     }
 }
 
@@ -1111,7 +1306,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpHeterogeneousGroupUsesOneLocalEndpointP
                                   /*block_num=*/1,
                                   "default",
                                   /*layer_id=*/0,
-                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  resolvedCpFullPolicy(),
                                   /*add_dummy_group=*/false,
                                   /*mla_cache=*/true);
     config.seq_size_per_block   = base_tokens_per_block;

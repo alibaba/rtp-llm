@@ -85,25 +85,6 @@ size_t positiveDelta(size_t larger, size_t smaller) {
     return larger > smaller ? larger - smaller : 0;
 }
 
-class ScopedWarmUpCacheManagerBinding {
-public:
-    ScopedWarmUpCacheManagerBinding(ResourceContext& resource_context, std::shared_ptr<KVCacheManager> cache_manager):
-        resource_context_(resource_context), previous_cache_manager_(resource_context.cache_manager) {
-        resource_context_.cache_manager = std::move(cache_manager);
-    }
-
-    ~ScopedWarmUpCacheManagerBinding() {
-        resource_context_.cache_manager = std::move(previous_cache_manager_);
-    }
-
-    ScopedWarmUpCacheManagerBinding(const ScopedWarmUpCacheManagerBinding&) = delete;
-    ScopedWarmUpCacheManagerBinding& operator=(const ScopedWarmUpCacheManagerBinding&) = delete;
-
-private:
-    ResourceContext&                resource_context_;
-    std::shared_ptr<KVCacheManager> previous_cache_manager_;
-};
-
 std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
     auto cache_config = CacheConfigCreator::createWarmupConfig(
         params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
@@ -773,6 +754,7 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
     }
     const auto& cache_config = cache_manager->cacheConfig();
     RTP_LLM_LOG_INFO("cache manager initialized with config %s", cache_config.debugString().c_str());
+
 
     // Publish the cache state only after allocation, BlockTree/backend setup,
     // and callback registration have all completed successfully.

@@ -2,10 +2,12 @@
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/context_parallel/CpTransferProjection.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CachePhysicalRegion.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -211,41 +213,17 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
     const size_t seq_size_per_block              = group.seqSizePerBlock();
-    const size_t kv_block_stride_bytes           = group.kvBlockStrideBytes();
-    const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
-    const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
-    const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
     const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
-    RTP_LLM_CHECK_WITH_INFO(
-        kv_block_stride_bytes > 0, "cache-store tag=%s has zero kv block stride", layer_kv.tag.c_str());
-    RTP_LLM_CHECK_WITH_INFO(
-        kv_block_transfer_bytes > 0, "cache-store tag=%s has zero kv transfer bytes", layer_kv.tag.c_str());
-    RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes <= kv_block_stride_bytes,
-                            "cache-store tag=%s transfer bytes=%zu exceed physical stride=%zu",
-                            layer_kv.tag.c_str(),
-                            kv_block_transfer_bytes,
-                            kv_block_stride_bytes);
-    RTP_LLM_CHECK_WITH_INFO(kv_scale_transfer_bytes <= kv_scale_stride_bytes,
-                            "cache-store tag=%s scale transfer bytes=%zu exceed physical stride=%zu",
-                            layer_kv.tag.c_str(),
-                            kv_scale_transfer_bytes,
-                            kv_scale_stride_bytes);
-
-    auto       kv_cache_data  = static_cast<uint8_t*>(layer_kv.kv_cache_base.data_ptr());
     auto       kv_cache_owner = std::make_shared<torch::Tensor>(layer_kv.kv_cache_base);
-    const bool kv_gpu_mem     = layer_kv.kv_cache_base.is_cuda();
-    const bool has_kv_scale   = layer_kv.kv_scale_base.defined() && layer_kv.kv_scale_base.numel() > 0
-                              && kv_scale_stride_bytes > 0 && kv_scale_transfer_bytes > 0;
-    uint8_t*                       kv_scale_data = nullptr;
+    const bool has_kv_scale =
+        layer_kv.kv_scale_base.defined() && layer_kv.kv_scale_base.numel() > 0 && group.kvScaleStrideBytes() > 0;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
-        kv_scale_data  = static_cast<uint8_t*>(layer_kv.kv_scale_base.data_ptr());
         kv_scale_owner = std::make_shared<torch::Tensor>(layer_kv.kv_scale_base);
     }
-    const bool kv_scale_gpu_mem = has_kv_scale && layer_kv.kv_scale_base.is_cuda();
 
     const size_t total_batch_size = static_cast<size_t>(param.input_lengths_host.numel());
     RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.numel() == static_cast<int64_t>(context_batch_size),
@@ -294,48 +272,29 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             continue;
         }
 
-        const size_t base_seq_size_per_block = cache_config.seq_size_per_block;
-        RTP_LLM_CHECK_WITH_INFO(base_seq_size_per_block > 0 && seq_size_per_block >= base_seq_size_per_block
-                                    && seq_size_per_block % base_seq_size_per_block == 0,
-                                "cache-store tag=%s tokens_per_block=%zu is incompatible with "
-                                "base tokens_per_block=%zu",
-                                layer_kv.tag.c_str(),
-                                seq_size_per_block,
-                                base_seq_size_per_block);
-        const size_t key_blocks_per_group_block = seq_size_per_block / base_seq_size_per_block;
-        const bool   compact_cp_mapping =
-            group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && key_blocks_per_group_block > 1;
-        RTP_LLM_CHECK_WITH_INFO(!compact_cp_mapping || key_blocks_per_group_block == static_cast<size_t>(cp_size),
-                                "cache-store tag=%s compact block scale=%zu does not match cp_size=%d",
-                                layer_kv.tag.c_str(),
-                                key_blocks_per_group_block,
-                                cp_size);
-        const int planner_cp_size =
-            group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && !compact_cp_mapping ? 1 : cp_size;
-
         const int prefix_length = prefix_lengths_host[context_index];
-        RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(base_seq_size_per_block) == 0,
-                                "cache-store tag=%s prefix_length=%d is not aligned to base "
-                                "tokens_per_block=%zu",
-                                layer_kv.tag.c_str(),
-                                prefix_length,
-                                base_seq_size_per_block);
-
         const auto   input_index  = static_cast<int64_t>(decoder_batch_size + batch_id);
         const int    input_length = input_lengths_host[input_index];
-        const size_t request_cache_key_count =
-            std::min(cache_keys_per_batch,
-                     static_cast<size_t>((input_length + static_cast<int>(base_seq_size_per_block) - 1)
-                                             / static_cast<int>(base_seq_size_per_block)
-                                         + prefix_length / static_cast<int>(base_seq_size_per_block)));
-        if (request_cache_key_count == 0) {
+        RTP_LLM_CHECK_WITH_INFO(cp_size > 0 && cp_rank >= 0 && cp_rank < cp_size,
+                                "producer cache-store requires a valid rank and CP size");
+        RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0 && input_length >= 0 && prefix_length >= 0
+                                    && static_cast<size_t>(prefix_length) % cache_config.seq_size_per_block == 0,
+                                "cache-store requires nonnegative input/prefix and a block-aligned prefix");
+        const size_t key_count    = std::min(cache_keys_per_batch,
+                                          (static_cast<size_t>(input_length) + cache_config.seq_size_per_block - 1)
+                                                  / cache_config.seq_size_per_block
+                                              + static_cast<size_t>(prefix_length) / cache_config.seq_size_per_block);
+        const bool   compact_tail = cache_config.groupUsesCompactTransferTail(layer_kv.tag);
+        RTP_LLM_CHECK_WITH_INFO(!compact_tail
+                                    || cache_config.groupKeyScale(layer_kv.tag) == static_cast<size_t>(cp_size),
+                                "producer compact block scale does not match CP size");
+        const auto pages = selectProducerTransferPages(group.policy,
+                                                       cache_config.logicalBlockCountForGroup(layer_kv.tag, key_count),
+                                                       use_group_cache_transfer_policy,
+                                                       compact_tail);
+        if (pages.empty()) {
             continue;
         }
-        const size_t total_logical_blocks =
-            compact_cp_mapping ?
-                request_cache_key_count :
-                (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
-        const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
         const int64_t request_id       = request_ids[context_index];
         const int publish_start_token = publish_start_tokens[context_index];
@@ -349,128 +308,93 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
-        RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
-                          static_cast<long>(request_id),
-                          total_logical_blocks);
+        RTP_LLM_LOG_DEBUG(
+            "write cache store, request id is %ld, blocks num is %zu", static_cast<long>(request_id), pages.size());
 
-        auto addBlock = [&](int key_index, int offset_index) {
-            RTP_LLM_CHECK_WITH_INFO(offset_index >= 0 && offset_index < static_cast<int>(max_blocks_per_batch),
-                                    "invalid block offset_index=%d (max_blocks_per_batch=%zu)",
-                                    offset_index,
-                                    max_blocks_per_batch);
-            RTP_LLM_CHECK_WITH_INFO(key_index >= 0 && key_index < static_cast<int>(cache_keys_per_batch),
-                                    "invalid block key_index=%d (cache_keys_per_batch=%zu)",
-                                    key_index,
-                                    cache_keys_per_batch);
-            const std::string cache_key = makeCacheKey(
-                cache_model_id,
-                std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
-                layer_kv.layer_id,
-                layer_kv.tag);
-            const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
-            // Host block-offset tables use -1 as the null block sentinel.
-            if (block_id == -1) {
-                RTP_LLM_LOG_DEBUG(
-                    "PD_CACHE_KEY_WRITE_SKIP_NULL key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d cp_size=%d "
-                    "key_index=%d offset_index=%d block_id=%d",
-                    cache_key.c_str(),
-                    static_cast<long>(request_id),
-                    layer_kv.tag.c_str(),
-                    layer_kv.layer_id,
-                    cp_rank,
-                    cp_size,
-                    key_index,
-                    offset_index,
-                    block_id);
-                return;
-            }
-            publication_lease_keys.push_back(
-                cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]);
-            publication_lease_blocks.push_back(block_id);
-
-            if (cp_size > 1 && group.policy.cp_slice != CpBlockSliceMode::NONE) {
-                RTP_LLM_CHECK_WITH_INFO(cp_rank >= 0 && cp_rank < cp_size,
-                                        "cache-store tag=%s invalid cp_rank=%d cp_size=%d",
-                                        layer_kv.tag.c_str(),
-                                        cp_rank,
-                                        cp_size);
-                // The prefill topology already materializes each rank's local
-                // STATE/SWA row. Send that complete local row from offset zero;
-                // decode applies the peer-rank offset in the corresponding
-                // full row. Dividing here would slice an already-sliced row.
-            }
-
-            const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
-                                               || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
-            void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
-            std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
-            RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_BLOCK key=kv_%s request_id=%ld tag=%s layer=%d cp_rank=%d "
-                              "cp_size=%d cp_slice=%d key_index=%d offset_index=%d block_id=%d addr=%p "
-                              "physical_stride=%zu len=%zu",
-                              cache_key.c_str(),
-                              static_cast<long>(request_id),
-                              layer_kv.tag.c_str(),
-                              layer_kv.layer_id,
-                              cp_rank,
-                              cp_size,
-                              static_cast<int>(group.policy.cp_slice),
-                              key_index,
-                              offset_index,
-                              block_id,
-                              kv_addr,
-                              kv_block_stride_bytes,
-                              kv_block_transfer_bytes);
-            if (use_opaque_key_prefix) {
-                request_blocks->addBlock(
-                    "kv_" + cache_key, kv_block_addr, static_cast<uint32_t>(kv_block_transfer_bytes), kv_gpu_mem, true);
-            } else {
-                RTP_LLM_CHECK_WITH_INFO(kv_block_transfer_bytes % 2 == 0,
-                                        "KV transfer bytes must split evenly into K/V");
-                const auto            kv_half = static_cast<uint32_t>(kv_block_transfer_bytes / 2);
-                std::shared_ptr<void> k_block_addr(kv_cache_owner, kv_addr);
-                std::shared_ptr<void> v_block_addr(kv_cache_owner, static_cast<uint8_t*>(kv_addr) + kv_half);
-                request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, kv_gpu_mem, true);
-                request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, kv_gpu_mem, true);
-            }
-
-            if (kv_scale_data) {
-                void* kv_scale_addr = kv_scale_data + static_cast<size_t>(block_id) * kv_scale_stride_bytes;
-                std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
-                if (use_opaque_key_prefix) {
-                    request_blocks->addBlock("kv_scale_" + cache_key,
-                                             kv_scale_block_addr,
-                                             static_cast<uint32_t>(kv_scale_transfer_bytes),
-                                             kv_scale_gpu_mem,
-                                             true);
-                } else {
-                    RTP_LLM_CHECK_WITH_INFO(kv_scale_transfer_bytes % 2 == 0,
-                                            "scale transfer bytes must split evenly into K/V");
-                    const auto            sc_half = static_cast<uint32_t>(kv_scale_transfer_bytes / 2);
-                    std::shared_ptr<void> k_scale_block_addr(kv_scale_owner, kv_scale_addr);
-                    std::shared_ptr<void> v_scale_block_addr(kv_scale_owner,
-                                                             static_cast<uint8_t*>(kv_scale_addr) + sc_half);
-                    request_blocks->addBlock(
-                        "k_scale_" + cache_key, k_scale_block_addr, sc_half, kv_scale_gpu_mem, true);
-                    request_blocks->addBlock(
-                        "v_scale_" + cache_key, v_scale_block_addr, sc_half, kv_scale_gpu_mem, true);
-                }
-            }
+        // Tensor owners stay with the asynchronous request; the cache query
+        // resolves only this rank's selected physical parts.
+        auto tensorBase = [](const torch::Tensor& tensor) {
+            BlockInfo base;
+            base.addr         = tensor.data_ptr();
+            base.size_bytes   = static_cast<size_t>(tensor.numel()) * tensor.element_size();
+            base.is_cuda      = tensor.is_cuda();
+            base.device_index = tensor.is_cuda() ? tensor.get_device() : 0;
+            base.scalar_type  = static_cast<int32_t>(tensor.scalar_type());
+            return base;
         };
-
-        // Under CP sharding, kv_cache_offset can be rank-local-compact while
-        // cache_keys stays in the full logical namespace. The common cache
-        // policy owns the key/offset projection for both legacy and sharded cases.
-        const auto block_plan = buildCacheStorePlan(group.policy,
-                                                    total_logical_blocks,
-                                                    /*reuse_block_size=*/0,
-                                                    use_group_cache_transfer_policy,
-                                                    cp_rank,
-                                                    planner_cp_size,
-                                                    key_blocks_per_logical_block,
-                                                    request_cache_key_count,
-                                                    publish_start_block);
-        for (const auto& pair : block_plan) {
-            addBlock(pair.key_index, pair.offset_index);
+        std::vector<BlockInfo> part_bases{tensorBase(layer_kv.kv_cache_base)};
+        if (has_kv_scale) {
+            part_bases.push_back(tensorBase(layer_kv.kv_scale_base));
+        }
+        std::vector<int32_t> block_ids(max_blocks_per_batch);
+        for (size_t slot = 0; slot < max_blocks_per_batch; ++slot) {
+            block_ids[slot] = host_kv_cache_offset[input_index][static_cast<int64_t>(slot)];
+        }
+        const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
+                                           || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
+        for (size_t logical_page : pages) {
+            if (logical_page < publish_start_block) {
+                continue;
+            }
+            const auto regions = queryProducerCacheBlockRegions(cache_config,
+                                                                layer_kv.layer_id,
+                                                                layer_kv.tag,
+                                                                key_count,
+                                                                logical_page,
+                                                                cp_rank,
+                                                                cp_size,
+                                                                use_opaque_key_prefix,
+                                                                block_ids.data(),
+                                                                block_ids.size(),
+                                                                part_bases);
+            if (regions.empty()) {
+                // Another producer owns the page, or the source block is NULL.
+                continue;
+            }
+            const auto& first = regions.front();
+            RTP_LLM_CHECK_WITH_INFO(first.key_index < cache_keys_per_batch,
+                                    "producer cache key index=%zu exceeds table width=%zu",
+                                    first.key_index,
+                                    cache_keys_per_batch);
+            RTP_LLM_CHECK_WITH_INFO(first.local_slot < block_ids.size(),
+                                    "producer slot=%zu exceeds block table width=%zu",
+                                    first.local_slot,
+                                    block_ids.size());
+            cacheTransferPartPrefix(use_opaque_key_prefix, 0, regions.size());
+            const int32_t block_id = block_ids[first.local_slot];
+            const int64_t cache_key_id =
+                cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(first.key_index)];
+            const std::string cache_key =
+                makeCacheKey(cache_model_id, std::to_string(cache_key_id), layer_kv.layer_id, layer_kv.tag);
+            publication_lease_keys.push_back(cache_key_id);
+            publication_lease_blocks.push_back(block_id);
+            for (const auto& region : regions) {
+                const std::string wire_key =
+                    std::string(cacheTransferPartPrefix(use_opaque_key_prefix, region.part_index, regions.size()))
+                    + cache_key;
+                const bool  scale_part = region.part_index >= (use_opaque_key_prefix ? 1u : 2u);
+                const auto& owner      = scale_part ? kv_scale_owner : kv_cache_owner;
+                RTP_LLM_CHECK_WITH_INFO(owner != nullptr && region.buffer.addr != nullptr
+                                            && region.buffer.size_bytes > 0,
+                                        "invalid producer cache part key=%s",
+                                        wire_key.c_str());
+                std::shared_ptr<void> addr(owner, region.buffer.addr);
+                RTP_LLM_LOG_DEBUG("PD_CACHE_KEY_WRITE_BLOCK key=%s request_id=%ld tag=%s layer=%d cp_rank=%d "
+                                  "cp_size=%d key_index=%zu offset_index=%zu block_id=%d addr=%p len=%zu",
+                                  wire_key.c_str(),
+                                  static_cast<long>(request_id),
+                                  layer_kv.tag.c_str(),
+                                  layer_kv.layer_id,
+                                  cp_rank,
+                                  cp_size,
+                                  region.key_index,
+                                  region.local_slot,
+                                  block_id,
+                                  region.buffer.addr,
+                                  region.buffer.size_bytes);
+                request_blocks->addBlock(
+                    wire_key, addr, static_cast<uint32_t>(region.buffer.size_bytes), region.buffer.is_cuda, true);
+            }
         }
 
         if (request_blocks->getBlocksCount() > 0) {

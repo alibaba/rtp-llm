@@ -121,25 +121,6 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
-    // Projects the producer's buildCacheStorePlan onto one group's decode block
-    // table: key_index indexes the global cache keys, offset_index the group-local
-    // BlockIds::blocks(). Derived from group policy plus block geometry only, never
-    // from how many prefill peers answered this load. Static so it is testable.
-    static std::vector<CacheStoreBlockPair> buildGroupLoadPlan(const CacheGroupPolicy& policy,
-                                                               size_t                  local_block_num,
-                                                               size_t                  cache_key_count,
-                                                               size_t                  reuse_block_size,
-                                                               bool                    use_hybrid,
-                                                               size_t                  group_seq_size_per_block,
-                                                               size_t                  base_seq_size_per_block);
-    static size_t    cacheKeysPerPhysicalBlock(size_t group_seq_size_per_block, size_t base_seq_size_per_block);
-    static size_t    keyBlocksPerLogicalBlock(const CacheGroupPolicy& policy,
-                                              size_t                  group_seq_size_per_block,
-                                              size_t                  base_seq_size_per_block);
-    static void      markCacheKeyRange(std::vector<size_t>& cache_key_counts,
-                                       size_t               endpoint_key_index,
-                                       size_t               block_offset_index,
-                                       size_t               cache_keys_per_physical_block);
     static size_t    completedHandoffPrefixBlocks(size_t                     already_reused_blocks,
                                                   const std::vector<size_t>& required_cache_key_counts,
                                                   const std::vector<size_t>& transferred_cache_key_counts);

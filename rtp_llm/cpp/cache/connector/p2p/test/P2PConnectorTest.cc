@@ -22,6 +22,41 @@
 
 namespace rtp_llm {
 
+TEST(P2PConnectorConfigTest, ShardedKeyCoordinatesMustBeExplicit) {
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 4;
+    parallelism.tp_rank = 3;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    const RuntimeConfig runtime;
+    const CacheStoreConfig cache_store;
+    const PDSepConfig pd_sep;
+
+    EXPECT_THROW((void)P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1),
+                 std::invalid_argument);
+    const std::pair<size_t, size_t> coordinates{3, 4};
+    EXPECT_EQ(coordinates, (std::pair<size_t, size_t>{3, 4}));
+    const auto config = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1, coordinates);
+    EXPECT_EQ(config.worker_config.resolvedCacheKeyCoordinates(), (std::pair<size_t, size_t>{3, 4}));
+    EXPECT_EQ(config.worker_config.cp_rank, 3);
+    EXPECT_EQ(config.worker_config.cp_size, 4);
+
+    EXPECT_THROW((void)P2PConnectorConfig::create(
+                     runtime, cache_store, parallelism, pd_sep, 1, std::pair<size_t, size_t>{2, 2}),
+                 std::invalid_argument);
+    EXPECT_THROW((void)P2PConnectorConfig::create(
+                     runtime, cache_store, parallelism, pd_sep, 1, std::pair<size_t, size_t>{0, 0}),
+                 std::invalid_argument);
+
+    parallelism.tp_size = 1;
+    parallelism.tp_rank = 0;
+    const auto p1 = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    EXPECT_EQ(p1.worker_config.resolvedCacheKeyCoordinates(), (std::pair<size_t, size_t>{0, 1}));
+    parallelism.tp_size = 4;
+    parallelism.prefill_cp_config.kv_cache_sharded = false;
+    const auto unsharded = P2PConnectorConfig::create(runtime, cache_store, parallelism, pd_sep, 1);
+    EXPECT_EQ(unsharded.worker_config.resolvedCacheKeyCoordinates(), (std::pair<size_t, size_t>{0, 1}));
+}
+
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:

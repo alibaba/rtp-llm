@@ -2,12 +2,15 @@
 
 #include <chrono>
 #include <thread>
+#include <unordered_map>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/distribute/context_parallel/CpTransferProjection.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -73,22 +76,119 @@ constexpr size_t kCompactSeqSizePerBlock = kBaseSeqSizePerBlock * 2;
 
 CacheGroupPolicy makeCompactStatePolicy(uint32_t active_tail_blocks) {
     auto policy               = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    policy.cp_mapping         = CpBlockMappingMode::COMPACT_LAST_RANK;
     policy.active_tail_blocks = active_tail_blocks;
     policy.cp_slice           = CpBlockSliceMode::PAYLOAD_BYTES;
     EXPECT_EQ(policy.cp_mapping, CpBlockMappingMode::COMPACT_LAST_RANK);
     return policy;
 }
 
-using KeyOffsetPairs = std::vector<std::pair<int, int>>;
-
-KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
-    KeyOffsetPairs pairs;
-    pairs.reserve(plan.size());
-    for (const auto& pair : plan) {
-        pairs.emplace_back(pair.key_index, pair.offset_index);
-    }
-    return pairs;
+// Test the selected logical pages. Physical key/slot/byte mapping is covered
+// by cache-region tests and the handoff load fixture below.
+std::vector<size_t> testLoadPlan(const CacheGroupPolicy& policy,
+                                 size_t                  local_block_num,
+                                 size_t                  cache_key_count,
+                                 size_t                  reuse_block_size,
+                                 bool                    use_hybrid,
+                                 size_t                  group_seq_size_per_block,
+                                 size_t                  base_seq_size_per_block) {
+    const size_t key_scale = group_seq_size_per_block / base_seq_size_per_block;
+    const bool   compact_tail     = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && key_scale > 1;
+    const int    producer_cp_size = compact_tail ? static_cast<int>(key_scale) : 1;
+    return selectLoadTransferPages(policy,
+                                   cache_key_count / key_scale + (cache_key_count % key_scale != 0),
+                                   local_block_num,
+                                   compact_tail ? reuse_block_size : reuse_block_size / key_scale,
+                                   use_hybrid,
+                                   compact_tail,
+                                   producer_cp_size,
+                                   producer_cp_size,
+                                   producer_cp_size - 1)
+        .logical_pages;
 }
+
+std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length) {
+    auto input             = std::make_shared<GenerateInput>();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids       = torch::zeros({seq_length}, torch::kInt32);
+
+    ModelConfig model_config;
+    model_config.max_seq_len = seq_length + 16;
+    return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+}
+
+class HandoffTestEngine final: public EngineBase {
+public:
+    HandoffTestEngine(const EngineInitParams& params,
+                      std::shared_ptr<KVCacheManager> manager,
+                      bool                            has_mtp = false):
+        EngineBase(params), has_mtp_(has_mtp) {
+        resource_context_.cache_manager = std::move(manager);
+    }
+    std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void enqueue(std::shared_ptr<GenerateStream>&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in cache handoff test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+    bool isMTPEagle() override {
+        return has_mtp_;
+    }
+
+private:
+    bool has_mtp_;
+};
+
+class CapturingHandoffLoadStore final: public NormalCacheStore {
+public:
+    CapturingHandoffLoadStore() {
+        // NormalCacheStore's destructor stops this holder. No transport or
+        // worker threads are started by this synchronous capture fixture.
+        request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    }
+    struct Block {
+        void*    addr = nullptr;
+        uint32_t bytes = 0;
+    };
+    std::unordered_map<std::string, std::vector<std::string>> visited_groups;
+    std::unordered_map<std::string, std::unordered_map<std::string, Block>> loaded_blocks;
+
+    void load(const std::shared_ptr<RequestBlockBuffer>& buffer,
+              CacheStoreLoadDoneCallback callback,
+              const std::string& ip,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {
+        for (const auto& [key, block] : buffer->getBlocks()) {
+            loaded_blocks[ip].emplace(key, Block{block->addr.get(), block->len});
+        }
+        callback(true, CacheStoreErrorCode::None);
+    }
+    std::shared_ptr<LoadContext> loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers,
+                                             const std::string& ip,
+                                             uint32_t port,
+                                             uint32_t rdma_port,
+                                             int64_t timeout_ms,
+                                             LoadContext::CheckCancelFunc cancel,
+                                             int partition_count,
+                                             int partition_id) override {
+        for (const auto& buffer : buffers) {
+            visited_groups[ip].push_back(buffer->getRequestKey());
+        }
+        auto context = std::make_shared<LoadContext>(shared_from_this(), /*combine_load=*/false);
+        context->load(buffers, ip, port, rdma_port, timeout_ms, cancel, partition_count, partition_id);
+        return context;
+    }
+};
 
 }  // namespace
 
@@ -193,27 +293,58 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
 }
 
 TEST(DecodeRpcServerTest, HeterogeneousPhysicalBlockMarksExactCoveredBaseKeys) {
-    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(8, 4), 2u);
-    EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, 8, 4), 2u);
-
+    auto       policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    CacheConfig config;
+    config.seq_size_per_block = 4;
+    config.setTopology({makeRpcGroup("full")}, {{0, {"full"}}});
+    const size_t key_scale = config.groupKeyScale("full");
+    const auto plan   = testLoadPlan(policy,
+                                   /*local_block_num=*/3,
+                                   /*cache_key_count=*/5,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   8,
+                                   4);
+    ASSERT_EQ(plan.size(), 3u);
+    EXPECT_EQ(plan, (std::vector<size_t>{0, 1, 2}));
     std::vector<size_t> transferred(5, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/1, /*block_offset_index=*/0, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/3, /*block_offset_index=*/1, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/4, /*block_offset_index=*/2, /*key_span=*/2);
+    for (size_t page : plan) {
+        const size_t begin = page * key_scale;
+        const size_t end   = std::min(begin + key_scale, transferred.size());
+        for (size_t key = begin; key < end; ++key) {
+            ++transferred[key];
+        }
+    }
 
     EXPECT_EQ(transferred, (std::vector<size_t>{1, 1, 1, 1, 1}));
 }
 
 TEST(DecodeRpcServerTest, CompactPhysicalBlockCoversEveryBaseKey) {
-    auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    EXPECT_EQ(DecodeRpcServer::cacheKeysPerPhysicalBlock(kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 2u);
-    EXPECT_EQ(DecodeRpcServer::keyBlocksPerLogicalBlock(policy, kCompactSeqSizePerBlock, kBaseSeqSizePerBlock), 1u);
-
+    auto       policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    CacheConfig config;
+    config.seq_size_per_block = kBaseSeqSizePerBlock;
+    auto group                = makeRpcGroup("state");
+    group.spec   = std::make_shared<MHAKVCacheSpec>("state", kCompactSeqSizePerBlock, kCompactSeqSizePerBlock, 1);
+    group.policy = policy;
+    config.setTopology({std::move(group)}, {{0, {"state"}}});
+    const size_t key_scale = config.groupKeyScale("state");
+    const auto plan   = testLoadPlan(policy,
+                                   /*local_block_num=*/6,
+                                   /*cache_key_count=*/11,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kCompactSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
+    ASSERT_EQ(plan.size(), 2u);
+    EXPECT_EQ(plan, (std::vector<size_t>{4, 5}));
     std::vector<size_t> transferred(11, 0);
-    DecodeRpcServer::markCacheKeyRange(transferred, /*endpoint_key_index=*/9, /*block_offset_index=*/4, /*key_span=*/2);
-    DecodeRpcServer::markCacheKeyRange(
-        transferred, /*endpoint_key_index=*/10, /*block_offset_index=*/5, /*key_span=*/2);
+    for (size_t page : plan) {
+        const size_t begin = page * key_scale;
+        const size_t end   = std::min(begin + key_scale, transferred.size());
+        for (size_t key = begin; key < end; ++key) {
+            ++transferred[key];
+        }
+    }
 
     EXPECT_EQ(transferred, (std::vector<size_t>{0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1}));
 }
@@ -233,6 +364,17 @@ TEST(DecodeRpcServerTest, CompletedHandoffPrefixRequiresEveryTransferObligation)
     EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(
                   /*already_reused_blocks=*/0, /*required=*/{1}, /*transferred=*/{}),
               0u);
+
+    std::vector<size_t> arrivals{0, 0};
+    const std::vector<size_t> required{2, 2};  // Two peer slices per key.
+    ++arrivals[1];  // Later key arrives first.
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, required, arrivals), 0u);
+    ++arrivals[0];
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, required, arrivals), 0u);
+    ++arrivals[1];
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, required, arrivals), 0u);
+    ++arrivals[0];
+    EXPECT_EQ(DecodeRpcServer::completedHandoffPrefixBlocks(0, required, arrivals), 2u);
 }
 
 TEST(DecodeRpcServerTest, MultiRankHandoffUsesMinimumPrefix) {
@@ -261,11 +403,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -290,11 +432,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -310,6 +452,48 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     ASSERT_EQ(request.peer_addrs_size(), 2);
     EXPECT_EQ(request.peer_addrs(0), "prefill-0");
     EXPECT_EQ(request.peer_addrs(1), "prefill-1");
+}
+
+TEST(DecodeRpcServerTest, NonCpLoadRequestKeepsOrdinaryAndMlaPeerRoutes) {
+    DecodeRpcServer server;
+    server.resource_.workers               = {"decode-0", "decode-1"};
+    const std::vector<std::string> peers   = {"prefill-0", "prefill-1", "prefill-2", "prefill-3"};
+    const auto                     context = makeLoadContext("request", peers, {101}, GroupBlockIds{}, /*cp_size=*/1);
+
+    const auto ordinary = server.constructRemoteLoadRequest(context, /*index=*/1, peers);
+    EXPECT_EQ(ordinary.partition_count(), 1);
+    EXPECT_EQ(ordinary.partition_id(), 0);
+    ASSERT_EQ(ordinary.peer_addrs_size(), 2);
+    EXPECT_EQ(ordinary.peer_addrs(0), "prefill-2");
+    EXPECT_EQ(ordinary.peer_addrs(1), "prefill-3");
+
+    const auto mla = server.constructRemoteLoadRequestForMla(context, /*index=*/1, peers);
+    EXPECT_EQ(mla.partition_count(), 1);
+    EXPECT_EQ(mla.partition_id(), 0);
+    ASSERT_EQ(mla.peer_addrs_size(), 1);
+    EXPECT_EQ(mla.peer_addrs(0), "prefill-2");
+
+    server.resource_.workers                   = {"decode-0", "decode-1", "decode-2", "decode-3"};
+    const std::vector<std::string> fewer_peers = {"prefill-0", "prefill-1"};
+    const auto fewer_context = makeLoadContext("request", fewer_peers, {101}, GroupBlockIds{}, /*cp_size=*/1);
+    const auto split         = server.constructRemoteLoadRequest(fewer_context, /*index=*/3, fewer_peers);
+    EXPECT_EQ(split.partition_count(), 2);
+    EXPECT_EQ(split.partition_id(), 1);
+    ASSERT_EQ(split.peer_addrs_size(), 1);
+    EXPECT_EQ(split.peer_addrs(0), "prefill-1");
+
+    const auto mla_split = server.constructRemoteLoadRequestForMla(fewer_context, /*index=*/3, fewer_peers);
+    EXPECT_EQ(mla_split.partition_count(), 1);
+    EXPECT_EQ(mla_split.partition_id(), 0);
+    ASSERT_EQ(mla_split.peer_addrs_size(), 1);
+    EXPECT_EQ(mla_split.peer_addrs(0), "prefill-1");
+
+    server.maga_init_params_.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    const auto unsharded_cp = server.constructRemoteLoadRequest(fewer_context, /*index=*/3, fewer_peers);
+    EXPECT_EQ(unsharded_cp.partition_count(), 4);
+    EXPECT_EQ(unsharded_cp.partition_id(), 3);
+    ASSERT_EQ(unsharded_cp.peer_addrs_size(), 1);
+    EXPECT_EQ(unsharded_cp.peer_addrs(0), "prefill-1");
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsPreserveReceivedOrderAcrossTopologies) {
@@ -816,47 +1000,29 @@ TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
 }
 
 TEST(DecodeRpcServerTest, HeterogeneousFullGroupUsesGlobalEndpointKeys) {
-    const auto policy        = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    const auto producer_plan = buildCacheStorePlan(policy,
-                                                   /*total_logical_blocks=*/3,
-                                                   /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
-                                                   /*cp_rank=*/0,
-                                                   /*cp_size=*/1,
-                                                   /*key_blocks_per_logical_block=*/2,
-                                                   /*cache_key_count=*/6);
-    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                                 /*local_block_num=*/3,
-                                                                 /*cache_key_count=*/6,
-                                                                 /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
-                                                                 /*group_seq_size_per_block=*/2,
-                                                                 /*base_seq_size_per_block=*/1);
+    const auto policy      = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto decode_plan = testLoadPlan(policy,
+                                          /*local_block_num=*/3,
+                                          /*cache_key_count=*/6,
+                                          /*reuse_block_size=*/0,
+                                          /*use_hybrid=*/true,
+                                          /*group_seq_size_per_block=*/2,
+                                          /*base_seq_size_per_block=*/1);
 
-    EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {5, 2}}));
-    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+    EXPECT_EQ(decode_plan, (std::vector<size_t>{0, 1, 2}));
 }
 
 TEST(DecodeRpcServerTest, HeterogeneousPartialBlockUsesLastAvailableKey) {
-    const auto policy        = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    const auto producer_plan = buildCacheStorePlan(policy,
-                                                   /*total_logical_blocks=*/3,
-                                                   /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
-                                                   /*cp_rank=*/0,
-                                                   /*cp_size=*/1,
-                                                   /*key_blocks_per_logical_block=*/2,
-                                                   /*cache_key_count=*/5);
-    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                                 /*local_block_num=*/3,
-                                                                 /*cache_key_count=*/5,
-                                                                 /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
-                                                                 /*group_seq_size_per_block=*/2,
-                                                                 /*base_seq_size_per_block=*/1);
+    const auto policy      = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto decode_plan = testLoadPlan(policy,
+                                          /*local_block_num=*/3,
+                                          /*cache_key_count=*/5,
+                                          /*reuse_block_size=*/0,
+                                          /*use_hybrid=*/true,
+                                          /*group_seq_size_per_block=*/2,
+                                          /*base_seq_size_per_block=*/1);
 
-    EXPECT_EQ(keyOffsetPairs(producer_plan), (KeyOffsetPairs{{1, 0}, {3, 1}, {4, 2}}));
-    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+    EXPECT_EQ(decode_plan, (std::vector<size_t>{0, 1, 2}));
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots) {
@@ -865,51 +1031,56 @@ TEST(DecodeRpcServerTest, CompactStateGroupLoadsGlobalTailKeysIntoCanonicalSlots
     // 5 must be filled from the *global* cache keys 9 and 10 - not from keys 4
     // and 5, which is what indexing the compacted table with logical positions
     // (or the table length with the logical key count) would produce.
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/6,
-                                                          /*cache_key_count=*/11,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                   /*local_block_num=*/6,
+                                   /*cache_key_count=*/11,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kCompactSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{4, 5}));
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupLoadPlanMatchesProducerStorePlan) {
-    // The consumer must project exactly like the producer: same (key, offset)
-    // pairs, or the decode reads a key the prefill never registered.
-    const auto policy        = makeCompactStatePolicy(/*active_tail_blocks=*/2);
-    const auto decode_plan   = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                                 /*local_block_num=*/6,
-                                                                 /*cache_key_count=*/11,
-                                                                 /*reuse_block_size=*/0,
-                                                                 /*use_hybrid=*/true,
-                                                                 kCompactSeqSizePerBlock,
-                                                                 kBaseSeqSizePerBlock);
-    const auto producer_plan = buildCacheStorePlan(policy,
-                                                   /*total_logical_blocks=*/11,
-                                                   /*reuse_block_size=*/0,
-                                                   /*use_hybrid=*/true,
-                                                   /*cp_rank=*/1,
-                                                   /*cp_size=*/2);
-
-    EXPECT_EQ(keyOffsetPairs(decode_plan), keyOffsetPairs(producer_plan));
+    // Both sides must retain the old fixed global key and canonical slot pairs.
+    const auto policy      = makeCompactStatePolicy(/*active_tail_blocks=*/2);
+    const auto decode_plan = testLoadPlan(policy,
+                                          /*local_block_num=*/6,
+                                          /*cache_key_count=*/11,
+                                          /*reuse_block_size=*/0,
+                                          /*use_hybrid=*/true,
+                                          kCompactSeqSizePerBlock,
+                                          kBaseSeqSizePerBlock);
+    EXPECT_EQ(decode_plan, (std::vector<size_t>{4, 5}));
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupIgnoresSpeculativeReserveTailSlots) {
     // MTP reserve slots make the positional table longer than the canonical slots
     // the sequence actually backs. The destinations must stay 4 and 5; picking the
     // tail of the table would target the reserve slot 6 and duplicate key 10.
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/7,
-                                                          /*cache_key_count=*/11,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                   /*local_block_num=*/7,
+                                   /*cache_key_count=*/11,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kCompactSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{9, 4}, {10, 5}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{4, 5}));
+}
+
+TEST(DecodeRpcServerTest, CpFourCompactTailLoadsPartialBundleWithoutReserveSlot) {
+    // Nine B=64 keys occupy three P=4 compact slots. The third slot contains
+    // only key 8; slot 3 is a speculative reserve and has no producer data.
+    const auto plan = testLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                   /*local_block_num=*/4,
+                                   /*cache_key_count=*/9,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   /*group_seq_size_per_block=*/256,
+                                   /*base_seq_size_per_block=*/64);
+    EXPECT_EQ(plan, (std::vector<size_t>{1, 2}));
 }
 
 TEST(DecodeRpcServerTest, CompactOneTailGroupLoadsOnlyTheLastCanonicalSlot) {
@@ -918,41 +1089,249 @@ TEST(DecodeRpcServerTest, CompactOneTailGroupLoadsOnlyTheLastCanonicalSlot) {
     auto policy               = makeCompactStatePolicy(/*active_tail_blocks=*/1);
     policy.explicit_block_num = 256;
 
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                          /*local_block_num=*/6,
-                                                          /*cache_key_count=*/11,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(policy,
+                                   /*local_block_num=*/6,
+                                   /*cache_key_count=*/11,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kCompactSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{10, 5}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{5}));
+}
+
+TEST(DecodeRpcServerTest, CompactHybridWithoutDeclaredTailKeepsLastCanonicalSlot) {
+    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/0);
+    const auto producer =
+        selectProducerTransferPages(policy, /*logical_page_count=*/6, /*use_hybrid=*/true, /*compact_tail=*/true);
+    const auto decode = selectLoadTransferPages(policy,
+                                                /*logical_page_count=*/6,
+                                                /*max_destination_slots=*/6,
+                                                /*first_page_after_reuse=*/0,
+                                                /*use_hybrid=*/true,
+                                                /*compact_tail=*/true,
+                                                /*producer_cp_size=*/2,
+                                                /*decode_peer_count=*/2,
+                                                /*peer_index=*/1);
+    EXPECT_EQ(producer, (std::vector<size_t>{5}));
+    EXPECT_EQ(decode.logical_pages, (std::vector<size_t>{5}));
+}
+
+TEST(DecodeRpcServerTest, StateAndSwaTailSelectionsIncludeEverySlicedPeer) {
+    for (int cp_size : {2, 4}) {
+        for (const auto slice_mode : {CpBlockSliceMode::PAYLOAD_BYTES, CpBlockSliceMode::EQUAL_BYTES}) {
+            auto policy                = makeCompactStatePolicy(/*active_tail_blocks=*/1);
+            policy.enable_prefix_reuse = false;  // HCA_STATE is still a PD obligation.
+            policy.cp_slice            = slice_mode;
+            const size_t key_count     = 9;
+            const size_t logical_page_count =
+                key_count / static_cast<size_t>(cp_size) + (key_count % static_cast<size_t>(cp_size) != 0);
+            for (int peer = 0; peer < cp_size; ++peer) {
+                const auto plan = selectLoadTransferPages(policy,
+                                                          logical_page_count,
+                                                          logical_page_count + 1,
+                                                          /*first_page_after_reuse=*/0,
+                                                          /*use_hybrid=*/true,
+                                                          /*compact_tail=*/true,
+                                                          cp_size,
+                                                          cp_size,
+                                                          peer);
+                ASSERT_TRUE(plan.peer_participates);
+                ASSERT_EQ(plan.logical_pages, (std::vector<size_t>{logical_page_count - 1}));
+                EXPECT_TRUE(transferPageReadFromPeer(policy, plan.logical_pages.front(), true, cp_size, cp_size, peer));
+            }
+        }
+    }
+}
+
+TEST(DecodeRpcServerTest, SingleGroupNonFullKeepsLegacyPeerSelection) {
+    const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/1);
+    for (int peer = 0; peer < 2; ++peer) {
+        const auto plan = selectLoadTransferPages(policy,
+                                                  /*logical_page_count=*/2,
+                                                  /*max_destination_slots=*/2,
+                                                  /*first_page_after_reuse=*/0,
+                                                  /*use_hybrid=*/false,
+                                                  /*compact_tail=*/true,
+                                                  /*producer_cp_size=*/2,
+                                                  /*decode_peer_count=*/2,
+                                                  peer);
+        ASSERT_EQ(plan.logical_pages, (std::vector<size_t>{0, 1}));
+        EXPECT_EQ(transferPageReadFromPeer(policy, 0, false, 2, 2, peer), peer == 0);
+        EXPECT_EQ(transferPageReadFromPeer(policy, 1, false, 2, 2, peer), peer == 1);
+    }
+}
+
+class HybridHandoffLoadTest: public DeviceTestBase {};
+
+TEST_F(HybridHandoffLoadTest, LoadCacheMainAndDraftUsePhysicalRowsAndPeerObligations) {
+    constexpr uint32_t base_tokens = 4;
+    CacheConfig config;
+    config.dtype                     = DataType::TYPE_UINT8;
+    config.layer_num                 = 1;
+    config.seq_size_per_block        = base_tokens;
+    config.use_opaque_kv_cache_store = true;
+    auto full_spec = test::makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, base_tokens, "full");
+    auto state_spec = test::makeResolvedOpaqueSpec(true, "state", DataType::TYPE_UINT8, 32, base_tokens * 2);
+    auto swa_spec = test::makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 33, base_tokens * 2);
+    auto plain_spec = test::makeResolvedOpaqueSpec(true, "plain", DataType::TYPE_UINT8, 16, base_tokens);
+    config.fromGroupedSpecs({full_spec, state_spec, swa_spec, plain_spec},
+                            {{0}, {0}, {0}, {0}},
+                            {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA, CacheGroupType::SWA},
+                            {"full", "state", "swa", "plain"});
+    auto groups = config.topology().groups();
+    for (auto& group : groups) {
+        group.block_num = 8;
+        if (group.tag == "state") {
+            group.policy.cp_slice           = CpBlockSliceMode::PAYLOAD_BYTES;
+            group.policy.active_tail_blocks = 1;
+        } else if (group.tag == "swa") {
+            group.policy.cp_slice           = CpBlockSliceMode::EQUAL_BYTES;
+            group.policy.active_tail_blocks = 1;
+            test::setGroupLayout(group, /*kv_stride=*/40, /*scale_stride=*/0);
+        } else if (group.tag == "plain") {
+            group.policy.active_tail_blocks = 1;
+        }
+    }
+    config.setTopology(std::move(groups), config.topology().layers());
+
+    // MTP module0 shares the logical group/table contract, while its physical
+    // row sizes and remote model namespace belong to the draft child.
+    auto draft_config = config;
+    auto draft_groups = draft_config.topology().groups();
+    for (auto& group : draft_groups) {
+        if (group.tag == "state") {
+            group.spec = test::makeResolvedOpaqueSpec(true, "state", DataType::TYPE_UINT8, 48, base_tokens * 2);
+        } else if (group.tag == "swa") {
+            group.spec = test::makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 41, base_tokens * 2);
+            test::setGroupLayout(group, /*kv_stride=*/48, /*scale_stride=*/0);
+        }
+    }
+    draft_config.setTopology(std::move(draft_groups), draft_config.topology().layers());
+    config.mtp_sub_configs.push_back(config.mergeMTPModule(draft_config, /*module_index=*/0, /*main_layer_num=*/1));
+
+    auto cache_manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr);
+    ASSERT_TRUE(cache_manager->init());
+    EngineInitParams params;
+    params.model_config_.num_layers            = 1;
+    params.model_id                            = 7;
+    params.parallelism_config.local_world_size = 1;
+    params.parallelism_config.world_size       = 1;
+    params.parallelism_config.role_type        = RoleType::DECODE;
+    auto module                                = std::make_unique<EngineInitParams>();
+    module->model_id                           = 17;
+    module->model_config_.num_layers           = 1;
+    auto modules                               = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+    modules->push_back(std::move(module));
+    ProposeModelEngineInitParams proposal(SP_TYPE_MTP, /*gen_num_per_cycle=*/1, std::move(modules));
+    DecodeRpcServer              server;
+    server.engine_                   = std::make_shared<HandoffTestEngine>(params, cache_manager, /*has_mtp=*/true);
+    server.maga_init_params_         = params;
+    server.propose_maga_init_params_ = &proposal;
+    auto capture                     = std::make_shared<CapturingHandoffLoadStore>();
+    server.resource_.cache_store     = capture;
+
+    std::vector<std::shared_ptr<BlockIds>>  rows;
+    std::unordered_map<std::string, size_t> index;
+    for (const auto& tag : config.groupTags()) {
+        index.emplace(tag, rows.size());
+        auto blocks = std::make_shared<BlockIds>();
+        blocks->assign(tag == "full" ? BlockIndicesType{0, 1} : BlockIndicesType{0});
+        rows.push_back(std::move(blocks));
+    }
+    grpc::ServerContext rpc_context;
+    const auto          load_context = makeLoadContext("hybrid",
+                                              {"peer0:1:1", "peer1:1:1"},
+                                              {111, 222},
+                                              GroupBlockIds{std::move(index), std::move(rows)},
+                                              /*prefill_cp_size=*/2);
+    // makeLoadContext deliberately leaves the server context null; loadCache's
+    // cancellation callback needs a live context for the synchronous mock.
+    auto live_context           = load_context;
+    live_context.server_context = &rpc_context;
+    const auto result           = server.loadCache(live_context);
+    ASSERT_TRUE(result.ok()) << result.error_info.ToString();
+    EXPECT_EQ(result.loaded_cache_block_count, 2u);
+
+    const auto expectGroup = [&](const std::string& peer, const std::string& tag, bool present) {
+        const auto  key  = DecodeRpcServer::makeTaggedRequestKey(42, 0, tag);
+        const auto& seen = capture->visited_groups.at(peer);
+        EXPECT_EQ(std::find(seen.begin(), seen.end(), key) != seen.end(), present) << peer << " " << tag;
+    };
+    for (const auto& peer : {"peer0", "peer1"}) {
+        expectGroup(peer, "full", true);
+        expectGroup(peer, "state", true);
+        expectGroup(peer, "swa", true);
+    }
+    expectGroup("peer0", "plain", true);
+    expectGroup("peer1", "plain", false);
+    EXPECT_EQ(capture->visited_groups.at("peer0").size(), 8u);
+    EXPECT_EQ(capture->visited_groups.at("peer1").size(), 6u);
+
+    for (const auto& [global_layer, model_id] : {std::pair<int, size_t>{0, 7}, {1, 17}}) {
+        for (const auto& tag : {"state", "swa"}) {
+            const size_t local_bytes = global_layer == 0 ? (std::string(tag) == "state" ? 16 : 20) : 24;
+            const auto   full        = cache_manager->convertIndexToBuffer(global_layer, tag, 0);
+            ASSERT_EQ(full.size(), 1u);
+            for (int peer = 0; peer < 2; ++peer) {
+                const auto  peer_name = "peer" + std::to_string(peer);
+                const auto  key       = "kv_" + makeCacheKey(model_id, "222", 0, tag);
+                const auto& loaded    = capture->loaded_blocks.at(peer_name).at(key);
+                EXPECT_EQ(loaded.addr, static_cast<uint8_t*>(full[0].addr) + peer * local_bytes);
+                EXPECT_EQ(loaded.bytes, local_bytes);
+            }
+        }
+    }
+
+    // A missing destination still contributes a required key obligation. The
+    // complete first B key may be reused, but key 222 cannot be published as
+    // loaded merely because the other STATE/SWA groups transferred it.
+    std::vector<std::shared_ptr<BlockIds>>  null_rows;
+    std::unordered_map<std::string, size_t> null_index;
+    for (const auto& tag : config.groupTags()) {
+        null_index.emplace(tag, null_rows.size());
+        auto blocks = std::make_shared<BlockIds>();
+        blocks->assign(tag == "full" ? BlockIndicesType{0, NULL_BLOCK_IDX} : BlockIndicesType{0});
+        null_rows.push_back(std::move(blocks));
+    }
+    auto null_context           = makeLoadContext("hybrid-null",
+                                        {"peer0:1:1", "peer1:1:1"},
+                                        {111, 222},
+                                        GroupBlockIds{std::move(null_index), std::move(null_rows)},
+                                        /*prefill_cp_size=*/2);
+    null_context.server_context = &rpc_context;
+    capture->loaded_blocks.clear();
+    const auto null_result = server.loadCache(null_context);
+    ASSERT_TRUE(null_result.ok()) << null_result.error_info.ToString();
+    EXPECT_EQ(null_result.loaded_cache_block_count, 1u);
+    const auto missing_full = "kv_" + makeCacheKey(/*model_id=*/7, "222", /*layer_id=*/0, "full");
+    EXPECT_EQ(capture->loaded_blocks.at("peer1").count(missing_full), 0u);
 }
 
 TEST(DecodeRpcServerTest, CompactStateGroupWithSingleLogicalBlockLoadsKeyZero) {
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/1,
-                                                          /*cache_key_count=*/1,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kCompactSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                   /*local_block_num=*/1,
+                                   /*cache_key_count=*/1,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kCompactSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{0, 0}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{0}));
 }
 
 TEST(DecodeRpcServerTest, UnscaledSwaGroupKeepsLogicalTailPositions) {
     // A COMPACT_LAST_RANK policy on a group whose block still covers one logical
     // block has a flat table: the tail slots are logical positions 3 and 4.
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
-                                                          /*local_block_num=*/5,
-                                                          /*cache_key_count=*/5,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kBaseSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(makeCompactStatePolicy(/*active_tail_blocks=*/2),
+                                   /*local_block_num=*/5,
+                                   /*cache_key_count=*/5,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kBaseSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{3, 3}, {4, 4}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{3, 4}));
 }
 
 TEST(DecodeRpcServerTest, TailGroupReserveSlotsDoNotStarveTheLoad) {
@@ -962,53 +1341,84 @@ TEST(DecodeRpcServerTest, TailGroupReserveSlotsDoNotStarveTheLoad) {
     policy.active_tail_blocks = 1;
     ASSERT_EQ(policy.cp_mapping, CpBlockMappingMode::NONE);
 
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                          /*local_block_num=*/4,
-                                                          /*cache_key_count=*/3,
-                                                          /*reuse_block_size=*/0,
-                                                          /*use_hybrid=*/true,
-                                                          kBaseSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(policy,
+                                   /*local_block_num=*/4,
+                                   /*cache_key_count=*/3,
+                                   /*reuse_block_size=*/0,
+                                   /*use_hybrid=*/true,
+                                   kBaseSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{2}));
 }
 
 TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
     // Decode owns whole logical blocks of a BLOCK_ROUND_ROBIN group: the plan must
     // not shard it (the per-peer split happens later, per block), and reused
     // blocks are skipped.
-    const auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     ASSERT_EQ(policy.cp_mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
 
-    const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                          /*local_block_num=*/5,
-                                                          /*cache_key_count=*/4,
-                                                          /*reuse_block_size=*/2,
-                                                          /*use_hybrid=*/false,
-                                                          kBaseSeqSizePerBlock,
-                                                          kBaseSeqSizePerBlock);
+    const auto plan = testLoadPlan(policy,
+                                   /*local_block_num=*/5,
+                                   /*cache_key_count=*/4,
+                                   /*reuse_block_size=*/2,
+                                   /*use_hybrid=*/false,
+                                   kBaseSeqSizePerBlock,
+                                   kBaseSeqSizePerBlock);
 
-    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
+    EXPECT_EQ(plan, (std::vector<size_t>{2, 3}));
+}
+
+TEST(DecodeRpcServerTest, FullReaderRoutingIsIndependentOfProducerOwnership) {
+    auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    const auto pages =
+        selectProducerTransferPages(policy, /*logical_page_count=*/5, /*use_hybrid=*/false, /*compact_tail=*/false);
+    EXPECT_EQ(pages, (std::vector<size_t>{0, 1, 2, 3, 4}));
+    for (int peer = 0; peer < 4; ++peer) {
+        EXPECT_EQ(transferPageReadFromPeer(policy, 4, false, 4, 4, peer), peer == 0);
+    }
+
+    // Reusing two B keys with B_g=2B starts from logical page one.
+    const auto load = selectLoadTransferPages(policy,
+                                              /*logical_page_count=*/3,
+                                              /*max_destination_slots=*/3,
+                                              /*first_page_after_reuse=*/1,
+                                              /*use_hybrid=*/false,
+                                              /*compact_tail=*/false,
+                                              /*producer_cp_size=*/2,
+                                              /*decode_peer_count=*/2,
+                                              /*peer_index=*/0);
+    EXPECT_EQ(load.logical_pages, (std::vector<size_t>{1, 2}));
+
+    // An unsharded producer still routes one reader per page when D has one
+    // peer for each producer rank. Unequal peer counts keep all pages.
+    policy.cp_mapping = CpBlockMappingMode::NONE;
+    EXPECT_TRUE(transferPageReadFromPeer(policy, 1, false, 2, 2, 1));
+    EXPECT_FALSE(transferPageReadFromPeer(policy, 1, false, 2, 2, 0));
+    EXPECT_TRUE(transferPageReadFromPeer(policy, 1, false, 2, 1, 0));
 }
 
 TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {
     const auto policy = makeCompactStatePolicy(/*active_tail_blocks=*/2);
 
-    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                    /*local_block_num=*/0,
-                                                    /*cache_key_count=*/11,
-                                                    /*reuse_block_size=*/0,
-                                                    /*use_hybrid=*/true,
-                                                    kCompactSeqSizePerBlock,
-                                                    kBaseSeqSizePerBlock)
+    EXPECT_TRUE(testLoadPlan(policy,
+                             /*local_block_num=*/0,
+                             /*cache_key_count=*/11,
+                             /*reuse_block_size=*/0,
+                             /*use_hybrid=*/true,
+                             kCompactSeqSizePerBlock,
+                             kBaseSeqSizePerBlock)
                     .empty());
-    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy,
-                                                    /*local_block_num=*/6,
-                                                    /*cache_key_count=*/0,
-                                                    /*reuse_block_size=*/0,
-                                                    /*use_hybrid=*/true,
-                                                    kCompactSeqSizePerBlock,
-                                                    kBaseSeqSizePerBlock)
+    EXPECT_TRUE(testLoadPlan(policy,
+                             /*local_block_num=*/6,
+                             /*cache_key_count=*/0,
+                             /*reuse_block_size=*/0,
+                             /*use_hybrid=*/true,
+                             kCompactSeqSizePerBlock,
+                             kBaseSeqSizePerBlock)
                     .empty());
 }
 

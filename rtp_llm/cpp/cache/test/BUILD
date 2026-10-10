@@ -76,6 +76,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
     ],
     visibility = ["//visibility:public"],
 )
@@ -120,29 +121,15 @@ cc_test(
 )
 
 cc_test(
-    name = "cp_slot_mapper_test",
+    name = "cp_transfer_projection_test",
     srcs = [
-        "CPSlotMapperTest.cc",
+        "CpTransferProjectionTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-    env = {},
-)
-
-cc_test(
-    name = "kv_cache_resource_local_cache_keys_test",
-    srcs = [
-        "KVCacheResourceLocalCacheKeysTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cache_config",
+        "//rtp_llm/cpp/distribute/context_parallel:cp_transfer_projection",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
@@ -324,12 +311,25 @@ cc_test(
 cc_test(
     name = "kv_cache_manager_cp_test",
     srcs = [
-        "KVCacheManagerCPSlotMapperTest.cc",
+        "KVCacheManagerCPLayoutTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
         ":block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "prefill_cache_hit_metrics_contract_test",
+    srcs = ["PrefillCacheHitMetricsContractTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache:prefill_cache_hit_metrics_reporter",
     ],
     env = {},
     exec_properties = {"gpu": "L20_CU13"},
@@ -399,8 +399,10 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/distribute/context_parallel:cp_transfer_projection",
     ],
     env = {},
     exec_properties = {"gpu": "L20_CU13"},
