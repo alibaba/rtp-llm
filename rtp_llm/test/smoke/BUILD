@@ -8,7 +8,7 @@ py_test(
         "//rtp_llm/test/utils:maga_server_manager",
     ],
     tags = ["open_skip"],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
 )
 
 py_test(
