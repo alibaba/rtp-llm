@@ -123,6 +123,17 @@ Scope = namedtuple("Scope", "scope_id root components")
 # fmt: on
 
 
+def _distribution_version(name: str) -> str:
+    # AMD's ROCm wheel installs the `aiter` Python package under the
+    # `amd-aiter` distribution name. Older wheels used `aiter` for both.
+    if name == "aiter":
+        try:
+            return importlib.metadata.version("aiter")
+        except importlib.metadata.PackageNotFoundError:
+            return importlib.metadata.version("amd-aiter")
+    return importlib.metadata.version(name)
+
+
 def resolve_scope(
     local_root: Path, cache_env_config: CacheEnvConfig | None = None
 ) -> Scope | None:
@@ -157,7 +168,7 @@ def resolve_scope(
             continue
         with suppress(importlib.metadata.PackageNotFoundError):
             parts = tuple(
-                importlib.metadata.version(p[1:]) if p.startswith("@") else scopes[p]
+                _distribution_version(p[1:]) if p.startswith("@") else scopes[p]
                 for p in item.scopes
             )
             if parts and all(parts):

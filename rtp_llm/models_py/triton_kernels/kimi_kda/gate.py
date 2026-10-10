@@ -9,7 +9,6 @@
 # Adapted for rtp-llm: forward-only, no backward.
 
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -65,28 +64,40 @@ def kda_gate_fwd_kernel(
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
-    p_g = tl.make_block_ptr(
-        g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-    )
-    p_yg = tl.make_block_ptr(
-        yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
-    )
+    p_g_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_g_m0 = (p_g_i0 >= 0) & (p_g_i0 < (T))
+    p_g_i1 = tl.arange(0, BD).to(tl.int64) + (0)
+    p_g_m1 = (p_g_i1 >= 0) & (p_g_i1 < (D))
+    p_g = (g + i_h * D) + p_g_i0[:, None] * (H * D) + p_g_i1[None, :] * (1)
+    p_yg_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_yg_m0 = (p_yg_i0 >= 0) & (p_yg_i0 < (T))
+    p_yg_i1 = tl.arange(0, BD).to(tl.int64) + (0)
+    p_yg_m1 = (p_yg_i1 >= 0) & (p_yg_i1 < (D))
+    p_yg = (yg + i_h * D) + p_yg_i0[:, None] * (H * D) + p_yg_i1[None, :] * (1)
     # [BT, BD]
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
+    b_g = tl.load(p_g, mask=p_g_m0[:, None] & p_g_m1[None, :], other=0).to(tl.float32)
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
-        b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        p_b_i0 = tl.arange(0, BD).to(tl.int64) + (i_h * D)
+        p_b_m0 = (p_b_i0 >= 0) & (p_b_i0 < (H * D))
+        p_b = (dt_bias) + p_b_i0 * (1)
+        b_g = b_g + tl.load(p_b, mask=p_b_m0, other=0).to(tl.float32)
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
     else:
         b_yg = lower_bound * tl.sigmoid(exp(b_A) * b_g)
-    tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(
+        p_yg, b_yg.to(p_yg.dtype.element_ty), mask=p_yg_m0[:, None] & p_yg_m1[None, :]
+    )
 
     if HAS_BETA:
-        p_b = tl.make_block_ptr(beta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_yb = tl.make_block_ptr(yb + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_yb = tl.sigmoid(tl.load(p_b, boundary_check=(0,)).to(tl.float32))
-        tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), boundary_check=(0,))
+        p_b_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_b_m0 = (p_b_i0 >= 0) & (p_b_i0 < (T))
+        p_b = (beta + i_h) + p_b_i0 * (H)
+        p_yb_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_yb_m0 = (p_yb_i0 >= 0) & (p_yb_i0 < (T))
+        p_yb = (yb + i_h) + p_yb_i0 * (H)
+        b_yb = tl.sigmoid(tl.load(p_b, mask=p_b_m0, other=0).to(tl.float32))
+        tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), mask=p_yb_m0)
 
 
 def kda_gate_fwd(
@@ -202,29 +213,25 @@ def kda_gate_chunk_cumsum_vector_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
-    p_s = tl.make_block_ptr(
-        s + (bos * H + i_h) * S,
-        (T, S),
-        (H * S, 1),
-        (i_t * BT, i_s * BS),
-        (BT, BS),
-        (1, 0),
-    )
-    p_o = tl.make_block_ptr(
-        o + (bos * H + i_h) * S,
-        (T, S),
-        (H * S, 1),
-        (i_t * BT, i_s * BS),
-        (BT, BS),
-        (1, 0),
-    )
+    p_s_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_s_m0 = (p_s_i0 >= 0) & (p_s_i0 < (T))
+    p_s_i1 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+    p_s_m1 = (p_s_i1 >= 0) & (p_s_i1 < (S))
+    p_s = (s + (bos * H + i_h) * S) + p_s_i0[:, None] * (H * S) + p_s_i1[None, :] * (1)
+    p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+    p_o_i1 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+    p_o_m1 = (p_o_i1 >= 0) & (p_o_i1 < (S))
+    p_o = (o + (bos * H + i_h) * S) + p_o_i0[:, None] * (H * S) + p_o_i1[None, :] * (1)
     # [BT, BS]
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_s = tl.load(p_s, mask=p_s_m0[:, None] & p_s_m1[None, :], other=0).to(tl.float32)
 
     # Apply dt_bias if exists
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,), (0,))
-        b_bias = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
+        p_b_i0 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+        p_b_m0 = (p_b_i0 >= 0) & (p_b_i0 < (S))
+        p_b = (dt_bias + i_h * S) + p_b_i0 * (1)
+        b_bias = tl.load(p_b, mask=p_b_m0, other=0).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
@@ -242,14 +249,14 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_m0[:, None] & p_o_m1[None, :])
 
 
 def kda_gate_chunk_cumsum(
     g: torch.Tensor,
     A_log: torch.Tensor,
     chunk_size: int,
-    scale: float = None,
+    scale: float | None = None,
     dt_bias: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = torch.float,

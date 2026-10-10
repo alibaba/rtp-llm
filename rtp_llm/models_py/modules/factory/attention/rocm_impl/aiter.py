@@ -1472,6 +1472,23 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
 
         paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
         key_cache, value_cache = paged_kv_cache.unbind(1)
+        # The 4D shape is only the packed cache allocation's metadata: ROCm
+        # getKLocalIdx writes its bytes in [heads, head_dim/x, page, x] order.
+        # pa_fwd_asm reads page from K.size(3), so expose that physical layout
+        # without moving bytes. A permute here would corrupt the written K.
+        if key_cache.ndim == 4:
+            vector_width = 16 // key_cache.element_size()
+            if key_cache.shape[2:] != (self.tokens_per_block, self.head_dim):
+                raise ValueError(
+                    f"unexpected ASM PA key cache shape: {key_cache.shape}"
+                )
+            key_cache = key_cache.view(
+                key_cache.shape[0],
+                key_cache.shape[1],
+                self.head_dim // vector_width,
+                self.tokens_per_block,
+                vector_width,
+            )
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
@@ -1485,8 +1502,8 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
         out_ = self._get_output(query)
         output = aiter.pa_fwd_asm(
             query,  # [num_seqs, num_heads, head_size]
-            key_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
-            value_cache,  # [num_blocks, num_kv_heads, block_size, head_size/x, x]
+            key_cache,  # physical [blocks, kv_heads, head_dim/x, page, x]
+            value_cache,  # physical [blocks, kv_heads, page/x, head_dim, x]
             block_tables_id_device,
             seq_lens,
             max_num_blocks,

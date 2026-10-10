@@ -193,6 +193,19 @@ cc_library(
 )
 
 cc_test(
+    name = "block_pool_zero_init_test",
+    srcs = ["BlockPoolZeroInitTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+cc_test(
     name = "block_pool_device_malloc_test",
     srcs = [
         "BlockPoolDeviceMallocTest.cc",
