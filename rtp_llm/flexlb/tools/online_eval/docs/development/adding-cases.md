@@ -15,7 +15,7 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 | 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
 | 6 | `analysis`、`reports` | 分析策略及交付视图 |
 
-`parameters` 按 `traffic` → `procedure` → `observation` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → 测量规则（`slo`、`collapse`）→ `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
+`parameters` 按 `traffic` → `procedure` → `observation` → `analysis` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
 
 从 `rtp_llm/flexlb` 检查或整理配置：
 
@@ -35,12 +35,12 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 | `metadata` | 测试性质、目标、分类与标签；`kind` 参与 CI 筛选和执行器选择 | suite 选择、实例清单、执行器与报告 |
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
 | `execution` | 实例、阶段和清理预算，以及 `collection` 和 `monitoring` 取证策略 | runner、阶段执行器、客户端与采集器 |
-| `parameters` | 按流量、流程、观测与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
+| `parameters` | 按流量、流程、观测、分析与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
 | `parameter_schema` | 场景对 program 数值契约的范围收紧 | program 构建前统一校验；`CaseBuilder.number(path)` 可显式读取 |
 
 `environment.n_prefill` 是启动多少个 Prefill worker；`parameters.traffic.count` 是 program 发出多少个请求。整数类型、正负和协议范围由 Python 数值契约定义；`parameter_schema["traffic.count"].maximum` 可以进一步限制该场景的请求预算。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
 
-`traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作、流程等待和超时上限；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
+`traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作、流程等待和超时上限；`observation` 保存观测时窗、指标输入绑定与采样要求；`parameters.analysis` 保存 SLO、持续异常等证据解释规则；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
 
 program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `ProgramInputs`。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
 
@@ -49,7 +49,7 @@ program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `Pr
 - 跨阶段窗口使用 `stage`、`field: epoch_s` 和可选 `offset_s`，经 `ObservationWindow` 编译成有类型的输出引用。`procedure` 中的 `wait_s` 控制现场流程实际等待；窗口引用完成后记录的时间戳，有效时长由实际边界之差计算，不能把操作的 `timeout_s` 当成窗口长度，也不再另写同义的窗口时长。
 - 单次观测内的窗口使用 `event` 和显式 `offset_s`，测量能力验证允许的锚点及边界方向，并从边界推导预热、测量时长和采集截止时间。偏移量定义取证区间；改变边界也可能改变观测执行时长，并非只改变报告显示。
 
-两种形式遵守同一规则：流程等待、操作超时与取证区间是不同输入，不相互冒充，也不重复声明同一个窗口长度。无条件等待属于 `procedure`；观测能力为等待指标就绪或覆盖达标设置的有界预算属于 `observation`。program 选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
+两种形式遵守同一规则：流程等待、操作超时与取证区间是不同输入，不相互冒充，也不重复声明同一个窗口长度。无条件等待属于 `procedure`；观测能力为等待指标就绪或覆盖达标设置的有界预算属于 `observation`。program 选择当前流程可用的窗口。`checks.<id>.windows` 使用非空、无重复的窗口名列表；不存在或当前流程不可用的窗口报错。单窗口检查也使用列表；仅支持单窗口的测量能力拒绝多窗口，不能隐式拼接数据。多个窗口的切分和归约由 Python 测量契约决定，列表不定义算法。`full_run` 等整体范围及阶段输出窗口由 program 显式声明，不用组合字符串代替窗口引用。YAML 不能借此定义步骤顺序或分支。
 
 运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 
@@ -59,13 +59,13 @@ program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `cases.nu
 
 数值校验不把字段标为“业务已使用”，未被 program 读取的输入仍会被拒绝。复杂对象和跨字段关系由 program 或 action 合同校验；数值契约不提供参数缺省值，也不承担环境配置校验。
 
-观测输入统一使用 `source: metric_store` 和 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。`metric_store` 指定读取后端，运行时来源实例另由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
+观测输入统一使用 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`；输入组只绑定指标，不声明固定的存储后端。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。读取能力由 Python program 提供，实时观测可通过 monitoring session 读取 Prometheus，离线分析消费冻结证据；运行时来源实例由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
 
-字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。四组是公开输入语义，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
+字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。五组是公开输入语义，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
 
 固定测量能力在 Python 声明指标、单位、窗口和方向，YAML 提供阈值；通用指标检查可由 YAML 选择指标与窗口，但仍验证定义与允许选择。前者保障持续性、cohort 等算法的前提，后者用于无专属测量流程的标量比较。两者复用比较与依赖绑定，不把测量算法复制成 YAML 规则。消费方单位是算法要求，query plan 单位是生产声明；必须相等，不能直接抄生产单位代替消费断言。
 
-数值检查写明 `metric`、`unit`、`window`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `observation`；复杂归因和持续性计算仍由 Python 负责。
+数值检查写明 `metric`、`unit`、`windows`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `parameters.analysis`；复杂归因和持续性计算仍由 Python 负责。根级 `analysis` 属于注册的多运行分析能力，与单次运行的 `parameters.analysis` 分别校验。
 
 QPS 只取 `traffic.client.playback.qps`，编译时核对请求数量和 goodput 下界不超过允许的 offered-load 范围。修改负载不自动缩放绝对阈值，需要同时核对时窗和门槛。priority 由 `traffic.source.parameters.priority` 定义，客户端环境从该值生成；显式客户端 PRIORITY 与来源冲突时报错。
 

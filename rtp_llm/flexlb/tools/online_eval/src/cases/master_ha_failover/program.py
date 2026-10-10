@@ -73,7 +73,7 @@ def _cycle(case, restart_mode):
     checks.append("unique_requests")
     for name in checks:
         params = dict(data.checks[name])
-        window = params.pop("window")
+        window, = params.pop("windows")
         params.pop("unit")
         if window not in rows:
             raise ScenarioError(f"parameters.checks.{name}: window unavailable in {restart_mode}")

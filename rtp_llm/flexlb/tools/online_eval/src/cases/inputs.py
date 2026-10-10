@@ -10,10 +10,11 @@ class ProgramInputs:
     traffic: dict = field(default_factory=dict)
     procedure: dict = field(default_factory=dict)
     observation: dict = field(default_factory=dict)
+    analysis: dict = field(default_factory=dict)
     checks: dict = field(default_factory=dict)
 
     @classmethod
-    def read(cls, case, *, traffic=(), procedure=(), observation=(), checks=(),
+    def read(cls, case, *, traffic=(), procedure=(), observation=(), analysis=(), checks=(),
              optional=None):
         """Required fields are explicit; omitted groups have no YAML parameters.
 
@@ -21,7 +22,7 @@ class ProgramInputs:
         Reading a group never admits arbitrary additional fields in that group.
         """
         required = dict(traffic=set(traffic), procedure=set(procedure),
-                        observation=set(observation), checks=set(checks))
+                        observation=set(observation), analysis=set(analysis), checks=set(checks))
         optional = optional or {}
         if set(optional) - set(required):
             raise ValueError("unknown optional program input group")

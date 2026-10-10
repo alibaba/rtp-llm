@@ -34,9 +34,9 @@ NUMERIC_PARAMETERS = {
     ),
     **number_fields(NONNEGATIVE,
         'checks.collapse.expected',
-        'observation.collapse.absolute_min_hit',
-        'observation.collapse.max_drop',
-        'observation.collapse.sustain_s',
+        'analysis.collapse.absolute_min_hit',
+        'analysis.collapse.max_drop',
+        'analysis.collapse.sustain_s',
         'observation.max_gap_s',
         'observation.sample_s',
         'observation.step_s',
@@ -109,10 +109,10 @@ def engine_metric_snapshot(monitor, fields, timeout=5):
 
 
 RULES = {
-    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', 'baseline_and_post'),
-    'baseline_hit': ('baseline_min_hit', 'baseline_min_half_hit', 'ge', 'ratio', 'baseline'),
-    'baseline_stability': ('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', 'baseline'),
-    'completed': ('min_completed', 'min_window_completed', 'ge', 'requests', 'baseline_and_post'),
+    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('baseline', 'post')),
+    'baseline_hit': ('baseline_min_hit', 'baseline_min_half_hit', 'ge', 'ratio', ('baseline',)),
+    'baseline_stability': ('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', ('baseline',)),
+    'completed': ('min_completed', 'min_window_completed', 'ge', 'requests', ('baseline', 'post')),
 }
 
 
@@ -121,11 +121,11 @@ def compile_checks(case, checks, policy):
     from cases.check_inputs import metric_criterion, compile_metric_checks
 
     fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
-    fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.observation.collapse')
+    fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.analysis.collapse')
     result = dict(policy)
     result.update(compile_metric_checks(case, checks, RULES, namespace='cache_gate'))
     expected, _ = metric_criterion(case, checks['collapse'], metric='cache_gate/collapse_detected',
-        unit='boolean', window='post', op='eq', path='parameters.checks.collapse')
+        unit='boolean', windows=('post',), op='eq', path='parameters.checks.collapse')
     if expected != 0:
         raise ValueError('cache gate requires absence of sustained collapse')
     return result

@@ -24,17 +24,17 @@ BLOCK_FIELDS = {
                     'discovery', 'n_prefill', 'n_decode', 'prefill_cache_policy',
                     'config_overrides', 'metric_whitelist'),
     'execution': ('timeout_s', 'stage_timeout_s', 'cleanup_timeout_s', 'collection', 'monitoring'),
-    'parameters': ('traffic', 'procedure', 'observation', 'checks'),
+    'parameters': ('traffic', 'procedure', 'observation', 'analysis', 'checks'),
     'traffic': ('kind', 'group_id', 'phase_id', 'source', 'client', 'targets', 'duration_s',
              'timeout_ms', 'replay_speed', 'loop', 'max_concurrency', 'max_requests',
              'fallback', 'live_events', 'poll_s', 'jvm_xms', 'jvm_xmx'),
     'source': ('kind', 'model', 'version', 'parameters'),
     'client': ('playback',),
 }
-# Sampling settings, inputs, measurement rules, capture bounds, then windows.
+# Sampling settings, metric bindings, capture bounds, then windows.
 OBSERVATION_FIELDS = (
     'warmup_timeout_s', 'sample_s', 'window_s', 'step_s', 'max_gap_s',
-    'inputs', 'slo', 'collapse', 'capture', 'windows',
+    'inputs', 'capture', 'windows',
 )
 
 QUERY_FIELDS = ('promql', 'mode', 'producer', 'source_type', 'unit', 'value_kind',

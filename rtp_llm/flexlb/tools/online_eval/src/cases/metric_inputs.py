@@ -4,10 +4,10 @@ from monitoring.identity import METRIC_ID, NAME as FIELD
 
 
 def metric_fields(spec):
-    if (not isinstance(spec, dict) or set(spec) != {"source", "fields"}
-            or spec["source"] != "metric_store" or not isinstance(spec["fields"], dict)
+    if (not isinstance(spec, dict) or set(spec) != {"fields"}
+            or not isinstance(spec["fields"], dict)
             or not spec["fields"]):
-        raise ValueError("metric input requires metric_store and fields")
+        raise ValueError("metric input requires fields; the program owns the reader")
     identities = set()
     for name, binding in spec["fields"].items():
         if (type(name) is not str or not FIELD.fullmatch(name)

@@ -22,7 +22,7 @@ def config(name):
 @pytest.mark.parametrize("name", CASES)
 def test_base_parameters_and_each_read_group_reject_unknown_fields(name):
     data = config(name)
-    assert set(data["parameters"]) <= {"traffic", "procedure", "observation", "checks"}
+    assert set(data["parameters"]) <= {"traffic", "procedure", "observation", "analysis", "checks"}
     for group in [None, *data["parameters"]]:
         changed = config(name)
         target = changed["parameters"] if group is None else changed["parameters"][group]
@@ -74,7 +74,7 @@ def test_inactive_ha_checks_are_validated_without_running_their_program(patch):
 def test_ha_windows_and_check_binding_are_yaml_data_and_compile_to_typed_outputs():
     data = config("master_ha_failover")
     data["parameters"]["observation"]["windows"]["baseline"]["until"]["offset_s"] = -3
-    data["parameters"]["checks"]["b_success"]["window"] = "both"
+    data["parameters"]["checks"]["b_success"]["windows"] = ["both"]
     document = configure_program(data, "ha.yaml")
     stages = {s["id"]: s for s in document["variants"][0]["stages"]}
     assert stages["baseline"]["params"]["until_offset_s"] == -3
@@ -86,7 +86,7 @@ def test_ha_windows_and_check_binding_are_yaml_data_and_compile_to_typed_outputs
 @pytest.mark.parametrize("window", ["typo", "outage"])
 def test_unknown_or_inactive_window_cannot_be_silently_substituted(window):
     data = config("master_ha_failover")
-    data["parameters"]["checks"]["b_success"]["window"] = window
+    data["parameters"]["checks"]["b_success"]["windows"] = [window]
     with pytest.raises(ScenarioError, match="window"):
         configure_program(data, "ha.yaml")
 

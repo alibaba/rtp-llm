@@ -72,7 +72,6 @@ parameters:
     max_gap_s: 5
     inputs:
       engine_counters:
-        source: metric_store
         fields:
           running:
             metric: mock/running
@@ -130,10 +129,6 @@ parameters:
             metric: mock/rejected_rpcs_total
             labels:
               role: prefill
-    collapse:
-      absolute_min_hit: 0.45
-      max_drop: 0.25
-      sustain_s: 30
     capture:
       max_samples: 1000
       max_bytes: 67108864
@@ -152,34 +147,39 @@ parameters:
         until:
           event: target_topology_observed
           offset_s: 60
+  analysis:
+    collapse:
+      absolute_min_hit: 0.45
+      max_drop: 0.25
+      sustain_s: 30
   checks:
     offered_load:
       metric: cache_gate/offered_qps_deviation
-      window: baseline_and_post
+      windows: [baseline, post]
       unit: ratio
       op: le
       expected: 0.1
     baseline_hit:
       metric: cache_gate/baseline_min_half_hit
-      window: baseline
+      windows: [baseline]
       unit: ratio
       op: ge
       expected: 0.85
     baseline_stability:
       metric: cache_gate/baseline_half_spread
-      window: baseline
+      windows: [baseline]
       unit: ratio
       op: le
       expected: 0.05
     completed:
       metric: cache_gate/min_window_completed
-      window: baseline_and_post
+      windows: [baseline, post]
       unit: requests
       op: ge
       expected: 20
     collapse:
       metric: cache_gate/collapse_detected
-      window: post
+      windows: [post]
       unit: boolean
       op: eq
       expected: 0

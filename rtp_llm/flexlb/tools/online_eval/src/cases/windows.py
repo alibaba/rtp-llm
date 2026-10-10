@@ -8,6 +8,17 @@ from cases.inputs import fields
 from scenario.loader import ScenarioError
 
 
+def check_windows(data, *, available, path, single=False):
+    """Validate explicit window references without introducing composite names."""
+    if (not isinstance(data, list) or not data
+            or any(type(name) is not str or name not in available for name in data)
+            or len(set(data)) != len(data)):
+        raise ScenarioError(path + ": windows must be a nonempty list of distinct available window names")
+    if single and len(data) != 1:
+        raise ScenarioError(path + ": measurement requires exactly one window")
+    return tuple(data)
+
+
 @dataclass(frozen=True)
 class ObservationWindow:
     boundaries: dict

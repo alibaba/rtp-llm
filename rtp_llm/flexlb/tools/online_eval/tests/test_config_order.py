@@ -98,11 +98,12 @@ def test_observation_order_covers_base_and_variant_without_sorting_named_windows
       second: {until: {event: end, offset_s: 10}}
       first: {from: {event: start, offset_s: 0}}
     capture: {max_samples: 10, max_bytes: 1024}
-    collapse: {sustain_s: 1}
-    slo: {ttft_ms: 2}
-    inputs: {engine: {source: metric_store}}
+    inputs: {engine: {fields: {}}}
     max_gap_s: 3
     sample_s: 1
+  analysis:
+    collapse: {sustain_s: 1}
+    slo: {ttft_ms: 2}
 variants:
 - id: extra
   parameters:
@@ -115,7 +116,7 @@ variants:
     parsed = yaml.safe_load(result)
     assert parsed == yaml.safe_load(source)
     assert list(parsed['parameters']['observation']) == [
-        'sample_s', 'max_gap_s', 'inputs', 'slo', 'collapse', 'capture', 'windows',
+        'sample_s', 'max_gap_s', 'inputs', 'capture', 'windows',
     ]
     assert list(parsed['parameters']['observation']['windows']) == ['second', 'first']
     assert list(parsed['variants'][0]['parameters']['observation']) == ['sample_s', 'capture', 'windows']

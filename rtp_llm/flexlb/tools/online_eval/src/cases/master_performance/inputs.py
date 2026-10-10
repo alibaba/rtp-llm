@@ -46,9 +46,9 @@ NUMERIC_PARAMETERS = {
     ),
     **number_fields(COUNT,
         'checks.requests.expected',
-        'observation.slo.e2e_ms',
-        'observation.slo.tpot_ms',
-        'observation.slo.ttft_ms',
+        'analysis.slo.e2e_ms',
+        'analysis.slo.tpot_ms',
+        'analysis.slo.ttft_ms',
         'traffic.source.parameters.max_input_tokens',
     ),
     **number_fields(OFFSET,
@@ -85,18 +85,18 @@ def engine_roles(spec, bounds=None):
 # Public comparisons bind exact metrics, units and cohorts. The analyzer keeps
 # its compact numerical criteria; compilation owns this projection.
 RULES = {
-    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', 'measurement'),
-    'requests': ('min_requests', 'cohort_requests', 'ge', 'requests', 'measurement'),
-    'pacing_lag': ('max_pacing_lag_ms', 'pacing_lag_max_ms', 'le', 'ms', 'measurement'),
-    'input_tps': ('min_input_tps', 'input_tps', 'ge', 'tokens/s', 'measurement'),
-    'output_tps': ('min_output_tps', 'output_tps', 'ge', 'tokens/s', 'measurement'),
-    'goodput': ('min_goodput_rps', 'goodput_rps', 'ge', 'requests/s', 'measurement'),
-    'slo_fraction': ('min_slo_fraction', 'slo_fraction', 'ge', 'ratio', 'measurement'),
-    'errors': ('max_error_rate', 'error_rate', 'le', 'ratio', 'full_run'),
-    'ttft': ('max_ttft_p99_ms', 'ttft_p99_ms', 'le', 'ms', 'measurement'),
-    'e2e': ('max_e2e_p99_ms', 'e2e_p99_ms', 'le', 'ms', 'measurement'),
-    'tpot': ('max_tpot_p99_ms', 'tpot_p99_ms', 'le', 'ms', 'measurement'),
-    'inflight_growth': ('max_inflight_growth_rps', 'inflight_growth_rps', 'le', 'requests/s', 'measurement'),
+    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('measurement',)),
+    'requests': ('min_requests', 'cohort_requests', 'ge', 'requests', ('measurement',)),
+    'pacing_lag': ('max_pacing_lag_ms', 'pacing_lag_max_ms', 'le', 'ms', ('measurement',)),
+    'input_tps': ('min_input_tps', 'input_tps', 'ge', 'tokens/s', ('measurement',)),
+    'output_tps': ('min_output_tps', 'output_tps', 'ge', 'tokens/s', ('measurement',)),
+    'goodput': ('min_goodput_rps', 'goodput_rps', 'ge', 'requests/s', ('measurement',)),
+    'slo_fraction': ('min_slo_fraction', 'slo_fraction', 'ge', 'ratio', ('measurement',)),
+    'errors': ('max_error_rate', 'error_rate', 'le', 'ratio', ('full_run',)),
+    'ttft': ('max_ttft_p99_ms', 'ttft_p99_ms', 'le', 'ms', ('measurement',)),
+    'e2e': ('max_e2e_p99_ms', 'e2e_p99_ms', 'le', 'ms', ('measurement',)),
+    'tpot': ('max_tpot_p99_ms', 'tpot_p99_ms', 'le', 'ms', ('measurement',)),
+    'inflight_growth': ('max_inflight_growth_rps', 'inflight_growth_rps', 'le', 'requests/s', ('measurement',)),
 }
 
 
@@ -114,7 +114,7 @@ def compile_checks(case, checks, inputs):
         identity = binding['metric']
         floor, profiles = metric_criterion(case, checks['engine_tps'][name],
             metric='performance_gate/'+identity.split('/')[1]+'_scrape_engine_mean',
-            unit='tokens/s', window='measurement', op='ge',
+            unit='tokens/s', windows=('measurement',), op='ge',
             path='parameters.checks.engine_tps.'+name, profiles=True)
         floors[identity] = floor
         for profile, value in profiles.items():

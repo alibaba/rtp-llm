@@ -28,6 +28,8 @@ Prometheus 查询的完整 ID 由 `sources` 的来源种类和查询键组成；
 
 场景通过 `execution.monitoring.query_plan` 选择 `config/monitoring/` 中的集合。`default.yaml` 是公共默认集合，case 集合通过 `include` 引用；它与 `config/report_views/default.yaml` 全量诊断视图是独立配置。默认集合的文件名由 `monitoring.query_plan.DEFAULT_PLAN` 声明。
 
+`config/monitoring` 定义指标身份、采集查询及单位、标签、测量口径元数据。`parameters.observation.inputs` 将这些指标按标签映射为 case 使用的本地字段；`observation.windows`、采样与 capture 设置限定取证范围和完整性要求。`parameters.analysis` 定义证据的解释规则，`parameters.checks` 绑定结果指标、窗口集合及门槛。指标采集、输入投影、测量计算与判定分别由其拥有者校验，输入绑定不创建新的采集后端。
+
 ```yaml
 metric_plan_schema_version: 3
 include: [default.yaml]

@@ -2,15 +2,17 @@
 
 from analysis.checks import validate_comparison
 from cases.inputs import fields
+from cases.windows import check_windows
 
 
-def metric_criterion(case, spec, *, metric, unit, window, op, path,
+def metric_criterion(case, spec, *, metric, unit, windows, op, path,
                      profiles=False):
-    fields(spec, {"metric", "unit", "window", "op", "expected"}, path,
+    fields(spec, {"metric", "unit", "windows", "op", "expected"}, path,
            optional={"expected_by_profile"} if profiles else ())
+    check_windows(spec["windows"], available=windows, path=path + ".windows")
     if (spec["metric"] != metric or spec["unit"] != unit
-            or spec["window"] != window or spec["op"] != op):
-        raise ValueError(path + ": metric, unit, window or comparison does not match the measurement contract")
+            or set(spec["windows"]) != set(windows) or spec["op"] != op):
+        raise ValueError(path + ": metric, unit, windows or comparison does not match the measurement contract")
     validate_comparison(spec["op"], spec["expected"])
     if type(spec["expected"]) not in (int, float):
         raise ValueError(path + ": metric threshold must be numeric")
@@ -31,9 +33,9 @@ def metric_criterion(case, spec, *, metric, unit, window, op, path,
 def compile_metric_checks(case, checks, rules, *, namespace, path="parameters.checks"):
     """Project a fixed measurement table; case-specific policies stay with the case."""
     result = {}
-    for name, (key, metric, op, unit, window) in rules.items():
+    for name, (key, metric, op, unit, windows) in rules.items():
         result[key], _ = metric_criterion(
             case, checks[name], metric=namespace + '/' + metric,
-            unit=unit, window=window, op=op, path=path + '.' + name,
+            unit=unit, windows=windows, op=op, path=path + '.' + name,
         )
     return result

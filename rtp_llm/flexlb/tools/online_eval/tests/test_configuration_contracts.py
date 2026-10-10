@@ -23,7 +23,7 @@ def config(name):
 @pytest.mark.parametrize('name,criterion', [('master_performance', 'ttft'),
     ('cache_scale_in', 'baseline_hit'), ('master_ha_failover', 'outage_failures')])
 @pytest.mark.parametrize('field,value', [('metric', 'missing/id'), ('unit', 'seconds'),
-                                       ('window', 'typo')])
+                                       ('windows', ['typo'])])
 def test_check_identity_unit_and_window_are_compile_time_contracts(name, criterion, field, value):
     data = config(name)
     data['parameters']['checks'][criterion][field] = value
@@ -93,10 +93,10 @@ def test_numeric_schema_does_not_hide_unused_program_fields():
 def test_metric_projections_have_one_direction_and_no_duplicate_identity():
     fields = dict(a=dict(metric='mock/running', labels=dict(role='prefill')),
                   b=dict(metric='mock/running', labels=dict(role='decode')))
-    assert metric_fields(dict(source='metric_store', fields=fields)) == fields
+    assert metric_fields(dict(fields=fields)) == fields
     fields['b']['labels']['role'] = 'prefill'
     with pytest.raises(ValueError, match='duplicate'):
-        metric_fields(dict(source='metric_store', fields=fields))
+        metric_fields(dict(fields=fields))
 
 
 def test_export_allowlist_and_query_selection_are_independent_but_consistent():
@@ -140,3 +140,60 @@ def test_origin_does_not_control_producer_execution_or_retention(tmp_path):
     with patch('cases.master_ha_failover.metrics.produce', return_value={}) as producer:
         produce(tmp_path / 'ha', {})
     producer.assert_called_once()
+
+
+@pytest.mark.parametrize('name,criterion', [
+    ('cache_scale_in', 'offered_load'), ('master_performance', 'ttft'),
+    ('master_ha_failover', 'b_success'), ('request_completion', 'completed'),
+])
+@pytest.mark.parametrize('windows', [[], 'baseline_and_post', ['typo'], [None],
+                                     ['baseline', 'baseline']])
+def test_check_windows_reject_ambiguous_or_invalid_references(name, criterion, windows):
+    data = config(name)
+    data['parameters']['checks'][criterion]['windows'] = windows
+    with pytest.raises((ScenarioError, ValueError), match='window'):
+        configure_program(data, 'case.yaml')
+
+
+def test_composite_check_requires_both_declared_windows_and_has_no_order_semantics():
+    data = config('cache_scale_in')
+    expected = configure_program(data, 'case.yaml')['variants']
+    check = data['parameters']['checks']['offered_load']
+    check['windows'] = ['post', 'baseline']
+    assert configure_program(data, 'case.yaml')['variants'] == expected
+    check['windows'] = ['baseline']
+    with pytest.raises(ValueError, match='measurement contract'):
+        configure_program(data, 'case.yaml')
+
+
+@pytest.mark.parametrize('name,criterion,windows', [
+    ('master_ha_failover', 'b_success', ['b_only', 'both']),
+    ('request_completion', 'completed', ['terminal', 'terminal']),
+])
+def test_single_window_measurements_do_not_concatenate_scopes(name, criterion, windows):
+    data = config(name)
+    data['parameters']['checks'][criterion]['windows'] = windows
+    with pytest.raises(ScenarioError, match='window'):
+        configure_program(data, 'case.yaml')
+
+
+@pytest.mark.parametrize('name,policy', [('cache_scale_in', 'collapse'),
+                                        ('master_performance', 'slo')])
+def test_analysis_policies_are_separate_from_observation_and_still_typed(name, policy):
+    data = config(name)
+    data['parameters']['analysis'][policy][next(iter(data['parameters']['analysis'][policy]))] = True
+    with pytest.raises(ScenarioError, match='analysis'):
+        configure_program(data, 'case.yaml')
+    data = config(name)
+    data['parameters']['observation'][policy] = data['parameters']['analysis'].pop(policy)
+    with pytest.raises(ScenarioError):
+        configure_program(data, 'case.yaml')
+
+
+@pytest.mark.parametrize('name,input_group', [('cache_scale_in', 'engine_counters'),
+                                             ('master_performance', 'engine_tps')])
+def test_metric_bindings_cannot_select_a_reader_backend(name, input_group):
+    data = config(name)
+    data['parameters']['observation']['inputs'][input_group]['source'] = 'metric_store'
+    with pytest.raises(ValueError, match='program owns the reader'):
+        configure_program(data, 'case.yaml')

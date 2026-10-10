@@ -54,7 +54,7 @@ class GatePolicyTest(unittest.TestCase):
         criteria['engine_tps'] = {'mock/rtp_llm_context_tps': 50000, 'mock/rtp_llm_context_tps_with_cache': 100000, 'mock/rtp_llm_generate_tps': 2230}
         criteria['engine_tps_by_profile'] = {'single-nonbatch': {
             'mock/rtp_llm_context_tps': 45000, 'mock/rtp_llm_context_tps_with_cache': 90000}}
-        gate_input = dict(source='metric_store', fields={name.split('/')[1]: dict(metric=name, labels=dict(role=role)) for name, role in {'mock/rtp_llm_context_tps': 'prefill', 'mock/rtp_llm_context_tps_with_cache': 'prefill', 'mock/rtp_llm_generate_tps': 'decode'}.items()})
+        gate_input = dict(fields={name.split('/')[1]: dict(metric=name, labels=dict(role=role)) for name, role in {'mock/rtp_llm_context_tps': 'prefill', 'mock/rtp_llm_context_tps_with_cache': 'prefill', 'mock/rtp_llm_generate_tps': 'decode'}.items()})
         single = for_profile(criteria, 'single-nonbatch', gate_input)
         batch = for_profile(criteria, 'batch-window', gate_input)
         self.assertEqual(single['engine_tps']['mock/rtp_llm_context_tps'], 45000)

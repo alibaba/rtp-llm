@@ -23,7 +23,8 @@ def default(case):
     data = case.inputs(
         traffic=JAVA_FLOW_INPUT_FIELDS | {"kind"},
         procedure=PROCEDURE_FIELDS | {"analysis_timeout_s"},
-        observation=OBSERVATION_FIELDS | {"inputs", "collapse", "windows", "capture"},
+        observation=OBSERVATION_FIELDS | {"inputs", "windows", "capture"},
+        analysis={"collapse"},
         checks=set(RULES) | {"collapse"},
     )
     flow = driver(data.traffic, "java_flow")
@@ -31,7 +32,7 @@ def default(case):
     gate = dict({k: v for k, v in data.procedure.items() if k != "analysis_timeout_s"},
                 **{k: data.observation[k] for k in OBSERVATION_FIELDS},
                 **observation_contract(data.observation),
-                **compile_checks(case, data.checks, data.observation["collapse"]))
+                **compile_checks(case, data.checks, data.analysis["collapse"]))
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])

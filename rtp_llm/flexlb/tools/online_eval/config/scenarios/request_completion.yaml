@@ -34,12 +34,12 @@ parameters:
     completed:
       op: eq
       expected: true
-      window: terminal
+      windows: [terminal]
       output: completed
       unit: boolean
     no_errors:
       op: eq
       expected: 0
-      window: terminal
+      windows: [terminal]
       output: error_count
       unit: errors

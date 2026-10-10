@@ -71,7 +71,6 @@ parameters:
     max_gap_s: 3
     inputs:
       engine_tps:
-        source: metric_store
         fields:
           rtp_llm_context_tps:
             metric: mock/rtp_llm_context_tps
@@ -85,10 +84,6 @@ parameters:
             metric: mock/rtp_llm_generate_tps
             labels:
               role: decode
-    slo:
-      ttft_ms: 2000
-      e2e_ms: 30000
-      tpot_ms: 50
     capture:
       max_samples: 1000
       max_bytes: 67108864
@@ -100,83 +95,88 @@ parameters:
         until:
           event: observation_start
           offset_s: 360
+  analysis:
+    slo:
+      ttft_ms: 2000
+      e2e_ms: 30000
+      tpot_ms: 50
   checks:
     offered_load:
       metric: performance_gate/offered_qps_deviation
-      window: measurement
+      windows: [measurement]
       unit: ratio
       op: le
       expected: 0.05
     requests:
       metric: performance_gate/cohort_requests
-      window: measurement
+      windows: [measurement]
       unit: requests
       op: ge
       expected: 260000
     pacing_lag:
       metric: performance_gate/pacing_lag_max_ms
-      window: measurement
+      windows: [measurement]
       unit: ms
       op: le
       expected: 250
     input_tps:
       metric: performance_gate/input_tps
-      window: measurement
+      windows: [measurement]
       unit: tokens/s
       op: ge
       expected: 4290000
     output_tps:
       metric: performance_gate/output_tps
-      window: measurement
+      windows: [measurement]
       unit: tokens/s
       op: ge
       expected: 429000
     goodput:
       metric: performance_gate/goodput_rps
-      window: measurement
+      windows: [measurement]
       unit: requests/s
       op: ge
       expected: 1440
     slo_fraction:
       metric: performance_gate/slo_fraction
-      window: measurement
+      windows: [measurement]
       unit: ratio
       op: ge
       expected: 0.95
     errors:
       metric: performance_gate/error_rate
-      window: full_run
+      windows: [full_run]
       unit: ratio
       op: le
       expected: 0
     ttft:
       metric: performance_gate/ttft_p99_ms
-      window: measurement
+      windows: [measurement]
       unit: ms
       op: le
       expected: 2000
     e2e:
       metric: performance_gate/e2e_p99_ms
-      window: measurement
+      windows: [measurement]
       unit: ms
       op: le
       expected: 30000
     tpot:
       metric: performance_gate/tpot_p99_ms
-      window: measurement
+      windows: [measurement]
       unit: ms
       op: le
       expected: 50
     inflight_growth:
       metric: performance_gate/inflight_growth_rps
-      window: measurement
+      windows: [measurement]
       unit: requests/s
       op: le
       expected: 10
     engine_tps:
       rtp_llm_context_tps:
         metric: performance_gate/rtp_llm_context_tps_scrape_engine_mean
-        window: measurement
+        windows: [measurement]
         unit: tokens/s
         op: ge
         expected: 50000
@@ -184,7 +184,7 @@ parameters:
           single-nonbatch: 45000
       rtp_llm_context_tps_with_cache:
         metric: performance_gate/rtp_llm_context_tps_with_cache_scrape_engine_mean
-        window: measurement
+        windows: [measurement]
         unit: tokens/s
         op: ge
         expected: 100000
@@ -192,7 +192,7 @@ parameters:
           single-nonbatch: 90000
       rtp_llm_generate_tps:
         metric: performance_gate/rtp_llm_generate_tps_scrape_engine_mean
-        window: measurement
+        windows: [measurement]
         unit: tokens/s
         op: ge
         expected: 2230

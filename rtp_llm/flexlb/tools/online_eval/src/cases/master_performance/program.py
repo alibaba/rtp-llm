@@ -19,7 +19,8 @@ def default(case):
     data = case.inputs(
         traffic=JAVA_FLOW_INPUT_FIELDS | {"kind"},
         procedure={"analysis_timeout_s"},
-        observation=OBSERVATION_FIELDS | {"inputs", "slo", "windows", "capture"},
+        observation=OBSERVATION_FIELDS | {"inputs", "windows", "capture"},
+        analysis={"slo"},
         checks=set(RULES) | {"engine_tps"},
     )
     from input_contract import finite_number
@@ -32,7 +33,7 @@ def default(case):
     flow = driver(data.traffic, "java_flow")
     client, _ = normalize(flow["client"])
     from cases.inputs import fields
-    slo = fields(data.observation["slo"], {"ttft_ms", "e2e_ms", "tpot_ms"}, "parameters.observation.slo")
+    slo = fields(data.analysis["slo"], {"ttft_ms", "e2e_ms", "tpot_ms"}, "parameters.analysis.slo")
     c = validate(dict({k: data.observation[k] for k in OBSERVATION_FIELDS},
                       **observation_contract(data.observation),
                       **compile_checks(case, data.checks, inputs["engine_tps"]),

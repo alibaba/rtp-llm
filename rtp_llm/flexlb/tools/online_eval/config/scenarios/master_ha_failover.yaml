@@ -126,21 +126,21 @@ parameters:
       all_requests: {}
   checks:
     baseline_success:
-      window: baseline
+      windows: [baseline]
       metric: ha_gate/success_rate
       op: ge
       expected: 0.95
       min_samples: 100
       unit: ratio
     b_success:
-      window: b_only
+      windows: [b_only]
       metric: ha_gate/success_rate
       op: ge
       expected: 0.95
       min_samples: 100
       unit: ratio
     b_route:
-      window: b_only
+      windows: [b_only]
       metric: ha_gate/target_share
       target: B
       op: ge
@@ -148,21 +148,21 @@ parameters:
       min_samples: 100
       unit: ratio
     b_balance:
-      window: b_only
+      windows: [b_only]
       metric: ha_gate/prefill_max_share
       op: le
       expected: 0.25
       min_samples: 100
       unit: ratio
     outage_failures:
-      window: outage
+      windows: [outage]
       metric: ha_gate/failed_count
       op: ge
       expected: 1
       min_samples: 50
       unit: requests
     outage_no_master:
-      window: outage
+      windows: [outage]
       metric: ha_gate/route_count
       route: master
       op: eq
@@ -170,21 +170,21 @@ parameters:
       min_samples: 50
       unit: requests
     outage_terminal:
-      window: outage
+      windows: [outage]
       metric: ha_gate/visible_terminal_share
       op: eq
       expected: 1
       min_samples: 50
       unit: ratio
     a_success:
-      window: a_only
+      windows: [a_only]
       metric: ha_gate/success_rate
       op: ge
       expected: 0.95
       min_samples: 100
       unit: ratio
     a_route:
-      window: a_only
+      windows: [a_only]
       metric: ha_gate/target_share
       target: A
       op: ge
@@ -192,28 +192,28 @@ parameters:
       min_samples: 100
       unit: ratio
     a_balance:
-      window: a_only
+      windows: [a_only]
       metric: ha_gate/prefill_max_share
       op: le
       expected: 0.25
       min_samples: 100
       unit: ratio
     both_success:
-      window: both
+      windows: [both]
       metric: ha_gate/success_rate
       op: ge
       expected: 0.95
       min_samples: 100
       unit: ratio
     both_balance:
-      window: both
+      windows: [both]
       metric: ha_gate/prefill_max_share
       op: le
       expected: 0.25
       min_samples: 100
       unit: ratio
     handover_errors:
-      window: a_handover
+      windows: [a_handover]
       metric: ha_gate/non_ok_count
       op: eq
       expected: 0
@@ -222,14 +222,14 @@ parameters:
       - batch-window
       unit: requests
     late_errors:
-      window: post_recovery
+      windows: [post_recovery]
       metric: ha_gate/non_ok_count
       op: eq
       expected: 0
       min_samples: 100
       unit: requests
     rolling_errors:
-      window: all_requests
+      windows: [all_requests]
       metric: ha_gate/non_ok_count
       op: eq
       expected: 0
@@ -238,7 +238,7 @@ parameters:
       - batch-window
       unit: requests
     unique_requests:
-      window: full_run
+      windows: [full_run]
       metric: ha_gate/duplicate_ids
       op: eq
       expected: 0

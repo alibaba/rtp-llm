@@ -121,7 +121,7 @@ def validate_client_criterion(params, *, path="client criterion"):
 
 
 def read_cycle(case):
-    from cases.windows import ObservationWindow
+    from cases.windows import ObservationWindow, check_windows
 
     if isinstance(case.parameters.get("procedure"), dict) and "restart_mode" in case.parameters["procedure"]:
         raise ScenarioError("restart_mode is owned by flow identity, not parameters")
@@ -150,12 +150,12 @@ def read_cycle(case):
                           "both_start", "both_end", "outage_start", "outage_end"})
         for name, spec in data.observation["windows"].items()}
     for name, criterion in data.checks.items():
-        fields(criterion, {"window", "metric", "unit", "op", "expected", "min_samples"},
+        fields(criterion, {"windows", "metric", "unit", "op", "expected", "min_samples"},
                "parameters.checks." + name,
                optional={"target", "route", "error_kind", "code", "warning_profiles"})
-        if type(criterion["window"]) is not str or criterion["window"] not in window_names | {"full_run"}:
-            raise ScenarioError(f"parameters.checks.{name}: unknown observation window")
-        validate_client_criterion({k: v for k, v in criterion.items() if k not in {"window", "unit"}},
+        check_windows(criterion["windows"], available=window_names | {"full_run"},
+                      path=f"parameters.checks.{name}.windows", single=True)
+        validate_client_criterion({k: v for k, v in criterion.items() if k not in {"windows", "unit"}},
                                   path="parameters.checks." + name)
         case.metric(criterion["metric"], unit=criterion["unit"])
     return data, windows
