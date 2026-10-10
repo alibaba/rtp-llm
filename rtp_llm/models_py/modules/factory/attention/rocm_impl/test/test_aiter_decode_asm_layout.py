@@ -34,6 +34,7 @@ class AiterDecodeAsmLayoutTest(unittest.TestCase):
             cache = torch.empty((3, 2, 4, 16, 128), dtype=dtype)
             cache_base = cache
         raw_key = cache.select(1, 0)
+        raw_value = cache.select(1, 1)
         kv_cache = SimpleNamespace(
             kv_cache_base=cache_base,
             kv_scale_base=torch.ones((3, 2, 4)),
@@ -49,7 +50,11 @@ class AiterDecodeAsmLayoutTest(unittest.TestCase):
             self.assertEqual(k.shape, (3, 4, 128 // vector_width, 16, vector_width))
             self.assertEqual(k.data_ptr(), raw_key.data_ptr())
             self.assertEqual(k.stride()[:2], raw_key.stride()[:2])
-            self.assertEqual(v.data_ptr(), cache.select(1, 1).data_ptr())
+            self.assertEqual(k.stride()[2:], (16 * vector_width, vector_width, 1))
+            self.assertEqual(v.shape, (3, 4, 16 // vector_width, 128, vector_width))
+            self.assertEqual(v.data_ptr(), raw_value.data_ptr())
+            self.assertEqual(v.stride()[:2], raw_value.stride()[:2])
+            self.assertEqual(v.stride()[2:], (128 * vector_width, vector_width, 1))
             return args[6]
 
         with patch.object(aiter, "pa_fwd_asm", side_effect=check_asm_call):
