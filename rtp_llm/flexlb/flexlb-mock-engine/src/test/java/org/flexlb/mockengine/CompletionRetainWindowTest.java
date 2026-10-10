@@ -189,7 +189,7 @@ class CompletionRetainWindowTest {
 
     @Test
     void periodicCleanupTrimsBacklogToRetainWindow() throws Exception {
-        prefill.setCompletionRetainWindow(2);
+        MockEngineTestSupport.setCompletionRetainWindow(prefill, 2);
         publishCompletions(1, 4);
 
         // Before cleanup the full backlog is still readable (reads never trim).
@@ -218,7 +218,7 @@ class CompletionRetainWindowTest {
 
     @Test
     void periodicCleanupKeepsBacklogWhenInsideWindow() throws Exception {
-        prefill.setCompletionRetainWindow(8);
+        MockEngineTestSupport.setCompletionRetainWindow(prefill, 8);
         publishCompletions(1, 3);
 
         prefill.periodicCleanup();
@@ -233,7 +233,7 @@ class CompletionRetainWindowTest {
 
     @Test
     void backlogStaysBoundedAcrossPublishAndCleanupRounds() throws Exception {
-        prefill.setCompletionRetainWindow(3);
+        MockEngineTestSupport.setCompletionRetainWindow(prefill, 3);
         // Three rounds of (publish 2 completions + cleanup): the queue must
         // converge to the window, never grow past it. Readiness is awaited
         // via latestFinishedVersion — earlier rounds' trimmed records are

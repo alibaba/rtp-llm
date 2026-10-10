@@ -99,7 +99,9 @@ class TelemetryEmissionSurfaceTest {
                                             .uri(
                                                     URI.create(
                                                             "http://127.0.0.1:"
-                                                                    + controlServer.getPort()
+                                                                    + MockEngineTestSupport
+                                                                            .controlPort(
+                                                                                    controlServer)
                                                                     + "/snapshot"))
                                             .GET()
                                             .build(),

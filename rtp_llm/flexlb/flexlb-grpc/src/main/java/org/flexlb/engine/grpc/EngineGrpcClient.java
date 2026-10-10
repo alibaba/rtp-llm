@@ -28,6 +28,8 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Engine gRPC client for worker status queries
  */
@@ -67,32 +69,13 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             @Value("${" + ENQUEUE_TIMEOUT_PROPERTY + ":" + DEFAULT_ENQUEUE_TIMEOUT_MILLIS + "}")
                     long enqueueTimeoutMillis) {
         super(grpcReporter);
-        if (enqueueTimeoutMillis <= 0L) {
-            throw new IllegalArgumentException("enqueueTimeoutMillis must be positive");
-        }
+        checkArgument(enqueueTimeoutMillis > 0L, "enqueueTimeoutMillis must be positive");
         this.enqueueTimeoutMillis = enqueueTimeoutMillis;
-        if (connectTimeoutMillis <= 0) {
-            throw new IllegalArgumentException("connectTimeoutMillis must be positive");
-        }
+        checkArgument(connectTimeoutMillis > 0, "connectTimeoutMillis must be positive");
         this.executor = executor;
         this.eventLoopGroup = eventLoopGroup;
         this.connectTimeoutMillis = connectTimeoutMillis;
         nameResolver.start(this);
-    }
-
-    private <R> CompletableFuture<R> executeGrpcCallAsync(
-            String ip,
-            int port,
-            Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
-            long requestTimeoutMs,
-            ServiceType serviceType) {
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                grpcCall,
-                requestTimeoutMs,
-                serviceType,
-                retriesBrokenConnections(serviceType));
     }
 
     static boolean retriesBrokenConnections(ServiceType serviceType) {
@@ -104,8 +87,8 @@ public class EngineGrpcClient extends AbstractGrpcClient {
             int port,
             Function<GrpcFutureStubWrapper, ListenableFuture<R>> grpcCall,
             long requestTimeoutMs,
-            ServiceType serviceType,
-            boolean retryOnBrokenConnection) {
+            ServiceType serviceType) {
+        boolean retryOnBrokenConnection = retriesBrokenConnections(serviceType);
         CompletableFuture<R> resultFuture = new CompletableFuture<>();
         long startTime = System.nanoTime();
 
@@ -129,7 +112,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 invoker = replaceInvoker(channelKey, invoker, newChannel);
             }
 
-            invoker.updateLastUsedTime();
             final Invoker finalInvoker = invoker;
             GrpcFutureStubWrapper stubWrapper =
                     new GrpcFutureStubWrapper(
@@ -335,14 +317,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
      */
     public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
             String ip, int port, EngineRpcService.EnqueueBatchRequestPB request) {
-        return batchEnqueueAsync(ip, port, request, enqueueTimeoutMillis);
-    }
-
-    public CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> batchEnqueueAsync(
-            String ip,
-            int port,
-            EngineRpcService.EnqueueBatchRequestPB request,
-            long requestTimeoutMs) {
         // EnqueueBatch is not safe to replay after an ambiguous connection
         // failure: the Engine may have accepted the first invocation even
         // though its ACK was lost. Reconciliation is owned by the scheduler's
@@ -352,7 +326,7 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 ip,
                 port,
                 stub -> stub.getRpcServiceFutureStub().enqueueBatch(request),
-                requestTimeoutMs,
+                enqueueTimeoutMillis,
                 ServiceType.BATCH_ENQUEUE);
     }
 

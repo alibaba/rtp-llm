@@ -92,7 +92,9 @@ class InflightLeakTest {
 
     @Test
     void midFlightEngineStopDrainsInflight() throws Exception {
-        MockPerformanceModel model = model("500"); // 500ms prefill to keep requests in-flight
+        MockPerformanceModel model =
+                MockEngineTestSupport.performanceModel(
+                        tempDir, "500", 1.0, 1000.0); // 500ms prefill to keep requests in-flight
         startCluster(model, 2, 2);
 
         int n = 50;
@@ -191,7 +193,7 @@ class InflightLeakTest {
         // Assert cancelled requests are not in "running" state
         for (long requestId : cancelledIds) {
             for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-                String state = service.getRequestStates().get(requestId);
+                String state = MockEngineTestSupport.getRequestStates(service).get(requestId);
                 if (state != null) {
                     assertNotEquals(
                             "running",
@@ -230,12 +232,14 @@ class InflightLeakTest {
 
         // During grace window (60s) — should NOT detect leak
         prefill.checkLeakDrain(60_000_000_000L);
-        assertFalse(prefill.isLeakDetected(), "leak should NOT be detected during grace window");
+        assertFalse(
+                MockEngineTestSupport.isLeakDetected(prefill),
+                "leak should NOT be detected during grace window");
 
         // After grace expires (force with 0 grace) — should detect leak
         prefill.checkLeakDrain(0);
         assertTrue(
-                prefill.isLeakDetected(),
+                MockEngineTestSupport.isLeakDetected(prefill),
                 "leak should be detected when inflight > 0 and grace expired");
 
         // Assert via HTTP snapshot
@@ -255,7 +259,8 @@ class InflightLeakTest {
     void doubleSchedulingNoLeak() throws Exception {
         // Prefill 500ms gives a wide window for the second scheduling path to
         // arrive while the first decode completion is still pending.
-        MockPerformanceModel model = model("500");
+        MockPerformanceModel model =
+                MockEngineTestSupport.performanceModel(tempDir, "500", 1.0, 1000.0);
         startCluster(model, 1, 1);
 
         JavaMockEngineCluster.FastRpcService prefill = prefillServices.get(0);
@@ -264,7 +269,6 @@ class InflightLeakTest {
         // Stretch decode to 1000ms so that the first scheduleDecodeCompletion
         // (from path B) is still in runningTasks when path A's prefill finishes
         // and triggers a second scheduleDecodeCompletion for the same requestId.
-        decode.getPerformance().setOverrideDecodeStepMs(1000.0);
 
         long requestId = 1L;
         int decodePort = decode.getGrpcPort();
@@ -296,7 +300,7 @@ class InflightLeakTest {
         // Assert no leak was detected
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             assertFalse(
-                    service.isLeakDetected(),
+                    MockEngineTestSupport.isLeakDetected(service),
                     "leak should not be detected on engine on port " + service.getGrpcPort());
         }
     }
@@ -306,9 +310,11 @@ class InflightLeakTest {
     @Test
     @Timeout(15)
     void firstPollSettlesBatchesThatFinishedBeforeAnyStatusPump() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(63400, 1, 1, "5", 1.0, false)) {
-            h.fixedWindowDecision().setMaxRequests(2);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000L);
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxRequests(2);
+        decision.setMaxCollectionWaitMs(10_000L);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(63400, 1, 1, "5", 1.0, false, decision)) {
+            var prefill = h.prefillEndpoint(0);
             List<CompletableFuture<Response>> firstWave = new ArrayList<>();
             for (long requestId = 90_001L; requestId <= 90_004L; requestId++) {
                 firstWave.add(h.scheduler.submit(h.context(requestId, 50)));
@@ -317,23 +323,27 @@ class InflightLeakTest {
             // Read Engine counters, not getWorkerStatus: this must be the first
             // poll after discovery, with every completion already in its delta.
             AutoTpmE2EHarness.await(
-                    () -> h.decodeEngines.getFirst().getCompletedCount() == 4L,
+                    () -> MockEngineTestSupport.getCompletedCount(h.decodeEngines.getFirst()) == 4L,
                     5_000L,
                     "all four requests must finish before the first status pump");
-            assertEquals(2, h.prefillEndpoint(0).getInflightBatchCount());
-            assertEquals(4, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(2, h.prefillEndpoint(0).ownership.stats().batchCount());
+            assertEquals(
+                    4,
+                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
 
             h.pumpPrefillOnce(0);
             assertEquals(
                     0,
-                    h.prefillEndpoint(0).getInflightBatchCount(),
+                    h.prefillEndpoint(0).ownership.stats().batchCount(),
                     "the first real status response must release both completed batches");
-            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(
+                    0,
+                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             h.pumpDecodeOnce(0);
             h.pumpPrefillOnce(0);
             assertEquals(
                     0,
-                    h.prefillEndpoint(0).getInflightBatchCount(),
+                    h.prefillEndpoint(0).ownership.stats().batchCount(),
                     "repeated polls must not restore or double-release completed ownership");
 
             List<CompletableFuture<Response>> secondWave = new ArrayList<>();
@@ -341,12 +351,14 @@ class InflightLeakTest {
                 secondWave.add(h.scheduler.submit(h.context(requestId, 50)));
             }
             AutoTpmE2EHarness.await(
-                    () -> h.decodeEngines.getFirst().getCompletedCount() == 6L,
+                    () -> MockEngineTestSupport.getCompletedCount(h.decodeEngines.getFirst()) == 6L,
                     5_000L,
                     "returned batch slots must allow the next requests to dispatch");
             h.pumpOnce();
-            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount());
-            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(0, h.prefillEndpoint(0).ownership.stats().batchCount());
+            assertEquals(
+                    0,
+                    prefill.ownership.admissionSummary(0, prefill.requestLimit).occupiedRequests());
             for (CompletableFuture<Response> future : firstWave) {
                 assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
             }

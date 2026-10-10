@@ -5,12 +5,15 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 /**
  * One service-discovery generation of an Engine worker.
@@ -71,24 +74,6 @@ public class WorkerStatus {
                             || priorityPreemptionProgress == PriorityPreemptionProgress.CANCELED)
                     && phase == TaskPhase.PENDING;
         }
-
-        private static TaskObservation copyOf(TaskInfo task) {
-            return new TaskObservation(
-                    task.getRequestId(),
-                    task.getPrefixLength(),
-                    task.getPrefillTime(),
-                    task.getInputLength(),
-                    task.getWaitingTime(),
-                    task.getIterateCount(),
-                    task.getEndTimeMs(),
-                    task.getDpRank(),
-                    task.getErrorCode(),
-                    task.getErrorMessage(),
-                    task.getBatchId(),
-                    task.getPhase(),
-                    task.getExecutionTimeMs(),
-                    task.getPriorityPreemptionProgress());
-        }
     }
 
     /**
@@ -139,11 +124,11 @@ public class WorkerStatus {
             boolean reportedAlive) {
 
         public PollHealth {
-            if (lastSuccessfulPollUs < 0L
-                    || successfulPollIntervalUs < 0L
-                    || consecutiveTransportFailures < 0L) {
-                throw new IllegalArgumentException("poll health counters must be non-negative");
-            }
+            checkArgument(
+                    lastSuccessfulPollUs >= 0L
+                            && successfulPollIntervalUs >= 0L
+                            && consecutiveTransportFailures >= 0L,
+                    "poll health counters must be non-negative");
         }
     }
 
@@ -205,14 +190,6 @@ public class WorkerStatus {
 
         public Map<String, TaskObservation> finishedTasks() {
             return finishedTasks;
-        }
-
-        public long runningQueryLen() {
-            return engine.runningQueryLen();
-        }
-
-        public long waitingQueryLen() {
-            return engine.waitingQueryLen();
         }
     }
 
@@ -287,7 +264,7 @@ public class WorkerStatus {
                 new AtomicReference<>(
                         new CommittedWorkerStatus(
                                 initialStatus, new AppliedStatusCursor(-1L, -1L)));
-        long discoveredAtUs = System.nanoTime() / 1000;
+        long discoveredAtUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         pollHealth = new AtomicReference<>(new PollHealth(discoveredAtUs, 0L, 0L, false));
     }
 
@@ -296,9 +273,7 @@ public class WorkerStatus {
             RoleType role, String group, String ip, int port, int grpcPort, String site) {
         Objects.requireNonNull(role, "role");
         Objects.requireNonNull(ip, "ip");
-        if (port <= 0 || grpcPort <= 0) {
-            throw new IllegalArgumentException("worker ports must be positive");
-        }
+        checkArgument(port > 0 && grpcPort > 0, "worker ports must be positive");
         return new WorkerStatus(
                 new TopologySnapshot(group, ip, port, grpcPort, site),
                 new EngineObservation(
@@ -326,39 +301,6 @@ public class WorkerStatus {
         return committedStatus.get().cursor();
     }
 
-    /**
-     * Deep-freeze one RPC response. Finished tasks remain response-local and
-     * are never copied into the committed Engine observation.
-     */
-    public StatusObservation freezeStatusResponse(WorkerStatusResponse response) {
-        Objects.requireNonNull(response, "response");
-        Map<String, TaskObservation> runningTasks = freezeTaskMap(response.getRunningTaskInfo());
-        Map<String, TaskObservation> finishedTasks = freezeTaskMap(response.getFinishedTaskInfo());
-        EngineObservation engine =
-                new EngineObservation(
-                        response.getRole(),
-                        response.getAvailableConcurrency(),
-                        response.getAvailableKvCacheTokens(),
-                        response.getTotalKvCacheTokens(),
-                        runningTasks,
-                        response.getStepLatencyMs(),
-                        response.getIterateCount(),
-                        response.getDpSize(),
-                        response.getTpSize(),
-                        response.getDpRank(),
-                        response.getMaxSeqLen(),
-                        response.getMaxBatchTokensSize(),
-                        response.getRunningQueryLen(),
-                        response.getWaitingQueryLen());
-        return new StatusObservation(
-                this,
-                engine,
-                response.isAlive(),
-                response.getStatusVersion(),
-                response.getLatestFinishedVersion(),
-                finishedTasks);
-    }
-
     /** Bind an already immutable protocol conversion to this exact generation. */
     public StatusObservation bindStatusObservation(
             EngineObservation engine,
@@ -381,10 +323,9 @@ public class WorkerStatus {
     public PreparedStatus prepareNewStatus(StatusObservation observation) {
         requireGenerationLock();
         requireActiveGeneration();
-        if (observation.owner != this) {
-            throw new IllegalArgumentException(
-                    "status observation belongs to another worker generation");
-        }
+        checkArgument(
+                observation.owner == this,
+                "status observation belongs to another worker generation");
         CommittedWorkerStatus current = committedStatus.get();
         Long responseVersion = observation.statusVersion();
         if (responseVersion == null
@@ -412,10 +353,9 @@ public class WorkerStatus {
     public void publishPreparedStatus(PreparedStatus prepared) {
         requireGenerationLock();
         requireActiveGeneration();
-        if (prepared.observation.owner != this) {
-            throw new IllegalArgumentException(
-                    "prepared status belongs to another worker generation");
-        }
+        checkArgument(
+                prepared.observation.owner == this,
+                "prepared status belongs to another worker generation");
         Long responseVersion = prepared.observation.statusVersion();
         if (responseVersion == null
                 || responseVersion <= 0L
@@ -426,17 +366,16 @@ public class WorkerStatus {
                             + ", response="
                             + responseVersion);
         }
-        if (!committedStatus.compareAndSet(prepared.baseCommitted, prepared.nextCommitted)) {
-            throw new IllegalStateException(
-                    "prepared status is stale or has already been published");
-        }
+        checkState(
+                committedStatus.compareAndSet(prepared.baseCommitted, prepared.nextCommitted),
+                "prepared status is stale or has already been published");
     }
 
     /** Record one validated status response independently from Engine state. */
     public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
         requireGenerationLock();
         requireActiveGeneration();
-        long nowUs = System.nanoTime() / 1000;
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         return pollHealth.updateAndGet(
                 current ->
                         new PollHealth(
@@ -459,26 +398,19 @@ public class WorkerStatus {
     }
 
     public void requireGenerationLock() {
-        if (!lock.isHeldByCurrentThread()) {
-            throw new IllegalStateException("status transaction requires generation lock");
-        }
+        checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
     }
 
     /** Reject any new publication or ownership after retirement starts. */
     public void requireActiveGeneration() {
         requireGenerationLock();
-        if (retiring) {
-            throw new IllegalStateException("WorkerStatus generation is retiring: " + generationId);
-        }
+        checkState(!retiring, "WorkerStatus generation is retiring: %s", generationId);
     }
 
     /** Require an operation to target the one retiring generation. */
     public void requireRetiringGeneration() {
         requireGenerationLock();
-        if (!retiring) {
-            throw new IllegalStateException(
-                    "WorkerStatus generation is not retiring: " + generationId);
-        }
+        checkState(retiring, "WorkerStatus generation is not retiring: %s", generationId);
     }
 
     /**
@@ -578,23 +510,18 @@ public class WorkerStatus {
                                 next, current.indexInitialized(), current.indexedVersion()));
     }
 
-    public long getCacheIndexedVersion() {
-        return cacheIndexSnapshot.get().indexedVersion();
-    }
-
     public void publishCacheIndexedVersion(long version) {
         requireGenerationLock();
         requireActiveGeneration();
         CacheIndexSnapshot current = cacheIndexSnapshot.get();
-        if (current.cacheStatus() == null || current.cacheStatus().getVersion() != version) {
-            throw new IllegalStateException(
-                    "indexed cache version must match current cache status");
-        }
+        checkState(
+                current.cacheStatus() != null && current.cacheStatus().getVersion() == version,
+                "indexed cache version must match current cache status");
         cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), true, version));
     }
 
     public long recordSuccessfulCachePoll() {
-        long nowUs = System.nanoTime() / 1000;
+        long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         long previousUs = cacheLastUpdateTime.getAndSet(nowUs);
         return previousUs <= 0L ? 0L : Math.max(0L, nowUs - previousUs);
     }
@@ -689,19 +616,6 @@ public class WorkerStatus {
             return null;
         }
         return current.ip() + ":" + current.port();
-    }
-
-    private static Map<String, TaskObservation> freezeTaskMap(Map<String, TaskInfo> tasks) {
-        if (tasks == null || tasks.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, TaskObservation> frozen = new HashMap<>(tasks.size());
-        for (Map.Entry<String, TaskInfo> entry : tasks.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                frozen.put(entry.getKey(), TaskObservation.copyOf(entry.getValue()));
-            }
-        }
-        return Map.copyOf(frozen);
     }
 
     @Override

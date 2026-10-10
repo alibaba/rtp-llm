@@ -1,12 +1,12 @@
 package org.flexlb.service;
 
+import com.google.common.math.LongMath;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
-import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -40,7 +40,7 @@ public class RecentCacheKeyTraceReporter {
                     .withZone(ZoneId.systemDefault());
 
     @Autowired(required = false)
-    private ShardedRecentCacheKeyWindow shardedRecentCacheKeyWindow;
+    private RecentCacheKeyWindow recentCacheKeyWindow;
 
     @Autowired(required = false)
     private CacheMetricsReporter cacheMetricsReporter;
@@ -58,24 +58,23 @@ public class RecentCacheKeyTraceReporter {
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
 
-    public void report(BalanceContext balanceContext) {
-        if (balanceContext == null) {
+    public void report(RequestContext requestContext) {
+        if (requestContext == null) {
             return;
         }
-        FlexlbConfig config = balanceContext.getConfig();
+        FlexlbConfig config = requestContext.data().getConfig();
         if (config != null
                 && !config.getObservability().getCacheHit().getRecentKeyWindow().isWriteEnabled()) {
             return;
         }
 
-        Request request = balanceContext.getRequest();
-        if (request == null || shardedRecentCacheKeyWindow == null) {
+        Request request = requestContext.data().getRequest();
+        if (request == null || recentCacheKeyWindow == null) {
             return;
         }
 
         List<Long> cacheKeys = request.getBlockCacheKeys();
-        RecentCacheKeyWindow.Snapshot snapshot =
-                shardedRecentCacheKeyWindow.record(balanceContext.getRequestId(), cacheKeys);
+        RecentCacheKeyWindow.Snapshot snapshot = recentCacheKeyWindow.record(cacheKeys);
         long inputTokens = Math.max(0L, request.getSeqLen());
         long hitTokens =
                 theoryHitTokens(
@@ -83,8 +82,8 @@ public class RecentCacheKeyTraceReporter {
                         inputTokens,
                         request.getCacheKeyBlockSize());
         CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(hitTokens, inputTokens);
-        logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
-        logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
+        logTraceIfEnabled(requestContext, request, snapshot, hitTokens, inputTokens, config);
+        logTheoryIfEnabled(requestContext, request, theorySnapshot, config);
 
         if (cacheMetricsReporter == null
                 || (config != null
@@ -102,17 +101,13 @@ public class RecentCacheKeyTraceReporter {
         if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
             return 0L;
         }
-        long hitTokens = hitKeyCount * cacheKeyBlockSize;
-        if (hitTokens < 0L) {
-            return inputTokens;
-        }
-        return Math.min(inputTokens, hitTokens);
+        return Math.min(inputTokens, LongMath.saturatedMultiply(hitKeyCount, cacheKeyBlockSize));
     }
 
     @PostConstruct
     public void initializeTheoryLog() {
         FlexlbConfig config = configService == null ? null : configService.loadBalanceConfig();
-        if (!theoryLogEnabled(config)) {
+        if (config == null || config.getObservability().getCacheHit().getTheoryLog() == null) {
             return;
         }
         theoryLogPath = config.getObservability().getCacheHit().getTheoryLog().getPath();
@@ -122,7 +117,7 @@ public class RecentCacheKeyTraceReporter {
     }
 
     private void logTraceIfEnabled(
-            BalanceContext balanceContext,
+            RequestContext requestContext,
             Request request,
             RecentCacheKeyWindow.Snapshot snapshot,
             long hitTokens,
@@ -136,10 +131,10 @@ public class RecentCacheKeyTraceReporter {
                 "Master cache-key trace: masterRequestId={}, requestId={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
-                balanceContext.getRequestId(),
+                requestContext.data().getRequestId(),
                 request.getRequestId(),
                 request.getSeqLen(),
-                request.getRequestTimeMs(),
+                request == null ? 0L : request.getRequestTimeMs(),
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitOccurrences(),
                 hitRatio(snapshot.getRequestHitOccurrences(), snapshot.getRequestOccurrences()),
@@ -147,8 +142,8 @@ public class RecentCacheKeyTraceReporter {
                 inputTokens,
                 hitRatio(hitTokens, inputTokens),
                 cacheKeyDigest(cacheKeys),
-                formatServerStatusList(balanceContext.getResponse()),
-                formatCacheKeys(cacheKeys));
+                formatServerStatusList(requestContext.data().getResponse()),
+                cacheKeys == null ? "[]" : cacheKeys.toString());
     }
 
     private static double hitRatio(long hitCount, long totalCount) {
@@ -159,42 +154,38 @@ public class RecentCacheKeyTraceReporter {
     }
 
     private void logTheoryIfEnabled(
-            BalanceContext balanceContext,
+            RequestContext requestContext,
             Request request,
             CacheHitTheoryStats.Snapshot snapshot,
             FlexlbConfig config) {
-        if (!theoryLogEnabled(config)) {
+        if (config == null || config.getObservability().getCacheHit().getTheoryLog() == null) {
             return;
         }
         if (snapshot == null || snapshot.getRequestTotalCount() <= 0L) {
             return;
         }
-        writeTheoryLogLine(formatTheoryLogLine(balanceContext, request, snapshot));
+        writeTheoryLogLine(formatTheoryLogLine(requestContext, request, snapshot));
     }
 
     private static String formatTheoryLogLine(
-            BalanceContext balanceContext, Request request, CacheHitTheoryStats.Snapshot snapshot) {
+            RequestContext requestContext, Request request, CacheHitTheoryStats.Snapshot snapshot) {
         return String.format(
                 Locale.ROOT,
                 "time=%s ts_ms=%d source=master master_request_id=%s request_id=%d seq_len=%d "
                         + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f "
                         + "all_hit_tokens=%d all_input_tokens=%d all_ratio=%.6f",
-                formatTimestamp(snapshot.getNowMs()),
+                THEORY_LOG_TIME_FORMATTER.format(Instant.ofEpochMilli(snapshot.getNowMs())),
                 snapshot.getNowMs(),
-                balanceContext == null ? "" : String.valueOf(balanceContext.getRequestId()),
-                request == null ? 0L : request.getRequestId(),
-                request == null ? 0L : request.getSeqLen(),
-                request == null ? 0L : request.getCacheKeyBlockSize(),
+                requestContext == null ? "" : String.valueOf(requestContext.data().getRequestId()),
+                request.getRequestId(),
+                request.getSeqLen(),
+                request.getCacheKeyBlockSize(),
                 snapshot.getRequestHitCount(),
                 snapshot.getRequestTotalCount(),
                 snapshot.getRequestHitRatio(),
                 snapshot.getAllHitCount(),
                 snapshot.getAllTotalCount(),
                 snapshot.getAllHitRatio());
-    }
-
-    private static String formatTimestamp(long timestampMs) {
-        return THEORY_LOG_TIME_FORMATTER.format(Instant.ofEpochMilli(timestampMs));
     }
 
     private static void writeTheoryLogLine(String line) {
@@ -238,10 +229,6 @@ public class RecentCacheKeyTraceReporter {
                     "Failed to open master theory hit log path {}: {}", logPath, e.getMessage());
         }
         return theoryLogWriter;
-    }
-
-    private static boolean theoryLogEnabled(FlexlbConfig config) {
-        return config != null && config.getObservability().getCacheHit().getTheoryLog() != null;
     }
 
     @Scheduled(fixedDelay = 1000L)
@@ -301,10 +288,6 @@ public class RecentCacheKeyTraceReporter {
             digest *= FNV_PRIME;
         }
         return Long.toUnsignedString(digest);
-    }
-
-    private static String formatCacheKeys(List<Long> cacheKeys) {
-        return cacheKeys == null ? "[]" : cacheKeys.toString();
     }
 
     private static String formatServerStatusList(Response response) {

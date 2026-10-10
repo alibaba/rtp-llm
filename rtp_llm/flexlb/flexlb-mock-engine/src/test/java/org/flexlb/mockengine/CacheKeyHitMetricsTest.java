@@ -278,7 +278,7 @@ class CacheKeyHitMetricsTest {
 
     private int controlPort() {
         assertNotNull(controlServer, "control server must be running");
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 
     /** Wait until the engine reports {@code expectedCompleted} completions —
@@ -288,12 +288,13 @@ class CacheKeyHitMetricsTest {
             JavaMockEngineCluster.FastRpcService service, long expectedCompleted)
             throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < deadline && service.getCompletedCount() < expectedCompleted) {
+        while (System.nanoTime() < deadline
+                && MockEngineTestSupport.getCompletedCount(service) < expectedCompleted) {
             Thread.sleep(5);
         }
         assertEquals(
                 expectedCompleted,
-                service.getCompletedCount(),
+                MockEngineTestSupport.getCompletedCount(service),
                 "the prefill request must complete (keys parked in the LRU)");
     }
 

@@ -1,7 +1,7 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.config.DecisionPolicyConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
@@ -35,9 +35,11 @@ class ProductionRoutingDeadlineE2ETest {
 
             long nearDeadlineId = 88_001L;
             long batchFollowerId = 88_002L;
-            BalanceContext nearDeadline = h.context(nearDeadlineId, 50, 10_000L, 8);
-            nearDeadline.setSchedulingMetadata(
-                    SchedulingMetadata.explicit(50, System.currentTimeMillis() + 2_000L));
+            RequestContext nearDeadline = h.context(nearDeadlineId, 50, 10_000L, 8);
+            nearDeadline
+                    .data()
+                    .setSchedulingMetadata(
+                            SchedulingMetadata.explicit(50, System.currentTimeMillis() + 2_000L));
 
             CompletableFuture<Response> first = h.scheduler.submit(nearDeadline);
             CompletableFuture<Response> second =

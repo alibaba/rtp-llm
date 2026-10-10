@@ -477,10 +477,10 @@ HA_TIER1_MASTER_B_HTTP_PORT = int(
 # Tier-2/3 ZK-activated layout: the SAME port group on DIFFERENT loopback
 # IPs (127.0.0.1:18080..18082 + 127.0.0.2:18080..18082 + FLEXLB_ADVERTISED_IP
 # injected per master).  Required because (verified in the Java code):
-#   * ZookeeperMasterElectService.initializeIpAndPort() sets the ZK
+#   * ZookeeperMasterElectService.initializeZookeeperClient() sets the ZK
 #     LeaderSelector id to the BARE local IP (no port) — same-IP dual
 #     instances collide and mis-elect (isStillMaster compares bare IPs);
-#   * LBStatusConsistencyService.getMasterHostIpPort() stitches the LOCAL
+#   * MasterStatusService.getMasterHostIpPort() stitches the LOCAL
 #     server.port onto the leader IP — a distinct-port layout would forward
 #     to the wrong port (A_IP:B_port is unreachable);
 #   * FlexlbGrpcForwarder.sameHost() compares bare IPs — same-IP instances
@@ -494,8 +494,8 @@ HA_TIER1_MASTER_B_HTTP_PORT = int(
 #
 # RULING (2026-09-02): the same-host distinct-IP layout is DEAD.  The
 # election localIp comes ONLY from InetAddress.getLocalHost() hostname
-# resolution (ZookeeperMasterElectService L106-111 + LBStatusConsistency-
-# Service L52, two independent sites, no env override channel), the gRPC
+# resolution through ZookeeperMasterElectService.localNodeIdentity()
+# (shared by MasterStatusService, no env override channel), the gRPC
 # wildcard bind (forPort) cannot start a second same-port instance, and
 # same-IP distinct-port makes SELF_TARGET permanently true, blocking all
 # forwarding; the production-side prerequisites (FLEXLB_ADVERTISED_IP
@@ -585,8 +585,8 @@ class MasterSpec:
       default).  Each master gets its OWN port group (A: HTTP 18080 /
       mgmt 18081 / gRPC 18082, B: HTTP 18083 / mgmt 18084 / gRPC 18085).
       With consistency disabled the three same-host assumptions are inert:
-      ZookeeperMasterElectService.init() returns before touching ZK,
-      LBStatusConsistencyService.getMasterHostIpPort() returns null (no
+      ZookeeperMasterElectService construction returns before touching ZK,
+      MasterStatusService.getMasterHostIpPort() returns null (no
       forwarding, LOCAL_STANDALONE routing) and
       FlexlbGrpcForwarder.sameHost(ip, null) is false (no SELF_TARGET), so
       distinct ports are the zero-risk layout.  No FLEXLB_ADVERTISED_IP.
@@ -595,9 +595,9 @@ class MasterSpec:
       harness (EnvSpec.zk_consistency).  The layout MUST switch to
       same-port / different-IP (bind_ip 127.0.0.1 vs 127.0.0.2 +
       FLEXLB_ADVERTISED_IP): the ZK LeaderSelector id is the BARE local IP
-      (ZookeeperMasterElectService.initializeIpAndPort), the forwarded
+      (ZookeeperMasterElectService.initializeZookeeperClient), the forwarded
       master address stitches the LOCAL server.port onto the leader IP
-      (LBStatusConsistencyService.getMasterHostIpPort) and SELF_TARGET
+      (MasterStatusService.getMasterHostIpPort) and SELF_TARGET
       compares bare IPs (FlexlbGrpcForwarder.sameHost) — a distinct-port
       same-IP pair breaks on all three.  Both instances share ONE
       HIPPO_ROLE: the ZK lock path is /master_lb_leader/{HIPPO_ROLE}, so
@@ -605,9 +605,9 @@ class MasterSpec:
 
     RULING (2026-09-02): the same-host distinct-IP Tier-3 layout is
     DEAD — the election localIp comes only from InetAddress.getLocalHost()
-    hostname resolution (ZookeeperMasterElectService L106-111 +
-    LBStatusConsistencyService L52, two independent sites, no env
-    override channel), the gRPC wildcard bind (forPort) cannot start a
+    hostname resolution through ZookeeperMasterElectService.localNodeIdentity()
+    (shared by MasterStatusService, no env override channel), the gRPC
+    wildcard bind (forPort) cannot start a
     second same-port instance, and same-IP distinct-port makes
     SELF_TARGET permanently true, blocking all forwarding; the
     production-side prerequisites (FLEXLB_ADVERTISED_IP consumer /

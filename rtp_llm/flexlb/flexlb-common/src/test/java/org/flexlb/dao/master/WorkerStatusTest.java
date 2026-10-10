@@ -52,7 +52,8 @@ class WorkerStatusTest {
     private static void publish(WorkerStatus status, WorkerStatusResponse response) {
         status.lock.lock();
         try {
-            WorkerStatus.StatusObservation observation = status.freezeStatusResponse(response);
+            WorkerStatus.StatusObservation observation =
+                    WorkerStatusTestSupport.freezeStatusResponse(status, response);
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(observation);
             status.publishPreparedStatus(prepared);
         } finally {
@@ -197,7 +198,8 @@ class WorkerStatusTest {
             WorkerStatusResponse stale = responseWithMarker(5L); // equal version
             status.lock.lock();
             try {
-                WorkerStatus.StatusObservation observation = status.freezeStatusResponse(stale);
+                WorkerStatus.StatusObservation observation =
+                        WorkerStatusTestSupport.freezeStatusResponse(status, stale);
                 assertThrows(
                         IllegalArgumentException.class, () -> status.prepareNewStatus(observation));
             } finally {
@@ -210,7 +212,7 @@ class WorkerStatusTest {
         void prepareRequiresGenerationLock() {
             WorkerStatus status = discovered();
             WorkerStatus.StatusObservation observation =
-                    status.freezeStatusResponse(responseWithMarker(1L));
+                    WorkerStatusTestSupport.freezeStatusResponse(status, responseWithMarker(1L));
             assertThrows(IllegalStateException.class, () -> status.prepareNewStatus(observation));
         }
 
@@ -223,7 +225,8 @@ class WorkerStatusTest {
             try {
                 prepared =
                         status.prepareNewStatus(
-                                status.freezeStatusResponse(responseWithMarker(1L)));
+                                WorkerStatusTestSupport.freezeStatusResponse(
+                                        status, responseWithMarker(1L)));
             } finally {
                 status.lock.unlock();
             }
@@ -244,10 +247,12 @@ class WorkerStatusTest {
             try {
                 first =
                         status.prepareNewStatus(
-                                status.freezeStatusResponse(responseWithMarker(2L)));
+                                WorkerStatusTestSupport.freezeStatusResponse(
+                                        status, responseWithMarker(2L)));
                 second =
                         status.prepareNewStatus(
-                                status.freezeStatusResponse(responseWithMarker(3L)));
+                                WorkerStatusTestSupport.freezeStatusResponse(
+                                        status, responseWithMarker(3L)));
             } finally {
                 status.lock.unlock();
             }
@@ -273,7 +278,8 @@ class WorkerStatusTest {
             try {
                 assertTrue(status.beginRetirementAfterEndpointGateClosed());
                 WorkerStatus.StatusObservation observation =
-                        status.freezeStatusResponse(responseWithMarker(2L));
+                        WorkerStatusTestSupport.freezeStatusResponse(
+                                status, responseWithMarker(2L));
                 assertThrows(
                         IllegalStateException.class, () -> status.prepareNewStatus(observation));
             } finally {
@@ -325,8 +331,8 @@ class WorkerStatusTest {
                                         try {
                                             long next = version.getAndIncrement();
                                             WorkerStatus.StatusObservation observation =
-                                                    status.freezeStatusResponse(
-                                                            responseWithMarker(next));
+                                                    WorkerStatusTestSupport.freezeStatusResponse(
+                                                            status, responseWithMarker(next));
                                             status.publishPreparedStatus(
                                                     status.prepareNewStatus(observation));
                                         } finally {

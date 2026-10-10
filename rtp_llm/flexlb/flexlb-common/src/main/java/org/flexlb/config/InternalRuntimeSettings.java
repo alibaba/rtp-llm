@@ -31,8 +31,6 @@ public final class InternalRuntimeSettings {
     /** Number of parallel route planners owned by the model queue by default. */
     private final int queuePlannerThreads = resolveQueuePlannerThreads();
 
-    private final long queueDecisionThreadJoinTimeoutMs = 5_000L;
-
     /** Completion callbacks must not contend with the dispatch handoff pool. */
     private final int batchDispatchCompletionThreads = 8;
 
