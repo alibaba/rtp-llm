@@ -433,6 +433,30 @@ def requant_weight_ue8m0(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     weight_block_size = [128, 128]
 
+    # Expert boundaries coincide with quantization blocks. Process one expert
+    # at a time to avoid full-batch FP32 scale repeats, dequantized weights and
+    # padded copies during simultaneous P/D loading. Retain the original FP32
+    # arithmetic and pack scales once to preserve DeepGEMM's batch TMA layout.
+    if weight.ndim == 3 and weight.shape[-2] % 128 == 0 and weight.shape[-1] % 128 == 0:
+        out_w = torch.empty(
+            weight.shape, device=weight.device, dtype=torch.float8_e4m3fn
+        )
+        out_s = torch.empty(
+            weight_scale_inv.shape, device=weight.device, dtype=torch.float32
+        )
+        for expert in range(weight.shape[0]):
+            dequant = block_quant_dequant(
+                weight[expert],
+                weight_scale_inv[expert],
+                weight_block_size,
+                torch.float32,
+            )
+            quant, sf = per_block_cast_to_fp8(dequant, use_ue8m0=True)
+            out_w[expert].copy_(quant)
+            out_s[expert].copy_(sf)
+            del dequant, quant, sf
+        return out_w, _transform_scale_ue8m0(out_s, mn=weight.shape[-2])
+
     # Match vLLM/DeepGEMM post-load processing: dequantize the serialized
     # FP8 blocks in FP32, then requantize to UE8M0.  Rounding through BF16
     # changes a small fraction of FP8 weight bits and is enough to flip GLM5
