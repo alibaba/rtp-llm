@@ -137,6 +137,18 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_deep_decode_sparse_replay",
+    testonly = True,
+    srcs = ["dsv41_deep_decode_sparse_replay.py"],
+    deps = [
+        ":dsv41_mhc_collapse_replay",
+        ":dsv41_sparse_precision_replay",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
