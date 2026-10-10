@@ -40,9 +40,7 @@ def build_spec(payload, presentation):
     spec = dict(
         run_id=payload["id"], title=title(payload["id"]), subtitle=presentation["report"]["subtitle"],
         timeOriginLabel="秒；t=0 为 workload 运行开始", timeAxis=dict(min=0, max=maximum),
-        kpis=[dict(label=KPI_LABELS["execution"], value=payload["status"]),
-              dict(label=KPI_LABELS["validity"], value=payload["workload"]["runtime_validity"]),
-              dict(label=KPI_LABELS["request_count"], value=metadata["request_count"])],
+        kpis=[dict(id="case.request_count", label=KPI_LABELS["request_count"], value=metadata["request_count"])],
         panels=panels, sections=sections,
     )
     from reporting.events import attach_events

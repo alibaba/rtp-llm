@@ -35,6 +35,8 @@ class Instance:
     duration_s: float
     budget: JavaMockBudget
     metadata: dict
+    compiled: dict | None = None
+    dependencies: dict | None = None
 
 
 def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]:
@@ -144,6 +146,8 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                     )
                     if key in row
                 },
+                row.get("compiled"),
+                payload.get("dependencies"),
             )
         )
     return instances

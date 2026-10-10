@@ -6,6 +6,20 @@ import copy
 from dataclasses import dataclass, field
 
 
+CHECK_STATUSES = frozenset({"PASS", "FAIL", "ERROR", "SKIP", "WARNING"})
+EFFECTIVE_CHECK_STATUSES = CHECK_STATUSES - {"SKIP"}
+
+
+def check_verdict(statuses):
+    """One aggregation rule: evidence errors dominate, skipped checks cannot pass."""
+    values = set(statuses)
+    if values - CHECK_STATUSES:
+        raise ValueError("invalid check status")
+    if not values & EFFECTIVE_CHECK_STATUSES or "ERROR" in values:
+        return "INVALID"
+    return "FAIL" if "FAIL" in values else "PASS"
+
+
 @dataclass(frozen=True)
 class CheckResult:
     """Shared decision data; importing numerical analysis never loads execution."""

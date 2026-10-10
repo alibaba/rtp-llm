@@ -13,6 +13,21 @@ def analyze_report(directory, result, evidence):
     return read_analysis(directory, result, evidence)
 
 
+def executed_result(status="PASS", **values):
+    check_status = "FAIL" if status in {"FAIL", "FINDING-CONFIRMED"} else "PASS"
+    result = dict(id="test", status=status, error=None, cleanup=[], stages=[dict(
+        id="check", status="TIMEOUT" if status == "TIMEOUT" else check_status,
+        error="stage deadline exceeded" if status == "TIMEOUT" else None,
+        checks=[dict(id="criterion", status=check_status)],
+    )])
+    if status == "FINDING-CONFIRMED":
+        result["finding_confirmed"] = ["check.criterion"]
+    elif status == "FINDING-RESOLVED":
+        result["finding_resolved"] = ["check.criterion"]
+    result.update(values)
+    return result
+
+
 class EvidenceIntegrityTest(unittest.TestCase):
     def test_optional_missing_curve_is_diagnostic_but_required_curve_invalidates(self):
         with tempfile.TemporaryDirectory() as d:
@@ -26,8 +41,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             path = telemetry / "queries.json"
             path.write_text(json.dumps(queries))
             def result():
-                return dict(id="test", status="PASS", error=None, stages=[],
-                            workload=dict(capture_metrics=True,
+                return executed_result(workload=dict(capture_metrics=True,
                                           runtime_validity="VALID"))
             evidence = dict(clock_anchor={"epoch_s": 0}, phases=[],
                             expected_telemetry=["1/mock"])
@@ -90,11 +104,8 @@ class EvidenceIntegrityTest(unittest.TestCase):
                 )
             (telemetry / "mock.prom").write_text("".join(raw))
             (telemetry / "mock-samples.jsonl").write_text("\n".join(journal) + "\n")
-            result = dict(
+            result = executed_result(
                 id="sparse",
-                status="PASS",
-                error=None,
-                stages=[],
                 workload=dict(
                     capture_metrics=True,
                     runtime_validity="VALID",
@@ -124,19 +135,15 @@ class EvidenceIntegrityTest(unittest.TestCase):
             "TIMEOUT",
         ):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as d:
-                result = dict(
-                    id="test",
+                result = executed_result(
                     status=status,
-                    error=None,
-                    stages=[],
                     workload=dict(capture_metrics=False, runtime_validity="INVALID"),
                 )
                 analyze_report(d, result, dict(clock_anchor={"epoch_s": 0}, phases=[]))
-                if status in ("FAIL", "TIMEOUT"):
-                    self.assertEqual(result["status"], status)
-                else:
-                    self.assertEqual(result["status"], "ERROR")
-                    self.assertEqual(result["workload"]["prior_status"], status)
+                self.assertEqual(result["status"], "TIMEOUT" if status == "TIMEOUT" else "ERROR")
+                self.assertEqual(result["outcome"]["validity"], "INVALID")
+                self.assertEqual(result["outcome"]["execution"], "TIMEOUT" if status == "TIMEOUT" else "PASS")
+                self.assertEqual(result["outcome"]["gate"], "PASS" if status == "TIMEOUT" else status)
 
     def test_interrupted_ha_keeps_partial_rows_and_rejects_completeness(self):
         with tempfile.TemporaryDirectory() as d:
@@ -215,11 +222,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     )
                 )
             )
-            r = dict(
-                id="test",
-                status="PASS",
-                stages=[],
-                error=None,
+            r = executed_result(
                 workload=dict(capture_metrics=True, runtime_validity="VALID"),
             )
             e = dict(

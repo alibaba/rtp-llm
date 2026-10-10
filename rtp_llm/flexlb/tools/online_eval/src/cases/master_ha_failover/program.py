@@ -87,3 +87,8 @@ def _cycle(case, restart_mode):
 REPORT_VIEWS = {
     "master_ha_failover.yaml": ReportView(validate_view, write_report),
 }
+
+
+def produce_gate_metrics(directory):
+    from cases.master_ha_failover.metrics import produce_gates
+    produce_gates(directory)

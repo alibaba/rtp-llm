@@ -67,7 +67,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertEqual(r["status"], "FAIL")
         self.assertEqual([s["status"] for s in r["stages"][-2:]], ["FAIL", "FAIL"])
         self.assertEqual(r["workload"]["runtime_validity"], "VALID")
-        self.assertEqual(r["workload"]["performance_verdict"], "NOT_EVALUATED")
+        self.assertEqual(r["outcome"]["gate"], "FAIL")
 
     def test_prerequisite_failure_blocks(self):
         self.assertEqual(

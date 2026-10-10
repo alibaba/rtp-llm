@@ -25,8 +25,8 @@ from scenario.contracts import PlanContext
 from scenario.runtime import (
     Deadline,
     RuntimeContext,
-    _core_action,
 )
+from scenario.stage_execution import _core_action
 from test_scenario_backend import lease_manifest
 from test_scenario_runtime import source
 

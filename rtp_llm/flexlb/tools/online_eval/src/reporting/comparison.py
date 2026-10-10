@@ -45,7 +45,7 @@ def _controls(analysis, spec):
         configuration=meta.get("configuration"),
         workload=meta.get("workload"),
         environment=meta.get("environment"),
-        criteria=analysis.get("criteria", (spec.get("meta") or {}).get("params")),
+        criteria=analysis.get("criteria"),
         statistic_sources=analysis.get("statistic_sources"),
     )
 

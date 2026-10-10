@@ -6,7 +6,7 @@ import json
 import threading
 
 from runtime.requests import ClientRecords, request_success
-from scenario.runtime import StageTimeout
+from runtime.deadline import StageTimeout
 
 
 def error_trailer_evidence(exc, pb2):

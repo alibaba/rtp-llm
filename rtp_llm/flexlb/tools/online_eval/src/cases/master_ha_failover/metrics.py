@@ -2,7 +2,6 @@
 
 import json
 import math
-import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -160,21 +159,31 @@ def gate_labels(params):
                                       if k in params}, sort_keys=True))
 
 
-def publish_gate(ctx, params, actual, rows):
-    """Freeze the computed cohort metric and return the published store for checks."""
-    from monitoring.metric_store import export_metrics, publish
-    store = export_metrics(ctx.artifact_dir, ctx.monitor.query_plan)
-    identity = params["metric"]
-    labels = gate_labels(params)
-    observations = [row for row in store.document["metrics"].get(identity, [])
-                    if row["labels"] != labels]
-    current = series_row([[time.time(), actual]], epoch=ctx.env_epoch,
-                         source="ha_gate", labels=labels)
-    stamps = [row["send_start_epoch_ms"] / 1000 for row in rows if "send_start_epoch_ms" in row]
-    publish(store, identity, store.document["definitions"][identity], [current],
-            producer="ha_gates", evidence=dict(input_resource=params["rows"], sample_count=len(rows),
-                observed_request_bounds=[min(stamps), max(stamps)] if stamps else None, selection=json.loads(labels["selection"]),
-                calculation=identity))
-    store.document["metrics"][identity] = observations + store.document["metrics"][identity]
-    store.save(ctx.artifact_dir)
-    return store
+
+def produce_gates(directory):
+    """Publish completed checks from the persisted run; never re-evaluate a gate."""
+    from monitoring.metric_store import MetricStore, publish
+    directory = Path(directory)
+    result = json.loads((directory / "result.json").read_text())
+    store = MetricStore.read(directory)
+    for stage in result["stages"]:
+        if stage["action"] != "master_client_check":
+            continue
+        for check in stage["checks"]:
+            evidence = check["evidence"]
+            identity = evidence["metric"]
+            if check["status"] not in {"PASS", "FAIL", "WARNING"}:
+                continue
+            labels = evidence["labels"]
+            observations = [row for row in store.document["metrics"].get(identity, [])
+                            if row["labels"] != labels]
+            stamp = evidence["observed_request_bounds"]
+            if stamp is None:
+                raise MetricUnavailable("HA gate evidence lacks observed request bounds")
+            timestamp = stamp[1]
+            current = series_row([[timestamp, check["actual"]]], epoch=evidence["env_epoch"],
+                                source="ha_gate", labels=labels)
+            publish(store, identity, store.document["definitions"][identity], [current],
+                    producer="ha_gates", evidence=dict(evidence, check=stage["id"] + "." + check["id"]))
+            store.document["metrics"][identity] = observations + store.document["metrics"][identity]
+    store.save(directory)

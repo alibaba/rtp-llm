@@ -48,7 +48,8 @@ def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
         else:
             output = module.finish(ctx, dict(flow=f, evidence=h), Deadline(100, lambda: 0))
     _, frozen = load_gate(tmp_path, kind)
-    assert output.checks[0].actual == frozen
+    assert output.checks[0].actual == frozen["verdict"]
+    assert output.checks[0].evidence["checks"] == frozen["checks"]
     assert output.checks[0].status == {"PASS": "PASS", "FAIL": "FAIL", "INVALID": "ERROR"}[frozen["verdict"]]
     assert not (tmp_path / "reports").exists()
 
@@ -170,3 +171,16 @@ def test_atomic_result_writer_preserves_previous_checkpoint_on_serialization_fai
         write_json(target, {"value": float("nan")})
     assert target.read_bytes() == before
     assert list(tmp_path.iterdir()) == [target]
+
+
+def test_malformed_analysis_is_a_persisted_delivery_error(tmp_path):
+    clock = Clock()
+    def invalid_analysis(self, ctx, result, deadline):
+        result["workload"] = dict(runtime_validity="VALID")
+        return None
+    with mock.patch.object(WorkloadPolicy, "finalize", invalid_analysis):
+        result = execute_workload(plan(), Backend(clock), artifact_dir=tmp_path,
+                                  clock=clock, sleeper=clock.sleep)
+    assert result["outcome"] == dict(execution="PASS", gate="PASS", validity="VALID", delivery="ERROR")
+    assert result["finalization"][1]["status"] == "ERROR"
+    assert json.loads((tmp_path / "result.json").read_text()) == result

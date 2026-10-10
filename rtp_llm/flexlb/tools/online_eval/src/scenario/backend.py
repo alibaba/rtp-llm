@@ -13,7 +13,7 @@ from pathlib import Path
 
 from scenario.request_batch import RequestBatch
 from runtime.perf_presets import load_preset
-from scenario.runtime import StageTimeout
+from runtime.deadline import StageTimeout
 
 
 class BoundedOps:

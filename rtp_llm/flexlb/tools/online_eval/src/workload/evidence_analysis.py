@@ -164,23 +164,8 @@ def analyze_report(directory, result, evidence):
     if missing:
         result["workload"]["runtime_validity"] = "INVALID"
         result["workload"]["missing_telemetry"] = missing
-        result["workload"]["prior_status"] = result["status"]
-        result["status"] = "ERROR"
-        result["error"] = result["error"] or "missing workload telemetry: " + ", ".join(
-            missing
-        )
-    if result["workload"]["runtime_validity"] == "INVALID" and result["status"] in {
-        "PASS",
-        "FINDING-CONFIRMED",
-        "FINDING-RESOLVED",
-    }:
-        # A contract or expected-failure detector cannot bless incomplete evidence.
-        result["workload"]["prior_status"] = result["status"]
-        result["status"] = "ERROR"
-        result["error"] = (
-            result.get("error")
-            or "workload evidence is invalid; inspect workload diagnostics"
-        )
+    from runtime.outcome import apply_outcome
+    apply_outcome(result)
     traffic = []
     iterations = []
     for flow_input in sorted(directory.glob("flows/*/flow-input.json")):
@@ -208,8 +193,4 @@ def analyze_report(directory, result, evidence):
             "configuration_sha256"
         ),
     )
-    from reporting import discover_reports
-
-    payload["gate_reports"] = discover_reports(directory, role="gate")
-    payload["gate_report"] = next(iter(payload["gate_reports"]), None)
     return payload

@@ -59,7 +59,7 @@ def _cell(value):
 
 def render_context(spec):
     """Grouped key/value cards, with long configuration values expanded on demand."""
-    meta = spec.get("run_meta") or spec.get("meta") or {}
+    meta = spec.get("run_meta") or {}
     runs = meta.get("runs") if isinstance(meta, dict) else None
     cards = runs.items() if isinstance(runs, dict) and runs else [(None, meta)]
     names = {"implementation": "代码与制品", "configuration": "配置与模型", "environment": "运行环境与拓扑",
@@ -150,7 +150,6 @@ def render(spec):
         "timeAxis": spec.get("timeAxis"),
         "events": spec.get("events", []),
         "timeOriginLabel": spec.get("timeOriginLabel"),
-        "meta": spec.get("meta"),
         "panels": [
             {
                 "id": p["id"],

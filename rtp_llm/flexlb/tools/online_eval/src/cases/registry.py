@@ -12,10 +12,6 @@ PROGRAMS = {
 }
 
 
-class ReportNotProduced(FileNotFoundError):
-    """No committed source for this view; corruption is a separate hard error."""
-
-
 @dataclass(frozen=True)
 class ReportView:
     validator: Callable

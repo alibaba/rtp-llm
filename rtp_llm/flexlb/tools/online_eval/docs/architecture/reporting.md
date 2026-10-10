@@ -14,7 +14,7 @@
 | `charts` | `curves`、`panels`、事件显示名和时间轴文案；全量视图在这里声明分组、采样和曲线可见性 |
 | `sections` | 按稳定 section ID 声明附录标题、表头和默认开合状态 |
 
-`sections.<id>` 只包含 `title`、`opened` 和表格的 `columns`。`checks` 表示专属门禁说明，`monitoring`、`validity`、`metrics`、`sources` 表示相应诊断；case 专属附录由注册的 Python 校验器声明。每个 case 校验附录 ID 集合及表格列数，不能依赖生产时的 KeyError。表格和详情使用相同开合组件，Python 决定内容和顺序，YAML 只控制展示。标准 KPI 的标签由公共组件统一提供，视图不另造一套 KPI 身份。
+`sections.<id>` 只包含 `title`、`opened` 和表格的 `columns`。`checks` 表示专属门禁说明，`monitoring`、`validity`、`metrics`、`sources` 表示相应诊断；case 专属附录由注册的 Python 校验器声明。每个 case 校验附录 ID 集合及表格列数，不能依赖生产时的 KeyError。表格和详情使用相同开合组件，Python 决定内容和顺序，YAML 只控制展示。公共骨架使用稳定的 `run.checks`、`run.validity` 区块 ID 和 `run.execution`、`run.validity` KPI ID；视图附录使用 `case.<id>`。结构去重只比较 ID，不比较标题或展示文字。公共组件生成标准 KPI 与检查表，case 提供专属面板和附录；运行报告不重复展示 case 的另一份检查表。
 
 曲线通过 `charts.curves.<curve_id>.metric_id` 与 `labels` 选择冻结指标，面板通过 `charts.panels[].curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
 
@@ -50,7 +50,7 @@
 
 单 run 标题统一由运行身份生成 `case : variant : profile`，视图 YAML 不声明或覆盖标题。副标题由视图的 `report.subtitle` 提供；离线重生成使用证据中冻结的运行身份。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
 
-门禁检查默认展开；有效性、诊断与附件使用同一折叠组件。较大的实际值展示摘要，完整值保留供展开，原始证据仍留在运行目录。
+门禁检查展示冻结结果中的具体检查，外层 action 的 `actual` 只记录 verdict，完整结果用校验后的工件路径引用，不把整份结果及窗口序列塞入表格单元格。门禁检查默认展开；有效性、诊断与附件使用同一折叠组件。较大的实际值展示摘要，完整值保留供展开，原始证据仍留在运行目录。
 
 时间曲线支持拖拽、输入秒数和还原区间，各时间面板同步。读数显示当前值与选区有效样本的等权 avg，并显示有效/总点数；缺采不补零。avg 用于阅读，不是时间加权均值，也不重判。全量 HTML 可以降采样，但完整序列与统计留在指标归档。
 
@@ -69,3 +69,5 @@
 在线门禁独立保存 `<gate>-gate-evidence.json`、`<gate>-gate-result.json` 和 `<gate>-gate-manifest.json`。manifest 最后原子提交，记录输入和结果的摘要；读取时校验固定文件名和摘要。缺少提交的 manifest 表示尚未产生门禁，已提交工件缺失或校验失败属于损坏，不能回退成普通缺失视图。
 
 每个专属视图由 program 的 `ReportView` 显式注册 renderer。在线执行在资源清理、证据分析和数值投影完成后调用 renderer，直接写出包含运行上下文的最终 bundle。公共报告层不读取旧 bundle 补写运行上下文；重绘只消费校验后的冻结结果和归档指标，不重判。缺少未提交门禁且运行已失败时，可生成默认监控视图，并明确显示未生成的视角。
+
+HA 的逐阶段检查直接根据已选请求证据产生 `CheckResult`，其输入选择、样本数、窗口边界与实测值进入阶段结果。收尾阶段从已落盘的阶段检查发布门禁标量，不重新测量或比较；门禁判定不依赖指标写入或 HTML 成功。公共报告元信息只接受明确的 `run_meta`，未知信息保留为空，不转换旧 `meta` 字段补造配置。

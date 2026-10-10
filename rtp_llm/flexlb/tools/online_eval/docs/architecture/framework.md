@@ -7,7 +7,9 @@ cases/<case>/program.py   步骤、分支、检查与能力声明
         ↓
 scenario compiler        校验并生成有类型的执行计划
         ↓
-parallel runner          分配 lane，执行并清理 Master / Mock
+parallel runner          冻结执行计划，分配 lane 与租约
+        ↓
+stage executor           执行固定步骤并清理 Master / Mock
         ↓
 frozen evidence/metrics  原始证据、指标定义与完整序列
         ↓
@@ -26,6 +28,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | CI suite | `suite_schema_version` | 2 |
 | mode profile | `mode_profiles_schema_version` | 1 |
 | Python 内部 program document | `program_schema_version` | 1 |
+| 冻结执行计划 | `execution_plan_schema_version` | 1 |
 | 编译 / 列举的实例清单 | `instance_catalog_schema_version` | 1 |
 | 子执行器结果 / 父 runner 汇总 | `scenario_results_schema_version` / `run_summary_schema_version` | 1 |
 | runner 计划 / 端口租约 / 耗时缓存 | `runner_plan_schema_version` / `lease_schema_version` / `timings_schema_version` | 1 |
@@ -68,11 +71,13 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、通用 `$ref` 或任意表达式；具名观测窗口只能选择 program 声明的时间输出，不能编排步骤。配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
 
-资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。
+资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要与代码、运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；代码或运行配置变化使启动失败，必须重新规划。
+
+`ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
 
 阶段使用剩余 deadline，清理使用独立预算并逆序执行。同一资源回调内的独立清理操作使用 `cleanup_all`，逐项尝试并汇总错误，诊断采样器失败不得阻断进程回收。启动部分失败也要回收已登记资源；未退出线程、未回收进程或清理异常不能成为 PASS。普通失败阻断依赖步骤，独立观察应放在最终判定之前。finding 只能声明具体检查，不豁免证据、超时和清理。
 
-观察预算覆盖预热、流程等待和取证窗口；排空预算覆盖停止发送后等待请求终态；分析预算覆盖归档、判定和报告发布。需要单独分析阶段的负载在 `procedure.analysis_timeout_s` 声明预算，不能由客户端请求超时推导。
+观察预算覆盖预热、流程等待和取证窗口；排空预算覆盖停止发送后等待请求终态；分析预算覆盖门禁所需的取证和判定；报告发布使用独立的 `execution.report_timeout_s`。需要单独分析阶段的负载在 `procedure.analysis_timeout_s` 声明预算，不能由客户端请求超时推导。
 
 请求发出、Schedule ACK、Fetch、业务 FINISHED、取消和资源释放分别取证，不互相推断。服务启动及诊断 API 成功应答不代替业务完成。具体协议见[请求生命周期](request-lifecycle.md)。
 
@@ -101,3 +106,9 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 清理结束后立即原子保存 `result.json`，每段收尾前后保存检查点。未完成的检查点使用 `status: FINALIZING`，不能作为终态 PASS；`execution_status` 保留阶段与清理的结果，`finalization` 保存各段预算、状态、耗时和错误。最终 `duration_ms` 包含执行、清理、证据和报告。证据阶段失败使 runtime validity 为 INVALID，并阻止报告阶段；报告失败记录 report status，保留已有 runtime validity 和独立门禁结果。整体执行器结果仍报告交付失败，调用方不能把未完成的交付当成成功。
 
 细项检查使用 `CheckResult` 的 id、status、actual、expected、detail、evidence；`gate_checks` 汇总有效阈值检查与完整性错误。ERROR 对应 INVALID，FAIL 对应有效观测越过门槛，SKIP 表示不适用，WARNING 表示 advisory。持续异常、窗口归属和请求 cohort 的计算属于各 case，公共组件只统一结果协议与聚合。
+
+## 结果状态
+
+`result.json.outcome` 分别保存 `execution`、`gate`、`validity` 和 `delivery`。流程异常、业务未达标、证据不足与交付失败分别记录，不用一种错误覆盖其他事实。`runtime.outcome.RunOutcome` 是最终状态的唯一计算规则，父 runner 使用同一规则验证子结果一致性。交付失败仍使任务失败，但不能改变已冻结的门禁 verdict；finding 只匹配明确失败的检查。
+
+没有执行有效检查，或只有 `SKIP`，不构成 PASS。`WARNING` 是实际完成的建议性检查；证据不足始终为 ERROR，不受建议性策略豁免。可缺失的测量输出必须显式声明 `nullable_number`，只有伴随证据 ERROR 时才能输出 null；成功结果仍要求实际有限数值。

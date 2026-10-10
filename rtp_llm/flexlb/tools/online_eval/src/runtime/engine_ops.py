@@ -7,22 +7,21 @@ Role addresses use the protocol string values PREFILL and DECODE.
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
-from dataclasses import dataclass, field
 from typing import List, Optional
 
 import grpc
 
 from runtime.environment_config import DEFAULT_MASTER_MANAGEMENT_PORT
 from runtime.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
-from runtime.network import http_get_json, http_post_json
+from runtime.network import http_get_json
+from runtime.mock_engine import MockEngineControl
+from runtime.stream import StreamHandle, StreamSnapshot
 
 DEFAULT_INPUT_LEN = 2048
 DEFAULT_OUTPUT_LEN = 10
 RECOVERY_TIMEOUT_S = 30.0
-STREAM_CANCEL_TIMEOUT_S = 5.0
 
 CHANNEL_OPTIONS = [
     ("grpc.max_receive_message_length", 64 * 1024 * 1024),
@@ -35,119 +34,8 @@ CHANNEL_OPTIONS = [
 # (mirror of flexlb-common PriorityNormalizer.QOS_HEADER_NAME).
 QOS_LEVEL_HEADER = "x-dashscope-inner-qos-level"
 
-# Master management-port prometheus exposition: primary Spring Boot
-# actuator path first, then the plain /prometheus fallback — the same URL
-# ladder as the G3 poller (eval_collectors.py).
-MASTER_PROMETHEUS_PATHS = ("actuator/prometheus", "prometheus")
 
-# Management-port warm-up gate: a freshly started master serves its HTTP
-# port and reports ready long before the management actuator exposition
-# answers (observed 40s–2.5min after master start).  A case that scrapes a
-# baseline right after env build then reads None and FAILs for environment
-# reasons — the full-parallel run masked this only because lanes shared an
-# already-warm env.  The gate polls the exposition ladder once per
-# EngineOps instance (== once per env: ops are cached per env in
-# JavaMockBackend._setup); after the endpoint answers the first time it
-# stays up for the env's lifetime, so later scrapes skip the wait.  A gate
-# timeout does NOT raise — the scrape falls through to the caller's
-# existing fail-loud None handling.
-PROMETHEUS_READY_TIMEOUT_S = 180.0
-PROMETHEUS_READY_INTERVAL_S = 2.0
-
-
-def _http_get_text(url: str, timeout: float = 5.0) -> Optional[str]:
-    from monitoring.telemetry import http_text
-
-    try:
-        return http_text(url, timeout)
-    except Exception:
-        return None
-
-
-@dataclass
-class StreamSnapshot:
-    """Collected state from a FetchResponse / GenerateStreamCall stream."""
-
-    outputs: List[object] = field(default_factory=list)
-    first_received: bool = False
-    completed: bool = False
-    error: Optional[str] = None
-    terminated: bool = False
-    terminated_s: Optional[float] = None  # monotonic time when stream ended
-    # Monotonic time when the FIRST output arrived — the client-observed
-    # TTFT anchor for graded property P7 (see balance_overload_avoid_prefill;
-    # under BATCH dispatch the first FetchResponse message only surfaces
-    # after decode completes, so P7 uses the completion-duration口径 there).
-    first_received_s: Optional[float] = None
-    # In-band typed error frame (GenerateOutputsPB.error_info, RpcErrorPB):
-    # the engine terminates failed streams IN-BAND — a frame carrying
-    # error_info is the LAST frame, then the stream completes with gRPC
-    # status OK (see priority.py _StreamTerminal's A1 note).  The raw code
-    # is an int: proto3 open enums surface non-production values (e.g. an
-    # injected 8500) as plain ints on the wire.  These fields are PURE
-    # additions — snap.error / snap.completed semantics stay untouched, so
-    # every existing consumer keeps its exact prior behavior.
-    stream_error_code: Optional[int] = None
-    stream_error_message: Optional[str] = None
-
-
-class StreamHandle:
-    """A gRPC stream consumed on a background thread."""
-
-    def __init__(self, call, snap: StreamSnapshot):
-        self.call = call
-        self.snap = snap
-        self.thread = threading.Thread(target=self._consume, daemon=True)
-        self.thread.start()
-
-    def _consume(self) -> None:
-        try:
-            for output in self.call:
-                if not self.snap.first_received:
-                    self.snap.first_received = True
-                    self.snap.first_received_s = time.monotonic()
-                self.snap.outputs.append(output)
-                # In-band typed terminal (error frame): record the raw code
-                # and message WITHOUT touching error/completed — the fields
-                # above stay exactly as legacy consumers see them, and
-                # run_one_request(typed_stream_error=True) surfaces the
-                # typed failure to its caller.
-                try:
-                    if output.HasField("error_info"):
-                        self.snap.stream_error_code = int(output.error_info.error_code)
-                        self.snap.stream_error_message = output.error_info.error_message
-                except AttributeError:
-                    pass
-                finished = output.flatten_output.finished
-                if finished and any(finished):
-                    self.snap.completed = True
-        except grpc.RpcError as exc:
-            # Client-side cancellation is not an error (mirrors legacy
-            # asyncio.CancelledError handling).
-            if exc.code() != grpc.StatusCode.CANCELLED:
-                self.snap.error = repr(exc)
-        except Exception as exc:
-            self.snap.error = repr(exc)
-        finally:
-            self.snap.terminated = True
-            self.snap.terminated_s = time.monotonic()
-
-    def wait_end(self, timeout_s: float = STREAM_CANCEL_TIMEOUT_S) -> bool:
-        self.thread.join(timeout_s)
-        if self.thread.is_alive():
-            self.cancel()
-            self.thread.join(5.0)
-            return False
-        return True
-
-    def cancel(self) -> None:
-        try:
-            self.call.cancel()
-        except Exception:
-            pass
-
-
-class EngineOps:
+class EngineOps(MockEngineControl):
     """Mock-engine HTTP control plane + master/worker gRPC client."""
 
     def __init__(
@@ -174,10 +62,6 @@ class EngineOps:
         self._channels: dict = {}
         self._request_counter = 20000
         self._rid_lock = threading.Lock()
-        # One-shot management-exposition readiness gate state (see
-        # _wait_prometheus_ready): False until the first
-        # master_prometheus_text() call has run the gate.
-        self._prometheus_gate_done = False
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -224,7 +108,7 @@ class EngineOps:
         output_len: int = DEFAULT_OUTPUT_LEN,
         block_keys: Optional[List[int]] = None,
         # Accepted (and ignored) for kwargs-forwarding symmetry with
-        # build_schedule_request: the shared call paths (run_one_request,
+        # build_schedule_request: the shared call paths (request submission,
         # case _fire helpers) forward ONE kwargs dict to both schedule()
         # and build_generate_input(); GenerateInputPB has no priority
         # field — priority rides the ScheduleRequest proto field (or the
@@ -383,7 +267,7 @@ class EngineOps:
         else:
             if input_pb is None:
                 # Default-shape fallback: callers that scheduled with a
-                # non-default shape MUST pass input_pb (see run_one_request).
+                # non-default shape MUST pass input_pb to preserve the scheduled request shape.
                 input_pb = self.build_generate_input(request_id)
             self._copy_role_addrs(input_pb, response)
             call = stub.GenerateStreamCall(input_pb, timeout=60.0)
@@ -447,301 +331,10 @@ class EngineOps:
         except Exception as exc:
             return False, f"exception: {exc!r}"
 
-    # -- mock HTTP control plane -------------------------------------------
-
-    def snapshot(self) -> dict:
-        data = http_get_json(f"http://127.0.0.1:{self.mock_http_port}/snapshot")
-        if data is None:
-            raise RuntimeError(
-                f"snapshot failed on mock http port {self.mock_http_port}"
-            )
-        return data
-
-    def snapshot_by_name(self) -> dict:
-        snap = self.snapshot()
-        return {e["name"]: e for e in snap.get("engines", [])}
-
-    def inject(self, engine_name: str, config: dict) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/inject",
-            {"engine": engine_name, "config": config},
-        )
-        if status != 200:
-            raise RuntimeError(f"inject({engine_name}) failed: {status} {body}")
-        return body or {}
-
-    def clear_inject(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/clear_inject",
-            {"engine": engine_name},
-        )
-        if status != 200:
-            raise RuntimeError(f"clear_inject({engine_name}) failed: {status} {body}")
-        return body or {}
-
-    def set_perf(self, engine_name: str, **kwargs) -> bool:
-        status, _ = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/set_perf",
-            {"engine": engine_name, **kwargs},
-        )
-        return status == 200
-
-    def set_kv_pressure(self, engine_name: str, active_kv_tokens: int) -> bool:
-        status, _ = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/set_kv_pressure",
-            {"engine": engine_name, "active_kv_tokens": active_kv_tokens},
-        )
-        return status == 200
-
-    def set_queue_depth(self, engine_name: str, queue_depth: int) -> bool:
-        """Java mock: sets FaultInjectionConfig.queueDepthLimit — a *real*
-        enqueue rejection gate (``pendingRequests >= limit``), not the legacy
-        Python fake display value."""
-        status, _ = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/set_queue_depth",
-            {"engine": engine_name, "queue_depth": queue_depth},
-        )
-        return status == 200
-
-    def stop_engine(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/stop_engine",
-            {"engine": engine_name},
-        )
-        if status != 200:
-            raise RuntimeError(f"stop_engine({engine_name}) failed: {status} {body}")
-        return body or {}
-
-    def start_engine(self, engine_name: str) -> dict:
-        status, body = http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/start_engine",
-            {"engine": engine_name},
-        )
-        if status != 200:
-            raise RuntimeError(f"start_engine({engine_name}) failed: {status} {body}")
-        return body or {}
-
-    def add_engine(
-        self, role: str, port: Optional[int] = None
-    ) -> tuple[int, Optional[dict]]:
-        """POST /add_engine {"role": ..., "port": optional} — dynamic scale-out.
-
-        The Java mock's field name is ``port`` (gRPC port; auto-allocated as
-        current max + 1 when omitted).  Returns (status, body) WITHOUT raising:
-        200 → body carries ``engine`` (name) + ``port`` (gRPC) + ``http_port``;
-        409 port-in-use / 400 bad role / 501 (cluster started without
-        --discovery-file) are surfaced to the caller (chaos cases exercise
-        concurrent add/remove and treat those as expected outcomes).
-        """
-        body: dict = {"role": role}
-        if port is not None:
-            body["port"] = port
-        return http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/add_engine", body
-        )
-
-    def remove_engine(
-        self,
-        engine_name: Optional[str] = None,
-        port: Optional[int] = None,
-        mode: str = "graceful",
-        drain_timeout_ms: Optional[int] = None,
-    ) -> tuple[int, Optional[dict]]:
-        """POST /remove_engine {"engine": name} or {"port": grpcPort}.
-
-        Default mode is the mock's GRACEFUL scale-in (strip the discovery
-        entry first so the master stops routing, then wait bounded for all
-        in-flight work to finish, then tear down) — the production rolling
-        scale-in order (user ruling 2026-09: a planned scale-in under load
-        must not lose or fail any request).  ``mode="abrupt"`` keeps the
-        legacy immediate teardown (in-flight streams cut) for chaos-style
-        fault cases.
-
-        The graceful call BLOCKS until the drain settles (mock drain cap
-        60s by default), so the HTTP timeout sits well above the bound;
-        the response carries ``drained`` / ``drain_ms`` alongside the
-        ``running_at_removal`` / ``waiting_at_removal`` counters.  Returns
-        (status, body) without raising — 404 (unknown engine) is an
-        expected outcome under concurrent add/remove racing.
-        """
-        body: dict = {}
-        if engine_name:
-            body["engine"] = engine_name
-        if port is not None:
-            body["port"] = port
-        if not body:
-            raise ValueError("remove_engine needs engine_name or port")
-        body["mode"] = mode
-        if drain_timeout_ms is not None:
-            body["drain_timeout_ms"] = drain_timeout_ms
-        # Graceful cap is 60s + teardown margin on the Java side; keep the
-        # client out of the way of a legitimately slow drain.
-        timeout = 5.0 if mode == "abrupt" else 95.0
-        return http_post_json(
-            f"http://127.0.0.1:{self.mock_http_port}/remove_engine",
-            body,
-            timeout=timeout,
-        )
-
-    def master_info(self) -> Optional[dict]:
-        """POST /rtp_llm/master/info {} → response payload (None on failure)."""
-        status, data = http_post_json(
-            f"http://127.0.0.1:{self.master_http_port}/rtp_llm/master/info",
-            {},
-            timeout=5,
-        )
-        return data if status == 200 else None
+    # -- Master debug read -------------------------------------------------
 
     def master_inflight(self) -> Optional[dict]:
         return http_get_json(
             f"http://127.0.0.1:{self.master_http_port}/rtp_llm/inflight_status",
             timeout=5,
         )
-
-    # -- master prometheus (management port) --------------------------------
-
-    def _wait_prometheus_ready(self) -> None:
-        """One-shot warm-up gate for the management exposition.
-
-        Polls the MASTER_PROMETHEUS_PATHS ladder until any path answers
-        (HTTP 200 → non-None body) or PROMETHEUS_READY_TIMEOUT_S elapses,
-        then marks the gate done so every later scrape goes straight
-        through.  Never raises and never swallows: on timeout the scrape
-        proceeds and returns None, preserving the caller-side fail-loud
-        contract ("unreachable = environment failure").
-        """
-        deadline = time.monotonic() + PROMETHEUS_READY_TIMEOUT_S
-        print(
-            "[engine_ops] waiting for master /prometheus warm-up "
-            f"(management port {self.master_management_port}, "
-            f"up to {PROMETHEUS_READY_TIMEOUT_S:.0f}s) ...",
-            file=sys.stderr,
-            flush=True,
-        )
-        while time.monotonic() < deadline:
-            for path in MASTER_PROMETHEUS_PATHS:
-                if (
-                    _http_get_text(
-                        f"http://127.0.0.1:{self.master_management_port}/{path}"
-                    )
-                    is not None
-                ):
-                    return
-            time.sleep(PROMETHEUS_READY_INTERVAL_S)
-        print(
-            "[engine_ops] master /prometheus still cold after "
-            f"{PROMETHEUS_READY_TIMEOUT_S:.0f}s — scrape proceeds and may "
-            "return None",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    def master_prometheus_text(self) -> Optional[str]:
-        """Raw prometheus exposition from the master management port.
-
-        Tries /actuator/prometheus first, then the /prometheus fallback
-        (MASTER_PROMETHEUS_PATHS).  Returns None when neither path
-        answers (master down / management port not exposed) — distinct
-        from an empty exposition string.  The first call per instance
-        runs the one-shot warm-up gate first (see
-        _wait_prometheus_ready — fresh-master management exposition has
-        a 40s–2.5min cold window).
-        """
-        if not self._prometheus_gate_done:
-            self._prometheus_gate_done = True
-            self._wait_prometheus_ready()
-        for path in MASTER_PROMETHEUS_PATHS:
-            body = _http_get_text(
-                f"http://127.0.0.1:{self.master_management_port}/{path}"
-            )
-            if body is not None:
-                return body
-        return None
-
-    # -- composite request helper ------------------------------------------
-
-    def run_one_request(
-        self,
-        rid: int,
-        stream_timeout_s: float = 15.0,
-        typed_stream_error: bool = False,
-        **kwargs,
-    ) -> tuple[str, Optional[str]]:
-        """Schedule → stream → consume to completion.
-
-        Returns (prefill_addr, error) — error is None on success.
-
-        ``typed_stream_error`` (default False, legacy behavior preserved):
-        when True, a stream that ended WITHOUT completing but WITH an
-        in-band error frame surfaces the typed failure
-        ("engine error code=<code>: <message>") instead of the generic
-        "stream did not complete" — the execution-phase failure family
-        (prefill_async_partial_fail) needs the code visible client-side
-        (production stream->reportError half of the terminal), while the
-        cancel/timeout family keeps the generic form every existing
-        assertion matches on.
-        """
-        try:
-            response = self.schedule(rid, **kwargs)
-            if response.code != 200 or not response.success:
-                return "", f"schedule failed: {response.error_message}"
-            addr = self.role_addr(response, "PREFILL")
-            # NON_BATCH re-builds the GenerateInputPB client-side with the
-            # SAME shape/block-keys kwargs the ScheduleRequest carried — a
-            # default-shape rebuild would desynchronize the engine's view
-            # (admitting default block keys) from the master's routing view.
-            input_pb = (
-                self.build_generate_input(rid, **kwargs)
-                if not response.enqueued_by_master
-                else None
-            )
-            handle = self.start_stream(response, rid, input_pb=input_pb)
-            handle.wait_end(stream_timeout_s)
-            snap = handle.snap
-            if snap.error:
-                return addr, snap.error
-            if not snap.completed:
-                if typed_stream_error and snap.stream_error_code is not None:
-                    return addr, (
-                        f"engine error code={snap.stream_error_code}: "
-                        f"{snap.stream_error_message}"
-                    )
-                return addr, "stream did not complete"
-            return addr, None
-        except Exception as exc:
-            return "", repr(exc)
-
-
-# ===========================================================================
-# Shared control-plane helpers (suite reorg)
-#
-# Cross-category helpers that used to live in injection_gate_cases.py /
-# status_fault_cases.py (the latter held its own copy while the mock control
-# server learned the status-fault types).  They operate purely on the mock
-# HTTP control plane and engine snapshots, so engine_ops.py is their shared
-# home — case action adapters import them from here.
-# ===========================================================================
-
-
-def inject_type(
-    ops: "EngineOps", engine_name: str, fault_type: str, enabled: bool = True, **params
-) -> dict:
-    """POST /inject with the ORIGINAL Java "type" format (MERGE semantics,
-    supports all fault types plus their parameters).
-
-    The EngineOps.inject() method uses the Python "config" format which
-    REPLACES the whole config and only knows the four boolean flags, so it
-    cannot express kv_pressure / queue_depth / crash_after / delays / the
-    status_* family.
-    """
-    payload = {"engine": engine_name, "type": fault_type, "enabled": enabled}
-    payload.update(params)
-    status, body = http_post_json(
-        f"http://127.0.0.1:{ops.mock_http_port}/inject", payload
-    )
-    if status != 200:
-        raise RuntimeError(
-            f"inject_type({engine_name}, {fault_type}, {params}) "
-            f"failed: {status} {body}"
-        )
-    return body or {}

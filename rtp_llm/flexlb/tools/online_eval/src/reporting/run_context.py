@@ -37,31 +37,33 @@ def provenance_from(analysis, inherited=None):
 
 
 def checks_section(analysis):
-    return table("门禁检查", ["阶段 / 检查", "状态", "实际值", "门槛"], [
-        [row["stage"] + "/" + row["id"], row["status"], row.get("actual"), row.get("expected")]
-        for row in analysis.get("checks", [])
-    ], opened=True)
+    rows = []
+    for row in analysis.get("checks", []):
+        nested = row.get("evidence", {}).get("checks")
+        for check in nested if nested is not None else [row]:
+            identity = row["stage"] + "/" + (row["id"] + "/" if nested is not None else "") + check["id"]
+            rows.append([identity, check["status"], check.get("actual"), check.get("expected")])
+    return table("门禁检查", ["阶段 / 检查", "状态", "实际值", "门槛"],
+                 rows, opened=True, identity="run.checks")
 
 
 def validity_section(analysis):
     workload = analysis.get("workload", {})
     return details("有效性与证据完整性", {key: workload.get(key) for key in (
         "runtime_validity", "telemetry_completeness", "missing_telemetry",
-        "telemetry_integrity_errors", "telemetry_diagnostics", "telemetry_warnings")})
+        "telemetry_integrity_errors", "telemetry_diagnostics", "telemetry_warnings")}, identity="run.validity")
 
 
 def canonical_spec(spec, analysis):
     result = copy.deepcopy(spec)
     result.update(run_id=analysis["id"], title=title(analysis["id"]))
-    kpis = result.setdefault("kpis", [])
-    result["kpis"] = [dict(label=label, value=value)
-                      for label, value in ((KPI_LABELS["execution"], analysis["status"]),
-                                           (KPI_LABELS["validity"], analysis["workload"]["runtime_validity"]))
-                      if not any(kpi["label"] == label for kpi in kpis)] + kpis
-    sections = [checks_section(analysis), validity_section(analysis)]
-    sections.extend(section for section in result.get("sections", [])
-                    if section.get("title") not in {"门禁检查", "有效性与证据完整性", "其他报告视角", "门禁详细结果"})
-    result["sections"] = sections
+    common = {"execution": analysis["status"], "validity": analysis["workload"]["runtime_validity"]}
+    result["kpis"] = [dict(id="run." + key, label=KPI_LABELS[key], value=value)
+                      for key, value in common.items()] + [
+        item for item in result.get("kpis", []) if item.get("id") not in {"run." + key for key in common}]
+    result["sections"] = [checks_section(analysis), validity_section(analysis)] + [
+        section for section in result.get("sections", [])
+        if section.get("id") not in {"run.checks", "run.validity", "case.checks"}]
     return result
 
 def selected_spec(spec, analysis, presentation):

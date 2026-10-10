@@ -14,7 +14,7 @@ from runtime.resource_plan import ResourcePlanError
 
 
 def catalog():
-    return {
+    document = {
         "instance_catalog_schema_version": 1,
         "instances": [
             {
@@ -46,6 +46,10 @@ def catalog():
             for i in range(7)
         ],
     }
+
+    for row in document["instances"]:
+        row["compiled"] = copy.deepcopy(row)
+    return document
 
 
 def parse(payload=None):

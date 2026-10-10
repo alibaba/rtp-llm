@@ -2,9 +2,10 @@
 
 import copy
 
-from cases.registry import view_capabilities, ReportNotProduced
+from cases.registry import view_capabilities
+from artifacts.errors import ArtifactNotProduced
 from reporting import details, write_bundle
-from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from
+from reporting.run_context import canonical_spec, provenance_from
 from reporting.view_config import DEFAULT_VIEW, view
 from workload.report_panels import build_panels
 
@@ -15,8 +16,7 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW):
     spec = dict(
         subtitle=presentation["report"]["subtitle"],
         timeOriginLabel="秒；t=0 为 workload 运行开始",
-        kpis=[dict(label=KPI_LABELS["execution"], value=payload["status"]),
-              dict(label=KPI_LABELS["validity"], value=payload["workload"]["runtime_validity"])],
+        kpis=[],
         panels=build_panels(series, payload.get("statistic_sources", {}), presentation),
         timeAxis=dict(min=0, max=max((point[0] for points in series.values()
                                     for point in points), default=1) or 1),
@@ -53,7 +53,7 @@ def write_views(directory, analysis, names=None):
             raise ValueError("selected view has no registered renderer: " + name)
         try:
             paths[name] = capability.renderer(directory, analysis, presentation)
-        except ReportNotProduced:
+        except ArtifactNotProduced:
             if analysis["status"] not in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
                 raise
             analysis.setdefault("unavailable_report_views", []).append(dict(

@@ -46,7 +46,7 @@ def instance_directory(instance_id):
     return "instance-" + hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
 
 
-def inventory(plans):
+def inventory(plans, dependencies):
     rows = []
     for plan in plans:
         row = {key: plan[key] for key in LIST_FIELDS}
@@ -57,8 +57,13 @@ def inventory(plans):
         if "implementation" in plan:
             row["implementation"] = plan["implementation"]
         row["execution"] = plan["execution"]
+        row["compiled"] = plan
         rows.append(row)
-    return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows)
+    from scenario.execution_plan import dependency_files
+    if dependencies != dependency_files():
+        raise ScenarioError("execution code/config changed during compilation")
+    return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows,
+                dependencies=dependencies)
 
 
 def select(plans, exact_ids):
@@ -104,6 +109,8 @@ def main(argv=None):
     )
     parser.add_argument("--instances", help="comma separated exact instance IDs")
     parser.add_argument("--list-json", action="store_true")
+    parser.add_argument("--plan", type=Path, help="execute a frozen parent-owned plan")
+    parser.add_argument("--plan-sha256", help="expected frozen plan checksum")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--archive", type=Path,
                         help="optional single-file scenario experiment archive")
@@ -117,21 +124,33 @@ def main(argv=None):
             parser.error("--profile disagrees with --master-mode")
         args.profile = selected
     try:
+        from scenario.execution_plan import dependency_files
+        dependencies = dependency_files()
         registry = handlers()
-        plans = select(
-            classify(
-                compile_scenarios(
-                    preselect_documents(load_scenarios(args.source), args.suite),
-                    args.profile,
-                    registry,
-                    grade=args.grade,
+        if args.plan:
+            if args.list_json or not args.plan_sha256:
+                raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
+            from scenario.execution_plan import load_plan
+            plans = select(load_plan(args.plan, args.plan_sha256), args.instances)
+            if any(plan["profile"] != args.profile or plan["grade"] != args.grade for plan in plans):
+                raise ScenarioError("frozen plan profile/grade disagrees with selection")
+        else:
+            if args.plan_sha256:
+                raise ScenarioError("--plan-sha256 requires --plan")
+            plans = select(
+                classify(
+                    compile_scenarios(
+                        preselect_documents(load_scenarios(args.source), args.suite),
+                        args.profile,
+                        registry,
+                        grade=args.grade,
+                    ),
+                    args.suite,
                 ),
-                args.suite,
-            ),
-            args.instances,
-        )
+                args.instances,
+            )
         if args.list_json:
-            print(json.dumps(inventory(plans), indent=2, allow_nan=False))
+            print(json.dumps(inventory(plans, dependencies), indent=2, allow_nan=False))
             return 0
         if args.out_dir is None or args.lease_json is None:
             raise ScenarioError(

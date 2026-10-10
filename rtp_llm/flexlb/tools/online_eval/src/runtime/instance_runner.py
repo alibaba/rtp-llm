@@ -33,7 +33,7 @@ from runtime.instance_plan import (
 from runtime.resource_plan import ResourcePlanError, plan_lane_leases
 
 SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
-STATUSES = {"PASS", "FAIL", "ERROR", "TIMEOUT", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
+from runtime.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
 
 
 class ChildProcesses:
@@ -265,6 +265,14 @@ def _execution_issues(row):
             issues.append(
                 "finding classification does not match explicit failed checks"
             )
+    if "outcome" in row:
+        from dataclasses import asdict
+        try:
+            outcome = RunOutcome.from_result(row)
+            if row["outcome"] != asdict(outcome) or row["status"] != outcome.status:
+                issues.append("result outcome disagrees with execution evidence")
+        except (ValueError, TypeError, KeyError) as exc:
+            issues.append("invalid result outcome: " + str(exc))
     return issues
 
 
@@ -348,23 +356,28 @@ def _run_lane(index, lane, lease, args, out, children):
     result_path = segment / "scenarios.json"
     lease_path = segment / "lease.json"
     write_json(lease_path, {"lease_schema_version": 1, **lease.to_manifest()})
-    command = [
-        sys.executable,
-        str(SCENARIO_RUNNER),
-        "--source",
-        str(Path(args.case_dir).resolve()),
-        "--profile",
-        args.profile,
-        "--grade",
-        args.grade,
-        "--instances",
-        ",".join((instance.id for instance in group)),
-        "--out-dir",
-        str(segment),
-        "--lease-json",
-        str(lease_path),
-    ]
     try:
+        from scenario.execution_plan import freeze_plan
+        plan_path = segment / "execution-plan.json"
+        plan_sha = freeze_plan(plan_path, [instance.compiled for instance in group],
+                               dependencies=group[0].dependencies)
+        command = [
+            sys.executable,
+            str(SCENARIO_RUNNER),
+            "--plan", str(plan_path), "--plan-sha256", plan_sha,
+            "--source",
+            str(Path(args.case_dir).resolve()),
+            "--profile",
+            args.profile,
+            "--grade",
+            args.grade,
+            "--instances",
+            ",".join((instance.id for instance in group)),
+            "--out-dir",
+            str(segment),
+            "--lease-json",
+            str(lease_path),
+        ]
         execution = [instance.metadata["execution"] for instance in group]
         timeout = (
             sum((item["timeout_s"] + item["cleanup_timeout_s"]

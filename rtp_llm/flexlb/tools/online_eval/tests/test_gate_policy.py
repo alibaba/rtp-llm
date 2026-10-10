@@ -30,18 +30,6 @@ class GatePolicyTest(unittest.TestCase):
         deadline = SimpleNamespace(check=lambda: None)
         params = dict(rows='rows', metric='ha_gate/non_ok_count', op='eq', expected=0,
                       min_samples=2, warning_profiles=['batch-window'])
-        def publish(c, p, value, rows):
-            from monitoring.metric_store import MetricStore
-            from cases.master_ha_failover.metrics import gate_labels
-
-            return MetricStore(dict(metrics_schema_version=1,
-                definitions={p['metric']: dict(unit='requests')},
-                metrics={p['metric']: [dict(epoch='1', source='ha_gate', labels=gate_labels(p),
-                    points=[[1, value]], status='OK', provenance={})]}))
-
-        publisher = mock.patch("cases.master_ha_failover.metrics.publish_gate", side_effect=publish)
-        publisher.start()
-        self.addCleanup(publisher.stop)
         check = _client_check(ctx, params, deadline).checks[0]
         self.assertEqual((check.status, check.actual, check.expected), ('WARNING', 1, 0))
         self.assertEqual(_client_check(ctx, {**params, 'min_samples': 3}, deadline)

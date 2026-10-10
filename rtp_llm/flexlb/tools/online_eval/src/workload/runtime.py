@@ -250,8 +250,6 @@ class WorkloadPolicy:
                 or any(x["status"] != "PASS" for x in result["cleanup"])
                 else "VALID"
             ),
-            # A valid execution is not proof that a calibrated performance band passed.
-            performance_verdict="NOT_EVALUATED",
         )
         result["workload"]["collection_profile"] = self.profile
         result["workload"]["monitor_backend"] = "prometheus"

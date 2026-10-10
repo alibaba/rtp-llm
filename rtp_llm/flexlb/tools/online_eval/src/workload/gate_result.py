@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from analysis.checks import CheckResult
 from analysis.gates import gate_checks
-from cases.registry import ReportNotProduced
+from artifacts.errors import ArtifactNotProduced
 from schema_contract import matches_schema
 from artifacts.json_io import write_json
 
@@ -40,7 +40,7 @@ def load_gate(directory, name):
     directory = Path(directory)
     committed = directory / f"{name}-gate-manifest.json"
     if not committed.is_file():
-        raise ReportNotProduced("gate result was not committed: " + name)
+        raise ArtifactNotProduced("gate result was not committed: " + name)
     manifest = json.loads(committed.read_text())
     if not matches_schema(manifest, "gate_result_schema_version", 1):
         raise ValueError("unsupported frozen gate manifest")
@@ -59,5 +59,5 @@ def load_gate(directory, name):
 
 def gate_check(identity, result, path, expected):
     return CheckResult(identity, {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[result["verdict"]],
-                       detail="; ".join(result.get("errors", [])), actual=result, expected=expected,
-                       evidence=dict(result=str(path), sha256=_sha(Path(path))))
+                       detail="; ".join(result.get("errors", [])), actual=result["verdict"], expected=expected,
+                       evidence=dict(result=str(path), sha256=_sha(Path(path)), checks=result["checks"]))

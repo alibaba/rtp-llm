@@ -272,7 +272,7 @@ def _client_check(ctx, params, deadline):
     metric = params["metric"].split("/", 1)[1]
     if n < params["min_samples"]:
         from analysis.checks import invalid_check
-        return StageOutput(checks=[invalid_check("criterion", detail="insufficient request samples",
+        return StageOutput({"actual": None}, checks=[invalid_check("criterion", detail="insufficient request samples",
             expected=params["expected"], evidence=dict(metric=params["metric"],
                 sample_count=n, min_samples=params["min_samples"]))])
 
@@ -285,15 +285,16 @@ def _client_check(ctx, params, deadline):
 
         prefill_pool = topology_pools(ctx, deadline)["prefill"]
     actual = measure_client_metric(params, rows, target=target, prefill_pool=prefill_pool)
-    from cases.master_ha_failover.metrics import publish_gate, gate_labels
-    from analysis.checks import check_metric
+    from cases.master_ha_failover.metrics import gate_labels
+    from analysis.checks import evaluate
 
-    store = publish_gate(ctx, params, actual, rows)
-    result = check_metric(store, "criterion", params["metric"],
-        labels=gate_labels(params), source="ha_gate", epoch=ctx.env_epoch, reduction="last",
-        op=params["op"], expected=params["expected"],
+    stamps = [row_ts_ms(row) / 1000 for row in rows if "send_start_epoch_ms" in row]
+    result = evaluate("criterion", actual, params["op"], params["expected"],
         advisory=bool(params.get("warning_profiles")) and ctx.instance["profile"] in params["warning_profiles"],
-        evidence=dict(sample_count=n, min_samples=params["min_samples"]))
+        evidence=dict(metric=params["metric"], op=params["op"], env_epoch=ctx.env_epoch,
+            input_resource=params["rows"], labels=gate_labels(params),
+            sample_count=n, min_samples=params["min_samples"],
+            observed_request_bounds=[min(stamps), max(stamps)] if stamps else None))
     if result.status == "WARNING":
         import logging
         logging.getLogger(__name__).warning(
@@ -322,7 +323,7 @@ HANDLERS = [
                 "master_client_check",
                 _client_check_validate,
                 _client_check,
-                {"actual": "number"},
+                {"actual": "nullable_number"},
                 checks=frozenset({"criterion"}),
             ),
 ]

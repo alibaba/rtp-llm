@@ -8,12 +8,12 @@ from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
 from schema_contract import matches_schema
 
 
-def details(title, value, *, opened=False):
-    return dict(type="details", title=title, value=value, opened=opened)
+def details(title, value, *, opened=False, identity=None):
+    return dict(type="details", id=identity, title=title, value=value, opened=opened)
 
 
-def table(title, columns, rows, *, opened=True):
-    return dict(type="table", title=title, columns=list(columns), rows=list(rows), opened=opened)
+def table(title, columns, rows, *, opened=True, identity=None):
+    return dict(type="table", id=identity, title=title, columns=list(columns), rows=list(rows), opened=opened)
 
 
 def links(title, items):
@@ -135,15 +135,9 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     validate(spec)
     spec = copy.deepcopy(spec)
     spec["report_spec_schema_version"] = REPORT_SPEC_SCHEMA_VERSION
-    legacy_meta = spec.get("meta") or {}
-    spec["run_meta"] = meta or run_meta(
+    spec["run_meta"] = meta or spec.get("run_meta") or run_meta(
         dict(id=str(identity), kind=kind),
-        implementation=legacy_meta.get("version"),
-        workload=legacy_meta.get("dataset"),
-        configuration=legacy_meta.get("params"),
-        environment=legacy_meta.get("env"),
         clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
-        evidence=legacy_meta.get("sources"),
     )
     _validate_run_meta(spec["run_meta"])
     directory = bundle_path(root, kind, identity)

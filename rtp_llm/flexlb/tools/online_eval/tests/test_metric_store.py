@@ -104,13 +104,19 @@ class MetricPlanTest(unittest.TestCase):
 class MetricArtifactTest(unittest.TestCase):
     def test_ha_windows_keep_their_own_source_provenance(self):
         from types import SimpleNamespace
-        from cases.master_ha_failover.metrics import publish_gate
+        from cases.master_ha_failover.metrics import produce_gates, gate_labels
+        from monitoring.metric_store import export_metrics
         with tempfile.TemporaryDirectory() as d:
-            ctx = SimpleNamespace(artifact_dir=Path(d), env_epoch=1,
-                                  monitor=SimpleNamespace(query_plan=load_plan("master_ha_failover.yaml")))
+            export_metrics(d, load_plan("master_ha_failover.yaml")).save(d)
+            checks = []
             for window, stamp in [("before", 1000), ("after", 2000)]:
-                publish_gate(ctx, dict(metric="ha_gate/success_rate", rows=window), 1,
-                             [dict(send_start_epoch_ms=stamp)])
+                params = dict(metric="ha_gate/success_rate", rows=window)
+                checks.append(dict(id=window, action="master_client_check", checks=[dict(
+                    id="criterion", status="PASS", actual=1, evidence=dict(metric=params["metric"],
+                        labels=gate_labels(params), env_epoch=1, sample_count=1,
+                        observed_request_bounds=[stamp/1000, stamp/1000]))]))
+            (Path(d)/"result.json").write_text(json.dumps(dict(stages=checks)))
+            produce_gates(d)
             rows = MetricStore.read(d).document["metrics"]["ha_gate/success_rate"]
             self.assertEqual([row["provenance"]["evidence"]["observed_request_bounds"] for row in rows],
                              [[1, 1], [2, 2]])
