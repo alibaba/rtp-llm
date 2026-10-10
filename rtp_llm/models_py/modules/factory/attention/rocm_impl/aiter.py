@@ -1472,6 +1472,21 @@ class AiterDecodeAttnOpAsm(AiterDecodeAttnOpBase):
 
         paged_kv_cache = self.reshape_kv_cache(kv_cache.kv_cache_base)
         key_cache, value_cache = paged_kv_cache.unbind(1)
+        # pa_fwd_asm reads the page size from K.size(3). The packed RTP cache
+        # exposes K as [blocks, heads, page, head_dim]; reinterpret its existing
+        # vectorized bytes as AITER's [blocks, heads, head_dim/x, page, x].
+        # view() preserves the pointer and strides used by the ASM kernel.
+        if key_cache.ndim == 4:
+            vector_width = 16 // key_cache.element_size()
+            if key_cache.shape[2:] != (self.tokens_per_block, self.head_dim):
+                raise ValueError(f"unexpected ASM PA key cache shape: {key_cache.shape}")
+            key_cache = key_cache.view(
+                key_cache.shape[0],
+                key_cache.shape[1],
+                self.head_dim // vector_width,
+                self.tokens_per_block,
+                vector_width,
+            )
         block_tables_id_device = fmha_params.kv_cache_block_id_device
         max_num_blocks = block_tables_id_device.shape[1]
         K_QScale = None
