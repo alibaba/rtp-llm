@@ -489,8 +489,10 @@ final class MockControlServer {
                     targets = targets.stream().filter(s -> s.getEngineName().equals(engine)).toList();
                 }
                 if (targets.isEmpty()) throw new IllegalArgumentException("no matching decode engine");
-                for (String key : new String[]{"step_base_ms", "step_per_running_ms", "tokens_per_step"})
+                for (String key : new String[]{"step_base_ms", "step_per_running_ms", "tokens_per_step"}) {
+                    if (!body.has(key)) throw new IllegalArgumentException("missing required field: " + key);
                     if (!body.path(key).isNumber()) throw new IllegalArgumentException(key + " number required");
+                }
                 double base = body.path("step_base_ms").asDouble();
                 double slope = body.path("step_per_running_ms").asDouble();
                 double tokens = body.path("tokens_per_step").asDouble();

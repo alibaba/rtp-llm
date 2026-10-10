@@ -11,6 +11,7 @@ import hashlib
 import json
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -22,6 +23,7 @@ from flexlb_cfg import (  # noqa: E402
     PROFILES,
     STRESS_PROFILE,
     ConfigOverride,
+    build_flexlb_config,
     parse_overrides,
     render_env,
     render_process_config,
@@ -166,9 +168,50 @@ class LayeringTest(unittest.TestCase):
         )
 
 
+class DecodeAvailabilityTest(unittest.TestCase):
+    def test_invalid_values_fail_in_override_and_direct_generator(self):
+        for field, values in (
+            ('decode_max_engine_requests', (-1, 0, True, 1.5, 2_147_483_648)),
+            ('decode_max_kv_usage_percent', (-1, 0, 101, True, 1.5)),
+        ):
+            for value in values:
+                for factory in (ConfigOverride, build_flexlb_config):
+                    with self.subTest(field=field, value=value, factory=factory), self.assertRaisesRegex(ValueError, field):
+                        factory(**{field: value})
+
+    def test_boundaries_are_valid_in_both_profile_paths(self):
+        for requests, percent in ((1, 1), (2_147_483_647, 100)):
+            for profile in ('batch-window', STRESS_PROFILE):
+                doc = json.loads(render_env(profile, ConfigOverride(
+                    decode_max_engine_requests=requests, decode_max_kv_usage_percent=percent)))
+                self.assertEqual({'maxEngineRequests': requests, 'maxKvUsagePercent': percent},
+                                 doc['router']['roles']['decode']['availability'])
+
+
 class StressOverrideTest(unittest.TestCase):
     """stress-na130 override edit-in-place contracts."""
 
+    def test_fifo_accepts_preemption_omit_but_rejects_priority_values(self):
+        doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(ordering='fifo', preemption=OMIT)))
+        self.assertEqual({'type': 'FIFO'}, doc['scheduler']['ordering'])
+        from flexlb_profile_data import STRESS_BASE
+        with patch.dict(STRESS_BASE['scheduler'], ordering={'type': 'FIFO'}):
+            for override in (ConfigOverride(default_priority=50),
+                             ConfigOverride(preemption={'allowed_victim_stages': ['PREFILL_QUEUED']})):
+                with self.subTest(override=override), self.assertRaisesRegex(ValueError, 'apply only to ordering'):
+                    render_env(STRESS_PROFILE, override)
+            doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(preemption=OMIT)))
+            self.assertEqual({'type': 'FIFO'}, doc['scheduler']['ordering'])
+
+    def test_dispatcher_accepts_json_enum_case(self):
+        for lower in ('batch', 'non_batch'):
+            self.assertEqual(render_env(STRESS_PROFILE, ConfigOverride(dispatcher=lower)),
+                             render_env(STRESS_PROFILE, ConfigOverride(dispatcher=lower.upper())))
+
+    def test_single_rejects_window_parameters(self):
+        for field in ('max_requests', 'max_collection_wait_ms', 'max_predicted_execution_ms'):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field + ' applies only'):
+                render_env(STRESS_PROFILE, ConfigOverride(decision='single', **{field: 1}))
     def test_decode_max_engine_requests(self) -> None:
         doc = json.loads(
             render_env(STRESS_PROFILE, ConfigOverride(decode_max_engine_requests=5000))

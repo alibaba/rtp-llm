@@ -124,6 +124,17 @@ def _validate_affinity(extra_ms, percent):
         raise ValueError("cache_affinity_min_prefix_hit_percent must be finite and in [0, 100]")
 
 
+def _validate_decode_availability(max_requests, kv_percent):
+    if max_requests is not None and (
+        type(max_requests) is not int or not 1 <= max_requests <= 2_147_483_647
+    ):
+        raise ValueError("decode_max_engine_requests must be a positive Java integer")
+    if kv_percent is not None and (
+        type(kv_percent) is not int or not 1 <= kv_percent <= 100
+    ):
+        raise ValueError("decode_max_kv_usage_percent must be an integer in [1, 100]")
+
+
 @dataclass(frozen=True)
 class ConfigOverride:
     """Explicit schema-v3 overrides; removed schema-v3 keys are rejected."""
@@ -151,6 +162,8 @@ class ConfigOverride:
     strip_preemption: bool = False
 
     def __post_init__(self):
+        _validate_decode_availability(self.decode_max_engine_requests,
+                                      self.decode_max_kv_usage_percent)
         if self.decision_lifetime is not None and (
             type(self.decision_lifetime) not in (int, float)
             or not math.isfinite(self.decision_lifetime)
@@ -340,6 +353,7 @@ def build_flexlb_config(
     decode_max_kv_usage_percent: int = GENERATOR_DEFAULTS["decode_max_kv_usage_percent"],
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
+    _validate_decode_availability(decode_max_engine_requests, decode_max_kv_usage_percent)
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
     if decision not in ("single", "fixed_window") or dispatcher not in (
         "batch", "non_batch"
@@ -488,13 +502,6 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
             raise ValueError(
                 f"ordering must be 'fifo' or 'priority', got {overrides.ordering!r}"
             )
-        if new_type == "fifo" and (
-            overrides.default_priority is not None or overrides.preemption is not None
-        ):
-            raise ValueError(
-                "default_priority/preemption apply only to ordering='priority' "
-                "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
-            )
         policy = FifoOrdering() if new_type == "fifo" else PriorityOrdering(
             current.get("defaultPriority") if current_type == "priority" else None,
             PreemptionPolicy.from_json(current["preemption"])
@@ -509,6 +516,13 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
     else:
         policy = FifoOrdering()
     if isinstance(policy, FifoOrdering):
+        if overrides.default_priority is not None or (
+            overrides.preemption is not None and overrides.preemption is not OMIT
+        ):
+            raise ValueError(
+                "default_priority/preemption apply only to ordering='priority' "
+                "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
+            )
         scheduler["ordering"] = policy.to_json()
         return
     priority = (policy.default_priority if overrides.default_priority is None
@@ -537,13 +551,11 @@ def _retype_decision(doc: dict, overrides: ConfigOverride) -> None:
             f"{overrides.decision!r}"
         )
     if new_type == "single":
-        doc["scheduler"]["decision"] = SingleDecision().to_json()
-        for field, key in (("max_requests", "maxRequests"),
-                           ("max_collection_wait_ms", "maxCollectionWaitMs"),
-                           ("max_predicted_execution_ms", "maxPredictedExecutionMs")):
+        for field in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
             value = getattr(overrides, field)
             if value is not None and value is not OMIT:
-                _edit_doc(doc, ("scheduler", "decision", key), value, field)
+                raise ValueError(f"ConfigOverride.{field} applies only to decision='fixed_window'")
+        doc["scheduler"]["decision"] = SingleDecision().to_json()
         return
     values = {}
     for field, key in (("max_requests", "maxRequests"),
@@ -567,7 +579,7 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
     if cap is None or cap is OMIT:
         cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
     doc["dispatcher"] = DispatcherPolicy(
-        overrides.dispatcher or doc["dispatcher"]["type"].lower(), cap,
+        (overrides.dispatcher or doc["dispatcher"]["type"]).lower(), cap,
     ).to_json()
 
 

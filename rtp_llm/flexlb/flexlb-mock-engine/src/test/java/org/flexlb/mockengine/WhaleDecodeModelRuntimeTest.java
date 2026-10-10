@@ -48,6 +48,14 @@ class WhaleDecodeModelRuntimeTest {
             assertFalse(services.get(63220).getPerformance().decodeModelState()
                     .get("runtime_override").equals(true));
             String after = MockEngineTestSupport.httpGet(httpPort, "/decode_model");
+            var missing = MockEngineTestSupport.httpPostResponse(httpPort, "/decode_model", "{\"step_base_ms\":23}");
+            assertEquals(400, missing.statusCode());
+            assertEquals("missing required field: step_per_running_ms", json.readTree(missing.body()).path("error").asText());
+            var wrongType = MockEngineTestSupport.httpPostResponse(httpPort, "/decode_model",
+                    body.replace("23", "\"23\""));
+            assertEquals(400, wrongType.statusCode());
+            assertEquals("step_base_ms number required", json.readTree(wrongType.body()).path("error").asText());
+            assertEquals(json.readTree(after), json.readTree(MockEngineTestSupport.httpGet(httpPort, "/decode_model")));
             for (String bad : new String[]{"{}", body.replace("2.35", "0"),
                     body.replace("0.02", "-1"), body.replace("\"step_base_ms\"", "\"unknown\""),
                     body.replace("}", ",\"engine\":\"missing\"}")}) {

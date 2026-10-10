@@ -25,14 +25,13 @@ def parser():
     p.add_argument("--log-glob", default="dash_sc_grpc_access_r0_s*.log*")
     p.add_argument("--time-budget-s", type=float, default=900)
     p.add_argument("--tail-bytes", type=int, default=16000000)
-    p.add_argument("--completion-grace-ms", type=int, default=300000)
     p.add_argument("--on-budget", choices=("error", "truncate"), default="error")
     return p
 
 
 def capture(a, *, clock=time.monotonic):
     """同一核心用于容器目录或下载目录；clock 可用于确定性护栏验证。"""
-    if not 0 < a.time_budget_s < float("inf") or a.tail_bytes <= 0 or a.completion_grace_ms < 0:
+    if not 0 < a.time_budget_s < float("inf") or a.tail_bytes <= 0:
         raise ValueError("invalid capture guard parameters")
     if a.start >= a.end:
         raise ValueError("capture start must precede end")
@@ -182,7 +181,7 @@ def capture(a, *, clock=time.monotonic):
         "errors": errors,
         "parameters": dict(log_dir=str(a.log_dir), log_glob=a.log_glob,
                            time_budget_s=a.time_budget_s, tail_bytes=a.tail_bytes,
-                           completion_grace_ms=a.completion_grace_ms, on_budget=a.on_budget),
+                           on_budget=a.on_budget),
         "hostname": socket.gethostname(),
         "start": a.start,
         "end": a.end,

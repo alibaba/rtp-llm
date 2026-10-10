@@ -79,7 +79,7 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 不覆盖原始归档，不以拟合件恢复、推算或生成已丢失的精确长度。
 
 采集支持 `--log-dir`、`--log-glob`；运行位置、部署/Pod 定位由外部执行环境负责。
-护栏默认 `--time-budget-s 900 --tail-bytes 16000000 --completion-grace-ms 300000`。
+护栏默认 `--time-budget-s 900 --tail-bytes 16000000`。采集窗口按请求到达时间筛选，完成时间不用于裁剪窗口。
 超预算默认 `--on-budget error` 返回失败，仍写 summary；显式 `truncate` 正常返回，
 但 summary 必须标记 `complete: false`、`truncated: true` 和 `budget_exceeded`。
 fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采集，再分别拟合；
