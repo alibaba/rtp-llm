@@ -80,6 +80,13 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_output_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_output_owner_replay.py"],
+    deps = [":dsv41_output_projection_replay", "//rtp_llm:torch"],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
