@@ -2857,4 +2857,54 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
+TEST_F(FIFOSchedulerTest, testSumQuotaBacklogThresholdPreservesSmallBatchesAndBothCaps) {
+    ScopedEnvVar threshold("RTP_LLM_PREFILL_SUM_QUOTA_MIN_STREAMS", "8");
+    CacheConfig  cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, DataType::TYPE_FP16);
+    auto         cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    ModelConfig model_config;
+    model_config.max_seq_len = 1000;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    runtime_config.fifo_scheduler_config.max_batch_kv_len      = 250;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+    auto make_stream = [&](int length = 60, int reused = 50) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::arange(length, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        auto stream =
+            std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setReuseLength(reused);
+        return stream;
+    };
+    std::list<GenerateStreamPtr> admitted{make_stream()};
+    auto                         candidate = make_stream();
+    scheduler.waiting_streams_.push_back(candidate);
+    // Two cached tails fit sum(q)/sum(KV), but retain legacy admission when
+    // there is little queued work: 60 + 60 exceeds the legacy token budget.
+    EXPECT_FALSE(scheduler.evaluateRunningBatch(admitted, candidate));
+    scheduler.loading_cache_streams_.push_back(make_stream());
+    scheduler.loading_cache_streams_.push_back(make_stream());
+    scheduler.waiting_group_queue_.push_back({make_stream(), make_stream(), make_stream(), make_stream()});
+    EXPECT_TRUE(scheduler.evaluateRunningBatch(admitted, candidate));
+    // Large backlogs still obey both strict capacity bounds, including KV
+    // history reused from host memory.
+    EXPECT_FALSE(scheduler.evaluateRunningBatch(admitted, make_stream(200, 190)));
+    scheduler.max_batch_tokens_size_ = 20;
+    EXPECT_FALSE(scheduler.evaluateRunningBatch(admitted, candidate));
+    scheduler.max_batch_tokens_size_ = 100;
+    scheduler.loading_cache_streams_.clear();
+    scheduler.waiting_group_queue_.clear();
+    // Threshold 0 restores the previously configured sum-quota behavior.
+    ScopedEnvVar disabled("RTP_LLM_PREFILL_SUM_QUOTA_MIN_STREAMS", "0");
+    EXPECT_TRUE(scheduler.evaluateRunningBatch(admitted, candidate));
+}
+
 }  // namespace rtp_llm

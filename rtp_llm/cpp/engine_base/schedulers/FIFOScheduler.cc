@@ -30,6 +30,18 @@ bool asyncCachePrepareEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
+// Opt-in workload threshold: short cached tails can lose throughput when
+// only a few requests are batched, but large backlogs amortize model launches.
+size_t prefillSumQuotaMinStreams() {
+    const char* env = std::getenv("RTP_LLM_PREFILL_SUM_QUOTA_MIN_STREAMS");
+    if (env == nullptr) {
+        return 0;
+    }
+    char*      end   = nullptr;
+    const long value = std::strtol(env, &end, 10);
+    return end != env && *end == '\0' && value > 0 ? static_cast<size_t>(value) : 0;
+}
+
 bool fifoBatchTraceEnabled() {
     const char* env = std::getenv("RTP_LLM_FIFO_BATCH_TRACE");
     return env != nullptr && std::strcmp(env, "1") == 0;
@@ -333,6 +345,31 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     // keeping it here makes both callers retain the original boundary semantics.
     const auto running_token_reserve = running_streams_.size();
 
+    const auto fits_legacy = [&]() {
+        if (running_token_reserve >= max_batch_tokens_size_) {
+            return false;
+        }
+        const auto available_tokens = max_batch_tokens_size_ - running_token_reserve;
+
+        // Full logical token cost (including reused prefix) must be strictly below
+        // max_batch_tokens_size_. Subtraction avoids overflow in the sum.
+        if (admitted_tokens >= available_tokens) {
+            return false;
+        }
+        const auto candidate_tokens = prefillTokenCostWithCache(candidate);
+        if (candidate_tokens >= available_tokens - admitted_tokens) {
+            return false;
+        }
+
+        // The model executes prefill as a padded rectangle. Use the full logical
+        // sequence length (prefix included) and the real sequence width represented
+        // by currentBatchSize(). Division avoids overflow in max_seq_len * width.
+        const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
+        const auto sequence_count           = admitted_sequence_count + candidate_sequence_count;
+        const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
+        return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
+    };
+
     if (max_batch_kv_len_ > 0) {
         const auto candidate_tokens               = prefillTokenCostWithCache(candidate);
         const auto candidate_tokens_without_cache = prefillTokenCostWithoutCache(candidate);
@@ -343,45 +380,38 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
             return candidate < limit - running_token_reserve - admitted;
         };
         const bool fits_kv = fits_strict_sum(admitted_tokens, candidate_tokens, max_batch_kv_len_);
-        const bool fits_q  = fits_strict_sum(
-            admitted_tokens_without_cache, candidate_tokens_without_cache, max_batch_tokens_size_);
+        const bool fits_q =
+            fits_strict_sum(admitted_tokens_without_cache, candidate_tokens_without_cache, max_batch_tokens_size_);
+        const size_t min_streams = prefillSumQuotaMinStreams();
+        // schedule() owns lock_. Normal and explicit-group admission track
+        // admitted streams differently; max avoids counting them twice.
+        const size_t pending_streams = waiting_streams_.size() + loading_cache_streams_.size()
+                                       + std::max(admitted_stream_count, new_streams_.size())
+                                       + groupQueueStreamsSize(waiting_group_queue_)
+                                       + groupQueueStreamsSize(loading_cache_group_queue_);
+        const bool use_sum_quota = min_streams == 0 || pending_streams >= min_streams;
+        // The independent KV cap remains mandatory in either policy.
+        const bool admitted = fits_kv && (use_sum_quota ? fits_q : fits_legacy());
         if (fifoBatchTraceEnabled()) {
-            RTP_LLM_LOG_INFO("[FIFO_BATCH_TRACE] mode=sum_q_and_kv candidate_batch=%zu sum_q_tokens=%zu "
-                             "q_limit=%zu fits_q=%d sum_kv_tokens=%zu kv_limit=%zu fits_kv=%d admitted=%d",
-                             admitted_stream_count + 1,
-                             admitted_tokens_without_cache + candidate_tokens_without_cache,
-                             max_batch_tokens_size_,
-                             fits_q,
-                             admitted_tokens + candidate_tokens,
-                             max_batch_kv_len_,
-                             fits_kv,
-                             fits_q && fits_kv);
+            RTP_LLM_LOG_INFO(
+                "[FIFO_BATCH_TRACE] mode=%s min_streams=%zu pending_streams=%zu candidate_batch=%zu sum_q_tokens=%zu "
+                "q_limit=%zu fits_q=%d sum_kv_tokens=%zu kv_limit=%zu fits_kv=%d admitted=%d",
+                use_sum_quota ? "sum_q_and_kv" : "adaptive_legacy",
+                min_streams,
+                pending_streams,
+                admitted_stream_count + 1,
+                admitted_tokens_without_cache + candidate_tokens_without_cache,
+                max_batch_tokens_size_,
+                fits_q,
+                admitted_tokens + candidate_tokens,
+                max_batch_kv_len_,
+                fits_kv,
+                admitted);
         }
-        return fits_q && fits_kv;
+        return admitted;
     }
 
-    if (running_token_reserve >= max_batch_tokens_size_) {
-        return false;
-    }
-    const auto available_tokens = max_batch_tokens_size_ - running_token_reserve;
-
-    // Full logical token cost (including reused prefix) must be strictly below
-    // max_batch_tokens_size_. Subtraction avoids overflow in the sum.
-    if (admitted_tokens >= available_tokens) {
-        return false;
-    }
-    const auto candidate_tokens = prefillTokenCostWithCache(candidate);
-    if (candidate_tokens >= available_tokens - admitted_tokens) {
-        return false;
-    }
-
-    // The model executes prefill as a padded rectangle. Use the full logical
-    // sequence length (prefix included) and the real sequence width represented
-    // by currentBatchSize(). Division avoids overflow in max_seq_len * width.
-    const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
-    const auto sequence_count           = admitted_sequence_count + candidate_sequence_count;
-    const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
-    return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
+    return fits_legacy();
 }
 
 size_t FIFOScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const {
