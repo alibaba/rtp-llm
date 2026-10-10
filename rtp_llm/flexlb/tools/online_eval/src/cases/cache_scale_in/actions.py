@@ -164,7 +164,7 @@ def observe(ctx, p, deadline):
                         deadline,
                         dict(
                             engine=name,
-                            mode=p.get("removal_mode", "graceful"),
+                            mode=p["removal_mode"],
                             drain_timeout_ms=p["drain_timeout_ms"],
                         ),
                     )
@@ -209,7 +209,7 @@ def observe(ctx, p, deadline):
                 ctx.ops,
                 "remove_engine",
                 deadline,
-                dict(engine=n, mode=p.get("removal_mode", "graceful"), drain_timeout_ms=p["drain_timeout_ms"]),
+                dict(engine=n, mode=p["removal_mode"], drain_timeout_ms=p["drain_timeout_ms"]),
             )
             for n in removed
         ]

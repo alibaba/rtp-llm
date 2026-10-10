@@ -46,6 +46,15 @@ def test_admission_dependency_is_required_before_any_live_poll():
         configure_program(data, "cache.yaml")
 
 
+def test_cache_action_cannot_supply_a_hidden_removal_mode():
+    from cases.cache_scale_in.actions import validate
+    stages = configure_program(configuration("cache_scale_in"), "cache.yaml")["variants"][0]["stages"]
+    params = next(row["params"] for row in stages if row["id"] == "scale_in")
+    del params["criteria"]["removal_mode"]
+    with pytest.raises(ValueError, match="removal_mode"):
+        validate(params, NS(path="scale_in"))
+
+
 @pytest.mark.parametrize("name", ["cache_scale_in", "master_performance"])
 @pytest.mark.parametrize("field,value", [("unit", "wrong"), ("mode", "evaluated"), ("labels", [])])
 def test_authoritative_metric_metadata_is_checked_against_consumer_dimensions(name, field, value):

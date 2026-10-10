@@ -107,9 +107,9 @@ def observation_contract(data):
     return dict(baseline_s=-base["from"], observe_s=post["until"])
 
 
-FIELDS = (PROCEDURE_FIELDS - {"removal_mode"}) | OBSERVATION_FIELDS | {"baseline_s", "observe_s"} | CHECK_FIELDS | {"flow", "qps"}
+FIELDS = PROCEDURE_FIELDS | OBSERVATION_FIELDS | {"baseline_s", "observe_s"} | CHECK_FIELDS | {"flow", "qps"}
 INTERMEDIATE_FIELDS = {"intermediate_p", "intermediate_hold_s"}
-OPTIONAL_FIELDS = INTERMEDIATE_FIELDS | {"removal_mode"}
+OPTIONAL_FIELDS = INTERMEDIATE_FIELDS
 
 
 def validate_criteria(params, plan):
@@ -118,12 +118,12 @@ def validate_criteria(params, plan):
     )
     from cases.cache_scale_in.inputs import engine_counters
     engine_counters(p["gate_input"])
-    if p.get("removal_mode", "graceful") not in ("graceful", "abrupt"):
+    if p["removal_mode"] not in ("graceful", "abrupt"):
         raise ValueError("removal_mode must be graceful or abrupt")
     plan.reference(p["flow"], "java_flow")
     if plan.environment.get("discovery") != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
-    for k in FIELDS - {"flow"}:
+    for k in FIELDS - {"flow", "removal_mode"}:
         if type(p[k]) not in (int, float) or not math.isfinite(p[k]) or p[k] < 0:
             raise ValueError(k + " must be finite and nonnegative")
     for k in ("target_p", "min_completed"):
@@ -169,7 +169,7 @@ def validate_criteria(params, plan):
         raise ValueError("observation cannot cover sustained collapse")
     if (type(p["drain_timeout_ms"]) is not int
             or not 0 <= p["drain_timeout_ms"] <= 30000
-            or (p.get("removal_mode", "graceful") == "graceful" and p["drain_timeout_ms"] == 0)
+            or (p["removal_mode"] == "graceful" and p["drain_timeout_ms"] == 0)
             or p["topology_timeout_s"] <= 0):
         raise ValueError("removal must have bounded drain and topology budgets")
     from scenario.compiler import environment
