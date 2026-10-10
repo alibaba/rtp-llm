@@ -8,6 +8,7 @@ import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
@@ -18,6 +19,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
@@ -46,7 +48,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -728,20 +729,67 @@ class RequestSchedulerTest {
         }
     }
 
-    @Test
-    void submissionUsesRequestConfigWithoutReloading() throws Exception {
+    @ParameterizedTest(name = "requestUsesDirect={0}, currentConfigUsesQueue=true")
+    @ValueSource(booleans = {true, false})
+    @DisplayName("提交按请求快照选择 DIRECT 或 QUEUE，同时允许读取当前队列配置")
+    void submissionUsesRequestSchedulerModeWithCurrentQueueConfig(boolean requestUsesDirect) throws Exception {
         Fixture fixture = new Fixture(true);
         try {
-            when(fixture.configService.loadBalanceConfig())
-                    .thenThrow(new IllegalStateException("configuration unavailable after initialization"));
+            FlexlbConfig requestConfig = SchedulingTestConfig.batchConfig();
+            if (requestUsesDirect) {
+                requestConfig.setScheduler(SchedulerConfig.direct());
+            } else {
+                SchedulingTestConfig.usePriorityQueue(requestConfig);
+            }
+            when(fixture.context.getConfig()).thenReturn(requestConfig);
+            when(fixture.context.getFuture()).thenReturn(fixture.future);
+            FlexlbConfig currentConfig = SchedulingTestConfig.batchConfig();
+            SchedulingTestConfig.usePriorityQueue(currentConfig).setMaxQueuedRequests(2);
+            when(fixture.configService.loadBalanceConfig()).thenReturn(currentConfig);
+            when(fixture.router.select(fixture.context)).thenReturn(PlacementResult.rejected(
+                    Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
+
             CompletableFuture<Response> future = fixture.scheduler.submit(fixture.context);
 
             assertSame(fixture.future, future);
             assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(5, TimeUnit.SECONDS).getCode());
-            verify(fixture.router).select(fixture.context, null);
+            if (requestUsesDirect) {
+                verify(fixture.router).select(fixture.context);
+                verify(fixture.router, never()).select(fixture.context, null);
+            } else {
+                verify(fixture.router).select(fixture.context, null);
+                verify(fixture.router, never()).select(fixture.context);
+            }
         } finally {
-            doReturn(fixture.config).when(fixture.configService).loadBalanceConfig();
+            fixture.scheduler.closePlacement();
+        }
+    }
+
+    @Test
+    @DisplayName("旧请求快照允许入队时，仍按当前全局容量拒绝第二个请求")
+    void submissionUsesCurrentGlobalCapacityInsteadOfRequestSnapshot() throws Exception {
+        Fixture fixture = new Fixture(true);
+        try {
+            FlexlbConfig currentConfig = SchedulingTestConfig.batchConfig();
+            SchedulingTestConfig.usePriorityQueue(currentConfig).setMaxQueuedRequests(1);
+            when(fixture.configService.loadBalanceConfig()).thenReturn(currentConfig);
+            when(fixture.router.select(fixture.context, null)).thenReturn(
+                    PlacementResult.blocked(PlacementKey.anyGroup(RoleType.PREFILL)));
+            BalanceContext nextRequest = RequestLifecycleTestSupport.context(fixture.config, 702L);
+            CompletableFuture<Response> nextFuture = new CompletableFuture<>();
+            when(fixture.lifecycle.register(nextRequest)).thenReturn(nextFuture);
+
+            fixture.scheduler.submit(fixture.context);
+            verify(fixture.router, timeout(1_000)).select(fixture.context, null);
+            CompletableFuture<Response> returned = fixture.scheduler.submit(nextRequest);
+
+            assertSame(nextFuture, returned);
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), returned.get(5, TimeUnit.SECONDS).getCode());
+            assertFalse(fixture.future.isDone());
+            assertEquals(1, fixture.scheduler.getQueuedRequestCount());
+            verify(fixture.router, never()).select(nextRequest, null);
+        } finally {
             fixture.scheduler.closePlacement();
         }
     }
