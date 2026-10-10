@@ -6,6 +6,7 @@ from cases.cache_scale_in.report import validate_view
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
+from cases.cache_scale_in.inputs import NUMERIC_PARAMETERS
 from traffic.playback_config import normalize
 from cases.cache_scale_in.comparison import validate_policy
 from cases.cache_scale_in.inputs import (

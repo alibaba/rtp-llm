@@ -51,9 +51,17 @@ class VariantAxis:
         return cls(kind, tuple(fields))
 
     def validate_patch(self, row, source):
-        for field in leaf_paths({key: value for key, value in row.items() if key != "id"}):
+        for field in leaf_paths({key: value for key, value in row.items() if key not in {"id", "parameter_schema"}}):
             if not path_in_scope(field, self.fields):
                 raise ScenarioError(f"{source}: variant field {field!r} outside declared dimension")
+
+        schema = row.get("parameter_schema", {})
+        if not isinstance(schema, dict):
+            raise ScenarioError(f"{source}: parameter_schema must be a mapping")
+        for path in schema:
+            if (type(path) is not str or self.kind != "data"
+                    or not path_in_scope("parameters." + path, self.fields)):
+                raise ScenarioError(f"{source}: variant constraint {path!r} outside declared dimension")
 
     def validate_flow(self, program, identity, module, source):
         if self.kind == "flow" and (program != identity or program not in getattr(module, "FLOW_PROGRAMS", ())):

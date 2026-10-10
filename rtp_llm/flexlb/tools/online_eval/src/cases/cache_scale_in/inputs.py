@@ -2,6 +2,10 @@
 
 import math
 from input_contract import finite_number
+from cases.numeric_parameters import (
+    SOURCE_NUMBERS, JAVA_FLOW_NUMBERS, CAPTURE_NUMBERS, FRACTION,
+    NONNEGATIVE, COUNT, OFFSET, number_fields,
+)
 from scenario.parameters import validate_fields
 from cases.metric_inputs import metric_fields
 
@@ -17,6 +21,42 @@ ENGINE_FIELDS = {"running": "requests", "waiting": "requests", "cache_evictions"
         "hit_tokens_total": "tokens", "context_tokens_total": "tokens", "context_requests_total": "requests",
         "cache_key_hits": "keys", "cache_keys_requested": "keys", "admission_open": "boolean",
         "admitted_rpcs_total": "requests", "rejected_rpcs_total": "requests"}
+
+
+NUMERIC_PARAMETERS = {
+    **SOURCE_NUMBERS,
+    **JAVA_FLOW_NUMBERS,
+    **CAPTURE_NUMBERS,
+    **number_fields(FRACTION,
+        'checks.baseline_hit.expected',
+        'checks.baseline_stability.expected',
+        'checks.offered_load.expected',
+    ),
+    **number_fields(NONNEGATIVE,
+        'checks.collapse.expected',
+        'observation.collapse.absolute_min_hit',
+        'observation.collapse.max_drop',
+        'observation.collapse.sustain_s',
+        'observation.max_gap_s',
+        'observation.sample_s',
+        'observation.step_s',
+        'observation.warmup_timeout_s',
+        'observation.window_s',
+        'procedure.analysis_timeout_s',
+        'procedure.topology_timeout_s',
+    ),
+    **number_fields(COUNT,
+        'checks.completed.expected',
+        'procedure.drain_timeout_ms',
+        'procedure.target_p',
+    ),
+    **number_fields(OFFSET,
+        'observation.windows.baseline.from.offset_s',
+        'observation.windows.baseline.until.offset_s',
+        'observation.windows.post.from.offset_s',
+        'observation.windows.post.until.offset_s',
+    ),
+}
 
 
 def engine_counters(spec):

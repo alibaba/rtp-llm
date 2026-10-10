@@ -2,6 +2,11 @@
 
 from cases.metric_inputs import metric_fields
 from input_contract import finite_number as finite
+from cases.numeric_parameters import (
+    SOURCE_NUMBERS, OUTPUT_DISTRIBUTION_NUMBERS, JAVA_FLOW_NUMBERS, CAPTURE_NUMBERS,
+    NONNEGATIVE, FRACTION, COUNT, OFFSET,
+    number_fields,
+)
 
 OBSERVATION_FIELDS = frozenset({"sample_s", "max_gap_s"})
 CHECK_FIELDS = frozenset({
@@ -10,6 +15,46 @@ CHECK_FIELDS = frozenset({
     "max_ttft_p99_ms", "max_e2e_p99_ms", "max_tpot_p99_ms", "slo_ttft_ms",
     "slo_e2e_ms", "slo_tpot_ms", "max_inflight_growth_rps",
 })
+
+
+NUMERIC_PARAMETERS = {
+    **SOURCE_NUMBERS,
+    **OUTPUT_DISTRIBUTION_NUMBERS,
+    **JAVA_FLOW_NUMBERS,
+    **CAPTURE_NUMBERS,
+    **number_fields(NONNEGATIVE,
+        'checks.e2e.expected',
+        'checks.engine_tps.rtp_llm_context_tps.expected',
+        'checks.engine_tps.rtp_llm_context_tps_with_cache.expected',
+        'checks.engine_tps.rtp_llm_generate_tps.expected',
+        'checks.goodput.expected',
+        'checks.inflight_growth.expected',
+        'checks.input_tps.expected',
+        'checks.output_tps.expected',
+        'checks.pacing_lag.expected',
+        'checks.tpot.expected',
+        'checks.ttft.expected',
+        'observation.max_gap_s',
+        'observation.sample_s',
+        'traffic.client.playback.ramp_up_seconds',
+    ),
+    **number_fields(FRACTION,
+        'checks.errors.expected',
+        'checks.offered_load.expected',
+        'checks.slo_fraction.expected',
+    ),
+    **number_fields(COUNT,
+        'checks.requests.expected',
+        'observation.slo.e2e_ms',
+        'observation.slo.tpot_ms',
+        'observation.slo.ttft_ms',
+        'traffic.source.parameters.max_input_tokens',
+    ),
+    **number_fields(OFFSET,
+        'observation.windows.measurement.from.offset_s',
+        'observation.windows.measurement.until.offset_s',
+    ),
+}
 
 
 def engine_tps(spec, bounds=None):

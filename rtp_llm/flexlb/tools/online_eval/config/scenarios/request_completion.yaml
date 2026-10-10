@@ -44,21 +44,5 @@ parameters:
       output: error_count
       unit: errors
 parameter_schema:
-  traffic.input_len:
-    minimum: 1
-    integer: true
-    maximum: 2147483647
-  traffic.output_len:
-    minimum: 1
-    integer: true
-    maximum: 2147483647
   traffic.count:
-    minimum: 1
-    integer: true
     maximum: 10000
-  procedure.setup_timeout_s:
-    minimum: 0
-    integer: false
-  checks.no_errors.expected:
-    minimum: 0
-    integer: true

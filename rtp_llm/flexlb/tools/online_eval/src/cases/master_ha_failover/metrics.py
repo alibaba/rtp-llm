@@ -63,7 +63,7 @@ def _state_series(rows, anchor):
             raise ValueError("healthy HA Master state violates ledger contract")
         for field in STATE_FIELDS:
             value = row.get(field)
-            if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
                 raise ValueError("invalid HA Master state value")
             samples[(name, field)].append(dict(x=timestamp - anchor, y=value))
     return samples

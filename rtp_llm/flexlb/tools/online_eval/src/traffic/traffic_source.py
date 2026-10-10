@@ -4,6 +4,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from traffic.contracts import PRIORITY, JAVA_LENGTH
+
 from traffic.realistic import write_trace as write_realistic
 from traffic.prefix_lineage import write_trace as write_lineage
 from traffic.prefix_lineage_v3 import write_trace as write_lineage_v3
@@ -64,17 +66,23 @@ def validate_plan(path, namespace=None):
             if any(not (valid_token(t) or (compact and isinstance(t,list) and len(t)==block_size and all(valid_token(v) for v in t))) for t in tokens):
                 raise ValueError("invalid token id")
             block_size = row.get("cache_key_block_size")
-            if type(row.get("il")) is not int or not 1 <= row["il"] <= 2147483647:
-                raise ValueError("invalid input length")
+            try:
+                JAVA_LENGTH.validate(row.get("il"), "il")
+            except ValueError as exc:
+                raise ValueError("invalid input length") from exc
             if compact and (type(block_size) is not int or block_size not in (64,128,256,512,1024,2048,4096)):
                 raise ValueError("invalid compact block size")
             expected_count = (row["il"] + block_size - 1) // block_size if compact else row["il"]
             if expected_count != len(tokens):
                 raise ValueError("input length differs from tokens")
-            if type(row.get("ol")) is not int or not 1 <= row["ol"] <= 2147483647:
-                raise ValueError("invalid output length")
-            if type(row.get("priority")) is not int or not 1 <= row["priority"] <= 100:
-                raise ValueError("invalid priority")
+            try:
+                JAVA_LENGTH.validate(row.get("ol"), "ol")
+            except ValueError as exc:
+                raise ValueError("invalid output length") from exc
+            try:
+                PRIORITY.validate(row.get("priority"), "priority")
+            except ValueError as exc:
+                raise ValueError("invalid priority") from exc
             if type(row.get("cache_key_block_size")) is not int or row[
                 "cache_key_block_size"
             ] not in (64, 128, 256, 512, 1024, 2048, 4096):

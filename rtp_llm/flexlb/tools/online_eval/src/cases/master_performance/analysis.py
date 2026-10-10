@@ -77,7 +77,7 @@ def engine_tps_checks(evidence):
             means.append(sum(sum(s[t] for s in priorities.values()) for t in stamps) / len(stamps))
         value = sum(means) / expected
         metrics[name] = value
-        metrics[name + "_engine_count"] = expected
+        metrics[name + "_engine_count"] = len(engines)
         checks.append(dict(metric=name, actual=value, bound=bounds[name], direction="min",
                            status="PASS" if compare(value, "ge", bounds[name]) else "FAIL"))
     return metrics, checks

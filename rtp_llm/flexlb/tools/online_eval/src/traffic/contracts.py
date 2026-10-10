@@ -2,13 +2,19 @@
 
 import copy
 
+from input_contract import NumberRule
+
+PRIORITY = NumberRule(integer=True, minimum=1, maximum=100)
+JAVA_LENGTH = NumberRule(integer=True, minimum=1, maximum=(1 << 31) - 1)
+
 
 def source_priority(source):
     parameters = source.get("parameters") if isinstance(source, dict) else None
     priority = parameters.get("priority") if isinstance(parameters, dict) else None
-    if type(priority) is not int or not 1 <= priority <= 100:
-        raise ValueError("traffic.source.parameters.priority must be an integer in [1,100]")
-    return priority
+    try:
+        return PRIORITY.validate(priority, "traffic.source.parameters.priority")
+    except ValueError as exc:
+        raise ValueError(f"traffic.source.parameters.priority must be an integer in [{PRIORITY.minimum},{PRIORITY.maximum}]") from exc
 
 
 def java_client_priority(source, client):

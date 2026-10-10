@@ -1,8 +1,11 @@
 """Content projection of decoded prefix lineages; pacing belongs to the client."""
 
+
 import hashlib
 import json
 from pathlib import Path
+
+from traffic.contracts import PRIORITY, JAVA_LENGTH
 
 from traffic.capture_contract import BLOCK_SIZE as BLOCK
 from traffic.output_sampling import output_sampler, output_semantics
@@ -35,7 +38,7 @@ def write_trace(path, parameters, namespace, base_dir, *, decode, max_requests=N
     cap = p.get('max_input_tokens')
     if cap is not None and (type(cap) is not int or not 1 <= cap <= 2147483647):
         raise ValueError('invalid input length filter')
-    if type(p['output_tokens']) is not int or not 1 <= p['output_tokens'] <= 2147483647 or type(p['priority']) is not int or not 1 <= p['priority'] <= 100:
+    if type(p['output_tokens']) is not int or not JAVA_LENGTH.minimum <= p['output_tokens'] <= JAVA_LENGTH.maximum or type(p['priority']) is not int or not PRIORITY.minimum <= p['priority'] <= PRIORITY.maximum:
         raise ValueError('invalid output length/priority')
     sampler = output_sampler(p)
     raw = (Path(base_dir) / p['path']).read_bytes()

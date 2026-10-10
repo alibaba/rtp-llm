@@ -1,10 +1,10 @@
 """Data-only case configuration. All control flow comes from registered Python programs."""
 
 import copy
+from dataclasses import asdict
 import hashlib
 import importlib
 import json
-import math
 from monitoring.identity import METRIC_ID, NAME
 from pathlib import Path
 
@@ -27,10 +27,10 @@ def output(stage, field):
 class CaseBuilder:
     """Python owns ordering, branches and checks; YAML supplies declared parameters."""
 
-    def __init__(self, environment, parameters, parameter_schema=None):
+    def __init__(self, environment, parameters, *, number_rules):
         self.environment = copy.deepcopy(environment)
         self.parameters = copy.deepcopy(parameters)
-        self.parameter_schema = copy.deepcopy(parameter_schema if parameter_schema is not None else {})
+        self.number_rules = dict(number_rules)
         self.steps = []
         self.read_parameters = set()
         self.metric_dependencies = {}
@@ -67,36 +67,21 @@ class CaseBuilder:
         return merge_data(values, dynamic)
 
     def number(self, name):
-        value = self.value(name)
-        rule = self.parameter_schema.get(name, {})
-        integer = rule.get("integer", True)
-        minimum, maximum = rule.get("minimum"), rule.get("maximum")
-        if (
-            type(value) not in ((int,) if integer else (int, float))
-            or (isinstance(value, float) and not math.isfinite(value))
-            or (minimum is not None and value < minimum)
-            or (maximum is not None and value > maximum)
-        ):
-            raise ScenarioError(f"parameter {name!r}: invalid value {value!r}")
-        return value
+        if name not in self.number_rules:
+            raise ScenarioError("undeclared numeric parameter: " + name)
+        try:
+            return self.number_rules[name].validate(self.value(name), name)
+        except ValueError as exc:
+            raise ScenarioError(str(exc)) from exc
 
     def validate_numbers(self):
-        """Apply every declared boundary, without marking unused inputs as read."""
-        if not isinstance(self.parameter_schema, dict):
-            raise ScenarioError("parameter_schema must be a mapping")
+        """Apply program types and YAML narrowing without consuming business inputs."""
         reads = set(self.read_parameters)
-        for name, rule in self.parameter_schema.items():
-            if type(name) is not str or not name:
-                raise ScenarioError("parameter_schema requires dotted parameter paths")
-            mapping(rule, {"integer", "minimum", "maximum"}, "parameter_schema." + name)
-            if "integer" in rule and type(rule["integer"]) is not bool:
-                raise ScenarioError("parameter_schema integer must be boolean")
-            bounds = [rule.get(key) for key in ("minimum", "maximum")]
-            if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value))
-                   for value in bounds) or (all(value is not None for value in bounds) and bounds[0] > bounds[1]):
-                raise ScenarioError("parameter_schema requires finite, increasing bounds")
-            self.number(name)
-        self.read_parameters = reads
+        try:
+            for name in self.number_rules:
+                self.number(name)
+        finally:
+            self.read_parameters = reads
 
     def step(self, name, action, *, params=None, timeout_s=None):
         step = {"id": name, "action": action}
@@ -157,6 +142,7 @@ def configure_program(config, source):
     axis = VariantAxis.from_config(config, source)
     document = _program_document(config, name, source)
     seen = set()
+    numeric_contracts = {}
     for index, row in enumerate([{"id": "default"}, *config.get("variants", [])]):
         mapping(row, {
             "id", "program", "profiles", "environment", "execution", "parameters",
@@ -169,9 +155,10 @@ def configure_program(config, source):
             raise ScenarioError(f"{source}: missing or duplicate configuration id {identity!r}")
         seen.add(identity)
         document["variants"].append(_build_variant(
-            config, row, identity, module, axis if index else None, document.get("profiles"), source,
+            config, row, identity, module, axis if index else None, document.get("profiles"), source, numeric_contracts,
         ))
     document.implementation = _implementation(config, module, name)
+    document.implementation["numeric_parameters"] = numeric_contracts
     return document
 
 
@@ -251,7 +238,7 @@ def _select_program(module, program, source):
     return build
 
 
-def _build_variant(config, row, identity, module, axis, selected_profiles, source):
+def _build_variant(config, row, identity, module, axis, selected_profiles, source, numeric_contracts):
     environment = config.get("environment", {})
     parameters = config.get("parameters", {})
     program = row.get("program", config.get("program"))
@@ -271,12 +258,16 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
     if not isinstance(variant_parameters, dict):
         raise ScenarioError(f"{source}: variant parameters must be a mapping")
     patch = row.get("environment", {})
+    from cases.numeric_parameters import parameter_rules, narrow_parameters
+    defaults = parameter_rules(getattr(module, "NUMERIC_PARAMETERS", {}))
+    base_rules = narrow_parameters(defaults, config.get("parameter_schema", {}))
     builder = CaseBuilder(
         merge_environment(environment, patch),
         merge_data(parameters, variant_parameters),
-        config.get("parameter_schema", {}),
+        number_rules=narrow_parameters(base_rules, row.get("parameter_schema", {})),
     )
     builder.validate_numbers()
+    numeric_contracts[identity] = {path: asdict(rule) for path, rule in builder.number_rules.items()}
     try:
         build(builder)
     except ValueError as exc:

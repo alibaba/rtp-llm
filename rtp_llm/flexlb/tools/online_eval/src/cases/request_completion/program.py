@@ -3,6 +3,27 @@
 from cases.config import output
 from cases.inputs import fields
 from traffic.contracts import driver
+from cases.numeric_parameters import (
+    COUNT, NONNEGATIVE, POSITIVE_COUNT, JAVA_LENGTH,
+    number_fields,
+)
+
+
+NUMERIC_PARAMETERS = {
+    **number_fields(COUNT,
+        'checks.no_errors.expected',
+    ),
+    **number_fields(NONNEGATIVE,
+        'procedure.setup_timeout_s',
+    ),
+    **number_fields(POSITIVE_COUNT,
+        'traffic.count',
+    ),
+    **number_fields(JAVA_LENGTH,
+        'traffic.input_len',
+        'traffic.output_len',
+    ),
+}
 
 
 def default(case):

@@ -36,9 +36,9 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
 | `execution` | 实例、阶段和清理预算，以及 `collection` 和 `monitoring` 取证策略 | runner、阶段执行器、客户端与采集器 |
 | `parameters` | 按流量、流程、观测与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
-| `parameter_schema` | 数值参数的整数类型、最小值和最大值约束 | program 构建前统一校验；`CaseBuilder.number(path)` 可显式读取 |
+| `parameter_schema` | 场景对 program 数值契约的范围收紧 | program 构建前统一校验；`CaseBuilder.number(path)` 可显式读取 |
 
-`environment.n_prefill` 是启动多少个 Prefill worker；`parameters.traffic.count` 是 program 发出多少个请求；`parameter_schema["traffic.count"].maximum` 是该数量允许的上界。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
+`environment.n_prefill` 是启动多少个 Prefill worker；`parameters.traffic.count` 是 program 发出多少个请求。整数类型、正负和协议范围由 Python 数值契约定义；`parameter_schema["traffic.count"].maximum` 可以进一步限制该场景的请求预算。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
 
 `traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作、流程等待和超时上限；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
 
@@ -53,7 +53,11 @@ program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `Pr
 
 运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 
-`parameter_schema` 的每条 dotted path 在 program 构建前统一校验，variant 合并后的值也受约束。未声明字段不会推断边界；缺字段、错误类型、非有限或越界值失败。校验本身不把字段标为“业务已使用”，未被 program 读取的输入仍会被拒绝。复杂对象和跨字段关系由 program 或 action 合同校验；schema 不提供缺省值，也不承担环境配置校验。
+program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `cases.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；改变同一公共字段的类型或通用范围会在构建前失败。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
+
+`parameter_schema` 可省略，只声明场景自己的 `minimum`、`maximum`，不能改变整数类型或放宽 program 契约。variant 的范围只能在场景范围上继续收紧。所有字段在 program 构建前校验，包括 variant 合并后的值；未绑定字段、缺字段、错误类型、非有限或越界值失败。展开后的每个 variant 数值契约写入 `implementation.numeric_parameters`，供编译结果与运行证据核对。
+
+数值校验不把字段标为“业务已使用”，未被 program 读取的输入仍会被拒绝。复杂对象和跨字段关系由 program 或 action 合同校验；数值契约不提供参数缺省值，也不承担环境配置校验。
 
 观测输入统一使用 `source: metric_store` 和 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。`metric_store` 指定读取后端，运行时来源实例另由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
 

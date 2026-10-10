@@ -6,6 +6,7 @@ from cases.master_ha_failover.report import validate_view, write_report
 from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
+from cases.master_ha_failover.inputs import NUMERIC_PARAMETERS
 from cases.master_ha_failover.inputs import read_cycle
 from scenario.loader import ScenarioError
 from traffic.contracts import driver
