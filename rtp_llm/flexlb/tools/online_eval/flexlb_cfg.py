@@ -623,6 +623,10 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
         validate_profile_identity(profile, {
             axis: getattr(overrides, axis) for axis in PROFILE_SPECS[profile]
         })
+        if kwargs["decision"] == "single":
+            for field in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
+                if getattr(overrides, field) is not None:
+                    raise ValueError(f"ConfigOverride.{field} applies only to decision='fixed_window'")
         for f in fields(ConfigOverride):
             value = getattr(overrides, f.name)
             if value is None:
@@ -734,7 +738,8 @@ _BOOL_FIELDS = frozenset({"strip_preemption"})
 def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
     """Parse a ``"k=v,k=v"`` override string (FLEXLB_CONFIG_OVERRIDE).
 
-    Bare ``k`` (no ``=``) is a boolean flag (``k=1``).  Unknown keys raise
+    Bare ``k`` (no ``=``) is allowed only for boolean flags (``k=1``).
+    Other fields require an explicit value. Unknown keys raise
     ValueError — the SSOT vocabulary is closed.  Returns None for an
     empty/blank input.
     """
@@ -757,6 +762,8 @@ def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
                 f"FLEXLB_CONFIG_OVERRIDE: unknown key {key!r}; valid keys: "
                 f"{sorted(known)}"
             )
+        if "=" not in item and key not in _BOOL_FIELDS:
+            raise ValueError(f"FLEXLB_CONFIG_OVERRIDE: {key} requires an explicit value (key=value)")
         if key in _INT_FIELDS:
             try:
                 kwargs[key] = int(raw)

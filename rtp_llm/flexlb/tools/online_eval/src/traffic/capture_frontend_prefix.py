@@ -15,6 +15,10 @@ class BudgetExceeded(Exception):
     pass
 
 
+class CaptureInputError(ValueError):
+    """只含固定诊断原因，可安全写入 summary。"""
+
+
 def parser():
     p = argparse.ArgumentParser()
     p.add_argument("--start", type=int, required=True)
@@ -107,9 +111,9 @@ def capture(a, *, clock=time.monotonic):
                     ts = int(r["request_enter_ts_epoch_ms"])
                     if not a.start <= ts < a.end:
                         continue
-                    rid = str(r.get("upstream_request_id") or r.get("request_id") or "")
+                    rid = str(r.get("request_id") or r.get("upstream_request_id") or "")
                     # Log rotation overlap is deduplicated by local request identity + arrival.
-                    ident = (str(r.get("request_id") or r.get("upstream_request_id") or ""), ts)
+                    ident = (rid, ts)
                     if ident in seen:
                         stats["duplicate"] += 1
                         continue
@@ -120,7 +124,7 @@ def capture(a, *, clock=time.monotonic):
                         continue
                     if any(type(token) is not int or not -2147483648 <= token <= 2147483647 for token in ids):
                         stats["invalid_tokens"] += 1
-                        raise ValueError("invalid int32 input tokens")
+                        raise CaptureInputError("invalid int32 input tokens")
                     values = array.array("i", ids)
                     if values.itemsize != 4:
                         raise RuntimeError("capture requires 4-byte int32")
@@ -169,7 +173,10 @@ def capture(a, *, clock=time.monotonic):
     except Exception as exc:
         # 不写日志原文或原始 token 到错误产物。
         stats["fatal_errors"] += 1
-        errors.append(str(exc) if isinstance(exc, ValueError) and "contract_errors" in stats else type(exc).__name__)
+        safe_reason = isinstance(exc, CaptureInputError) or (
+            isinstance(exc, ValueError) and "contract_errors" in stats
+        )
+        errors.append(str(exc) if safe_reason else type(exc).__name__)
         failure = exc
     finally:
         out.close()

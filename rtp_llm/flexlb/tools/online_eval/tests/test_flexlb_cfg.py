@@ -167,6 +167,19 @@ class LayeringTest(unittest.TestCase):
             85, doc["router"]["roles"]["decode"]["availability"]["maxKvUsagePercent"]
         )
 
+    def test_single_profiles_reject_explicit_window_overrides(self):
+        for profile in ('single-batch', 'single-nonbatch'):
+            for field in ('max_requests', 'max_collection_wait_ms', 'max_predicted_execution_ms'):
+                with self.subTest(profile=profile, field=field), self.assertRaisesRegex(
+                    ValueError, field + ' applies only'
+                ):
+                    render_env(profile, ConfigOverride(**{field: 5}))
+
+    def test_window_profiles_accept_window_overrides(self):
+        for profile in ('batch-window', 'window-nonbatch'):
+            doc = json.loads(render_env(profile, ConfigOverride(max_requests=5)))
+            self.assertEqual(5, doc['scheduler']['decision']['maxRequests'])
+
 
 class DecodeAvailabilityTest(unittest.TestCase):
     def test_invalid_values_fail_in_override_and_direct_generator(self):
@@ -359,6 +372,14 @@ class OverrideParsingTest(unittest.TestCase):
     def test_bad_int_raises(self) -> None:
         with self.assertRaises(ValueError):
             parse_overrides("request_timeout_ms=abc")
+
+    def test_only_boolean_fields_accept_bare_keys(self):
+        self.assertTrue(parse_overrides('strip_preemption').strip_preemption)
+        for key in ('ordering', 'decision', 'dispatcher', 'prefill_expression',
+                    'max_requests', 'decision_lifetime'):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key + ' requires an explicit value'):
+                parse_overrides(key)
+        self.assertEqual(1, parse_overrides('max_requests=1').max_requests)
 
     def test_bad_float_reports_key_and_value(self) -> None:
         for key in ("decision_lifetime", "cache_affinity_min_prefix_hit_percent"):

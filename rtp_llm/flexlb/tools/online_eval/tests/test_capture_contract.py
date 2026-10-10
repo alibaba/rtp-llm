@@ -73,6 +73,55 @@ class CaptureContractTest(unittest.TestCase):
                 self.assertFalse(summary['complete'])
                 self.assertEqual(['no supported log files matched'], summary['errors'])
 
+    def test_local_identity_drives_both_digest_and_deduplication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            path = logs / 'dash_sc_grpc_access_r0_s0.log'
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            for row in rows:
+                row['upstream_request_id'] = 'shared-upstream'
+            duplicate = dict(rows[0], upstream_request_id='another-upstream')
+            path.write_text('\n'.join(map(json.dumps, rows + [duplicate])) + '\n')
+            summary = self.run_capture(root, logs)
+            self.assertEqual(1, summary['stats']['duplicate'])
+            with gzip.open(root / 'pod-0.jsonl.gz', 'rt') as stream:
+                captured = [json.loads(line) for line in stream]
+            self.assertEqual([hashlib.sha256(row['request_id'].encode()).hexdigest()[:32]
+                              for row in rows], [row['rid'] for row in captured])
+            self.assertEqual(2, len({(row['rid'], row['ts']) for row in captured}))
+
+    def test_invalid_tokens_keep_safe_reason_and_fail_capture(self):
+        for token in (1.0, 2147483648, 'private-token-value'):
+            with self.subTest(token=token), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                logs = self.fixture(root)
+                path = logs / 'dash_sc_grpc_access_r0_s0.log'
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                rows[1]['input_ids'][0] = token
+                path.write_text('\n'.join(map(json.dumps, rows)) + '\n')
+                with self.assertRaisesRegex(RuntimeError, 'capture incomplete'):
+                    self.run_capture(root, logs)
+                summary = json.loads((root / 'pod-0.summary.json').read_text())
+                self.assertFalse(summary['complete'])
+                self.assertEqual(['invalid int32 input tokens'], summary['errors'])
+                self.assertEqual(1, summary['stats']['records'])
+                self.assertIn('incomplete capture', self.fit(root).stderr)
+
+    def test_untrusted_exception_text_is_not_written_to_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            path = logs / 'dash_sc_grpc_access_r0_s0.log'
+            row = json.loads(path.read_text().splitlines()[0])
+            row['request_enter_ts_epoch_ms'] = 'private-invalid-timestamp'
+            path.write_text(json.dumps(row) + '\n')
+            with self.assertRaisesRegex(RuntimeError, 'capture incomplete'):
+                self.run_capture(root, logs)
+            summary = json.loads((root / 'pod-0.summary.json').read_text())
+            self.assertEqual(['ValueError'], summary['errors'])
+            self.assertNotIn('private-invalid-timestamp', json.dumps(summary))
+
     def test_valid_logs_with_no_arrivals_in_window_are_complete(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

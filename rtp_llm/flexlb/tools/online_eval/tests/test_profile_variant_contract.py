@@ -287,5 +287,5 @@ def test_stress_scheduling_overrides_are_serialized_by_value_objects():
     )))
     assert doc['scheduler']['decision'] == SingleDecision().to_json()
     assert doc['dispatcher'] == DispatcherPolicy('non_batch', 7).to_json()
-    with pytest.raises(ValueError, match='profile document has no scheduler.decision.maxRequests'):
+    with pytest.raises(ValueError, match="max_requests applies only to decision='fixed_window'"):
         render_env('stress-na130', ConfigOverride(decision='single', max_requests=64))

@@ -22,7 +22,7 @@ FIELDS = {
     "ol": (int, True, "观测输出 token 数，含错误截断"),
     "keys": (list, False, "完整块的累计前缀摘要"),
     "tail_hash": (str, False, "全部输入的摘要"),
-    "rid": (str, False, "upstream_request_id 或 request_id 的摘要"),
+    "rid": (str, False, "request_id 的摘要，缺失时回退 upstream_request_id；去重使用同一身份"),
     "status": (str, True, "frontend 状态"),
     "error": ((int, str), True, "backend_error_code"),
     "cached": (int, True, "prompt_cached_token_num"),
