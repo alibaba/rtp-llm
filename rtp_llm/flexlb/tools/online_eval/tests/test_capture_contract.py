@@ -56,6 +56,26 @@ class CaptureContractTest(unittest.TestCase):
             self.assertEqual(2, len(captured))
             self.assertNotEqual(captured[0]['rid'], captured[1]['rid'])
 
+    def test_arrival_window_survives_late_or_unordered_completions(self):
+        for last_arrival, last_completion in [(4000, 900001), (100, 500)]:
+            with self.subTest(last_completion=last_completion), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                logs = self.fixture(root)
+                path = logs / 'dash_sc_grpc_access_r0_s0.log'
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                rows[0]['ts_epoch_ms'] = 900000
+                rows[1]['request_enter_ts_epoch_ms'] = last_arrival
+                rows[1]['ts_epoch_ms'] = last_completion
+                path.write_text('\n'.join(map(json.dumps, rows)) + '\n')
+                summary = self.run_capture(root, logs)
+                self.assertTrue(summary['complete'])
+                with gzip.open(root / 'pod-0.jsonl.gz', 'rt') as stream:
+                    captured = [json.loads(line) for line in stream]
+                self.assertEqual(1, len(captured))
+                self.assertEqual(2000, captured[0]['ts'])
+                self.assertEqual(hashlib.sha256((root / 'pod-0.jsonl.gz').read_bytes()).hexdigest(),
+                                 summary['sha256'])
+
     def test_fit_rejects_bad_rows_with_line_and_reason(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

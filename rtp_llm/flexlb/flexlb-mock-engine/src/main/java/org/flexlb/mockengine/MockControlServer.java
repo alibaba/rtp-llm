@@ -1086,9 +1086,6 @@ final class MockControlServer {
                         "hit_tokens_total", "context_requests_total")) {
                     sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
                 }
-                for (String name : List.of("hit_tokens_total", "context_requests_total")) {
-                    sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
-                }
                 appendPrefillBatchHistogram(sb, labels, List.of(snap));
                 appendPrefillTps(sb, labels, List.of(snap), true);
             } else if ("decode".equalsIgnoreCase(service.getRoleName())) {

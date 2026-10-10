@@ -8,6 +8,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from traffic.capture_contract import BLOCK_SIZE, SCHEMA_VERSION, validate_row
+from traffic.traffic_source import sha256_file
 
 
 class BudgetExceeded(Exception):
@@ -73,9 +74,9 @@ def capture(a, *, clock=time.monotonic):
                     continue
                 lo = int(first.get("ts_epoch_ms") or 0)
                 hi = int(last.get("ts_epoch_ms") or 0)
-                # Include completions up to 5 minutes later; preserve requested arrival window.
-                if hi < a.start or lo > a.end + a.completion_grace_ms:
-                    continue
+                # Completion timestamps cannot bound the arrival window: a long
+                # request may complete arbitrarily late, and records need not be
+                # ordered by arrival. Filter each request below instead.
                 coverage.append(
                     {
                         "path": path,
@@ -186,7 +187,7 @@ def capture(a, *, clock=time.monotonic):
         "files": coverage,
         "elapsed_s": clock() - started,
         "output_bytes": os.path.getsize(output_path),
-        "sha256": hashlib.sha256(Path(output_path).read_bytes()).hexdigest(),
+        "sha256": sha256_file(output_path),
         "hash": f"SHA256 prefix, 128 bit, little-endian int32, {BLOCK_SIZE} tokens",
     }
     with open(a.out + ".summary.json", "w") as f:

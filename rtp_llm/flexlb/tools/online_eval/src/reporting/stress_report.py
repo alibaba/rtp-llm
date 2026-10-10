@@ -894,7 +894,7 @@ def main():
     p_wg_pts = [(t, v) for t, v in zip(wg_ts, wg.get("prefill") or []) if v is not None]
     d_wg_pts = [(t, v) for t, v in zip(wg_ts, wg.get("decode") or []) if v is not None]
 
-    def wg_axes(pts, cats_name, data_name):
+    def wg_axes(pts):
         if len(pts) > 48:
             pts = [pts[i] for i in downsample_idx(len(pts), 40)]
         cats = str_arr([str(t) for t, _ in pts])
@@ -905,9 +905,9 @@ def main():
     p_wg_cats = p_wg_data = None
     d_wg_cats = d_wg_data = None
     if p_wg_pts:
-        p_wg_cats, p_wg_data, p_wg_pts = wg_axes(p_wg_pts, "pWinT", "pWinG")
+        p_wg_cats, p_wg_data, p_wg_pts = wg_axes(p_wg_pts)
     if d_wg_pts:
-        d_wg_cats, d_wg_data, d_wg_pts = wg_axes(d_wg_pts, "dWinT", "dWinG")
+        d_wg_cats, d_wg_data, d_wg_pts = wg_axes(d_wg_pts)
 
     # engine_dist：引擎维度分布（降采样到 40 点，x = 池内引擎排名）
     # engine_dist：三口径数据（请求数 / token / 利用率）。新 aggregate 内嵌
@@ -938,7 +938,7 @@ def main():
     p_ly_all = lorenz.get("prefill_all_y_pct") or []
     d_ly_all = lorenz.get("decode_all_y_pct") or []
 
-    def rank_axes(vals, cats_name, data_name):
+    def rank_axes(vals):
         idx = downsample_idx(len(vals), 40)
         cats = str_arr([str(i + 1) for i in idx])
         data = num_arr([vals[i] for i in idx])
@@ -954,9 +954,9 @@ def main():
     p_lorenz_all_y = d_lorenz_all_y = None
     LORENZ_TOK_X = p_tok_lorenz_y = d_tok_lorenz_y = None
     if p_reqs:
-        PRANK, p_req_curve = rank_axes(p_reqs, "PRANK", "pReqCurve")
+        PRANK, p_req_curve = rank_axes(p_reqs)
     if d_reqs:
-        DRANK, d_req_curve = rank_axes(d_reqs, "DRANK", "dReqCurve")
+        DRANK, d_req_curve = rank_axes(d_reqs)
     if p_toks:
         sc, label = token_scale_label(max(p_toks))
         p_tok_idx = downsample_idx(len(p_toks), 40)
@@ -982,9 +982,9 @@ def main():
             "个）" if not label_d else "×" + label_d + "）"
         )
     if p_util:
-        PRANK_UTIL, p_util_curve = rank_axes(p_util, "PRANK_UTIL", "pUtilCurve")
+        PRANK_UTIL, p_util_curve = rank_axes(p_util)
     if d_util:
-        DRANK_UTIL, d_util_curve = rank_axes(d_util, "DRANK_UTIL", "dUtilCurve")
+        DRANK_UTIL, d_util_curve = rank_axes(d_util)
     if p_ly or d_ly or p_ly_all or d_ly_all:
         LORENZ_X = str_arr(lorenz_x)
         if p_ly:
@@ -1246,13 +1246,11 @@ def main():
         err_max = 0
         for k, lb, tn in sel:
             if k == "__merged__":
-                cname = "errMergedSmall"
                 vals = [
                     sum((ps_by_t.get(t) or {}).get(mk, 0) or 0 for mk in merged_keys)
                     for t in tsec_vals
                 ]
             else:
-                cname = "err" + k[4:].title().replace("_", "")
                 vals = [(ps_by_t.get(t) or {}).get(k, 0) or 0 for t in tsec_vals]
             ref = num_arr(vals)
             err_series.append((k, lb, ref, tn))
@@ -1388,7 +1386,7 @@ def main():
                 except (TypeError, ValueError):
                     pass
 
-            def stage_resample(key, cname):
+            def stage_resample(key):
                 vals = []
                 for r in stage_ts:
                     try:
@@ -1408,18 +1406,18 @@ def main():
                 (
                     "sp95",
                     "schedule p95（10s 窗口中值）",
-                    stage_resample("sched_p95", "stageSchedP95"),
+                    stage_resample("sched_p95"),
                     "info",
                 )
             )
         stage_defs = [
-            ("grpc_queue_p95_ms", "grpc_queue p95", "grpcQueueP95"),
-            ("route_submit_p95_ms", "route_submit p95", "routeSubmitP95"),
-            ("batch_wait_p95_ms", "batch_wait p95", "batchWaitP95"),
-            ("dispatch_ack_p95_ms", "dispatch_ack p95", "dispatchAckP95"),
-            ("ack_response_p95_ms", "ack_response p95", "ackResponseP95"),
+            ("grpc_queue_p95_ms", "grpc_queue p95"),
+            ("route_submit_p95_ms", "route_submit p95"),
+            ("batch_wait_p95_ms", "batch_wait p95"),
+            ("dispatch_ack_p95_ms", "dispatch_ack p95"),
+            ("ack_response_p95_ms", "ack_response p95"),
         ]
-        for key, label, cname in stage_defs:
+        for key, label in stage_defs:
             ref = num_arr([r.get(key, 0) or 0 for r in stage_ts])
             stage_series.append((key[:4], label, ref, None))
         stage_all_max = max(

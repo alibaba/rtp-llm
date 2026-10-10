@@ -548,6 +548,12 @@ class PythonCompatControlApiTest {
         awaitCompleted(decodeServices.get(0), 1, 10_000);
 
         String body = httpGet("/metrics?per_engine=true");
+        List<String> sampleKeys = body.lines()
+                .filter(line -> !line.isBlank() && !line.startsWith("#"))
+                .map(line -> line.substring(0, line.lastIndexOf(' ')))
+                .toList();
+        assertEquals(sampleKeys.size(), sampleKeys.stream().distinct().count(),
+                "each Prometheus series must appear exactly once per scrape");
         String expectedLabels = "engine_name=\"prefill-0\",role=\"prefill\","
                 + "grpc_port=\"" + prefill.getGrpcPort() + "\",engine_ip=\"127.0.0.1\",engine_incarnation=\""
                 + prefill.getMetricsSnapshot().get("engine_incarnation") + "\"";

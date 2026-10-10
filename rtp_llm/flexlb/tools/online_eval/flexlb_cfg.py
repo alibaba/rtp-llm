@@ -118,7 +118,6 @@ _OMITTABLE = frozenset({"queue_timeout_ms", "preemption"})
 
 
 def _validate_affinity(extra_ms, percent):
-    import math
     if extra_ms is not None and (type(extra_ms) is not int or not 0 <= extra_ms <= 9223372036854775807):
         raise ValueError("cache_affinity_max_extra_ttft_ms must be a nonnegative Java long")
     if percent is not None and (type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100):
@@ -355,7 +354,6 @@ def build_flexlb_config(
             continue
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
-    import math
 
     if max_inflight_per_prefill_worker > 2_147_483_647:
         raise ValueError(
