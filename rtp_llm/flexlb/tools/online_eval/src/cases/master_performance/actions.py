@@ -79,10 +79,10 @@ def observe(ctx, p, deadline):
         errors=[],
         samples=[],
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
-        provenance={},
+        provenance=dict(instance=ctx.instance["id"]),
     )
     try:
-        evidence["provenance"] = provenance(ctx, flow, c)
+        evidence["provenance"].update(provenance(ctx, flow, c))
         while True:
             deadline.check()
             state = flow.control_status()

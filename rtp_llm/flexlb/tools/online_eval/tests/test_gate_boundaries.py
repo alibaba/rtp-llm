@@ -75,6 +75,12 @@ def test_report_uses_frozen_verdict_without_republishing_metrics(kind):
             render(root, changed, result)
         bundle = root/'reports/run'/('cache-scale-in' if kind == 'cache' else 'master-performance')
         assert load_analysis(bundle) == result
+        spec = json.loads((bundle/'report-spec.json').read_text())
+        identity = evidence['provenance']['instance']
+        assert spec['run_id'] == identity
+        assert spec['title'] == ' : '.join(identity.split('::'))
+        meta = spec['run_meta']
+        assert meta['identity']['id'] == identity
         assert before == {name: (root/name).read_bytes() for name in before}
         with pytest.raises(TypeError):
             render(root, evidence)
@@ -144,7 +150,7 @@ def test_registered_view_extension_needs_no_workload_case_branch():
     validator = mock.Mock()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        (root/'another.yaml').write_text('report_view_schema_version: 1\nkind: another\nreport:\n  title: new view\n  subtitle: explanation\n')
+        (root/'another.yaml').write_text('report_view_schema_version: 1\nkind: another\nreport:\n  subtitle: explanation\n')
         extension = dict(validator='test_extension.validate', renderer='test_extension.render')
         with mock.patch.dict(VIEW_KINDS, {'another': extension}), \
              mock.patch('reporting.view_config.VIEWS', root), \

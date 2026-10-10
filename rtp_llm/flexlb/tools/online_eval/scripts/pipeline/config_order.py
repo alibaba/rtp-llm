@@ -13,7 +13,7 @@ SCENARIO_FIELDS = (
 )
 VIEW_FIELDS = ('report_view_schema_version', 'kind', 'report', 'metrics', 'charts', 'sections')
 VIEW_BLOCK_FIELDS = {
-    ('report',): ('title', 'subtitle', 'id', 'producer'),
+    ('report',): ('subtitle', 'id', 'producer'),
     ('metrics',): ('query_plan', 'diagnostic_only'),
     ('charts',): ('time_origin_label', 'events', 'curves', 'panels', 'group_by',
                   'detail_labels', 'summaries', 'default_visible', 'max_points_per_series', 'presets'),

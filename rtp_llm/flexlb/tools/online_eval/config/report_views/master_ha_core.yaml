@@ -1,7 +1,6 @@
 report_view_schema_version: 1
 kind: ha
 report:
-  title: 双 Master HA · 核心观测
   subtitle: Master 事件、请求结果与两台 FlexLB 的 inflight 状态
 metrics:
   query_plan: master_ha_failover.yaml

@@ -14,8 +14,8 @@ def validate_structure(path, data, fail):
             or not matches_schema(data, "report_view_schema_version", 1)):
         fail(path, "invalid report view fields or version")
     report = data["report"]
-    if (not isinstance(report, dict) or not {"title", "subtitle"} <= report.keys()
-            or report.keys() - {"title", "subtitle", "id", "producer"}):
+    if (not isinstance(report, dict) or not {"subtitle"} <= report.keys()
+            or report.keys() - {"subtitle", "id", "producer"}):
         fail(str(path) + ".report", "invalid report fields")
     if "metrics" in data:
         metrics = data["metrics"]
@@ -44,13 +44,13 @@ def validate_structure(path, data, fail):
 
 def validate_checks(path, data, fail):
     if (set(data) != {"report_view_schema_version", "kind", "report"}
-            or data["kind"] != "checks" or set(data["report"]) != {"title", "subtitle"}):
+            or data["kind"] != "checks" or set(data["report"]) != {"subtitle"}):
         fail(path, "invalid execution view")
 
 
 def validate_default(path, data, fail):
     if (set(data) != {"report_view_schema_version", "kind", "report", "charts"}
-            or data["kind"] != "default" or set(data["report"]) != {"title", "subtitle"}):
+            or data["kind"] != "default" or set(data["report"]) != {"subtitle"}):
         fail(path, "invalid default view")
     charts = data["charts"]
     required = {"group_by", "detail_labels", "summaries", "default_visible", "max_points_per_series", "presets"}
@@ -169,7 +169,7 @@ def validate_produced(path, data, fail):
     if set(data) != required or data["kind"] != "produced":
         fail(path, "invalid produced report view")
     report = data["report"]
-    if set(report) != {"title", "subtitle", "id", "producer"}:
+    if set(report) != {"subtitle", "id", "producer"}:
         fail(str(path) + ".report", "produced reports require id and producer")
     for field in ("id", "producer"):
         if type(report[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", report[field]):
@@ -230,8 +230,9 @@ def validate_monitoring_policy(path, data, query_plan, fail):
 
 
 def validate_text(path, data, fail):
-    if any(type(data["report"][key]) is not str or not data["report"][key].strip() for key in ("title", "subtitle")):
-        fail(path, "title and subtitle are required")
+    subtitle = data["report"]["subtitle"]
+    if type(subtitle) is not str or not subtitle.strip():
+        fail(path, "subtitle is required")
     if data["kind"] != "produced":
         return
     try:

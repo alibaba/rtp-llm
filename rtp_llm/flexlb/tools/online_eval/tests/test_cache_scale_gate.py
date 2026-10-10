@@ -68,7 +68,6 @@ class CacheGateTest(unittest.TestCase):
 
     def test_report_layout_follows_yaml_view(self):
         template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
-        template["report"]["title"] = "YAML title"
         template["charts"]["panels"][0]["title"] = "YAML panel"
         template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
         prepared = dict(
@@ -82,7 +81,7 @@ class CacheGateTest(unittest.TestCase):
         ):
             evidence = self.evidence()
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
-        self.assertEqual(spec["title"], "YAML title")
+        self.assertEqual(spec["title"], "cache_scale_in : default : batch-window")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
@@ -142,6 +141,7 @@ class CacheGateTest(unittest.TestCase):
                 )
             )
         return dict(
+            provenance=dict(instance="cache_scale_in::default::batch-window"),
             samples=rows,
             criteria=dict(
                 max_gap_s=2,

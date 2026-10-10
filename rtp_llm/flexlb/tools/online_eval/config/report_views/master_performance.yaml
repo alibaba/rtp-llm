@@ -1,7 +1,6 @@
 report_view_schema_version: 1
 kind: produced
 report:
-  title: Master 性能绝对门禁
   subtitle: '{verdict}'
   id: master-performance
   producer: performance-gate

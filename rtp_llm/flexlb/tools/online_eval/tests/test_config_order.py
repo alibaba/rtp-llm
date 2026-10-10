@@ -75,7 +75,6 @@ def test_named_collections_keep_their_order():
 kind: produced
 report_view_schema_version: 1
 report:
-  title: report
   subtitle: selected
 """
     result = ordered_yaml(source, 'report_views')

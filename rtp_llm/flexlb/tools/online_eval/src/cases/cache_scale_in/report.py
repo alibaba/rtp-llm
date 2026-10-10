@@ -6,7 +6,7 @@ from pathlib import Path
 
 from reporting.view_config import view
 from reporting import run_meta, write_bundle
-from reporting.run_context import KPI_LABELS
+from reporting.run_context import KPI_LABELS, title
 from reporting.view_sections import view_details, view_table
 
 
@@ -145,8 +145,8 @@ def build_spec(directory, evidence, result, prepared):
     monitoring_status = prepared["monitoring_status"]
     monitor_warnings = prepared["monitor_warnings"]
     return dict(
-        run_id="cache-scale-in",
-        title=presentation["report"]["title"],
+        run_id=evidence["provenance"]["instance"],
+        title=title(evidence["provenance"]["instance"]),
         subtitle=presentation["report"]["subtitle"].format(
             verdict=result["verdict"], monitoring_status=monitoring_status),
         timeOriginLabel=presentation["charts"]["time_origin_label"],
@@ -178,7 +178,7 @@ def write_report(directory, evidence, result, prepared=None):
     spec = build_spec(directory, evidence, result, prepared)
     provenance = evidence.get("provenance", {})
     meta = run_meta(
-        dict(id="cache-scale-in", instance=provenance.get("instance")),
+        dict(id=provenance["instance"]),
         implementation=dict(
             files=provenance.get("files"), master=provenance.get("master_artifact")
         ),

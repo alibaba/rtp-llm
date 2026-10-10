@@ -72,6 +72,7 @@ def evidence():
         samples=[dict(epoch_ms=100000 + i * 1000) for i in range(11)],
         flow=dict(complete=True, errors=[], issued=issued, records=records),
         provenance=dict(
+            instance="master_performance::default::batch-window",
             benchmark_id=c["benchmark_id"],
             master_artifact=dict(jar_sha256="a" * 64),
             mock_jar_sha256="b" * 64,
@@ -116,6 +117,25 @@ class PerformanceGateTest(unittest.TestCase):
         self.assertEqual(actual["windows"], expected["windows"])
         shuffled["flow"] = compact_flow(shuffled["flow"])
         self.assertEqual(analyze(shuffled), actual)
+
+    def test_observe_freezes_run_identity_even_when_provenance_collection_fails(self):
+        from types import SimpleNamespace
+        from cases.master_performance.actions import observe
+
+        identity = "master_performance::default::single-nonbatch"
+        with tempfile.TemporaryDirectory() as d:
+            ctx = SimpleNamespace(
+                artifact_dir=Path(d), instance=dict(id=identity, profile="single-nonbatch"),
+                resource=lambda name, kind: mock.Mock(),
+                register_resource=lambda kind, value, **kwargs: value,
+            )
+            with mock.patch("cases.master_performance.actions.provenance",
+                            side_effect=ValueError("artifact missing")):
+                observe(ctx, dict(flow="flow", criteria=evidence()["criteria"], gate_input=None), mock.Mock())
+            frozen = json.loads((Path(d) / "performance-gate-evidence.json").read_text())
+            self.assertEqual(frozen["provenance"]["instance"], identity)
+            self.assertEqual(frozen["errors"], ["artifact missing"])
+            self.assertEqual(analyze(frozen)["verdict"], "INVALID")
 
     def test_finish_archives_scoped_raw_evidence_before_analysis(self):
         from types import SimpleNamespace

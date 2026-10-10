@@ -2,7 +2,7 @@
 
 from reporting import write_bundle
 from reporting.view_sections import view_details
-from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from
+from reporting.run_context import title, KPI_LABELS, canonical_spec, provenance_from
 
 
 def build_spec(payload, presentation):
@@ -56,7 +56,7 @@ def build_spec(payload, presentation):
         + [1]
     )
     return dict(
-        run_id=payload["id"], title=presentation["report"]["title"], subtitle=presentation["report"]["subtitle"],
+        run_id=payload["id"], title=title(payload["id"]), subtitle=presentation["report"]["subtitle"],
         timeOriginLabel="秒；t=0 为 workload 运行开始", timeAxis=dict(min=0, max=maximum),
         kpis=[dict(label=KPI_LABELS["execution"], value=payload["status"]),
               dict(label=KPI_LABELS["validity"], value=payload["workload"]["runtime_validity"]),

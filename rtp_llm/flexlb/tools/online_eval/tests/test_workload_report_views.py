@@ -66,7 +66,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 {"epoch_s": 15, "master": "A", "http_up": 0},
             ]) + "\n")
             analysis = payload()
-            analysis["id"] = "ha"
+            analysis["id"] = "master_ha_failover::default::batch-window"
             analysis["status"] = "FAIL"
             analysis["configuration"] = {"environment": {"n_prefill": 2}}
             analysis["stages"] = [dict(id="finish", artifacts=[str(requests), str(state)])]
@@ -98,7 +98,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
                                 and panel["events"] for panel in panels.values()))
             self.assertEqual(1, panels["request_qps"]["events"][0]["t"])
             self.assertEqual(5, spec["timeAxis"]["max"])
-            self.assertEqual(spec["title"], "ha")
+            self.assertEqual(spec["title"], "master_ha_failover : default : batch-window")
+            self.assertEqual(spec["subtitle"], view("master_ha_core.yaml")["report"]["subtitle"])
             default = json.loads((paths["workload.yaml"].parent / "report-spec.json").read_text())
             self.assertNotIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
 
@@ -241,11 +242,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 write_views(d, data, ["workload.yaml", "cache_scale_in_overview.yaml"])
 
-    def test_performance_report_title_follows_yaml_view(self):
+    def test_performance_report_title_follows_frozen_run_identity(self):
         from cases.master_performance.report import write_report as report
 
         presentation = view("master_performance.yaml").copy()
-        presentation["report"]["title"] = "YAML performance title"
         with tempfile.TemporaryDirectory() as d, mock.patch(
             "reporting.view_config.view", return_value=presentation
         ), mock.patch(
@@ -255,10 +255,11 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 dict(curve_id="mock/rtp_llm_generate_tps_engine_mean/D", metric_id="mock/rtp_llm_generate_tps_engine_mean/D", name="D detail", group="Decode 逐引擎 TPS", axis="forward", hidden=True, points=[]),
             ]), {}),
         ):
-            bundle = report(d, {"criteria": {"measure_s": 1}},
+            bundle = report(d, {"criteria": {"measure_s": 1},
+                                "provenance": {"instance": "master_performance::default::single-nonbatch"}},
                             {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}, "windows": []})
             spec = json.loads((bundle / "report-spec.json").read_text())
-            self.assertEqual(spec["title"], "YAML performance title")
+            self.assertEqual(spec["title"], "master_performance : default : single-nonbatch")
             self.assertEqual([panel["title"] for panel in spec["panels"]],
                              [panel["title"] for panel in presentation["charts"]["panels"]])
             self.assertEqual([panel["id"] for panel in spec["panels"]],

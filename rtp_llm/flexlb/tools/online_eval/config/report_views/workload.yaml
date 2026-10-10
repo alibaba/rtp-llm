@@ -1,7 +1,6 @@
 report_view_schema_version: 1
 kind: default
 report:
-  title: 运行监控
   subtitle: 全量采集指标与实验结果
 charts:
   group_by:

@@ -9,7 +9,7 @@
 | 块 | 职责 |
 |---|---|
 | `kind` | 由 Python 注册的视图能力；不能在 YAML 指定模块 |
-| `report` | `title`、`subtitle`；已生产报告另声明 `id`、`producer`，用于定位和校验 bundle |
+| `report` | `subtitle`；已生产报告另声明 `id`、`producer`，用于定位和校验 bundle |
 | `metrics` | `query_plan` 选择指标集合；`diagnostic_only` 明确哪些已采指标不绘图 |
 | `charts` | `curves`、`panels`、事件显示名和时间轴文案；全量视图在这里声明分组、采样和曲线可见性 |
 | `sections` | 按稳定 section ID 声明附录标题、表头和默认开合状态 |
@@ -36,7 +36,7 @@
 
 ## 展示与交互
 
-单 run 标题为 case、variant、profile，副标题由视图提供。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
+单 run 标题统一由运行身份生成 `case : variant : profile`，视图 YAML 不声明或覆盖标题。副标题由视图的 `report.subtitle` 提供；离线重生成使用证据中冻结的运行身份。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
 
 门禁检查默认展开；有效性、诊断与附件使用同一折叠组件。较大的实际值展示摘要，完整值保留供展开，原始证据仍留在运行目录。
 

@@ -1,7 +1,6 @@
 report_view_schema_version: 1
 kind: produced
 report:
-  title: P scale-in cache-collapse gate
   subtitle: '{verdict} · monitoring {monitoring_status}'
   id: cache-scale-in
   producer: cache-gate

@@ -103,3 +103,13 @@ def test_missing_case_chart_label_fails_before_rendering():
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='requires time_origin_label'):
             view('cache_scale_in_overview.yaml')
+
+
+@pytest.mark.parametrize('filename', VIEWS)
+def test_report_title_cannot_override_runtime_identity(filename):
+    data = copy.deepcopy(view(filename))
+    assert 'title' not in data['report']
+    data['report']['title'] = 'arbitrary case title'
+    with patch('reporting.view_config.load_document', return_value=data):
+        with pytest.raises(ScenarioError, match='invalid report fields'):
+            view(filename)

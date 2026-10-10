@@ -3,7 +3,7 @@
 
 def validate(path, data, _fail):
     if (set(data) != {"report_view_schema_version", "kind", "report", "metrics", "charts", "sections"}
-            or set(data["report"]) != {"title", "subtitle"}
+            or set(data["report"]) != {"subtitle"}
             or set(data["metrics"]) != {"query_plan"}
             or set(data["charts"]) != {"events", "curves", "panels"}):
         _fail(path, "invalid HA view fields")

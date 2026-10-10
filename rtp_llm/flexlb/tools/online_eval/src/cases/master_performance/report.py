@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from reporting import write_bundle, run_meta
+from reporting.run_context import title
 from reporting.view_sections import view_details, view_table
 
 
@@ -19,7 +20,8 @@ def write_report(directory, evidence, result, telemetry_directory=None):
     chart, monitoring = panel(metric_directory, evidence, result, presentation)
     panels = report_panels(chart["series"], evidence.get("criteria", {}), presentation)
     spec = dict(
-        title=presentation["report"]["title"],
+        run_id=p["instance"],
+        title=title(p["instance"]),
         subtitle=presentation["report"]["subtitle"].format(verdict=result["verdict"]),
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
         panels=panels,
@@ -48,7 +50,7 @@ def write_report(directory, evidence, result, telemetry_directory=None):
         result,
         spec,
         meta=run_meta(
-            dict(id="master-performance", verdict=result["verdict"]),
+            dict(id=p["instance"], verdict=result["verdict"]),
             implementation=p.get("master_artifact"),
             workload=p.get("trace"),
             configuration=p,
