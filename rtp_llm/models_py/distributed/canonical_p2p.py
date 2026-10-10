@@ -55,6 +55,10 @@ class CanonicalPeerAllReduce:
             and tensor.dtype == torch.bfloat16
             and tensor.is_contiguous()
             and 0 < tensor.numel() <= self.max_elements
+            # Scalar peer reads regress for larger partial tiles. The extended
+            # capacity is for full-tile verification rows; retain the backend
+            # fallback for larger ragged messages.
+            and (tensor.numel() <= 40960 or tensor.numel() % 256 == 0)
         )
 
     def all_reduce(self, tensor: torch.Tensor, *, inplace: bool = True):
@@ -134,12 +138,18 @@ def init_canonical_p2p(
     large = _agree_across_group(
         group, os.getenv("RTP_LLM_CANONICAL_P2P_LARGE") == "1", "canonical_p2p_large"
     )
+    verify_batch = _agree_across_group(
+        group,
+        os.getenv("RTP_LLM_CANONICAL_P2P_VERIFY_BATCH") == "1",
+        "canonical_p2p_verify_batch",
+    )
     pingpong = _agree_across_group(
         group,
         os.getenv("RTP_LLM_CANONICAL_P2P_PINGPONG") == "1",
         "canonical_p2p_pingpong",
     )
-    max_elements = 40960 if large else _MAX_ELEMENTS
+    # TP8 verification of eight requests with three drafts has 32 hidden rows.
+    max_elements = 81920 if verify_batch else (40960 if large else _MAX_ELEMENTS)
     buffer_elements = max_elements * (2 if pingpong else 1)
     slot = None
     pingpong_kernels = None
