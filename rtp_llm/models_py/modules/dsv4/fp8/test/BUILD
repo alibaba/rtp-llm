@@ -27,6 +27,29 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_library(
+    name = "v41_deep_history_testlib",
+    testonly = True,
+    srcs = [
+        "v41_compressor_precision.py",
+        "v41_engram_precision.py",
+        "v41_expert_precision.py",
+        "v41_mhc_precision.py",
+        "v41_output_precision.py",
+        "v41_query_precision.py",
+        "v41_sparse_precision.py",
+        "v41_tp8_projection.py",
+        "test_v41_decode_attention_sm120.py",
+        "test_v41_decode_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_attention_owner_testlib",
+        ":v41_sparse_prefill_reference_testlib",
+    ],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
     name = "v41_attention_owner_testlib",
     srcs = ["test_v41_attention_owner_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS,

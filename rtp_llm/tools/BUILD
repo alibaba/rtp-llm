@@ -113,6 +113,19 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_deep_attention_history_replay",
+    testonly = True,
+    srcs = ["dsv41_deep_attention_history_replay.py", "dsv41_deep_native_history_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_sparse_prefill_owner_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_deep_history_testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
