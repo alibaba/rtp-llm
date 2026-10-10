@@ -305,6 +305,8 @@ class HostContractTest(unittest.TestCase):
 class CUDAContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if torch.cuda.get_device_capability() != (10, 0):
+            raise unittest.SkipTest("Broad opt-in domain is qualified only on SM100")
         cls.env = mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "1"})
         cls.env.start()
         if not op.warmup("cuda:0"):
@@ -403,6 +405,349 @@ class CUDAContractTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(out.sort(-1).values, ids.int().sort(-1).values)
                 )
+
+
+class SM103HostPolicyTest(unittest.TestCase):
+    def test_prepare_compatibility_fallback_is_auto_only_and_narrow(self):
+        lib = mock.Mock()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
+            stack.enter_context(mock.patch.dict(op._QUALIFIED_SHAPES, {}, clear=True))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(
+                mock.patch.object(
+                    torch.version,
+                    "git_version",
+                    "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda, "device", return_value=contextlib.nullcontext()
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=False
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(torch.cuda, "current_device", return_value=0)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=mock.Mock(major=10, minor=3),
+                )
+            )
+            stack.enter_context(mock.patch.object(op, "_load", return_value=lib))
+            allocate = stack.enter_context(mock.patch.object(torch, "full"))
+            launch = stack.enter_context(mock.patch.object(op, "_execute"))
+            stream = stack.enter_context(
+                mock.patch.object(torch.cuda, "current_stream")
+            )
+            for mode in ("auto", "1"):
+                for error in (98, 200, 209, 1, 201, 700, 719, 0):
+                    with self.subTest(mode=mode, error=error), mock.patch.dict(
+                        os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": mode}
+                    ):
+                        lib.v41_candidate_topk_prepare.return_value = error
+                        if mode == "auto" and error in (98, 200, 209):
+                            self.assertFalse(op.warmup("cuda:0"))
+                        else:
+                            with self.assertRaisesRegex(
+                                RuntimeError, f"prepare failed: CUDA {error}"
+                            ):
+                                op.warmup("cuda:0")
+                        self.assertEqual(op._READY, {})
+                        self.assertEqual(op._QUALIFIED_SHAPES, {})
+            allocate.assert_not_called()
+            launch.assert_not_called()
+            stream.assert_not_called()
+
+    def test_auto_warmup_launch_and_synchronize_errors_remain_fatal(self):
+        lib = mock.Mock()
+
+        def prepare(pointer):
+            pointer._obj.value = 123
+            return 0
+
+        lib.v41_candidate_topk_prepare.side_effect = prepare
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
+            )
+            stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
+            stack.enter_context(mock.patch.dict(op._QUALIFIED_SHAPES, {}, clear=True))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(
+                mock.patch.object(
+                    torch.version,
+                    "git_version",
+                    "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda, "device", return_value=contextlib.nullcontext()
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=False
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(torch.cuda, "current_device", return_value=0)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=mock.Mock(major=10, minor=3),
+                )
+            )
+            stack.enter_context(mock.patch.object(op, "_load", return_value=lib))
+            stack.enter_context(
+                mock.patch.object(torch, "full", return_value=mock.MagicMock())
+            )
+            stack.enter_context(mock.patch.object(torch, "empty"))
+            launch = stack.enter_context(
+                mock.patch.object(
+                    op, "_execute", side_effect=RuntimeError("launch failed: CUDA 209")
+                )
+            )
+            stream = stack.enter_context(
+                mock.patch.object(torch.cuda, "current_stream")
+            )
+            with self.assertRaisesRegex(RuntimeError, "launch failed: CUDA 209"):
+                op.warmup("cuda:0")
+            stream.assert_not_called()
+            launch.side_effect = None
+            stream.return_value.synchronize.side_effect = RuntimeError(
+                "synchronize failed: CUDA 700"
+            )
+            with self.assertRaisesRegex(RuntimeError, "synchronize failed: CUDA 700"):
+                op.warmup("cuda:0")
+            self.assertEqual(op._READY, {})
+            self.assertEqual(op._QUALIFIED_SHAPES, {})
+
+    def test_optional_auto_compile_failure_keeps_existing_path(self):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
+            )
+            stack.enter_context(mock.patch.dict(op._READY, {}, clear=True))
+            stack.enter_context(mock.patch.object(torch, "__version__", "2.11.0+cu130"))
+            stack.enter_context(
+                mock.patch.object(
+                    torch.version,
+                    "git_version",
+                    "70d99e998b4955e0049d13a98d77ae1b14db1f45",
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda, "device", return_value=contextlib.nullcontext()
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=False
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(torch.cuda, "current_device", return_value=0)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    torch.cuda,
+                    "get_device_properties",
+                    return_value=mock.Mock(major=10, minor=3),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    op, "_load", side_effect=RuntimeError("compiler unavailable")
+                )
+            )
+            log = stack.enter_context(mock.patch.object(op.logging, "exception"))
+            self.assertFalse(op.warmup("cuda:0"))
+            self.assertEqual(op._READY, {})
+            log.assert_called_once()
+            with mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "1"}):
+                with self.assertRaisesRegex(RuntimeError, "compiler unavailable"):
+                    op.warmup("cuda:0")
+
+    def test_startup_nvcc_discovery_preserves_explicit_override(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            op.shutil, "which", return_value=None
+        ), mock.patch.object(op.Path, "is_file", return_value=True), mock.patch.object(
+            op.os, "access", return_value=True
+        ):
+            self.assertEqual(op._find_nvcc(), "/usr/local/cuda/bin/nvcc")
+            with mock.patch.dict(os.environ, {"CUDA_HOME": "/custom/cuda"}):
+                self.assertEqual(op._find_nvcc(), "/custom/cuda/bin/nvcc")
+            with mock.patch.object(op.Path, "is_file", return_value=False):
+                self.assertIsNone(op._find_nvcc())
+
+    def test_default_qualified_shape_and_explicit_disable(self):
+        scores = metadata((512, 4096), torch.float32, 4096)
+        out = metadata((512, 2048), torch.int32, 8192)
+        scratch = metadata((512,), torch.int32, 12288)
+        lib = mock.Mock()
+        lib.v41_candidate_topk_is_current.return_value = 1
+        with mock.patch.dict(
+            os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"}
+        ), mock.patch.dict(op._READY, {0: (lib, 123)}, clear=True), mock.patch.dict(
+            op._QUALIFIED_SHAPES, {0: (512, 4096)}, clear=True
+        ), mock.patch.object(
+            torch.cuda, "device", return_value=contextlib.nullcontext()
+        ), mock.patch.object(
+            op, "_execute", return_value=out
+        ) as launch:
+            self.assertIs(op.try_select(scores, out, scratch=scratch), out)
+            for rows, width in ((511, 4096), (513, 4096), (512, 4095), (512, 4097)):
+                self.assertIsNone(
+                    op.try_select(
+                        metadata((rows, width), torch.float32, 4096),
+                        metadata((rows, 2048), torch.int32, 8192),
+                    )
+                )
+            with mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "0"}):
+                self.assertIsNone(op.try_select(scores, out, scratch=scratch))
+            self.assertEqual(launch.call_count, 1)
+
+    def test_sm100_ready_state_still_requires_explicit_opt_in(self):
+        scores = metadata((512, 4096), torch.float32, 4096)
+        out = metadata((512, 2048), torch.int32, 8192)
+        with mock.patch.dict(
+            os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"}
+        ), mock.patch.dict(
+            op._READY, {0: (mock.Mock(), 123)}, clear=True
+        ), mock.patch.dict(
+            op._QUALIFIED_SHAPES, {0: None}, clear=True
+        ), mock.patch.object(
+            op, "_execute"
+        ) as launch:
+            self.assertIsNone(op.try_select(scores, out))
+            launch.assert_not_called()
+
+
+@unittest.skipUnless(
+    os.environ.get("RTP_CANDIDATE_TOPK_GPU_TEST") == "1",
+    "GPU execution requires explicit authorization",
+)
+class SM103CUDAContractTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if torch.cuda.get_device_capability() != (10, 3):
+            raise unittest.SkipTest("SM103 qualification")
+        cls.env = mock.patch.dict(os.environ, {"DSV41_CANDIDATE_NATIVE_TOPK": "auto"})
+        cls.env.start()
+        if not op.warmup("cuda:0"):
+            cls.env.stop()
+            raise AssertionError("SM103 candidate startup warmup unavailable")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.env.stop()
+
+    def test_target_ties_nonfinite_strides_padding_and_reuse(self):
+        torch.manual_seed(71031)
+        for offset in (0, 1):
+            backing = torch.empty((512, 4096 + 7 * offset), device="cuda")
+            scores = backing[:, offset : offset + 4096]
+            output_storage = torch.full(
+                (512, 2080), -77, device="cuda", dtype=torch.int32
+            )
+            out = output_storage[:, 1:2066]
+            scratch = torch.empty((512,), device="cuda", dtype=torch.int32)
+            for case in (
+                "random",
+                "ties",
+                "zeros",
+                "signed_zero",
+                "negative",
+                "neginf",
+                "nan",
+                "inf2047",
+                "inf2048",
+                "inf2049",
+                "all_inf",
+            ):
+                with self.subTest(offset=offset, case=case):
+                    scores.normal_()
+                    if case == "ties":
+                        scores[:, 1000:4000] = 0.5
+                    elif case == "zeros":
+                        scores.zero_()
+                    elif case == "signed_zero":
+                        scores.zero_()
+                        scores[:, ::2] = -0.0
+                    elif case == "negative":
+                        scores.fill_(-1e30)
+                    elif case == "neginf":
+                        scores.fill_(-torch.inf)
+                    elif case == "nan":
+                        scores[:, :2049] = torch.nan
+                    elif case.startswith("inf"):
+                        scores[:, : int(case[3:])] = torch.inf
+                    elif case == "all_inf":
+                        scores.fill_(torch.inf)
+                    before = scores.contiguous().view(torch.uint8).clone()
+                    values, ids = scores.topk(2048, dim=-1, sorted=False)
+                    expected = torch.nn.functional.pad(
+                        torch.where(values > -torch.inf, ids, -1).int(),
+                        (0, 17),
+                        value=-1,
+                    )
+                    with mock.patch.object(
+                        op, "_load", side_effect=AssertionError("forward JIT")
+                    ):
+                        self.assertIs(op.try_select(scores, out, scratch=scratch), out)
+                    self.assertTrue(
+                        torch.equal(out.sort(1).values, expected.sort(1).values)
+                    )
+                    self.assertTrue(
+                        torch.equal(before, scores.contiguous().view(torch.uint8))
+                    )
+                    self.assertTrue(bool((output_storage[:, 0] == -77).all()))
+                    self.assertTrue(bool((output_storage[:, 2066:] == -77).all()))
+                    selected = scores.gather(
+                        1, out[:, :2048].clamp_min(0).long()
+                    ).masked_fill(out[:, :2048] < 0, -torch.inf)
+                    reference = values.masked_fill(~(values > -torch.inf), -torch.inf)
+                    self.assertTrue(
+                        torch.equal(selected.sort(1).values, reference.sort(1).values)
+                    )
+                    ordered = out.sort(1).values
+                    self.assertTrue(
+                        bool(
+                            (
+                                (ordered[:, 1:] != ordered[:, :-1])
+                                | (ordered[:, 1:] < 0)
+                            ).all()
+                        )
+                    )
+
+    def test_graph_replay_keeps_qualified_path(self):
+        scores = torch.randn((512, 4096), device="cuda")
+        out = torch.empty((512, 2048), device="cuda", dtype=torch.int32)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            op.try_select(scores, out)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            self.assertIs(op.try_select(scores, out), out)
+        for _ in range(3):
+            scores.normal_()
+            graph.replay()
+            ids = scores.topk(2048, dim=-1, sorted=False).indices.int()
+            self.assertTrue(torch.equal(out.sort(1).values, ids.sort(1).values))
 
 
 if __name__ == "__main__":

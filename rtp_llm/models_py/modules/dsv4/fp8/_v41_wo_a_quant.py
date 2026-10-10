@@ -1,4 +1,4 @@
-"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on SM100.
+"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on SM100/SM103.
 
 No compilation, CUDA initialization, or vendor-library import occurs at import.
 Unsupported or unprepared calls return None so the caller retains its BF16 path.
@@ -39,8 +39,11 @@ def _device_supported(device):
     if device.type != "cuda":
         return False
     prop = torch.cuda.get_device_properties(device)
-    # These two schedules have been validated on the 152-SM SM100 device.
-    return (prop.major, prop.minor, prop.multi_processor_count) == (10, 0, 152)
+    # The unchanged schedules are qualified only on these complete devices.
+    return (prop.major, prop.minor, prop.multi_processor_count) in (
+        (10, 0, 152),
+        (10, 3, 148),
+    )
 
 
 def _weight_supported(weight, scale):
@@ -87,6 +90,23 @@ def _legacy(m, mode):
     return mode == "legacy" or (mode == "auto" and m * 8192 < 4 * 1024 * 1024)
 
 
+def _nvcc_path():
+    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda:
+        # An explicit toolchain choice must not silently switch to another CUDA.
+        path = Path(cuda) / "bin/nvcc"
+        return str(path) if path.is_file() else None
+    path = shutil.which("nvcc")
+    if path:
+        return path
+    # Service launchers need not expose CUDA's bin directory on PATH.
+    for prefix in ("/usr/local/cuda", "/usr/local/cuda-13"):
+        path = Path(prefix) / "bin/nvcc"
+        if path.is_file():
+            return str(path)
+    return None
+
+
 def _dependencies():
     import deep_gemm
 
@@ -98,8 +118,7 @@ def _dependencies():
             or hashlib.sha256(path.read_bytes()).hexdigest() != expected
         ):
             return None
-    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
+    nvcc = _nvcc_path()
     cxx = os.environ.get("CXX") or shutil.which("c++")
     if not nvcc or not cxx or not Path(nvcc).is_file():
         return None
@@ -223,8 +242,9 @@ def _load(device):
 
 def _output(m, device):
     q = torch.empty((m, 8192), dtype=torch.float8_e4m3fn, device=device)
-    s = torch.empty((64, (m + 3) // 4 * 4), dtype=torch.int32, device=device).T[:m]
-    return q, s
+    padded_m = (m + 3) // 4 * 4
+    s = torch.empty((64, padded_m), dtype=torch.int32, device=device).T
+    return q, s if padded_m == m else s[:m]
 
 
 def is_ready(weight, scale):
@@ -290,7 +310,13 @@ def warmup(weight, scale):
             return False
         _READY[device.index] = entry
         try:
-            for m in (128, 256):
+            prop = torch.cuda.get_device_properties(device)
+            rows = (
+                (128, 256, 512, 4096, 12288)
+                if (prop.major, prop.minor, prop.multi_processor_count) == (10, 3, 148)
+                else (128, 256)
+            )
+            for m in rows:
                 q = torch.zeros(
                     (8, m, 4096), dtype=torch.float8_e4m3fn, device=device
                 ).transpose(0, 1)
@@ -301,6 +327,14 @@ def warmup(weight, scale):
                 )
                 try_grouped_quant((q, s), (weight, scale))
             torch.cuda.current_stream(device).synchronize()
+            logging.info(
+                "[DSV41 WoAQuant] device=%s SM=%d%d SMS=%d M=%s ready=True",
+                device,
+                prop.major,
+                prop.minor,
+                prop.multi_processor_count,
+                rows,
+            )
         except BaseException:
             _READY.pop(device.index, None)
             raise

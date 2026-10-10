@@ -1325,6 +1325,110 @@ class CedVectorizedLayoutParityTest(_SingleThreadTest):
                 self.assertTrue((actual[1:] > actual[:-1]).all())
 
 
+class CedHostLayoutTest(_SingleThreadTest):
+    def setUp(self):
+        super().setUp()
+        environment = mock.patch.dict(os.environ, {"DSV41_CED_VECTOR_LAYOUT": "1"})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def assert_layout_equal(self, reference, actual):
+        checker = CedVectorizedLayoutParityTest()
+        checker.compare([[actual], [reference]])
+        for left, right in zip(reference, actual):
+            if isinstance(left, tuple):
+                tensors = zip(
+                    (t for pair in left for t in pair),
+                    (t for pair in right for t in pair),
+                )
+            else:
+                tensors = (
+                    (getattr(left, f.name), getattr(right, f.name))
+                    for f in fields(left)
+                    if isinstance(getattr(left, f.name), torch.Tensor)
+                )
+            for a, b in tensors:
+                self.assertEqual(a.stride(), b.stride())
+                self.assertEqual(a.storage_offset(), b.storage_offset())
+                self.assertEqual(a.device, b.device)
+
+    def test_target_builds_selected_rows_without_full_tensor_indexing(self):
+        lengths, prefixes = (4096,) * 16, (28672,) * 16
+        ranks, info = _batch_cp4_layout(lengths)
+        selected = _CED._bounded_replay_selected(lengths, (3968,) * 16)
+        for rank in range(4):
+            ctx = _CP.build_cp_context(
+                info,
+                cp_size=4,
+                cp_rank=rank,
+                chunk_length=len(ranks[rank]),
+                device=torch.device("cpu"),
+                position_offset=torch.tensor(prefixes, dtype=torch.int64),
+                kv_cache_sharded=True,
+            )
+            expected = _CED._query_layout_fallback(
+                ctx, selected, None, keep_candidate_rows=True
+            )
+            with (
+                mock.patch.object(
+                    _CED,
+                    "_query_layout_fallback",
+                    side_effect=AssertionError("fallback"),
+                ),
+                mock.patch.object(
+                    torch, "repeat_interleave", side_effect=AssertionError("full rows")
+                ),
+                mock.patch.object(
+                    torch, "nonzero", side_effect=AssertionError("full mask")
+                ),
+            ):
+                actual_selected = _CED._bounded_replay_selected(lengths, (3968,) * 16)
+                actual = _CED._query_layout(
+                    ctx, actual_selected, None, keep_candidate_rows=True
+                )
+            self.assert_layout_equal(expected, actual)
+            self.assertEqual(actual[0].chunk_length, 512)
+
+    def test_permuted_restore_and_noncanonical_mask_preserve_fallback(self):
+        selected = torch.tensor([0, 9, 18, 27, 36, 45, 54, 63, 64])
+        for rank in range(4):
+            ctx, _ = _context(65, rank, 16387, permuted=True)
+            for noncanonical in (False, True):
+                if noncanonical:
+                    ctx.cp_info.prefill_qkv_padding_mask = (
+                        ctx.cp_info.prefill_qkv_padding_mask.roll(1)
+                    )
+                expected = _CED._query_layout_fallback(
+                    ctx, selected, None, keep_candidate_rows=True
+                )
+                with mock.patch.object(
+                    _CED, "_query_layout_fallback", wraps=_CED._query_layout_fallback
+                ) as fallback:
+                    actual = _CED._query_layout(
+                        ctx, selected, None, keep_candidate_rows=True
+                    )
+                self.assertEqual(fallback.call_count, int(noncanonical))
+                self.assert_layout_equal(expected, actual)
+
+    def test_invalid_selection_retains_exception_type_and_message(self):
+        ctx, _ = _context(65, 0)
+        for selected in (
+            torch.empty(0, dtype=torch.int64),
+            torch.tensor([-1, 0]),
+            torch.tensor([0, 65]),
+            torch.tensor([[1, 3]]),
+        ):
+            with self.subTest(selected=selected):
+                try:
+                    _CED._query_layout_fallback(ctx, selected, None)
+                except Exception as expected:
+                    with self.assertRaises(type(expected)) as actual:
+                        _CED._query_layout(ctx, selected, None)
+                    self.assertEqual(str(actual.exception), str(expected))
+                else:
+                    self.fail("invalid fixture unexpectedly accepted")
+
+
 class V41KVWorkspaceTest(_SingleThreadTest):
     def test_same_global_reuses_buffer_and_only_updates_swa(self):
         shared = {}
@@ -2131,6 +2235,56 @@ class CedRouterProjectionTest(_SingleThreadTest):
 
 
 class CedL20SplitTest(_SingleThreadTest):
+    def test_domain_transition_releases_cached_attention_plan_views(self):
+        path = Path(_CED.__file__).parent.parent / "prefill_workspace.py"
+        spec = importlib.util.spec_from_file_location("ced_workspace_lifetime", path)
+        workspace_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workspace_module)
+        for split_l20 in (False, True):
+            with self.subTest(split_l20=split_l20):
+                workspace = workspace_module.PrefillWorkspace(
+                    torch.device("cpu"),
+                    q_rows=4,
+                    q_dim=4,
+                    reserve_cp=False,
+                    align_bytes=1,
+                )
+                indices = torch.zeros((4, 640), dtype=torch.int32)
+                lengths = torch.ones(4, dtype=torch.int32)
+                previous = weakref.ref(indices)
+                workspace.attention_metadata(
+                    torch.ones((4, 2), dtype=torch.complex64), indices, lengths, 4, 2
+                )
+                shared = {
+                    "prefill_index_plan": (object(), indices, lengths),
+                    "topk": {20: torch.ones((4, 2), dtype=torch.int32)},
+                    "candidates": None,
+                }
+                del indices, lengths
+                self.assertIsNotNone(previous())
+                attn = types.SimpleNamespace(
+                    _shared_attention=shared,
+                    _prefill_meta_shared=types.SimpleNamespace(workspace=workspace),
+                )
+                block = types.SimpleNamespace(
+                    attn=attn,
+                    attn_hc=types.SimpleNamespace(pre_mix_out=torch.ones(4, 2)),
+                    ffn_hc=types.SimpleNamespace(pre_mix_out=torch.ones(4, 2)),
+                )
+                model = types.SimpleNamespace(layers=[None] * 20 + [block])
+                plan, _ = _plan(129, 0, torch.arange(1, 129))
+                # Only isolate transport; execute the complete transition and
+                # real workspace cache, including both strong ownership chains.
+                plan.exchange.compact = lambda tensor: tensor
+                hidden, ids = torch.ones(4, 2), torch.arange(4)
+                if split_l20:
+                    plan.compact_l20(block, hidden, hidden, hidden, ids)
+                else:
+                    plan.compact(model, hidden, ids, shared)
+                self.assertIsNone(previous())
+                self.assertIsNone(workspace._attention_metadata)
+                self.assertNotIn("prefill_index_plan", shared)
+
     def test_split_minimum_counts_fresh_rows_before_model_checks_or_uploads(self):
         for fresh in (129, 16384, 32768, 65535):
             for prefix in (0, 131072):
@@ -2438,11 +2592,11 @@ class CedL20SplitTest(_SingleThreadTest):
         launch = owner._prefill_sparse_attention.call_args.kwargs
         self.assertEqual(launch["kv"].shape, (end + 256, 1, 2))
         for row, pos in enumerate(query_ctx.global_positions.tolist()):
-            indices = launch["indices"][row, 0]
+            indices = launch["indices"][row]
             expected = [0] + [end + p - swstart for p in range(pos - 127, pos + 1)]
             self.assertEqual(indices[:129].tolist(), expected)
         self.assertEqual(query_ctx.global_positions[0].item(), end - 128)
-        first_swa = launch["indices"][0, 0, 1].item()
+        first_swa = launch["indices"][0, 1].item()
         self.assertEqual(launch["kv"][first_swa, 0, 0].item(), end - 255)
         owner._prefill_write_swa_fp8_paged.assert_not_called()
         self.assertIsNone(common.cp_ctx.swa_replay_start)

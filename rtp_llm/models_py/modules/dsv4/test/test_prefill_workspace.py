@@ -73,6 +73,138 @@ def test_prefill_q_storage_is_stable_across_gets():
     assert ws.prefill_q(3).data_ptr() == ws._union.data_ptr()
 
 
+def test_cached_q_view_keeps_slice_boundaries_and_cp_region_limits():
+    for capacity in (0, 5, 128):
+        ws = PrefillWorkspace(
+            torch.device("cpu"),
+            q_rows=capacity,
+            q_dim=4,
+            reserve_cp=True,
+            cp_rows=256,
+            main_w=8,
+            idx_w=4,
+            align_bytes=64,
+        )
+        full = ws.prefill_q(capacity)
+        assert ws.prefill_q(capacity) is full
+        assert full.numel() * full.element_size() == ws._q_bytes
+        for rows in (-2, -1, 0, 1, capacity, capacity + 1):
+            actual = ws.prefill_q(rows)
+            expected = full[:rows]
+            assert actual.shape == expected.shape
+            assert actual.stride() == expected.stride()
+            assert actual.storage_offset() == expected.storage_offset()
+            assert actual.untyped_storage().data_ptr() == ws._union.data_ptr()
+            actual.fill_(9)
+            assert torch.equal(actual, expected)
+
+
+def test_attention_metadata_cache_tracks_query_domain_and_preserves_strides():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=4, q_dim=4, reserve_cp=False, align_bytes=1
+    )
+    freqs = torch.zeros((14, 4), dtype=torch.complex64)[1::2, ::2]
+    indices = torch.arange(7 * 8).view(7, 8)[:, ::2]
+    lengths = torch.arange(14)[::2]
+    for rows, chunk in ((7, 4), (7, 3), (3, 4), (1, 1)):
+        actual = ws.attention_metadata(freqs, indices, lengths, rows, chunk)
+        assert ws.attention_metadata(freqs, indices, lengths, rows, chunk) is actual
+        for chunks, source in zip(actual, (freqs, indices.unsqueeze(1), lengths)):
+            for tensor, start in zip(chunks, range(0, rows, chunk)):
+                expected = source[start : min(start + chunk, rows)]
+                assert tensor.shape == expected.shape
+                assert tensor.stride() == expected.stride()
+                assert tensor.storage_offset() == expected.storage_offset()
+                assert (
+                    tensor.untyped_storage().data_ptr()
+                    == source.untyped_storage().data_ptr()
+                )
+                assert torch.equal(tensor, expected)
+    # Equal shapes do not authorize reusing metadata from another source/CED domain.
+    changed = indices.clone().add_(100)
+    replacement = ws.attention_metadata(freqs, changed, lengths, 1, 1)
+    assert replacement is not actual
+    assert torch.equal(replacement[1][0], changed[:1].unsqueeze(1))
+    changed[0, 0] = 999
+    assert replacement[1][0][0, 0, 0] == 999
+    assert ws._attention_metadata[0][1] is changed
+    # Full-range chunks retain the source directly; differentiable inputs never cache.
+    direct = ws.attention_metadata(freqs, indices.unsqueeze(1), lengths, 7, 8)
+    assert direct[0][0] is freqs
+    assert direct[2][0] is lengths
+    # An in-place autograd flag change must also invalidate an identity hit.
+    cached = ws.attention_metadata(freqs, indices, lengths, 7, 4)
+    freqs.requires_grad_()
+    assert ws.attention_metadata(freqs, indices, lengths, 7, 4) is not cached
+    assert ws._attention_metadata is None
+    differentiable = freqs.detach().requires_grad_()
+    ws.attention_metadata(differentiable, indices, lengths, 7, 4)
+    assert ws._attention_metadata is None
+
+
+def test_attention_metadata_releases_previous_source_and_forward():
+    import weakref
+
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=4, q_dim=4, reserve_cp=False, align_bytes=1
+    )
+    freqs = torch.zeros((7, 2), dtype=torch.complex64)
+    lengths = torch.ones(7, dtype=torch.int32)
+    indices = torch.zeros((7, 8), dtype=torch.int32)
+    previous = weakref.ref(indices)
+    ws.attention_metadata(freqs, indices, lengths, 7, 4)
+    del indices
+    assert previous() is not None
+    ws.clear_attention_metadata()
+    assert previous() is None
+    assert ws._attention_metadata is None
+    # Repeated clearing is safe before any metadata has been constructed.
+    ws.clear_attention_metadata()
+    indices = torch.zeros((7, 8), dtype=torch.int32)
+    previous = weakref.ref(indices)
+    ws.attention_metadata(freqs, indices, lengths, 7, 4)
+    del indices
+    ws.attention_metadata(freqs, torch.ones(7, 8, dtype=torch.int32), lengths, 7, 4)
+    assert previous() is None
+    current = weakref.ref(ws._attention_metadata[0][1])
+    del ws
+    assert current() is None
+
+
+def test_attention_metadata_rejects_short_sources_and_crops_longer_sources():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=4, q_dim=4, reserve_cp=False, align_bytes=1
+    )
+    sources = (
+        torch.zeros((12, 2), dtype=torch.complex64),
+        torch.arange(12 * 8).view(12, 8),
+        torch.ones(12, dtype=torch.int32),
+    )
+    for index in range(3):
+        for short_rows in (0, 4, 8):
+            changed = list(sources)
+            changed[index] = sources[index][:short_rows]
+            try:
+                ws.attention_metadata(*changed, 9, 4)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("Short metadata must not silently truncate chunks")
+    for rows, chunk in ((-1, 4), (9, 0), (9, -1)):
+        try:
+            ws.attention_metadata(*sources, rows, chunk)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid row/chunk geometry must be rejected")
+    result = ws.attention_metadata(*sources, 9, 4)
+    for chunks, source in zip(
+        result, (sources[0], sources[1].unsqueeze(1), sources[2])
+    ):
+        assert tuple(len(tensor) for tensor in chunks) == (4, 4, 1)
+        assert torch.equal(torch.cat(chunks), source[:9])
+
+
 def test_cp_region_not_reserved_when_reserve_cp_false():
     ws = PrefillWorkspace(
         torch.device("cpu"), q_rows=1, q_dim=1, reserve_cp=False, align_bytes=1

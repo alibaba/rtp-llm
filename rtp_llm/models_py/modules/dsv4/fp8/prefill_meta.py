@@ -16,7 +16,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import cached_swa_region
 
@@ -38,6 +37,16 @@ class _SwaWriteSource(NamedTuple):
     block_table: Any
 
 
+def _clear_v41_attention_metadata(shared: Dict) -> None:
+    seen = set()
+    for attn in shared.get("layers", {}).values():
+        meta = getattr(attn, "_prefill_meta_shared", None)
+        workspace = getattr(meta, "workspace", None)
+        if workspace is not None and id(workspace) not in seen:
+            seen.add(id(workspace))
+            workspace.clear_attention_metadata()
+
+
 def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> None:
     """Release prefill tensors after their last consumer, or at forward exit.
 
@@ -46,6 +55,7 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
     The layer registry and paged KV pools are not per-forward scratch.
     """
     if layer_id is None:
+        _clear_v41_attention_metadata(shared)
         for key in (
             "ced_indexer_projection",
             "global",
@@ -86,7 +96,11 @@ def release_v41_prefill_shared(shared: Dict, layer_id: Optional[int] = None) -> 
                     del values[source]
         if not values:
             for dependent in dependent_keys:
-                shared.pop(dependent, None)
+                removed = shared.pop(dependent, None)
+                if dependent == "prefill_index_plan" and removed is not None:
+                    # Final views must not extend the plan's existing lifetime
+                    # into the next source group's MQA workspace allocation.
+                    _clear_v41_attention_metadata(shared)
 
     if not any(getattr(attn, "is_index_source", False) for attn in remaining):
         for key in (

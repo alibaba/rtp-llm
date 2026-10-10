@@ -34,7 +34,6 @@ import torch.nn.functional as F
 from deep_gemm.utils.layout import (  # noqa: E402
     get_mn_major_tma_aligned_packed_ue8m0_tensor,
 )
-
 from rtp_llm.model_loader.weight_memory_saver import (
     feature_weights_region,
     suppress_weights_region,
@@ -1494,7 +1493,7 @@ class AttentionFP8(nn.Module):
         base = layer_kv.kv_cache_base
         if base is None or base.numel() == 0 or base.dim() != 2:
             return None
-        return base.view(torch.uint8)
+        return base if base.dtype == torch.uint8 else base.view(torch.uint8)
 
     def _swa_cp_byte_sliced(self) -> bool:
         cp_ctx = getattr(self, "_cp_ctx", None)
@@ -3694,7 +3693,6 @@ class AttentionFP8(nn.Module):
     ) -> torch.Tensor:
         q = qkv.q
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 

@@ -4,6 +4,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include <algorithm>
 
 namespace rtp_llm {
 
@@ -295,7 +296,9 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                                     && model_input.engram_token_windows.size(0) == total_input_tokens.numel()
                                     && model_input.engram_token_windows.size(1) == 4,
                                 "Engram history must be CPU [total_tokens, 4] before CP");
-        cp_engram_windows = torch::full({cp_split_input_tokens.numel(), 4}, -1, pinned_i32);
+        // Decode rows and valid prefill rows are copied below; initialize only
+        // invalid padding rows there instead of filling the entire buffer twice.
+        cp_engram_windows = torch::empty({cp_split_input_tokens.numel(), 4}, pinned_i32);
     }
     auto          prefill_shuffle_indices = torch::empty({(int64_t)prefill_cp_split_tokens_size}, pinned_i32);
     const int64_t global_token_num        = total_input_tokens.numel();
@@ -393,6 +396,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
                     std::memcpy(cp_engram_windows.data_ptr<int32_t>() + (input_token_idx + i) * 4,
                                 model_input.engram_token_windows.data_ptr<int32_t>() + (source_offset + source) * 4,
                                 4 * sizeof(int32_t));
+                } else {
+                    std::fill_n(cp_engram_windows.data_ptr<int32_t>() + (input_token_idx + i) * 4, 4, -1);
                 }
             }
         }

@@ -39,6 +39,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.prefill_meta import (
     build_and_propagate_prefill_meta_fp8,
     release_v41_prefill_shared,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 
 
 class _FakeMeta(NamedTuple):
@@ -102,6 +103,53 @@ def _inputs():
 
 
 class V41PrefillMetaCacheTest(unittest.TestCase):
+    def test_workspace_views_release_with_plan_and_at_forward_exit(self):
+        workspace = PrefillWorkspace(
+            torch.device("cpu"), q_rows=4, q_dim=8, reserve_cp=False, align_bytes=1
+        )
+        layers = {
+            i: SimpleNamespace(
+                index_source_layer_id=2,
+                _prefill_meta_shared=SimpleNamespace(workspace=workspace),
+            )
+            for i in (2, 3)
+        }
+        indices = torch.zeros(9, 8, dtype=torch.int32)
+        reference = weakref.ref(indices)
+        lengths = torch.ones(9, dtype=torch.int32)
+        freqs = torch.ones(9, 2, dtype=torch.complex64)
+        workspace.attention_metadata(freqs, indices, lengths, 9, 4)
+        shared = {
+            "layers": layers,
+            "topk": {2: object()},
+            "prefill_index_plan": (indices, lengths),
+        }
+        del indices
+        with patch.object(
+            workspace,
+            "clear_attention_metadata",
+            wraps=workspace.clear_attention_metadata,
+        ) as clear:
+            release_v41_prefill_shared(shared, 2)
+            self.assertIsNotNone(reference())
+            clear.assert_not_called()
+            release_v41_prefill_shared(shared, 3)
+            self.assertIsNone(reference())
+            clear.assert_called_once_with()
+            self.assertNotIn("prefill_index_plan", shared)
+            release_v41_prefill_shared(shared, 3)
+            clear.assert_called_once_with()
+
+            # Final cleanup also drops views if no index plan was registered.
+            indices = torch.zeros(9, 8, dtype=torch.int32)
+            reference = weakref.ref(indices)
+            workspace.attention_metadata(freqs, indices, lengths, 9, 4)
+            del indices
+            release_v41_prefill_shared(shared)
+            self.assertIsNone(reference())
+            self.assertEqual(clear.call_count, 2)
+            self.assertIs(shared["layers"], layers)
+
     def test_release_rechecks_changed_consumers_and_noncontiguous_layers(self):
         future = SimpleNamespace(
             kv_source_layer_id=2, index_source_layer_id=4, is_index_source=True

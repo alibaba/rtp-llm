@@ -128,6 +128,14 @@ class PrefillWorkspace:
         union_bytes = max(self._q_bytes, cp_region_bytes)
         union_bytes = ((union_bytes + align - 1) // align) * align
         self._union = torch.empty(union_bytes, dtype=torch.uint8, device=device)
+        self._q_view = (
+            self._union[: self._q_bytes]
+            .view(torch.bfloat16)
+            .view(self._q_rows, self._q_dim)
+        )
+        # Only the latest attention metadata is retained. Replacing the query
+        # domain (including CED) drops its old views; no Q/K activation is cached.
+        self._attention_metadata = None
         # Cache fixed role sub-regions once so hot getters cannot cross into a
         # neighboring gather/restore buffer even when caller metadata drifts.
         self._gather_main_region = self._union[
@@ -146,11 +154,44 @@ class PrefillWorkspace:
     def prefill_q(self, num_tokens: int) -> torch.Tensor:
         """``[num_tokens, q_dim]`` bf16 view at the front of the union buffer."""
         num_tokens = int(num_tokens)
-        return (
-            self._union[: self._q_bytes]
-            .view(torch.bfloat16)
-            .view(self._q_rows, self._q_dim)[:num_tokens]
-        )
+        return self._q_view if num_tokens == self._q_rows else self._q_view[:num_tokens]
+
+    def clear_attention_metadata(self) -> None:
+        """Release old-domain metadata before a CED transition allocates its plan."""
+        self._attention_metadata = None
+
+    def attention_metadata(self, freqs, indices, lengths, rows, chunk_rows):
+        """Reuse final metadata views within this forward's current query domain."""
+        cached = self._attention_metadata
+        sources = (freqs, indices, lengths)
+        geometry = (rows, chunk_rows)
+        cacheable = not any(t.requires_grad for t in sources)
+        if (
+            cacheable
+            and cached is not None
+            and cached[1] == geometry
+            and all(a is b for a, b in zip(cached[0], sources))
+        ):
+            return cached[2]
+        self._attention_metadata = None
+        if rows < 0 or chunk_rows <= 0:
+            raise ValueError(
+                "attention metadata needs nonnegative rows and positive chunks"
+            )
+        for name, tensor in zip(("freqs", "indices", "lengths"), sources):
+            if tensor.ndim == 0 or tensor.shape[0] < rows:
+                raise ValueError(f"attention {name} must contain at least {rows} rows")
+        indices_3d = indices.unsqueeze(1) if indices.ndim == 2 else indices
+        chunks = []
+        for tensor in (freqs, indices_3d, lengths):
+            live = tensor if tensor.shape[0] == rows else tensor[:rows]
+            chunks.append((live,) if rows <= chunk_rows else live.split(chunk_rows))
+        result = tuple(chunks)
+        # Production runs in inference_mode. Avoid retaining a caller's graph
+        # if this utility is exercised with differentiable tensors elsewhere.
+        if cacheable:
+            self._attention_metadata = (sources, geometry, result)
+        return result
 
     def cp_gather_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP gather buffer."""

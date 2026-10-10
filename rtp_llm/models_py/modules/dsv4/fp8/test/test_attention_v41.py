@@ -6,7 +6,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention_v41_module
 from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import cp_kv_slot_mapping
 from rtp_llm.models_py.modules.dsv4.fp8.attention import _configure_flash_mla_l2_persist
@@ -21,6 +20,32 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import (
 
 
 class AttentionV41Test(unittest.TestCase):
+    def test_raw_pool_identity_keeps_reinterpret_and_strided_layout(self):
+        attn = AttentionV41FP8.__new__(AttentionV41FP8)
+        torch.nn.Module.__init__(attn)
+        attn.layer_id = 2
+        layer = SimpleNamespace(kv_cache_base=None)
+        attn._kv_cache = SimpleNamespace(get_layer_cache=lambda *args: layer)
+        for dtype in (torch.uint8, torch.int8, torch.bfloat16, torch.float32):
+            backing = torch.zeros((5, 32), dtype=dtype)
+            for base in (backing, backing[:, :16], backing[1:, 4:20]):
+                layer.kv_cache_base = base
+                result = attn._pool_raw_u8(attention_v41_module.SWA_KV)
+                expected = base.view(torch.uint8)
+                self.assertEqual(result.shape, expected.shape)
+                self.assertEqual(result.stride(), expected.stride())
+                self.assertEqual(result.storage_offset(), expected.storage_offset())
+                if dtype == torch.uint8:
+                    self.assertIs(result, base)
+                result[0, 0] = 7
+                self.assertEqual(expected[0, 0], 7)
+        layer.kv_cache_base = torch.empty(0, 3)
+        self.assertIsNone(attn._pool_raw_u8(attention_v41_module.SWA_KV))
+        layer.kv_cache_base = torch.empty(3)
+        self.assertIsNone(attn._pool_raw_u8(attention_v41_module.SWA_KV))
+        attn._kv_cache = None
+        self.assertIsNone(attn._pool_raw_u8(attention_v41_module.SWA_KV))
+
     def test_source_pool_views_follow_backing_storage_and_layout(self):
         region = attention_v41_module.HCA_KV
         attn = AttentionV41FP8.__new__(AttentionV41FP8)

@@ -13,7 +13,6 @@ from bisect import bisect_left
 
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.attn_type import (
@@ -686,7 +685,8 @@ class AttentionV41FP8(AttentionFP8):
     def _project_output(self, o, freqs, out=None):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
 
-        o = o.reshape(-1, self.n_heads, self.head_dim)
+        if o.ndim != 3 or o.shape[1:] != (self.n_heads, self.head_dim):
+            o = o.reshape(-1, self.n_heads, self.head_dim)
         if _v41_output_projection.is_supported(
             o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
         ):
@@ -908,7 +908,9 @@ class AttentionV41FP8(AttentionFP8):
 
     def _project_prefill_q(self, qr, freqs_cis, workspace):
         rows = qr.shape[0]
-        q_out = workspace.prefill_q(rows).view(rows, self.n_heads * self.head_dim)
+        q_out = workspace.prefill_q(rows)
+        if q_out.shape != (rows, self.n_heads * self.head_dim):
+            q_out = q_out.view(rows, self.n_heads * self.head_dim)
         if rows == 0:
             return q_out.view(rows, self.n_heads, self.head_dim)
         with record_function_range("dsv41.prefill.q_lora_b_rope"):
@@ -929,21 +931,27 @@ class AttentionV41FP8(AttentionFP8):
         from flash_mla import flash_mla_sparse_fwd
 
         out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
-        for start in range(0, rows, _FLASH_MLA_SPARSE_Q_CHUNK):
-            end = min(start + _FLASH_MLA_SPARSE_Q_CHUNK, rows)
-            freqs = common.freqs_cis[start:end]
-            q = self._project_prefill_q(qkv.qr[start:end], freqs, common.workspace)
+        chunk = _FLASH_MLA_SPARSE_Q_CHUNK
+        freqs_chunks, index_chunks, length_chunks = common.workspace.attention_metadata(
+            common.freqs_cis, indices, topk_length, rows, chunk
+        )
+        qr_chunks = (qkv.qr,) if rows <= chunk else qkv.qr.split(chunk)
+        out_chunks = (out,) if rows <= chunk else out.split(chunk)
+        for qr, target, freqs, indices_chunk, lengths in zip(
+            qr_chunks, out_chunks, freqs_chunks, index_chunks, length_chunks
+        ):
+            q = self._project_prefill_q(qr, freqs, common.workspace)
             with record_function_range(profile_name):
                 o, _, _ = flash_mla_sparse_fwd(
                     q=q,
                     kv=kv,
-                    indices=indices[start:end],
+                    indices=indices_chunk,
                     sm_scale=self.softmax_scale,
                     attn_sink=self.attn_sink,
-                    topk_length=topk_length[start:end],
+                    topk_length=lengths,
                 )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                self._prefill_output_proj_into(o, freqs, out=out[start:end])
+                self._prefill_output_proj_into(o, freqs, out=target)
             dispose_tensor(o)
         self._prefill_output_all_reduce(out)
         return out
@@ -2351,7 +2359,7 @@ class AttentionV41FP8(AttentionFP8):
                     qkv,
                     common,
                     kv=swa_only_workspace.view(-1, 1, self.head_dim),
-                    indices=meta.combined_indices.unsqueeze(1),
+                    indices=meta.combined_indices,
                     topk_length=meta.combined_lens,
                     profile_name="dsv41.prefill.swa_concat.flash_mla",
                 )
@@ -2362,7 +2370,7 @@ class AttentionV41FP8(AttentionFP8):
                 qkv,
                 common,
                 kv=qkv.kv_full.unsqueeze(1),
-                indices=topk.unsqueeze(1).to(torch.int32),
+                indices=topk.to(torch.int32),
                 topk_length=common.swa_meta.topk_length_kv_full,
                 profile_name="dsv41.prefill.swa.flash_mla_kv_full",
             )
@@ -2433,7 +2441,7 @@ class AttentionV41FP8(AttentionFP8):
             kv=prefill_kv_workspace.combine_kv(
                 self._shared_attention, globals_by_req, swa
             ).unsqueeze(1),
-            indices=indices.unsqueeze(1),
+            indices=indices,
             topk_length=lens,
             profile_name="dsv41.prefill.shared_global",
         )

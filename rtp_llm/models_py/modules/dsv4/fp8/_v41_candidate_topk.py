@@ -1,7 +1,10 @@
-"""Startup-warmed candidate-only FP32 K2048 selection on SM100.
+"""Startup-warmed candidate-only FP32 K2048 selection on SM100/SM103.
+
+SM103 defaults to the qualified [512, 4096] score shape. SM100 retains its
+explicit opt-in; other devices and SM103 shapes keep the existing fallback.
 
 try_select never compiles or reads device data. Unsupported/cold calls return
-None before allocation or output writes. warmup owns the four fixed variants.
+None before allocation or output writes. warmup owns the fixed CUDA variants.
 Graph callers retain captured input/output tensors through the graph lifetime;
 forward-local scratch allocated during capture belongs to the graph pool.
 """
@@ -24,6 +27,9 @@ from pathlib import Path
 import torch
 
 _READY = {}
+_QUALIFIED_SHAPES = {}
+# cudaErrorInvalidDeviceFunction / InvalidKernelImage / NoKernelImageForDevice.
+_PREPARE_IMAGE_ERRORS = frozenset((98, 200, 209))
 _LIBRARY = None
 _LOCK = threading.Lock()
 _SOURCE = Path(__file__).resolve().parent
@@ -47,7 +53,7 @@ STATUS = {
 
 
 def _enabled():
-    return os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "0") == "1"
+    return os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") in ("1", "auto")
 
 
 def _shape_supported(rows, width, k):
@@ -100,6 +106,20 @@ def is_supported(scores, out, *, k=2048, scratch=None):
     return len({t.untyped_storage().data_ptr() for t in tensors}) == len(tensors)
 
 
+def _find_nvcc():
+    """CPU-only discovery for explicit startup compilation."""
+    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda:
+        return str(Path(cuda) / "bin/nvcc")
+    nvcc = shutil.which("nvcc")
+    if nvcc:
+        return nvcc
+    standard = Path("/usr/local/cuda/bin/nvcc")
+    return (
+        str(standard) if standard.is_file() and os.access(standard, os.X_OK) else None
+    )
+
+
 def _build_library():
     """CPU-only compilation; called exclusively from explicit startup warmup."""
     if torch.__version__ != "2.11.0+cu130":
@@ -112,8 +132,7 @@ def _build_library():
             or hashlib.sha256(path.read_bytes()).hexdigest() != expected
         ):
             return None
-    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
+    nvcc = _find_nvcc()
     cxx = os.environ.get("CXX") or shutil.which("c++")
     if not nvcc or not cxx:
         return None
@@ -250,6 +269,14 @@ def try_select(scores, out, *, k=2048, scratch=None):
     entry = _READY.get(scores.device.index)
     if entry is None:
         return None
+    qualified = _QUALIFIED_SHAPES.get(scores.device.index)
+    if qualified is not None and tuple(scores.shape) != qualified:
+        return None
+    if (
+        os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") != "1"
+        and qualified is None
+    ):
+        return None
     lib, context = entry
     with torch.cuda.device(scores.device):
         if not lib.v41_candidate_topk_is_current(context):
@@ -263,7 +290,7 @@ def try_select(scores, out, *, k=2048, scratch=None):
 
 @torch.inference_mode()
 def warmup(device):
-    """Compile/load and prime exactly four variants outside graph capture."""
+    """Compile/load and prime qualified variants outside graph capture."""
     if not _enabled() or torch.__version__ != "2.11.0+cu130":
         return False
     device = torch.device(device)
@@ -274,26 +301,69 @@ def warmup(device):
             raise RuntimeError("Candidate TopK warmup must precede graph capture")
         device = torch.device("cuda", torch.cuda.current_device())
         prop = torch.cuda.get_device_properties(device)
-        if (prop.major, prop.minor) != (10, 0):
+        capability = (prop.major, prop.minor)
+        if capability not in ((10, 0), (10, 3)):
+            return False
+        if capability == (10, 3) and torch.version.git_version != (
+            "70d99e998b4955e0049d13a98d77ae1b14db1f45"
+        ):
+            return False
+        if (
+            capability == (10, 0)
+            and os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") != "1"
+        ):
             return False
         if device.index in _READY:
             lib, context = _READY[device.index]
             return bool(lib.v41_candidate_topk_is_current(context))
-        lib = _load()
+        try:
+            lib = _load()
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            if os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") != "auto":
+                raise
+            logging.exception(
+                "Candidate TopK JIT unavailable; retaining existing selection"
+            )
+            return False
         if lib is None:
             logging.info("Candidate TopK unavailable; retaining existing selection")
             return False
         context = ctypes.c_void_p()
         error = lib.v41_candidate_topk_prepare(ctypes.byref(context))
+        if (
+            error in _PREPARE_IMAGE_ERRORS
+            and os.environ.get("DSV41_CANDIDATE_NATIVE_TOPK", "auto") == "auto"
+        ):
+            logging.info(
+                "Candidate TopK image unavailable (CUDA %s); retaining existing selection",
+                error,
+            )
+            return False
         if error or not context.value:
             raise RuntimeError(f"Candidate TopK prepare failed: CUDA {error}")
-        for width in (4096, 4099, 8196, 8199):
-            scores = torch.full(
-                (256, width), float("-inf"), dtype=torch.float32, device=device
-            )
-            out = torch.empty((256, 2048), dtype=torch.int32, device=device)
-            scratch = torch.empty((256,), dtype=torch.int32, device=device)
-            _execute(lib, scores, out, scratch)
+        if capability == (10, 3):
+            # Prime the target shape and both aligned/offset input variants.
+            # Dynamic leading strides and output padding do not add variants.
+            for offset in (0, 1):
+                storage = torch.full(
+                    (512, 4096 + 7 * offset),
+                    float("-inf"),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                scores = storage[:, offset : 4096 + offset]
+                out = torch.empty((512, 2065), dtype=torch.int32, device=device)
+                scratch = torch.empty((512,), dtype=torch.int32, device=device)
+                _execute(lib, scores, out, scratch)
+        else:
+            for width in (4096, 4099, 8196, 8199):
+                scores = torch.full(
+                    (256, width), float("-inf"), dtype=torch.float32, device=device
+                )
+                out = torch.empty((256, 2048), dtype=torch.int32, device=device)
+                scratch = torch.empty((256,), dtype=torch.int32, device=device)
+                _execute(lib, scores, out, scratch)
         torch.cuda.current_stream(device).synchronize()
+        _QUALIFIED_SHAPES[device.index] = (512, 4096) if capability == (10, 3) else None
         _READY[device.index] = (lib, context)
     return True

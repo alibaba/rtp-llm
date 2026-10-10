@@ -1,4 +1,4 @@
-"""CPU dispatch contracts and actual SM100 GEMM epilogue regressions."""
+"""CPU dispatch contracts and qualified Blackwell GEMM epilogue regressions."""
 
 import ast
 import ctypes
@@ -54,6 +54,95 @@ def _metadata(m=33):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    def test_output_scale_alias_padding_stride_and_full_range_slice_elision(self):
+        for m in (0, 1, 3, 4, 5, 512):
+            with self.subTest(m=m), torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as profile:
+                q, scales = op._output(m, torch.device("cpu"))
+            padded = (m + 3) // 4 * 4
+            self.assertEqual(q.shape, (m, 8192))
+            self.assertEqual(scales.shape, (m, 64))
+            self.assertEqual(scales.stride(), (1, padded if padded else 1))
+            self.assertEqual(scales.storage_offset(), 0)
+            base = scales._base
+            self.assertEqual(scales.untyped_storage().data_ptr(), base.data_ptr())
+            base.fill_(-1)
+            scales.fill_(17)
+            self.assertTrue(bool((base[:, :m] == 17).all()))
+            self.assertTrue(bool((base[:, m:] == -1).all()))
+            slices = sum(
+                e.count for e in profile.key_averages() if e.key == "aten::slice"
+            )
+            self.assertEqual(slices, int(padded != m))
+
+    def test_quantize_keeps_contiguous_copy_and_restores_leading_dimensions(self):
+        linear_cls = self._linear_class()
+        linear = linear_cls.__new__(linear_cls)
+        torch.nn.Module.__init__(linear)
+        linear.K = 8
+        captured = []
+
+        def quantize(flat, **kwargs):
+            self.assertTrue(flat.is_contiguous())
+            result = flat.clone()
+            captured.append((flat, result))
+            return result, object()
+
+        path = "rtp_llm.models_py.kernels.cuda.fp8_kernel"
+        with mock.patch.dict(
+            sys.modules, {path: SimpleNamespace(sgl_per_token_group_quant_fp8=quantize)}
+        ):
+            inputs = (
+                torch.arange(32).float().view(4, 8),
+                torch.arange(64).float().view(4, 16)[:, ::2],
+                torch.arange(48).float().view(2, 3, 8).transpose(0, 1),
+                torch.arange(32).float().view(2, 16),
+                torch.ones(4, 8, requires_grad=True),
+            )
+            for x in inputs:
+                actual, _ = linear._quantize_input(x)
+                flat, quantized = captured[-1]
+                torch.testing.assert_close(actual, x)
+                self.assertEqual(actual.shape, x.shape)
+                self.assertEqual(flat.shape, (x.numel() // 8, 8))
+                if (
+                    x.ndim == 2
+                    and x.shape[1] == 8
+                    and x.is_contiguous()
+                    and not x.requires_grad
+                ):
+                    self.assertIs(flat, x)
+                    self.assertIs(actual, quantized)
+                elif x.requires_grad:
+                    self.assertIsNot(flat, x)
+                    self.assertIsNot(actual, quantized)
+
+    def test_quantized_exact_shape_keeps_noncontiguous_input_and_out_aliases(self):
+        linear_cls = self._linear_class()
+        linear = linear_cls.__new__(linear_cls)
+        torch.nn.Module.__init__(linear)
+        linear.N, linear.K = 3, 8
+        linear.weight = torch.ones(3, 8)
+        linear.weight_scales = torch.ones(1)
+        q = torch.arange(64).float().view(4, 16)[:, ::2]
+        storage = torch.full((4, 8), -1.0)
+        out = storage[:, 1:7:2]
+
+        def gemm(a, b, output, **kwargs):
+            self.assertIs(a[0], q)
+            self.assertIs(output, out)
+            output.copy_(a[0] @ b[0].T)
+
+        with mock.patch.dict(
+            sys.modules, {"deep_gemm": SimpleNamespace(fp8_fp4_gemm_nt=gemm)}
+        ):
+            self.assertIs(linear.forward_quantized(q, torch.ones(1), out=out), out)
+            torch.testing.assert_close(out, q @ linear.weight.T)
+            self.assertTrue(bool((storage[:, ::2] == -1).all()))
+            with self.assertRaises(RuntimeError):
+                linear.forward_quantized(torch.zeros(2, 16), torch.ones(1))
+
     def test_linear_valid_quantized_calls_keep_output_and_gemm_geometry(self):
         linear_cls = self._linear_class()
         linear = linear_cls.__new__(linear_cls)
@@ -209,6 +298,37 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             self.assertIsNone(op.try_grouped_quant(a, w))
         load.assert_not_called()
 
+    def test_sm103_148_sms_is_supported_but_cold_calls_cannot_compile(self):
+        a, w = _metadata()
+        prop = SimpleNamespace(major=10, minor=3, multi_processor_count=148)
+        with mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=prop
+        ), mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
+            op, "_load"
+        ) as load:
+            self.assertTrue(op.is_supported(a, w))
+            self.assertIsNone(op.try_grouped_quant(a, w))
+        load.assert_not_called()
+
+    def test_nvcc_discovery_respects_explicit_toolchain_and_local_fallback(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            op.shutil, "which", return_value=None
+        ), mock.patch.object(
+            op.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: str(path) == "/usr/local/cuda/bin/nvcc",
+        ):
+            self.assertEqual(op._nvcc_path(), "/usr/local/cuda/bin/nvcc")
+            with mock.patch.dict(os.environ, {"CUDA_HOME": "/explicit/missing"}):
+                self.assertIsNone(op._nvcc_path())
+            with mock.patch.dict(os.environ, {"CUDA_PATH": "/usr/local/cuda"}):
+                self.assertEqual(op._nvcc_path(), "/usr/local/cuda/bin/nvcc")
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            op.shutil, "which", return_value="/chosen/bin/nvcc"
+        ):
+            self.assertEqual(op._nvcc_path(), "/chosen/bin/nvcc")
+
     def test_incompatible_layout_dtype_device_and_alignment_fall_back(self):
         changes = (
             (0, "shape", (33, 2, 4096)),
@@ -232,7 +352,8 @@ class WoAQuantCPUContractTest(unittest.TestCase):
     def test_unverified_architecture_and_sms_fall_back(self):
         for major, minor, sms in (
             (9, 0, 132),
-            (10, 3, 148),
+            (10, 3, 144),
+            (10, 3, 152),
             (10, 0, 151),
             (10, 0, 148),
         ):
@@ -415,11 +536,10 @@ class WoAQuantCPUContractTest(unittest.TestCase):
 class WoAQuantCudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability() != (10, 0):
-            raise unittest.SkipTest("SM100 required")
+        if not op._device_supported(torch.device("cuda", torch.cuda.current_device())):
+            raise unittest.SkipTest("Qualified SM100/SM103 device required")
         import deep_gemm
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )

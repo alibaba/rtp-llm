@@ -4,7 +4,6 @@ import weakref
 
 import torch
 from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_loader.weight_memory_saver import (
     current_model_scope,
@@ -40,7 +39,11 @@ class V41MXFP8Linear(torch.nn.Module):
             sgl_per_token_group_quant_fp8,
         )
 
-        flat = x.reshape(-1, self.K).contiguous()
+        flat = (
+            x
+            if x.ndim == 2 and x.shape[1] == self.K and not x.requires_grad
+            else x.reshape(-1, self.K)
+        ).contiguous()
         quantized, scales = sgl_per_token_group_quant_fp8(
             flat,
             group_size=32,
@@ -49,7 +52,11 @@ class V41MXFP8Linear(torch.nn.Module):
             scale_tma_aligned=True,
             scale_ue8m0=True,
         )
-        return quantized.view(x.shape), scales
+        return (
+            quantized
+            if quantized.shape == x.shape and not quantized.requires_grad
+            else quantized.view(x.shape)
+        ), scales
 
     def forward_quantized(self, x_q: torch.Tensor, x_s: torch.Tensor, out=None):
         """Consume group32 E4M3/packed UE8M0 without another quantization.
@@ -69,9 +76,20 @@ class V41MXFP8Linear(torch.nn.Module):
             import deep_gemm
 
             deep_gemm.fp8_fp4_gemm_nt(
-                (x_q.reshape(m, self.K), x_s),
+                (
+                    (
+                        x_q
+                        if x_q.shape == (m, self.K) and not x_q.requires_grad
+                        else x_q.reshape(m, self.K)
+                    ),
+                    x_s,
+                ),
                 (self.weight, self.weight_scales),
-                output.reshape(m, self.N),
+                (
+                    output
+                    if output.shape == (m, self.N) and not output.requires_grad
+                    else output.reshape(m, self.N)
+                ),
                 recipe=(1, 1, 32),
             )
         return output

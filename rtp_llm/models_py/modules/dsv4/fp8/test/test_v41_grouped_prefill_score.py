@@ -5,12 +5,12 @@ import os
 import random
 import sys
 import unittest
+import weakref
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-
 from rtp_llm.models_py.modules.dsv4.fp8 import _v41_grouped_prefill_score as grouped
 
 
@@ -196,7 +196,9 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                 with patch.object(
                     grouped,
                     "try_grouped_scores",
-                    return_value=SimpleNamespace(groups=groups),
+                    return_value=SimpleNamespace(
+                        groups=groups, split_rows=lambda tensor: (tensor,)
+                    ),
                 ) as score, patch.object(
                     batched, "_try_publish_with_tokens", side_effect=publish
                 ) as published, patch.object(
@@ -235,6 +237,190 @@ class GroupedCEDDispatchCPU(unittest.TestCase):
                         )
                     )
                 projection.assert_not_called()
+
+    def test_group_output_views_and_partial_width_fallback(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_batched_prefill_select as batched,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as topk
+
+        for lengths, width in (((7,), 512), ((2, 3, 2), 512), ((2, 3, 2), 37)):
+            with self.subTest(lengths=lengths, width=width):
+                rows = sum(lengths)
+                output = torch.full((rows, 512), -777, dtype=torch.int32)
+                scores = torch.arange(width, dtype=torch.float32).expand(rows, -1)
+                visible = torch.full((rows,), width, dtype=torch.int32)
+                shared = {}
+                owner = SimpleNamespace(
+                    _shared_attention=shared,
+                    layer_id=2,
+                    compress_ratio=2,
+                    index_topk=512,
+                    _cp_ctx=SimpleNamespace(
+                        prefix_lengths=torch.tensor([512, 512]),
+                        input_lengths_global=torch.tensor([128, 128]),
+                    ),
+                )
+                spans, start = [], 0
+                for count in lengths:
+                    spans.append(slice(start, start + count))
+                    start += count
+
+                def groups(*, mask_tail):
+                    self.assertFalse(mask_tail)
+                    for span in spans:
+                        ends = visible[span]
+                        yield span, scores[span], ends, (torch.zeros_like(ends), ends)
+
+                calls = []
+
+                def select(logits, ends, count, *, bounds, out):
+                    span = spans[len(calls)]
+                    expected = output[span, :width]
+                    self.assertEqual(out.shape, expected.shape)
+                    self.assertEqual(out.stride(), expected.stride())
+                    self.assertEqual(out.storage_offset(), expected.storage_offset())
+                    self.assertEqual(out.data_ptr(), expected.data_ptr())
+                    calls.append(span)
+                    if width < 512:
+                        # Legacy K512 rejects this, then real torch.topk fills only
+                        # the request's available columns in the existing output.
+                        return None
+                    if len(lengths) == 1:
+                        self.assertIs(out, output)
+                    out.copy_(torch.arange(512, dtype=torch.int32))
+                    return out
+
+                with patch.object(
+                    grouped,
+                    "try_grouped_scores",
+                    return_value=SimpleNamespace(
+                        groups=groups,
+                        split_rows=lambda tensor: (
+                            (tensor,)
+                            if len(lengths) == 1
+                            else tuple(tensor[span] for span in spans)
+                        ),
+                    ),
+                ), patch.object(grouped, "_mask_tail_kernel"), patch.object(
+                    topk, "try_select_tokens", side_effect=select
+                ):
+                    self.assertTrue(
+                        batched.try_select_batched(
+                            owner,
+                            SimpleNamespace(is_cuda=True),
+                            None,
+                            None,
+                            [None] * 2,
+                            [slice(0, rows)],
+                            None,
+                            output,
+                            candidate_source=-1,
+                            publish_candidates=False,
+                            candidate_size=8,
+                            candidate_blocks=64,
+                            req_ids=object(),
+                        )
+                    )
+                self.assertEqual(calls, spans)
+                expected = (
+                    torch.arange(512, dtype=torch.int32)
+                    if width == 512
+                    else torch.arange(width - 1, -1, -1, dtype=torch.int32)
+                )
+                self.assertTrue(
+                    torch.equal(output[:, :width], expected.expand(rows, -1))
+                )
+                self.assertTrue(torch.all(output[:, width:] == -777))
+
+    def test_consumed_score_is_released_before_next_group_allocation(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as scorer
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _v41_batched_prefill_select as batched,
+        )
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_prefill_topk as topk
+
+        rows, chunk_rows = 12, 4
+        shared = {}
+        owner = SimpleNamespace(
+            _shared_attention=shared,
+            layer_id=2,
+            compress_ratio=2,
+            index_topk=512,
+            _cp_ctx=SimpleNamespace(
+                prefix_lengths=torch.tensor([512, 512]),
+                input_lengths_global=torch.tensor([128, 128]),
+            ),
+        )
+        output = torch.empty(rows, 512, dtype=torch.int32)
+        spans = tuple(
+            slice(start, start + chunk_rows) for start in range(0, rows, chunk_rows)
+        )
+        layout = tuple(
+            grouped._ScoreGroup(0, 2, span, 512, None, None) for span in spans
+        )
+        bounds = tuple(
+            (
+                span,
+                *(
+                    torch.full((chunk_rows,), value, dtype=torch.int32)
+                    for value in (0, 512, 0, 512)
+                ),
+            )
+            for span in spans
+        )
+        plan = grouped._GroupedScores(
+            torch.empty(rows, 32, 64, dtype=torch.int8),
+            torch.empty(rows, 32, dtype=torch.int32),
+            torch.empty(rows, 32),
+            None,
+            2,
+            shared,
+            (rows // 2,) * 2,
+            layout,
+            None,
+            None,
+        )
+        references = []
+
+        def score(*args, **kwargs):
+            self.assertTrue(all(reference() is None for reference in references))
+            logits = torch.empty(chunk_rows, 512)
+            references.append(weakref.ref(logits))
+            return logits
+
+        def select(logits, visible, count, *, bounds, out):
+            out.zero_()
+            return out
+
+        # Mock call history would itself retain score arguments, so install the
+        # selector function directly when checking the consumer's tensor lifetime.
+        with patch.object(
+            grouped, "try_grouped_scores", return_value=plan
+        ), patch.object(plan, "_bounds", return_value=bounds), patch.object(
+            scorer, "fp8_fp4_mqa_indexer_score", side_effect=score
+        ), patch.object(
+            topk, "try_select_tokens", select
+        ):
+            self.assertTrue(
+                batched.try_select_batched(
+                    owner,
+                    SimpleNamespace(is_cuda=True),
+                    None,
+                    None,
+                    [None] * 2,
+                    [slice(0, rows)],
+                    None,
+                    output,
+                    candidate_source=-1,
+                    publish_candidates=False,
+                    candidate_size=8,
+                    candidate_blocks=64,
+                    req_ids=object(),
+                )
+            )
+        self.assertEqual(len(references), len(spans))
+        self.assertTrue(all(reference() is None for reference in references))
 
 
 class GroupedScoreEnvironmentTest(unittest.TestCase):
@@ -307,6 +493,77 @@ class GroupedScoreEnvironmentTest(unittest.TestCase):
 
 
 class GroupedScoreLayoutTest(unittest.TestCase):
+    def test_cold_bounds_split_preserves_ragged_planes_and_cache_identity(self):
+        for counts in ((4,) * 4, (1, 17, 4095, 4096)):
+            layout, start = [], 0
+            for request, count in enumerate(counts):
+                layout.append(
+                    SimpleNamespace(
+                        first=request,
+                        stop=request + 1,
+                        rows=slice(start, start + count),
+                        width=256,
+                        scale=torch.empty(256, dtype=torch.int32),
+                    )
+                )
+                start += count
+            plan = grouped._GroupedScores(
+                torch.empty(0),
+                None,
+                None,
+                torch.zeros(start, dtype=torch.int32),
+                2,
+                {},
+                counts,
+                tuple(layout),
+                torch.zeros(start, dtype=torch.int32),
+                torch.full((4,), 256, dtype=torch.int32),
+            )
+            buffers = []
+
+            def launch(
+                positions, ids, key_counts, descriptors, output, *args, **kwargs
+            ):
+                # Distinct values in each plane expose wrong flat-buffer offsets.
+                output.copy_(torch.arange(output.numel(), dtype=torch.int32))
+                buffers.append(output)
+
+            class Kernel:
+                def __getitem__(self, grid):
+                    return launch
+
+            tensor = torch.tensor
+
+            def host_tensor(*args, **kwargs):
+                kwargs.pop("pin_memory", None)
+                return tensor(*args, **kwargs)
+
+            with patch.object(
+                torch.cuda, "is_current_stream_capturing", return_value=False
+            ), patch.object(
+                grouped, "_all_grouped_score_bounds_kernel", Kernel()
+            ), patch.object(
+                torch, "tensor", side_effect=host_tensor
+            ):
+                result = plan._bounds()
+                self.assertIs(plan._bounds(), result)
+            self.assertEqual(len(buffers), 1)
+            base = buffers[0]
+            for group, (rows, *planes) in zip(layout, result):
+                self.assertEqual(rows, group.rows)
+                count = rows.stop - rows.start
+                for index, plane in enumerate(planes):
+                    offset = 4 * rows.start + index * count
+                    self.assertEqual(plane.shape, (count,))
+                    self.assertEqual(plane.stride(), (1,))
+                    self.assertEqual(plane.storage_offset(), offset)
+                    self.assertEqual(
+                        plane.untyped_storage().data_ptr(), base.data_ptr()
+                    )
+                    self.assertTrue(
+                        torch.equal(plane, torch.arange(offset, offset + count))
+                    )
+
     def test_bounds_descriptors_preserve_ragged_geometry_and_cap(self):
         layout, cursor = [], 0
         for i, count in enumerate((1, 127, 129, 4096)):
@@ -362,6 +619,120 @@ class GroupedScoreLayoutTest(unittest.TestCase):
         keys[2].scale, keys[3].scale = scale[:1024], scale[1024:]
         layout = grouped._group_layout(keys, (4,) * 4)
         self.assertEqual([(g.first, g.stop) for g in layout], [(0, 2), (2, 4)])
+
+    def test_group_slab_aliases_ragged_padded_keys_at_nonzero_offset(self):
+        widths = [257, 511, 513, 1023]
+        # Drop the first request so both planes start within their allocations.
+        keys = key_views([513, *widths], (5,))[1:]
+        for index, key in enumerate(keys):
+            key.quant.fill_(index + 1)
+            key.scale.fill_(index + 11)
+        layout = grouped._group_layout(keys, (5, 7, 11, 13))
+        self.assertEqual(len(layout), 1)
+        group = layout[0]
+        expected_span = 512 + 512 + 768 + 1023
+        self.assertEqual(group.payload.shape, (expected_span, 64))
+        self.assertEqual(group.scale.shape, (expected_span,))
+        self.assertEqual(group.payload.storage_offset(), keys[0].quant.storage_offset())
+        self.assertEqual(group.scale.storage_offset(), keys[0].scale.storage_offset())
+        offset = 0
+        for index, (key, width) in enumerate(zip(keys, widths)):
+            payload = group.payload[offset : offset + width]
+            scale = group.scale[offset : offset + width]
+            self.assertTrue(torch.equal(payload, key.quant))
+            self.assertTrue(torch.equal(scale, key.scale))
+            payload[0, 0] = 31 + index
+            scale[-1] = 41 + index
+            self.assertEqual(int(key.quant[0, 0]), 31 + index)
+            self.assertEqual(int(key.scale[-1]), 41 + index)
+            offset += (width + 255) // 256 * 256
+
+    def test_same_storage_gap_in_either_plane_splits_group(self):
+        for plane in ("quant", "scale"):
+            with self.subTest(plane=plane):
+                keys = key_views([1024] * 4, (4,))
+                tail_shape = (64,) if plane == "quant" else ()
+                dtype = torch.int8 if plane == "quant" else torch.int32
+                storage = torch.empty((4352, *tail_shape), dtype=dtype)
+                # The middle 256 entries belong to neither neighboring request.
+                for key, start in zip(keys, (0, 1024, 2304, 3328)):
+                    setattr(key, plane, storage[start : start + 1024])
+                layout = grouped._group_layout(keys, (4,) * 4)
+                self.assertEqual(
+                    [(group.first, group.stop) for group in layout],
+                    [(0, 2), (2, 4)],
+                )
+                for group in layout:
+                    self.assertEqual(group.payload.shape, (2048, 64))
+                    self.assertEqual(group.scale.shape, (2048,))
+                    self.assertEqual(
+                        group.payload.data_ptr(), keys[group.first].quant.data_ptr()
+                    )
+                    self.assertEqual(
+                        group.scale.data_ptr(), keys[group.first].scale.data_ptr()
+                    )
+
+    def test_groups_preserve_row_views_offsets_and_writes(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score as scorer
+
+        for lengths in ((11,), (3, 5, 3)):
+            with self.subTest(lengths=lengths):
+                rows = sum(lengths)
+                q = torch.arange((rows + 4) * 32 * 64, dtype=torch.int64).view(
+                    rows + 4, 32, 64
+                )[2 : rows + 2]
+                sf = torch.arange((rows + 4) * 32, dtype=torch.int32).view(
+                    rows + 4, 32
+                )[2 : rows + 2]
+                weights = torch.arange((rows + 4) * 32, dtype=torch.float32).view(
+                    rows + 4, 32
+                )[2 : rows + 2]
+                layout, bounds, start = [], [], 0
+                for count in lengths:
+                    span = slice(start, start + count)
+                    layout.append(grouped._ScoreGroup(0, 1, span, 257, None, None))
+                    ends = torch.full((count,), 257, dtype=torch.int32)
+                    zeros = torch.zeros_like(ends)
+                    bounds.append((span, zeros, ends, zeros, ends))
+                    start += count
+                shared, calls = {}, []
+                plan = grouped._GroupedScores(
+                    q, sf, weights, None, 1, shared, (rows,), tuple(layout), None, None
+                )
+
+                def score(
+                    q_view, sf_view, payload, scale, weight_view, *args, **kwargs
+                ):
+                    span = layout[len(calls)].rows
+                    for actual, original in (
+                        (q_view, q),
+                        (sf_view, sf),
+                        (weight_view, weights),
+                    ):
+                        expected = original[span]
+                        self.assertEqual(actual.shape, expected.shape)
+                        self.assertEqual(actual.stride(), expected.stride())
+                        self.assertEqual(
+                            actual.storage_offset(), expected.storage_offset()
+                        )
+                        self.assertEqual(actual.data_ptr(), expected.data_ptr())
+                        self.assertTrue(torch.equal(actual, expected))
+                    # Consumers still receive writable views of this call's activations.
+                    weight_view.fill_(len(calls) + 17)
+                    self.assertTrue(torch.all(weights[span] == len(calls) + 17))
+                    calls.append(span)
+                    return torch.empty(q_view.shape[0], 257)
+
+                with patch.object(
+                    plan, "_bounds", return_value=tuple(bounds)
+                ), patch.object(scorer, "fp8_fp4_mqa_indexer_score", side_effect=score):
+                    for span, logits, visible, selection_bounds in plan.groups(
+                        mask_tail=False
+                    ):
+                        self.assertEqual(logits.shape[0], span.stop - span.start)
+                        self.assertIs(visible, selection_bounds[1])
+                self.assertEqual(calls, [group.rows for group in layout])
+                self.assertEqual(shared, {})
 
     def test_ragged_rows_and_width_buckets(self):
         keys = key_views([1021, 1031, 2041, 2051, 3077], (5,))
@@ -1157,7 +1528,9 @@ class GroupedTailSelectionTest(unittest.TestCase):
                 patch.object(
                     grouped,
                     "try_grouped_scores",
-                    return_value=SimpleNamespace(groups=groups),
+                    return_value=SimpleNamespace(
+                        groups=groups, split_rows=lambda tensor: (tensor,)
+                    ),
                 )
             )
             stack.enter_context(
@@ -1317,6 +1690,7 @@ class GroupedTailSelectionTest(unittest.TestCase):
                         dict(
                             selector=1,
                             native=1,
+                            finite_native=0,
                             finish=0,
                             legacy_publication=0,
                             raw_attempts=1,

@@ -3,7 +3,6 @@ import sys
 import unittest
 
 import torch
-
 from rtp_llm.cpp.models.context_parallel.test import (
     libth_context_parallel_py_wrapper_test as cp_test,
 )
@@ -149,6 +148,60 @@ class TestContextParallelLoadBalanceSplit(unittest.TestCase):
             self.assertTrue(result)
             self.assertEqual(input_tokens, expect_input_tokens[cp_rank])
             self.assertEqual(shuffle_indices, expect_shuffle_indices[cp_rank])
+
+
+class TestHandleInputsWithEngram(unittest.TestCase):
+    def test_real_rows_and_padding_are_fully_initialized(self):
+        # Each source element is distinct, including genuine -1 history, so a
+        # partial copy or an uninitialized padding column cannot pass equality.
+        for decode, lengths in (
+            (3, ()),
+            (0, (1, 5, 17)),
+            (2, (1, 5, 17)),
+            (0, (4096,) * 16),
+        ):
+            for cp_size in (1, 2, 4):
+                total = decode + sum(lengths)
+                tokens = torch.arange(total, dtype=torch.int32)
+                input_lengths = torch.tensor((1,) * decode + lengths, dtype=torch.int32)
+                sequence_lengths = torch.full((decode,), 10, dtype=torch.int32)
+                windows = torch.arange(total * 4, dtype=torch.int32).reshape(-1, 4)
+                windows[::3, 0] = -1
+                original_windows = windows.clone()
+                for rank in range(cp_size):
+                    with self.subTest(
+                        decode=decode, lengths=lengths, cp=cp_size, rank=rank
+                    ):
+                        actual, shuffle, local_lengths = (
+                            cp_test.handle_inputs_with_engram(
+                                tokens,
+                                input_lengths,
+                                sequence_lengths,
+                                windows,
+                                rank,
+                                cp_size,
+                            )
+                        )
+                        expected_parts = [windows[:decode]]
+                        source_offset = decode
+                        shuffle_offset = 0
+                        for request, length in enumerate(lengths):
+                            chunk = int(local_lengths[decode + request])
+                            indices = shuffle[shuffle_offset : shuffle_offset + chunk]
+                            valid = (indices >= 0) & (indices < length)
+                            expected = torch.full((chunk, 4), -1, dtype=torch.int32)
+                            expected[valid] = windows[
+                                source_offset + indices[valid].long()
+                            ]
+                            expected_parts.append(expected)
+                            source_offset += length
+                            shuffle_offset += chunk
+                        self.assertTrue(torch.equal(actual, torch.cat(expected_parts)))
+                        self.assertEqual(actual.dtype, torch.int32)
+                        self.assertEqual(actual.device.type, "cpu")
+                        self.assertEqual(actual.stride(), (4, 1))
+                        self.assertTrue(actual.is_pinned())
+                        self.assertTrue(torch.equal(windows, original_windows))
 
 
 class TestHandleInputsWithHidden(unittest.TestCase):

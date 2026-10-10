@@ -6,6 +6,25 @@
 #include <cstdint>
 
 namespace v41_candidate_topk {
+// Attribute queries can leave a runtime last-error before any kernel launch.
+// Clear only a known unavailable image so the existing Torch path can run;
+// preserve any unrelated asynchronous error for the Python caller to raise.
+inline bool unavailable_image(cudaError_t error) {
+    return error == cudaErrorInvalidDeviceFunction ||
+           error == cudaErrorInvalidKernelImage ||
+           error == cudaErrorNoKernelImageForDevice;
+}
+
+inline int prepare_error(cudaError_t error) {
+    if (unavailable_image(error)) {
+        const cudaError_t pending = cudaGetLastError();
+        if (pending != cudaSuccess && !unavailable_image(pending)) {
+            return static_cast<int>(pending);
+        }
+    }
+    return static_cast<int>(error);
+}
+
 template <int Vecs, bool Aligned>
 __global__ __launch_bounds__(1024, 2) void select_ids(
     const float* scores, int32_t* output, int32_t* row_status,
@@ -62,7 +81,7 @@ extern "C" int v41_candidate_topk_prepare(void** context) {
     cudaError_t error;
 #define PREPARE(V, A) \
     error = cudaFuncGetAttributes(&attributes, v41_candidate_topk::select_ids<V, A>); \
-    if (error != cudaSuccess) return static_cast<int>(error)
+    if (error != cudaSuccess) return v41_candidate_topk::prepare_error(error)
     PREPARE(2, true);
     PREPARE(2, false);
     PREPARE(4, true);
