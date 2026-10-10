@@ -1,0 +1,27 @@
+{
+  "case_id": "cache_store_mha_int8_2to1_1k",
+  "layout": "mha",
+  "dtype": "int8",
+  "source_tp": 2,
+  "target_tp": 1,
+  "tokens": 1024,
+  "block_tokens": 64,
+  "seed": 41983,
+  "layers": 2,
+  "heads": 8,
+  "kv_heads": 8,
+  "head_dim": 64,
+  "pool_blocks": 19,
+  "deadline_ms": 30000,
+  "process_timeout_seconds": 90,
+  "model_source": {
+    "model": "Qwen/Qwen-7B",
+    "original": {
+      "layers": 32,
+      "heads": 32,
+      "kv_heads": 32,
+      "head_dim": 128
+    },
+    "weights_loaded": false
+  }
+}
