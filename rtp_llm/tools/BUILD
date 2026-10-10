@@ -163,6 +163,19 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_router_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_router_boundary_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_corrected_history_replay",
+        ":dsv41_query_boundary_replay",
+        ":dsv41_reference_probe",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
     name = "dsv41_corrected_history_replay",
     testonly = True,
     srcs = ["dsv41_corrected_history_replay.py"],
