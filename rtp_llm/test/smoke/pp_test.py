@@ -1,19 +1,14 @@
-"""PP topology smoke cases, selected with --cases or PP_TEST_CASES.
+"""PP smoke cases selected with --cases or PP_TEST_CASES (default: sym).
 
---list-cases lists the available PD and PDFUSION cases without starting a server.
-PD_VARIANT remains an alias for selecting one of the original PD cases.
-pdfusion_mtp_regression retains the MTP step/cache-reuse/concurrency matrix.
-Its defaults remain qwen35_dense and block size 2048; PD defaults remain
-qwen_3 and block size 16.
-MODEL_TYPE, CHECKPOINT_PATH and TOKENIZER_PATH select the target model;
-SP_MODEL_TYPE, SP_CHECKPOINT_PATH and SP_TYPE select the optional draft model.
-PD_MODEL_TYPE / PD_SP_MODEL_TYPE remain supported as fallbacks.
-For Qwen3.5 dense, use MODEL_TYPE=qwen35_dense and PP_SEQ_SIZE_PER_BLOCK=2048.
-DP cases configure EP=TP*DP; expert communication is exercised only by MoE models.
-shutdown_pp* cases stop after startup, after requests, or while idle DP lanes run
-fake batches. Each rank must complete executor finish and BackendManager.stop,
-children must exit, and signaling the start_server parent must need no forced kill.
-Executor tests cover result draining and both local-stop/terminal-plan arrival orders.
+PP=1 supplies matching generation references. The retained cases cover distinct
+PD routes, middle stages, MTP step/cache paths, DP recovery and resident prefixes.
+The MTP DP recovery case also checks shutdown once; PPExecutor/PPScheduler unit
+tests cover fake-result consumption, slot draining and idle scheduler wakeup.
+
+Pass CHECKPOINT_PATH / MODEL_TYPE for an individual target, or
+PP_QWEN3_CHECKPOINT_PATH and PP_QWEN35_DENSE_CHECKPOINT_PATH for mixed suites.
+SP_MODEL_TYPE / SP_CHECKPOINT_PATH / SP_TYPE retain the draft-model overrides.
+--list-cases lists the catalogue without starting a server.
 """
 
 import argparse
@@ -39,35 +34,13 @@ from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 from rtp_llm.test.utils.port_util import PortsContext
 
-MODEL_TYPE = os.environ.get("MODEL_TYPE", os.environ.get("PD_MODEL_TYPE", "qwen_3"))
 # Draft model registry name for the MTP variants, overridable per checkpoint family.
 SP_MODEL_TYPE = os.environ.get(
     "SP_MODEL_TYPE", os.environ.get("PD_SP_MODEL_TYPE", "qwen35_dense_mtp")
 )
 REQUEST_TIMEOUT = int(os.environ.get("PP_REQUEST_TIMEOUT", "300"))
 
-# Variant table: each side's (pp, tp) width. decode_gpus = decode_pp*decode_tp.
-#   sym:              prefill pp2tp1 / decode pp2tp1 - symmetric PP stage routing
-#   sym_mtp1..4: sym layout + MTP, proposal width 1..4. P hands off s0+d1
-#                     only; width>2 pads on D, so sp>=2 exercises that path.
-#   asym:             prefill pp2tp1 / decode pp2tp2 - decode TP finer, sub-slice read
-#   conv:             prefill pp2tp2 / decode pp2tp1 - prefill TP finer, peer assembly
-#   pp2_tp2:          prefill pp2tp2 / decode pp2tp2 - TP>1 both sides, no CP (control)
-#   pp1_tp2:          prefill pp1tp2 / decode pp1tp2 - pp=1 flat path with TP>1
-#   pp1_tp1:          prefill pp1tp1 / decode pp1tp1 - flat single-worker direct path
-#   pp1_asym:         prefill pp1tp1 / decode pp1tp2 - flat, decode TP finer
-#   pp1_conv:         prefill pp1tp2 / decode pp1tp1 - flat, prefill TP finer
-#   cp_sharded:       prefill pp2tp2(cp=2,sharded) / decode pp2tp1 - CP mode A
-#   cp_full:          prefill pp2tp2(cp=2,full) / decode pp2tp1 - CP mode B
-#   cp_full_alltoall: same layout with ALLTOALL P2P rotation within each P stage
-#   cp_full_decode_tp2: prefill pp2tp2(cp=2,full) / decode pp2tp2 - CP mode B + decode TP>1
-#   pp1_cp_full:      prefill pp1tp2(cp=2,full) / decode pp1tp1 - flat path + CP mode B
-#   pp1_cp_full_tp2:  prefill pp1tp2(cp=2,full) / decode pp1tp2 - flat + CP mode B + decode TP>1
-#   pp1_mla_cp_import: prefill pp1tp2 / decode pp1tp2 - MLA only: decode-side PREFILL_CP flag
-#   pp2_pp1:          prefill pp2tp1 / decode pp1tp1 - decode rank pulls across both stage groups
-#   pp1_pp2:          prefill pp1tp1 / decode pp2tp1 - each decode stage pulls a partial range
-#   pp2_pp1_tp2:      prefill pp2tp2 / decode pp1tp2 - partial ranges with TP>1 on both sides
-#
+# /** Keep one representative for each PD stage/TP routing path. */
 VARIANTS = {
     "sym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 1},
     "sym_mtp1": {
@@ -77,13 +50,6 @@ VARIANTS = {
         "decode_tp": 1,
         "sp": 1,
     },
-    "sym_mtp2": {
-        "prefill_pp": 2,
-        "prefill_tp": 1,
-        "decode_pp": 2,
-        "decode_tp": 1,
-        "sp": 2,
-    },
     "sym_mtp3": {
         "prefill_pp": 2,
         "prefill_tp": 1,
@@ -91,27 +57,8 @@ VARIANTS = {
         "decode_tp": 1,
         "sp": 3,
     },
-    "sym_mtp4": {
-        "prefill_pp": 2,
-        "prefill_tp": 1,
-        "decode_pp": 2,
-        "decode_tp": 1,
-        "sp": 4,
-    },
-    "sym_pp4_mtp3": {
-        "prefill_pp": 4,
-        "prefill_tp": 1,
-        "decode_pp": 4,
-        "decode_tp": 1,
-        "sp": 3,
-    },
     "asym": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 2},
     "conv": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 1},
-    "pp2_tp2": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 2, "decode_tp": 2},
-    "pp1_tp2": {"prefill_pp": 1, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 2},
-    "pp1_tp1": {"prefill_pp": 1, "prefill_tp": 1, "decode_pp": 1, "decode_tp": 1},
-    "pp1_asym": {"prefill_pp": 1, "prefill_tp": 1, "decode_pp": 1, "decode_tp": 2},
-    "pp1_conv": {"prefill_pp": 1, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 1},
     # Requires a model with PP support and a sparse MLA backend with CP prefill.
     "cp_sharded": {
         "prefill_pp": 2,
@@ -171,7 +118,6 @@ VARIANTS = {
         "decode_tp": 2,
         "decode_prefill_cp": True,
     },
-    "pp2_pp1": {"prefill_pp": 2, "prefill_tp": 1, "decode_pp": 1, "decode_tp": 1},
     "pp1_pp2": {"prefill_pp": 1, "prefill_tp": 1, "decode_pp": 2, "decode_tp": 1},
     "pp2_pp1_tp2": {"prefill_pp": 2, "prefill_tp": 2, "decode_pp": 1, "decode_tp": 2},
 }
@@ -180,11 +126,8 @@ VARIANTS = {
 VARIANTS.update(
     {
         "pdfusion_mtp_regression": {"pp": 2, "tp": 2, "dp": 1, "ep": 1},
-        "pdfusion_pp2_tp2": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 0},
-        "pdfusion_pp2_tp2_mtp": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 3},
         "fake_pp2_tp2_dp2": {"pp": 2, "tp": 2, "dp": 2, "ep": 4, "sp": 0},
         "fake_pp2_tp2_dp2_mtp": {"pp": 2, "tp": 2, "dp": 2, "ep": 4, "sp": 3},
-        "multi_task_prompt_pp2": {"pp": 2, "tp": 1, "dp": 1, "ep": 1, "sp": 0},
         "multi_task_prompt_pp2_tp2": {"pp": 2, "tp": 2, "dp": 1, "ep": 1, "sp": 0},
         "multi_task_prompt_pp2_dp2": {"pp": 2, "tp": 1, "dp": 2, "ep": 2, "sp": 0},
         "multi_task_prompt_pp2_pd": {
@@ -225,27 +168,8 @@ VARIANTS.update(
     }
 )
 
-VARIANTS.update(
-    {
-        f"shutdown_pp{pp}_tp{tp}{'_mtp' if sp else ''}": {
-            "pp": pp,
-            "tp": tp,
-            "dp": 1,
-            "ep": 1,
-            "sp": sp,
-            "graceful_shutdown": True,
-            "block_size": 2048 if sp else 16,
-        }
-        for pp, tp, sp in ((2, 1, 0), (3, 1, 0), (4, 1, 0), (2, 2, 0), (2, 2, 3))
-    }
-)
-
-VARIANTS["shutdown_pp2_tp1_before_requests"] = dict(
-    VARIANTS["shutdown_pp2_tp1"], shutdown_scenario="idle_after_startup"
-)
-VARIANTS["shutdown_pp2_tp1_dp2"] = dict(
-    VARIANTS["shutdown_pp2_tp1"], dp=2, ep=2, shutdown_scenario="dp_fake_batches"
-)
+VARIANTS["pdfusion_pp4_tp1"] = {"pp": 4, "tp": 1, "dp": 1, "ep": 1, "sp": 0}
+VARIANTS["fake_pp2_tp2_dp2_mtp"]["graceful_shutdown"] = True
 
 
 def selected_cases():
@@ -319,40 +243,6 @@ def base_smoke_args(default_seq_size_per_block=16):
     return stripped + ["--seq_size_per_block", str(seq_size_per_block)]
 
 
-class FakeBatchProgress:
-    """Read PP completions and actual request destinations from the console log."""
-
-    def __init__(self, path):
-        self.path = path
-        self.offset = 0
-        self.counts = Counter()
-        self.requests = []
-
-    def poll(self):
-        with open(self.path, "rb") as log:
-            log.seek(self.offset)
-            # Bound each poll even while debug output is still being appended.
-            end = os.fstat(log.fileno()).st_size
-            while self.offset < end:
-                line = log.readline()
-                if not line.endswith(b"\n"):
-                    break
-                self.offset = log.tell()
-                match = re.search(rb"PP fake batch completed: dp_rank=(\d+)", line)
-                if match:
-                    self.counts[int(match[1])] += 1
-                match = re.search(
-                    rb"\[RANK (\d+)\].*\[rtp_llm/cpp/model_rpc/LocalRpcServer.cc:\d+\]"
-                    rb".*receive request (\d+)",
-                    line,
-                )
-                if match:
-                    self.requests.append(
-                        {"world_rank": int(match[1]), "request_id": int(match[2])}
-                    )
-        return self.counts.copy()
-
-
 def reserve_server_port(test_case):
     context = PortsContext(num_ports=200)
     ports = context.__enter__()
@@ -360,7 +250,121 @@ def reserve_server_port(test_case):
     return str(ports[0] + 100)
 
 
-class PPTopologyTest(unittest.TestCase):
+class DPRequestRouting:
+    def dp_role_addrs(self, port, tp, busy_dp):
+        # /** Frontend ports do not pin DP routing; select the backend explicitly. */
+        backend = ServerConfig()
+        backend.start_port = port
+        backend.set_local_rank(busy_dp * tp)
+        return [{
+            "role": "PDFUSION",
+            "ip": "127.0.0.1",
+            "http_port": backend.http_port,
+            "grpc_port": backend.rpc_server_port,
+        }]
+
+    def worker_status(self, port, dp):
+        response = requests.get(f"http://127.0.0.1:{port}/worker_status", timeout=5)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertIn("results", body, body)
+        results = body["results"]
+        status = {int(item["dp_rank"]): item for item in results}
+        self.assertEqual(set(status), set(range(dp)), results)
+        return status
+
+    def finished_requests(self, status):
+        return {
+            (rank, int(task["request_id"])): task
+            for rank, item in status.items()
+            for task in item["finished_task_list"]
+        }
+
+    def generate_on_dp(
+        self, port, variant, busy_dp, tokens, label,
+        prompt="Continue counting the positive integers: 1, 2, 3,",
+        task_id=None,
+    ):
+        before = self.worker_status(port, variant["dp"])
+        result = self.generate(
+            port, prompt, tokens, label,
+            self.dp_role_addrs(port, variant["tp"], busy_dp), task_id,
+        )
+
+        # /** The frontend assigns request IDs; inspect completion deltas to
+        # verify the actual destination rather than echoed routing arguments. */
+        previous = set(self.finished_requests(before))
+        # /** Responses can precede metadata cleanup. Wait for completion and
+        # idle replicas before the next request, without sampling a RUNNING phase. */
+        deadline = time.monotonic() + 5
+        while True:
+            status = self.worker_status(port, variant["dp"])
+            finished = self.finished_requests(status)
+            added = finished.keys() - previous
+            running = {
+                rank: item["running_task_info"]
+                for rank, item in status.items() if item["running_task_info"]
+            }
+            if (added and not running) or time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+        self.assertEqual(
+            [rank for rank, _ in added], [busy_dp],
+            f"{label}: expected one completed request on DP {busy_dp}, got {added}",
+        )
+        self.assertFalse(running, f"{label}: requests did not drain: {running}")
+        for key in added:
+            self.assertEqual(
+                int(finished[key].get("error_info", {}).get("error_code", 0)), 0,
+                finished[key],
+            )
+        return result
+
+
+class PPModelTest(unittest.TestCase):
+    def setUp(self):
+        variant = VARIANTS[self.case_name]
+        dense = variant.get("sp", 0) > 0 or self.case_name == "pdfusion_mtp_regression"
+        family = "PP_QWEN35_DENSE" if dense else "PP_QWEN3"
+        self.checkpoint = os.environ.get(
+            f"{family}_CHECKPOINT_PATH", os.environ.get("CHECKPOINT_PATH")
+        )
+        self.model_type = os.environ.get(
+            "MODEL_TYPE", os.environ.get("PD_MODEL_TYPE", "qwen35_dense" if dense else "qwen_3")
+        )
+        self.tokenizer_path = os.environ.get(
+            f"{family}_TOKENIZER_PATH", os.environ.get("TOKENIZER_PATH", self.checkpoint)
+        )
+
+    def assert_draft_accepted(self, results, label, propose_step=None):
+        speculative = [
+            result["aux_info"] for result in results
+            if len(result["output_ids"][0]) > 1
+        ]
+        if propose_step is not None:
+            for aux in speculative:
+                self.assertEqual(
+                    len(aux["speculative_accepted_tokens_per_pos"]), propose_step, label,
+                )
+        self.assertTrue(
+            any(
+                aux["speculative_draft_rounds"] > 0
+                and sum(aux["speculative_accepted_tokens_per_pos"]) > 0
+                for aux in speculative
+            ),
+            f"{label}: no draft token was accepted",
+        )
+        if propose_step is not None and propose_step > 1:
+            self.assertTrue(
+                any(
+                    aux["speculative_accepted_tokens_per_pos"][-1] > 0
+                    for aux in speculative
+                ),
+                f"{label}: the multi-step draft chain never reached acceptance",
+            )
+
+
+class PPTopologyTest(DPRequestRouting, PPModelTest):
     case_name = "sym"
 
     def id(self):
@@ -369,7 +373,7 @@ class PPTopologyTest(unittest.TestCase):
     def shortDescription(self):
         return self.case_name
 
-    def generate(self, port, prompt, max_new_tokens, label="", role_addrs=None):
+    def generate(self, port, prompt, max_new_tokens, label="", role_addrs=None, task_id=None):
         started = time.monotonic()
         output = {"label": label, "port": port, "max_new_tokens": max_new_tokens}
         self.outputs.append(output)
@@ -385,6 +389,8 @@ class PPTopologyTest(unittest.TestCase):
         }
         if role_addrs is not None:
             generate_config["role_addrs"] = role_addrs
+        if task_id is not None:
+            generate_config["task_id"] = task_id
         response = requests.post(
             f"http://127.0.0.1:{port}/",
             json={
@@ -436,8 +442,8 @@ class PPTopologyTest(unittest.TestCase):
             self.assertTrue(
                 server.start_server(
                     model_path=checkpoint,
-                    model_type=MODEL_TYPE,
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"baseline failed to start: {server.log_file_path}",
             )
@@ -525,7 +531,7 @@ class PPTopologyTest(unittest.TestCase):
             port=prefill_port,
             role_name=f"{self.case_name}_{label}_prefill_pp{prefill_pp}",
             smoke_args_str=shlex.join(
-                base_smoke_args()
+                base_smoke_args(default_seq_size_per_block=2048 if sp else 16)
                 + shlex.split(prefill_args)
                 + sp_args
                 + ["--role_type", "PREFILL"]
@@ -543,7 +549,7 @@ class PPTopologyTest(unittest.TestCase):
             port=decode_port,
             role_name=f"{self.case_name}_{label}_decode_pp{decode_pp}",
             smoke_args_str=shlex.join(
-                base_smoke_args()
+                base_smoke_args(default_seq_size_per_block=2048 if sp else 16)
                 + shlex.split(decode_args)
                 + sp_args
                 + ["--role_type", "DECODE"]
@@ -553,16 +559,16 @@ class PPTopologyTest(unittest.TestCase):
             self.assertTrue(
                 decode.start_server(
                     model_path=checkpoint,
-                    model_type=MODEL_TYPE,
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"decode failed to start: {decode.log_file_path}",
             )
             self.assertTrue(
                 prefill.start_server(
                     model_path=checkpoint,
-                    model_type=MODEL_TYPE,
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"prefill failed to start: {prefill.log_file_path}",
             )
@@ -587,21 +593,6 @@ class PPTopologyTest(unittest.TestCase):
             ("Briefly explain what a distributed system is:", 64),
         ]
 
-    def wait_fake_progress(self, progress, before, ranks, minimum):
-        deadline = time.monotonic() + 30
-        while True:
-            counts = progress.poll()
-            if all(counts[rank] - before[rank] >= minimum for rank in ranks):
-                self.fake_progress.append(dict(counts))
-                return
-            if time.monotonic() >= deadline:
-                self.fail(
-                    f"PP fake round trips stopped: ranks={ranks}, before={dict(before)}, "
-                    f"after={dict(counts)}, expected >= {minimum} new completions; "
-                    f"log={progress.path}"
-                )
-            time.sleep(0.1)
-
     def wait_frontends(self, ports):
         pending = set(ports)
         deadline = time.monotonic() + 60
@@ -620,59 +611,6 @@ class PPTopologyTest(unittest.TestCase):
         self.assertFalse(
             pending, f"DP frontends failed to become ready: ports={pending}"
         )
-
-    def generate_on_dp(self, port, progress, variant, busy_dp, tokens, label):
-        # A frontend knows every DP backend; its HTTP port does not pin routing.
-        backend = ServerConfig()
-        backend.start_port = port
-        backend.set_local_rank(busy_dp * variant["tp"])
-        role_addr = {
-            "role": "PDFUSION",
-            "ip": "127.0.0.1",
-            "http_port": backend.http_port,
-            "grpc_port": backend.rpc_server_port,
-        }
-        before = progress.poll()
-        request_index = len(progress.requests)
-        during_request = before
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            pending = pool.submit(
-                self.generate,
-                port,
-                "Continue counting the positive integers: 1, 2, 3,",
-                tokens,
-                label,
-                [role_addr],
-            )
-            while not pending.done():
-                counts = progress.poll()
-                if not pending.done():
-                    during_request = counts
-                time.sleep(0.1)
-            pending.result()
-
-        progress.poll()
-        received = progress.requests[request_index:]
-        self.assertEqual(
-            [request["world_rank"] for request in received],
-            [busy_dp * variant["tp"]],
-            f"{label}: request did not reach the selected DP; received={received}",
-        )
-        idle_progress = {
-            rank: during_request[rank] - before[rank]
-            for rank in range(variant["dp"])
-            if rank != busy_dp
-        }
-        self.outputs[-1].update(
-            backend_request=received[0], idle_fake_completions=idle_progress
-        )
-        for rank, completed in idle_progress.items():
-            self.assertGreaterEqual(
-                completed,
-                variant["pp"] + 1,
-                f"{label}: idle DP {rank} did not complete enough fake batches "
-                f"while the real request was pending: {idle_progress}",
-            )
 
     def assert_graceful_shutdown(self, server, variant):
         """Signal the parent and require every backend to finish the complete stop path."""
@@ -710,11 +648,15 @@ class PPTopologyTest(unittest.TestCase):
             self.assertEqual(completed, expected, server.log_file_path)
             backend_stops = log.count("BackendManager stopped successfully")
             self.assertEqual(backend_stops, sum(expected.values()), server.log_file_path)
-            self.assertNotIn("Force killing process ", log)
-            self.assertNotRegex(log, r"Timed out waiting for .* process group to exit")
-            self.assertNotIn("engine stop failed during backend shutdown", log)
+            failure = re.search(
+                r"Force killing process |Timed out waiting for .* process group to exit"
+                r"|engine stop failed during backend shutdown"
+                r"|\*\*\* SIG(?:SEGV|FPE|ILL|ABRT|BUS).*received by PID",
+                log,
+            )
+            self.assertIsNone(failure, f"shutdown failure: {failure}; log={server.log_file_path}")
             self.shutdown_evidence.update(
-                scenario=variant.get("shutdown_scenario", "idle_after_requests"),
+                scenario="idle_after_dp_recovery",
                 backend_stops=backend_stops,
                 elapsed_seconds=time.monotonic() - started,
                 exit_code=exit_code,
@@ -738,7 +680,7 @@ class PPTopologyTest(unittest.TestCase):
         world_size = pp * tp * dp
         self.assertGreaterEqual(len(gpu_ids), world_size)
         args = (
-            base_smoke_args(default_seq_size_per_block=variant.get("block_size", 16))
+            base_smoke_args(default_seq_size_per_block=variant.get("block_size", 2048 if variant.get("sp") else 16))
             + [
                 "--pp_size",
                 str(pp),
@@ -782,27 +724,11 @@ class PPTopologyTest(unittest.TestCase):
                 ]
             )
             env.update(
+                FT_SERVER_TEST="1",
                 DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS="0",
                 RTP_LLM_STOP_TIMEOUT_MS="30000",
                 RTP_LLM_DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS="10",
             )
-        if dp > 1 or variant.get("graceful_shutdown"):
-            # Keep fake-result progress and shutdown completion from all ranks in process.log.
-            env.update(FT_SERVER_TEST="1", LOG_LEVEL="DEBUG")
-            # initLogger reloads alog.conf after LOG_LEVEL was applied. Set the
-            # console level in that config as well so completion markers survive.
-            base_config = Path(__file__).resolve().parents[2] / "config/alog.conf"
-            output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
-            output_dir.mkdir(parents=True, exist_ok=True)
-            log_config = output_dir / f"{self.case_name}.alog.conf"
-            log_config.write_text(
-                re.sub(
-                    r"(?m)^alog.logger.console=[^,\n]+",
-                    "alog.logger.console=DEBUG",
-                    base_config.read_text(),
-                )
-            )
-            args.extend(["--ft_alog_conf_path", str(log_config.resolve())])
         server = MagaServerManager(
             port=reserve_server_port(self),
             env_args=env,
@@ -813,54 +739,37 @@ class PPTopologyTest(unittest.TestCase):
             self.assertTrue(
                 server.start_server(
                     model_path=checkpoint,
-                    model_type=MODEL_TYPE,
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"{self.case_name} failed to start: {server.log_file_path}",
             )
-            if variant.get("shutdown_scenario") == "idle_after_startup":
-                self.assert_graceful_shutdown(server, variant)
-                return []
             if dp == 1:
                 outputs = [
                     self.generate(server.port, prompt, tokens, self.case_name)
                     for prompt, tokens in self.cases()
                 ]
-                if variant.get("graceful_shutdown"):
-                    self.assert_graceful_shutdown(server, variant)
                 return outputs
 
-            progress = FakeBatchProgress(server.log_file_path)
             ports = [
-                server.port + rank * tp * MIN_WORKER_INFO_PORT_NUM for rank in range(dp)
+                int(server.port) + rank * tp * MIN_WORKER_INFO_PORT_NUM for rank in range(dp)
             ]
             self.wait_frontends(ports)
-            self.wait_fake_progress(progress, Counter(), list(range(dp)), pp + 1)
+            outputs = []
+            # /** Returning to each previously idle replica checks recovery in both directions. */
+            for busy_dp in (0, 1, 0, 1):
+                result = self.generate_on_dp(
+                    server.port, variant, busy_dp, 64,
+                    f"request={len(outputs)},dp={busy_dp}",
+                )
+                if outputs:
+                    self.assertEqual(result["output_ids"], outputs[0]["output_ids"])
+                outputs.append(result)
+            if variant["sp"]:
+                self.assert_draft_accepted(outputs, self.case_name, variant["sp"])
             if variant.get("graceful_shutdown"):
-                for busy_dp in range(dp):
-                    self.generate_on_dp(
-                        server.port, progress, variant, busy_dp, 64, f"before_shutdown,dp={busy_dp}"
-                    )
-                before = progress.poll()
-                self.wait_fake_progress(progress, before, list(range(dp)), pp + 1)
                 self.assert_graceful_shutdown(server, variant)
-                return
-            # Exercise both busy/idle directions, then return to each DP after idle.
-            for cycle in range(2):
-                for busy_dp in range(dp):
-                    for tokens in (64, 128):
-                        self.generate_on_dp(
-                            server.port,
-                            progress,
-                            variant,
-                            busy_dp,
-                            tokens,
-                            f"cycle={cycle},busy_dp={busy_dp},tokens={tokens}",
-                        )
-                    # Once the real request drains, every DP must keep completing
-                    # fake batches. The next request then checks recovery from idle.
-                    before = progress.poll()
-                    self.wait_fake_progress(progress, before, list(range(dp)), pp + 1)
+            return outputs
         finally:
             server.stop_server()
 
@@ -874,7 +783,7 @@ class PPTopologyTest(unittest.TestCase):
         if decode_prefill_cp:
             # MLA-only: with MHA the slice plan assumes a rotating prefill.
             self.assertNotEqual(
-                MODEL_TYPE,
+                self.model_type,
                 "qwen_3",
                 f"case {self.case_name} needs an MLA checkpoint (MODEL_TYPE=deepseek2)",
             )
@@ -903,28 +812,18 @@ class PPTopologyTest(unittest.TestCase):
                 f"PP PD diverges from the matching PP=1 PD baseline on: {prompt[:40]}",
             )
         if sp:
-            # Speculative decoding must actually engage: some multi-token case
-            # has to accept at least one draft (iter_count < emitted tokens).
-            self.assertTrue(
-                any(
-                    got["aux_info"]["iter_count"] < len(got["output_ids"][0])
-                    for (prompt, tokens), got in zip(self.cases(), actual)
-                    if tokens > 1
-                ),
-                f"MTP sp={sp} accepted no draft token on any multi-token case",
-            )
+            self.assert_draft_accepted(actual, self.case_name, sp)
 
     def test_selected_topology(self):
-        checkpoint = os.environ.get("CHECKPOINT_PATH")
+        checkpoint = self.checkpoint
         self.assertTrue(checkpoint, "Pass --test_env=CHECKPOINT_PATH=<checkpoint>")
         variant = VARIANTS[self.case_name]
         gpu_ids = [str(x) for x in get_gpu_ids()]
         self.outputs = []
-        self.fake_progress = []
         self.shutdown_evidence = {}
         report = {
             "case": self.case_name,
-            "model_type": MODEL_TYPE,
+            "model_type": self.model_type,
             "checkpoint": checkpoint,
             "sp_type": (
                 os.environ.get("SP_TYPE", "mtp") if variant.get("sp") else "none"
@@ -932,14 +831,13 @@ class PPTopologyTest(unittest.TestCase):
             "sp_model_type": SP_MODEL_TYPE if variant.get("sp") else None,
             "topology": variant,
             "outputs": self.outputs,
-            "fake_completions": self.fake_progress,
             "shutdown": self.shutdown_evidence,
             "passed": False,
         }
         try:
             if "prefill_pp" in variant:
                 self.check_pd_variant(checkpoint, gpu_ids, variant)
-            elif variant["dp"] > 1 or variant.get("shutdown_scenario") == "idle_after_startup":
+            elif variant["dp"] > 1:
                 self.run_pdfusion(checkpoint, gpu_ids, variant)
             else:
                 self.assertGreaterEqual(len(gpu_ids), variant["pp"] * variant["tp"])
@@ -947,7 +845,7 @@ class PPTopologyTest(unittest.TestCase):
                     checkpoint,
                     ",".join(gpu_ids[: variant["tp"]]),
                     variant["tp"],
-                    block_size=variant.get("block_size", 16),
+                    block_size=variant.get("block_size", 2048 if variant.get("sp") else 16),
                 )
                 actual = self.run_pdfusion(checkpoint, gpu_ids, variant)
                 self.assertEqual(
@@ -967,7 +865,9 @@ class PPTopologyTest(unittest.TestCase):
             )
 
 
-class MtpPPTest(unittest.TestCase):
+class MtpPPTest(PPModelTest):
+    case_name = "pdfusion_mtp_regression"
+
     def generate(self, server, prompt, max_new_tokens, sampling_options=None):
         generate_config = {
             "is_streaming": False,
@@ -1054,16 +954,15 @@ class MtpPPTest(unittest.TestCase):
             self.assertTrue(
                 server.start_server(
                     model_path=checkpoint,
-                    model_type=os.environ.get(
-                        "MODEL_TYPE", os.environ.get("PD_MODEL_TYPE", "qwen35_dense")
-                    ),
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"{variant} failed to start: {server.log_file_path}",
             )
             outputs["serial"] = []
             for case in cases:
                 outputs["serial"].append(self.generate(server, *case))
+            self.assertEqual(outputs["serial"][2]["aux_info"]["reuse_len"], 0)
             if reuse_cache:
                 for result in outputs["serial"][3:6]:
                     self.assertGreater(result["aux_info"]["reuse_len"], 0, result)
@@ -1072,9 +971,13 @@ class MtpPPTest(unittest.TestCase):
                     self.assertEqual(result["aux_info"]["reuse_len"], 0, result)
             with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = [
-                    executor.submit(self.generate, server, *case) for case in cases[1:]
+                    executor.submit(self.generate, server, *case)
+                    for case in (cases[4], cases[-1])
                 ]
                 outputs["concurrent"] = [future.result() for future in futures]
+            if reuse_cache:
+                result = outputs["concurrent"][0]
+                self.assertGreater(result["aux_info"]["reuse_len"], 0, result)
         finally:
             server.stop_server()
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -1084,12 +987,12 @@ class MtpPPTest(unittest.TestCase):
         return outputs
 
     def test_pdfusion_mtp_matches_target_generation(self):
-        checkpoint = os.environ.get("CHECKPOINT_PATH")
+        checkpoint = self.checkpoint
         self.assertTrue(
             checkpoint, "Pass --test_env=CHECKPOINT_PATH=<Qwen3.5-27B checkpoint>"
         )
         baseline = self.run_variant(checkpoint, 0)
-        variants = ((step, reuse) for step in (1, 3, 4) for reuse in (False, True))
+        variants = ((step, reuse) for step in (1, 3) for reuse in (False, True))
         for propose_step, reuse_cache in variants:
             with self.subTest(propose_step=propose_step, reuse_cache=reuse_cache):
                 actual = self.run_variant(
@@ -1101,13 +1004,7 @@ class MtpPPTest(unittest.TestCase):
                         [result["output_ids"] for result in baseline[mode]],
                         f"{mode}: MTP {propose_step} differs from target-only PP",
                     )
-                self.assertTrue(
-                    any(
-                        result["aux_info"]["iter_count"] < len(result["output_ids"][0])
-                        for result in actual["serial"][1:]
-                    ),
-                    f"MTP {propose_step} did not accept any draft tokens",
-                )
+                self.assert_draft_accepted(actual["serial"], f"MTP {propose_step}", propose_step)
 
 
 # System prompts long enough to span multiple KV blocks at the smoke block size
@@ -1168,7 +1065,7 @@ MULTI_TASK_CASES_LONG = [
 ]
 
 
-class MultiTaskPromptPPTest(unittest.TestCase):
+class MultiTaskPromptPPTest(DPRequestRouting, PPModelTest):
     """PP multi-task system prompt: build resident KV at startup, reuse it per request.
 
     PP>1 exercises preRun's synchronous pipeline completion; the PP=1 baseline
@@ -1178,21 +1075,20 @@ class MultiTaskPromptPPTest(unittest.TestCase):
     produced correct, reusable resident KV on every stage.
     """
 
-    case_name = "multi_task_prompt_pp2"
+    case_name = "multi_task_prompt_pp2_tp2"
 
     def id(self):
         return f"{super().id()}[{self.case_name}]"
 
     def request_cases(self, block_size):
-        """Switch tasks across slot wraps, then send identical user tokens under different resident prefixes."""
+        """Switch A/B/A, then distinguish resident prefixes with identical user tokens."""
         cases = MULTI_TASK_CASES_LONG if block_size > 16 else MULTI_TASK_CASES
-        requests_by_task = [
-            case
-            for round_index in range(VARIANTS[self.case_name]["pp"] + 1)
-            for case in (cases if round_index % 2 == 0 else reversed(cases))
-        ]
+        requests_by_task = [cases[0], cases[1], cases[0]]
+        # /** Long-prefix fixtures can emit a shared reasoning preamble before task-dependent tokens. */
+        probe_tokens = 128 if block_size > 16 else 8
         requests_by_task.extend(
-            (task_id, "One, two, three,", 8) for task_id, _, _ in cases
+            (task_id, "Input: One, two, three.\nOutput:", probe_tokens)
+            for task_id, _, _ in cases
         )
         return requests_by_task
 
@@ -1252,14 +1148,14 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         self.assertTrue(
             server.start_server(
                 model_path=checkpoint,
-                model_type=MODEL_TYPE,
-                tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                model_type=self.model_type,
+                tokenizer_path=self.tokenizer_path,
             ),
             f"{role_name} failed to start: {server.log_file_path}",
         )
         return server
 
-    def generate_with_task(self, server, task_id, prompt, max_new_tokens):
+    def generate(self, port, prompt, max_new_tokens, label="", role_addrs=None, task_id=None):
         generate_config = {
             "is_streaming": False,
             "max_new_tokens": max_new_tokens,
@@ -1271,8 +1167,10 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             "aux_info": True,
             "task_id": task_id,
         }
+        if role_addrs is not None:
+            generate_config["role_addrs"] = role_addrs
         response = requests.post(
-            f"http://127.0.0.1:{server.port}/",
+            f"http://127.0.0.1:{port}/",
             json={"prompt": prompt, "generate_config": generate_config},
             timeout=REQUEST_TIMEOUT,
         )
@@ -1299,10 +1197,18 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         )
         cases = self.request_cases(block_size)
         try:
-            return [
-                self.generate_with_task(server, task_id, prompt, tokens)
-                for task_id, prompt, tokens in cases
-            ]
+            outputs = []
+            for rank in range(dp):
+                for task_id, prompt, tokens in cases:
+                    if dp > 1:
+                        result = self.generate_on_dp(
+                            server.port, {"tp": tp, "dp": dp}, rank, tokens,
+                            f"{role_name},dp={rank},task={task_id}", prompt, task_id,
+                        )
+                    else:
+                        result = self.generate(server.port, prompt, tokens, task_id=task_id)
+                    outputs.append(result)
+            return outputs
         finally:
             server.stop_server()
 
@@ -1414,21 +1320,21 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             self.assertTrue(
                 decode.start_server(
                     model_path=checkpoint,
-                    model_type=MODEL_TYPE,
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"PD decode failed to start: {decode.log_file_path}",
             )
             self.assertTrue(
                 prefill.start_server(
                     model_path=checkpoint,
-                    model_type=MODEL_TYPE,
-                    tokenizer_path=os.environ.get("TOKENIZER_PATH", checkpoint),
+                    model_type=self.model_type,
+                    tokenizer_path=self.tokenizer_path,
                 ),
                 f"PD prefill failed to start: {prefill.log_file_path}",
             )
             return [
-                self.generate_with_task(prefill, task_id, prompt, tokens)
+                self.generate(prefill.port, prompt, tokens, task_id=task_id)
                 for task_id, prompt, tokens in self.request_cases(block_size)
             ]
         finally:
@@ -1436,14 +1342,14 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             decode.stop_server()
 
     def test_pp_multi_task_prompt_matches_pp1(self):
-        checkpoint = os.environ.get("CHECKPOINT_PATH")
+        checkpoint = self.checkpoint
         self.assertTrue(checkpoint, "Pass --test_env=CHECKPOINT_PATH=<checkpoint>")
         variant = VARIANTS[self.case_name]
         pp, tp, dp = variant["pp"], variant["tp"], variant.get("dp", 1)
         ep = variant.get("ep", 1)
         cp = variant.get("cp", 1)
         sp = variant.get("sp", 0)
-        block_size = variant.get("block_size", 16)
+        block_size = variant.get("block_size", 2048 if variant.get("sp") else 16)
         is_pd = variant.get("pd", False)
         cases = self.request_cases(block_size)
         gpu_ids = [str(x) for x in get_gpu_ids()]
@@ -1452,12 +1358,16 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             gpu_ids,
             1,
             tp,
-            dp,
-            ep,
+            1,
+            1,
             f"{self.case_name}_pp1_baseline",
             cp=1 if is_pd else cp,
             sp=sp,
             block_size=block_size,
+        )
+        self.assertNotEqual(
+            baseline[-2]["output_ids"], baseline[-1]["output_ids"],
+            "identical task outputs cannot detect a switched resident prefix",
         )
         if is_pd:
             actual = self.run_pd_with_prompt(
@@ -1486,7 +1396,7 @@ class MultiTaskPromptPPTest(unittest.TestCase):
             )
         report = {
             "case": self.case_name,
-            "model_type": MODEL_TYPE,
+            "model_type": self.model_type,
             "checkpoint": checkpoint,
             "topology": variant,
             "baseline": baseline,
@@ -1495,9 +1405,12 @@ class MultiTaskPromptPPTest(unittest.TestCase):
         }
         try:
             self.assertEqual(len(baseline), len(cases))
-            self.assertEqual(len(actual), len(cases))
+            self.assertEqual(len(actual), dp * len(cases))
             seen_tasks = set()
-            for (task_id, prompt, _), base, got in zip(cases, baseline, actual):
+            for index, got in enumerate(actual):
+                task_id, prompt, _ = cases[index % len(cases)]
+                base = baseline[index % len(cases)]
+                task_key = (index // len(cases), task_id)
                 got_reuse = got["aux_info"]["reuse_len"]
                 base_reuse = base["aux_info"]["reuse_len"]
                 self.assertGreaterEqual(
@@ -1506,14 +1419,14 @@ class MultiTaskPromptPPTest(unittest.TestCase):
                     f"task {task_id!r}: reuse_len={got_reuse} < one full block ({block_size}); "
                     f"resident prefix was not reused",
                 )
-                if task_id not in seen_tasks:
+                if task_key not in seen_tasks:
                     self.assertEqual(
                         got_reuse,
                         base_reuse,
                         f"task {task_id!r}: PP={pp} reuse_len={got_reuse} != "
                         f"PP=1 baseline reuse_len={base_reuse}",
                     )
-                    seen_tasks.add(task_id)
+                    seen_tasks.add(task_key)
                 self.assertEqual(
                     got["output_ids"],
                     base["output_ids"],
@@ -1535,7 +1448,6 @@ def load_tests(loader, tests, pattern):
         if name == "pdfusion_mtp_regression":
             case = MtpPPTest("test_pdfusion_mtp_matches_target_generation")
         elif name in (
-            "multi_task_prompt_pp2",
             "multi_task_prompt_pp2_tp2",
             "multi_task_prompt_pp2_dp2",
             "multi_task_prompt_pp2_pd",

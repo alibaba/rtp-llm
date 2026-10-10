@@ -85,128 +85,7 @@ load("//rtp_llm/test/smoke:suites_sm120.bzl", "sm120_suites")
 load("//rtp_llm/test/smoke:suites_rocm_oss.bzl", "rocm_oss_suites")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "remote_cache_suites")
 load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test")
-
-# Keep the original MTP regression target and its launch defaults.
-custom_smoke_test(
-    name = "qwen35_dense_mtp_pp_test",
-    main = "pp_test.py",
-    args = ["--cases=pdfusion_mtp_regression"],
-    smoke_args = "--tp_size 2 --pp_size 2 --dp_size 1 --ep_size 1 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --warm_up 0 --model_warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PD separation across pp x tp variants, each compared against a PP=1 PD
-# baseline with matching TP/CP/SP. world_size only feeds the GPU reservation (max 8
-# across variants); each server sets its own parallelism.
-custom_smoke_test(
-    name = "qwen3_pd_pp_test",
-    main = "pp_test.py",
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 8 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-custom_smoke_test(
-    name = "qwen3_pd_pp_alltoall_test",
-    main = "pp_test.py",
-    args = ["--cases=cp_full_alltoall"],
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 6 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --use_ub_comm 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# Shutdown must wake idle scheduling and finish the full stop path on every PP/TP/DP rank.
-custom_smoke_test(
-    name = "qwen3_pp_shutdown_test",
-    main = "pp_test.py",
-    args = ["--cases=shutdown_pp2_tp1_before_requests,shutdown_pp2_tp1,shutdown_pp3_tp1,shutdown_pp4_tp1,shutdown_pp2_tp2,shutdown_pp2_tp1_dp2"],
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 30",
-    gpu_type = ["H20"],
-)
-
-custom_smoke_test(
-    name = "qwen35_pp_shutdown_mtp_test",
-    main = "pp_test.py",
-    args = ["--cases=shutdown_pp2_tp2_mtp"],
-    smoke_args = "--tp_size 2 --pp_size 2 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 2048 --ssm_state_dtype fp32 --kv_cache_mem_mb 8192 --warm_up 0 --model_warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 30",
-    gpu_type = ["H20"],
-)
-
-# PP multi-task system prompt: startup builds resident KV through the pipeline and
-# requests reuse it via task_id. Compared against a PP=1 baseline of the same config.
-custom_smoke_test(
-    name = "qwen3_multi_task_prompt_pp_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2"],
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PP=2 TP=2 multi-task system prompt: verifies tpSyncModelInputs broadcast alignment
-# during the startup build across TP ranks within each stage.
-custom_smoke_test(
-    name = "qwen3_multi_task_prompt_pp2_tp2_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2_tp2"],
-    smoke_args = "--tp_size 2 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PP=2 DP=2 multi-task system prompt: each DP builds prompts with control-only cleanup,
-# then serves requests without extra startup model executions or result receives.
-custom_smoke_test(
-    name = "qwen3_multi_task_prompt_pp2_dp2_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2_dp2"],
-    smoke_args = "--tp_size 1 --dp_size 2 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PP=2 PD separation with multi-task system prompt: P and D each build resident KV
-# independently through their own PP pipelines; D-side prefix reuse skips KV transfer.
-custom_smoke_test(
-    name = "qwen3_multi_task_prompt_pp2_pd_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2_pd"],
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PP=2 CP=2 multi-task system prompt: CP reuses the TP group (tp_size=2, prefill_cp_size=2),
-# and ALL_GATHER writes the full KV to each CP rank's local cache for resident-prefix reuse.
-custom_smoke_test(
-    name = "qwen3_multi_task_prompt_pp2_cp2_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2_cp2"],
-    smoke_args = "--tp_size 2 --dp_size 1 --world_size 8 --act_type BF16 --max_seq_len 4096 --seq_size_per_block 16 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PP=2 MTP multi-task system prompt: build stream is a pure prefill (max_new_tokens=1),
-# SP dispatch enforces accepted_length==1 for context streams, pump loop exits normally.
-custom_smoke_test(
-    name = "qwen35_multi_task_prompt_pp2_mtp_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2_mtp"],
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 2 --act_type BF16 --max_seq_len 8192 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# PP=2 PD separation + MTP: P and D each build resident KV through their own PP pipelines
-# with speculative decoding enabled; D-side prefix reuse skips KV transfer for resident blocks.
-custom_smoke_test(
-    name = "qwen35_multi_task_prompt_pp2_pd_mtp_test",
-    main = "pp_test.py",
-    args = ["--cases=multi_task_prompt_pp2_pd_mtp"],
-    smoke_args = "--tp_size 1 --dp_size 1 --world_size 4 --act_type BF16 --max_seq_len 8192 --seq_size_per_block 2048 --warm_up 0 --enable_cuda_graph 0 --frontend_server_count 1 --concurrency_limit 4 --load_method scratch --shutdown_timeout 10",
-    gpu_type = ["H20"],
-)
-
-# The same entry supports model overrides and --cases / PP_TEST_CASES.
-# Keep the original target available for existing PD smoke commands.
-test_suite(
-    name = "pp_topology_test",
-    tags = ["manual"],
-    tests = [":qwen3_pd_pp_test"],
-)
+load("//rtp_llm/test/smoke:suites_pp.bzl", "pp_suites")
 
 h20_oss_suites()
 cuda13_suites()
@@ -215,6 +94,7 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+pp_suites(gpu_type = ["H20"])
 
 # ============================================================================
 # Top-level CI suites (OSS tests only)
