@@ -94,6 +94,22 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_output_precision_sm120",
+    srcs = [
+        "test_v41_output_precision_sm120.py",
+        "v41_output_precision.py",
+        "v41_expert_precision.py",
+        "v41_tp8_projection.py",
+        "v41_query_precision.py",
+        "v41_compressor_precision.py",
+        "v41_sparse_precision.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_output_projection_replay"],
+    tags = ["RTX_5000_PRO", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_v41_expert_precision_sm120",
     srcs = ["test_v41_expert_precision_sm120.py", "v41_expert_precision.py"],
     deps = _DSV4_FP8_TEST_DEPS,
