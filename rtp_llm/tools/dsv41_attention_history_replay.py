@@ -76,6 +76,13 @@ def validate_native_recipe(traces, *, reference_kernel_sha256=None):
             True,
         ),
     }
+    recipes.update(
+        {
+            f"{profile}_engram_reference": flags
+            for profile, flags in recipes.copy().items()
+            if flags[-1]
+        }
+    )
     if not traces:
         raise ValueError("Native history requires nonempty recipe traces")
     selected = None
@@ -91,6 +98,7 @@ def validate_native_recipe(traces, *, reference_kernel_sha256=None):
                 "Native history requires the composed TP8/mHC/compressor recipe"
             )
         sparse, shared, routed, post = recipes[profile]
+        engram = profile.endswith("_engram_reference")
         expected = {
             "precision_profile": profile,
             "compressor_fused": True,
@@ -136,6 +144,19 @@ def validate_native_recipe(traces, *, reference_kernel_sha256=None):
             raise ValueError(
                 "Native history recipe has an unexpected down-reference hash"
             )
+        for field in ("engram_projection_reference", "engram_gate_reference"):
+            actual = metadata.get(field) if engram else metadata.get(field, False)
+            if actual is not engram:
+                raise ValueError(f"Native history recipe flag differs: {field}")
+            if engram:
+                expected[field] = True
+        engram_digest = metadata.get("engram_reference_kernel_sha256")
+        if engram:
+            if engram_digest != reference_kernel_sha256:
+                raise ValueError("Native history Engram kernel hash differs")
+            expected["engram_reference_kernel_sha256"] = engram_digest
+        elif engram_digest is not None:
+            raise ValueError("Native history has an unexpected Engram kernel hash")
         if selected is not None and expected != selected:
             raise ValueError("Native history cannot mix recipes across steps")
         selected = expected
@@ -538,7 +559,7 @@ def main():
     parser.add_argument("--input-artifact", type=Path, required=True)
     parser.add_argument("--native-traces", type=Path)
     parser.add_argument("--prompt-index", type=int, default=0, choices=(0, 1))
-    parser.add_argument("--steps", type=int, default=3, choices=(2, 3))
+    parser.add_argument("--steps", type=int, default=3, choices=(2, 3, 4))
     cli = parser.parse_args()
     if cli.report.exists() or cli.input_artifact.exists():
         raise ValueError("Replay artifacts must be fresh")
@@ -699,6 +720,8 @@ def main():
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_compressor_precision.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_tp8_projection.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_mhc_precision.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/v41_engram_precision.py",
+        "rtp_llm/models_py/modules/dsv4/fp8/test/v41_expert_precision.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/v41_sparse_precision.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/test_v41_attention_owner_sm120.py",
         "rtp_llm/models_py/modules/dsv4/fp8/test/test_v41_decode_owner_sm120.py",
@@ -758,7 +781,7 @@ def main():
         "limitations": [
             "One short L0-L2 request: retained caches use exact official attention inputs.",
             "Saved FFN outputs are substituted from each experiment's own trace; experts are not re-executed.",
-            "Native-input history uses the validated composed recipe and its optional sparse-prefill/output-GEMM/mHC-post diagnostics.",
+            "Native-input history uses the validated composed recipe and its optional sparse-prefill/output-GEMM/mHC-post/Engram diagnostics.",
             "TP8 output partials are simulated serially, without live collectives.",
             "Serving, distributed topology, graphs, full-model accuracy and latency remain separate.",
         ],
