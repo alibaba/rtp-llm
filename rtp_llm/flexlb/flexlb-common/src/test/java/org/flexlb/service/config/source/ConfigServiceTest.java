@@ -225,6 +225,19 @@ class ConfigServiceTest {
     }
 
     @Test
+    void runtimeUpdateChangesHighPriorityThreshold() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "scheduler":{"ordering":{"type":"PRIORITY","highPriorityThreshold":50}}}
+                """);
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+        assertThat(service.loadBalanceConfig().priorityOrdering().getHighPriorityThreshold()).isEqualTo(50);
+
+        source.emit("{\"schemaVersion\":3,\"scheduler\":{\"ordering\":{\"highPriorityThreshold\":70}}}");
+        assertThat(service.loadBalanceConfig().priorityOrdering().getHighPriorityThreshold()).isEqualTo(70);
+    }
+
+    @Test
     void runtimeUpdateLogsTheNewSourceSchemaVersion() {
         ch.qos.logback.classic.Logger logger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigService.class);

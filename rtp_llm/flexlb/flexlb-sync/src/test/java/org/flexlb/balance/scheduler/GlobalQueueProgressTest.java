@@ -17,6 +17,8 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
@@ -49,6 +51,212 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlobalQueueProgressTest {
+    @Test
+    void completedArrivalDoesNotDisplaceWaitingRequest() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            f.groups.put(2L, "a");
+            BalanceContext incoming = RequestLifecycleTestSupport.context(f.config, 2L);
+            CompletableFuture<Response> completed = CompletableFuture.completedFuture(new Response());
+            GlobalQueueCoordinator queue = (GlobalQueueCoordinator) ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            assertEquals(GlobalQueueCoordinator.OfferResult.COMPLETED, queue.offer(incoming, completed, 90));
+            assertEquals(1, f.scheduler.getQueuedRequestCount());
+            assertFalse(f.requests.get(1L).isDone());
+        }
+    }
+
+    @Test
+    void concurrentHigherPriorityArrivalsReplaceOnlyOneQueuedRequest() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            CountDownLatch finishPlanning = new CountDownLatch(1);
+            f.onSelection = id -> {
+                if (id > 1) {
+                    await(finishPlanning);
+                }
+            };
+            try {
+                LongStream.rangeClosed(2, 20).parallel().forEach(id -> f.submit(id, "a", 90));
+                awaitCondition(() -> f.requests.get(1L).isDone());
+
+                assertEquals(429, f.requests.get(1L).join().getCode());
+                assertEquals(1, f.scheduler.getQueuedRequestCount());
+                assertEquals(18, f.requests.values().stream()
+                        .filter(CompletableFuture::isDone)
+                        .map(CompletableFuture::join)
+                        .filter(response -> response.getCode() == StrategyErrorType.QUEUE_FULL.getErrorCode())
+                        .count());
+            } finally {
+                finishPlanning.countDown();
+            }
+        }
+    }
+
+    @Test
+    void higherPriorityRequestReplacesNewestQueuedRequestAtLowestPriority() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(2);
+            f.decodeBlocked.addAll(Set.of(1L, 2L));
+            f.submit(1, "a", 20);
+            f.submit(2, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 2);
+
+            f.submit(3, "a", 90);
+            awaitCondition(() -> f.requests.get(2L).isDone());
+            assertEquals(429, f.requests.get(2L).join().getCode());
+            assertFalse(f.requests.get(1L).isDone());
+            awaitCondition(() -> f.admitted.contains(3L));
+            assertEquals(1, f.scheduler.getQueuedRequestCount());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"40,50", "49,50", "60,61", "99,100"})
+    void eligibleRequestCanReplaceAnyLowerPriority(int waitingPriority, int incomingPriority) throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1, "a", waitingPriority);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            f.submit(2, "a", incomingPriority);
+            awaitCondition(() -> f.requests.get(1L).isDone());
+            assertEquals(429, f.requests.get(1L).join().getCode());
+            awaitCondition(() -> f.admitted.contains(2L));
+        }
+    }
+
+    @Test
+    void fullPriorityQueueRejectsWithoutLowerPriorityAndReplacesWhenPossible() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1, "a", 90);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            f.submit(2, "a", 40);
+            Response low = f.requests.get(2L).join();
+            assertEquals(429, low.getCode());
+            assertEquals("低优先级限流", low.getErrorMessage());
+
+            f.submit(3, "a", 90);
+            Response equal = f.requests.get(3L).join();
+            assertEquals(503, equal.getCode());
+            assertEquals("队列满", equal.getErrorMessage());
+
+            f.submit(4, "a", 95);
+            Response displaced = f.requests.get(1L).get(5, TimeUnit.SECONDS);
+            assertEquals(429, displaced.getCode());
+            assertEquals("低优先级限流", displaced.getErrorMessage());
+            awaitCondition(() -> f.admitted.contains(4L));
+        }
+    }
+
+    @Test
+    void requestBelowThresholdDoesNotReplaceEvenLowerQueuedPriority() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            f.submit(2, "a", 40);
+            Response rejected = f.requests.get(2L).join();
+            assertEquals(429, rejected.getCode());
+            assertEquals("低优先级限流", rejected.getErrorMessage());
+            assertFalse(f.requests.get(1L).isDone());
+            assertEquals(1, f.scheduler.getQueuedRequestCount());
+        }
+    }
+
+    @Test
+    void updatedThresholdAppliesToSubsequentArrivals() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.decodeBlocked.add(1L);
+            f.submit(1, "a", 40);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            FlexlbConfig updated = SchedulingTestConfig.batchConfig();
+            SchedulingTestConfig.usePriorityQueue(updated);
+            updated.getScheduler().setMaxQueuedRequests(1);
+            updated.priorityOrdering().setHighPriorityThreshold(70);
+            f.currentConfig.set(updated);
+
+            f.submit(2, "a", 60);
+            assertEquals(429, f.requests.get(2L).join().getCode());
+            assertFalse(f.requests.get(1L).isDone());
+
+            f.submit(3, "a", 70);
+            assertEquals(429, f.requests.get(1L).get(5, TimeUnit.SECONDS).getCode());
+            awaitCondition(() -> f.admitted.contains(3L));
+        }
+    }
+
+    @Test
+    void fullQueueDoesNotReplaceLowerPriorityRequestDuringPlanning() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            CountDownLatch planning = new CountDownLatch(1);
+            CountDownLatch finishPlanning = new CountDownLatch(1);
+            f.onSelection = id -> {
+                if (id == 1) {
+                    planning.countDown();
+                    await(finishPlanning);
+                }
+            };
+            try {
+                f.submit(1, "a", 20);
+                await(planning);
+                f.submit(2, "a", 90);
+                assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), f.requests.get(2L).join().getCode());
+                assertFalse(f.requests.get(1L).isDone());
+            } finally {
+                finishPlanning.countDown();
+            }
+        }
+    }
+
+    @Test
+    void fullQueueReplacesLowestEligiblePriorityEvenWhenOthersAreLowerThanIncoming() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, true)) {
+            f.config.getScheduler().setMaxQueuedRequests(3);
+            f.decodeBlocked.addAll(Set.of(1L, 2L, 3L));
+            f.submit(1, "a", 30);
+            f.submit(2, "a", 60);
+            f.submit(3, "a", 10);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 3);
+
+            f.submit(4, "a", 70);
+            Response displaced = f.requests.get(3L).get(5, TimeUnit.SECONDS);
+            assertEquals(429, displaced.getCode());
+            assertFalse(f.requests.get(1L).isDone());
+            assertFalse(f.requests.get(2L).isDone());
+            awaitCondition(() -> f.admitted.contains(4L));
+        }
+    }
+
+    @Test
+    void fifoQueueKeepsItsCapacityLimitRegardlessOfNumericPriority() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.submit(1, "a", 20);
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+
+            f.submit(2, "a", 90);
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), f.requests.get(2L).join().getCode());
+            assertFalse(f.requests.get(1L).isDone());
+        }
+    }
+
     @Test
     void concurrentArrivalsNeverExceedGlobalQueueCapacity() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
@@ -390,6 +598,10 @@ class GlobalQueueProgressTest {
             EndpointRegistry endpoints = mock(EndpointRegistry.class);
             PrefillRoutingEntry a = endpoint("a");
             RequestRegistry lifecycle = mock(RequestRegistry.class);
+            when(lifecycle.publishDecisionResponseAsync(anyString(), any(), any())).thenAnswer(call -> {
+                CompletableFuture<Response> victim = call.getArgument(1);
+                return victim.complete(call.getArgument(2));
+            });
             when(lifecycle.register(any())).thenAnswer(i -> {
                 BalanceContext context = i.getArgument(0);
                 CompletableFuture<Response> future = new CompletableFuture<>();
@@ -440,7 +652,7 @@ class GlobalQueueProgressTest {
 
         private void submit(long id, String group, int priority) {
             groups.put(id, group);
-            BalanceContext context = RequestLifecycleTestSupport.context(config, id);
+            BalanceContext context = RequestLifecycleTestSupport.context(currentConfig.get(), id);
             context.setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(
                     priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
             scheduler.submit(context);

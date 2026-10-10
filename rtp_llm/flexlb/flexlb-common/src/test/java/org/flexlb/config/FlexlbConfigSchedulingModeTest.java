@@ -178,6 +178,26 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void high_priority_threshold_is_configurable_in_priority_ordering() {
+        assertEquals(50, ConfigTestFixtures.parse("""
+                {"scheduler":{"ordering":{"type":"PRIORITY"}}}
+                """).priorityOrdering().getHighPriorityThreshold());
+        assertEquals(70, ConfigTestFixtures.parse("""
+                {"scheduler":{"ordering":{"type":"PRIORITY","highPriorityThreshold":70}}}
+                """).priorityOrdering().getHighPriorityThreshold());
+        for (String value : new String[]{"0", "101", "-1", "null", "\"50\""}) {
+            var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                    {"scheduler":{"ordering":{"type":"PRIORITY","highPriorityThreshold":%s}}}
+                    """.formatted(value)));
+            assertTrue(error.getMessage().contains("highPriorityThreshold"), error.getMessage());
+        }
+        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                {"scheduler":{"ordering":{"type":"FIFO","highPriorityThreshold":50}}}
+                """));
+        assertTrue(error.getMessage().contains("scheduler.ordering.highPriorityThreshold"));
+    }
+
+    @Test
     void tagged_unions_reject_parameters_from_inactive_variants() {
         assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
                 {

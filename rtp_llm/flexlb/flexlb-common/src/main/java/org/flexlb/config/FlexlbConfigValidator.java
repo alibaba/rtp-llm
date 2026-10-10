@@ -77,7 +77,7 @@ public final class FlexlbConfigValidator {
             rejectFieldsExcept(ordering, "scheduler.ordering", "type");
         } else if ("PRIORITY".equals(type)) {
             rejectFieldsExcept(ordering, "scheduler.ordering", "type",
-                    "defaultPriority", "preemption");
+                    "defaultPriority", "highPriorityThreshold", "preemption");
             validatePreemptionShape(ordering.path("preemption"));
         }
     }
@@ -193,6 +193,10 @@ public final class FlexlbConfigValidator {
                     PriorityNormalizer.MIN_PRIORITY,
                     PriorityNormalizer.MAX_PRIORITY,
                     "scheduler.ordering.defaultPriority");
+            range(ordering.getHighPriorityThreshold(),
+                    PriorityNormalizer.MIN_PRIORITY,
+                    PriorityNormalizer.MAX_PRIORITY,
+                    "scheduler.ordering.highPriorityThreshold");
             PreemptionConfig preemption = ordering.getPreemption();
             if (preemption != null) {
                 require(preemption.getAllowedVictimStages() != null

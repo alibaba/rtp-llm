@@ -2918,7 +2918,7 @@ def atpm_error_code_family(ctx: CaseContext):
         # keeps slot one).  The tryFallback path to 8510 needs a failed
         # enqueue, which the NON_BATCH pull model never produces
         # (maxWaiting is a BATCH-path cap — the equivalent explicit-cap
-        # rejection observation lives in segment 1's 8502).  Zero
+        # rejection observation lives in segment 1's 503).  Zero
         # evictions; all nine complete.
         s2_wave = high_rids + [inc90]
         prio2 = {rid: 70 for rid in high_rids}
@@ -2955,7 +2955,7 @@ def atpm_error_code_family(ctx: CaseContext):
                     f"{list(ROUTE_REJECT_FAMILY)} route-reject family lost "
                     f"its capacity-blocked trigger at intake3 "
                     f"PendingPlacementCoordinator 6ad0315f10; the explicit-"
-                    f"cap rejection observation lives in s1's 8502), "
+                    f"cap rejection observation lives in s1's 503), "
                     f"shape ok={s2_shape}, "
                     f"dispatch={[r % 1_000_000 for r in s2_order]}, "
                     f"zero 8400/8429={zero_eviction}, "

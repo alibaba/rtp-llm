@@ -127,8 +127,10 @@ public final class RequestScheduler {
     private void enqueueGenerationRequest(BalanceContext context, CompletableFuture<Response> future) {
         try {
             switch (globalQueue.offer(context, future, context.getPriority())) {
-                case ENQUEUED -> { }
-                case QUEUE_FULL -> future.complete(error(StrategyErrorType.QUEUE_FULL, "Global queue is full"));
+                case ENQUEUED, COMPLETED -> { }
+                case QUEUE_FULL -> future.complete(error(StrategyErrorType.QUEUE_FULL, "队列满"));
+                case QUEUE_PRIORITY_THROTTLED -> future.complete(error(
+                        StrategyErrorType.QUEUE_PRIORITY_THROTTLED, "低优先级限流"));
                 case CLOSED -> future.complete(error(StrategyErrorType.DISPATCH_FAILED, "request scheduler is shutting down"));
             }
         } catch (Throwable failure) {

@@ -17,6 +17,10 @@ public final class QueueOrderingConfig {
 
     private Type type = Type.FIFO;
     private int defaultPriority = 50;
+    /**
+     * Minimum priority that may preempt a queued request when the global queue is full.
+     */
+    private int highPriorityThreshold = 50;
     private PreemptionConfig preemption;
 
     public void setType(Type type) {

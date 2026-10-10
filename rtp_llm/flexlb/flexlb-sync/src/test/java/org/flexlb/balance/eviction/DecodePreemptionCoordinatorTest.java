@@ -44,8 +44,9 @@ import static org.mockito.Mockito.when;
 
 class DecodePreemptionCoordinatorTest {
 
-    @Test
-    void commitsOnlyAfterEveryExactVictimIsTerminal() throws Exception {
+    @ParameterizedTest
+    @EnumSource(value = DecodeTaskPhase.class, names = {"ACCEPTED_NOT_RUNNING", "RUNNING"})
+    void commitsOnlyAfterEveryExactVictimIsTerminal(DecodeTaskPhase victimPhase) throws Exception {
         Fixture fixture = fixture();
         RequestRegistry requests = fixture.requests();
         DecodeEndpoint endpoint = fixture.endpoint();
@@ -68,7 +69,7 @@ class DecodePreemptionCoordinatorTest {
                 coordinator.preempt(new DecodePreemptionCoordinator.PreemptionCommand(
                         endpoint, "20", 64L, 64L, 70,
                         new DecodeEndpoint.AdmissionCapacity(2L, 100L),
-                        List.of(victim(11L, 101L), victim(12L, 102L)),
+                        List.of(victim(11L, 101L, victimPhase), victim(12L, 102L, victimPhase)),
                         1_000L, 1_000L, () -> true, "test"));
 
         assertFalse(result.isDone());
@@ -329,9 +330,13 @@ class DecodePreemptionCoordinatorTest {
     }
 
     private static DecodeRequestView victim(long requestId, long reservationToken) {
+        return victim(requestId, reservationToken, DecodeTaskPhase.ACCEPTED_NOT_RUNNING);
+    }
+
+    private static DecodeRequestView victim(long requestId, long reservationToken, DecodeTaskPhase phase) {
         return new DecodeRequestView(
                 Long.toString(requestId), 30, 64L, 64L,
-                DecodeTaskPhase.ACCEPTED_NOT_RUNNING,
+                phase,
                 true, reservationToken, false, false);
     }
 }

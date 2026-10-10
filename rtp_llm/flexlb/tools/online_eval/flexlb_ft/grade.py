@@ -188,7 +188,7 @@ GRADE_BANDS: Dict[str, dict] = {
     #        fail master startup)
     #   AT2  omitted preemption block = eviction fully disabled
     #   AT3  single-QoS (all-equal-priority) zero eviction
-    #   AT4  capacity-reject error-code family separation (8502 /
+    #   AT4  capacity-reject error-code family separation (503 /
     #        8402-family / 8431, no cross-contamination between
     #        segments)
     #   AT6  accounting integrity, black-box aggregate form (P6 +

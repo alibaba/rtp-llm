@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -54,7 +55,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     enum OfferResult {
         ENQUEUED,
+        COMPLETED,
         QUEUE_FULL,
+        QUEUE_PRIORITY_THROTTLED,
         CLOSED
     }
 
@@ -151,14 +154,29 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         Objects.requireNonNull(future, "future");
         GlobalQueueEntry entry = new GlobalQueueEntry(context, future, normalizePriority(priority),
                 router.resolvePolicyGroup(context));
+        GlobalQueueEntry victim = null;
         lock.lock();
         try {
             if (closed.get()) {
                 return OfferResult.CLOSED;
             }
-            int maxQueuedRequests = configService.loadBalanceConfig().queueScheduler().getMaxQueuedRequests();
+            if (future.isDone()) {
+                return OfferResult.COMPLETED;
+            }
+            FlexlbConfig config = context.getConfig();
+            int maxQueuedRequests = config.queueScheduler().getMaxQueuedRequests();
             if (orderedQueue.size() >= maxQueuedRequests) {
-                return OfferResult.QUEUE_FULL;
+                if (!priorityOrdering) {
+                    return OfferResult.QUEUE_FULL;
+                }
+                if (entry.priority < config.priorityOrdering().getHighPriorityThreshold()) {
+                    return OfferResult.QUEUE_PRIORITY_THROTTLED;
+                }
+                victim = orderedQueue.findQueuedRequestToPreempt(entry.priority, inFlight);
+                if (victim == null) {
+                    return OfferResult.QUEUE_FULL;
+                }
+                removeRequestUnderLock(victim);
             }
             orderedQueue.add(entry);
             registered.put(future, entry);
@@ -166,10 +184,14 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             // indexes without scanning the backlog.
             future.whenComplete((ignored, failure) -> completeRequest(entry));
             changed.signal();
-            return OfferResult.ENQUEUED;
         } finally {
             lock.unlock();
         }
+        if (victim != null) {
+            completeDecisionResponse(victim, error(StrategyErrorType.QUEUE_PRIORITY_THROTTLED,
+                    "低优先级限流"));
+        }
+        return OfferResult.ENQUEUED;
     }
 
     int size() {

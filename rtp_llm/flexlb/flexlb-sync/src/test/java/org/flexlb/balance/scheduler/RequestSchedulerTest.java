@@ -156,6 +156,58 @@ class RequestSchedulerTest {
     }
 
     @Test
+    void fullQueueReplacementAllowsDecodeResourcePreemption() throws Exception {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        SchedulingTestConfig.allowVictim(config, VictimStage.DECODE_ENGINE_OWNED);
+        config.getScheduler().setMaxQueuedRequests(1);
+        ConfigService configService = mock(ConfigService.class);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        DefaultRouter router = mockRouter();
+        RequestRegistry lifecycle = mock(RequestRegistry.class);
+        EvictionManager eviction = mock(EvictionManager.class);
+        PlacementAvailability availability = new PlacementAvailability();
+
+        BalanceContext queued = context(config, 898L, 20);
+        BalanceContext incoming = context(config, 899L, 90);
+        CompletableFuture<Response> queuedFuture = new CompletableFuture<>();
+        CompletableFuture<Response> incomingFuture = new CompletableFuture<>();
+        when(lifecycle.register(queued)).thenReturn(queuedFuture);
+        when(lifecycle.register(incoming)).thenReturn(incomingFuture);
+        when(lifecycle.claimAdmissionHandle("898", queuedFuture)).thenReturn(mock(AdmissionHandle.class));
+        when(lifecycle.claimAdmissionHandle("899", incomingFuture)).thenReturn(mock(AdmissionHandle.class));
+        when(lifecycle.publishDecisionResponseAsync(anyString(), any(), any())).thenAnswer(call ->
+                queuedFuture.complete(call.getArgument(2)));
+
+        DecodeEndpoint selectedEndpoint = mock(DecodeEndpoint.class);
+        when(selectedEndpoint.ipPort()).thenReturn("selected-decode:8080");
+        RouteAdmission selectedRoute = mock(RouteAdmission.class);
+        when(router.select(queued, null)).thenReturn(PlacementResult.blocked(PlacementKey.anyGroup(RoleType.DECODE)));
+        when(router.select(incoming, null)).thenReturn(PlacementResult.success(selectedRoute));
+        when(selectedRoute.tryEnqueue(incoming, incomingFuture, lifecycle)).thenReturn(
+                PlacementResult.blocked(PlacementKey.exact(RoleType.DECODE, "g1", "selected-decode:8080")));
+        when(selectedRoute.blockedEndpoint()).thenReturn(selectedEndpoint);
+        when(eviction.tryAdmit(incoming, incomingFuture, selectedRoute, selectedEndpoint)).thenReturn(true);
+
+        RequestScheduler scheduler = new RequestScheduler(configService, router, mock(EndpointRegistry.class),
+                mock(BatchSchedulerReporter.class), eviction, lifecycle, availability);
+        try {
+            scheduler.submit(queued);
+            RequestLifecycleTestSupport.awaitGlobalCapacityWaiters(scheduler, 1);
+            scheduler.submit(incoming);
+
+            Response displaced = queuedFuture.get(5, TimeUnit.SECONDS);
+            assertEquals(429, displaced.getCode());
+            assertEquals("低优先级限流", displaced.getErrorMessage());
+            verify(eviction, timeout(1_000)).tryAdmit(incoming, incomingFuture, selectedRoute, selectedEndpoint);
+            verify(router).select(incoming, null);
+        } finally {
+            queuedFuture.complete(new Response());
+            incomingFuture.complete(new Response());
+            scheduler.closePlacement();
+        }
+    }
+
+    @Test
     void nonBatchWaitsWhenEveryEngineRequestSlotIsOccupied() {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.useFifoQueue(config);
