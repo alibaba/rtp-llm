@@ -1,13 +1,10 @@
-package org.flexlb.mock.grpc;
+package org.flexlb.discovery;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.dao.route.Endpoint;
-import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.discovery.ServiceHostListener;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,72 +17,62 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * File-backed discovery fixture for dynamic worker topology tests.
- */
+import static com.google.common.base.Preconditions.checkArgument;
+
+/** Local domain-to-host discovery from a configured mapping or a reloadable JSON file. */
 @Slf4j
-final class LocalServiceDiscovery implements ServiceDiscovery {
+public final class LocalServiceDiscovery implements ServiceDiscovery {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /**
-     * Rate limit for the repeated fallback debug log per fixture.
-     */
+    /** Rate limit for the repeated fallback debug log (per instance). */
     private static final long FALLBACK_LOG_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private final Path file;
 
-    /**
-     * Last fully parsed snapshot, replaced wholesale on every successful read.
-     */
+    /** Last fully-parsed snapshot; replaced wholesale on every successful read. */
     private volatile Map<String, List<WorkerHost>> lastGoodSnapshot;
 
     private final AtomicLong lastFallbackLogNanos = new AtomicLong();
 
-    LocalServiceDiscovery(Path file) {
+    public LocalServiceDiscovery(String filePath) {
+        this(Path.of(filePath));
+    }
+
+    public LocalServiceDiscovery(Path file) {
         this.file = Objects.requireNonNull(file, "discovery file");
     }
 
-    @Override
-    public void validate(Endpoint endpoint) {
-        if (endpoint == null || StringUtils.isBlank(endpoint.getAddress())) {
-            throw new IllegalArgumentException("endpoint address must not be blank");
-        }
+    public LocalServiceDiscovery(Map<String, List<String>> hosts) {
+        this.file = null;
+        this.lastGoodSnapshot = parseHosts(MAPPER.valueToTree(hosts));
     }
 
     @Override
-    public List<WorkerHost> getHosts(Endpoint endpoint) {
-        validate(endpoint);
-        return getHosts(endpoint.getAddress());
-    }
-
     public List<WorkerHost> getHosts(String address) {
         if (StringUtils.isBlank(address)) {
             return List.of();
         }
-        try {
-            lastGoodSnapshot = parseHosts(MAPPER.readTree(Files.readString(file)));
-        } catch (Exception e) {
-            if (lastGoodSnapshot == null) {
-                throw new IllegalStateException(
-                        "Failed to read discovery file with no previous snapshot: " + file, e);
+        if (file != null) {
+            try {
+                lastGoodSnapshot = parseHosts(MAPPER.readTree(Files.readString(file)));
+            } catch (Exception e) {
+                if (lastGoodSnapshot == null) {
+                    throw new IllegalStateException(
+                            "Failed to read discovery file with no previous snapshot: " + file, e);
+                }
+                logFallbackOnce(e);
             }
-            logFallbackOnce(e);
         }
         return lastGoodSnapshot.getOrDefault(address, List.of());
     }
 
+    @Override
     public void listen(String address, ServiceHostListener listener) {
         // Notify the listener once with the current view.
         if (listener != null) {
             listener.onHostsChanged(getHosts(address));
         }
-    }
-
-    @Override
-    public void listen(Endpoint endpoint, ServiceHostListener listener) {
-        validate(endpoint);
-        listen(endpoint.getAddress(), listener);
     }
 
     @Override
@@ -100,9 +87,7 @@ final class LocalServiceDiscovery implements ServiceDiscovery {
      * so callers can never observe a half list.
      */
     private static Map<String, List<WorkerHost>> parseHosts(JsonNode root) {
-        if (root == null || !root.isObject()) {
-            throw new IllegalArgumentException("discovery hosts must be an object");
-        }
+        checkArgument(root != null && root.isObject(), "discovery hosts must be an object");
         Map<String, List<WorkerHost>> result = new LinkedHashMap<>();
         for (Iterator<Map.Entry<String, JsonNode>> it = root.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> entry = it.next();
@@ -128,26 +113,18 @@ final class LocalServiceDiscovery implements ServiceDiscovery {
         return Map.copyOf(result);
     }
 
-    /**
-     * Port interpretation follows the endpoint protocol.
-     */
+    /** Port interpretation follows the endpoint protocol. */
     private static WorkerHost parseHost(String hostStr) {
         String[] parts = hostStr.split(":");
-        if (parts.length != 2) {
-            throw new IllegalArgumentException(
-                    "Invalid host format: " + hostStr + ", expected ip:port");
-        }
+        checkArgument(parts.length == 2, "Invalid host format: %s, expected ip:port", hostStr);
         String ip = parts[0].trim();
         int port = Integer.parseInt(parts[1].trim());
-        if (ip.isEmpty() || port < 1 || port > 65535) {
-            throw new IllegalArgumentException("Invalid host:port: " + hostStr);
-        }
+        checkArgument(
+                !ip.isEmpty() && port >= 1 && port <= 65535, "Invalid host:port: %s", hostStr);
         return WorkerHost.of(ip, port);
     }
 
-    /**
-     * Limits fallback logs at the 20ms test polling cadence.
-     */
+    /** Debug-log a read fallback at most once per interval (avoids log flooding at 20ms poll cadence). */
     private void logFallbackOnce(Exception cause) {
         long now = System.nanoTime();
         long last = lastFallbackLogNanos.get();

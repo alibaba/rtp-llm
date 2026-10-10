@@ -8,28 +8,27 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.CancelReason;
+import org.flexlb.balance.scheduler.DeliveryDispatcher;
 import org.flexlb.balance.scheduler.PlacementKey;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.balance.scheduler.RequestScheduler;
 import org.flexlb.balance.scheduler.RequestSchedulerTestRuntime;
-import org.flexlb.balance.scheduler.RouteAdmission;
+import org.flexlb.balance.scheduler.RequestWorkerSelector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.EncoderStrategy;
-import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.balance.strategy.VitWorkerSelector;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -37,17 +36,15 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RequestId;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
-import org.flexlb.metric.NoOpFlexMonitor;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
-import org.flexlb.sync.status.WorkerDirectory;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -87,21 +84,20 @@ import static org.mockito.Mockito.when;
  * prepared-status transaction, closing the calibrate/settle loop exactly like
  * production polling would.
  *
- * <p>By default, {@code ConfigService}/{@code DefaultRouter}/{@code EngineGrpcClient}/reporters
+ * <p>By default, {@code ConfigService}/{@code RequestWorkerSelector}/{@code EngineGrpcClient}/reporters
  * are Mockito stand-ins — identical to the flexlb-sync unit-test harness pattern.
- * Routing-regression scenarios can opt into the production {@link DefaultRouter}
+ * Routing-regression scenarios can opt into the production {@link RequestWorkerSelector}
  * and endpoint-selection strategies while retaining the in-process transport.
  */
 final class AutoTpmE2EHarness implements AutoCloseable {
 
     final FlexlbConfig config;
-    final DecisionPolicyConfig fixedWindowDecision;
     final ConfigService configService = mock(ConfigService.class);
     private final java.util.concurrent.atomic.AtomicReference<Throwable> pumpFailure =
             new java.util.concurrent.atomic.AtomicReference<>();
-    final DefaultRouter router = mock(DefaultRouter.class);
+    final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
     final EngineGrpcClient grpcClient = mock(EngineGrpcClient.class);
-    final BatchSchedulerReporter reporter = mock(BatchSchedulerReporter.class);
+    final DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
     final RequestSchedulerReporter requestReporter = mock(RequestSchedulerReporter.class);
 
     final Map<Integer, JavaMockEngineCluster.FastRpcService> services = new ConcurrentHashMap<>();
@@ -111,8 +107,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     final EndpointRegistry endpointRegistry;
     final RequestScheduler scheduler;
-    final DefaultBatchDispatcher dispatcher;
+    final org.flexlb.balance.scheduler.RequestRepository requests;
+    final DeliveryDispatcher dispatcher;
     private final RequestSchedulerTestRuntime schedulerRuntime;
+
+    void pauseDelivery() {
+        schedulerRuntime.pauseDelivery();
+    }
+
+    void resumeDelivery() {
+        schedulerRuntime.resumeDelivery();
+    }
 
     /** requestIds in the order the mock engines actually received them via enqueueBatch. */
     final List<Long> engineArrivalOrder = new CopyOnWriteArrayList<>();
@@ -121,7 +126,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     final Map<Long, Long> engineArrivalNanos = new ConcurrentHashMap<>();
 
     /** Prefill index chosen by the deterministic fixture route. */
-    volatile Function<BalanceContext, Integer> prefillSelector = ctx -> 0;
+    volatile Function<RequestContext, Integer> prefillSelector = ctx -> 0;
 
     private final Map<Integer, WorkerStatus> statusByPort = new ConcurrentHashMap<>();
     private final Map<Integer, String> ipPortByEnginePort = new ConcurrentHashMap<>();
@@ -230,10 +235,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
             boolean productionRouting,
             FlexlbConfig initialConfig) {
         this.config = initialConfig == null ? new FlexlbConfig() : initialConfig;
-        this.fixedWindowDecision =
-                decisionPolicy.getType() == DecisionPolicyConfig.Type.FIXED_WINDOW
-                        ? decisionPolicy
-                        : null;
         try {
             tempDir = Files.createTempDirectory("auto-tpm-e2e");
         } catch (IOException e) {
@@ -282,7 +283,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         // Priority ordering must be set BEFORE registerEndpoint (WorkerBatcher freezes it).
         if (initialConfig == null) {
             if (autoTpm) {
-                config.queueScheduler().setOrdering(QueueOrderingConfig.priority());
+                config.queueScheduler().setOrdering(ConfigTestSupport.priority());
             }
             config.setDispatcher(new DispatcherConfig());
             config.queueScheduler().setDecision(decisionPolicy);
@@ -293,7 +294,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.getRequestLifecycle().getDecision().setLifetime(2.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        when(router.select(any(BalanceContext.class), any()))
+        when(router.select(any(RequestContext.class), any()))
                 .thenAnswer(inv -> routeResult(inv.getArgument(0)));
         // ---- E2E bridge: mocked gRPC transport → real in-process mock engine ----
         when(grpcClient.batchEnqueueAsync(
@@ -365,22 +366,17 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                             return future;
                         });
 
-        dispatcher =
-                new DefaultBatchDispatcher(
-                        grpcClient, configService, NoOpFlexMonitor.getInstance());
+        dispatcher = new DeliveryDispatcher(grpcClient, configService, null, reporter, null);
         EngineCancelChannel cancelChannel =
                 realCancelChannel
                         ? new MockEngineCancelChannel(services)
-                        : new UnsupportedCancelStub();
+                        : new UnsupportedCancelStub(new MockEngineCancelChannel(services));
         schedulerRuntime =
                 new RequestSchedulerTestRuntime(
-                        configService,
-                        dispatcher::tryPrepareSubmission,
-                        reporter,
-                        requestReporter,
-                        cancelChannel);
+                        configService, dispatcher, reporter, requestReporter, cancelChannel);
         endpointRegistry = schedulerRuntime.endpointRegistry();
         scheduler = schedulerRuntime.scheduler();
+        requests = schedulerRuntime.requestRegistry();
 
         for (JavaMockEngineCluster.FastRpcService svc : prefillEngines) {
             registerEndpoint(RoleType.PREFILL, svc);
@@ -392,13 +388,6 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     }
 
     // ==================== endpoint / route wiring ====================
-
-    DecisionPolicyConfig fixedWindowDecision() {
-        if (fixedWindowDecision == null) {
-            throw new IllegalStateException("FIXED_WINDOW decision is not active");
-        }
-        return fixedWindowDecision;
-    }
 
     private static DecisionPolicyConfig defaultFixedWindowDecision() {
         DecisionPolicyConfig decision = new DecisionPolicyConfig();
@@ -435,7 +424,8 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared =
-                    status.prepareNewStatus(status.freezeStatusResponse(initial));
+                    status.prepareNewStatus(
+                            WorkerStatusTestSupport.freezeStatusResponse(status, initial));
             endpointRegistry.publishPreparedEndpoint(status.getIpPort(), status, prepared);
         } finally {
             status.lock.unlock();
@@ -520,12 +510,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         config.priorityOrdering().setPreemption(preemption);
     }
 
-    private ServerStatus prefillServer(int index, String requestId) {
+    private ServerStatus prefillServer(int index, long requestId) {
         int grpcPort = prefillEngines.get(index).getGrpcPort();
         return server(RoleType.PREFILL, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
 
-    private ServerStatus decodeServer(int index, String requestId) {
+    private ServerStatus decodeServer(int index, long requestId) {
         int grpcPort = decodeEngines.get(index).getGrpcPort();
         return server(RoleType.DECODE, "127.0.0.1", httpPort(grpcPort), grpcPort, requestId);
     }
@@ -536,38 +526,44 @@ final class AutoTpmE2EHarness implements AutoCloseable {
      * selects a physically valid winner first, and the commit boundary turns
      * an exact capacity miss into either a wait or a preemption transaction.
      */
-    Response defaultRoute(BalanceContext ctx) {
+    Response defaultRoute(RequestContext ctx) {
         int prefillIndex = prefillSelector.apply(ctx);
-        ServerStatus prefill = prefillServer(prefillIndex, ctx.getRequestId());
+        ServerStatus prefill = prefillServer(prefillIndex, ctx.data().getRequestId());
         Response response = new Response();
         response.setSuccess(true);
-        response.setServerStatus(List.of(prefill, decodeServer(0, ctx.getRequestId())));
+        response.setServerStatus(List.of(prefill, decodeServer(0, ctx.data().getRequestId())));
         return response;
     }
 
-    private PlacementResult<RouteAdmission, PlacementKey> routeResult(BalanceContext context) {
+    private PlacementResult<RequestRoute, PlacementKey> routeResult(RequestContext context) {
         return schedulerRuntime.routeResult(context, defaultRoute(context));
     }
 
-    private DefaultRouter productionRouter() {
-        WorkerDirectory workers = new WorkerDirectory(endpointRegistry);
+    private RequestWorkerSelector productionRouter() {
+        EndpointRegistry workers = endpointRegistry;
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any()))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
         ModelMetaConfig modelMeta = mock(ModelMetaConfig.class);
         when(modelMeta.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
-        return new DefaultRouter(
-                new CostBasedPrefillStrategy(workers, cache, healthReporter),
-                new DecodeSelector(workers),
-                new RandomStrategy(workers),
-                mock(EncoderStrategy.class),
-                configService,
+        return new RequestWorkerSelector(
+                new CostBasedPrefillStrategy(
+                        workers,
+                        cache,
+                        healthReporter,
+                        org.mockito.Mockito.mock(CacheMetricsReporter.class),
+                        configService),
+                new DecodeSelector(
+                        workers,
+                        configService,
+                        new org.flexlb.balance.scheduler.PlacementConfiguration()
+                                .decodeAdmissionCapacity(configService)),
+                new VitWorkerSelector(workers),
                 modelMeta);
     }
 
     private static ServerStatus server(
-            RoleType role, String ip, int httpPort, int grpcPort, String requestId) {
+            RoleType role, String ip, int httpPort, int grpcPort, long requestId) {
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
         status.setRole(role);
@@ -582,41 +578,39 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     // ==================== request construction ====================
 
-    BalanceContext context(String requestId, int priority) {
+    RequestContext context(long requestId, int priority) {
         return context(requestId, priority, 128, 8);
     }
 
-    BalanceContext context(long requestId, int priority) {
-        return context(Long.toString(requestId), priority);
-    }
+    RequestContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
+        Request request =
+                Request.builder()
+                        .requestId(requestId)
+                        .seqLen(seqLen)
+                        .maxNewTokens(maxNewTokens)
+                        .numBeams(1)
+                        .model("test-model")
+                        .rawPriority(priority)
+                        .build();
 
-    BalanceContext context(String requestId, int priority, long seqLen, int maxNewTokens) {
-        Request request = new Request();
-        request.setRequestId(requestId);
-        request.setSeqLen(seqLen);
-        request.setMaxNewTokens(maxNewTokens);
-        request.setNumBeams(1);
-        request.setModel("test-model");
-        request.setPriority(priority);
-
-        BalanceContext ctx = new BalanceContext(config);
-        ctx.setRequest(request);
-        ctx.setGenerateInputPb(
-                ByteString.copyFrom(generateInputBytes(requestId, (int) seqLen, maxNewTokens)));
+        RequestContext ctx = new RequestContext(config);
+        ctx.data().setRequest(request);
+        ctx.data()
+                .setGenerateInputPb(
+                        ByteString.copyFrom(
+                                generateInputBytes(requestId, (int) seqLen, maxNewTokens)));
         // Mirror production admission with immutable request scheduling metadata.
         // A 30 s request lifetime avoids accidental expiry during eviction tests.
-        ctx.setSchedulingMetadata(
-                SchedulingMetadata.explicit(priority, ctx.getStartTime() + 30_000));
+        ctx.data()
+                .setSchedulingMetadata(
+                        SchedulingMetadata.explicit(priority, ctx.data().getStartTime() + 30_000));
         return ctx;
     }
 
-    BalanceContext context(long requestId, int priority, long seqLen, int maxNewTokens) {
-        return context(Long.toString(requestId), priority, seqLen, maxNewTokens);
-    }
-
-    static byte[] generateInputBytes(String requestId, int inputTokens, int maxNewTokens) {
+    static byte[] generateInputBytes(long requestId, int inputTokens, int maxNewTokens) {
         EngineRpcService.GenerateInputPB.Builder input =
-                RequestIdFixtures.write(EngineRpcService.GenerateInputPB.newBuilder(), requestId)
+                EngineRpcService.GenerateInputPB.newBuilder()
+                        .setRequestId(requestId)
                         .setGenerateConfig(
                                 EngineRpcService.GenerateConfigPB.newBuilder()
                                         .setMaxNewTokens(maxNewTokens)
@@ -666,7 +660,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
 
     static TaskInfo toTaskInfo(EngineRpcService.TaskInfoPB task) {
         TaskInfo info = new TaskInfo();
-        info.setRequestId(RequestId.parse(task));
+        info.setRequestId(task.getRequestId());
         info.setInputLength(task.getInputLength());
         info.setBatchId(task.getBatchId());
         info.setErrorCode(task.getErrorInfo().getErrorCode());
@@ -762,25 +756,30 @@ final class AutoTpmE2EHarness implements AutoCloseable {
     @Override
     public void close() {
         stopAutoPump();
-        schedulerRuntime.close();
-        dispatcher.shutdown();
-        for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
-            svc.shutdown();
+        try {
+            schedulerRuntime.close();
+        } finally {
+            for (JavaMockEngineCluster.FastRpcService svc : services.values()) {
+                svc.shutdown();
+            }
+            engineScheduler.shutdownNow();
         }
-        engineScheduler.shutdownNow();
     }
 
     /** Test-local fail-closed cancel transport for non-preemption scenarios. */
     private static final class UnsupportedCancelStub implements EngineCancelChannel {
-        @Override
-        public boolean isSupported(DecodeEndpoint endpoint) {
-            return false;
+        private final EngineCancelChannel cleanup;
+
+        private UnsupportedCancelStub(EngineCancelChannel cleanup) {
+            this.cleanup = cleanup;
         }
 
         @Override
         public CompletableFuture<CancelAck> cancel(
-                CancelTarget target, String requestId, long timeoutMs) {
-            return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
+                CancelTarget target, long requestId, CancelReason reason, long timeoutMs) {
+            return reason == CancelReason.PRIORITY_PREEMPTED
+                    ? CompletableFuture.completedFuture(CancelAck.UNSUPPORTED)
+                    : cleanup.cancel(target, requestId, reason, timeoutMs);
         }
     }
 }

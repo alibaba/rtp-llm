@@ -1,27 +1,26 @@
 package org.flexlb.service;
 
 import io.grpc.Server;
+import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
-import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
-import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.engine.grpc.nameresolver.CustomNameResolver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -30,6 +29,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -39,6 +39,7 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
@@ -55,7 +56,7 @@ class VitCacheDirectoryTest {
     private WorkerStatus a;
     private WorkerStatus b;
     private EngineGrpcClient grpc;
-    private LBStatusConsistencyService consistency;
+    private MasterStatusService consistency;
 
     @BeforeEach
     void setUp() {
@@ -63,11 +64,11 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.getIpPort(), a);
         live.put(b.getIpPort(), b);
-        var workers = mock(WorkerDirectory.class);
+        var workers = mock(EndpointRegistry.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
                 .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
-        when(workers.captureEndpoint(eq(RoleType.VIT), any()))
+        when(workers.capture(eq(RoleType.VIT), any()))
                 .thenAnswer(
                         call -> {
                             WorkerStatus status = live.get(call.getArgument(1));
@@ -76,7 +77,7 @@ class VitCacheDirectoryTest {
                                     : new WorkerEndpoint(status).tryPinGeneration();
                         });
         grpc = mock(EngineGrpcClient.class);
-        consistency = mock(LBStatusConsistencyService.class);
+        consistency = mock(MasterStatusService.class);
         directory = new VitCacheDirectory(workers, grpc, consistency);
         selector = new VitCacheSelector(directory, workers);
     }
@@ -90,13 +91,15 @@ class VitCacheDirectoryTest {
         return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
     }
 
-    private BalanceContext context(String... keys) {
-        Request request = new Request();
-        request.setRequestId("123");
-        request.setCacheAffinityKeys(List.of(keys));
-        request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
-        context.setRequest(request);
+    private RequestContext context(String... keys) {
+        Request request =
+                Request.builder()
+                        .requestId(123L)
+                        .cacheAffinityKeys(List.of(keys))
+                        .generateTimeout(30000L)
+                        .build();
+        RequestContext context = new RequestContext(new FlexlbConfig());
+        context.data().setRequest(request);
         return context;
     }
 
@@ -270,7 +273,6 @@ class VitCacheDirectoryTest {
                                         .addAllGpuEmbeddingKeys(keys))
                         .build();
         assertTrue(response.getSerializedSize() > 8 * 1024 * 1024);
-        assertTrue(response.getSerializedSize() < 16 * 1024 * 1024);
         var received = new AtomicReference<CacheVersionPB>();
         Server server =
                 NettyServerBuilder.forPort(0)
@@ -299,13 +301,14 @@ class VitCacheDirectoryTest {
                         .start();
         var executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
         var eventLoop = new NioEventLoopGroup(1);
-        var channelFactory = new GrpcChannelFactory(executor, eventLoop, 1000);
         var client =
                 new EngineGrpcClient(
-                        mock(EngineAddressResolver.class),
-                        channelFactory,
+                        mock(CustomNameResolver.class),
+                        executor,
+                        eventLoop,
                         mock(GrpcReporter.class),
-                        mock(CacheMatchConfiguration.class));
+                        1000,
+                        5000);
         try {
             var request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
             for (int i = 0; i < 2; i++) {
@@ -316,16 +319,20 @@ class VitCacheDirectoryTest {
                 assertEquals(response, actual);
                 assertTrue(received.get().getNeedCacheKeys());
             }
-            assertEquals(
-                    response,
-                    client.getCacheStatusAsync("127.0.0.1", server.getPort(), request, 5000)
-                            .join());
+            CompletionException error =
+                    assertThrows(
+                            CompletionException.class,
+                            () ->
+                                    client.getCacheStatusAsync(
+                                                    "127.0.0.1", server.getPort(), request, 5000)
+                                            .join());
+            assertEquals(Status.Code.RESOURCE_EXHAUSTED, Status.fromThrowable(error).getCode());
             directory.replace(a, response.getMultimodalCache());
             assertEquals(
                     a.getIp(),
                     selector.select(context(keys.get(keys.size() - 1)), null).getServerIp());
         } finally {
-            client.shutdown();
+            client.shutdownChannelPool();
             server.shutdownNow().awaitTermination(5, TimeUnit.SECONDS);
             eventLoop.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync();
             executor.shutdownNow();
@@ -386,7 +393,7 @@ class VitCacheDirectoryTest {
         assertEquals(b.getIp(), selector.select(context("image"), null).getServerIp());
         var ctx = context("image");
         var selected = selector.select(ctx, "two");
-        ctx.getRequest().setSelectedVit(selected);
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(selected).build());
         assertTrue(selector.validate(ctx, "two").isSuccess());
         assertFalse(selector.validate(ctx, "one").isSuccess());
         live.remove(b.getIpPort());
@@ -429,10 +436,11 @@ class VitCacheDirectoryTest {
                         mapper.writeValueAsBytes(copied),
                         org.flexlb.dao.loadbalance.ServerStatus.class);
         assertEquals(a.getGenerationId(), copied.getWorkerGeneration());
-        ctx.getRequest().setSelectedVit(copied);
         copied.setWorkerGeneration(0);
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
         assertFalse(selector.validate(ctx, "one").isSuccess());
         copied.setWorkerGeneration(a.getGenerationId());
+        ctx.data().setRequest(ctx.data().getRequest().toBuilder().selectedVit(copied).build());
         try (var pinned = selector.selectPinned(ctx, "one")) {
             org.junit.jupiter.api.Assertions.assertNotNull(pinned);
             assertEquals(a.getGenerationId(), pinned.serverStatus().getWorkerGeneration());

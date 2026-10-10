@@ -2,7 +2,6 @@ package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +34,10 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
     private record FinishedTask(long version, EngineRpcService.TaskInfoPB task) {}
 
+    // The fixture has no decoder execution or KV allocation. Fencing under this
+    // lock prevents delayed Enqueue handlers from creating any later acceptance.
+    private final java.util.Map<Long, EngineRpcService.RequestCancelReasonPB> fences =
+            new java.util.HashMap<>();
     private final List<FinishedTask> finishedTasks = new ArrayList<>();
     private volatile Consumer<EngineRpcService.EnqueueBatchRequestPB> acceptedBatchListener;
 
@@ -74,12 +77,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     /** Counter for GetWorkerStatus calls. */
     final AtomicLong workerStatusCallCount = new AtomicLong(0);
 
-    /** Counter for GetCacheStatus calls. */
-    final AtomicLong cacheStatusCallCount = new AtomicLong(0);
-
-    /** Counter for CheckHealth calls. */
-    final AtomicLong healthCheckCount = new AtomicLong(0);
-
     // ==================== Behavior (volatile, hot-swappable) ====================
 
     private volatile MockWorkerBehavior behavior = MockWorkerBehavior.builder().build();
@@ -89,10 +86,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
      */
     public void setBehavior(MockWorkerBehavior behavior) {
         this.behavior = behavior;
-    }
-
-    public MockWorkerBehavior getBehavior() {
-        return behavior;
     }
 
     // ==================== Accessors for test assertions ====================
@@ -109,20 +102,10 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         return workerStatusCallCount.get();
     }
 
-    public long getCacheStatusCallCount() {
-        return cacheStatusCallCount.get();
-    }
-
-    public long getHealthCheckCount() {
-        return healthCheckCount.get();
-    }
-
     /** Clear all call records (useful between test cases sharing a worker). */
     public void resetRecords() {
         enqueuedRequests.clear();
         workerStatusCallCount.set(0);
-        cacheStatusCallCount.set(0);
-        healthCheckCount.set(0);
     }
 
     // ==================== RPC implementations ====================
@@ -152,41 +135,68 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 EngineRpcService.EnqueueBatchResponsePB.newBuilder()
                         .setBatchId(request.getBatchId());
 
-        if (beh.isFailOnEnqueue()) {
-            for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
-                for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    String reqId = RequestId.parse(ext.getInput());
-                    responseBuilder.addErrors(
-                            RequestIdFixtures.write(
-                                            EngineRpcService.EnqueueBatchErrorPB.newBuilder(),
-                                            reqId)
-                                    .setErrorInfo(
-                                            EngineRpcService.ErrorDetailsPB.newBuilder()
-                                                    .setErrorCode(beh.getEnqueueErrorCode())
-                                                    .setErrorMessage(beh.getEnqueueErrorMessage())
-                                                    .build())
-                                    .build());
+        synchronized (fences) {
+            if (beh.isFailOnEnqueue()) {
+                for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
+                    for (EngineRpcService.EnqueueBatchExternalInputPB ext :
+                            slot.getRequestsList()) {
+                        long reqId = ext.getInput().getRequestId();
+                        responseBuilder.addErrors(
+                                EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                        .setRequestId(reqId)
+                                        .setErrorInfo(
+                                                EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                        .setErrorCode(beh.getEnqueueErrorCode())
+                                                        .setErrorMessage(
+                                                                beh.getEnqueueErrorMessage())
+                                                        .build())
+                                        .build());
+                    }
                 }
-            }
-        } else {
-            for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
-                for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    String reqId = RequestId.parse(ext.getInput());
-                    responseBuilder.addSuccesses(
-                            RequestIdFixtures.write(
-                                            EngineRpcService.EnqueueBatchSuccessPB.newBuilder(),
-                                            reqId)
-                                    .build());
+            } else {
+                for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
+                    for (EngineRpcService.EnqueueBatchExternalInputPB ext :
+                            slot.getRequestsList()) {
+                        long reqId = ext.getInput().getRequestId();
+                        if (fences.containsKey(reqId)) {
+                            responseBuilder.addErrors(
+                                    EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                                            .setRequestId(reqId)
+                                            .setErrorInfo(
+                                                    EngineRpcService.ErrorDetailsPB.newBuilder()
+                                                            .setErrorCode(1)
+                                                            .setErrorMessage("request cancelled")));
+                            continue;
+                        }
+                        responseBuilder.addSuccesses(
+                                EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                                        .setRequestId(reqId)
+                                        .build());
+                    }
                 }
             }
         }
-
         responseObserver.onNext(responseBuilder.build());
         responseObserver.onCompleted();
         Consumer<EngineRpcService.EnqueueBatchRequestPB> listener = acceptedBatchListener;
         if (!beh.isFailOnEnqueue() && listener != null) {
             listener.accept(request);
         }
+    }
+
+    @Override
+    public void cancel(
+            EngineRpcService.CancelRequestPB request,
+            StreamObserver<EngineRpcService.CancelResponsePB> observer) {
+        synchronized (fences) {
+            fences.putIfAbsent(request.getRequestId(), request.getReason());
+        }
+        observer.onNext(
+                EngineRpcService.CancelResponsePB.newBuilder()
+                        .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_TOMBSTONED)
+                        .setDecodeCleanupComplete(true)
+                        .build());
+        observer.onCompleted();
     }
 
     @Override
@@ -198,6 +208,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
 
         EngineRpcService.WorkerStatusPB.Builder builder =
                 EngineRpcService.WorkerStatusPB.newBuilder()
+                        .setSupportsRequestCleanup(true)
                         .setAlive(true)
                         .setRoleType(beh.getRoleType())
                         .setAvailableConcurrency(beh.getAvailableConcurrency())
@@ -230,7 +241,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     public void getCacheStatus(
             EngineRpcService.CacheVersionPB request,
             StreamObserver<EngineRpcService.CacheStatusPB> responseObserver) {
-        cacheStatusCallCount.incrementAndGet();
         MockWorkerBehavior beh = behavior;
 
         EngineRpcService.CacheStatusPB.Builder builder =
@@ -248,7 +258,6 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
     public void checkHealth(
             EngineRpcService.EmptyPB request,
             StreamObserver<EngineRpcService.CheckHealthResponsePB> responseObserver) {
-        healthCheckCount.incrementAndGet();
         responseObserver.onNext(
                 EngineRpcService.CheckHealthResponsePB.newBuilder().setHealth("ok").build());
         responseObserver.onCompleted();

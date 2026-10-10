@@ -1,6 +1,5 @@
 package org.flexlb.dao.route;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -62,9 +61,9 @@ class ServiceRouteTest {
 
     @Test
     void testConfigLoaderList() {
-        List<ServiceRoute> serviceRoutes =
-                JsonUtils.toObject("[" + ROUTE_JSON + "]", new TypeReference<>() {});
-        assertStandardRoute(serviceRoutes.getFirst());
+        ServiceRoute[] serviceRoutes =
+                JsonUtils.toObject("[" + ROUTE_JSON + "]", ServiceRoute[].class);
+        assertStandardRoute(serviceRoutes[0]);
     }
 
     private static void assertStandardRoute(ServiceRoute serviceRoute) {
@@ -105,8 +104,20 @@ class ServiceRouteTest {
                 serviceRoute
                         .getAllRoleTypes()
                         .containsAll(List.of(RoleType.PDFUSION, RoleType.VIT)));
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
+        Assertions.assertEquals(
+                "pd",
+                serviceRoute
+                        .getAllEndpointsWithGroup(RoleType.PDFUSION)
+                        .getFirst()
+                        .getRight()
+                        .getAddress());
+        Assertions.assertEquals(
+                "vit",
+                serviceRoute
+                        .getAllEndpointsWithGroup(RoleType.VIT)
+                        .getFirst()
+                        .getRight()
+                        .getAddress());
     }
 
     @Test

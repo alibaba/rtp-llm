@@ -12,7 +12,6 @@ class FaultInjectionConfigTest {
     void defaultsAreSensible() {
         FaultInjectionConfig config = FaultInjectionConfig.builder().build();
         assertFalse(config.isFailOnEnqueue());
-        assertEquals(13, config.getEnqueueErrorCode());
         assertEquals("mock enqueue failure", config.getEnqueueErrorMessage());
         assertEquals(0, config.getEnqueueDelayMs());
         assertFalse(config.isGenerateError());
@@ -28,7 +27,6 @@ class FaultInjectionConfigTest {
         FaultInjectionConfig config =
                 FaultInjectionConfig.builder()
                         .failOnEnqueue(true)
-                        .enqueueErrorCode(42)
                         .enqueueErrorMessage("custom error")
                         .enqueueDelayMs(500)
                         .generateError(true)
@@ -40,7 +38,6 @@ class FaultInjectionConfigTest {
                         .build();
 
         assertTrue(config.isFailOnEnqueue());
-        assertEquals(42, config.getEnqueueErrorCode());
         assertEquals("custom error", config.getEnqueueErrorMessage());
         assertEquals(500, config.getEnqueueDelayMs());
         assertTrue(config.isGenerateError());
@@ -65,7 +62,6 @@ class FaultInjectionConfigTest {
         FaultInjectionConfig copy = original.toBuilder().build();
 
         assertEquals(original.isFailOnEnqueue(), copy.isFailOnEnqueue());
-        assertEquals(original.getEnqueueErrorCode(), copy.getEnqueueErrorCode());
         assertEquals(original.getEnqueueErrorMessage(), copy.getEnqueueErrorMessage());
         assertEquals(original.getEnqueueDelayMs(), copy.getEnqueueDelayMs());
         assertEquals(original.isGenerateError(), copy.isGenerateError());

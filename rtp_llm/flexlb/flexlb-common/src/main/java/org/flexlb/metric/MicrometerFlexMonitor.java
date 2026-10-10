@@ -51,9 +51,13 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public static void setAllowedMetrics(Set<String> metrics) {
         ALLOWED_METRICS = metrics;
-        log.info(
-                "MicrometerFlexMonitor allowlist set: {} metrics",
-                metrics == null ? "unlimited" : metrics.size());
+        try {
+            log.info(
+                    "MicrometerFlexMonitor allowlist set: {} metrics",
+                    metrics == null ? "unlimited" : metrics.size());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure("allowlist", failure);
+        }
     }
 
     private final MeterRegistry meterRegistry;
@@ -70,18 +74,19 @@ public class MicrometerFlexMonitor implements FlexMonitor {
      */
     public MicrometerFlexMonitor(MeterRegistry meterRegistry) {
         this.meterRegistry = meterRegistry;
-        log.debug(
-                "MicrometerFlexMonitor initialized with MeterRegistry: {}",
-                meterRegistry.getClass().getSimpleName());
     }
 
     @Override
     public void register(String metricName, FlexMetricType metricType) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
-            return;
+        try {
+            Set<String> allowedMetrics = ALLOWED_METRICS;
+            if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
+                return;
+            }
+            metricTypes.put(metricName, metricType);
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
         }
-        metricTypes.put(metricName, metricType);
-        log.debug("Registered metric: {} as type {}", metricName, metricType);
     }
 
     @Override
@@ -102,14 +107,14 @@ public class MicrometerFlexMonitor implements FlexMonitor {
 
     @Override
     public void report(String metricName, FlexMetricTags metricsTags, double value) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
-            return;
-        }
-        String prefixedName = METRIC_PREFIX + metricName;
-        FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-        MetricKey key = new MetricKey(prefixedName, metricsTags);
-
         try {
+            Set<String> allowedMetrics = ALLOWED_METRICS;
+            if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
+                return;
+            }
+            String prefixedName = METRIC_PREFIX + metricName;
+            FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
+            MetricKey key = new MetricKey(prefixedName, metricsTags);
             switch (metricType) {
                 case QPS:
                 case COUNTER:
@@ -129,20 +134,21 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     reportGauge(key, value);
                     break;
             }
-        } catch (Exception e) {
-            log.debug("Failed to report metric {}: {}", metricName, e.getMessage());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
         }
     }
 
     @Override
     public void prepare(String metricName, FlexMetricTags metricsTags) {
-        if (ALLOWED_METRICS != null && !ALLOWED_METRICS.contains(metricName)) {
-            return;
-        }
-        String prefixedName = METRIC_PREFIX + metricName;
-        FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
-        MetricKey key = new MetricKey(prefixedName, metricsTags);
         try {
+            Set<String> allowedMetrics = ALLOWED_METRICS;
+            if (allowedMetrics != null && !allowedMetrics.contains(metricName)) {
+                return;
+            }
+            String prefixedName = METRIC_PREFIX + metricName;
+            FlexMetricType metricType = metricTypes.getOrDefault(metricName, FlexMetricType.GAUGE);
+            MetricKey key = new MetricKey(prefixedName, metricsTags);
             switch (metricType) {
                 case QPS:
                 case COUNTER:
@@ -156,8 +162,8 @@ public class MicrometerFlexMonitor implements FlexMonitor {
                     gaugeEntry(key);
                     break;
             }
-        } catch (Exception e) {
-            log.debug("Failed to prepare metric {}: {}", metricName, e.getMessage());
+        } catch (Throwable failure) {
+            SafeFlexMonitor.logFailure(metricName, failure);
         }
     }
 
@@ -237,7 +243,7 @@ public class MicrometerFlexMonitor implements FlexMonitor {
     @Override
     public String toString() {
         return "MicrometerFlexMonitor{meterRegistry="
-                + meterRegistry.getClass().getSimpleName()
+                + (meterRegistry == null ? "disabled" : meterRegistry.getClass().getSimpleName())
                 + "}";
     }
 }

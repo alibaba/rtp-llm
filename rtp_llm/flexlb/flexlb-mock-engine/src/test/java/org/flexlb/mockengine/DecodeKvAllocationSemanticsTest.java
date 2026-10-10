@@ -177,8 +177,8 @@ class DecodeKvAllocationSemanticsTest {
                 0L,
                 metrics.get("mock_engine_lack_mem_rejects_total").getOrDefault(decodePort, -1L),
                 "a flipped verdict never counts (PERMANENT side)");
-        assertFalse(prefill.isLeakDetected(), "no leak on P");
-        assertFalse(decode.isLeakDetected(), "no leak on D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill), "no leak on P");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on D");
     }
 
     /**
@@ -241,8 +241,8 @@ class DecodeKvAllocationSemanticsTest {
                         .getOrDefault(prefill.getGrpcPort(), -1L),
                 "the P pool did not reject (100-block pool, 9-block demand)");
         assertEquals(9L, heldBlocks(decodePort), "A's pin survives the whole episode");
-        assertFalse(prefill.isLeakDetected(), "no leak on P");
-        assertFalse(decode.isLeakDetected(), "no leak on D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill), "no leak on P");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on D");
     }
 
     /**
@@ -337,7 +337,7 @@ class DecodeKvAllocationSemanticsTest {
         assertNull(cache.acquireDetailed(9, List.of()).lease(), "a failed attempt yields no lease");
 
         cache.release(pin);
-        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        assertTrue(MockEngineTestSupport.seedCache(cache, List.of(1L, 2L, 3L, 4L, 5L)));
         assertEquals(
                 MockLruBlockCache.AllocationFailure.PERMANENT,
                 cache.acquireWithReuseDetailed(11, List.of(1L, 2L, 3L, 4L, 5L)).failure(),
@@ -416,8 +416,8 @@ class DecodeKvAllocationSemanticsTest {
                 enqueue(prefill0, batch(1, slot(0, inputWithDecode(200L, 8 * SPB, decode0Port, 1))))
                         .getSuccessesCount());
         assertEquals(8L, heldBlocks(decode0Port), "no front-load without reserve_step");
-        assertFalse(decode.isLeakDetected(), "no leak on the speculative D");
-        assertFalse(decode0.isLeakDetected(), "no leak on the plain D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on the speculative D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode0), "no leak on the plain D");
     }
 
     // ────────────────── helpers ──────────────────
@@ -477,7 +477,7 @@ class DecodeKvAllocationSemanticsTest {
 
     private int controlPort() {
         assertNotNull(controlServer, "control server must be running");
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 
     private Map<String, Map<Integer, Long>> perEngineMetrics()

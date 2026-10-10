@@ -98,7 +98,9 @@ class UniformSendModeTest {
                 0,
                 sendMode,
                 sendModeQps,
-                true);
+                0.0,
+                true,
+                List.of());
     }
 
     private List<JsonNode> readPerRequest(Path outDir) throws IOException {

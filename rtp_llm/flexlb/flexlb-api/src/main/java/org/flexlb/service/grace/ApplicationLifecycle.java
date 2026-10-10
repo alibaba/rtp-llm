@@ -1,7 +1,7 @@
 package org.flexlb.service.grace;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.util.Logger;
@@ -25,7 +25,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
 
-    private final LBStatusConsistencyService consistency;
+    private final MasterStatusService consistency;
     private final FlexlbGrpcServer grpcServer;
     private final GracefulLifecycleReporter reporter;
     private final Environment environment;
@@ -44,7 +44,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     @Autowired
     public ApplicationLifecycle(
-            LBStatusConsistencyService consistency,
+            MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
             GracefulLifecycleReporter reporter,
             Environment environment,
@@ -53,7 +53,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     ApplicationLifecycle(
-            LBStatusConsistencyService consistency,
+            MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
             GracefulLifecycleReporter reporter,
             Environment environment,
@@ -79,7 +79,9 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long consistencyStartedAt = System.currentTimeMillis();
         try {
             consistency.start();
-            reporter.reportZkNodeOnline(System.currentTimeMillis() - consistencyStartedAt);
+            reporter.reportDuration(
+                    GracefulLifecycleReporter.Event.ZK_NODE_ONLINE,
+                    System.currentTimeMillis() - consistencyStartedAt);
         } catch (Exception e) {
             Logger.error("application online registration failed", e);
         }
@@ -88,7 +90,9 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         long warmUpStartedAt = System.currentTimeMillis();
         try {
             Thread.sleep(warmUpWaitMs);
-            reporter.reportWarmerComplete(System.currentTimeMillis() - warmUpStartedAt);
+            reporter.reportDuration(
+                    GracefulLifecycleReporter.Event.WARMER_COMPLETE,
+                    System.currentTimeMillis() - warmUpStartedAt);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.error("application warm up interrupted", e);
@@ -103,11 +107,13 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         }
         if (!shutdownReceived) {
             shutdownReceived = true;
-            reporter.reportHealthCheckOffline(0L);
+            reporter.reportDuration(GracefulLifecycleReporter.Event.HEALTH_CHECK_OFFLINE, 0L);
             long consistencyStartedAt = System.currentTimeMillis();
             try {
                 consistency.offline();
-                reporter.reportZkNodeOffline(System.currentTimeMillis() - consistencyStartedAt);
+                reporter.reportDuration(
+                        GracefulLifecycleReporter.Event.ZK_NODE_OFFLINE,
+                        System.currentTimeMillis() - consistencyStartedAt);
             } catch (Throwable failure) {
                 Logger.error("application offline deregistration failed", failure);
             }
@@ -118,7 +124,8 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         // accepted RPCs finish. The platform owns the forced-kill deadline.
         grpcServer.drain();
         shutdownCompletedSuccessfully = true;
-        reporter.reportShutdownComplete(
+        reporter.reportDuration(
+                GracefulLifecycleReporter.Event.SHUTDOWN_COMPLETE,
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - drainStartedAt));
         return true;
     }
@@ -135,9 +142,5 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     public boolean isHealthy() {
         return warmupState.isWarmupFinished() && !shutdownReceived;
-    }
-
-    public boolean shutdownCompletedSuccessfully() {
-        return shutdownCompletedSuccessfully;
     }
 }
