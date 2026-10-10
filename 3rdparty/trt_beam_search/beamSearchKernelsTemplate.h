@@ -29,6 +29,7 @@
 #endif
 
 #include "beamSearchKernels.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/cuda/reduce_kernel_utils.cuh"
 #include "decodingCommon.h"
 
@@ -224,12 +225,16 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     size_t const nMBS{bh.nMaxBatchSize}; // Only for bh.logProbsTiled
     size_t const nBMIn{bh.nBeamWidthIn};
     size_t const nBMOut{bh.nBeamWidthOut};
-    size_t const nStage2TopK{IS_V2 && bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut * 2};
+    size_t const nStage2TopK{IS_V2 && bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut};
     size_t const nMSL{bh.nMaxSeqLen};
     size_t const nV{bh.nVocabSize};
     float const diversityRate{bh.diversityRates == nullptr ? kBeamSearchDiversity : bh.diversityRates[slot]};
     float const lengthPenalty{bh.lengthPenalties == nullptr ? kLengthPenalty : bh.lengthPenalties[slot]};
     int const earlyStopping{bh.earlyStoppings == nullptr ? kEarlyStopping : bh.earlyStoppings[slot]};
+    // Candidates consumed per step. V1 keeps the upstream 2*nBMOut bound for the (never
+    // wired) CBA path; V2 is hard-rejected with CBA in the launcher, so nBMOut is the
+    // only reachable value there.
+    int const nSelectLimit = (!IS_V2 && bh.numBeamsCBA != nullptr) ? 2 * nBMOut : nBMOut;
 
     using KVPair = cub::KeyValuePair<int, T>;
     __shared__ BeamStage3KernelSmem<KVPair, PBM, IS_V2> smem;
@@ -293,7 +298,8 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
         __shared__ typename BlockReduce::TempStorage smemReduceBuffer;
         __shared__ int threadToUpdate;
 
-        for (int i = 0; i < 2 * nBMOut; ++i)
+        // Only the first nSelectLimit entries are consumed by the selection loop below.
+        for (int i = 0; i < nSelectLimit; ++i)
         {
             KVPair kv = BlockReduce(smemReduceBuffer).Reduce(kvLocal, argmax);
             if (tid == 0)
@@ -305,7 +311,7 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
             __syncthreads();
             // Only one thread needs to update the old partial before the next block reduce.
             // No need to do this in the last iteration.
-            if (tid == threadToUpdate && i < 2 * nBMOut - 1)
+            if (tid == threadToUpdate && i < nSelectLimit - 1)
             {
                 kvLocal.key = nCandidate - 1;
                 kvLocal.value = -MAX_T_VAL;
@@ -333,11 +339,10 @@ __launch_bounds__(BLOCK_SIZE) __global__ void beamStage3Kernel(
     if (tid == 0)
     {
         int nBeamForNextStep{0};
-        size_t const nStage3Candidate{IS_V2 ? nStage2TopK : nBMOut * 2};
         // Select finished beams into CBA or select tokens for next step sequentially
         // Reference (might be changed along HF in the future):
         // https://github.com/huggingface/transformers/blob/main/src/transformers/generation/beam_search.py#L272
-        for (size_t i = 0; i < nStage3Candidate; ++i)
+        for (int i = 0; i < nSelectLimit; ++i)
         {
             int topId;
             T topLogProb;
@@ -610,7 +615,7 @@ void beamSearchKernelLauncher(
 
     V2 Workflow (use Air-TopK for better performance, https://dl.acm.org/doi/pdf/10.1145/3581784.3607062)
     logProbs.shape = [nBS, nBM, nV]
-        |<- nV ->|          |<- nBM*2 ->|  |<- nBM*2 ->|          |<- nBM*2 ->|          |<- nBM*2 ->|          |<- nBM*2 ->|
+        |<- nV ->|          |<- nBM ->|    |<- nBM ->|            |<- nBM ->|            |<- nBM ->|            |<- nBM ->|
         ┏━━━━━━━━┓          ┏━━━━━━━━━━━┓  ┏━━━━━━━━━━━┓          ┏━━━━━━━━━━━┓          ┏━━━━━━━━━━━┓  D       ┏━━━━━━━━━━━┓
         ┃nBM     ┃          ┃nBM        ┃  ┃nBM        ┃          ┃nBM        ┃      nBS ┃           ┃ ---> nBS ┃           ┃ ---\
         ┣━━━━━━━━┫  A       ┣━━━━━━━━━━━┫  ┣━━━━━━━━━━━┫  B       ┣━━━━━━━━━━━┫  C       ┗━━━━━━━━━━━┛          ┗━━━━━━━━━━━┛    | E
@@ -620,10 +625,10 @@ void beamSearchKernelLauncher(
         ┗━━━━━━━━┛          ┗━━━━━━━━━━━┛  ┗━━━━━━━━━━━┛          ┗━━━━━━━━━━━┛          ┗━━━━━━━━━━━┛
          logProbs             pStage1Id   pStage1LogProbs        pStage1LogProbs        pStage2LogProbs
 
-    A: TopK            : Get top `nBM*2` elements in `nBS*nBM` groups (`nV` elements per group)
+    A: TopK            : Get top `nBM` elements in `nBS*nBM` groups (`nV` elements per group)
     B: addCumLogProbs  : Add `cumLogProbs` to the elements in each beam
-    C: TopK            : Get top `nBM*2` elements in `nBS` group (`nBM*nBM*2` elements per group)
-    D: gatherIds       : Combine stage1Id and stage2Id to get ids of the top `nBM*2` elements in input logProbs
+    C: TopK            : Get top `nBM` elements in `nBS` group (`nBM*nBM` elements per group)
+    D: gatherIds       : Combine stage1Id and stage2Id to get ids of the top `nBM` elements in input logProbs
     E: beamStage3Kernel: Main logic of Beam-Search, each Block is responsible for one batch, doing work below:
                              + moves one beam into candidate-beam-array if it is finished (gemerated end_id in this step).
                              + selects BM elements for the next generation step if not.
@@ -633,7 +638,7 @@ void beamSearchKernelLauncher(
 
     V2 Workflow for VBWS, similar to V2 workflow above, but `nBMIn` and `nBMOut` might be different from `nBM`
     logProbs.shape = [nBS, nBMIn, nV]
-        |<- nV ->|          |<- nBMOut*2 ->|  |<- nBMOut*2 ->|          |<- nBMOut*2 ->|          |<- nBMOut*2 ->|          |<- nBMOut*2 ->|
+        |<- nV ->|          |<- nBMOut ->|    |<- nBMOut ->|            |<- nBMOut ->|            |<- nBMOut ->|            |<- nBMOut ->|
         ┏━━━━━━━━┓          ┏━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━┓          ┏━━━━━━━━━━━━━━┓          ┏━━━━━━━━━━━━━━┓  D       ┏━━━━━━━━━━━━━━┓
         ┃nBMIn   ┃          ┃nBMIn         ┃  ┃nBMIn         ┃          ┃nBMIn         ┃      nBS ┃              ┃ ---> nBS ┃              ┃ ---\
         ┣━━━━━━━━┫  A       ┣━━━━━━━━━━━━━━┫  ┣━━━━━━━━━━━━━━┫  B       ┣━━━━━━━━━━━━━━┫  C       ┗━━━━━━━━━━━━━━┛          ┗━━━━━━━━━━━━━━┛    | E
@@ -670,9 +675,14 @@ void beamSearchKernelLauncher(
 
     if constexpr (IS_V2)
     {
-        size_t const nStage1TopK{bh.nStage1TopK > 0 ? bh.nStage1TopK : nBMOut * 2};
+        // CBA (candidate-beam-array) is unsupported in V2: stage C emits only nBMOut
+        // candidates. Wiring it must restore 2*nBMOut emission first.
+        RTP_LLM_CHECK_WITH_INFO(
+            bh.numBeamsCBA == nullptr, "beam search V2 does not support the CBA path (numBeamsCBA != nullptr)");
+
+        size_t const nStage1TopK{bh.nStage1TopK > 0 ? bh.nStage1TopK : std::min(nV, nBMOut)};
         size_t const nStage2InputLen{bh.nStage2InputLen > 0 ? bh.nStage2InputLen : nBMIn * nStage1TopK};
-        size_t const nStage2TopK{bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut * 2};
+        size_t const nStage2TopK{bh.nStage2TopK > 0 ? bh.nStage2TopK : nBMOut};
         // currently all the mask value of logits in beam search is -inf, pass to the kernel with the mask value fixed for now
         // note the function is just a kernel launcher running on host, it's perfectly fine to have a static varible here
         const static T mask_val = T(-std::numeric_limits<float>::infinity());
@@ -693,7 +703,7 @@ void beamSearchKernelLauncher(
 
         // Stage 1
         invokeTopkLastDim<T>(nBS * nBMIn, nV, static_cast<runtime::SizeType32>(nStage1TopK), true, mask_val,
-            logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream);
+            logProbs, pStage1LogProbs, pStage1Ids, pTopK, stream, /*sorted=*/false, beamTopkForcePath());
         check_cuda_error();
 
         int nThread = std::min(std::max(roundUp(nStage2InputLen, static_cast<size_t>(32)), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);
@@ -703,7 +713,7 @@ void beamSearchKernelLauncher(
         // Stage 2
         invokeTopkLastDim<T>(nBS, static_cast<runtime::SizeType32>(nStage2InputLen),
             static_cast<runtime::SizeType32>(nStage2TopK), true, mask_val, pStage1LogProbs, pStage2LogProbs,
-            pStage2Ids, pTopK, stream);
+            pStage2Ids, pTopK, stream, /*sorted=*/true, beamTopkForcePath());
         check_cuda_error();
 
         nThread = std::min(std::max(roundUp(nStage2TopK, static_cast<size_t>(32)), MIN_BLOCK_SIZE), MAX_BLOCK_SIZE);

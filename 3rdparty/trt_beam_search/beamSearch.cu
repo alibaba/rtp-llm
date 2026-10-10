@@ -197,9 +197,9 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         // |<- Stage2Ids ->|<- Stage2LogProbs ->|<- Stage1Ids ->|<- Stage1LogProbs ->|<---- Stage1TopK ---->|
         //                                                                           |<- stage2TopK ->|
         //                                      |<------------------ Stage3 ------------------>|
-        size_t const nStage1TopK = std::min(static_cast<size_t>(vocabSize), 2 * static_cast<size_t>(beamWidthOut));
+        size_t const nStage1TopK = std::min(static_cast<size_t>(vocabSize), static_cast<size_t>(beamWidthOut));
         size_t const nStage2InputLen = static_cast<size_t>(beamWidthIn) * nStage1TopK;
-        size_t const nStage2TopK = std::min(nStage2InputLen, 2 * static_cast<size_t>(beamWidthOut));
+        size_t const nStage2TopK = std::min(nStage2InputLen, static_cast<size_t>(beamWidthOut));
         TLLM_CHECK_WITH_INFO(nStage2TopK >= static_cast<size_t>(beamWidthOut),
             "not enough beam search candidates after vocabulary pruning: stage2_topk[%zu] < beam_width_out[%d]",
             nStage2TopK, beamWidthOut);
@@ -212,12 +212,12 @@ BeamSearchConfig configureBeamSearch(runtime::SizeType32 batchSize,
         size_t const nByteStage2LogProbs = roundUp(sizeof(T) * batchSize * nStage2TopK, 4);
         size_t const nByteStage2Ids = roundUp(sizeof(int) * batchSize * nStage2TopK, 4);
         size_t const nByteStage1TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
-            batchSize * beamWidthIn, vocabSize, static_cast<runtime::SizeType32>(nStage1TopK), true);
+            batchSize * beamWidthIn, vocabSize, static_cast<runtime::SizeType32>(nStage1TopK), true, beamTopkForcePath());
         size_t const nByteStage2TopK = invokeComputeTopkLastDimWorkspaceSize<T>(
             batchSize,
             static_cast<runtime::SizeType32>(nStage2InputLen),
             static_cast<runtime::SizeType32>(nStage2TopK),
-            true);
+            true, beamTopkForcePath());
         size_t const nByteStage3 = sizeof(T) * nStage2InputLen;
         config.mWorkspaceSize = nByteStage2LogProbs + nByteStage2Ids
             + std::max(nByteStage1LogProbs + nByteStage1Ids + std::max(nByteStage1TopK, nByteStage2TopK), nByteStage3);
