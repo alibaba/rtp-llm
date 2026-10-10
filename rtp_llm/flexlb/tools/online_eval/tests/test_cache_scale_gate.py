@@ -17,8 +17,6 @@ from scenario.catalog import handlers
 ROOT = Path(__file__).resolve().parents[1]
 
 
-
-
 def prepare_report(directory, evidence):
     from monitoring.metric_store import export_metrics
     from monitoring.query_plan import load_plan
@@ -91,7 +89,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
-        from cases.cache_scale_in.report import report_panels
+        from reporting.curves import project_panels
         names = ["P cache hit ratio", "P engine count", "Client sent QPS",
                  "Client success QPS", "Client error QPS", "P Waiting / engine"]
         metric_ids = ["mock/cache_hit_ratio", "mock/engine_count", "client/actual_send_qps",
@@ -99,7 +97,7 @@ class CacheGateTest(unittest.TestCase):
         curves = [dict(curve_id=metric_id, metric_id=metric_id, name=name,
                        points=[dict(x=5, y=None), dict(x=6, y=2)])
                   for metric_id, name in zip(metric_ids, names)]
-        panels = report_panels(curves, view("cache_scale_in.yaml"))
+        panels = project_panels(curves, view("cache_scale_in.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
         self.assertEqual([s["name"] for s in panels[2]["series"]],
@@ -110,7 +108,7 @@ class CacheGateTest(unittest.TestCase):
         for panel, axis in zip(panels, ("ratio", "qps")):
             self.assertEqual("left", panel["axes"][axis]["position"])
             self.assertEqual("right", panel["axes"]["count"]["position"])
-        sparse = report_panels(curves[:2], view("cache_scale_in.yaml"))
+        sparse = project_panels(curves[:2], view("cache_scale_in.yaml"))
         self.assertIn("Client error QPS", sparse[1]["caption"])
 
     def evidence(self, hit=0.8):
@@ -268,7 +266,7 @@ class CacheGateTest(unittest.TestCase):
             curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
             self.assertEqual(curves, {"Survivor window hit ratio":
                                      [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
-            self.assertIn("缺少监控序列", spec["panels"][0]["caption"])
+            self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
             self.assertNotIn("P cache hit ratio", curves)
             self.assertEqual(spec["summary"]["kpis"][1]["value"], "WARN")
             self.assertIn("缺少 Prometheus queries.json 归档",
@@ -442,7 +440,6 @@ class CacheGateTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "unknown configuration fields"):
                 compile_case(case)
-
 
 
 class WorkloadTest(unittest.TestCase):

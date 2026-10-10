@@ -154,6 +154,7 @@ class HaTrafficRunner:
         source_dir: Path | None = None,
         max_requests: int | None = None,
         loop: bool = False,
+        collection_profile="request",
         sampler_limits=None, clock=time.monotonic, wall_clock=time.time,
     ):
         self.manager = manager
@@ -203,42 +204,36 @@ class HaTrafficRunner:
         self.control.mkdir()
         self.flow_identity = dict(run_id=uuid.uuid4().hex, group_id=name, phase_id="ha")
         self.stop_command = None
-        overrides = {
-            "FLOW_CONTROL_DIR": str(self.control),
-            "FLOW_RUN_ID": self.flow_identity["run_id"],
-            "FLOW_GROUP_ID": name,
-            "FLOW_PHASE_ID": "ha",
-            "TRACE_FILE": str(trace),
-            "LIVE_CLIENT_EVENTS": str(live_events).lower(),
-            "GRPC_TARGETS": ",".join(self.targets),
-            "MASTER_DISCOVERY_FILE": str(discovery_file),
+        from runtime.load_client import client_environment, collection_environment, bind_environment
+        settings = {
             "DURATION_S": str(int(duration_s)),
-            "REPLAY_SPEED": str(replay_speed),
             "MAX_CONCURRENCY": str(max_concurrency),
             "TIMEOUT_MS": str(int(timeout_ms)),
-            # A short capture repeated with structural relabeling destroys
-            # cross-lap cache reuse; repeating it without relabeling invents
-            # identical future users. HA defaults to one pass of a long trace.
-            "LOOP": str(loop).lower(),
-            "REPLAY_UNIQUE_PREFIX": "false",
+            "REPLAY_UNIQUE_PREFIX": "false", "FETCH_OUTPUT_STREAM": "true",
             "N_CHANNELS": "8" if source is not None else "2",
             "EVENT_LOOP_THREADS": "8" if source is not None else "4",
-            "SKIP_SERVER_LATENCY": "true",
             "PRIORITY": str(source_priority(source)) if source is not None else str(HA_TRACE_PRIORITY),
+            "ENABLE_FALLBACK": str(enable_fallback).lower(),
+            "playback": dict(mode="true-ts", speed=replay_speed,
+                             max_laps=0 if loop else 1, identity="structural-relabel"),
         }
+        settings, playback = client_environment(settings)
+        runtime = dict(
+            FLOW_CONTROL_DIR=str(self.control), FLOW_RUN_ID=self.flow_identity["run_id"],
+            FLOW_GROUP_ID=name, FLOW_PHASE_ID="ha", TRACE_FILE=str(trace),
+            GRPC_TARGETS=",".join(self.targets), MASTER_DISCOVERY_FILE=str(discovery_file),
+            **collection_environment(collection_profile, live_events=live_events),
+        )
         if enable_fallback:
-            # Direct-connect engine addresses: the mock's endpoints.json
-            # snapshot (brief p7 — static engine set, equivalent to the
-            # production domain query).
-            overrides["ENABLE_FALLBACK"] = "true"
-            overrides["ENDPOINTS_FILE"] = str(env.endpoint_file)
+            runtime["ENDPOINTS_FILE"] = str(env.endpoint_file)
+        overrides = bind_environment(settings, runtime)
         self._overrides = overrides
         from traffic.traffic_source import sha256_file
         trace_info = {}
         source_manifest = trace.with_suffix(".manifest.json")
         if source_manifest.is_file():
             trace_info.update(json.loads(source_manifest.read_text()))
-        trace_info.update(path=str(trace), sha256=sha256_file(trace))
+        trace_info.update(path=str(trace), sha256=sha256_file(trace), playback=playback)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         (self.out_dir / "flow-input.json").write_text(json.dumps(
             dict(**self.flow_identity, trace=trace_info, environment=overrides), indent=2))

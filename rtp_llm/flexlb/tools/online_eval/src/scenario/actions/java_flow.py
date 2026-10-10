@@ -7,9 +7,8 @@ import time
 from pathlib import Path
 
 from runtime.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
-from runtime.load_client import LOAD_CLIENT_ENV_VARS
+from runtime.load_client import client_environment
 from traffic.traffic_source import materialize
-from traffic.playback_config import normalize
 from traffic.contracts import java_client_priority
 
 from runtime.java_client import ClientOps
@@ -37,38 +36,9 @@ def _start_validate(params, plan):
         or p["poll_s"] <= 0
     ):
         raise ValueError("invalid flow polling interval")
-    client, _ = normalize(java_client_priority(p["source"], p["client"]))
+    client, _ = client_environment(java_client_priority(p["source"], p["client"]))
     if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
         raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")
-    if (
-        not isinstance(client, dict)
-        or client.get("REPLAY_UNIQUE_PREFIX") != "false"
-        or client.get("FETCH_OUTPUT_STREAM") != "true"
-    ):
-        raise ValueError(
-            "scenario flow requires faithful prefix replay and response consumption"
-        )
-    if set(client) - set(LOAD_CLIENT_ENV_VARS):
-        raise ValueError("unknown Java client configuration names")
-    if (
-        int(client.get("DURATION_S", 0)) <= 0
-        or int(client.get("MAX_CONCURRENCY", 0)) <= 0
-    ):
-        raise ValueError("scenario flow requires bounded duration and concurrency")
-    if set(client) & {
-        "FLOW_CONTROL_DIR",
-        "FLOW_RUN_ID",
-        "FLOW_GROUP_ID",
-        "FLOW_PHASE_ID",
-        "TRACE_FILE",
-        "OUTPUT_DIR",
-        "GRPC_TARGET",
-        "GRPC_TARGETS",
-        "MASTER_DISCOVERY_FILE",
-    }:
-        raise ValueError(
-            "client endpoint and runtime identities are resolved by framework"
-        )
     return p
 
 
@@ -81,7 +51,7 @@ def _start(ctx, p, deadline):
         ctx.instance["id"] + ":" + p["group_id"],
         Path(ctx.instance["source_path"]).parent,
     )
-    environment, playback = normalize(java_client_priority(p["source"], p["client"]))
+    environment, playback = client_environment(java_client_priority(p["source"], p["client"]))
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']
     laps = int(environment.get('MAX_LAPS', 0 if environment.get('LOOP')=='true' else 1))
@@ -125,10 +95,8 @@ def _start(ctx, p, deadline):
             flow.drain(d)
 
     handle = ctx.register_resource("java_flow", flow, cleanup=cleanup)
-    environment = dict(
-        environment, GRPC_TARGET=f"127.0.0.1:{ctx.env.master_http_port + 2}"
-    )
-    flow.start(trace, environment, deadline)
+    flow.start(trace, environment, deadline,
+               target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])
 
 

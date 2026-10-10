@@ -1,6 +1,7 @@
 """Project HA request and Master-state evidence into the case-selected view."""
 
 from reporting import write_bundle
+from reporting.curves import materialize, project_panels
 from reporting.view_sections import view_details
 from reporting.run_context import title, KPI_LABELS, canonical_spec, provenance_from
 
@@ -11,27 +12,18 @@ def build_spec(payload, presentation):
     anchor = payload["clock_anchor"]["epoch_s"]
     observations = store.document["metrics"]
     metadata = payload["ha_metric_metadata"]
-    panels = []
-    for descriptor in presentation["charts"]["panels"]:
-        curves = []
-        for curve_id in descriptor["curve_ids"]:
-            style = presentation["charts"]["curves"][curve_id]
-            identity = style["metric_id"]
-            for row in observations.get(identity, []):
-                labels = row["labels"]
-                color = style["color"]
-                if any(labels.get(k) != v for k,v in style["labels"].items()):
-                    continue
-                curves.append(dict(curve_id=curve_id, metric_id=identity,
-                    name=style["name"].format(**labels), group=style["group"].format(**labels),
-                    unit=store.document["definitions"][identity]["unit"],
-                    axis=style["axis"], color=color,
-                    points=[dict(x=t-anchor, y=value) for t, value in row["points"]],
-                    provenance=row["provenance"]))
-        panels.append(dict(
-            id=descriptor["id"], title=descriptor["title"], caption=descriptor["caption"],
-            timeX=True, axes=descriptor["axes"], series=curves,
-        ))
+    curves = []
+    for curve_id, style in presentation["charts"]["curves"].items():
+        identity = style["metric_id"]
+        for row in observations.get(identity, []):
+            labels = row["labels"]
+            if any(labels.get(k) != v for k,v in style["labels"].items()):
+                continue
+            curves.append(materialize(
+                curve_id, style, row["points"], origin=anchor, labels=labels,
+                unit=store.document["definitions"][identity]["unit"], provenance=row["provenance"],
+            ))
+    panels = project_panels(curves, presentation)
     sections = [
         view_details(presentation, "sources", dict(metadata,
             metrics=payload["metric_directory"] + "/metrics.json",

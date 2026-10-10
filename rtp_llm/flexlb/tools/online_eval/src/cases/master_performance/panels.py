@@ -2,6 +2,7 @@
 
 
 from monitoring.session import archived_series
+from reporting.curves import materialize, project_panels, has_data
 from reporting.catalog import PALETTE
 
 
@@ -21,42 +22,25 @@ def panel(directory, evidence, result, presentation=None):
                 raise ValueError("conflicting view axis: " + axis)
             axes[axis] = dict(settings)
 
-    def add(metric_id, name, group, axis, points, description, hidden=True,
-            unit=None, apply_style=True):
-        style = presentation["charts"]["curves"][metric_id]
-        if apply_style:
-            name, group, axis = (style[field] for field in ("name", "group", "axis"))
-            scale = style.get("scale", 1)
-            points = [(t, value * scale if value is not None else None)
-                      for t, value in points]
-            unit = style.get("unit", unit)
-        curves.append(
-            dict(
-                curve_id=metric_id,
-                metric_id=style["metric_id"],
-                name=name,
-                group=group,
-                axis=axis,
-                unit=axes[axis]["title"] if unit is None else unit,
-                points=[dict(x=t, y=v) for t, v in points],
-                hidden=hidden,
-                color=style.get("color") or PALETTE[
-                    list(presentation["charts"]["curves"]).index(metric_id) % len(PALETTE)],
-                description=description,
-            )
-        )
+    def add(curve_id, points, description, *, name=None, hidden=True, provenance=None):
+        style = presentation["charts"]["curves"][curve_id]
+        curves.append(materialize(
+            curve_id, style, points, name=name, hidden=hidden,
+            unit=style["unit"] if "unit" in style else axes[style["axis"]]["title"],
+            description=description, provenance=provenance,
+            color_index=list(presentation["charts"]["curves"]).index(curve_id),
+        ))
 
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(directory)
     for identity, rows in store.document["metrics"].items():
         if not identity.startswith("request/") or identity not in presentation["charts"]["curves"]:
             continue
-        style = presentation["charts"]["curves"][identity]
         for row in rows:
-            add(identity, style["name"], style["group"], style["axis"],
-                [(t-lo/1000, value) for t,value in row["points"]],
-                "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99", True)
-            curves[-1]["provenance"] = row["provenance"]
+            add(identity, [(t-lo/1000, value) for t,value in row["points"]],
+                "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
+                provenance=row["provenance"])
+
 
     series, sources, gaps, errors = archived_series(directory, lo / 1000)
     for key, points in series.items():
@@ -71,21 +55,17 @@ def panel(directory, evidence, result, presentation=None):
         selected = bindings(presentation, identity, labels)
         residual = {k:v for k,v in labels.items() if k != "role"}
         for curve_id, style in selected:
-            name, group, axis = (style[field] for field in ("name", "group", "axis"))
+            name = style["name"]
             if residual:
                 name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(residual.items()))
             if any(c["name"] == name for c in curves):
                 name += " · epoch " + epoch
-            scale = style.get("scale", 1)
-            visible = [(t, v * scale if v is not None else None)
-                       for t, v in points if 0 <= t <= duration]
-            add(curve_id, name, group, axis, visible, sources[key]["promql"],
-                not style.get("primary", False), style.get("unit"), False)
-            curves[-1]["metric_id"] = identity
-            curves[-1]["provenance"] = sources[key]
+            visible = [(t, v) for t, v in points if 0 <= t <= duration]
+            add(curve_id, visible, sources[key]["promql"], name=name,
+                hidden=not style.get("primary", False), provenance=sources[key])
             audit.append(dict(name=name, samples=sum(v is not None for _,v in visible), **sources[key]))
     # Never open an empty chart when only request-level evidence survived.
-    if not any(not c["hidden"] and any(p["y"] is not None for p in c["points"]) for c in curves):
+    if not any(not c["hidden"] and has_data(c) for c in curves):
         for c in curves:
             if c["group"] == "客户端吞吐": c["hidden"] = False
     presets = {"核心": [c["name"] for c in curves if not c["hidden"]]}
@@ -105,26 +85,15 @@ def panel(directory, evidence, result, presentation=None):
 
 def report_panels(curves, criteria, presentation):
     """Show the four measured views; keep gate floors separate from measurements."""
-    panels = []
+    panels = project_panels(curves, presentation)
     duration = criteria.get("measure_s", 1)
     floor_metrics = {
         "mock/rtp_llm_context_tps_engine_mean/P": "mock/rtp_llm_context_tps",
         "mock/rtp_llm_context_tps_with_cache_engine_mean/P": "mock/rtp_llm_context_tps_with_cache",
         "mock/rtp_llm_generate_tps_engine_mean/D": "mock/rtp_llm_generate_tps",
     }
-    for descriptor in presentation["charts"]["panels"]:
-        selected = [dict(curve, hidden=False) for metric_id in descriptor["curve_ids"]
-                    for curve in curves if curve["curve_id"] == metric_id]
-        # A monitoring query may exist but contain only NaNs. Show an explicit
-        # gap rather than a 0% line or an apparently valid empty panel.
-        populated = [curve for curve in selected if any(
-            point["y"] is not None for point in curve["points"])]
-        missing = [presentation["charts"]["curves"][metric_id]["name"]
-                   for metric_id in descriptor["curve_ids"]
-                   if not any(curve["curve_id"] == metric_id for curve in populated)]
-        caption = descriptor["caption"] if populated else descriptor["empty_caption"]
-        if populated and missing:
-            caption += " 缺少有效曲线：" + "、".join(missing) + "。"
+    for panel, descriptor in zip(panels, presentation["charts"]["panels"]):
+        selected = panel["series"]
         if descriptor["id"] == "engine-tps":
             floors = criteria.get("engine_tps", {})
             for metric_id in descriptor["curve_ids"]:
@@ -140,8 +109,4 @@ def report_panels(curves, criteria, presentation):
                         points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
                         description="场景配置中的绝对下界；不是实测值",
                     ))
-        panels.append(dict(
-            id=descriptor["id"], title=descriptor["title"], caption=caption,
-            timeX=True, axes=descriptor["axes"], series=selected,
-        ))
     return panels

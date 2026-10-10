@@ -81,7 +81,7 @@ python3 -m traffic.derive_synthetic_parameters --model lineage-model.xz \
 可选曲线、随机到达及逐轮保留计划，见 [播放调节与复现](../development/playback-controls.md)。
 
 场景 `client.playback` 显式声明节奏与循环。不能同时混入原始 pacing env。
-原始 Java env 入口仍接受，供直接启动使用；循环须显式声明。
+原始 Java env 入口仍接受，供直接启动使用；循环须显式声明。场景与 HA 都通过 `runtime.load_client` 校验名称、标量、播放契约及 Fetch/前缀要求，启动边界再次校验。端点、flow 标识、制品目录及采集策略由框架注入；`LIVE_CLIENT_EVENTS`、`COLLECTION_PROFILE`、`CLIENT_MONITORING`、`SKIP_SERVER_LATENCY` 等运行字段不能在 `traffic.client` 声明，即使值与框架相同也报错。有效的最终配置写入 `flow-input.json`，随后直接用于启动。
 
 ```yaml
 client:

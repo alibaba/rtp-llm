@@ -1,5 +1,8 @@
 """Warm once, shrink in one step, keep the Java sender running, adjudicate offline."""
 
+from cases.registry import ReportView
+from cases.cache_scale_in.report import validate_view
+
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
@@ -66,3 +69,8 @@ def default(case):
         },
     )
     case.step("teardown", "teardown")
+
+
+REPORT_VIEWS = {
+    "cache_scale_in.yaml": ReportView(validate_view),
+}

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from runtime.client_journal import LiveClientEvents
 from traffic.traffic_source import sha256_file
-from traffic.playback_config import normalize
+from runtime.load_client import client_environment, collection_environment, bind_environment
 
 JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
 
@@ -55,32 +55,28 @@ class JavaFlowGroup:
         self.stop_command = None
         self.trace_manifest = None
 
-    def start(self, trace, environment, deadline):
+    def start(self, trace, environment, deadline, *, target):
         if self.proc is not None or self.directory.exists():
             raise ValueError("flow output directory must be fresh")
+        env, playback = client_environment(environment)
         trace = Path(trace).resolve()
         self.trace_manifest = dict(path=str(trace), sha256=sha256_file(trace))
         self.directory.mkdir(parents=True)
         self.control.mkdir()
-        env, playback = normalize(environment)
         source_manifest = trace.with_suffix(".manifest.json")
         semantics = (
             json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
         )
         self.trace_manifest.update(semantics)
         self.trace_manifest["playback"] = playback
-        env.update(
-            TRACE_FILE=str(trace),
+        env = bind_environment(env, dict(
+            TRACE_FILE=str(trace), GRPC_TARGET=target,
             FLOW_CONTROL_DIR=str(self.control),
             FLOW_RUN_ID=self.identity["run_id"],
             FLOW_GROUP_ID=self.identity["group_id"],
             FLOW_PHASE_ID=self.identity["phase_id"],
-            LIVE_CLIENT_EVENTS=str(self.collection_profile != "aggregate").lower(),
-            COLLECTION_PROFILE=self.collection_profile,
-            CLIENT_MONITORING=str(self.monitor is not None).lower(),
-        )
-        if self.collection_profile != "diagnostic":
-            env["SKIP_SERVER_LATENCY"] = "true"
+            **collection_environment(self.collection_profile, monitoring=self.monitor is not None),
+        ))
         (self.directory / "flow-input.json").write_text(
             json.dumps(
                 dict(**self.identity, trace=self.trace_manifest, environment=env),

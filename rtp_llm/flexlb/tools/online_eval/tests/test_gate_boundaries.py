@@ -143,7 +143,8 @@ def test_report_finalizer_is_a_registered_program_capability():
 
 
 def test_registered_view_extension_needs_no_workload_case_branch():
-    from cases.registry import VIEW_RENDERERS, VIEW_VALIDATORS
+    from cases import registry
+    from types import SimpleNamespace
     from workload.report import write_views
 
     render = mock.Mock(return_value=Path('/unused/new/report.html'))
@@ -154,11 +155,11 @@ def test_registered_view_extension_needs_no_workload_case_branch():
         import yaml
         definition = view('master_ha_failover.yaml')
         (root/'another.yaml').write_text(yaml.safe_dump(definition))
-        with mock.patch.dict(VIEW_RENDERERS, {'another.yaml': 'test_extension.render'}), \
-             mock.patch.dict(VIEW_VALIDATORS, {'another.yaml': 'test_extension.validate'}), \
-             mock.patch('reporting.view_config.VIEWS', root), \
-             mock.patch('reporting.view_config.load_capability', return_value=validator), \
-             mock.patch('workload.report.load_capability', return_value=render):
+        module = SimpleNamespace(REPORT_VIEWS={
+            'another.yaml': registry.ReportView(validator, render)})
+        with mock.patch.dict(registry.PROGRAMS, {'another_case': 'another.program'}, clear=True), \
+             mock.patch('importlib.import_module', return_value=module), \
+             mock.patch('reporting.view_config.VIEWS', root):
             assert write_views(root, {'status': 'PASS'}, ['another.yaml']) == {
                 'another.yaml': Path('/unused/new/report.html')}
         validator.assert_called_once()

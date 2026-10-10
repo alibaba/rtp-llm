@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from cases.registry import VIEW_VALIDATORS, load_capability
+from cases.registry import view_capabilities
 from reporting.view_schema import (
     validate_bindings, validate_default, validate_monitoring_policy,
     validate_selected, validate_structure, validate_text,
@@ -32,9 +32,9 @@ def view(name):
     from reporting.events import validate_events
     validate_events(path, data.get("charts", {}), fail)
     query_plan = None
-    case_validator = VIEW_VALIDATORS.get(name)
-    if case_validator is not None:
-        load_capability(case_validator)(path, data, fail)
+    capability = view_capabilities().get(name)
+    if capability is not None:
+        capability.validator(path, data, fail)
     if "metrics" in data:
         from monitoring.query_plan import load_plan
 

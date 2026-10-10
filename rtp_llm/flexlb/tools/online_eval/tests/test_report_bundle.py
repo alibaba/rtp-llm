@@ -19,7 +19,7 @@ from reporting import (
     table,
 )
 from analysis.statistics import select_window, counter_delta
-from reporting.pairing import event_anchor, shifted_panel, pair_samples, paired_overlay
+from reporting.pairing import event_anchor, shifted_panel, paired_overlay
 from reporting.renderer import render_context, render_sections
 from workload.report import write_report
 
@@ -154,9 +154,6 @@ class ReportBundleTest(unittest.TestCase):
         self.assertEqual(panel["series"][0]["points"][0]["x"], 12)
         self.assertEqual(aligned["series"][0]["points"],
                          [dict(x=0, y=None), dict(x=1, y=2)])
-        axis, left, right, delta = pair_samples([(0, None), (1, 2)], [(0, 3), (2, 4)])
-        self.assertEqual((axis, left, right, delta),
-                         ([0, 1, 2], [None, 2, None], [3, None, 4], [None, None, None]))
         curves, _ = paired_overlay([aligned, aligned])
         self.assertEqual([curve["name"] for curve in curves], ["A · hit", "B · hit"])
         self.assertEqual([curve["dash"] for curve in curves], [[6, 4], []])
@@ -179,7 +176,7 @@ class ReportBundleTest(unittest.TestCase):
         )
         original = copy.deepcopy(payload)
         with tempfile.TemporaryDirectory() as d, patch(
-            "workload.evidence_analysis.read_series",
+            "monitoring.session.archived_series",
             side_effect=AssertionError("renderer read telemetry"),
         ):
             result = write_report(d, payload)

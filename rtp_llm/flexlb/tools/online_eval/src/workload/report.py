@@ -4,7 +4,7 @@ import copy
 import json
 from pathlib import Path
 
-from cases.registry import VIEW_RENDERERS, load_capability
+from cases.registry import view_capabilities
 from reporting import bundle_path, details, load_analysis, read_bundle, write_bundle
 from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from
 from reporting.view_config import DEFAULT_VIEW, view
@@ -50,9 +50,9 @@ def write_views(directory, analysis, names=None):
         presentation = view(name)
         if name == DEFAULT_VIEW:
             continue
-        if name in VIEW_RENDERERS:
-            renderer = load_capability(VIEW_RENDERERS[name])
-            paths[name] = renderer(directory, analysis, presentation)
+        capability = view_capabilities().get(name)
+        if capability is not None and capability.renderer is not None:
+            paths[name] = capability.renderer(directory, analysis, presentation)
             continue
         expected = bundle_path(directory, "run", presentation["report"]["id"])
         if not expected.exists() and analysis["status"] in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:

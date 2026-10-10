@@ -220,6 +220,7 @@ def _ha_start(ctx, params, deadline):
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],
         live_events=params["live_events"],
+        collection_profile=ctx.instance.get("collection_profile", "request"),
         source=params.get("source"),
         source_dir=(
             Path(ctx.instance["source_path"]).parent if params.get("source") else None
@@ -235,8 +236,6 @@ def _ha_start(ctx, params, deadline):
             else {}
         ),
     )
-    flow._overrides["FETCH_OUTPUT_STREAM"] = "true"
-    flow._overrides["ENABLE_FALLBACK"] = str(params["fallback"]).lower()
     owned = OwnedHaClient(flow)
     handle = ctx.register_resource("ha_client", owned, owned.cleanup)
     deadline.check()

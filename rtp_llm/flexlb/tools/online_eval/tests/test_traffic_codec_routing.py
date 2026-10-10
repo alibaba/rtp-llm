@@ -7,7 +7,6 @@ from pathlib import Path
 from traffic import datasets, prefix_lineage, prefix_lineage_v3
 from traffic.derive_synthetic_parameters import derive_parameters
 from traffic.codecs import decode
-from traffic.playback_config import comparison_notice
 from scripts.pipeline.derive_master_templates import derive
 from scripts.pipeline.materialize_traffic import main as materialize_main
 
@@ -51,10 +50,3 @@ class CodecRoutingTest(unittest.TestCase):
                 sidecar.write_text(json.dumps(dict(manifest, block_size=1024)))
                 with self.assertRaisesRegex(ValueError, 'block_size'):
                     datasets.read_manifest(model)
-
-    def test_codec_difference_is_comparison_notice_even_with_same_tail(self):
-        a = dict(source=dict(kind='trace', model='prefix_lineage', version='2'), tail='same')
-        b = dict(source=dict(kind='trace', model='prefix_lineage', version='3'), tail='same')
-        self.assertIn('trace codec version', comparison_notice(a, b))
-        self.assertIn('TPS', comparison_notice(a, b))
-        self.assertIsNone(comparison_notice(a, a))

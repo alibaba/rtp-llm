@@ -61,7 +61,6 @@ parameters:
       FETCH_OUTPUT_STREAM: 'true'
       N_CHANNELS: '8'
       EVENT_LOOP_THREADS: '8'
-      SKIP_SERVER_LATENCY: 'true'
     poll_s: 0.1
     jvm_xms: 8g
     jvm_xmx: 8g

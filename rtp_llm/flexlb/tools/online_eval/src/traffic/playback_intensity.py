@@ -92,17 +92,6 @@ def integral(curve, seconds):
     return area + max(0, seconds-curve[-1][0]) * curve[-1][1]
 
 
-def inverse(curve, area):
-    curve = curve or [[0, 1]]
-    for (left, a), (right, b) in zip(curve, curve[1:]):
-        segment = (right-left) * (a+b)/2
-        if area <= segment:
-            slope = (b-a)/(right-left)
-            return left + 2*area/(a + math.sqrt(max(0, a*a + 2*slope*area)))
-        area -= segment
-    return curve[-1][0] + area/curve[-1][1]
-
-
 def poisson_count(intensity, seed, limit=1_000_000):
     """Exact seeded finite-window count; refuses workloads beyond evidence capacity."""
     total = 0.0

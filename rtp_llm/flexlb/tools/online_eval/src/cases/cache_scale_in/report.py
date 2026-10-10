@@ -9,6 +9,7 @@ from pathlib import Path
 from reporting.view_config import view
 from reporting import run_meta, write_bundle
 from reporting.run_context import KPI_LABELS, title
+from reporting.curves import materialize, project_panels
 from reporting.view_sections import view_details, view_table
 
 
@@ -46,9 +47,7 @@ def prepare_report(directory, evidence):
             audit.append([identity, "—", "DIAGNOSTIC_ONLY", sources[key]["promql"]])
             continue
         for curve_id, definition in selected_styles:
-            name, group, axis, unit, color, hidden = (
-                definition[field] for field in ("name", "group", "axis", "unit", "color", "hidden")
-            )
+            name = definition["name"]
             qualifiers = [str(value) for label, value in sorted(labels.items()) if label not in {"role"}]
             if qualifiers:
                 name += " · " + ", ".join(qualifiers)
@@ -60,19 +59,10 @@ def prepare_report(directory, evidence):
             )
             expected = max(1, round((visible_end + 1) / max(sources[key].get("step", 1), 0.001)))
             coverage = min(1, valid_points / expected)
-            curves.append(
-                dict(
-                    curve_id=curve_id, metric_id=definition["metric_id"],
-                    name=name,
-                    group=group,
-                    axis=axis,
-                    unit=unit,
-                    color=color,
-                    points=[dict(x=t, y=v) for t, v in points],
-                    hidden=hidden,
-                    description=sources[key]["promql"], provenance=sources[key],
-                )
-            )
+            curves.append(materialize(
+                curve_id, definition, points, name=name,
+                description=sources[key]["promql"], provenance=sources[key],
+            ))
             audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", sources[key]["promql"]])
     for identity, definition in metric_defs.items():
         kind, metric = identity.split("/", 1)
@@ -111,39 +101,19 @@ def prepare_report(directory, evidence):
                 monitoring_status=monitoring_status, monitor_warnings=monitor_warnings)
 
 
-def report_panels(curves, presentation):
-    """Project archived monitoring curves into independent presentation panels."""
-    panels = []
-    for descriptor in presentation["charts"]["panels"]:
-        selected = [dict(curve, hidden=False) for metric_id in descriptor["curve_ids"]
-                    for curve in curves
-                    if curve["curve_id"] == metric_id]
-        missing = [presentation["charts"]["curves"][metric_id]["name"]
-                   for metric_id in descriptor["curve_ids"] if not any(
-            curve["curve_id"] == metric_id
-            for curve in selected)]
-        caption = descriptor["caption"] if selected else descriptor["empty_caption"]
-        if selected and missing:
-            caption += " 缺少监控序列：" + "、".join(missing) + "。"
-        panels.append(dict(id=descriptor["id"], title=descriptor["title"],
-                           timeX=True, axes=descriptor["axes"],
-                           series=selected, caption=caption))
-    return panels
-
-
 def build_spec(directory, evidence, result, prepared):
     presentation = view("cache_scale_in.yaml")
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
     survivor_style = presentation["charts"]["curves"]["derived/survivor_hit_ratio"]
-    curves.append(dict(curve_id="derived/survivor_hit_ratio", metric_id="derived/survivor_hit_ratio",
-                       **{field: survivor_style[field]
-                          for field in ("name", "group", "axis", "unit", "color", "hidden")},
-                       description="冻结门禁窗口：仅 survivors 的 hit/context counter delta，x 为窗口结束时刻",
-                       points=[dict(x=t-evidence_origin(evidence), y=value)
-                               for observation in MetricStore.read(directory).document["metrics"].get("derived/survivor_hit_ratio", [])
-                               for t, value in observation["points"]]))
+    store = MetricStore.read(directory)
+    for observation in store.document["metrics"].get("derived/survivor_hit_ratio", []):
+        curves.append(materialize(
+            "derived/survivor_hit_ratio", survivor_style, observation["points"],
+            origin=evidence_origin(evidence), provenance=observation["provenance"],
+            description="冻结门禁窗口：仅 survivors 的 hit/context counter delta，x 为窗口结束时刻",
+        ))
     audit = prepared["audit"]
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
@@ -159,7 +129,7 @@ def build_spec(directory, evidence, result, prepared):
             dict(label=KPI_LABELS["monitoring"], value=monitoring_status,
                  tone="danger" if monitor_warnings else "success"),
         ],
-        panels=report_panels(curves, presentation),
+        panels=project_panels(curves, presentation),
         sections=[
             view_table(presentation, "audit", audit),
             view_details(presentation, "monitoring", dict(status=monitoring_status, warnings=monitor_warnings)),

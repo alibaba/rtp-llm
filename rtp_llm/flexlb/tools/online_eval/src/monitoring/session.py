@@ -38,49 +38,13 @@ def exposition(rows):
 
 
 class PrometheusSource:
-    """Compatibility view over actual scrape timestamps, without copying raw data."""
+    """Exporter-shaped view of owned Prometheus samples for live checks."""
 
     def __init__(self, session, name, url):
         self.session, self.name, self.url = session, name, url
 
     def read(self, timeout=5):
         return exposition(self.session.instant(self.name, timeout=timeout))
-
-    def samples_since(self, sequence):
-        # Cursor is the actual scrape timestamp in microseconds, not query time.
-        start = max(self.session.started, sequence / 1_000_000)
-        end = time.time()
-        output = []
-        for chunk in self.session.raw(self.name, start, end):
-            by_time = {}
-            for row in chunk:
-                for stamp, value in row["values"]:
-                    cursor = round(stamp * 1_000_000)
-                    if cursor > sequence:
-                        by_time.setdefault(stamp, []).append(
-                            dict(metric=row["metric"], value=[stamp, value])
-                        )
-            for stamp, rows in sorted(by_time.items()):
-                up = [r for r in rows if r["metric"]["__name__"] == "up"]
-                healthy = len(up) == 1 and up[0]["value"][1] == "1"
-                output.append(
-                    dict(
-                        sequence=round(stamp * 1_000_000),
-                        epoch_s=stamp,
-                        monotonic_s=self.session.monotonic
-                        + stamp
-                        - self.session.started,
-                        error=None if healthy else "Prometheus scrape failed",
-                        body=(
-                            exposition(
-                                [r for r in rows if r["metric"]["__name__"] != "up"]
-                            )
-                            if healthy
-                            else None
-                        ),
-                    )
-                )
-        return output
 
 
 class PrometheusSession:
@@ -444,7 +408,6 @@ class PrometheusSession:
                         del telemetry._REGISTRY[view.url]
             if self.log:
                 self.log.close()
-
 
 
 def archived_series(directory, anchor):

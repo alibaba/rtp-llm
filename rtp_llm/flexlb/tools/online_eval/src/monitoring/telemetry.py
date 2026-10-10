@@ -18,9 +18,3 @@ def http_text(url, timeout=5.0):
         return owner.read(timeout)
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read().decode("utf-8", "replace")
-
-
-def shared_samples_since(url, sequence):
-    with _REGISTRY_LOCK:
-        owner = _REGISTRY.get(url)
-    return None if owner is None else owner.samples_since(sequence)

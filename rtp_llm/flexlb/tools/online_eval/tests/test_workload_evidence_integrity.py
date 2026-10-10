@@ -75,32 +75,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             p.write_text(json.dumps(dict(epoch_s=10, ended_epoch_s=9)))
             self.assertTrue(journal_rows(p)[1])
 
-    def test_collector_lifetime_requires_start_and_tail_coverage(self):
-        from workload.evidence_analysis import audit_journals
-
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d) / "telemetry/1"
-            directory.mkdir(parents=True)
-            (directory / "mock.prom").write_text("# ts=10000\nx 1\n")
-            (directory / "mock-samples.jsonl").write_text(
-                json.dumps(dict(sequence=1, epoch_s=10, monotonic_s=10, error=None))
-                + "\n"
-            )
-            errors = audit_journals(
-                d, ["1/mock"], 5, {"1/mock": dict(started_epoch_s=0, ended_epoch_s=20)}
-            )
-            self.assertTrue(any("began too late" in e["error"] for e in errors))
-            self.assertTrue(any("ended too early" in e["error"] for e in errors))
-            self.assertEqual(
-                audit_journals(
-                    d,
-                    ["1/mock"],
-                    5,
-                    {"1/mock": dict(started_epoch_s=9, ended_epoch_s=11)},
-                ),
-                [],
-            )
-
     def test_sparse_metric_does_not_claim_source_outage(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -258,19 +232,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(r["workload"]["missing_telemetry"], ["1/master-B"])
             self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
 
-    def test_failed_sample_breaks_curve(self):
-        from workload.evidence_analysis import read_series
-
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "telemetry/1"
-            p.mkdir(parents=True)
-            (p / "master-A.prom").write_text("# ts=1000\nx 3\n# ts=3000\nx 4\n")
-            (p / "master-A.prom.samples.jsonl").write_text(
-                json.dumps(dict(epoch_s=2, error="offline")) + "\n"
-            )
-            series = read_series(d, 0)
-            self.assertEqual(next(iter(series.values())), [[1, 3], [2, None], [3, 4]])
-
     def test_outage_exemption_is_source_and_window_specific(self):
         from workload.evidence_analysis import classify_gaps
 
@@ -285,50 +246,3 @@ class EvidenceIntegrityTest(unittest.TestCase):
         expected, unexpected = classify_gaps(gaps, evidence)
         self.assertEqual(expected, {"1/master-A/x": [3]})
         self.assertEqual(unexpected, {"1/master-A/x": [1, 5], "1/master-B/x": [3]})
-
-
-    def test_raw_samples_without_matching_rounds_are_incomplete(self):
-        from workload.evidence_analysis import audit_journals
-
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d) / "telemetry/1"
-            directory.mkdir(parents=True)
-            raw = directory / "mock.prom"
-            raw.write_text("# ts=1000\nx 1\n# ts=3000\nx 3\n")
-            journal = directory / "mock-samples.jsonl"
-            journal.write_text(
-                json.dumps(dict(sequence=1, epoch_s=1, error=None)) + "\n"
-            )
-            issues = audit_journals(d, ["1/mock"])
-            self.assertTrue(any("do not match" in issue["error"] for issue in issues))
-            with journal.open("a") as stream:
-                stream.write(json.dumps(dict(sequence=2, epoch_s=3, error=None)) + "\n")
-            self.assertEqual(audit_journals(d, ["1/mock"]), [])
-            journal.write_text("{broken\n")
-            self.assertTrue(audit_journals(d, ["1/mock"]))
-
-    def test_silent_sampling_pause_breaks_curve_without_fabricating_zero(self):
-        from workload.evidence_analysis import (
-            audit_journals,
-            read_series,
-        )
-
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d) / "telemetry/1"
-            directory.mkdir(parents=True)
-            (directory / "mock.prom").write_text("# ts=1000\nx 1\n# ts=11000\nx 2\n")
-            (directory / "mock-samples.jsonl").write_text(
-                "".join(
-                    json.dumps(dict(sequence=index, epoch_s=timestamp, error=None))
-                    + "\n"
-                    for index, timestamp in enumerate([1, 11], 1)
-                )
-            )
-            points = next(iter(read_series(d, 0, 5).values()))
-            self.assertEqual(points, [[1, 1], [6, None], [11, 2]])
-            self.assertTrue(
-                any(
-                    "sampling gap" in issue["error"]
-                    for issue in audit_journals(d, ["1/mock"], 5)
-                )
-            )

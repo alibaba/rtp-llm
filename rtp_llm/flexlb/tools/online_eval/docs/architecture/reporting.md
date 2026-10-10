@@ -1,6 +1,6 @@
 # 报告契约
 
-报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、配对、spec 校验、renderer 与 bundle 校验。case 视图按文件名通过 `cases.registry.VIEW_VALIDATORS`、`VIEW_RENDERERS` 注册校验和渲染实现；YAML 只能引用视图文件，不能指定 Python 模块。
+报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、物化与面板投影、配对、spec 校验、renderer 与 bundle 校验。曲线统一处理单位缩放、时间原点和来源；面板只有有限实测值才算有效，零值有效，null/NaN 不补零，缺测使用 `empty_caption`，部分缺测列出缺少的曲线。配置门禁线由 case 在投影后添加，不算实测数据。case 程序在 `REPORT_VIEWS` 中按文件名声明 `ReportView` 校验与可选渲染能力；`cases.registry` 自动汇集已注册程序的声明，同一视图可以复用相同能力；能力冲突或声明非法直接报错；YAML 只能引用视图文件，不能指定 Python 模块。
 
 ## 输入与装配
 

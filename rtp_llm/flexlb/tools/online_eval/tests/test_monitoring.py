@@ -14,7 +14,7 @@ from monitoring.session import (
     PrometheusSession,
     archived_series,
 )
-from monitoring.telemetry import http_text, shared_samples_since
+from monitoring.telemetry import http_text
 from monitoring.query_plan import load_plan, queries_for_targets
 from scenario.loader import ScenarioError
 
@@ -173,8 +173,6 @@ class RealPrometheusTest(unittest.TestCase):
                     session.start()
                     time.sleep(0.5)
                     self.assertIn("rtp_llm_running_stream_size", http_text(url))
-                    samples = shared_samples_since(url, 0)
-                    self.assertTrue(samples)
                     session.query_plan["sources"]["mock"]["raw_context_tps"] = dict(
                         promql="rtp_llm_context_tps${selector}", mode="scrape", unit="tokens/s",
                         value_kind="gauge", labels=["role", "engine_name", "engine_incarnation"])
@@ -217,7 +215,8 @@ class RealPrometheusTest(unittest.TestCase):
                 finally:
                     session.stop(export=False)
                 self.assertIsNotNone(session.process.poll())
-                self.assertIsNone(shared_samples_since(url, 0))
+                from monitoring import telemetry
+                self.assertNotIn(url, telemetry._REGISTRY)
         finally:
             server.shutdown()
             server.server_close()

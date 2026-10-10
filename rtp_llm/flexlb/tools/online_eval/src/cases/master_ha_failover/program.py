@@ -1,5 +1,8 @@
 """One continuous real-trace replay across a dual-master restart cycle."""
 
+from cases.registry import ReportView
+from cases.master_ha_failover.report import validate_view, write_report
+
 from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
@@ -78,3 +81,8 @@ def _cycle(case, restart_mode):
     case.step("clean_a", "master_inflight_clean", params={"target": "A"})
     case.step("clean_b", "master_inflight_clean", params={"target": "B"})
     case.step("cleanup", "teardown")
+
+
+REPORT_VIEWS = {
+    "master_ha_failover.yaml": ReportView(validate_view, write_report),
+}

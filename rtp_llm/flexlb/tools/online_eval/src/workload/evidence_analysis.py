@@ -4,8 +4,6 @@ import json
 import math
 from pathlib import Path
 
-from monitoring.metrics import parse_prometheus_samples
-
 
 def journal_rows(path):
     rows, issues = [], []
@@ -34,107 +32,6 @@ def journal_rows(path):
         except (ValueError, TypeError) as exc:
             issues.append(f"line {number}: {exc}")
     return rows, issues
-
-
-def audit_journals(directory, expected_sources, max_gap_s=None, windows=None):
-    issues = []
-    for source in expected_sources:
-        epoch, name = source.split("/", 1)
-        raw = Path(directory) / "telemetry" / epoch / (name + ".prom")
-        journal = (
-            raw.with_name("mock-samples.jsonl")
-            if name == "mock"
-            else Path(str(raw) + ".samples.jsonl")
-        )
-        rows, errors = journal_rows(journal)
-        if not rows:
-            errors.append("no sampling rounds")
-        if windows is not None:
-            window = windows.get(source, {})
-            start, end = window.get("started_epoch_s"), window.get("ended_epoch_s")
-            if start is None or end is None or end < start:
-                errors.append("missing or invalid collector lifetime")
-            elif rows and max_gap_s is not None:
-                if rows[0]["epoch_s"] - start > max_gap_s:
-                    errors.append("sampling began too late for collector lifetime")
-                if end - rows[-1]["epoch_s"] > max_gap_s:
-                    errors.append("sampling ended too early for collector lifetime")
-        previous = None
-        for index, row in enumerate(rows, 1):
-            if row.get("sequence") != index:
-                errors.append(f"sampling sequence discontinuity at round {index}")
-            if previous is not None and row["epoch_s"] < previous:
-                errors.append("sample clock moved backwards")
-            if (
-                previous is not None
-                and max_gap_s is not None
-                and row["epoch_s"] - previous > max_gap_s
-            ):
-                errors.append(
-                    f"sampling gap exceeds {max_gap_s}s: {previous}..{row['epoch_s']}"
-                )
-            previous = row["epoch_s"]
-        try:
-            raw_times = [
-                int(line[5:])
-                for line in raw.read_text().splitlines()
-                if line.startswith("# ts=")
-            ]
-            successful = [
-                int(row["epoch_s"] * 1000) for row in rows if row.get("error") is None
-            ]
-            if raw_times != successful:
-                errors.append("raw samples do not match successful journal rounds")
-        except (OSError, ValueError) as exc:
-            errors.append(str(exc))
-        issues.extend(dict(source=source, error=error) for error in errors)
-    return issues
-
-
-def read_series(root, epoch_s, max_gap_s=None):
-    series = {}
-    for path in sorted(Path(root).glob("telemetry/*/*.prom")):
-        timestamp = None
-        for line in path.read_text().splitlines():
-            if line.startswith("# ts="):
-                timestamp = int(line[5:]) / 1000 - epoch_s
-                continue
-            if timestamp is None:
-                continue
-            for name, labels, value in parse_prometheus_samples(line, ""):
-                if not math.isfinite(value):
-                    continue
-                key = "/".join(
-                    (
-                        path.parent.name,
-                        path.stem,
-                        name,
-                        json.dumps(labels, sort_keys=True),
-                    )
-                )
-                series.setdefault(key, []).append([timestamp, value])
-    for path in sorted(Path(root).glob("telemetry/*/*samples.jsonl")):
-        source = path.name.replace(".prom.samples.jsonl", "").replace(
-            "-samples.jsonl", ""
-        )
-        prefix = f"{path.parent.name}/{source}/"
-        gaps = [
-            [int(row["epoch_s"] * 1000) / 1000 - epoch_s, None]
-            for row in journal_rows(path)[0]
-            if row.get("error") is not None
-        ]
-        for key in series:
-            if key.startswith(prefix):
-                series[key] = sorted(series[key] + gaps, key=lambda point: point[0])
-    if max_gap_s is not None:
-        for key, points in series.items():
-            gaps = [
-                [(left[0] + right[0]) / 2, None]
-                for left, right in zip(points, points[1:])
-                if right[0] - left[0] > max_gap_s
-            ]
-            series[key] = sorted(points + gaps, key=lambda point: point[0])
-    return series
 
 
 def classify_gaps(gaps, evidence):

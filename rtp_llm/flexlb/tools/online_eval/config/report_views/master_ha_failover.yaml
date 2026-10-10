@@ -160,6 +160,7 @@ charts:
   - id: request_qps
     title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
     caption: 请求按发送时间分桶；HTTP 状态用右轴（1 为可回读，0 为采样失败）。竖线为故障与重启事件，不代表 gRPC 已恢复。
+    empty_caption: 缺少有效请求或 Master HTTP 观测；缺失值不补零。
     curve_ids:
     - ha/sent
     - ha/success
@@ -178,6 +179,7 @@ charts:
   - id: inflight
     title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
     caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
+    empty_caption: 缺少有效 Master inflight 观测；缺失值不补零。
     curve_ids:
     - ha/scheduler_inflight/A
     - ha/scheduler_inflight/B
@@ -202,6 +204,7 @@ charts:
     title: Prefill 5 秒滚动分配均衡性
     caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于 200 条时不显示倍数。此短窗指标仅作观测，不作强制门禁。A/B
       HTTP 可回读使用独立 0/1 轴，不代表 gRPC 已恢复；竖线标出 Master 事件。
+    empty_caption: 缺少有效 Prefill 分配观测；缺失值不补零。
     curve_ids:
     - ha/prefill_peak_qps
     - ha/prefill_mean_qps

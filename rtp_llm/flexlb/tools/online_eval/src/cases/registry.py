@@ -1,5 +1,9 @@
 """Registered Python case programs. YAML can only select entries in this registry."""
 
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+
 PROGRAMS = {
     "cache_scale_in": "cases.cache_scale_in.program",
     "master_ha_failover": "cases.master_ha_failover.program",
@@ -20,21 +24,31 @@ def finalize_reports(program, directory):
         finalizer(directory)
 
 
-VIEW_RENDERERS = {
-    "master_ha_failover.yaml": "cases.master_ha_failover.report.write_report",
-}
+@dataclass(frozen=True)
+class ReportView:
+    validator: Callable
+    renderer: Optional[Callable] = None
 
 
-VIEW_VALIDATORS = {
-    "master_ha_failover.yaml": "cases.master_ha_failover.report.validate_view",
-    "cache_scale_in.yaml": "cases.cache_scale_in.report.validate_view",
-    "master_performance.yaml": "cases.master_performance.report.validate_view",
-}
-
-
-def load_capability(path):
-    """Resolve only a path supplied by the trusted capability registry."""
+def view_capabilities():
+    """Collect declarations from trusted programs; never import YAML-supplied paths."""
     from importlib import import_module
+    import re
 
-    module, _, name = path.rpartition(".")
-    return getattr(import_module(module), name)
+    views = {}
+    for path in dict.fromkeys(PROGRAMS.values()):
+        declared = getattr(import_module(path), "REPORT_VIEWS", {})
+        if not isinstance(declared, dict):
+            raise ValueError("REPORT_VIEWS must be a mapping: " + path)
+        for name, capability in declared.items():
+            if type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*\.yaml", name):
+                raise ValueError("invalid registered view filename: " + str(name))
+            if name == "default.yaml":
+                raise ValueError("reserved registered view: " + name)
+            if (not isinstance(capability, ReportView) or not callable(capability.validator)
+                    or (capability.renderer is not None and not callable(capability.renderer))):
+                raise ValueError("invalid registered view capability: " + name)
+            if name in views and views[name] != capability:
+                raise ValueError("conflicting registered view capability: " + name)
+            views[name] = capability
+    return views

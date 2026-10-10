@@ -1,5 +1,8 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
+from cases.registry import ReportView
+from cases.master_performance.report import validate_view
+
 from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
@@ -63,3 +66,8 @@ def REPORT_FINALIZER(directory):
     from cases.master_performance.report import refresh_report
 
     refresh_report(directory)
+
+
+REPORT_VIEWS = {
+    "master_performance.yaml": ReportView(validate_view),
+}

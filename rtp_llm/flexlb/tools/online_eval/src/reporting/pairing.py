@@ -33,17 +33,6 @@ def align_series(points, anchor):
     return [[time - anchor, value] for time, value in points]
 
 
-def pair_samples(left, right):
-    """Align sparse numeric series without inventing zero-valued samples."""
-    left, right = dict(left), dict(right)
-    axis = sorted(left.keys() | right.keys())
-    return axis, [left.get(time) for time in axis], [right.get(time) for time in axis], [
-        right[time] - left[time] if time in left and time in right
-        and left[time] is not None and right[time] is not None else None
-        for time in axis
-    ]
-
-
 def paired_overlay(panels, labels=("A", "B"), *, color_for=None, hidden_for=None):
     """Pair series and presets while retaining null gaps and source order."""
     if len(panels) != len(labels):
