@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 #include <memory>
+#include "autil/EnvUtil.h"
 #include <string>
 #include <utility>
 #include <vector>
@@ -123,7 +124,14 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
         result.push_back(std::move(grammar_processor));
     }
 
-    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size);
+    const auto snapshot = ConstraintTreeCsrManager::instance()->snapshot();
+    const auto admission_error = TreeLogitsProcessor::validateCsrRequest(
+        snapshot, config, autil::EnvUtil::getEnv("CONSTRAINT_TREE_REQUIRED", false));
+    if (!admission_error.empty()) { return ErrorInfo(ErrorCode::INVALID_PARAMS, admission_error); }
+    if (snapshot && (!grammar_key.empty() || config.combo_token_size > 0)) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, "runtime CSR decoding cannot combine grammar or recommendation constraints");
+    }
+    auto tree_processor = TreeLogitsProcessor::fromGenerateInput(generate_input, init_batch_size, snapshot);
     if (tree_processor != nullptr) {
         result.push_back(std::move(tree_processor));
     }

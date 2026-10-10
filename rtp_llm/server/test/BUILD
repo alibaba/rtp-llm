@@ -62,3 +62,15 @@ py_test(
         "//rtp_llm:pydantic",
     ],
 )
+
+py_test(
+    name = "constraint_tree_bootstrap_test",
+    srcs = ["constraint_tree_bootstrap_test.py"],
+    data = ["//rtp_llm/server:server"],
+    deps = ["//rtp_llm:testlib"],
+)
+py_test(
+    name = "constraint_tree_routing_test",
+    srcs = ["constraint_tree_routing_test.py"],
+    deps = ["//rtp_llm/server:server", "//rtp_llm:testlib"],
+)

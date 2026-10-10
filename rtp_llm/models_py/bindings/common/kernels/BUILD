@@ -50,11 +50,13 @@ cc_library(
         "sampling_penalty_kernels.cu",
         "banRepeatNgram.cu",
         "mask_logits.cu",
+        "mask_logits_csr.cu",
     ],
     hdrs = [
         "sampling_penalty_kernels.h",
         "banRepeatNgram.h",
         "mask_logits.h",
+        "mask_logits_csr.h",
     ],
     deps = any_cuda_deps + [
         "//rtp_llm/cpp/utils:core_utils",

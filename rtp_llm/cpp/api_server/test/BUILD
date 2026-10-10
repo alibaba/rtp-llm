@@ -112,3 +112,28 @@ filegroup(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_test(
+    name = "constraint_tree_service_test",
+    srcs = ["ConstraintTreeServiceTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/api_server:constraint_tree_service", "//rtp_llm/cpp/api_server:http_client", "//rtp_llm/cpp/api_server/common:common_service", "@com_google_googletest//:gmock"],
+)
+cc_binary(
+    name = "constraint_tree_test_server",
+    srcs = ["ConstraintTreeTestServer.cc"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/api_server:constraint_tree_service", "//rtp_llm/cpp/api_server/common:common_service"],
+)
+cc_binary(
+    name = "tokenizer_sid_mapping_test_lib.so",
+    srcs = ["TokenizerSidMappingTestBinding.cc"],
+    linkshared = 1,
+    deps = ["//rtp_llm/cpp/api_server:tokenizer"],
+)
+py_test(
+    name = "tokenizer_sid_mapping_test",
+    srcs = ["tokenizer_sid_mapping_test.py"],
+    data = [":tokenizer_sid_mapping_test_lib.so", "//rtp_llm:frontend"],
+    deps = ["//rtp_llm:testlib"],
+)

@@ -49,12 +49,14 @@ cc_library(
     name = "http_api_server",
     srcs = glob([
         "*.cc",
-    ]),
+    ], exclude = ["ConstraintTreeService.cc"]),
     hdrs = glob([
         "*.h",
     ]),
     deps = [
         ":openai",
+        ":constraint_tree_service",
+        "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/engine_base:weights_converter",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
@@ -115,4 +117,13 @@ cc_test(
         "@havenask//aios/network/arpc:arpc",
     ],
     copts = ["-fno-access-control",],
+)
+
+cc_library(
+    name = "constraint_tree_service",
+    srcs = ["ConstraintTreeService.cc"],
+    hdrs = ["ConstraintTreeService.h"],
+    deps = [":http_server", "//rtp_llm/cpp/models:logits_processor", "@havenask//aios/autil:json"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
 )

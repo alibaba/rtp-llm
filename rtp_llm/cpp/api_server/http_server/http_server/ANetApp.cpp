@@ -46,4 +46,8 @@ bool ANetApp::StopPrivateTransport() {
     return true;
 }
 
+void ANetApp::SetPackageLimit(size_t packageLimit) {
+    _streamer.setPkgLimit(packageLimit);
+}
+
 }  // namespace http_server

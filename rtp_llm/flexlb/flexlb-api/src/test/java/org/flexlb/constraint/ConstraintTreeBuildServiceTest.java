@@ -1,0 +1,299 @@
+package org.flexlb.constraint;
+
+import org.flexlb.constraint.ConstraintTreeModels.BuildRequest;
+import org.flexlb.constraint.ConstraintTreeModels.BuildState;
+import org.flexlb.constraint.ConstraintTreeModels.PublicationResult;
+import org.flexlb.constraint.ConstraintTreeModels.Submission;
+import org.flexlb.constraint.ConstraintTreeModels.SubmissionState;
+import org.flexlb.constraint.ConstraintTreeModels.WorkerPublication;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+class ConstraintTreeBuildServiceTest {
+
+    private final ConstraintTreePublisher publisher = artifact -> new PublicationResult(
+            1, 1, List.of(new WorkerPublication("127.0.0.1:8000", true, artifact.version(), "accepted")));
+    private final ConstraintTreeBuildService service = new ConstraintTreeBuildService(
+            new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), publisher);
+
+    @AfterEach
+    void tearDown() {
+        service.destroy();
+    }
+
+    @Test
+    void buildsAsynchronouslyAndMakesSerializedArtifactAvailable() throws Exception {
+        Submission submission = service.submit(request(10, "1_3", "1_4_5"));
+
+        assertEquals(SubmissionState.ACCEPTED, submission.state());
+        awaitState(BuildState.READY);
+        assertEquals(10, service.getStatus().activeVersion());
+        assertEquals(1, service.getStatus().publishedWorkerCount());
+
+        ConstraintTreeCsrCodec.DecodedArtifact artifact = ConstraintTreeCsrCodec.decode(
+                service.getCurrentArtifact().orElseThrow().payload());
+        assertEquals(10, artifact.version());
+        assertEquals(1699, artifact.startTokenId());
+        assertEquals(151645, artifact.endTokenId());
+        assertEquals(2, artifact.sidCount());
+        assertTrue(artifact.rowPtr().length > 1);
+        assertEquals(artifact.colIdx().length, artifact.nextState().length);
+    }
+
+    @Test
+    void retainsOnlyCurrentAndPreviousSuccessfulVersion() throws Exception {
+        service.submit(request(10, "1_3"));
+        awaitState(BuildState.READY);
+        assertTrue(service.getBackupArtifact().isEmpty());
+
+        service.submit(request(11, "4_5"));
+        awaitState(BuildState.READY);
+
+        assertEquals(11, service.getCurrentArtifact().orElseThrow().version());
+        assertEquals(10, service.getBackupArtifact().orElseThrow().version());
+        assertEquals(10, service.getStatus().backupVersion());
+    }
+
+    @Test
+    void rejectsDuplicateAndStaleVersionsBeforeQueueing() throws Exception {
+        service.submit(request(10, "1_3"));
+        awaitState(BuildState.READY);
+
+        assertEquals(SubmissionState.ALREADY_ACCEPTED, service.submit(request(10, "1_3", "1_3")).state());
+        assertEquals(SubmissionState.VERSION_CONFLICT, service.submit(request(10, "4_5_6")).state());
+        assertEquals(SubmissionState.STALE_VERSION, service.submit(request(9, "4_5_6")).state());
+        assertEquals(10, service.getStatus().activeVersion());
+    }
+
+    @Test
+    void failedBuildKeepsCurrentAndBackupArtifacts() throws Exception {
+        service.submit(request(10, "1_3"));
+        awaitState(BuildState.READY);
+        service.submit(request(11, "4_5"));
+        awaitState(BuildState.READY);
+
+        assertEquals(SubmissionState.ACCEPTED, service.submit(request(12, "malformed")).state());
+        awaitState(BuildState.FAILED);
+
+        assertEquals(12, service.getStatus().requestedVersion());
+        assertEquals(11, service.getStatus().activeVersion());
+        assertEquals(10, service.getStatus().backupVersion());
+        assertTrue(service.getStatus().message().contains("invalid SID at index 0"));
+        assertEquals(11, service.getCurrentArtifact().orElseThrow().version());
+        assertEquals(10, service.getBackupArtifact().orElseThrow().version());
+
+        assertEquals(SubmissionState.VERSION_CONFLICT, service.submit(request(12, "7_8_9")).state());
+        assertEquals(SubmissionState.ACCEPTED, service.submit(request(13, "7_8_9")).state());
+        awaitState(BuildState.READY);
+        assertEquals(13, service.getCurrentArtifact().orElseThrow().version());
+        assertEquals(11, service.getBackupArtifact().orElseThrow().version());
+    }
+
+    @Test
+    void keepsBuiltArtifactAndMarksPartialWhenPublicationThrows() throws Exception {
+        ConstraintTreeBuildService localService = new ConstraintTreeBuildService(
+                new ConstraintTreeBuilder(),
+                Executors.newSingleThreadExecutor(),
+                artifact -> {
+                    throw new IllegalStateException("service discovery unavailable");
+                });
+        try {
+            localService.submit(request(20, "1_2_3"));
+            awaitState(localService, BuildState.PARTIALLY_PUBLISHED);
+
+            assertEquals(20, localService.getCurrentArtifact().orElseThrow().version());
+            assertTrue(localService.getBackupArtifact().isEmpty());
+            assertTrue(localService.getStatus().message().contains("service discovery unavailable"));
+        } finally {
+            localService.destroy();
+        }
+    }
+
+    @Test
+    void reportsPartialWhenNoWorkersAreDiscovered() throws Exception {
+        ConstraintTreeBuildService localService = new ConstraintTreeBuildService(
+                new ConstraintTreeBuilder(),
+                Executors.newSingleThreadExecutor(),
+                artifact -> new PublicationResult(0, 0, List.of()));
+        try {
+            localService.submit(request(21, "1_2_3"));
+            awaitState(localService, BuildState.PARTIALLY_PUBLISHED);
+
+            assertEquals(0, localService.getStatus().targetWorkerCount());
+            assertTrue(localService.getStatus().message().contains("no Whale inference workers"));
+        } finally {
+            localService.destroy();
+        }
+    }
+
+    @Test
+    void rapidSubmissionsPublishOnlyTheLatestVersion() throws Exception {
+        CountDownLatch firstBuildStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstBuild = new CountDownLatch(1);
+        ConstraintTreeBuilder blockingBuilder = new ConstraintTreeBuilder() {
+            @Override
+            public ConstraintTreeModels.Artifact build(BuildRequest request) {
+                if (request.version() == 30) {
+                    firstBuildStarted.countDown();
+                    try {
+                        if (!releaseFirstBuild.await(5, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("timed out waiting to release first build");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException("first build interrupted", e);
+                    }
+                }
+                return super.build(request);
+            }
+        };
+        List<Long> publishedVersions = new CopyOnWriteArrayList<>();
+        ConstraintTreeBuildService localService = new ConstraintTreeBuildService(
+                blockingBuilder,
+                Executors.newSingleThreadExecutor(),
+                artifact -> {
+                    publishedVersions.add(artifact.version());
+                    return new PublicationResult(1, 1, List.of());
+                });
+        try {
+            localService.submit(request(30, "1_2"));
+            assertTrue(firstBuildStarted.await(5, TimeUnit.SECONDS));
+            localService.submit(request(31, "3_4"));
+            localService.submit(request(32, "5_6_7"));
+            releaseFirstBuild.countDown();
+            awaitState(localService, BuildState.READY);
+
+            assertEquals(32, localService.getCurrentArtifact().orElseThrow().version());
+            assertTrue(localService.getBackupArtifact().isEmpty());
+            assertEquals(List.of(32L), publishedVersions);
+        } finally {
+            releaseFirstBuild.countDown();
+            localService.destroy();
+        }
+    }
+
+    @Test
+    void reconciliationRetriesTheCurrentArtifactUntilWorkersAcceptIt() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        ConstraintTreeBuildService localService = new ConstraintTreeBuildService(
+                new ConstraintTreeBuilder(),
+                Executors.newSingleThreadExecutor(),
+                artifact -> attempts.incrementAndGet() == 1
+                        ? new PublicationResult(1, 0, List.of())
+                        : new PublicationResult(1, 1, List.of()));
+        try {
+            localService.submit(request(40, "1_2_3"));
+            awaitState(localService, BuildState.PARTIALLY_PUBLISHED);
+
+            localService.reconcileCurrent();
+
+            assertEquals(BuildState.READY, localService.getStatus().state());
+            assertEquals(2, attempts.get());
+            assertEquals(40, localService.getStatus().activeVersion());
+        } finally {
+            localService.destroy();
+        }
+    }
+
+    @Test
+    void reconciliationRepublishesLastGoodTreeAfterNewerBuildFails() throws Exception {
+        List<Long> publishedVersions = new CopyOnWriteArrayList<>();
+        ConstraintTreeBuildService localService = new ConstraintTreeBuildService(
+                new ConstraintTreeBuilder(),
+                Executors.newSingleThreadExecutor(),
+                artifact -> {
+                    publishedVersions.add(artifact.version());
+                    return new PublicationResult(1, 1, List.of());
+                });
+        try {
+            localService.submit(request(50, "1_2_3"));
+            awaitState(localService, BuildState.READY);
+            localService.submit(request(51, "malformed"));
+            awaitState(localService, BuildState.FAILED);
+
+            localService.reconcileCurrent();
+
+            assertEquals(List.of(50L, 50L), publishedVersions);
+            assertEquals(BuildState.FAILED, localService.getStatus().state());
+            assertEquals(51, localService.getStatus().requestedVersion());
+            assertEquals(50, localService.getStatus().activeVersion());
+            assertEquals(SubmissionState.ACCEPTED,
+                    localService.submit(request(52, "4_5_6")).state());
+            awaitState(localService, BuildState.READY);
+        } finally {
+            localService.destroy();
+        }
+    }
+
+    @Test
+    void manualRetryRechecksMappingAndReadyRetryDoesNotRebuild() throws Exception {
+        AtomicInteger prepares = new AtomicInteger();
+        AtomicInteger publications = new AtomicInteger();
+        var mapping = ConstraintTreeSidMappingTest.mapping(java.util.Map.of("C1", 17)).validated();
+        ConstraintTreePublisher transientPublisher = new ConstraintTreePublisher() {
+            public ConstraintTreeModels.PreparedBuild prepare(BuildRequest request) {
+                if (prepares.incrementAndGet() == 1) {
+                    throw new IllegalStateException("temporary mapping lookup failure");
+                }
+                return new ConstraintTreeModels.PreparedBuild(mapping.convert(request), mapping.fingerprint());
+            }
+            public PublicationResult publish(ConstraintTreeModels.SerializedArtifact artifact) {
+                publications.incrementAndGet();
+                return new PublicationResult(1, 1, List.of());
+            }
+        };
+        var local = new ConstraintTreeBuildService(new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), transientPublisher);
+        try {
+            local.submit(request(70, "C1C1"));
+            awaitState(local, BuildState.FAILED);
+            assertEquals(SubmissionState.ALREADY_ACCEPTED, local.submit(request(70, "C1C1")).state());
+            assertEquals(1, prepares.get());
+            assertEquals(SubmissionState.VERSION_CONFLICT, local.submit(request(70, "C2")).state());
+            local.retry(new ConstraintTreeModels.RetryRequest(70, "gul_item"));
+            awaitState(local, BuildState.READY);
+            var artifact = local.getCurrentArtifact().orElseThrow();
+            assertEquals(mapping.fingerprint(), ConstraintTreeCsrCodec.decode(artifact.payload()).mappingFingerprint());
+            local.retry(new ConstraintTreeModels.RetryRequest(70, "gul_item"));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (publications.get() < 2 && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertEquals(2, publications.get());
+            assertEquals(2, prepares.get());
+            assertTrue(artifact == local.getCurrentArtifact().orElseThrow());
+        } finally {
+            local.destroy();
+        }
+    }
+
+    private BuildRequest request(long version, String... sids) {
+        return new BuildRequest(version, "gul_item", null, null, null, null, List.of(sids));
+    }
+
+    private void awaitState(BuildState expected) throws Exception {
+        awaitState(service, expected);
+    }
+
+    private void awaitState(ConstraintTreeBuildService target, BuildState expected) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            if (target.getStatus().state() == expected) {
+                return;
+            }
+            Thread.sleep(5);
+        }
+        fail("timed out waiting for state " + expected + ", current status=" + target.getStatus());
+    }
+}

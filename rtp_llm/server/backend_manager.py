@@ -1,5 +1,6 @@
 import gc
 import logging
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Optional
@@ -38,6 +39,8 @@ class BackendManager(object):
             kmonitor.init()
         self.engine: Optional["BaseEngine"] = None
         self._shutdown_requested = threading.Event()
+        self._constraint_tree_bootstrap = None
+        self._constraint_tree_host_service = None
 
     def start(self):
         """Initialize backend server without entering service loop"""
@@ -144,6 +147,27 @@ class BackendManager(object):
             merge_lora=self.py_env_configs.lora_config.merge_lora,
             propose_model_config=propose_model_config,
         )
+        if (
+            self.engine.task_type.name == "LANGUAGE_MODEL"
+            and self.py_env_configs.role_config.role_type.name in ("DECODE", "PDFUSION")
+        ):
+            from rtp_llm.server.constraint_tree_bootstrap import ConstraintTreeBootstrap
+            host_service = None
+            if (
+                os.environ.get("CONSTRAINT_TREE_REQUIRED", "").lower()
+                in ("1", "true", "on")
+                and not os.environ.get("CONSTRAINT_TREE_MASTER_ENDPOINT", "").strip()
+            ):
+                from rtp_llm.server.host_service import HostService, HostServiceArgs
+
+                host_service = HostService(HostServiceArgs.create_from_env())
+                self._constraint_tree_host_service = host_service
+            self._constraint_tree_bootstrap = ConstraintTreeBootstrap.from_env(
+                host_service, self.py_env_configs.server_config.http_port,
+                self.py_env_configs.role_config.role_type,
+            )
+            if self._constraint_tree_bootstrap is not None:
+                self._constraint_tree_bootstrap.start()
         logging.info(
             "engine created successfully: self.engine.task_type=%s",
             self.engine.task_type,
@@ -168,6 +192,9 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        if getattr(self, "_constraint_tree_bootstrap", None) is not None:
+            self._constraint_tree_bootstrap.stop()
+            self._constraint_tree_bootstrap = None
         if self.engine is not None:
             from rtp_llm.utils.fuser import _nfs_manager
 

@@ -467,6 +467,24 @@ class FrontendApp(object):
                     detail="startup warmup is not ready",
                 )
 
+        tree_required = os.environ.get("CONSTRAINT_TREE_REQUIRED", "").lower() in ("1", "true", "on")
+
+        async def check_constraint_tree_ready():
+            if not tree_required or self.separated_frontend or self.frontend_server.is_embedding:
+                return
+            try:
+                result = await asyncio.wait_for(
+                    async_request_server("get", self.server_config.http_port, "health", {}), timeout=5
+                )
+            except asyncio.TimeoutError:
+                result = None
+            if result != "ok":
+                raise HTTPException(status_code=503, detail="runtime constraint tree is not ready")
+
+        @app.get("/live")
+        async def live():
+            return "ok"
+
         @app.post("/frontend_health")
         @app.get("/frontend_health")
         async def frontend_health():
@@ -495,6 +513,7 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return "ok"
+            await check_constraint_tree_ready()
             if self.frontend_server.is_embedding:
                 return await async_request_server(
                     "post", self.server_config.http_port, "health_check", {}
@@ -515,6 +534,7 @@ class FrontendApp(object):
             if self.separated_frontend:
                 await check_all_health()
                 return {"status": "home"}
+            await check_constraint_tree_ready()
             response = await self.grpc_client.post_request("health_check", {})
             if response.get("status", "") != "ok":
                 return ORJSONResponse(

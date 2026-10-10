@@ -61,6 +61,15 @@ public class WorkerAddressService {
     }
 
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
+        return getEngineWorkerList(modelName, modelEndpointType, false);
+    }
+
+    /** Used for tree bootstrap only; never use unready hosts for inference routing. */
+    public List<WorkerHost> getAllEngineWorkerList(String modelName, RoleType modelEndpointType) {
+        return getEngineWorkerList(modelName, modelEndpointType, true);
+    }
+
+    private List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType, boolean includeUnready) {
         ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(IdUtils.getServiceIdByModelName(modelName));
         if (serviceRoute == null) {
             logger.info("modelName={} service route not found", modelName);
@@ -76,15 +85,20 @@ public class WorkerAddressService {
                 continue;
             }
             String address = endpoint.getAddress();
-            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
+            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address, includeUnready), endpoint.getProtocol(), groupName));
         }
         return workerHosts;
     }
 
     public List<WorkerHost> getServiceHosts(String modelName, String address) {
-        // Use all machines mounted on the first service discovery address in ServiceRoute
+        return getServiceHosts(modelName, address, false);
+    }
+
+    private List<WorkerHost> getServiceHosts(String modelName, String address, boolean includeUnready) {
+        // 使用ServiceRoute里面第一个service discovery地址挂载的所有机器
         ServiceDiscoveryRunner serviceDiscoveryRunner = new ServiceDiscoveryRunner(modelName, address, engineHealthReporter, serviceDiscovery);
-        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(serviceDiscoveryRunner);
+        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(
+                includeUnready ? () -> serviceDiscovery.getAllHosts(address) : serviceDiscoveryRunner);
         try {
             // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return future.get(500, TimeUnit.MILLISECONDS);

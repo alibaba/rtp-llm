@@ -56,6 +56,7 @@ cc_library(
         "logits_processor/SpecLogitsVerifyRunner.h",
         "logits_processor/ThinkModeLogitsProcessor.h",
         "logits_processor/TreeLogitsProcessor.h",
+        "logits_processor/ConstraintTreeCsr.h",
         "logits_processor/RecommendationLogitsProcessor.h",
         "logits_processor/LogitsProcessorFactory.h",
         "logits_processor/GrammarLogitsProcessor.h",
@@ -70,6 +71,7 @@ cc_library(
         "logits_processor/SpecLogitsVerifyRunner.cc",
         "logits_processor/ThinkModeLogitsProcessor.cc",
         "logits_processor/TreeLogitsProcessor.cc",
+        "logits_processor/ConstraintTreeCsr.cc",
         "logits_processor/RecommendationLogitsProcessor.cc",
         "logits_processor/LogitsProcessorFactory.cc",
         "logits_processor/GrammarLogitsProcessor.cc",
@@ -77,6 +79,7 @@ cc_library(
     deps = [
         ":sample_infos",
         ":dfa_utils",
+        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_hdrs_lib",
         "//rtp_llm/cpp/engine_base/stream:generate_types",

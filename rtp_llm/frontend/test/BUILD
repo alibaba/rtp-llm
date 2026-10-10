@@ -75,3 +75,10 @@ py_test(
         "//rtp_llm:frontend",
     ],
 )
+
+py_test(
+    name = "frontend_health_test",
+    srcs = ["frontend_health_test.py"],
+    data = ["//rtp_llm:frontend"],
+    deps = ["//rtp_llm:fastapi", "//rtp_llm:testlib"],
+)

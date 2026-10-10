@@ -1,4 +1,8 @@
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
+#include <limits>
+#include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/api_server/ConstraintTreeService.h"
+#include "rtp_llm/cpp/models/logits_processor/ConstraintTreeCsr.h"
 #include "rtp_llm/cpp/api_server/common/HealthService.h"
 #include "rtp_llm/cpp/api_server/WorkerStatusService.h"
 #include "rtp_llm/cpp/api_server/ModelStatusService.h"
@@ -28,7 +32,8 @@ bool HttpApiServer::start(const std::string& address) {
     // TODO: queueSize may interleave with controller :(
     http_server_.reset(new http_server::HttpServer(/*transport=*/nullptr,
                                                    /*threadNum=*/controller_->get_available_concurrency(),
-                                                   /*queueSize=*/controller_->get_available_concurrency() * 5));
+                                                   /*queueSize=*/controller_->get_available_concurrency() * 5,
+                                                   /*packageLimit=*/std::numeric_limits<int>::max()));
     metric_reporter_.reset(new ApiServerMetricReporter());
     if (!metric_reporter_->init()) {
         RTP_LLM_LOG_WARNING("HttpApiServer start init metric reporter failed.");
@@ -102,6 +107,8 @@ bool HttpApiServer::registerServices() {
 
     // add uri:
     // POST: /chat/completions /v1/chat/completions /chat/render /v1/chat/render
+    if (!is_embedding_ && !registerConstraintTreeService()) { return false; }
+
     if (!registerChatService()) {
         RTP_LLM_LOG_WARNING("HttpApiServer register chat service failed.");
         return false;
@@ -131,7 +138,19 @@ bool HttpApiServer::registerHealthService() {
         return false;
     }
 
-    health_service_.reset(new HealthService());
+    const bool required = !is_embedding_
+                          && (params_.pd_sep_config.role_type == RoleType::DECODE
+                              || params_.pd_sep_config.role_type == RoleType::PDFUSION)
+                          && autil::EnvUtil::getEnv("CONSTRAINT_TREE_REQUIRED", false);
+    health_service_.reset(new HealthService([required] {
+        if (!required) { return true; }
+        const auto snapshot = ConstraintTreeCsrManager::instance()->snapshot();
+#if USING_CUDA || USING_ROCM
+        return snapshot && snapshot->deviceReady();
+#else
+        return snapshot != nullptr;
+#endif
+    }));
     return registerHealthServiceStatic(*http_server_, health_service_);
 }
 
@@ -193,6 +212,51 @@ bool HttpApiServer::registerTokenizerService() {
         tokenizer_service->tokenizerEncode(writer, request);
     };
     return http_server_->RegisterRoute("POST", "/tokenizer/encode", tokenizer_encode_callback);
+}
+
+bool HttpApiServer::registerConstraintTreeService() {
+    if (!http_server_) {
+        RTP_LLM_LOG_WARNING("register constraint tree service failed, http server is null");
+        return false;
+    }
+
+    std::string mapping_json = "{}";
+    if (tokenizer_) {
+        try {
+            mapping_json = tokenizer_->sidMappingJson();
+        } catch (const std::exception& e) {
+            // Non-SID tokenizers remain usable. A Master cannot publish mapped
+            // SID trees to such a worker because the manifest endpoint fails closed.
+            RTP_LLM_LOG_WARNING("SID mapping is unavailable: %s", e.what());
+        }
+    }
+    int device_id = -1;
+#if USING_CUDA || USING_ROCM
+    device_id = static_cast<int>(params_.parallelism_config.local_rank);
+#endif
+    constraint_tree_service_.reset(new ConstraintTreeService(device_id, mapping_json));
+    auto update_callback = [constraint_tree_service =
+                                constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                          const http_server::HttpRequest& request) -> void {
+        constraint_tree_service->updateConstraintTree(writer, request);
+    };
+    auto status_callback = [constraint_tree_service =
+                                constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                                          const http_server::HttpRequest& request) -> void {
+        constraint_tree_service->constraintTreeStatus(writer, request);
+    };
+    auto mapping_callback = [service = constraint_tree_service_](
+                                std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                const http_server::HttpRequest&) { service->constraintTreeMapping(writer, true); };
+    auto mapping_status_callback =
+        [service = constraint_tree_service_](std::unique_ptr<http_server::HttpResponseWriter> writer,
+                                             const http_server::HttpRequest&) {
+            service->constraintTreeMapping(writer, false);
+        };
+    return http_server_->RegisterRoute("POST", "/update_constraint_tree", update_callback)
+           && http_server_->RegisterRoute("GET", "/constraint_tree_status", status_callback)
+           && http_server_->RegisterRoute("GET", "/constraint_tree_mapping", mapping_callback)
+           && http_server_->RegisterRoute("GET", "/constraint_tree_mapping_status", mapping_status_callback);
 }
 
 bool HttpApiServer::registerChatService() {

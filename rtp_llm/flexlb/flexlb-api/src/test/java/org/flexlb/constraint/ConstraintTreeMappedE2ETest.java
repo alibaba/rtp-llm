@@ -1,0 +1,409 @@
+package org.flexlb.constraint;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.httpserver.ConstraintTreeServer;
+import org.flexlb.service.address.WorkerAddressService;
+import org.flexlb.transport.GeneralHttpNettyService;
+import org.flexlb.transport.HttpNettyConfig;
+import org.junit.jupiter.api.Test;
+import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
+import org.springframework.web.reactive.function.server.RouterFunctions;
+import reactor.netty.DisposableServer;
+import reactor.netty.http.server.HttpServer;
+
+import java.net.ServerSocket;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
+import static org.mockito.Mockito.*;
+
+/** Real Java HTTP receiver/publisher -> two C++ HTTP workers. Only discovery/election are stubbed. */
+class ConstraintTreeMappedE2ETest {
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void pythonBootstrapBreaksReadinessDiscoveryCycleAndRestoresRestartedWorker() throws Exception {
+        String binary = System.getenv("CONSTRAINT_TREE_CPP_WORKER_BINARY");
+        assumeTrue(binary != null && Files.isExecutable(Path.of(binary)), "requires compiled C++ test Worker");
+        Path clientPath = Path.of("../../server/constraint_tree_bootstrap.py").toAbsolutePath().normalize();
+        assertTrue(Files.exists(clientPath), clientPath.toString());
+        var mapping = ConstraintTreeSidMappingTest.mapping(Map.of("C1", 17, "C2", 19)).validated();
+        Path manifest = Files.createTempFile("csr-bootstrap-e2e-", ".json");
+        Files.writeString(manifest, JSON.writeValueAsString(mapping));
+        int port = freePort();
+        Process nativeWorker = null;
+        Process bootstrapClient = null;
+        try {
+            nativeWorker = worker(binary, port, manifest);
+            // The second round discards all Master state while retaining the Worker.
+            for (int masterGeneration = 0; masterGeneration < 2; masterGeneration++) {
+                var registry = new ConstraintTreeBootstrapRegistry();
+                var visible = new java.util.concurrent.atomic.AtomicBoolean();
+                var addresses = mock(WorkerAddressService.class);
+                var host = new WorkerHost("127.0.0.1", port - 5, port - 4, port, "local", "default");
+                when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+                // Simulate Carbon: no VIP record at all until health has passed.
+                when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION))
+                        .thenAnswer(ignored -> visible.get() ? List.of(host) : List.of());
+                var transport = new GeneralHttpNettyService(new HttpNettyConfig().createNettyClientHandler());
+                var publisher = new WhaleConstraintTreePublisher(addresses, transport, 2, Duration.ofSeconds(5), registry);
+                var builds = new ConstraintTreeBuildService(new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), publisher);
+                var reads = new java.util.concurrent.atomic.AtomicInteger();
+                org.flexlb.constraint.source.SidBucketClient source = (key, limit, timeout) -> {
+                    reads.incrementAndGet();
+                    return java.util.concurrent.CompletableFuture.completedFuture(key.equals("123")
+                            ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", "C1C2")) : List.of());
+                };
+                var poller = new IgraphConstraintTreePoller(new BucketSidReader(source, BucketSidReaderTest.skipEmptySettings(4000, 2000)),
+                        builds, () -> true, "gul_item", true, true, 600, java.time.Clock.systemUTC());
+                var provider = (org.springframework.beans.factory.ObjectProvider<IgraphConstraintTreePoller>)
+                        mock(org.springframework.beans.factory.ObjectProvider.class);
+                when(provider.getIfAvailable()).thenReturn(poller);
+                var leader = mock(LBStatusConsistencyService.class);
+                when(leader.isMaster()).thenReturn(true);
+                var coordinator = new ConstraintTreeBootstrapService(registry, builds, provider, leader);
+                var models = mock(org.flexlb.config.ModelMetaConfig.class);
+                var route = mock(org.flexlb.dao.route.ServiceRoute.class);
+                when(route.getRoleEndpoints(RoleType.PDFUSION)).thenReturn(List.of(new org.flexlb.dao.route.Endpoint()));
+                String service = org.flexlb.util.IdUtils.getServiceIdByModelName("gul_item");
+                when(models.getServiceRoute(service)).thenReturn(route);
+                when(models.getServiceIds()).thenReturn(java.util.Set.of(service));
+                var handler = RouterFunctions.toHttpHandler(new org.flexlb.httpserver.ConstraintTreeBootstrapServer(
+                        registry, models, leader).constraintTreeBootstrapRoutes());
+                var server = HttpServer.create().host("127.0.0.1").port(0).handle(new ReactorHttpHandlerAdapter(handler)).bindNow();
+                try {
+                    if (masterGeneration == 0) { assertEquals(503, healthCode(port)); }
+                    assertTrue(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION).isEmpty());
+                    assertTrue(builds.getCurrentArtifact().isEmpty());
+                    bootstrapClient = bootstrapPython(clientPath, server.port(), port);
+                    awaitBootstrap(coordinator, builds, registry, port);
+                    assertEquals(4000, reads.get(), "one source read, not one per repeated registration");
+                    assertTrue(bootstrapClient.isAlive(), "must renew until VIP handoff, even after tree is ready");
+                    var artifact = builds.getCurrentArtifact().orElseThrow();
+                    visible.set(true);
+                    builds.reconcileCurrent();
+                    assertTrue(bootstrapClient.waitFor(5, TimeUnit.SECONDS));
+                    assertEquals(0, bootstrapClient.exitValue());
+                    assertTrue(registry.pendingModels().isEmpty());
+
+                    // A replacement process has no tree; current artifact must be repushed, not rebuilt.
+                    stop(nativeWorker);
+                    nativeWorker = worker(binary, port, manifest);
+                    visible.set(false);
+                    builds.reconcileCurrent();
+                    assertEquals(503, healthCode(port));
+                    bootstrapClient = bootstrapPython(clientPath, server.port(), port);
+                    awaitBootstrap(coordinator, builds, registry, port);
+                    assertSame(artifact, builds.getCurrentArtifact().orElseThrow());
+                    assertEquals(4000, reads.get());
+                    visible.set(true);
+                    builds.reconcileCurrent();
+                    assertTrue(bootstrapClient.waitFor(5, TimeUnit.SECONDS));
+                    assertEquals(0, bootstrapClient.exitValue());
+                } finally {
+                    if (bootstrapClient != null && bootstrapClient.isAlive()) {
+                        bootstrapClient.destroy();
+                        bootstrapClient.waitFor(5, TimeUnit.SECONDS);
+                    }
+                    coordinator.close();
+                    poller.close();
+                    builds.destroy();
+                    publisher.destroy();
+                    server.disposeNow();
+                }
+            }
+        } finally {
+            stop(nativeWorker);
+            Files.deleteIfExists(manifest);
+        }
+    }
+
+    private Process bootstrapPython(Path path, int masterPort, int workerPort) throws Exception {
+        String script = "import importlib.util,sys,os; from types import SimpleNamespace; "
+                + "s=importlib.util.spec_from_file_location('bootstrap',sys.argv[1]); "
+                + "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                + "os.environ['CONSTRAINT_TREE_REQUIRED']='true'; "
+                + "os.environ['CONSTRAINT_TREE_MASTER_ENDPOINT']='tree.master.vip'; "
+                + "os.environ.pop('MODEL_SERVICE_CONFIG',None); "
+                + "sys.modules['rtp_llm.vipserver']=SimpleNamespace(get_host_list_by_domain_now="
+                + "lambda domain:[SimpleNamespace(ip='127.0.0.1',port=int(sys.argv[2].split(':')[1]))]); "
+                + "b=m.ConstraintTreeBootstrap.from_env(None,int(sys.argv[3]),'PDFUSION'); b.interval=0.05; "
+                + "assert 'service_id' not in b.body; "
+                + "b.start(); b._thread.join(40); sys.exit(1 if b._thread.is_alive() else 0)";
+        return new ProcessBuilder("python3", "-c", script, path.toString(), "127.0.0.1:" + masterPort,
+                Integer.toString(workerPort)).redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.INHERIT).start();
+    }
+
+    private int healthCode(int port) throws Exception {
+        return http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/health"))
+                .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.discarding()).statusCode();
+    }
+
+    private void awaitBootstrap(ConstraintTreeBootstrapService coordinator, ConstraintTreeBuildService builds,
+                                ConstraintTreeBootstrapRegistry registry, int port) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+        while (System.nanoTime() < deadline) {
+            // Accelerate the two production timers; never submit a tree from the test.
+            coordinator.tick();
+            if (builds.getCurrentArtifact().isPresent() && healthCode(port) == 200
+                    && get(port, "/constraint_tree_status").path("version").asLong()
+                        == builds.getCurrentArtifact().orElseThrow().version()
+                    && !registry.pendingModels().isEmpty()) { return; }
+            Thread.sleep(50);
+        }
+        fail("bootstrap failed: " + builds.getStatus());
+    }
+
+    @Test
+    void bucketInputBuildsCsrAndPublishesToNativeWorkerWhileReadFailureKeepsOldTree() throws Exception {
+        bucketInputRoundTrip(false);
+    }
+
+    @Test
+    void cappedMisplacedInputStillPublishesAndReadFailureKeepsOldTree() throws Exception {
+        bucketInputRoundTrip(true);
+    }
+
+    private void bucketInputRoundTrip(boolean bestEffort) throws Exception {
+        String binary = System.getenv("CONSTRAINT_TREE_CPP_WORKER_BINARY");
+        assumeTrue(binary != null && Files.isExecutable(Path.of(binary)), "requires compiled C++ test Worker");
+        var mapping = ConstraintTreeSidMappingTest.mapping(Map.of("C1", 17, "C2", 19, "C3", 23)).validated();
+        Path manifest = Files.createTempFile("csr-bucket-e2e-mapping-", ".json");
+        Files.writeString(manifest, JSON.writeValueAsString(mapping));
+        int port = freePort();
+        Process worker = null;
+        WhaleConstraintTreePublisher publisher = null;
+        ConstraintTreeBuildService builds = null;
+        IgraphConstraintTreePoller poller = null;
+        try {
+            worker = worker(binary, port, manifest);
+            assertEquals(503, http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + "/health"))
+                    .GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+            assertEquals("ok", get(port, "/live").asText());
+            var addresses = mock(WorkerAddressService.class);
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(
+                    new WorkerHost("127.0.0.1", port - 5, port - 4, port, "local", "default")));
+            var transport = new GeneralHttpNettyService(new HttpNettyConfig().createNettyClientHandler());
+            publisher = new WhaleConstraintTreePublisher(addresses, transport, 2, Duration.ofSeconds(5));
+            builds = new ConstraintTreeBuildService(new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), publisher);
+            var failRead = new java.util.concurrent.atomic.AtomicBoolean();
+            var sid = new java.util.concurrent.atomic.AtomicReference<>("C1C2");
+            org.flexlb.constraint.source.SidBucketClient client = (key, limit, timeout) -> {
+                if (failRead.get()) {
+                    return java.util.concurrent.CompletableFuture.failedFuture(new IllegalStateException("source unavailable"));
+                }
+                int bucket = bestEffort ? 0 : 123 % 4000;
+                return java.util.concurrent.CompletableFuture.completedFuture(key.equals(Integer.toString(bucket))
+                        ? List.of(new org.flexlb.constraint.source.SidBucketClient.Row(key, "123", sid.get()),
+                                new org.flexlb.constraint.source.SidBucketClient.Row(key, "4123", "")) : List.of());
+            };
+            poller = new IgraphConstraintTreePoller(new BucketSidReader(client,
+                    BucketSidReaderTest.skipEmptySettings(4000, bestEffort ? 2 : 2000)),
+                    builds, () -> true, "gul_item", true, true, 600,
+                    java.time.Clock.fixed(java.time.Instant.ofEpochMilli(100), java.time.ZoneOffset.UTC));
+            poller.pollOnce();
+            assertEquals("SUBMITTED", poller.getStatus().state());
+            assertEquals(4000, poller.getStatus().buckets());
+            assertEquals(2, poller.getStatus().items());
+            assertEquals(1, poller.getStatus().skippedEmptySids());
+            assertEquals(1, poller.getStatus().eligibleItems());
+            awaitState(builds, ConstraintTreeModels.BuildState.READY);
+            assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
+            assertEquals("ok", get(port, "/health").asText());
+            var firstArtifact = builds.getCurrentArtifact().orElseThrow();
+            assertEquals(1, ConstraintTreeCsrCodec.decode(firstArtifact.payload()).sidCount());
+
+            failRead.set(true);
+            poller.pollOnce();
+            assertEquals("FAILED", poller.getStatus().state());
+            assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+            assertEquals("ok", get(port, "/health").asText());
+            assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
+
+            failRead.set(false);
+            sid.set("");
+            poller.pollOnce();
+            assertEquals("FAILED", poller.getStatus().state());
+            assertTrue(poller.getStatus().message().contains("skippedEmptySids=2"));
+            assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+            assertEquals(100, get(port, "/constraint_tree_status").path("version").asLong());
+
+            sid.set("C3C2");
+            poller.pollOnce();
+            awaitState(builds, ConstraintTreeModels.BuildState.READY);
+            assertEquals(101, get(port, "/constraint_tree_status").path("version").asLong());
+            assertEquals(100, builds.getStatus().backupVersion());
+        } finally {
+            if (poller != null) { poller.close(); }
+            if (builds != null) { builds.destroy(); }
+            if (publisher != null) { publisher.destroy(); }
+            stop(worker);
+            Files.deleteIfExists(manifest);
+        }
+    }
+
+    @Test
+    void fullSidSubmissionMappingRetryAndRestartAcrossTwoWorkers() throws Exception {
+        String binary = System.getenv("CONSTRAINT_TREE_CPP_WORKER_BINARY");
+        assumeTrue(binary != null && Files.isExecutable(Path.of(binary)), "requires compiled C++ test Worker");
+        var mapping = ConstraintTreeSidMappingTest.mapping(Map.of("C1", 17, "C2", 19, "C3", 23)).validated();
+        var otherMapping = ConstraintTreeSidMappingTest.mapping(Map.of("C1", 29, "C2", 19, "C3", 23)).validated();
+        Path manifest = Files.createTempFile("csr-e2e-mapping-", ".json");
+        Path otherManifest = Files.createTempFile("csr-e2e-other-mapping-", ".json");
+        Files.writeString(manifest, JSON.writeValueAsString(mapping));
+        Files.writeString(otherManifest, JSON.writeValueAsString(otherMapping));
+        int firstPort = freePort(), secondPort = freePort();
+        Process first = null, second = null;
+        WhaleConstraintTreePublisher publisher = null;
+        ConstraintTreeBuildService builds = null;
+        DisposableServer server = null;
+        try {
+            first = worker(binary, firstPort, manifest);
+            second = worker(binary, secondPort, manifest);
+            var addresses = mock(WorkerAddressService.class);
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.DECODE)).thenReturn(List.of());
+            when(addresses.getAllEngineWorkerList("gul_item", RoleType.PDFUSION)).thenReturn(List.of(
+                    new WorkerHost("127.0.0.1", firstPort - 5, firstPort - 4, firstPort, "local", "default"),
+                    new WorkerHost("127.0.0.1", secondPort - 5, secondPort - 4, secondPort, "local", "default")));
+            var transport = new GeneralHttpNettyService(new HttpNettyConfig().createNettyClientHandler());
+            publisher = new WhaleConstraintTreePublisher(addresses, transport, 2, Duration.ofSeconds(5));
+            builds = new ConstraintTreeBuildService(new ConstraintTreeBuilder(), Executors.newSingleThreadExecutor(), publisher);
+            var leader = mock(LBStatusConsistencyService.class);
+            when(leader.isMaster()).thenReturn(true);
+            var handler = RouterFunctions.toHttpHandler(new ConstraintTreeServer(builds, leader, transport).constraintTreeRoutes());
+            server = HttpServer.create().host("127.0.0.1").port(0).handle(new ReactorHttpHandlerAdapter(handler)).bindNow();
+            int masterPort = server.port();
+            String body = "{\"version\":100,\"model\":\"gul_item\",\"sids\":[\"C1C2\",\"C3C2\",\"C1C3\"]}";
+            assertEquals("ACCEPTED", post(masterPort, "/rtp_llm/constraint_tree/build", body, 200).path("state").asText());
+            awaitState(builds, ConstraintTreeModels.BuildState.READY);
+            assertEquals(2, builds.getStatus().publishedWorkerCount());
+            assertEquals(mapping.fingerprint(), get(firstPort, "/constraint_tree_status").path("mapping_fingerprint").asText());
+            assertEquals(100, get(secondPort, "/constraint_tree_status").path("version").asLong());
+            var firstArtifact = builds.getCurrentArtifact().orElseThrow();
+            var decoded = ConstraintTreeCsrCodec.decode(firstArtifact.payload());
+            assertEquals(3, decoded.sidCount());
+            assertEquals(firstArtifact.contentSha256(), get(firstPort, "/constraint_tree_status").path("content_sha256").asText());
+
+            String reordered = body.replace("[\"C1C2\",\"C3C2\",\"C1C3\"]", "[\"C3C2\",\"C1C3\",\"C1C2\",\"C3C2\"]");
+            assertEquals("ALREADY_ACCEPTED", post(masterPort, "/rtp_llm/constraint_tree/build", reordered, 200).path("state").asText());
+            assertEquals("version already exists with different content", post(masterPort, "/rtp_llm/constraint_tree/build", body.replace("C1C2", "C2C2"), 409).path("error").asText());
+            assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+
+            stop(second);
+            second = worker(binary, secondPort, manifest);
+            assertEquals(0, get(secondPort, "/constraint_tree_status").path("version").asLong());
+            post(masterPort, "/rtp_llm/constraint_tree/retry", "{\"version\":100,\"model\":\"gul_item\"}", 200);
+            // Reconciliation represents the periodic production loop; wait for actual Worker activation, not just delivery.
+            awaitVersion(builds, secondPort, 100);
+            assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+
+            stop(second);
+            second = worker(binary, secondPort, otherManifest);
+            post(masterPort, "/rtp_llm/constraint_tree/build", body.replace("100", "101"), 200);
+            awaitState(builds, ConstraintTreeModels.BuildState.FAILED);
+            assertTrue(builds.getStatus().message().contains("disagree"));
+            assertEquals(100, builds.getStatus().activeVersion());
+            assertSame(firstArtifact, builds.getCurrentArtifact().orElseThrow());
+            assertEquals(100, get(firstPort, "/constraint_tree_status").path("version").asLong());
+
+            stop(second);
+            second = worker(binary, secondPort, manifest);
+            post(masterPort, "/rtp_llm/constraint_tree/retry", "{\"version\":101,\"model\":\"gul_item\"}", 200);
+            awaitState(builds, ConstraintTreeModels.BuildState.READY);
+            assertEquals(101, builds.getStatus().activeVersion());
+            assertEquals(100, builds.getStatus().backupVersion());
+            assertEquals(101, get(secondPort, "/constraint_tree_status").path("version").asLong());
+            assertEquals(101, get(masterPort, "/rtp_llm/constraint_tree/status").path("active_version").asLong());
+        } finally {
+            if (server != null) { server.disposeNow(); }
+            if (builds != null) { builds.destroy(); }
+            if (publisher != null) { publisher.destroy(); }
+            stop(first);
+            stop(second);
+            Files.deleteIfExists(manifest);
+            Files.deleteIfExists(otherManifest);
+        }
+    }
+
+    private JsonNode post(int port, String path, String body, int expected) throws Exception {
+        var response = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(10)).header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(expected, response.statusCode(), response.body());
+        return JSON.readTree(response.body());
+    }
+
+    private JsonNode get(int port, String path) throws Exception {
+        var response = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + port + path))
+                .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, response.statusCode(), response.body());
+        return JSON.readTree(response.body());
+    }
+
+    private Process worker(String binary, int port, Path manifest) throws Exception {
+        Process process = new ProcessBuilder(binary, Integer.toString(port), manifest.toString())
+                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            try { get(port, "/constraint_tree_mapping_status"); return process; }
+            catch (java.io.IOException e) { Thread.sleep(20); }
+            if (!process.isAlive()) { fail("C++ Worker exited: " + process.exitValue()); }
+        }
+        stop(process);
+        return fail("C++ Worker startup timeout");
+    }
+
+    private void awaitState(ConstraintTreeBuildService builds, ConstraintTreeModels.BuildState state) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            if (builds.getStatus().state() == state) { return; }
+            builds.reconcileCurrent();
+            Thread.sleep(20);
+        }
+        fail("Master did not reach " + state + ": " + builds.getStatus());
+    }
+
+    private void awaitVersion(ConstraintTreeBuildService builds, int port, long version) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            builds.reconcileCurrent();
+            if (get(port, "/constraint_tree_status").path("version").asLong() == version
+                    && builds.getStatus().state() == ConstraintTreeModels.BuildState.READY) { return; }
+            Thread.sleep(20);
+        }
+        fail("Worker version not restored");
+    }
+
+    private static int freePort() throws Exception {
+        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
+    }
+
+    private static void stop(Process process) throws Exception {
+        if (process == null || !process.isAlive()) { return; }
+        process.getOutputStream().write('\n');
+        process.getOutputStream().flush();
+        if (!process.waitFor(5, TimeUnit.SECONDS)) {
+            process.destroyForcibly();
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS));
+        }
+    }
+}
