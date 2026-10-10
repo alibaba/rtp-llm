@@ -17,24 +17,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FlexlbScheduleProtocolTest {
 
     @Test
-    void scheduleReservesRemovedInputIdsAndPreservesClientKeys() throws Exception {
+    void schedulePreservesCacheAffinityAndClientKeys() throws Exception {
         var descriptor = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.getDescriptor();
         assertNull(descriptor.findFieldByName("input_ids"));
-        assertTrue(descriptor.isReservedNumber(16));
-        assertTrue(descriptor.isReservedName("input_ids"));
+        assertEquals("cache_affinity_keys", descriptor.findFieldByNumber(16).getName());
+        assertEquals("selected_vit", descriptor.findFieldByNumber(17).getName());
+        assertEquals("vit_route_only", descriptor.findFieldByNumber(18).getName());
 
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         CodedOutputStream coded = CodedOutputStream.newInstance(output);
         coded.writeString(1, "client-keys");
         coded.writeInt64(3, 123L);
         coded.writeInt64(13, 4096L);
-        coded.writeInt32(16, 99);
+        coded.writeString(16, "image");
         coded.flush();
 
         var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.parseFrom(output.toByteArray());
         assertEquals(java.util.List.of(123L), request.getBlockCacheKeysList());
         assertEquals(4096L, request.getCacheKeyBlockSize());
-        assertTrue(request.getUnknownFields().hasField(16));
+        assertEquals(java.util.List.of("image"), request.getCacheAffinityKeysList());
         assertEquals(request, FlexlbScheduleProtocol.FlexlbScheduleRequestPB
                 .parseFrom(request.toByteArray()));
     }

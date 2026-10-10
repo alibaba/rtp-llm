@@ -89,7 +89,6 @@ message FlexlbScheduleRequestPB {
     FlexlbServerStatusPB selected_vit = 17;
     // Select ViT before media hashes are ready; this query owns no generation lifecycle.
     bool vit_route_only = 18;
-    reserved "input_ids";
     repeated ScheduleRolePB schedule_roles = 19;
     // Estimated MM encoder tokens already cached when this Encoder request is
     // routed. Absent means the client did not provide a cache estimate; zero

@@ -16,8 +16,8 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
 import org.flexlb.service.VitCacheSelector;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 

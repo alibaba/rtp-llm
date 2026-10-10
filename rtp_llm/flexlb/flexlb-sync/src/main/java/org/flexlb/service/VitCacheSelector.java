@@ -161,7 +161,7 @@ public class VitCacheSelector {
         return status;
     }
 
-    private static ServerStatus status(WorkerStatus worker, long requestId) {
+    private static ServerStatus status(WorkerStatus worker, String requestId) {
         ServerStatus status = new ServerStatus();
         status.setRole(RoleType.VIT);
         status.setWorkerGeneration(worker.getGenerationId());

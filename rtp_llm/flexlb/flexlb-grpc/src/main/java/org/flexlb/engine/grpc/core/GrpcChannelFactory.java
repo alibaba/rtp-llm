@@ -30,19 +30,12 @@ import java.util.concurrent.TimeUnit;
 public class GrpcChannelFactory {
 
     public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
-    public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
-            "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
-    private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
-    private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
+    private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
 
     private final ThreadPoolExecutor executor;
     private final EventLoopGroup eventLoopGroup;
     private final int connectTimeoutMillis;
-
-    @Value("${" + VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY + ":"
-            + DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES + "}")
-    private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
 
     @Autowired
     public GrpcChannelFactory(
@@ -65,14 +58,6 @@ public class GrpcChannelFactory {
     }
 
     public ManagedChannel create(GrpcTarget target) {
-        return create(target, DEFAULT_MAX_INBOUND_MESSAGE_BYTES);
-    }
-
-    public ManagedChannel createVitCacheStatusChannel(GrpcTarget target) {
-        return create(target, vitCacheMaxInboundMessageBytes);
-    }
-
-    private ManagedChannel create(GrpcTarget target, int maxInboundMessageBytes) {
         log.info("Creating gRPC channel: {}", target);
         return NettyChannelBuilder.forAddress(target.host(), target.port())
                 .channelType(channelType(eventLoopGroup))
@@ -87,7 +72,7 @@ public class GrpcChannelFactory {
                 // Receive/send buffer size
                 .withOption(ChannelOption.SO_RCVBUF, 512 * 1024)
                 .withOption(ChannelOption.SO_SNDBUF, 512 * 1024)
-                .maxInboundMessageSize(maxInboundMessageBytes)
+                .maxInboundMessageSize(DEFAULT_MAX_INBOUND_MESSAGE_BYTES)
                 // HTTP/2 initial flow control window: prevents transmission issues due to flow control
                 .initialFlowControlWindow(2 * 1024 * 1024)
                 // Send an HTTP/2 PING after this interval without read activity

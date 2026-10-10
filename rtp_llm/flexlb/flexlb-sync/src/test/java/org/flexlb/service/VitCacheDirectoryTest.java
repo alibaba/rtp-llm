@@ -1,10 +1,17 @@
 package org.flexlb.service;
 
 import io.grpc.Server;
-import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.FlexlbConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.BalanceContext;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService.CacheStatusPB;
 import org.flexlb.engine.grpc.EngineRpcService.CacheVersionPB;
 import org.flexlb.engine.grpc.EngineRpcService.MultimodalCacheStatusPB;
@@ -14,15 +21,6 @@ import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.config.CacheMatchConfiguration;
-import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
-import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,7 +30,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -43,7 +40,6 @@ import java.util.stream.IntStream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
@@ -244,6 +240,7 @@ class VitCacheDirectoryTest {
                 MultimodalCacheStatusPB.newBuilder().setWorkerInstance("large-worker")
                         .addAllKeys(keys).addAllGpuEmbeddingKeys(keys)).build();
         assertTrue(response.getSerializedSize() > 8 * 1024 * 1024);
+        assertTrue(response.getSerializedSize() < 16 * 1024 * 1024);
         var received = new AtomicReference<CacheVersionPB>();
         Server server = NettyServerBuilder.forPort(0)
                 .addService(new MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
@@ -273,9 +270,8 @@ class VitCacheDirectoryTest {
                 assertEquals(response, actual);
                 assertTrue(received.get().getNeedCacheKeys());
             }
-            CompletionException error = assertThrows(CompletionException.class,
-                    () -> client.getCacheStatusAsync("127.0.0.1", server.getPort(), request, 5000).join());
-            assertEquals(Status.Code.RESOURCE_EXHAUSTED, Status.fromThrowable(error).getCode());
+            assertEquals(response,
+                    client.getCacheStatusAsync("127.0.0.1", server.getPort(), request, 5000).join());
             directory.replace(a, response.getMultimodalCache());
             assertEquals(a.getIp(), selector.select(context(keys.get(keys.size() - 1)), null).getServerIp());
         } finally {
