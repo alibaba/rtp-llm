@@ -46,6 +46,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
     mhc_fp32,
     mhc_post_reference,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_output_precision import (
+    output_projection_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_query_precision import (
     query_projection_reference,
 )
@@ -108,6 +111,20 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
     compare_engram = os.environ.get("DSV41_TEST_COMPARE_ENGRAM") == "1"
     compare_query = os.environ.get("DSV41_TEST_COMPARE_QUERY") == "1"
+    compare_output = os.environ.get("DSV41_TEST_COMPARE_OUTPUT") == "1"
+    if compare_output and not all(
+        (
+            compare_tp8,
+            compare_mhc,
+            compare_recipe,
+            compare_sparse,
+            compare_down,
+            compare_post,
+            compare_engram,
+            compare_query,
+        )
+    ):
+        raise ValueError("Output diagnostic requires the qualified query composition")
     shared_eos_trace = os.environ.get("DSV41_TEST_TRACE_SHARED_EOS") == "1"
     paired = (
         compare_tp8
@@ -119,6 +136,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_post
         or compare_engram
         or compare_query
+        or compare_output
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -179,6 +197,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     "_sparse_sink_div_rn_prefill_", "_sparse_sink_div_rn_"
                 )
             )
+    if compare_output:
+        profiles.append(f"{profiles[-1]}_output_reference")
     trace_steps = dict.fromkeys(profiles, 0)
     post_trace_steps = {}
     post_trace_requests = {}
@@ -299,8 +319,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                query_reference = profile.endswith("_query_reference")
-                query_base = profile.removesuffix("_query_reference")
+                output_reference = profile.endswith("_output_reference")
+                output_base = profile.removesuffix("_output_reference")
+                query_reference = output_base.endswith("_query_reference")
+                query_base = output_base.removesuffix("_query_reference")
                 engram = query_base.endswith("_engram_reference")
                 post_profile = query_base.removesuffix("_engram_reference")
                 post = post_profile.endswith("_mhc_post_reference")
@@ -371,6 +393,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 if query_reference
                                 else {}
                             ),
+                            **(
+                                {
+                                    "output_projection_reference": True,
+                                    "output_reference_kernel_sha256": reference_hash,
+                                }
+                                if output_reference
+                                else {}
+                            ),
                         }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
@@ -398,6 +428,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     engram,
                 ), query_projection_reference(
                     query_reference,
+                    kernel=reference_kernel,
+                ), output_projection_reference(
+                    output_reference,
                     kernel=reference_kernel,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
@@ -562,16 +595,17 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_query_reference").endswith(
-                                    "_engram_reference"
-                                )
+                                or profile.removesuffix("_output_reference")
+                                .removesuffix("_query_reference")
+                                .endswith("_engram_reference")
                                 else 3
                             ),
                             new_tokens,
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_query_reference")
+                        or profile.removesuffix("_output_reference")
+                        .removesuffix("_query_reference")
                         .removesuffix("_engram_reference")
                         .endswith("_mhc_post_reference")
                         for prompt in range(len(prompts))
