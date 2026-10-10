@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import ctypes
 import gc
 import logging
 import os
 import re
+import socket
+from bisect import bisect_left
+from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
+from functools import lru_cache
 from typing import Dict, List, Optional, Union
 
 import torch
-import torch.distributed
+import torch.distributed as dist
 
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 
@@ -720,6 +725,12 @@ def _get_group(group: Group) -> torch.distributed.ProcessGroup:
     return _group_map[group_key]
 
 
+def get_process_group(group: Group) -> torch.distributed.ProcessGroup:
+    """Return RTP's initialized process group for collective operators."""
+
+    return _get_group(group)
+
+
 # 需要注意：调用 send/recv 时如果某些 rank 没有操作，就没有对应的 ncclgroupstart/ncclgroupend
 # 这样直接使用 torch 的 send/recv 是错误的。
 def send(tensor: torch.Tensor, dst: int, group: Group) -> None:
@@ -839,7 +850,9 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    # all_gather_into_tensor writes every element before returning. Avoid
+    # initializing the output only to overwrite it during the collective.
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,
@@ -851,6 +864,64 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # tensor_list = [torch.zeros_like(tensor) for _ in range(world_size)]
     # torch.distributed.all_gather(tensor_list, tensor, group=process_group)
     # return torch.cat(tensor_list, dim=0)
+
+
+def all_to_all_single(
+    tensor: torch.Tensor, group: Group, *, output: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """Exchange equal contiguous dim-0 chunks across the process group."""
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "all_to_all_single requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    send = tensor.contiguous()
+    if output is None:
+        output = torch.empty_like(send)
+    elif (
+        output.shape != send.shape
+        or output.dtype != send.dtype
+        or output.device != send.device
+        or not output.is_contiguous()
+        or output.untyped_storage().data_ptr() == send.untyped_storage().data_ptr()
+    ):
+        raise ValueError("AllToAll output must match input and use separate contiguous storage")
+    torch.distributed.all_to_all_single(output, send, group=process_group)
+    return output
+
+
+def all_gather_into(
+    tensor: torch.Tensor,
+    output: torch.Tensor,
+    group: Group,
+) -> torch.Tensor:
+    """All-gather into a caller-owned contiguous output buffer."""
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    expected_shape = [world_size * tensor.shape[0]] + list(tensor.shape[1:])
+    if (
+        list(output.shape) != expected_shape
+        or output.dtype != tensor.dtype
+        or output.device != tensor.device
+        or not tensor.is_contiguous()
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "all_gather_into input/output mismatch: "
+            f"input={tuple(tensor.shape)}, output={tuple(output.shape)}, "
+            f"expected={tuple(expected_shape)}"
+        )
+    if world_size <= 1:
+        output.copy_(tensor)
+        return output
+    torch.distributed.all_gather_into_tensor(output, tensor, group=process_group)
+    return output
 
 
 def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
@@ -899,6 +970,781 @@ def barrier(group: Group) -> None:
     torch.distributed.barrier(group=process_group)
 
 
+# BF16 projection reduction
+
+def reduce_scatter_bf16(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Keep BF16 communication without size-dependent widening or extra casts.
+
+    Other dtypes retain RTP's existing collective behavior.
+    """
+    if input_tensor.dtype != torch.bfloat16:
+        return reduce_scatter(input_tensor, group)
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if input_tensor.ndim == 0 or input_tensor.shape[0] % world_size:
+        raise ValueError("K3 SP token dimension must be divisible by the TP size")
+    if world_size == 1:
+        return input_tensor
+    if input_tensor.numel() == 0:
+        return input_tensor.new_empty(
+            (input_tensor.shape[0] // world_size, *input_tensor.shape[1:])
+        )
+    source = input_tensor.contiguous()
+    return reduce_scatter(source, group)
+
+
+# Push ReduceScatter and shared NVLink workspace setup
+# BF16 partials accumulate in FP32 in rank order and round once to BF16.
+# This need not be bitwise identical to NCCL's BF16 reduction tree.
+
+# Measured TP8 / BF16 / hidden=7168 launch configurations. Intermediate M uses
+# the next measured bucket; decode above 1024 keeps the largest configuration.
+_ROWS = (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024)
+_LAUNCHES = (
+    (128, 128),
+    (96, 128),
+    (96, 128),
+    (128, 128),
+    (64, 128),
+    (96, 128),
+    (96, 128),
+    (128, 128),
+    (128, 256),
+    (128, 256),
+    (96, 512),
+    (128, 256),
+    (128, 256),
+    (128, 512),
+)
+
+
+def _load_push_rs_kernel():
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    return rtp_llm_ops.push_reduce_scatter
+
+
+def _nvlink_fabric(uuid):
+    """Return the local GPU's usable fabric identity; old drivers may lack it."""
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByUUID("GPU-" + uuid)
+        info = pynvml.c_nvmlGpuFabricInfoV_t()
+        pynvml.nvmlDeviceGetGpuFabricInfoV(handle, ctypes.byref(info))
+        # Older NVML bindings decode c_char arrays as text and truncate at NUL.
+        field = type(info).clusterUuid
+        cluster = ctypes.string_at(ctypes.addressof(info) + field.offset, field.size)
+        if (
+            info.state == pynvml.NVML_GPU_FABRIC_STATE_COMPLETED
+            and info.status == pynvml.NVML_SUCCESS
+            and any(cluster)
+        ):
+            return cluster, int(info.cliqueId)
+    except (AttributeError, pynvml.NVMLError):
+        pass
+    finally:
+        pynvml.nvmlShutdown()
+    return None
+
+
+def _is_fabric_allocation(tensor):
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    return rtp_llm_ops.is_cuda_fabric_allocation(tensor)
+
+
+def _nvlink_peers(uuids: list[str], *, hostnames=None, fabrics=None) -> bool:
+    if hostnames is not None and len(set(hostnames)) > 1:
+        # Remote UUIDs cannot be looked up using this host's NVML. A nonzero
+        # cluster UUID plus clique ID identifies a shared multi-node NVLink domain.
+        return (
+            fabrics is not None
+            and len(fabrics) == len(uuids)
+            and fabrics[0] is not None
+            and all(f == fabrics[0] for f in fabrics)
+        )
+    # UUIDs remain unambiguous with CUDA_VISIBLE_DEVICES remapping. NVML also
+    # handles NVSwitch paths, unlike testing only direct NVLink remote ports.
+    import pynvml
+
+    pynvml.nvmlInit()
+    try:
+        handles = [pynvml.nvmlDeviceGetHandleByUUID("GPU-" + u) for u in uuids]
+        return all(
+            pynvml.nvmlDeviceGetP2PStatus(a, b, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+            == pynvml.NVML_P2P_STATUS_OK
+            for i, a in enumerate(handles)
+            for j, b in enumerate(handles)
+            if i != j
+        )
+    finally:
+        pynvml.nvmlShutdown()
+
+
+def is_same_host_group(group):
+    """Agree on allocation ordering before any prefill workspace rendezvous."""
+    hosts = [None] * group.size()
+    dist.all_gather_object(hosts, socket.gethostname(), group=group)
+    return len(set(hosts)) == 1
+
+
+def _all_ready(ready: bool, group, device) -> bool:
+    flag = torch.tensor([int(ready)], dtype=torch.int32, device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+    return bool(flag.item())
+
+
+def create_push_reduce_scatter(group, device, *, max_m: int, n: int):
+    """Return a same-host NVLink workspace for BF16 Decode ReduceScatter.
+
+    No allocation, rendezvous, topology query or backend change occurs during
+    forward or CUDA Graph capture.
+    """
+    world_size = group.size()
+    if world_size not in (2, 4, 8, 16) or n != 7168:
+        return None
+    if max_m <= 0 or max_m % world_size:
+        raise ValueError("Push RS capacity must be positive and divisible by TP size")
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("Push RS must be configured before CUDA Graph capture")
+    failure = ""
+    try:
+        import torch.distributed._symmetric_memory as symm
+
+        kernel = _load_push_rs_kernel()
+        props = torch.cuda.get_device_properties(device)
+        if (props.major, props.minor) not in ((10, 0), (10, 3)):
+            raise RuntimeError("requires SM100/SM103")
+        if symm.get_backend(device) != "CUDA":
+            raise RuntimeError("requires the CUDA symmetric-memory backend")
+        metadata = (
+            socket.gethostname(),
+            str(props.uuid),
+            max_m,
+            n,
+            props.multi_processor_count,
+            _nvlink_fabric(str(props.uuid)),
+        )
+    except Exception as exc:
+        failure = str(exc)
+    if not _all_ready(not failure, group, device):
+        logging.info("[PUSH_RS] NCCL fallback: %s", failure or "unsupported peer")
+        return None
+
+    peers_metadata = [None] * world_size
+    dist.all_gather_object(peers_metadata, metadata, group=group)
+    try:
+        uuids = [item[1] for item in peers_metadata]
+        hostnames = [item[0] for item in peers_metadata]
+        cross_host = len(set(hostnames)) > 1
+        if cross_host:
+            raise RuntimeError("Decode push ReduceScatter requires one host")
+        if (
+            any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
+            or len(set(uuids)) != world_size
+            or not _nvlink_peers(
+                uuids,
+                hostnames=hostnames,
+                fabrics=[item[-1] for item in peers_metadata],
+            )
+        ):
+            raise RuntimeError(
+                "requires distinct GPUs in one NVLink domain with matching capacities and SM counts"
+            )
+    except Exception as exc:
+        failure = str(exc)
+    if not _all_ready(not failure, group, device):
+        logging.info(
+            "[PUSH_RS] NCCL fallback: %s", failure or "unsupported peer topology"
+        )
+        return None
+
+    # Two phases, each with one output shard slot per producer = 2 full inputs.
+    # All ranks must finish allocating before any of them enters rendezvous.
+    storage = counters = None
+    try:
+        storage = symm.empty(2 * max_m * n * 2, dtype=torch.uint8, device=device)
+        counters = torch.zeros(
+            props.multi_processor_count, dtype=torch.int32, device=device
+        )
+    except Exception as exc:
+        failure = str(exc)
+    if not _all_ready(not failure, group, device):
+        logging.warning(
+            "[PUSH_RS] NCCL fallback allocating workspace: %s",
+            failure or "peer allocation failed",
+        )
+        return None
+    handle = None
+    try:
+        handle = symm.rendezvous(storage, group=group)
+        buffers = [
+            handle.get_buffer(i, [storage.numel()], torch.uint8)
+            for i in range(world_size)
+        ]
+        storage.zero_()
+    except Exception as exc:
+        failure = str(exc)
+    if not _all_ready(not failure, group, device):
+        logging.warning(
+            "[PUSH_RS] NCCL fallback mapping workspace: %s",
+            failure or "peer mapping failed",
+        )
+        return None
+    # No rank may poll or write a peer whose initialization has not completed.
+    torch.cuda.synchronize(device)
+    dist.barrier(group=group)
+    state = PushReduceScatter(kernel, storage, handle, buffers, counters, group.rank())
+    logging.info(
+        "[PUSH_RS] enabled TP%d max_m=%d n=%d workspace=%.3f MiB",
+        world_size,
+        max_m,
+        n,
+        storage.numel() / (1 << 20),
+    )
+    return state
+
+
+class PushReduceScatter:
+    """Shared workspace with the same ordering contract as the native kernel.
+
+    The caller must serialize eager calls and graph replays using this state.
+    RTP's graph runner synchronizes the device between warmup and capture and
+    runs inference on its compute stream. Do not insert stream waits here:
+    replay bypasses Python, so Python cannot track the last execution stream.
+    """
+
+    def __init__(self, kernel, storage, handle, peers, counters, rank):
+        self.kernel = kernel
+        # Own all mappings for the entire model/graph lifetime.
+        self.storage = storage
+        self.handle = handle
+        self.peers = peers
+        self.counters = counters
+        self.rank = rank
+
+    def reduce_scatter(self, partial: torch.Tensor, output: torch.Tensor) -> None:
+        # Use the existing TP8 / hidden=7168 buckets as the initial launch profile
+        # for each supported TP size. The bumper
+        # CTA keeps phases consistent when either blocks or threads changes.
+        index = min(bisect_left(_ROWS, partial.shape[0]), len(_ROWS) - 1)
+        blocks, threads = _LAUNCHES[index]
+        blocks = min(blocks, self.counters.numel() - 1)
+        self.kernel(
+            partial, output, self.peers, self.counters, self.rank, blocks, threads
+        )
+
+
+# BF16 / FP8 AllGather workspaces
+# FP8 values and packed UE8M0 scales move together without requantization.
+
+# Kernel launch tuning uses the gathered (global) row count.
+_STAGING_ROWS = (8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024)
+_BF16_STAGING = (
+    (96, 128),
+    (64, 256),
+    (128, 256),
+    (128, 256),
+    (96, 512),
+    (128, 512),
+    (96, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+)
+_FP8_STAGING = (
+    (128, 256),
+    (64, 256),
+    (64, 256),
+    (64, 256),
+    (96, 256),
+    (128, 256),
+    (128, 512),
+    (128, 512),
+    (96, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+    (128, 512),
+)
+
+
+def _load_custom_ag_kernel(fp8):
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+
+    name = "custom_all_gather_fp8_staging" if fp8 else "custom_all_gather_staging"
+    return getattr(rtp_llm_ops, name)
+
+
+def create_custom_all_gather(
+    group, device, *, max_m: int, k: int, fp8: bool
+):
+    """Return a workspace or collectively retain the existing AG backend.
+
+    All capability, allocation and multicast mapping checks finish here. Forward
+    must never rendezvous or make a rank-local choice to fall back to NCCL.
+    max_m is the gathered output capacity (TP times the per-rank input rows).
+    """
+    world_size = group.size()
+    if world_size not in (2, 4, 8, 16) or k != 7168:
+        return None
+    if max_m <= 0 or max_m % world_size:
+        raise ValueError("custom AG capacity must be positive and divisible by TP size")
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("Custom AG must be configured before CUDA Graph capture")
+    failure = ""
+    try:
+        import torch.distributed._symmetric_memory as symm
+
+        kernel = _load_custom_ag_kernel(fp8)
+        props = torch.cuda.get_device_properties(device)
+        if (props.major, props.minor) not in ((10, 0), (10, 3)):
+            raise RuntimeError("requires SM100/SM103")
+        if symm.get_backend(device) != "CUDA":
+            raise RuntimeError("requires the CUDA symmetric-memory backend")
+        metadata = (
+            socket.gethostname(),
+            str(props.uuid),
+            max_m,
+            k,
+            fp8,
+            props.multi_processor_count,
+            _nvlink_fabric(str(props.uuid)),
+        )
+    except Exception as exc:
+        failure = str(exc)
+    if not _all_ready(not failure, group, device):
+        logging.info(
+            "[CUSTOM_AG] existing backend retained: %s", failure or "unsupported peer"
+        )
+        return None
+
+    peers_metadata = [None] * world_size
+    dist.all_gather_object(peers_metadata, metadata, group=group)
+    try:
+        uuids = [item[1] for item in peers_metadata]
+        hostnames = [item[0] for item in peers_metadata]
+        cross_host = len(set(hostnames)) > 1
+        if cross_host:
+            raise RuntimeError("Decode FP8 staging AllGather requires one host")
+        if (
+            any(item[2:-1] != metadata[2:-1] for item in peers_metadata)
+            or len(set(uuids)) != world_size
+            or not _nvlink_peers(
+                uuids,
+                hostnames=hostnames,
+                fabrics=[item[-1] for item in peers_metadata],
+            )
+        ):
+            raise RuntimeError(
+                "requires distinct NVLink peers and matching capacities/precision/SM counts"
+            )
+    except Exception as exc:
+        failure = str(exc)
+    if not _all_ready(not failure, group, device):
+        logging.info(
+            "[CUSTOM_AG] existing backend retained: %s",
+            failure or "unsupported topology",
+        )
+        return None
+
+    # Reserve staging for the configured Decode/MTP token capacity.
+    local_staging_m = max_m // world_size
+    groups = (k + 511) // 512
+    if fp8:
+        # Four payload vectors plus one vector containing their original sign
+        # bits and ready markers. Each phase owns one slot per source rank.
+        vectors = local_staging_m * k // 16 + groups * ((local_staging_m + 3) // 4)
+        slot_bytes = (vectors + 3) // 4 * 80
+    else:
+        slot_bytes = local_staging_m * k * 2
+    storage = {}
+    try:
+        storage["staging"] = symm.empty(
+            2 * world_size * slot_bytes, dtype=torch.uint8, device=device
+        )
+        storage["values"] = symm.empty(
+            (max_m, k), dtype=torch.uint8 if fp8 else torch.bfloat16, device=device
+        )
+        if fp8:
+            storage["scales"] = symm.empty(
+                ((max_m + 3) // 4 * 4) * groups, dtype=torch.int32, device=device
+            )
+        if cross_host and not all(_is_fabric_allocation(t) for t in storage.values()):
+            raise RuntimeError("cross-host NVLink requires CUDA FABRIC allocations")
+        counters = torch.zeros(
+            props.multi_processor_count, dtype=torch.int32, device=device
+        )
+    except Exception as exc:
+        failure = str(exc)
+    # Agree before entering any rendezvous, including when only one rank OOMs.
+    if not _all_ready(not failure, group, device):
+        logging.warning(
+            "[CUSTOM_AG] workspace allocation failed: %s",
+            failure or "peer allocation failed",
+        )
+        return None
+    handles = {}
+    for name, tensor in storage.items():
+        try:
+            handle = symm.rendezvous(tensor, group=group)
+            if not handle.multicast_ptr:
+                raise RuntimeError(f"{name} has no multicast mapping")
+            handles[name] = handle
+        except Exception as exc:
+            failure = str(exc)
+        if not _all_ready(not failure, group, device):
+            logging.warning(
+                "[CUSTOM_AG] multicast mapping failed: %s",
+                failure or "peer mapping failed",
+            )
+            return None
+    storage["staging"].zero_()
+    torch.cuda.synchronize(device)
+    dist.barrier(group=group)
+    workspace = CustomAllGather(
+        kernel, storage, handles, counters, group.rank(), fp8, world_size
+    )
+    logging.info(
+        "[CUSTOM_AG] enabled TP%d max_m=%d k=%d fp8=%s workspace=%.3f MiB",
+        world_size,
+        max_m,
+        k,
+        fp8,
+        sum(t.numel() * t.element_size() for t in storage.values()) / (1 << 20),
+    )
+    return workspace
+
+
+class CustomAllGather:
+    """Same-order, serialized collective calls, including graph replay.
+
+    Results alias reusable workspace and must be consumed before the next AG
+    with this state. RTP's AG/GEMM caller completes all GEMMs on the same stream.
+    Own the symmetric allocations and handles for the entire model/graph lifetime.
+    """
+
+    def __init__(self, kernel, storage, handles, counters, rank, fp8, world_size):
+        self.staging_kernel = kernel
+        self.storage = storage
+        self.handles = handles
+        self.counters = counters
+        self.rank = rank
+        self.fp8 = fp8
+        self.world_size = world_size
+        self.pointers = {
+            name: int(handle.multicast_ptr) for name, handle in handles.items()
+        }
+
+    def _launch(self, m):
+        configs = _FP8_STAGING if self.fp8 else _BF16_STAGING
+        blocks, threads = configs[min(bisect_left(_STAGING_ROWS, m), len(_STAGING_ROWS) - 1)]
+        return min(blocks, self.counters.numel() - 1), threads
+
+    @staticmethod
+    def _aligned(tensor):
+        # A view may be contiguous with a rank-local, unaligned storage offset.
+        # Copy it without changing the group's selected communication backend.
+        return tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
+
+    def all_gather(self, local_input):
+        if self.fp8:
+            raise TypeError("BF16 AG requires a BF16 workspace")
+        m = local_input.shape[0] * self.world_size
+        if not 0 < m <= self.storage["values"].shape[0]:
+            raise ValueError("BF16 AG exceeds configured capacity")
+        local_input = self._aligned(local_input)
+        output = self.storage["values"][:m]
+        blocks, threads = self._launch(m)
+        self.staging_kernel(
+            local_input,
+            output,
+            self.storage["staging"],
+            self.counters,
+            self.pointers["staging"],
+            self.rank,
+            blocks,
+            threads,
+        )
+        return output
+
+    def all_gather_fp8(self, values, wire):
+        if not self.fp8:
+            raise TypeError("FP8 AG requires an FP8 workspace")
+        m, k = values.shape
+        m *= self.world_size
+        if not 0 < m <= self.storage["values"].shape[0]:
+            raise ValueError("FP8 AG exceeds configured capacity")
+        values = self._aligned(values.view(torch.uint8))
+        wire = self._aligned(wire)
+        output = self.storage["values"][:m]
+        scale_rows = (m + 3) // 4 * 4
+        scales = self.storage["scales"][: ((k + 511) // 512) * scale_rows].view(
+            -1, scale_rows
+        )
+        blocks, threads = self._launch(m)
+        self.staging_kernel(
+            values,
+            wire,
+            output,
+            scales,
+            self.storage["staging"],
+            self.counters,
+            self.pointers["staging"],
+            self.rank,
+            blocks,
+            threads,
+        )
+        return output.view(torch.float8_e4m3fn), scales[:, :m].T
+
+
+# FP8 activation wire format
+
+@dataclass(frozen=True)
+class Fp8Activation:
+    """Group128 E4M3 rows with TMA-aligned packed UE8M0 scale storage."""
+
+    values: torch.Tensor
+    scale_wire: torch.Tensor
+
+    def __post_init__(self):
+        if (
+            self.values.ndim != 2
+            or self.values.dtype != torch.float8_e4m3fn
+            or not self.values.is_contiguous()
+        ):
+            raise ValueError("FP8 activation values must be contiguous E4M3 [M,K]")
+        m, k = self.values.shape
+        if (
+            k % 128
+            or self.scale_wire.shape != ((k + 511) // 512, (m + 3) // 4 * 4)
+            or self.scale_wire.dtype != torch.int32
+            or not self.scale_wire.is_contiguous()
+            or self.scale_wire.device != self.values.device
+        ):
+            raise ValueError("FP8 activation scales must be packed UE8M0 group128")
+
+    @property
+    def shape(self):
+        return self.values.shape
+
+    @property
+    def device(self):
+        return self.values.device
+
+    @property
+    def dtype(self):
+        return self.values.dtype
+
+    @property
+    def is_cuda(self):
+        return self.values.is_cuda
+
+
+# BF16 MTP workspace ownership
+
+class KimiK3MtpBf16Collectives:
+    """Initialize private staging and Push RS workspaces before Graph capture.
+
+    Native MTP runs on the model compute stream. Its Q1 proposal and fixed-Q
+    update share these workspaces serially, as in feat/k3_dev. Real long prompt
+    initialization outside the configured Decode capacity keeps the existing
+    collective path. Target projections never use this instance.
+    """
+
+    def __init__(self, device, *, max_tokens, hidden_size):
+        group = _get_group(Group.TP)
+        self.tp_size = group.size()
+        self.max_tokens = int(max_tokens)
+        self.hidden_size = int(hidden_size)
+        if self.max_tokens <= 0 or self.max_tokens % self.tp_size:
+            raise ValueError("MTP BF16 collective capacity must be divisible by TP")
+        # Fixed feat uses BF16 multimem for embedding and final SP output.
+        # Give MTP its own buffer: the target's FP8 projections and the global
+        # custom-AllReduce policy must not select this model-local backend.
+        self.modeling_gather = _get_symm_mem().TorchSymmMemCommunicator(group, device)
+        self.gather = create_custom_all_gather(
+            group,
+            device,
+            max_m=self.max_tokens,
+            k=self.hidden_size,
+            fp8=False,
+        )
+        self.scatter = create_push_reduce_scatter(
+            group,
+            device,
+            max_m=self.max_tokens,
+            n=self.hidden_size,
+        )
+        self.output = (
+            torch.empty(
+                (self.max_tokens // self.tp_size, self.hidden_size),
+                dtype=torch.bfloat16,
+                device=device,
+            )
+            if self.scatter is not None
+            else None
+        )
+        logging.info(
+            "[K3_MTP_BF16_TP] TP%d max_tokens=%d hidden=%d AG=%s RS=%s modeling_AG=%s",
+            self.tp_size,
+            self.max_tokens,
+            self.hidden_size,
+            "custom_staging" if self.gather is not None else "nccl",
+            "push" if self.scatter is not None else "nccl",
+            "nccl" if self.modeling_gather.disabled else "bf16_multimem",
+        )
+
+    def all_gather_modeling_boundary(self, local_input):
+        if self.modeling_gather.should_torch_symm_mem_allgather(local_input):
+            gathered = self.modeling_gather.all_gather(local_input)
+            if gathered is not None:
+                return gathered.view(
+                    self.tp_size * local_input.shape[0], *local_input.shape[1:]
+                )
+        # Long prompt initialization and unsupported multicast keep the
+        # existing collective. The physical token/request layout is retained.
+        return all_gather(local_input, Group.TP)
+
+    def all_gather(self, local_input):
+        physical_tokens = local_input.shape[0] * self.tp_size
+        if self.gather is None or physical_tokens > self.max_tokens:
+            return all_gather(local_input, Group.TP)
+        if (
+            local_input.dtype != torch.bfloat16
+            or local_input.shape[1] != self.hidden_size
+        ):
+            raise ValueError("MTP staging AG requires BF16 hidden states")
+        return self.gather.all_gather(local_input)
+
+    def reduce_scatter(self, partial):
+        if self.scatter is None or partial.shape[0] > self.max_tokens:
+            return reduce_scatter_bf16(partial, Group.TP)
+        if (
+            partial.dtype != torch.bfloat16
+            or partial.shape[1] != self.hidden_size
+            or partial.shape[0] % self.tp_size
+        ):
+            raise ValueError("MTP Push RS requires request-padded BF16 projections")
+        output = self.output[: partial.shape[0] // self.tp_size]
+        self.scatter.reduce_scatter(partial.contiguous(), output)
+        return output
+
+
+# MLA Decode context-parallel communication
+
+@lru_cache(maxsize=1)
+def _get_mla_dcp_kernels():
+    from rtp_llm.models_py.triton_kernels.mla.dcp import _pack_a2a, _combine_a2a
+
+    return _pack_a2a, _combine_a2a
+
+
+class MlaDcpCommunicator:
+    """Communication state shared by serial MLA layers in one TP group.
+
+    Q is contiguous [local_heads,T,D]; partial O/LSE are [T,all_heads,L]
+    and [T,all_heads]. combine returns BF16 [local_heads,T,L]. LSE is base-2.
+    The local MLA adapter supplies O=0/LSE=-inf for empty shards.
+    """
+
+    def __init__(self, local_heads, q_dim, latent_dim, dtype, device):
+        self.group = get_process_group(Group.TP)
+        self.size = torch.distributed.get_world_size(self.group)
+        self.rank = torch.distributed.get_rank(self.group)
+        self.local_heads = local_heads
+        self.heads = local_heads * self.size
+        self.q_dim = q_dim
+        self.latent_dim = latent_dim
+        self.dtype = dtype
+        self.device = torch.device(device)
+        contract = (local_heads, q_dim, latent_dim, str(dtype))
+        contracts = [None] * self.size
+        torch.distributed.all_gather_object(contracts, contract, group=self.group)
+        if any(value != contract for value in contracts):
+            raise ValueError(f"MLA DCP initialization differs across TP ranks: {contracts}")
+        if (
+            dtype not in (torch.bfloat16, torch.float8_e4m3fn) or latent_dim % 2
+            or min(local_heads, q_dim, latent_dim) <= 0
+        ):
+            raise ValueError("MLA DCP requires BF16/E4M3 Q and an even latent dimension")
+        self.backend = "a2a"
+        self._pack_a2a, self._combine_a2a = _get_mla_dcp_kernels()
+        logging.info(
+            "[MLA_DCP] backend=a2a tp=%d rank=%d world_rank=%d dp_rank=%d",
+            self.size, self.rank, torch.distributed.get_rank(),
+            torch.distributed.get_rank() // self.size,
+        )
+
+    def query_gather(self, local_q):
+        _, tokens, _ = local_q.shape
+        if (
+            local_q.shape != (self.local_heads, tokens, self.q_dim)
+            or not local_q.is_contiguous() or local_q.dtype != self.dtype
+            or local_q.device != self.device
+        ):
+            raise ValueError("MLA DCP Q must be contiguous [local_heads,T,D] on the configured device")
+        output = local_q.new_empty(self.heads, tokens, self.q_dim)
+        # NCCL copies FP8 codes without needing FP8 reduction support.
+        wire_dtype = torch.uint8 if self.dtype == torch.float8_e4m3fn else self.dtype
+        all_gather_into(local_q.view(wire_dtype), output.view(wire_dtype), Group.TP)
+        return output
+
+    def combine(self, partial_o, partial_lse, local_seq_lens):
+        import triton
+
+        tokens, heads, dim = partial_o.shape
+        if (
+            heads != self.heads or dim != self.latent_dim
+            or partial_o.dtype != torch.bfloat16 or not partial_o.is_contiguous()
+            or partial_lse.shape != (tokens, heads) or partial_lse.dtype != torch.float32
+            or not partial_lse.is_contiguous() or local_seq_lens.numel() != tokens
+            or not local_seq_lens.is_contiguous() or local_seq_lens.dtype != torch.int32
+            or not (partial_o.device == partial_lse.device == local_seq_lens.device == self.device)
+        ):
+            raise ValueError("MLA DCP combine requires BF16 O[T,H,L], FP32 LSE[T,H] and int32 lengths[T]")
+        shape = (self.size, tokens, self.local_heads, dim + 2)
+        packed = torch.empty(shape, dtype=torch.bfloat16, device=self.device)
+        self._pack_a2a[(tokens, heads)](
+            partial_o, partial_lse, local_seq_lens, packed, packed.view(torch.float32),
+            tokens, heads=heads, local_heads=self.local_heads, dim=dim,
+            block=triton.next_power_of_2(dim),
+        )
+        received = all_to_all_single(packed, Group.TP)
+        output = partial_o.new_empty(self.local_heads, tokens, dim)
+        self._combine_a2a[(tokens, self.local_heads)](
+            received, received.view(torch.float32), output, tokens,
+            local_heads=self.local_heads, dim=dim, cp_size=self.size,
+            block=triton.next_power_of_2(dim),
+        )
+        return output
+
+
+_communicators = {}
+
+
+def _communicator_key(config, device, dtype):
+    return (get_process_group(Group.TP), device, config.head_num,
+            config.kv_lora_rank, config.rope_head_dim, dtype)
+
+
+def get_mla_dcp(config, device, dtype):
+    key = _communicator_key(config, device, dtype)
+    if key not in _communicators:
+        _communicators[key] = MlaDcpCommunicator(
+            config.head_num, config.kv_lora_rank + config.rope_head_dim,
+            config.kv_lora_rank, dtype, device,
+        )
+    return _communicators[key]
+
+
 __all__ = [
     "Group",
     "init_distributed_environment",
@@ -910,6 +1756,19 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "all_gather_into",
+    "all_to_all_single",
+    "get_process_group",
     "reduce_scatter",
     "barrier",
+    "reduce_scatter_bf16",
+    "create_custom_all_gather",
+    "CustomAllGather",
+    "create_push_reduce_scatter",
+    "PushReduceScatter",
+    "is_same_host_group",
+    "Fp8Activation",
+    "MlaDcpCommunicator",
+    "get_mla_dcp",
+    "KimiK3MtpBf16Collectives",
 ]

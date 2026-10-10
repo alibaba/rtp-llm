@@ -23,7 +23,13 @@ class MoEConfigAdapter:
         moe_config: Optional[MoeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         enable_cuda_graph: bool = False,
+        expert_activation: str = "swiglu",
+        activation_beta: Optional[float] = None,
+        activation_linear_beta: Optional[float] = None,
     ):
+        self.expert_activation = expert_activation
+        self.activation_beta = activation_beta
+        self.activation_linear_beta = activation_linear_beta
         self.model_config = model_config
         self.parallelism_config = parallelism_config
         self.moe_config = moe_config or MoeConfig()

@@ -46,6 +46,9 @@ public:
     bool use_typed_cache_regions                  = false;
     bool use_opaque_kv_cache_store                = false;
     bool disable_decode_first_malloc_device_reuse = false;
+    // Resolved before allocator construction. Only FULL/BLOCK_ROUND_ROBIN
+    // groups use compact owned-page tables; LINEAR state keeps its own policy.
+    bool local_kv_cache_sharded = false;
 
     rtp_llm::DataType dtype     = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num = 0;  // the number of main model layers
