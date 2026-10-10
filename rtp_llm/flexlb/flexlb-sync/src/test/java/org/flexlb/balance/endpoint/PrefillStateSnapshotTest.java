@@ -41,20 +41,20 @@ class PrefillStateSnapshotTest {
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
     @Test
-    void inflightExcludesQueuedAndConfirmedWorkerRequests() {
+    void workerStatusUnconfirmedCountExcludesQueuedAndConfirmedRequests() {
         enqueue(item(9));
-        assertEquals(0, state.stats().inflightRequests());
+        assertEquals(0, state.stats().workerStatusUnconfirmedRequests());
         try (var reservation = state.reserveUnqueuedRoute(item(8), 10, Long.MAX_VALUE).reservation()) {
-            assertEquals(0, state.stats().inflightRequests());
+            assertEquals(0, state.stats().workerStatusUnconfirmedRequests());
         }
         var request = item(1);
         try (var reservation = state.reserveUnqueuedRoute(request, 10, Long.MAX_VALUE).reservation();
              var handoff = state.commitRouteGroup(List.of(request), List.of(reservation),
                      generation.tryAcquireHandoff())) {
-            assertEquals(1, state.stats().inflightRequests());
+            assertEquals(1, state.stats().workerStatusUnconfirmedRequests());
         }
         reconcile(Map.of(), Map.of("1", task(1, TaskPhase.RUNNING, 0, 0)), unused -> 0L);
-        assertEquals(0, state.stats().inflightRequests());
+        assertEquals(0, state.stats().workerStatusUnconfirmedRequests());
         assertEquals(1, state.stats().locallyOwnedRequests());
     }
 

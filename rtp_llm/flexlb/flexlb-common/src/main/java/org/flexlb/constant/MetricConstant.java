@@ -87,10 +87,20 @@ public class MetricConstant {
     public static final String TRACKED_REQUEST_COUNT = "app.flexlb.tracked.request.count";
 
     /**
-     * Per-worker dispatched requests not yet confirmed by WorkerStatus.
-     * Tagged by role and engineIp; excludes queued and confirmed requests.
+     * NON_BATCH PREFILL/PDFUSION: all requests occupying worker capacity, including queued,
+     * unconfirmed, and WorkerStatus-confirmed requests, deduplicated against engine-reported work.
+     * BATCH PREFILL/PDFUSION: dispatched requests in batches not yet confirmed by WorkerStatus.
+     * DECODE: non-queued local reservations awaiting KV_ALLOCATED or RUNNING confirmation.
+     * Tagged by role and engineIp.
      */
     public static final String INFLIGHT_REQUEST_COUNT = "app.flexlb.inflight.request.count";
+
+    /**
+     * NON_BATCH PREFILL/PDFUSION submitted requests not yet confirmed by WorkerStatus.
+     * Excludes queued and confirmed requests; tagged by role and engineIp.
+     */
+    public static final String WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT =
+            "app.flexlb.worker.status.unconfirmed.request.count";
 
     /**
      * Encoder decisions awaiting their first matching WorkerStatus task.

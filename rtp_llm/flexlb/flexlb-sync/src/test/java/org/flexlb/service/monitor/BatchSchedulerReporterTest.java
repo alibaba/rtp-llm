@@ -45,7 +45,7 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
-    void workerInflightUsesSeparateRolesAndConfirmationScope() {
+    void workerInflightUsesSeparateRolesAndWorkerScope() {
         reporter.reportInflightRequestCount("PREFILL", "prefill:8080", 3);
         reporter.reportInflightRequestCount("DECODE", "decode:8080", 2);
         verify(monitor).report(org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT,
@@ -146,6 +146,8 @@ class BatchSchedulerReporterTest {
         reporter.init();
 
         verify(monitor).register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(org.flexlb.constant.MetricConstant.WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT,
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         verify(monitor).register(DECODE_INPUT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }

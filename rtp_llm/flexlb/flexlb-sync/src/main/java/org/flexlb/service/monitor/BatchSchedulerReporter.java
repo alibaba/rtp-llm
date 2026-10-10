@@ -32,6 +32,7 @@ import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT;
 
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
@@ -40,7 +41,8 @@ import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
  * conflicts with the non-batch path:
  * queue (routing.queue.length + routing.queue.wait.time.ms),
  * dispatch reason (engine.balancing.master.dispatch.reason),
- * tracked scheduler requests and unconfirmed worker requests.
+ * tracked scheduler requests, NON_BATCH Prefill capacity occupancy and WorkerStatus-unconfirmed requests,
+ * and Decode reservations awaiting allocation/running confirmation.
  */
 @Slf4j
 @Component
@@ -81,6 +83,7 @@ public class BatchSchedulerReporter {
         // Inflight — batch count and request count per worker (FlexLB scheduler view, tagged by role)
         monitor.register(INFLIGHT_BATCH_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(TRACKED_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
@@ -109,7 +112,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (20 metrics)");
+        log.info("BatchSchedulerReporter initialized (21 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -252,14 +255,24 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report per-worker inflight request count (dispatched but not yet confirmed by engine)
-     * via {@code flexlb.inflight.request.count}.
-     * <p>Unified for both prefill and decode workers, tagged by role and engineIp.
-     * Replaces the former separate reportPrefillInflightRequestCount and reportDecodeInflightCount.
+     * Report role-specific request counts via {@code flexlb.inflight.request.count}.
+     * NON_BATCH PREFILL/PDFUSION include all capacity occupancy, including queued and confirmed requests.
+     * BATCH retains dispatched requests whose batch is not yet confirmed by WorkerStatus.
+     * DECODE retains non-queued local reservations awaiting KV_ALLOCATED or RUNNING confirmation.
+     * Tagged by role, engineIp, and scope=worker; values must not be compared across roles.
      */
-    public void reportInflightRequestCount(String role, String engineIp, int count) {
+    public void reportInflightRequestCount(String role, String engineIp, long count) {
         monitor.report(INFLIGHT_REQUEST_COUNT, FlexMetricTags.ofEngine(engineIp,
                 "role", role, "scope", "worker"), count);
+    }
+
+    /**
+     * Report NON_BATCH PREFILL/PDFUSION submitted requests awaiting their first matching WorkerStatus task.
+     * Queued requests have not been submitted and do not count here.
+     */
+    public void reportWorkerStatusUnconfirmedRequestCount(String role, String engineIp, int count) {
+        monitor.report(WORKER_STATUS_UNCONFIRMED_REQUEST_COUNT,
+                FlexMetricTags.ofEngine(engineIp, "role", role, "scope", "worker"), count);
     }
 
     /**

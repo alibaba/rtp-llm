@@ -126,13 +126,15 @@ public final class PrefillState {
     }
 
     public record Stats(
+            long inflightRequests,
             int locallyOwnedRequests,
-            int inflightRequests,
+            int workerStatusUnconfirmedRequests,
             int individuallyOwnedRequests,
             int batchCount,
             long maxObservedAgeMs) {
         public Stats {
-            if (locallyOwnedRequests < 0 || inflightRequests < 0 || individuallyOwnedRequests < 0
+            if (inflightRequests < 0L || locallyOwnedRequests < 0 || workerStatusUnconfirmedRequests < 0
+                    || individuallyOwnedRequests < 0
                     || batchCount < 0 || maxObservedAgeMs < 0L) {
                 throw new IllegalArgumentException(
                         "Prefill state stats must be non-negative");
@@ -1832,7 +1834,7 @@ public final class PrefillState {
         lock.lock();
         try {
             int locallyOwned = 0;
-            int inflight = 0;
+            int workerStatusUnconfirmed = 0;
             int individual = 0;
             long maxAgeMs = 0L;
             Set<BatchWork> batches = java.util.Collections.newSetFromMap(
@@ -1847,7 +1849,7 @@ public final class PrefillState {
                         ? entry.individualPhase : entry.batchWork.servicePhase;
                 if (phase == Phase.COMMITTED && (entry.batchWork != null
                         || entry.reservation != null && entry.reservation.state == LeaseState.OWNED)) {
-                    inflight++;
+                    workerStatusUnconfirmed++;
                 }
                 if (entry.batchWork == null) {
                     individual++;
@@ -1864,8 +1866,9 @@ public final class PrefillState {
                         Math.max(0L, nowMs - batch.lastObservedAtMs));
             }
             return new Stats(
+                    saturatedAdd(requests.size(), unknownEngineRequestCount),
                     locallyOwned,
-                    inflight,
+                    workerStatusUnconfirmed,
                     individual,
                     batches.size(),
                     maxAgeMs);

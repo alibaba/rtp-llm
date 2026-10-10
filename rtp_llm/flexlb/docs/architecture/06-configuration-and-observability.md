@@ -400,9 +400,32 @@ WorkerStatus 成功轮询上报 `app.flexlb.encoder.pending.request.count` 和
 `app.flexlb.tracked.request.count` 按
 `role=PREFILL`（Generation）和 `role=ENCODER`（Encoder）分别上报，
 `engineIp=scheduler`；Prefill 序列只统计 Generation。节点侧使用 `app.flexlb.inflight.request.count`，按真实 `engineIp` 和
-`role=PREFILL/DECODE` 分开展示，只统计已提交给引擎且尚未在 WorkerStatus 中确认的请求。
-排队请求和已确认请求不计入节点在途数。大盘分为正在跟踪的请求数、Prefill 在途请求数、
-Decode 在途请求数三个独立面板。
+role 分开展示。NON_BATCH（包括 DIRECT）的 `role=PREFILL/PDFUSION`
+表示本地排队、已提交未确认、已确认但仍占用容量的请求，
+加上引擎报告的额外活动请求。同一请求按 ID 去重；WorkerStatus 仅提供 running/waiting 数量、
+缺少请求明细时，对无法确认重合的请求保守计数。该指标不是引擎 GPU 当前执行请求数。
+NON_BATCH（包括 DIRECT）的 Prefill 序列与 `dispatcher.maxInflightPerPrefillWorker` 的请求限流计数一致：
+设为 4 时，已确认请求仍占用名额，完成或本地清理后才释放。若引擎有其它来源的请求，或本地超时清理后
+引擎仍在处理请求，不能仅凭该配置保证引擎实际并发不超过 4。
+BATCH 的上限单位是批次，仍使用 `app.flexlb.inflight.batch.count` 查看已提交、尚未清理完成的批数；
+该批数不包含派发前短暂预留的批槽，4 个批次可以包含多于 4 个请求。
+BATCH 的 `app.flexlb.inflight.request.count` 保持原有口径：已提交且所在批次尚未被 WorkerStatus
+确认的请求数，不含本地排队请求；不新增逐请求确认状态，也不上报新 unconfirmed 指标。
+
+`role=DECODE` 保持原有口径：本地未确认预留数减去 Master 排队数，收到 `KV_ALLOCATED/RUNNING`
+后不再计入；仅收到 `RECEIVED` 仍计入。不新增 Decode 指标或改变 Decode 容量规则。
+Decode 总负载仍使用 `app.flexlb.decode.total.load`（已确认请求加本地预留，含排队）。
+因此不能跨 dispatcher 模式或 Prefill/Decode 聚合 `inflight.request.count` 并解释为同一种请求数。
+
+`app.flexlb.worker.status.unconfirmed.request.count` 仅由 NON_BATCH PREFILL/PDFUSION 上报，
+单独统计已提交、尚未在 WorkerStatus 中出现的请求，
+沿用 `role/engineIp/scope=worker` 标签，不含本地排队请求。首次有效活动任务上报（包括 RECEIVED）
+后请求阶段不再是 COMMITTED，即使之后暂时缺少该请求的明细也不重新计入。
+该指标直接复用现有请求阶段，不新增状态字段或改变调度、容量释放规则。
+NON_BATCH Prefill 的旧 `inflight.request.count` 未确认口径面板应切换到新指标；总占用面板使用原指标名。
+BATCH 和 Decode 面板保持原指标名及原口径。
+上述 Gauge 默认每 2 秒采样，无法证明采样间隔内没有短暂超限。大盘按 Master 和逻辑 worker 分线，
+不要将不同 Master 的样本直接相加来判断单 worker 的限流效果。
 `/rtp_llm/inflight_status` 的 `scheduler_tracked` 返回两个阶段正在跟踪的请求总数，包含排队请求；
 `scheduler_inflight` 保留为该值的兼容别名，供现有清账和测试工具使用。它不表示节点侧的未确认在途数。
 Decode 预留字段 `inputKvTokens = max(0, seqLen)`，
