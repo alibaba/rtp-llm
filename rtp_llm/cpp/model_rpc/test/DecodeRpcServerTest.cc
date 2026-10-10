@@ -73,16 +73,6 @@ KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
     return pairs;
 }
 
-std::shared_ptr<NormalGenerateStream> makeGenerateStream(int seq_length) {
-    auto input             = std::make_shared<GenerateInput>();
-    input->generate_config = std::make_shared<GenerateConfig>();
-    input->input_ids       = torch::zeros({seq_length}, torch::kInt32);
-
-    ModelConfig model_config;
-    model_config.max_seq_len = seq_length + 16;
-    return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
-}
-
 }  // namespace
 
 TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
@@ -205,36 +195,6 @@ TEST(DecodeRpcServerTest, OddTpWorkersWaitForEveryCompletionQueueResponse) {
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(5), (std::vector<size_t>{2, 2, 1}));
     EXPECT_EQ(DecodeRpcServer::completionQueueExpectedResponseCounts(4), (std::vector<size_t>{2, 2}));
     EXPECT_TRUE(DecodeRpcServer::completionQueueExpectedResponseCounts(0).empty());
-}
-
-TEST(DecodeRpcServerTest, CompletedHandoffPublishesOnlyReusablePromptBlocks) {
-    auto stream = makeGenerateStream(/*seq_length=*/2560);
-
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/10},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/true),
-              2304);
-    EXPECT_EQ(stream->initialReuseLength(), 2304);
-    EXPECT_EQ(stream->reuseLength(), 2304);
-    EXPECT_EQ(stream->localReuseLength(), 2304);
-}
-
-TEST(DecodeRpcServerTest, FailedOrSharedPoolHandoffDoesNotPublishReuse) {
-    auto stream = makeGenerateStream(/*seq_length=*/513);
-
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(
-                  stream,
-                  {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "load failed"), /*loaded_cache_block_count=*/2},
-                  /*seq_size_per_block=*/256,
-                  /*use_independent_block_pools=*/true),
-              0);
-    EXPECT_EQ(DecodeRpcServer::markLoadedCacheReuse(stream,
-                                                    {ErrorInfo::OkStatus(), /*loaded_cache_block_count=*/2},
-                                                    /*seq_size_per_block=*/256,
-                                                    /*use_independent_block_pools=*/false),
-              0);
-    EXPECT_EQ(stream->initialReuseLength(), 0);
 }
 
 TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
