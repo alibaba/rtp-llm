@@ -1,4 +1,8 @@
 
+load("//bazel:arch_select.bzl", "requirement")
+
+requirement(["zstandard"])
+
 filegroup(
     name = "testdata",
     srcs = glob([
@@ -87,6 +91,7 @@ py_test(
         "fuser_test.py",
     ],
     deps = [
+        ":zstandard",
         "//rtp_llm:utils",
     ],
 )

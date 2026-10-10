@@ -1,10 +1,13 @@
 import atexit
+import errno
 import functools
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
+import uuid
 from enum import Enum
 from subprocess import check_call
 from typing import Dict, Optional, Tuple, Type
@@ -62,6 +65,119 @@ class MountRwMode(Enum):
     RWMODE_RW = 2  # 读写模式
 
 
+def _fuse_mount_options(path: str) -> Optional[set[str]]:
+    """Find the FUSE mount covering path in this process's mount namespace."""
+    path = os.path.realpath(path)
+    matches = []
+    with open("/proc/self/mountinfo") as mounts:
+        for line in mounts:
+            mount, separator, filesystem = line.partition(" - ")
+            fields, fs_fields = mount.split(), filesystem.split()
+            if not separator or len(fields) < 6 or len(fs_fields) < 3:
+                continue
+            mount_path = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])
+            if path == mount_path or path.startswith(mount_path.rstrip("/") + "/"):
+                matches.append(
+                    (
+                        len(mount_path),
+                        fields[0],
+                        fields[1],
+                        fs_fields[0],
+                        set(fields[5].split(",")) | set(fs_fields[2].split(",")),
+                    )
+                )
+    if not matches:
+        return None
+    # Follow the visible mount tree, entering the closest child mount first.
+    # A parent-directory overmount can hide a deeper mount that remains in
+    # mountinfo, so choosing the longest path alone would reuse a hidden mount.
+    # Parents outside a chroot may be absent from mountinfo; treat those mounts
+    # as roots of the tree visible to this process.
+    mount_ids = {entry[1] for entry in matches}
+    roots = [
+        entry for entry in matches if entry[2] not in mount_ids or entry[1] == entry[2]
+    ]
+    if not roots:
+        return None
+    visible = min(roots, key=lambda entry: entry[0])
+    while True:
+        children = [
+            entry
+            for entry in matches
+            if entry[2] == visible[1] and entry[1] != visible[1]
+        ]
+        if not children:
+            break
+        visible = min(children, key=lambda entry: entry[0])
+    _, _, _, fs_type, options = visible
+    return (
+        options
+        if fs_type in ("fuse", "fuseblk") or fs_type.startswith("fuse.")
+        else None
+    )
+
+
+@retry_with_timeout(
+    timeout_seconds=10,
+    retry_interval=0.1,
+    exceptions=(FileNotFoundError, RetryableError),
+)
+def _read_external_mount_probe(path: str, expected: bytes) -> None:
+    # Some FUSE implementations expose a file only after its upload completes.
+    with open(path, "rb") as probe:
+        if probe.read(len(expected) + 1) != expected:
+            raise RetryableError(f"external fuse probe is not readable yet: {path}")
+
+
+@retry_with_timeout(
+    timeout_seconds=10,
+    retry_interval=0.1,
+    exceptions=(FileNotFoundError,),
+)
+def _rename_external_mount_probe(path: str, renamed: str) -> None:
+    # Write-only mounts cannot use a read probe to wait for upload visibility.
+    os.rename(path, renamed)
+
+
+def _check_external_mount_access(
+    path: str, mode: MountRwMode, options: set[str]
+) -> None:
+    if mode != MountRwMode.RWMODE_RO and "ro" in options:
+        raise PermissionError(errno.EROFS, "external fuse mount is read-only", path)
+    if not os.path.isdir(path):
+        raise NotADirectoryError(path)
+    if mode != MountRwMode.RWMODE_WO:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if mode == MountRwMode.RWMODE_RW:
+                    break
+                if entry.is_file(follow_symlinks=False):
+                    with open(entry.path, "rb") as sample:
+                        sample.read(1)
+                    break
+    if mode == MountRwMode.RWMODE_RO:
+        return
+
+    # Probe only the borrowed mount, without touching existing files or chmod.
+    probe_path = os.path.join(path, f".rtp_llm_fuse_probe_{uuid.uuid4().hex}")
+    payload, created = b"rtp-llm fuse access probe", False
+    try:
+        with open(probe_path, "xb") as probe:
+            created = True
+            probe.write(payload)
+        if mode == MountRwMode.RWMODE_RW:
+            _read_external_mount_probe(probe_path, payload)
+        renamed = probe_path + ".ready"
+        _rename_external_mount_probe(probe_path, renamed)
+        probe_path = renamed
+    finally:
+        if created:
+            try:
+                os.unlink(probe_path)
+            except FileNotFoundError:
+                pass
+
+
 # Fuser is a wrapper class for c2 sidecar fuse.
 # see documents at https://aliyuque.antfin.com/owt27z/ohohhg/xyardt2bwbyfmhn5
 class Fuser:
@@ -81,11 +197,15 @@ class Fuser:
         self._mount_src_map = {}  # Maps mount path to (original path, ref count)
         self.lock = threading.RLock()  # 使用重入锁
         atexit.register(self.umount_all)
-        self._available: bool = self._check_valid()
+        # Reusing an externally mounted directory must not require the sidecar.
+        self._available: Optional[bool] = None
 
     @property
     def available(self) -> bool:
-        return self._available
+        with self.lock:
+            if self._available is None:
+                self._available = self._check_valid()
+            return self._available
 
     def _check_valid(self) -> bool:
         requests = _requests_module()
@@ -116,6 +236,34 @@ class Fuser:
         except Exception:
             logging.warning(f"fuse is not valid: connet {self._fuse_uri}  unknown err")
             return False
+
+    def mount_or_reuse_dir(
+        self,
+        path: str,
+        mount_mode: MountRwMode = MountRwMode.RWMODE_RO,
+        enable_mnt_ref: bool = False,
+    ) -> Optional[str]:
+        mnt_path = os.path.join(
+            self._fuse_path_prefix, hashlib.md5(path.encode("utf-8")).hexdigest()
+        )
+        with self.lock:
+            if mnt_path not in self._mount_src_map:
+                options = _fuse_mount_options(mnt_path)
+                if options is not None:
+                    # An unusable external mount must not trigger another mount
+                    # on top of it. The caller handles the access error.
+                    _check_external_mount_access(mnt_path, mount_mode, options)
+                    logging.info(
+                        "reuse existing fuse directory, skip mount: %s -> %s",
+                        path,
+                        mnt_path,
+                    )
+                    # Do not register it: the external owner handles unmounting.
+                    return mnt_path
+
+            # Keep reuse detection outside the original mount/retry operation.
+            # Serialize callers so an in-progress mount cannot be borrowed.
+            return self.mount_dir(path, mount_mode, enable_mnt_ref)
 
     @retry_with_timeout()
     def mount_dir(
@@ -318,7 +466,7 @@ def fetch_remote_file_to_local(
         return _nfs_manager.mount_nfs_dir(path)
     else:
         logging.info(f"try fuse path {path}")
-        return _get_fuser().mount_dir(path, mount_mode, enable_mnt_ref)
+        return _get_fuser().mount_or_reuse_dir(path, mount_mode, enable_mnt_ref)
 
 
 def umount_file(path: str, force: bool = False):
