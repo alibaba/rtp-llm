@@ -396,6 +396,7 @@
             <id>api-performance-regression</id>
             <properties>
                 <flexlb.perf.heap>2g</flexlb.perf.heap>
+                <flexlb.perf.jvm-args></flexlb.perf.jvm-args>
             </properties>
             <build>
                 <plugins>
@@ -421,6 +422,7 @@
                                     -->
                                     <argLine>
                                         -Xms${flexlb.perf.heap} -Xmx${flexlb.perf.heap}
+                                        ${flexlb.perf.jvm-args}
                                         --add-modules ALL-SYSTEM
                                         --add-opens java.base/java.lang=ALL-UNNAMED
                                         --add-opens java.base/java.lang.invoke=ALL-UNNAMED

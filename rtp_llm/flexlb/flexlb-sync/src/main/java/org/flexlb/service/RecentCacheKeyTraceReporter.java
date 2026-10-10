@@ -1,12 +1,13 @@
 package org.flexlb.service;
 
+import com.google.common.math.LongMath;
+import org.flexlb.balance.scheduler.RequestContext;
+import org.flexlb.balance.scheduler.RequestRequirements;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
-import org.flexlb.cache.core.ShardedRecentCacheKeyWindow;
 import org.flexlb.cache.monitor.CacheHitTheoryStats;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -38,7 +39,7 @@ public class RecentCacheKeyTraceReporter {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX").withZone(ZoneId.systemDefault());
 
     @Autowired(required = false)
-    private ShardedRecentCacheKeyWindow shardedRecentCacheKeyWindow;
+    private RecentCacheKeyWindow recentCacheKeyWindow;
 
     @Autowired(required = false)
     private CacheMetricsReporter cacheMetricsReporter;
@@ -56,34 +57,34 @@ public class RecentCacheKeyTraceReporter {
     private static final long FNV_OFFSET_BASIS = 0xcbf29ce484222325L;
     private static final long FNV_PRIME = 0x100000001b3L;
 
-    public void report(BalanceContext balanceContext) {
-        if (balanceContext == null) {
+    public void report(RequestContext requestContext) {
+        if (requestContext == null) {
             return;
         }
-        FlexlbConfig config = balanceContext.getConfig();
-        if (config != null && !config.getObservability().getCacheHit()
-                .getRecentKeyWindow().isWriteEnabled()) {
-            return;
-        }
-
-        Request request = balanceContext.getRequest();
-        if (request == null || shardedRecentCacheKeyWindow == null) {
+        FlexlbConfig config = requestContext.getConfig();
+        if (config != null && !config.getObservability().getCacheHit().getRecentKeyWindow().isWriteEnabled()) {
             return;
         }
 
-        List<Long> cacheKeys = request.getBlockCacheKeys();
+        Request request = requestContext.getRequest();
+        RequestRequirements inputs = requestContext.getRequirements();
+        if (inputs == null || recentCacheKeyWindow == null) {
+            return;
+        }
+
+        List<Long> cacheKeys = inputs.blockCacheKeys();
         RecentCacheKeyWindow.Snapshot snapshot =
-                shardedRecentCacheKeyWindow.record(balanceContext.getRequestId(), cacheKeys);
-        long inputTokens = Math.max(0L, request.getSeqLen());
+                recentCacheKeyWindow.record(cacheKeys);
+        long inputTokens = Math.max(0L, inputs.seqLen());
         long hitTokens = theoryHitTokens(
                 snapshot.getRequestHitOccurrences(),
                 inputTokens,
-                request.getCacheKeyBlockSize());
+                inputs.cacheKeyBlockSize());
         CacheHitTheoryStats.Snapshot theorySnapshot = theoryStats.record(
                 hitTokens,
                 inputTokens);
-        logTraceIfEnabled(balanceContext, request, snapshot, hitTokens, inputTokens, config);
-        logTheoryIfEnabled(balanceContext, request, theorySnapshot, config);
+        logTraceIfEnabled(requestContext, request, inputs, snapshot, hitTokens, inputTokens, config);
+        logTheoryIfEnabled(requestContext, inputs, theorySnapshot, config);
 
         if (cacheMetricsReporter == null || (config != null
                 && !config.getObservability().getCacheHit().isMetricsEnabled())) {
@@ -100,17 +101,13 @@ public class RecentCacheKeyTraceReporter {
         if (hitKeyCount <= 0L || inputTokens <= 0L || cacheKeyBlockSize <= 0L) {
             return 0L;
         }
-        long hitTokens = hitKeyCount * cacheKeyBlockSize;
-        if (hitTokens < 0L) {
-            return inputTokens;
-        }
-        return Math.min(inputTokens, hitTokens);
+        return Math.min(inputTokens, LongMath.saturatedMultiply(hitKeyCount, cacheKeyBlockSize));
     }
 
     @PostConstruct
     public void initializeTheoryLog() {
         FlexlbConfig config = configService == null ? null : configService.loadBalanceConfig();
-        if (!theoryLogEnabled(config)) {
+        if (config == null || config.getObservability().getCacheHit().getTheoryLog() == null) {
             return;
         }
         theoryLogPath = config.getObservability().getCacheHit().getTheoryLog().getPath();
@@ -119,24 +116,24 @@ public class RecentCacheKeyTraceReporter {
         }
     }
 
-    private void logTraceIfEnabled(BalanceContext balanceContext,
+    private void logTraceIfEnabled(RequestContext requestContext,
                                    Request request,
+                                   RequestRequirements inputs,
                                    RecentCacheKeyWindow.Snapshot snapshot,
                                    long hitTokens,
                                    long inputTokens,
                                    FlexlbConfig config) {
-        if (config == null || !config.getObservability().getCacheHit()
-                .isRequestTraceLogEnabled()) {
+        if (config == null || !config.getObservability().getCacheHit().isRequestTraceLogEnabled()) {
             return;
         }
-        List<Long> cacheKeys = request.getBlockCacheKeys();
+        List<Long> cacheKeys = inputs.blockCacheKeys();
         Logger.info("Master cache-key trace: masterRequestId={}, requestId={}, "
                         + "seqLen={}, requestTimeMs={}, requestCacheKeys={}, hitCacheKeys={}, hitRatio={}, "
                         + "hitTokens={}, inputTokens={}, tokenHitRatio={}, cacheKeyDigest={}, selectedServers={}, cacheKeys={}",
-                balanceContext.getRequestId(),
-                request.getRequestId(),
-                request.getSeqLen(),
-                request.getRequestTimeMs(),
+                requestContext.getRequestId(),
+                inputs.requestId(),
+                inputs.seqLen(),
+                request == null ? 0L : request.getRequestTimeMs(),
                 snapshot.getRequestOccurrences(),
                 snapshot.getRequestHitOccurrences(),
                 hitRatio(snapshot.getRequestHitOccurrences(), snapshot.getRequestOccurrences()),
@@ -144,8 +141,8 @@ public class RecentCacheKeyTraceReporter {
                 inputTokens,
                 hitRatio(hitTokens, inputTokens),
                 cacheKeyDigest(cacheKeys),
-                formatServerStatusList(balanceContext.getResponse()),
-                formatCacheKeys(cacheKeys));
+                formatServerStatusList(requestContext.getResponse()),
+                cacheKeys == null ? "[]" : cacheKeys.toString());
     }
 
     private static double hitRatio(long hitCount, long totalCount) {
@@ -155,42 +152,38 @@ public class RecentCacheKeyTraceReporter {
         return (double) hitCount / totalCount;
     }
 
-    private void logTheoryIfEnabled(BalanceContext balanceContext,
-                                    Request request,
+    private void logTheoryIfEnabled(RequestContext requestContext,
+                                    RequestRequirements inputs,
                                     CacheHitTheoryStats.Snapshot snapshot,
                                     FlexlbConfig config) {
-        if (!theoryLogEnabled(config)) {
+        if (config == null || config.getObservability().getCacheHit().getTheoryLog() == null) {
             return;
         }
         if (snapshot == null || snapshot.getRequestTotalCount() <= 0L) {
             return;
         }
-        writeTheoryLogLine(formatTheoryLogLine(balanceContext, request, snapshot));
+        writeTheoryLogLine(formatTheoryLogLine(requestContext, inputs, snapshot));
     }
 
-    private static String formatTheoryLogLine(BalanceContext balanceContext,
-                                              Request request,
+    private static String formatTheoryLogLine(RequestContext requestContext,
+                                              RequestRequirements inputs,
                                               CacheHitTheoryStats.Snapshot snapshot) {
         return String.format(Locale.ROOT,
                 "time=%s ts_ms=%d source=master master_request_id=%s request_id=%d seq_len=%d "
                         + "cache_key_block_size=%d request_hit_tokens=%d request_input_tokens=%d request_ratio=%.6f "
                         + "all_hit_tokens=%d all_input_tokens=%d all_ratio=%.6f",
-                formatTimestamp(snapshot.getNowMs()),
+                THEORY_LOG_TIME_FORMATTER.format(Instant.ofEpochMilli(snapshot.getNowMs())),
                 snapshot.getNowMs(),
-                balanceContext == null ? "" : String.valueOf(balanceContext.getRequestId()),
-                request == null ? 0L : request.getRequestId(),
-                request == null ? 0L : request.getSeqLen(),
-                request == null ? 0L : request.getCacheKeyBlockSize(),
+                requestContext == null ? "" : String.valueOf(requestContext.getRequestId()),
+                inputs.requestId(),
+                inputs.seqLen(),
+                inputs.cacheKeyBlockSize(),
                 snapshot.getRequestHitCount(),
                 snapshot.getRequestTotalCount(),
                 snapshot.getRequestHitRatio(),
                 snapshot.getAllHitCount(),
                 snapshot.getAllTotalCount(),
                 snapshot.getAllHitRatio());
-    }
-
-    private static String formatTimestamp(long timestampMs) {
-        return THEORY_LOG_TIME_FORMATTER.format(Instant.ofEpochMilli(timestampMs));
     }
 
     private static void writeTheoryLogLine(String line) {
@@ -231,11 +224,6 @@ public class RecentCacheKeyTraceReporter {
             Logger.warn("Failed to open master theory hit log path {}: {}", logPath, e.getMessage());
         }
         return theoryLogWriter;
-    }
-
-    private static boolean theoryLogEnabled(FlexlbConfig config) {
-        return config != null
-                && config.getObservability().getCacheHit().getTheoryLog() != null;
     }
 
     @Scheduled(fixedDelay = 1000L)
@@ -295,10 +283,6 @@ public class RecentCacheKeyTraceReporter {
             digest *= FNV_PRIME;
         }
         return Long.toUnsignedString(digest);
-    }
-
-    private static String formatCacheKeys(List<Long> cacheKeys) {
-        return cacheKeys == null ? "[]" : cacheKeys.toString();
     }
 
     private static String formatServerStatusList(Response response) {

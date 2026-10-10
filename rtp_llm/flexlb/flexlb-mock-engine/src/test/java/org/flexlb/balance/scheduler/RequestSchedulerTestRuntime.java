@@ -2,26 +2,25 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.eviction.DecodePreemptionCoordinator;
+import org.flexlb.balance.eviction.DecodeCapacityAcquirer;
 import org.flexlb.balance.eviction.EngineCancelChannel;
-import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.balance.strategy.SelectedRole;
+import org.flexlb.balance.strategy.VitWorkerSelector;
+import org.flexlb.balance.strategy.WorkerAssignment;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 
 import java.util.ArrayList;
@@ -33,61 +32,42 @@ import java.util.function.Supplier;
 /** Test-only composition root for mock-engine end-to-end scheduler tests. */
 public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
-    private final RequestRegistry lifecycle;
-    private final EndpointEventProjector endpointEvents;
+    private final RequestRepository requests = new RequestRepository();
     private final PlacementAvailability placementAvailability =
             new PlacementAvailability();
     private final BindingRouter router;
     private final EndpointRegistry registry;
-    private final EvictionManager evictionManager;
-    private final RequestScheduler scheduler;
+    private final DecodeCapacityAcquirer decodeCapacity;
+    private final AbstractRequestScheduler scheduler;
     private final SchedulerRuntime runtime;
 
     public RequestSchedulerTestRuntime(
             ConfigService configService,
             Supplier<CapacityBoundary.Attempt<
-                    BatchDeliveryStrategy.PreparedSubmission>>
+                    DefaultBatchDispatcher.PreparedSubmission>>
                     prepareBatchSubmission,
-            BatchSchedulerReporter batchReporter,
+            DeliveryMetricsReporter deliveryReporter,
             RequestSchedulerReporter requestReporter,
             EngineCancelChannel cancelChannel) {
         Objects.requireNonNull(
                 prepareBatchSubmission, "prepareBatchSubmission");
-        this.lifecycle = new RequestRegistry(
-                configService, batchReporter, requestReporter);
-        this.endpointEvents = new EndpointEventProjector(lifecycle);
         AtomicLong batchIds = new AtomicLong();
-        DeliveryMetrics deliveryMetrics = new DeliveryMetrics(batchReporter);
         DeliveryStrategy delivery = configService.loadBalanceConfig().getDispatcher().requiresGenerateInput()
-                ? new BatchDeliveryStrategy(prepareBatchSubmission, batchIds::incrementAndGet, lifecycle, deliveryMetrics)
-                : new RouteDeliveryStrategy(lifecycle, deliveryMetrics);
-        this.registry = new EndpointRegistry(
-                configService,
-                endpointEvents,
-                batchReporter,
-                delivery,
-                placementAvailability);
-        this.evictionManager = new EvictionManager(
-                requestReporter,
-                cancelChannel,
-                new DecodePreemptionCoordinator(cancelChannel, lifecycle),
-                lifecycle,
-                batchReporter);
-        this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
-        this.scheduler = new RequestScheduler(
-                configService,
-                router,
-                registry,
-                batchReporter,
-                evictionManager,
-                lifecycle,
-                placementAvailability);
-        this.runtime = new SchedulerRuntime(
-                lifecycle, registry, batchReporter, requestReporter, scheduler);
+                ? new BatchDeliveryStrategy(prepareBatchSubmission, batchIds::incrementAndGet, deliveryReporter)
+                : new RouteDeliveryStrategy(deliveryReporter);
+        this.registry = new EndpointRegistry(configService, requests, deliveryReporter, delivery, placementAvailability);
+        this.router = new BindingRouter(registry);
+        this.runtime = new SchedulerRuntime(requests, registry, deliveryReporter, requestReporter,
+                org.mockito.Mockito.mock(DefaultBatchDispatcher.class), configService,
+                new org.flexlb.service.RecentCacheKeyTraceReporter(), cancelChannel);
+        this.decodeCapacity = new DecodeCapacityAcquirer(cancelChannel, requests, runtime, requestReporter);
+        this.scheduler = PlacementConfiguration.create(runtime, configService.loadBalanceConfig(),
+                router, deliveryReporter, decodeCapacity, placementAvailability);
+        runtime.initializeScheduler(scheduler);
     }
 
-    public RequestRegistry requestRegistry() {
-        return lifecycle;
+    public RequestRepository requestRegistry() {
+        return requests;
     }
 
     public RequestScheduler scheduler() {
@@ -102,13 +82,13 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         return placementAvailability;
     }
 
-    public void bindRouter(DefaultRouter exactRouter) {
+    public void bindRouter(RequestWorkerSelector exactRouter) {
         router.bind(exactRouter);
     }
 
     /** Translate fixture response metadata into an exact queue admission. */
-    public PlacementResult<RouteAdmission, PlacementKey> routeResult(
-            BalanceContext context, Response response) {
+    public PlacementResult<RequestRoute, PlacementKey> routeResult(
+            RequestContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
         if (!response.isSuccess()) {
@@ -119,7 +99,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     "successful fixture route has no worker metadata");
         }
 
-        List<SelectedRole> selections = new ArrayList<>();
+        List<WorkerAssignment> selections = new ArrayList<>();
         try {
             for (ServerStatus status : response.getServerStatus()) {
                 if (status == null) {
@@ -133,13 +113,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                             "fixture route references an unpublished endpoint: "
                                     + status.getRole() + " " + address);
                 }
-                SelectedRole selected = select(pin, status);
+                WorkerAssignment selected = select(pin, status);
                 selections.add(selected);
             }
-            return PlacementResult.success(
-                    RouteAdmission.prepare(context, selections, response));
+            var result = PlacementResult.<RequestRoute, PlacementKey>success(
+                    RequestRoute.prepare(context, selections));
+            selections.clear();
+            return result;
         } finally {
-            for (SelectedRole selection : selections) {
+            for (WorkerAssignment selection : selections) {
                 selection.close();
             }
         }
@@ -173,7 +155,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             WorkerStatus.StatusObservation observation =
                     status.freezeStatusResponse(response);
             if (responseVersion == committedVersion) {
-                projection = endpoint.observeStatusHeartbeat(status, observation);
+                projection = endpoint.applyStatusHeartbeat(status, observation);
             } else {
                 WorkerStatus.PreparedStatus prepared =
                         status.prepareNewStatus(observation);
@@ -185,14 +167,16 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         projection.run();
     }
 
-    private static SelectedRole select(
+    private static WorkerAssignment select(
             WorkerEndpoint.GenerationPin pin, ServerStatus status) {
         try {
             return switch (status.getRole()) {
-                case PREFILL, PDFUSION -> SelectedRole.prefill(
-                        pin, status, Math.max(0L, status.getPrefillTime()));
-                case DECODE -> SelectedRole.decode(pin, status);
-                case VIT -> SelectedRole.stateless(pin, status);
+                case PREFILL, PDFUSION -> WorkerAssignment.prefill(
+                        pin, status, Math.max(0L, status.getPrefillTime()),
+                        ((PrefillEndpoint) pin.endpoint()).placementVersion());
+                case DECODE -> WorkerAssignment.decode(
+                        pin, status, ((DecodeEndpoint) pin.endpoint()).placementVersion());
+                case VIT -> WorkerAssignment.stateless(pin, status);
                 case FRONTEND -> throw new IllegalArgumentException(
                         "FRONTEND cannot be a worker route");
             };
@@ -204,26 +188,25 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     @Override
     public void close() {
-        evictionManager.shutdown();
+        decodeCapacity.shutdown();
         runtime.shutdown();
     }
 
-    private static final class BindingRouter extends DefaultRouter {
-        private DefaultRouter delegate;
+    private static final class BindingRouter extends RequestWorkerSelector {
+        private RequestWorkerSelector delegate;
 
-        private BindingRouter(org.flexlb.sync.status.WorkerDirectory workers, ConfigService configs, RequestRegistry lifecycle) {
+        private BindingRouter(EndpointRegistry workers) {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
             super(new CostBasedPrefillStrategy(workers,
                             org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
-                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
+                            org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class), org.mockito.Mockito.mock(CacheMetricsReporter.class)),
                     new DecodeSelector(workers),
-                    new RandomStrategy(workers),
-                    configs,
+                    new VitWorkerSelector(workers),
                     emptyModelMeta());
         }
 
-        private synchronized void bind(DefaultRouter exactRouter) {
+        private synchronized void bind(RequestWorkerSelector exactRouter) {
             Objects.requireNonNull(exactRouter, "exactRouter");
             if (delegate != null) {
                 throw new IllegalStateException("test router was already bound");
@@ -232,17 +215,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context) {
-            return requireBound().select(context);
-        }
-
-        @Override
-        public PlacementResult<RouteAdmission, PlacementKey> select(
-                BalanceContext context, String policyGroup) {
+        public PlacementResult<RequestRoute, PlacementKey> select(
+                RequestContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }
 
-        private synchronized DefaultRouter requireBound() {
+        private synchronized RequestWorkerSelector requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");
             }

@@ -1,11 +1,13 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityDeficit;
-import org.flexlb.balance.endpoint.DecodeEndpoint.CapacityRelease;
-import org.flexlb.balance.endpoint.DecodeEndpoint.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityDeficit;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+import org.flexlb.balance.endpoint.DecodeResources.DecodeRequestView;
+import org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot;
+import org.flexlb.balance.scheduler.RequestRequirements;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
-import org.flexlb.enums.DecodeTaskPhase;
 import org.flexlb.util.PriorityNormalizer;
 
 import java.math.BigInteger;
@@ -15,10 +17,30 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** Plans resource reclamation for the exact selected Decode endpoint. */
+/** Pure victim selection for the selected Prefill or Decode generation. */
 public final class EvictionPlanner {
 
     private EvictionPlanner() {
+    }
+
+    public static boolean isLowerPriority(int incomingPriority, int candidatePriority) {
+        return PriorityNormalizer.hasPriority(incomingPriority)
+                && PriorityNormalizer.hasPriority(candidatePriority)
+                && candidatePriority < incomingPriority;
+    }
+
+    /**
+     * Consumes a caller-owned mutable candidate buffer. State checks resource
+     * ownership under its queue lock before supplying these candidates.
+     */
+    public static List<RequestRoute> selectPrefillVictims(
+            List<RequestRoute> uncommitted, int incomingPriority, long required) {
+        if (!PriorityNormalizer.hasPriority(incomingPriority) || required <= 0L) { return List.of(); }
+        uncommitted.removeIf(route -> !isLowerPriority(incomingPriority, route.priority()));
+        if (uncommitted.size() < required) { return List.of(); }
+        uncommitted.sort(Comparator.comparingInt(RequestRoute::priority)
+                .thenComparing(Comparator.comparingLong(RequestRoute::enqueueSeq).reversed()));
+        return uncommitted.subList(0, (int) required);
     }
 
     /** A decode plan never mixes Master-local removal with Engine Cancel. */
@@ -50,286 +72,160 @@ public final class EvictionPlanner {
             .thenComparing(v -> PriorityCostFunction.kvBucket(v.kvTokens()), Comparator.reverseOrder())
             .thenComparingLong(DecodeRequestView::requestId);
 
-    /**
-     * Plan the cheapest decode eviction that clears the incoming request's
-     * slot and/or KV deficit across the given endpoints.
-     *
-     * <p>Candidates are the strictly lower-priority reserved entries when
-     * {@link VictimStage#DECODE_RESERVED} is allowed, plus — only when
-     * {@link VictimStage#DECODE_ENGINE_OWNED} is allowed and the endpoint's
-     * engine supports the Cancel RPC — the strictly lower-priority
-     * engine-confirmed accepted/running entries. Running entries use a larger
-     * stage cost, so an otherwise equivalent accepted-not-running victim is
-     * preferred.
-     *
-     * @param incomingPriority incoming request priority
-     * @param hardKvTokens prompt KV demand
-     * @param expectedKvTokens complete prompt and output KV demand
-     * @param decodes  candidate decode endpoint snapshots
-     * @param preemption immutable policy for the current admission attempt
-     * @param channel  engine cancel channel for the per-endpoint support gate;
-     *                 {@code null} disables confirmed layers entirely
-     * @param failures out-param: per-endpoint infeasibility reason
-     * @return the best proposal by {@link DecodeEvictionProposal#ORDER}, or
-     *         {@code null} when no endpoint has a feasible plan
-     */
-    public static DecodeEvictionProposal planDecode(int incomingPriority, long hardKvTokens, long expectedKvTokens,
-                                                    List<DecodeEndpointSnapshot> decodes,
-                                                    PreemptionConfig preemption,
-                                                    EngineCancelChannel channel,
-                                                    Map<String, String> failures) {
-        DecodeEvictionProposal best = null;
-        for (DecodeEndpointSnapshot ep : decodes) {
-            DecodeEvictionProposal proposal =
-                    planDecodeOne(incomingPriority, hardKvTokens, expectedKvTokens, ep, preemption, channel, failures);
-            if (proposal != null
-                    && (best == null || DecodeEvictionProposal.ORDER.compare(proposal, best) < 0)) {
-                best = proposal;
+    /** One snapshot's capacity decision and its optional single-ownership eviction. */
+    public record DecodeEvictionDecision(CapacityDeficit deficit, DecodeEvictionProposal proposal) {
+        public String evictionCase() {
+            if (deficit.requests() > 0L && deficit.needsKv()) {
+                return DecodeEvictionProposal.CASE_SLOT_AND_KV;
             }
+            if (deficit.requests() > 0L) { return DecodeEvictionProposal.CASE_SLOT; }
+            return deficit.needsKv() ? DecodeEvictionProposal.CASE_KV : null;
         }
-        return best;
     }
 
-    /** The same capacity decision labels both ordinary admission and eviction planning. */
-    public static String decodeEvictionCase(long hardKvTokens, long expectedKvTokens, DecodeEndpointSnapshot ep) {
-        CapacityDeficit deficit = ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens);
-        if (deficit.requests() > 0L && deficit.needsKv()) {
-            return DecodeEvictionProposal.CASE_SLOT_AND_KV;
-        }
-        if (deficit.requests() > 0L) { return DecodeEvictionProposal.CASE_SLOT; }
-        return deficit.needsKv() ? DecodeEvictionProposal.CASE_KV : null;
-    }
-
-    private static DecodeEvictionProposal planDecodeOne(int incomingPriority, long hardKvTokens, long expectedKvTokens,
-                                                        DecodeEndpointSnapshot ep,
-                                                        PreemptionConfig preemption,
-                                                        EngineCancelChannel channel,
-                                                        Map<String, String> failures) {
-        CapacityDeficit deficit = ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens);
+    /** Plan the cheapest single-ownership eviction for this snapshot's capacity deficit. */
+    public static DecodeEvictionDecision planDecode(
+            RequestRequirements request, ResourceSnapshot ep,
+            PreemptionConfig preemption, Map<String, String> failures) {
+        var deficit = request.capacity().evaluate(ep.routing().placementUsage(), request.hardKvTokens(),
+                request.expectedKvTokens(), CapacityRelease.NONE);
         if (deficit.fits()) {
-            failures.put(ep.endpointId(), "decode_capacity_sufficient");
-            return null;
+            failures.put(ep.routing().address(), "decode_capacity_sufficient");
+            return new DecodeEvictionDecision(deficit, null);
         }
         boolean localEvictionEnabled = preemption != null
                 && preemption.allows(VictimStage.DECODE_RESERVED);
         boolean engineCancelEnabled = preemption != null
-                && preemption.allows(VictimStage.DECODE_ENGINE_OWNED)
-                && channel != null && channel.isSupported(ep.endpoint());
+                && preemption.allows(VictimStage.DECODE_ENGINE_OWNED);
         DecodeEvictionProposal local = localEvictionEnabled
-                ? planDecodeOneOwnership(incomingPriority, hardKvTokens, expectedKvTokens, ep, deficit,
+                ? planDecodeOneOwnership(request, ep, deficit,
                         VictimOwnership.MASTER_LOCAL, failures) : null;
         DecodeEvictionProposal engine = engineCancelEnabled
-                ? planDecodeOneOwnership(incomingPriority, hardKvTokens, expectedKvTokens, ep, deficit,
+                ? planDecodeOneOwnership(request, ep, deficit,
                         VictimOwnership.ENGINE_CANCEL, failures) : null;
-        if (local == null) { return engine; }
-        if (engine == null) { return local; }
-        return DecodeEvictionProposal.ORDER.compare(local, engine) <= 0 ? local : engine;
+        DecodeEvictionProposal proposal = local == null ? engine : engine == null ? local
+                : DecodeEvictionProposal.ORDER.compare(local, engine) <= 0 ? local : engine;
+        return new DecodeEvictionDecision(deficit, proposal);
     }
 
+    /** Try each needed dimension, then combine disjoint prefixes when neither suffices. */
     private static DecodeEvictionProposal planDecodeOneOwnership(
-            int incomingPriority, long hardKvTokens, long expectedKvTokens, DecodeEndpointSnapshot ep, CapacityDeficit deficit,
+            RequestRequirements request, ResourceSnapshot ep, CapacityDeficit deficit,
             VictimOwnership ownership, Map<String, String> failures) {
-        if (deficit.requests() > 0L && deficit.needsKv()) {
-            return planDecodeCombined(incomingPriority, hardKvTokens, expectedKvTokens, ep, deficit, ownership, failures);
-        }
-        DecodeVictimSet set = deficit.requests() > 0L
-                ? selectSlotVictims(incomingPriority, ep, deficit.requests(), Set.of(), ownership)
-                : selectKvVictims(incomingPriority, hardKvTokens, expectedKvTokens, ep, CapacityRelease.NONE, Set.of(), ownership);
-        if (!set.ok()) {
-            failures.put(ep.endpointId(), set.failReason());
-            return null;
-        }
-        if (!ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, set.release()).fits()) {
-            failures.put(ep.endpointId(), "insufficient_releasable_capacity");
-            return null;
-        }
-        return buildDecodeProposal(ep, deficit.requests() > 0L
-                        ? DecodeEvictionProposal.CASE_SLOT : DecodeEvictionProposal.CASE_KV,
-                set.victims(), set.harmProfile(), set.weightedCost(), set.freedKvTokens());
-    }
-
-    /** Preserve the cost ordering while testing every proposal against all capacity dimensions. */
-    private static DecodeEvictionProposal planDecodeCombined(
-            int incomingPriority, long hardKvTokens, long expectedKvTokens, DecodeEndpointSnapshot ep, CapacityDeficit deficit,
-            VictimOwnership ownership, Map<String, String> failures) {
-        DecodeVictimSet slotOnly = selectSlotVictims(incomingPriority, ep, deficit.requests(), Set.of(), ownership);
-        DecodeEvictionProposal slotSide = slotOnly.ok()
-                && ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, slotOnly.release()).fits()
+        DecodeVictimSet slotOnly = deficit.requests() > 0L
+                ? selectVictims(request, ep, CapacityRelease.NONE, Set.of(), ownership, false) : null;
+        DecodeVictimSet kvOnly = deficit.needsKv()
+                ? selectVictims(request, ep, CapacityRelease.NONE, Set.of(), ownership, true) : null;
+        DecodeEvictionProposal slotSide = slotOnly != null && slotOnly.ok()
+                && request.capacity().evaluate(ep.routing().placementUsage(), request.hardKvTokens(),
+                        request.expectedKvTokens(), slotOnly.release()).fits()
                 ? buildDecodeProposal(ep, DecodeEvictionProposal.CASE_SLOT, slotOnly.victims(),
-                        slotOnly.harmProfile(), slotOnly.weightedCost(), slotOnly.freedKvTokens()) : null;
-        DecodeVictimSet kvOnly = selectKvVictims(incomingPriority, hardKvTokens, expectedKvTokens, ep, CapacityRelease.NONE, Set.of(), ownership);
-        DecodeEvictionProposal kvSide = kvOnly.ok()
-                && ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, kvOnly.release()).fits()
+                        slotOnly.harmProfile(), slotOnly.freedKvTokens()) : null;
+        DecodeEvictionProposal kvSide = kvOnly != null && kvOnly.ok()
+                && request.capacity().evaluate(ep.routing().placementUsage(), request.hardKvTokens(),
+                        request.expectedKvTokens(), kvOnly.release()).fits()
                 ? buildDecodeProposal(ep, DecodeEvictionProposal.CASE_KV, kvOnly.victims(),
-                        kvOnly.harmProfile(), kvOnly.weightedCost(), kvOnly.freedKvTokens()) : null;
+                        kvOnly.harmProfile(), kvOnly.freedKvTokens()) : null;
         if (slotSide != null || kvSide != null) {
             if (slotSide == null) { return kvSide; }
             if (kvSide == null) { return slotSide; }
             return DecodeEvictionProposal.ORDER.compare(slotSide, kvSide) <= 0 ? slotSide : kvSide;
         }
-
-        double slotPressure = (double) deficit.requests() / Math.max(1L, ep.capacity().maxEngineRequests());
-        double kvPressure = (double) deficit.kvTokens() / Math.max(1L,
-                ep.capacity().kvBudget(ep.usage().totalKvTokens()));
-        DecodeVictimSet first = kvPressure >= slotPressure ? kvOnly : slotOnly;
-        if (!first.ok()) {
-            failures.put(ep.endpointId(), first.failReason());
+        if (slotOnly == null || kvOnly == null) {
+            DecodeVictimSet only = slotOnly == null ? kvOnly : slotOnly;
+            failures.put(ep.routing().address(), only.ok() ? "insufficient_releasable_capacity" : only.failReason());
             return null;
         }
-        CapacityDeficit remaining = ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, first.release());
-        DecodeVictimSet second = kvPressure >= slotPressure
-                ? selectSlotVictims(incomingPriority, ep, remaining.requests(), victimIds(first.victims()), ownership)
-                : selectKvVictims(incomingPriority, hardKvTokens, expectedKvTokens, ep, first.release(), victimIds(first.victims()), ownership);
+
+        double slotPressure = (double) deficit.requests() / Math.max(1L, request.capacity().maxEngineRequests());
+        double kvPressure = (double) deficit.kvTokens() / Math.max(1L,
+                request.capacity().kvBudget(ep.routing().placementUsage().totalKvTokens()));
+        DecodeVictimSet first = kvPressure >= slotPressure ? kvOnly : slotOnly;
+        if (!first.ok()) {
+            failures.put(ep.routing().address(), first.failReason());
+            return null;
+        }
+        Set<Long> excluded = new java.util.HashSet<>(first.victims().size());
+        for (DecodeRequestView victim : first.victims()) {
+            excluded.add(victim.requestId());
+        }
+        DecodeVictimSet second = selectVictims(request,
+                ep, first.release(), excluded, ownership, kvPressure < slotPressure);
         if (!second.ok()) {
-            failures.put(ep.endpointId(), second.failReason());
+            failures.put(ep.routing().address(), second.failReason());
             return null;
         }
         CapacityRelease release = first.release().plus(second.release());
-        if (!ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, release).fits()) {
-            failures.put(ep.endpointId(), "insufficient_releasable_capacity");
+        if (!request.capacity().evaluate(ep.routing().placementUsage(),
+                request.hardKvTokens(), request.expectedKvTokens(), release).fits()) {
+            failures.put(ep.routing().address(), "insufficient_releasable_capacity");
             return null;
         }
         List<DecodeRequestView> victims = new ArrayList<>(first.victims());
         victims.addAll(second.victims());
         return buildDecodeProposal(ep, DecodeEvictionProposal.CASE_SLOT_AND_KV, victims,
                 first.harmProfile().plus(second.harmProfile()),
-                PriorityCostFunction.saturatedAdd(first.weightedCost(), second.weightedCost()),
                 release.hardKvTokens());
     }
 
-    private static DecodeVictimSet selectSlotVictims(
-            int incomingPriority, DecodeEndpointSnapshot ep, long deficit,
-            Set<Long> excludedVictimIds, VictimOwnership ownership) {
-        List<DecodeRequestView> candidates = lowerPriorityCandidates(
-                incomingPriority, ep, excludedVictimIds, false, ownership);
-        if (candidates.size() < deficit) {
+    /** Select an ordered prefix, stopping at the requested slot or hard/expected KV deficit. */
+    private static DecodeVictimSet selectVictims(
+            RequestRequirements request,
+            ResourceSnapshot ep, CapacityRelease priorRelease,
+            Set<Long> excludedVictimIds, VictimOwnership ownership, boolean reclaimKv) {
+        List<DecodeRequestView> candidates = new ArrayList<>();
+        for (DecodeRequestView entry : ep.requests().values()) {
+            boolean ownershipMatches = ownership == VictimOwnership.MASTER_LOCAL
+                    ? entry.phase().isMasterQueued() : entry.phase().requiresEngineCancel();
+            if (ownershipMatches && !entry.claimedForPreemption()
+                    && entry.priorityKnown() && PriorityNormalizer.hasPriority(entry.priority())
+                    && entry.priority() < request.priority()
+                    && !excludedVictimIds.contains(entry.requestId())
+                    && (!reclaimKv || entry.expectedKvTokens() > 0L)) {
+                candidates.add(entry);
+            }
+        }
+        long requiredSlots = request.capacity().evaluate(
+                ep.routing().placementUsage(), request.hardKvTokens(), request.expectedKvTokens(), priorRelease).requests();
+        if (!reclaimKv && candidates.size() < requiredSlots) {
             return DecodeVictimSet.fail("insufficient_lower_priority_candidates");
         }
-        candidates.sort(DECODE_SLOT_ORDER);
-        List<DecodeRequestView> victims = candidates.subList(0, (int) deficit);
-        long cost = 0L;
+        candidates.sort(reclaimKv ? DECODE_KV_ORDER : DECODE_SLOT_ORDER);
+        int limit = reclaimKv ? candidates.size() : (int) requiredSlots;
+        long caseWeight = reclaimKv ? PriorityCostFunction.H_DECODE_KV_FULL
+                : PriorityCostFunction.H_DECODE_SLOT_FULL;
         CapacityRelease release = CapacityRelease.NONE;
         PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
-        for (DecodeRequestView victim : victims) {
+        int selected = 0;
+        while (selected < limit) {
+            if (reclaimKv && !request.capacity().evaluate(ep.routing().placementUsage(), request.hardKvTokens(),
+                    request.expectedKvTokens(), priorRelease.plus(release)).needsKv()) { break; }
+            DecodeRequestView victim = candidates.get(selected++);
             long stageCost = PriorityCostFunction.g(victim.phase());
-            cost = PriorityCostFunction.saturatedAdd(cost, PriorityCostFunction.saturatedMultiply(
-                    PriorityCostFunction.f(victim.priority()), stageCost));
-            harmProfile.add(victim.priority(), BigInteger.valueOf(PriorityCostFunction.H_DECODE_SLOT_FULL)
-                    .multiply(BigInteger.valueOf(stageCost)));
+            long lengthCost = reclaimKv ? PriorityCostFunction.lengthWasteCost(victim.kvTokens()) : 1L;
+            harmProfile.add(victim.priority(), BigInteger.valueOf(caseWeight)
+                    .multiply(BigInteger.valueOf(stageCost)).multiply(BigInteger.valueOf(lengthCost)));
             release = release.plus(victim.placementRelease());
         }
-        return new DecodeVictimSet(victims, harmProfile.build(),
-                PriorityCostFunction.saturatedMultiply(PriorityCostFunction.H_DECODE_SLOT_FULL, cost),
+        if (reclaimKv && request.capacity().evaluate(ep.routing().placementUsage(), request.hardKvTokens(),
+                request.expectedKvTokens(), priorRelease.plus(release)).needsKv()) {
+            return DecodeVictimSet.fail("insufficient_releasable_kv");
+        }
+        return new DecodeVictimSet(candidates.subList(0, selected), harmProfile.build(),
                 release, null);
     }
 
-    /** Both physical prompt supply and the complete-output budget must be satisfied. */
-    private static DecodeVictimSet selectKvVictims(
-            int incomingPriority, long hardKvTokens, long expectedKvTokens, DecodeEndpointSnapshot ep, CapacityRelease priorRelease,
-            Set<Long> excludedVictimIds, VictimOwnership ownership) {
-        List<DecodeRequestView> candidates = lowerPriorityCandidates(
-                incomingPriority, ep, excludedVictimIds, true, ownership);
-        candidates.sort(DECODE_KV_ORDER);
-        List<DecodeRequestView> victims = new ArrayList<>();
-        long cost = 0L;
-        CapacityRelease release = CapacityRelease.NONE;
-        PriorityHarmProfile.Builder harmProfile = PriorityHarmProfile.builder();
-        for (DecodeRequestView candidate : candidates) {
-            if (!ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, priorRelease.plus(release)).needsKv()) { break; }
-            victims.add(candidate);
-            release = release.plus(candidate.placementRelease());
-            long stageCost = PriorityCostFunction.g(candidate.phase());
-            long lengthCost = PriorityCostFunction.lengthWasteCost(candidate.kvTokens());
-            long victimCost = PriorityCostFunction.saturatedMultiply(PriorityCostFunction.saturatedMultiply(
-                    PriorityCostFunction.f(candidate.priority()), stageCost), lengthCost);
-            cost = PriorityCostFunction.saturatedAdd(cost, victimCost);
-            harmProfile.add(candidate.priority(), BigInteger.valueOf(PriorityCostFunction.H_DECODE_KV_FULL)
-                    .multiply(BigInteger.valueOf(stageCost)).multiply(BigInteger.valueOf(lengthCost)));
-        }
-        if (ep.capacity().evaluate(ep.usage(), hardKvTokens, expectedKvTokens, priorRelease.plus(release)).needsKv()) {
-            return DecodeVictimSet.fail("insufficient_releasable_kv");
-        }
-        return new DecodeVictimSet(victims, harmProfile.build(),
-                PriorityCostFunction.saturatedMultiply(PriorityCostFunction.H_DECODE_KV_FULL, cost), release, null);
-    }
-
-    /**
-     * Only strictly lower-priority entries are candidates. The
-     * base pool is the reserved (engine-unconfirmed) entries; both confirmed
-     * layers join only when engine-owned eviction is enabled, with
-     * the same strict priority boundary. The stage comparator/cost makes
-     * {@code ACCEPTED_NOT_RUNNING} cheaper than {@code RUNNING}.
-     * Priority-neutral entries (priority 0) never qualify.
-     * Placement counts queued reservations as well as Engine-facing owners;
-     * either ownership class releases its placement request charge.
-     */
-    private static List<DecodeRequestView> lowerPriorityCandidates(int incomingPriority,
-                                                                       DecodeEndpointSnapshot ep,
-                                                                       Set<Long> excludedVictimIds,
-                                                                       boolean releasableKvOnly,
-                                                                       VictimOwnership ownership) {
-        List<DecodeRequestView> candidates = new ArrayList<>();
-        for (DecodeRequestView entry : ep.reserved()) {
-            boolean ownershipMatches = ownership == VictimOwnership.MASTER_LOCAL
-                    ? entry.phase().isMasterQueued()
-                    : entry.phase() == DecodeTaskPhase.ENGINE_MAY_HAVE_SEEN;
-            if (ownershipMatches
-                    && entry.priorityKnown()
-                    && PriorityNormalizer.hasPriority(entry.priority())
-                    && entry.priority() < incomingPriority
-                    && !excludedVictimIds.contains(entry.requestId())
-                    && (!releasableKvOnly || entry.placementRelease().expectedKvTokens() > 0L)) {
-                candidates.add(entry);
-            }
-        }
-        if (ownership == VictimOwnership.ENGINE_CANCEL) {
-            addConfirmedCandidates(candidates, ep.accepted(), incomingPriority,
-                    excludedVictimIds, releasableKvOnly);
-            addConfirmedCandidates(candidates, ep.running(), incomingPriority,
-                    excludedVictimIds, releasableKvOnly);
-        }
-        return candidates;
-    }
-
-    private static void addConfirmedCandidates(List<DecodeRequestView> candidates,
-                                               List<DecodeRequestView> entries,
-                                               int incomingPriority,
-                                               Set<Long> excludedVictimIds,
-                                               boolean releasableKvOnly) {
-        for (DecodeRequestView entry : entries) {
-            if (entry.phase().isEngineConfirmed()
-                    && entry.priorityKnown()
-                    && PriorityNormalizer.hasPriority(entry.priority())
-                    && entry.priority() < incomingPriority
-                    && !excludedVictimIds.contains(entry.requestId())
-                    && (!releasableKvOnly || entry.placementRelease().expectedKvTokens() > 0L)) {
-                candidates.add(entry);
-            }
-        }
-    }
-
-    private static Set<Long> victimIds(List<DecodeRequestView> victims) {
-        Set<Long> ids = new java.util.HashSet<>(victims.size());
-        for (DecodeRequestView victim : victims) {
-            ids.add(victim.requestId());
-        }
-        return ids;
-    }
-
-    private static DecodeEvictionProposal buildDecodeProposal(DecodeEndpointSnapshot ep,
+    private static DecodeEvictionProposal buildDecodeProposal(ResourceSnapshot ep,
                                                               String evictionCase,
                                                               List<DecodeRequestView> victims,
                                                               PriorityHarmProfile harmProfile,
-                                                              long totalCost,
                                                               long freedKvTokens) {
         long tieBreak = Long.MAX_VALUE;
         for (DecodeRequestView victim : victims) {
             tieBreak = Math.min(tieBreak, victim.requestId());
         }
-        PlanCost cost = new PlanCost(
-                harmProfile, victims.size(), tieBreak);
-        return new DecodeEvictionProposal(ep.endpointId(),
-                victims, evictionCase, totalCost, freedKvTokens, cost);
+        return new DecodeEvictionProposal(ep.routing().address(),
+                victims, evictionCase, freedKvTokens, harmProfile, tieBreak);
     }
 
     /**
@@ -338,12 +234,11 @@ public final class EvictionPlanner {
      */
     private record DecodeVictimSet(List<DecodeRequestView> victims,
                                    PriorityHarmProfile harmProfile,
-                                   long weightedCost,
                                    CapacityRelease release,
                                    String failReason) {
 
         static DecodeVictimSet fail(String reason) {
-            return new DecodeVictimSet(null, PriorityHarmProfile.empty(), 0, CapacityRelease.NONE, reason);
+            return new DecodeVictimSet(null, PriorityHarmProfile.empty(), CapacityRelease.NONE, reason);
         }
 
         long freedKvTokens() { return release.hardKvTokens(); }

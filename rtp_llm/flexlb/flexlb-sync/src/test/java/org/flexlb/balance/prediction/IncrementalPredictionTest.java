@@ -1,13 +1,15 @@
 package org.flexlb.balance.prediction;
 
+import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
+
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -17,7 +19,9 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Executors;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 class IncrementalPredictionTest {
@@ -64,15 +68,15 @@ class IncrementalPredictionTest {
             else source.add(random.nextInt(source.size() + 1), item(1000 + round, 1000, 0, 100_000));
             if (round % 5 == 0) java.util.Collections.reverse(source);
             var constraints = new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700);
-            var full = GroupPlanner.select(source, GroupPlanner.itemAccess(), constraints,
-                    items -> model.predictBatchMs(PrefillBatchFeatures.from(items,
+            var full = GroupPlanner.selectWithPrediction(source, constraints,
+                    (added, items) -> model.predictBatchMs(PrefillBatchFeatures.from(items,
                             GroupPlanner.Item::seqLen, GroupPlanner.Item::hitCache)));
             var batch = model.newBatchPrediction();
-            var incremental = GroupPlanner.selectWithPrediction(source, GroupPlanner.itemAccess(), constraints,
+            var incremental = GroupPlanner.selectWithPrediction(source, constraints,
                     (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
             assertEquals(full, incremental);
-            assertEquals(GroupPlanner.evaluateReadiness(full, constraints, 2000),
-                    GroupPlanner.evaluateReadiness(incremental, constraints, 2000));
+            assertEquals(GroupPlanner.dispatchReason(full, constraints, 2000),
+                    GroupPlanner.dispatchReason(incremental, constraints, 2000));
         }
         var oldSession = model.newBatchPrediction();
         var replacement = new FormulaPredictor("42");
@@ -82,9 +86,7 @@ class IncrementalPredictionTest {
     @Test
     void projectionMatchesFullEvaluationAcrossExpiryPriorityAndProbePositions() throws Exception {
         var model = new FormulaPredictor(formula());
-        var policy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+        var policy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class)).projectionPolicy();
         var full = new PrefillTimePredictor.Evaluator() {
             public long estimateMs(long t, long h) { return model.estimateMs(t, h); }
             public double predictBatchMs(PrefillBatchFeatures f) { return model.predictBatchMs(f); }
@@ -99,13 +101,13 @@ class IncrementalPredictionTest {
                         i % 7 == 0 ? 500 : i % 11 == 0 ? 1100 : 100_000));
             }
             items.sort(order);
-            var queue = new QueueSnapshot(1000, true, order,
+            var queue = new QueueSnapshot(1000, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, order,
                     new GroupPlanner.Constraints(64, 200_000, 300_000, 700, 700), items, null);
-            var inputs = new RouteProjection.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0));
-            var probe = new RouteProjection.Probe(999, trial % 5, 1000, 100_000,
+            var inputs = new RouteProjection.Inputs(queue, new WorkSnapshot(1000, List.of(), List.of(), 0), 0L);
+            var probe = new RouteProjectionTestSupport.Probe(999, trial % 5, 1000, 100_000,
                     1 + random.nextInt(32768), 0, 0);
-            assertEquals(RouteProjection.project(inputs, probe, full, policy),
-                    RouteProjection.project(inputs, probe, model, policy));
+            assertEquals(RouteProjectionTestSupport.project(inputs, probe, full, policy),
+                    RouteProjectionTestSupport.project(inputs, probe, model, policy));
         }
     }
 
@@ -142,21 +144,15 @@ class IncrementalPredictionTest {
                 return (t, h) -> ++count[0] * 250.25;
             }
         };
-        var strategy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class));
-        var items = new ArrayList<org.flexlb.balance.scheduler.ScheduledRequest>();
+        var strategy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class));
+        var items = new ArrayList<org.flexlb.balance.scheduler.RequestRoute>();
         for (int i = 0; i < 4; i++) {
-            var request = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
+            var request = mock(org.flexlb.balance.scheduler.RequestRoute.class);
             org.mockito.Mockito.when(request.seqLen()).thenReturn(100L);
             org.mockito.Mockito.when(request.hitCache()).thenReturn(0L);
             items.add(request);
         }
-        var access = new GroupPlanner.ItemAccess<org.flexlb.balance.scheduler.ScheduledRequest>() {
-            public long seqLen(org.flexlb.balance.scheduler.ScheduledRequest r) { return r.seqLen(); }
-            public long enqueuedAtMs(org.flexlb.balance.scheduler.ScheduledRequest r) { return 0; }
-        };
-        var selected = GroupPlanner.selectWithPrediction(items, access,
+        var selected = GroupPlanner.selectWithPrediction(items,
                 new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
                 strategy.newGroupPredictor(evaluator));
         assertEquals(items.subList(0, 2), selected.items());
@@ -165,23 +161,22 @@ class IncrementalPredictionTest {
                 selected.selectedPredictionMs().orElseThrow()));
         assertTrue(selected.predictionBoundaryTriggered());
         // A second snapshot must receive fresh accumulation state.
-        assertEquals(selected, GroupPlanner.selectWithPrediction(items, access,
+        assertEquals(selected, GroupPlanner.selectWithPrediction(items,
                 new GroupPlanner.Constraints(64, 100_000, 100_000, 700, 700),
                 strategy.newGroupPredictor(evaluator)));
     }
 
     @Test
     void serviceReusesOnlyEvaluatedPrefixesFromItsOwnPlanningCursor() {
-        var strategy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class));
+        var strategy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class));
         int[] fullCalls = {0};
         var predictions = new RouteProjection.Predictions() {
             public long itemDurationMs(GroupPlanner.Item i) { return 100; }
-            public double batchPlanningDurationMs(List<GroupPlanner.Item> items) { return items.size() * 100.25; }
+            public long itemDurationMs(long seqLen, long hitCache) { throw new AssertionError("prefix test must not predict a singleton"); }
+            public long singletonBatchDurationMs(long seqLen, long hitCache) { throw new AssertionError("prefix test must not predict a singleton"); }
             public long batchDurationMs(List<GroupPlanner.Item> items) {
                 fullCalls[0]++;
-                return PrefillPredictionBoundary.committedDecisionGroupMs(batchPlanningDurationMs(items));
+                return PrefillPredictionBoundary.committedDecisionGroupMs(items.size() * 100.25);
             }
             public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
                 int[] size = {0};
@@ -192,31 +187,26 @@ class IncrementalPredictionTest {
         var policy = strategy.projectionPolicy();
         var cursor = policy.planning(predictions);
         assertEquals(200.5, cursor.durationMs(items, 1)); // only through probe, not suffix
-        var plan = new GroupPlanner.Plan<>(items, new GroupPlanner.Shape(3, 300, 100, 100),
-                1000, 1700, false, java.util.OptionalDouble.of(200.5), GroupPlanner.BATCH_FULL);
-        var service = policy.service(plan, predictions, cursor);
-        assertEquals(201, service.completionOffsetMs(1));
+        assertEquals(201, policy.completionOffsetMs(items, 1, predictions, cursor));
         assertEquals(0, fullCalls[0]);
-        assertEquals(301, service.totalDurationMs()); // must not mistake P2 for P3
+        assertEquals(301, policy.completionOffsetMs(items, items.size() - 1, predictions, cursor)); // must not mistake P2 for P3
         assertEquals(1, fullCalls[0]);
-        var independent = policy.service(plan, predictions);
-        assertEquals(301, independent.totalDurationMs());
+        assertEquals(301, policy.completionOffsetMs(items, items.size() - 1, predictions, null));
         assertEquals(2, fullCalls[0]);
     }
 
     @Test
     void appendCursorKeepsLatestAndOvershootPredecessorAndRecomputesOlderPrefixes() {
-        var policy = new BatchDeliveryStrategy(
-                () -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+        var policy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class)).projectionPolicy();
         int[] appended = {0};
         int[] recomputed = {0};
         var predictions = new RouteProjection.Predictions() {
             public long itemDurationMs(GroupPlanner.Item item) { return 11; }
-            public double batchPlanningDurationMs(List<GroupPlanner.Item> items) { return items.size() * 10.25; }
+            public long itemDurationMs(long seqLen, long hitCache) { throw new AssertionError("prefix test must not predict a singleton"); }
+            public long singletonBatchDurationMs(long seqLen, long hitCache) { throw new AssertionError("prefix test must not predict a singleton"); }
             public long batchDurationMs(List<GroupPlanner.Item> items) {
                 recomputed[0]++;
-                return (long) Math.ceil(batchPlanningDurationMs(items));
+                return (long) Math.ceil(items.size() * 10.25);
             }
             public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
                 return (tokens, hit) -> ++appended[0] * 10.25;
@@ -234,9 +224,7 @@ class IncrementalPredictionTest {
         assertTrue(cursor.predictedPrefixMs(0).isEmpty());
         assertTrue(cursor.predictedPrefixMs(5).isEmpty());
         var selected = items.subList(0, 2);
-        var plan = new GroupPlanner.Plan<>(selected, new GroupPlanner.Shape(2, 100, 200, 200),
-                1000, 1000, false, java.util.OptionalDouble.empty(), GroupPlanner.BATCH_FULL);
-        assertEquals(21, policy.service(plan, predictions, cursor).totalDurationMs());
+        assertEquals(21, policy.completionOffsetMs(selected, selected.size() - 1, predictions, cursor));
         assertEquals(1, recomputed[0]);
     }
 

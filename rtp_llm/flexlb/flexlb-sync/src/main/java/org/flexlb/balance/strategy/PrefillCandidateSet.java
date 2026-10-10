@@ -5,6 +5,8 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Arrays;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Reusable columns for modeled Prefill candidates from one fleet snapshot. */
 final class PrefillCandidateSet {
 
@@ -36,9 +38,8 @@ final class PrefillCandidateSet {
     void addCandidate(String address, PrefillEndpoint endpoint,
                       RouteProjection.CandidateView candidate,
                       long ownershipVersion) {
-        if (!candidate.selectable() && !candidate.engineWorkUnmodeled()) {
-            throw new IllegalArgumentException("candidate requires available capacity");
-        }
+        checkArgument(candidate.selectable() || candidate.engineWorkUnmodeled(),
+                "candidate requires available capacity");
         ensureCapacity(size + 1);
         endpointAddresses[size] = address;
         endpoints[size] = endpoint;

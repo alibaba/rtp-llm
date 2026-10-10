@@ -545,6 +545,103 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
 
+TEST_F(PrefillCompletionRpcTest, UnscheduledCancellationReleasesKvBeforePublishingTerminalEvidence) {
+    auto cache = std::make_shared<KVCacheManager>(
+        test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
+    ASSERT_TRUE(cache->init());
+    ResourceContext resources;
+    resources.cache_manager = cache;
+    resources.role_type = RoleType::DECODE;
+    auto input = std::make_shared<GenerateInput>();
+    input->request_id = 142;
+    input->begin_time_us = currentTimeUs();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+    ModelConfig config;
+    config.max_seq_len = 16;
+    auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeRpcContext rpc_context{nullptr};
+    grpc::ServerContext server_context;
+    kmonitor::MetricsReporterPtr reporter;
+    {
+        DecodeGenerateContext context(rpc_context, 0, &server_context, reporter, meta);
+        context.request_id = input->request_id;
+        context.setStream(stream);
+        context.error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel before enqueue");
+        context.finishUnscheduledStream();
+        context.stopStream();
+        EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+        EXPECT_EQ(stream->stream_cache_resource_->curBlocksNum(), 0);
+        EXPECT_TRUE(meta->getEngineScheduleInfo(-1).running_task_info_list.empty());
+    }
+    EXPECT_EQ(stream->getStatus(), StreamState::FINISHED);
+    EXPECT_TRUE(stream->hasError());
+}
+
+TEST_F(PrefillCompletionRpcTest, EnqueuedFailureWaitsForResourceEvidenceWithoutBlockingRpc) {
+    auto cache = std::make_shared<KVCacheManager>(
+        test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
+    ASSERT_TRUE(cache->init());
+    ResourceContext resources;
+    resources.cache_manager = cache;
+    resources.role_type = RoleType::DECODE;
+    auto input = std::make_shared<GenerateInput>();
+    input->request_id = 143;
+    input->begin_time_us = currentTimeUs();
+    input->generate_config = std::make_shared<GenerateConfig>();
+    input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+    ModelConfig config;
+    config.max_seq_len = 16;
+    auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
+    ASSERT_TRUE(stream->initKVBlock().ok());
+    ASSERT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
+    auto meta = std::make_shared<RpcServerRuntimeMeta>();
+    DecodeRpcServer server;
+    server.meta_ = meta;
+    DecodeRpcContext rpc_context{nullptr};
+    grpc::ServerContext server_context;
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext context(rpc_context, 0, &server_context, reporter, meta);
+    context.request_id = input->request_id;
+    context.setStream(stream);
+    context.stream_enqueued = true;
+    stream->incPendingAsyncBookkeeping();
+
+    const auto begin = std::chrono::steady_clock::now();
+    server.reportEarlyFinishTask(context, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION),
+                                "decode execution failed");
+    EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count(),
+              500);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    auto info = meta->getEngineScheduleInfo(-1);
+    EXPECT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_TRUE(info.finished_task_info_list.empty());
+
+    // The scheduler commits FINISHED, but a captured worker still owns the KV blocks.
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    EXPECT_FALSE(stream->stream_cache_resource_->isResourceReleased());
+    info = meta->getEngineScheduleInfo(-1);
+    EXPECT_EQ(info.running_task_info_list.size(), 1);
+    EXPECT_TRUE(info.finished_task_info_list.empty());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+
+    info = meta->getEngineScheduleInfo(-1);
+    EXPECT_TRUE(stream->stream_cache_resource_->isResourceReleased());
+    EXPECT_EQ(stream->stream_cache_resource_->curBlocksNum(), 0);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION));
+    EXPECT_NE(info.finished_task_info_list.front().error_message.find("decode execution failed"), std::string::npos);
+    server.reportEarlyFinishTask(context, static_cast<int64_t>(ErrorCode::CANCELLED), "late duplicate");
+    EXPECT_TRUE(meta->getEngineScheduleInfo(info.latest_finished_version).finished_task_info_list.empty());
+    EXPECT_EQ(meta->getEngineScheduleInfo(-1).finished_task_info_list.size(), 1);
+    context.markRpcHandlingCompleted();
+}
+
 TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
     class CompletionService final: public RpcService::Service {
     public:
@@ -552,9 +649,6 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             DecodeRpcContext             rpc_context{rpc_stream};
             kmonitor::MetricsReporterPtr reporter;
             auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
-            DecodeGenerateContext        context(rpc_context, 0, server_context, reporter, meta);
-            context.request_id = 42;
-            context.allocate_request.set_client_id("prefill");
             auto cache = std::make_shared<KVCacheManager>(
                 test::makeSimpleMhaCacheConfig(1, 8, 2, DataType::TYPE_FP16), false, nullptr);
             EXPECT_TRUE(cache->init());
@@ -571,35 +665,44 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             auto stream = std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, resources, nullptr);
             EXPECT_TRUE(stream->initKVBlock().ok());
             EXPECT_GT(stream->stream_cache_resource_->curBlocksNum(), 0);
-            if (running) {
-                stream->generate_status_->status.store(StreamState::RUNNING);
+            {
+                DecodeGenerateContext context(rpc_context, 0, server_context, reporter, meta);
+                context.request_id = 42;
+                context.allocate_request.set_client_id("prefill");
+                if (running) {
+                    stream->generate_status_->status.store(StreamState::RUNNING);
+                }
+                context.setStream(stream);
+                if (expired) {
+                    context.request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
+                }
+                if (stream_error) {
+                    stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
+                }
+                DecodeRpcServer server;
+                server.localGenerate(context);
+                status                  = context.error_status;
+                finished                = stream->isFinished();
+                had_error               = stream->hasError();
+                resource_released       = stream->stream_cache_resource_->isResourceReleased();
+                blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
+                const auto timing       = stream->getTimeInfo();
+                executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+                RpcMetricsCollector metrics;
+                context.collectBasicMetrics(metrics);
+                error_qps = metrics.error_qps;
+                if (running) {
+                    // This fixture has no scheduler to drain the deliberately invalid running stream.
+                    stream->reportError(ErrorCode::CANCELLED, "test cleanup");
+                    stream->moveToNext();
+                }
+                // Match RemoteGenerate: complete the handler before derived-context
+                // teardown settles streams that never reached the engine scheduler.
+                context.markRpcHandlingCompleted();
             }
-            context.setStream(stream);
-            if (expired) {
-                context.request_deadline = std::chrono::system_clock::now() - std::chrono::seconds(1);
-            }
-            if (stream_error) {
-                stream->reportError(ErrorCode::MALLOC_FAILED, "test allocation failure");
-            }
-            DecodeRpcServer server;
-            server.localGenerate(context);
-            status                  = context.error_status;
-            finished                = stream->isFinished();
-            had_error               = stream->hasError();
-            resource_released       = stream->stream_cache_resource_->isResourceReleased();
-            blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
-            RpcMetricsCollector metrics;
-            context.collectBasicMetrics(metrics);
-            error_qps = metrics.error_qps;
-            if (running) {
-                // This fixture has no scheduler to drain the deliberately invalid running stream.
-                stream->reportError(ErrorCode::CANCELLED, "test cleanup");
-                stream->moveToNext();
-            }
-            context.stopStream();
             error_after_cleanup = stream->hasError();
+            resource_released_after_cleanup = stream->stream_cache_resource_->isResourceReleased();
+            blocks_after_cleanup = stream->stream_cache_resource_->curBlocksNum();
             remaining_requests  = meta->getEngineScheduleInfo(-1).running_task_info_list.size();
             return status;
         }
@@ -609,6 +712,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         grpc::Status status;
         bool         finished = false, had_error = false, resource_released = false;
         bool         executed = false, error_qps = false, error_after_cleanup = false;
+        bool         resource_released_after_cleanup = false;
+        size_t       blocks_after_cleanup = 1;
         size_t       remaining_requests      = 1;
         size_t       blocks_after_completion = 1;
     };
@@ -643,6 +748,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
         server->Shutdown();
         server->Wait();
         EXPECT_EQ(service.remaining_requests, 0u);
+        EXPECT_TRUE(service.resource_released_after_cleanup);
+        EXPECT_EQ(service.blocks_after_cleanup, 0u);
         EXPECT_FALSE(service.executed);
         if (mode == "complete") {
             EXPECT_TRUE(status.ok());

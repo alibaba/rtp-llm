@@ -69,7 +69,7 @@ class FlexlbConfigSchedulingModeTest {
                 }
                 """);
 
-        DecisionPolicyConfig decision = config.fixedWindowDecision();
+        DecisionPolicyConfig decision = config.decisionPolicy();
         assertEquals(4, decision.getMaxRequests());
         assertEquals(25L, decision.getMaxCollectionWaitMs());
         assertEquals(80L, decision.getMaxPredictedExecutionMs().longValue());
@@ -84,9 +84,9 @@ class FlexlbConfigSchedulingModeTest {
                 }
                 """);
         assertTrue(batch.isFixedWindowDecision());
-        assertEquals(8, batch.fixedWindowDecision().getMaxRequests());
-        assertEquals(300L, batch.fixedWindowDecision().getMaxCollectionWaitMs());
-        assertNull(batch.fixedWindowDecision().getMaxPredictedExecutionMs());
+        assertEquals(8, batch.decisionPolicy().getMaxRequests());
+        assertEquals(300L, batch.decisionPolicy().getMaxCollectionWaitMs());
+        assertNull(batch.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(2, batch.getDispatcher().getMaxInflightPerPrefillWorker());
 
         FlexlbConfig nonBatchDefault = ConfigTestFixtures.parse("""
@@ -122,8 +122,8 @@ class FlexlbConfigSchedulingModeTest {
                 }
                 """);
 
-        assertEquals(4096, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(4096, config.fixedWindowDecision().resolveMaxRequests());
+        assertEquals(4096, config.decisionPolicy().getMaxRequests());
+        assertEquals(4096, config.decisionPolicy().resolveMaxRequests());
     }
 
     @Test

@@ -10,10 +10,6 @@ import java.util.Objects;
  */
 public record PlacementKey(RoleType role, String group, String endpoint) {
 
-    public PlacementKey(RoleType role, String group) {
-        this(role, group, null);
-    }
-
     public PlacementKey {
         Objects.requireNonNull(role, "role");
         if (group != null && group.isBlank()) {
@@ -24,8 +20,13 @@ public record PlacementKey(RoleType role, String group, String endpoint) {
         }
     }
 
+    /** Exact waiters follow role/address across changes to the endpoint's group. */
+    PlacementKey capacityDomain() {
+        return endpoint() == null || group() == null ? this : exact(role(), null, endpoint());
+    }
+
     public static PlacementKey anyGroup(RoleType role) {
-        return new PlacementKey(role, null);
+        return new PlacementKey(role, null, null);
     }
 
     public static PlacementKey exact(

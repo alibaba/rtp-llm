@@ -34,6 +34,12 @@ final class MockEngineTestSupport {
     private MockEngineTestSupport() {
     }
 
+    static boolean isReserved(org.flexlb.balance.endpoint.DecodeResources.ResourceSnapshot snapshot,
+                              long requestId) {
+        var request = snapshot.requests().get(requestId);
+        return request != null && !request.phase().isEngineConfirmed();
+    }
+
     static EngineRpcService.GenerateInputPB input(long requestId, int inputTokens) {
         return input(requestId, inputTokens, 1, null);
     }

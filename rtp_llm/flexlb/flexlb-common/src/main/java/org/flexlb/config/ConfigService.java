@@ -13,6 +13,8 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Loads the single, strict FLEXLB_CONFIG JSON document. */
 @Slf4j
 @Component
@@ -148,9 +150,7 @@ public class ConfigService {
     }
 
     public synchronized void updateTrafficPolicy(TrafficPolicyConfig groupSelector) {
-        if (groupSelector == null) {
-            throw new IllegalArgumentException("groupSelector cannot be null");
-        }
+        checkArgument(groupSelector != null, "groupSelector cannot be null");
         TrafficPolicyConfig.validate(groupSelector);
         flexlbConfig.getRouter().setGroupSelector(groupSelector);
         log.info("Group selector updated: rules={}", groupSelector.getRules().size());

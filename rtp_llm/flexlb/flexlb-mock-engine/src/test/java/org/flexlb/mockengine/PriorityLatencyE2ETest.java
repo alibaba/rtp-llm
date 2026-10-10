@@ -36,10 +36,12 @@ class PriorityLatencyE2ETest {
     @Test
     @Timeout(90)
     void b_high_priority_dispatches_earlier_under_saturation() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false)) {
-            // hold：批次上限大于总量 + 长 fixedWait → 零派发，队列稳定吸收提交
-            h.fixedWindowDecision().setMaxRequests(200);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxRequests(2);
+        decision.setMaxCollectionWaitMs(5);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, decision)) {
+            // Hold dispatch capacity while collecting the priority queue.
+            h.pauseDelivery();
             // This case measures Prefill priority ordering, not Decode KV
             // admission. Use the large fixture KV pool without a percentage
             // reserve so every request reaches the queue under test.
@@ -62,16 +64,18 @@ class PriorityLatencyE2ETest {
             }
             int total = PER_PRIORITY * PRIORITIES.length;
             assertEquals(total, futures.size());
+            // The aggregate count spans two queues and may double-count a route during handoff.
+            // Wait for the actual held endpoint queue, not an intermediate aggregate of 150.
             AutoTpmE2EHarness.await(
-                    () -> h.scheduler.getQueuedRequestCount() == total,
+                    () -> h.prefillEndpoint(0).queuedRequestCount() == total
+                            && h.requests.pendingDeliveryRequestCount() == total,
                     10_000,
-                    "all requests must be committed into the scheduler queue");
-            assertEquals(total, h.scheduler.getQueuedRequestCount(),
-                    "all requests must be committed into the global priority queue before release");
+                    "all requests must reach the endpoint priority queue before release");
+            assertEquals(total, h.requests.pendingDeliveryRequestCount(),
+                    "all requests must be committed into the endpoint priority queue before release");
 
-            // flip：小批次 + 短 fixedWait 放行派发，持续饱和下由优先级序主导
-            h.fixedWindowDecision().setMaxRequests(2);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
+            // Release the transport capacity without changing frozen queue settings.
+            h.resumeDelivery();
             h.startAutoPump(10);
 
             AutoTpmE2EHarness.await(
@@ -87,7 +91,7 @@ class PriorityLatencyE2ETest {
                         "no eviction switches on — every request must succeed, got "
                                 + response.getCode() + ": " + response.getErrorMessage()
                                 + ", arrivals=" + h.engineArrivalOrder.size()
-                                + ", queued=" + h.scheduler.getQueuedRequestCount()
+                                + ", queued=" + h.requests.pendingDeliveryRequestCount()
                                 + ", prefillWork=" + h.prefillEndpoint(0).captureRouteProjectionInputs().work()
                                 + ", decode=" + h.decodeEndpoint(0).resourceSnapshot());
             }

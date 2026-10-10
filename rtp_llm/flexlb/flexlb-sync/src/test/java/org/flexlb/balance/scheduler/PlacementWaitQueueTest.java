@@ -103,7 +103,7 @@ class PlacementWaitQueueTest {
         queue.park(second, A, 0);
         queue.capacityChanged(A);
         assertEquals(List.of(first), drain(1));
-        availability.capacityChanged(A);
+        availability.changed(A);
         queue.capacityChanged(A);
         assertTrue(drain(10).isEmpty(), "another edge cannot create two active retries");
         assertFalse(queue.park(first, A, 0), "the owner must retry the raced placement");
@@ -120,7 +120,7 @@ class PlacementWaitQueueTest {
         var decode = entry(50);
         queue.park(exact, A, 0);
         queue.park(other, B, 0);
-        queue.park(group, new PlacementKey(RoleType.PREFILL, "g"), 0);
+        queue.park(group, new PlacementKey(RoleType.PREFILL, "g", null), 0);
         queue.park(wildcard, PlacementKey.anyGroup(RoleType.PREFILL), 0);
         queue.park(decode, PlacementKey.exact(RoleType.DECODE, "g", "a:8000"), 0);
         queue.capacityChanged(A);
@@ -133,7 +133,7 @@ class PlacementWaitQueueTest {
     void groupEventDoesNotWakeExactEndpointWaiters() {
         var exact = entry(50);
         queue.park(exact, A, 0);
-        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g"));
+        queue.capacityChanged(new PlacementKey(RoleType.PREFILL, "g", null));
         assertTrue(drain(10).isEmpty());
     }
 
@@ -168,9 +168,9 @@ class PlacementWaitQueueTest {
     @Test
     void edgeDuringPlanningRequiresRetryInsteadOfSleeping() {
         long snapshot = availability.sequence();
-        availability.capacityChanged(A);
+        availability.changed(A);
         assertFalse(queue.park(entry(50), A, snapshot));
-        assertFalse(queue.park(entry(50), new PlacementKey(RoleType.PREFILL, "g"), snapshot));
+        assertFalse(queue.park(entry(50), new PlacementKey(RoleType.PREFILL, "g", null), snapshot));
         assertFalse(queue.park(entry(50), PlacementKey.anyGroup(RoleType.PREFILL), snapshot));
         assertTrue(queue.park(entry(50), B, snapshot));
         assertTrue(queue.park(entry(50), A, availability.sequence()));
@@ -184,7 +184,7 @@ class PlacementWaitQueueTest {
         queue.capacityChanged(replacement);
         assertEquals(List.of(first), drain(1));
         long snapshot = availability.sequence();
-        availability.topologyChanged(replacement);
+        availability.changed(replacement);
         assertFalse(queue.park(first, A, snapshot));
     }
 
@@ -192,7 +192,7 @@ class PlacementWaitQueueTest {
     void completionWithDelayedCallbackStillGetsCleanupOpportunity() {
         var first = entry(50);
         queue.park(first, A, 0);
-        first.future.complete(null);
+        first.context.getFuture().complete(null);
         queue.capacityChanged(A);
         assertEquals(List.of(first), drain(1), "the owner must remove completed nodes from the ordered queue");
         assertFalse(queue.isWaiting(first));
@@ -212,8 +212,67 @@ class PlacementWaitQueueTest {
         assertFalse(queue.isWaiting(second));
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("capacityEventCases")
+    void allCapacityScopesMatchBothBeforeAndAfterParking(String scope, String eventKind, boolean beforePark, boolean matches) {
+        PlacementKey blocker = switch (scope) {
+            case "EXACT" -> A;
+            case "GROUP" -> new PlacementKey(RoleType.PREFILL, "g", null);
+            case "ROLE" -> PlacementKey.anyGroup(RoleType.PREFILL);
+            default -> throw new AssertionError(scope);
+        };
+        PlacementKey event = switch (eventKind) {
+            case "SAME" -> A;
+            case "OTHER_ADDRESS" -> B;
+            case "MOVED_GROUP" -> PlacementKey.exact(RoleType.PREFILL, "other", A.endpoint());
+            case "GROUP_ONLY" -> new PlacementKey(RoleType.PREFILL, "g", null);
+            case "ROLE_ONLY" -> PlacementKey.anyGroup(RoleType.PREFILL);
+            case "OTHER_ROLE" -> PlacementKey.exact(RoleType.DECODE, "g", A.endpoint());
+            default -> throw new AssertionError(eventKind);
+        };
+        var request = entry(50);
+        long observed = availability.sequence();
+        if (beforePark) {
+            availability.changed(event);
+            queue.capacityChanged(event);
+            assertEquals(!matches, queue.park(request, blocker, observed));
+            assertEquals(!matches, queue.isWaiting(request));
+            assertTrue(drain(1).isEmpty(), "a pre-park edge is represented as immediate replan, not a duplicate wakeup");
+        } else {
+            assertTrue(queue.park(request, blocker, observed));
+            availability.changed(event);
+            queue.capacityChanged(event);
+            assertEquals(matches ? List.of(request) : List.of(), drain(1));
+            assertEquals(!matches, queue.isWaiting(request));
+            assertTrue(drain(1).isEmpty(), "one capacity edge cannot issue the same attempt twice");
+        }
+        queue.remove(request);
+        assertFalse(queue.isWaiting(request));
+        assertTrue(drain(1).isEmpty());
+    }
+
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> capacityEventCases() {
+        return java.util.stream.Stream.of("EXACT", "GROUP", "ROLE").flatMap(scope ->
+                java.util.stream.Stream.of("SAME", "OTHER_ADDRESS", "MOVED_GROUP", "GROUP_ONLY", "ROLE_ONLY", "OTHER_ROLE")
+                        .flatMap(event -> java.util.stream.Stream.of(false, true).map(before -> {
+                            boolean matches = switch (scope) {
+                                case "EXACT" -> event.equals("SAME") || event.equals("MOVED_GROUP");
+                                case "GROUP" -> event.equals("SAME") || event.equals("OTHER_ADDRESS") || event.equals("GROUP_ONLY");
+                                case "ROLE" -> !event.equals("OTHER_ROLE");
+                                default -> throw new AssertionError(scope);
+                            };
+                            return org.junit.jupiter.params.provider.Arguments.of(scope, event, before, matches);
+                        })));
+    }
+
     private GlobalQueueEntry entry(int priority) {
-        var entry = new GlobalQueueEntry(null, new CompletableFuture<>(), priority);
+        var context = new RequestContext(SchedulingTestConfig.newConfig());
+        context.setFuture(new CompletableFuture<>());
+        var request = new org.flexlb.dao.loadbalance.Request();
+        request.setPriority(priority);
+        context.setRequest(request);
+        SchedulingTestConfig.freezeInputs(context);
+        var entry = new GlobalQueueEntry(context, null);
         entry.sequence = ++sequence;
         return entry;
     }

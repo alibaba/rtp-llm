@@ -1,16 +1,10 @@
 package org.flexlb.balance.eviction;
 
+import com.google.common.math.LongMath;
 import org.flexlb.enums.DecodeTaskPhase;
 
-/**
- * Priority cost primitives for eviction planning (design doc 7.3).
- *
- * <p>The scalar {@code f(priority) = 1024^rank} is retained for metrics and
- * diagnostics. It is not used to enforce absolute priority ordering because
- * an unbounded victim set can exceed any fixed-radix scalar. Plan selection
- * uses {@link PriorityHarmProfile} instead.
- *
- */
+/** Case, stage and length costs. Scalar priority cost is diagnostic;
+ * {@link PriorityHarmProfile} enforces exact priority ordering. */
 public final class PriorityCostFunction {
 
     private static final int MIN_PRIORITY_RANK = 0;
@@ -36,41 +30,13 @@ public final class PriorityCostFunction {
 
     /** Rank 0..4 of a normalized priority (30..70), clamped for safety. */
     public static int rank(int priority) {
-        return Math.max(
-                MIN_PRIORITY_RANK,
-                Math.min(
-                        MAX_PRIORITY_RANK,
-                        (priority - PRIORITY_RANK_BASE)
-                                / PRIORITY_POINTS_PER_RANK));
+        return Math.clamp((priority - PRIORITY_RANK_BASE) / PRIORITY_POINTS_PER_RANK,
+                MIN_PRIORITY_RANK, MAX_PRIORITY_RANK);
     }
 
     /** Single-value victim cost: 1024^rank. */
     public static long f(int priority) {
-        long cost = 1;
-        int rank = rank(priority);
-        for (int i = 0; i < rank; i++) {
-            cost *= COST_RADIX;
-        }
-        return cost;
-    }
-
-    /** Add non-negative diagnostic costs, saturating instead of wrapping. */
-    public static long saturatedAdd(long left, long right) {
-        if (left < 0 || right < 0) {
-            throw new IllegalArgumentException("cost operands must be non-negative");
-        }
-        return left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right;
-    }
-
-    /** Multiply non-negative diagnostic costs, saturating instead of wrapping. */
-    public static long saturatedMultiply(long left, long right) {
-        if (left < 0 || right < 0) {
-            throw new IllegalArgumentException("cost operands must be non-negative");
-        }
-        if (left == 0 || right == 0) {
-            return 0;
-        }
-        return left > Long.MAX_VALUE / right ? Long.MAX_VALUE : left * right;
+        return LongMath.pow(COST_RADIX, rank(priority));
     }
 
     /**
@@ -79,7 +45,7 @@ public final class PriorityCostFunction {
      */
     public static long g(DecodeTaskPhase stage) {
         return switch (stage) {
-            case MASTER_QUEUED_NOT_DISPATCHED -> MASTER_QUEUED_STAGE_WEIGHT;
+            case LOCAL_RESERVED, MASTER_QUEUED_NOT_DISPATCHED -> MASTER_QUEUED_STAGE_WEIGHT;
             case ENGINE_MAY_HAVE_SEEN -> ENGINE_MAY_HAVE_SEEN_STAGE_WEIGHT;
             case ACCEPTED_NOT_RUNNING -> ACCEPTED_STAGE_WEIGHT;
             case RUNNING -> RUNNING_STAGE_WEIGHT;
@@ -88,10 +54,7 @@ public final class PriorityCostFunction {
 
     /** KV bucket of a reservation: ceil(kvTokens / 1024) (design doc 12.3). */
     public static long kvBucket(long kvTokens) {
-        long nonNegativeTokens = Math.max(0, kvTokens);
-        return nonNegativeTokens == 0
-                ? 0
-                : 1 + (nonNegativeTokens - 1) / KV_TOKENS_PER_COST_BUCKET;
+        return Math.ceilDiv(Math.max(0L, kvTokens), KV_TOKENS_PER_COST_BUCKET);
     }
 
     /**

@@ -6,6 +6,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * FlexMetricTags - Monitoring metric tags interface
  *
@@ -56,9 +58,8 @@ public interface FlexMetricTags {
         public ImmutableFlexMetricTags(String... keyValues) {
             if (keyValues == null || keyValues.length == 0) {
                 this.tags = Collections.emptyMap();
-            } else if (keyValues.length % 2 != 0) {
-                throw new IllegalArgumentException("Key-value pairs must be even number of arguments");
             } else {
+                checkArgument(keyValues.length % 2 == 0, "Key-value pairs must be even number of arguments");
                 Map<String, String> tempTags = new HashMap<>();
                 for (int i = 0; i < keyValues.length; i += 2) {
                     String key = keyValues[i];
@@ -131,9 +132,8 @@ public interface FlexMetricTags {
         if (engineIp != null) {
             map.put("engineIp", engineIp);
         }
-        if (extraKeyValues != null && extraKeyValues.length % 2 != 0) {
-            throw new IllegalArgumentException("extraKeyValues must have even number of elements");
-        }
+        checkArgument(extraKeyValues == null || extraKeyValues.length % 2 == 0,
+                "extraKeyValues must have even number of elements");
         if (extraKeyValues != null) {
             for (int i = 0; i + 1 < extraKeyValues.length; i += 2) {
                 String key = extraKeyValues[i];

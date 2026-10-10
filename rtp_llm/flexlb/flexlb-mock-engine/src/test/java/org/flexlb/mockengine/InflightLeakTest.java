@@ -287,9 +287,10 @@ class InflightLeakTest {
     @Test
     @Timeout(15)
     void firstPollSettlesBatchesThatFinishedBeforeAnyStatusPump() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(63400, 1, 1, "5", 1.0, false)) {
-            h.fixedWindowDecision().setMaxRequests(2);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000L);
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxRequests(2);
+        decision.setMaxCollectionWaitMs(10_000L);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(63400, 1, 1, "5", 1.0, false, decision)) {
             List<CompletableFuture<Response>> firstWave = new ArrayList<>();
             for (long requestId = 90_001L; requestId <= 90_004L; requestId++) {
                 firstWave.add(h.scheduler.submit(h.context(requestId, 50)));
@@ -299,16 +300,16 @@ class InflightLeakTest {
             // poll after discovery, with every completion already in its delta.
             AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 4L,
                     5_000L, "all four requests must finish before the first status pump");
-            assertEquals(2, h.prefillEndpoint(0).getInflightBatchCount());
-            assertEquals(4, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(2, h.prefillEndpoint(0).ownershipStats().batchCount());
+            assertEquals(4, h.prefillEndpoint(0).admissionSummary(0).occupiedRequests());
 
             h.pumpPrefillOnce(0);
-            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount(),
+            assertEquals(0, h.prefillEndpoint(0).ownershipStats().batchCount(),
                     "the first real status response must release both completed batches");
-            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(0, h.prefillEndpoint(0).admissionSummary(0).occupiedRequests());
             h.pumpDecodeOnce(0);
             h.pumpPrefillOnce(0);
-            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount(),
+            assertEquals(0, h.prefillEndpoint(0).ownershipStats().batchCount(),
                     "repeated polls must not restore or double-release completed ownership");
 
             List<CompletableFuture<Response>> secondWave = new ArrayList<>();
@@ -318,8 +319,8 @@ class InflightLeakTest {
             AutoTpmE2EHarness.await(() -> h.decodeEngines.getFirst().getCompletedCount() == 6L,
                     5_000L, "returned batch slots must allow the next requests to dispatch");
             h.pumpOnce();
-            assertEquals(0, h.prefillEndpoint(0).getInflightBatchCount());
-            assertEquals(0, h.prefillEndpoint(0).observedRequestCount());
+            assertEquals(0, h.prefillEndpoint(0).ownershipStats().batchCount());
+            assertEquals(0, h.prefillEndpoint(0).admissionSummary(0).occupiedRequests());
             for (CompletableFuture<Response> future : firstWave) {
                 assertTrue(future.get(1, TimeUnit.SECONDS).isSuccess());
             }

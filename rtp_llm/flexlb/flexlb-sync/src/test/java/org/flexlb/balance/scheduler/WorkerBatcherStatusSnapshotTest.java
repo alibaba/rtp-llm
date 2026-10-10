@@ -1,12 +1,13 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -19,25 +20,28 @@ import static org.mockito.Mockito.when;
 
 class WorkerBatcherStatusSnapshotTest {
 
-    @Test
-    void maxSequenceLengthBacksUnpublishedBatchTokenCapacity() {
-        WorkerStatusResponse response = statusResponse(
-                0L, 0L, 0L, 1L);
-        response.setMaxSeqLen(150L);
+    @ParameterizedTest
+    @CsvSource({
+            "0, 150, 0, 0, 150, 9223372036854775807",
+            "0, 0, 0, 0, 9223372036854775807, 9223372036854775807",
+            "200, 150, 1000, 100, 200, 100",
+            "200, 150, -1, 100, 200, 0"
+    })
+    void capacityFallbacksAndBoundsRemainStable(long batchTokens, long maxSeqLen, long availableKv,
+                                               long totalKv, long expectedTokens, long expectedKv) {
+        WorkerStatusResponse response = statusResponse(batchTokens, availableKv, totalKv, 1L);
+        response.setMaxSeqLen(maxSeqLen);
         WorkerStatus status = WorkerStatus.createDiscovered(
                 RoleType.PREFILL, "group-a", "10.0.0.1",
                 8080, 9090, "site-a");
         publish(status, response);
 
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getStatus()).thenReturn(status);
-        WorkerBatcher runtime = new WorkerBatcher(
-                "snapshot-test", endpoint, org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
-                mock(DeliveryStrategy.class),
-                mock(EndpointEventProjector.class));
+        PrefillEndpoint endpoint = org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
+                SchedulingTestConfig.newConfig(), status, mock(DeliveryStrategy.class), mock(AbstractRequestScheduler.class));
 
-        assertEquals(150L, runtime.captureRouteProjectionInputs()
-                .queue().constraints().batchTokenCapacity());
+        GroupPlanner.Constraints constraints = endpoint.captureRouteProjectionInputs().queue().constraints();
+        assertEquals(expectedTokens, constraints.batchTokenCapacity());
+        assertEquals(expectedKv, constraints.batchKvCapacity());
     }
 
     @Test
@@ -62,16 +66,10 @@ class WorkerBatcherStatusSnapshotTest {
             return captured;
         }).when(status).committedEngineObservation();
 
-        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
-        when(endpoint.getStatus()).thenReturn(status);
-        WorkerBatcher runtime = new WorkerBatcher(
-                "snapshot-test",
-                endpoint,
-                org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig(),
-                mock(DeliveryStrategy.class),
-                mock(EndpointEventProjector.class));
+        PrefillEndpoint endpoint = org.flexlb.balance.endpoint.EndpointTestSupport.unstartedPrefill(
+                SchedulingTestConfig.newConfig(), status, mock(DeliveryStrategy.class), mock(AbstractRequestScheduler.class));
 
-        GroupPlanner.Constraints capacity = runtime
+        GroupPlanner.Constraints capacity = endpoint
                 .captureRouteProjectionInputs().queue().constraints();
         assertEquals(700L, capacity.batchTokenCapacity());
         assertEquals(600L, capacity.batchKvCapacity());

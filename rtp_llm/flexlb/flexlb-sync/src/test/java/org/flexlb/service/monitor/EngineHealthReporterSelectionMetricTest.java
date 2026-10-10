@@ -1,14 +1,17 @@
 package org.flexlb.service.monitor;
 
 import io.netty.channel.EventLoopGroup;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.CacheStatus;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -19,6 +22,15 @@ import reactor.netty.resources.LoopResources;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_SUCCESS_PERIOD;
+import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_TOTAL_KV_CACHE_TOKENS;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -26,8 +38,6 @@ class EngineHealthReporterSelectionMetricTest {
 
     @Mock
     private FlexMonitor monitor;
-    @Mock
-    private CacheMetricsReporter cacheMetricsReporter;
     @Mock
     private EngineGrpcClient engineGrpcClient;
     @Mock
@@ -39,7 +49,7 @@ class EngineHealthReporterSelectionMetricTest {
     @Mock
     private EventLoopGroup grpcEventLoop;
     @Mock
-    private WorkerDirectory workerDirectory;
+    private EndpointRegistry workerDirectory;
 
     private EngineHealthReporter reporter;
 
@@ -49,8 +59,41 @@ class EngineHealthReporterSelectionMetricTest {
         when(loopResources.onServerSelect(true)).thenReturn(serverSelector);
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
         reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, engineGrpcClient, loopResources,
+                monitor, engineGrpcClient, loopResources,
                 workerDirectory);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void cacheMetricsKeepEngineAndRoleDimensions(boolean populated) {
+        WorkerStatus worker = mock(WorkerStatus.class);
+        var topology = mock(WorkerStatus.TopologySnapshot.class);
+        var observation = mock(WorkerStatus.EngineObservation.class);
+        when(worker.topologySnapshot()).thenReturn(topology);
+        when(worker.committedEngineObservation()).thenReturn(observation);
+        when(topology.ip()).thenReturn("10.0.0.1");
+        when(observation.role()).thenReturn(RoleType.PREFILL);
+        if (populated) {
+            CacheStatus cache = mock(CacheStatus.class);
+            when(worker.getCacheStatus()).thenReturn(cache);
+            when(cache.getBlockSize()).thenReturn(16L);
+            when(cache.getCacheKeySize()).thenReturn(7L);
+            when(observation.totalKvCacheTokens()).thenReturn(100L);
+            when(observation.availableKvCacheTokens()).thenReturn(40L);
+        }
+        reporter.reportCacheStatusCheckerSuccess("model", worker, populated ? 20L : 0L);
+        FlexMetricTags engine = FlexMetricTags.of("model", "model", "engineIp", "10.0.0.1", "role", "PREFILL");
+        FlexMetricTags role = FlexMetricTags.of("model", "model", "role", "PREFILL");
+        if (populated) {
+            verify(monitor).report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, engine, 20.0);
+            verify(monitor).report(CACHE_BLOCK_SIZE, role, 16.0);
+            verify(monitor).report(CACHE_KEY_SIZE, engine, 7.0);
+            verify(monitor).report(CACHE_USED_KV_CACHE_RATIO, engine, 60.0);
+        }
+        verify(monitor).report(CACHE_USED_KV_CACHE_TOKENS, engine, populated ? 60.0 : 0.0);
+        verify(monitor).report(CACHE_AVAILABLE_KV_CACHE_TOKENS, engine, populated ? 40.0 : 0.0);
+        verify(monitor).report(CACHE_TOTAL_KV_CACHE_TOKENS, role, populated ? 100.0 : 0.0);
+        verifyNoMoreInteractions(monitor);
     }
 
     @Test

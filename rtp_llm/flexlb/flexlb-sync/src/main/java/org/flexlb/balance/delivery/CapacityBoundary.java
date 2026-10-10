@@ -4,6 +4,8 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Materialized result of crossing one delivery-admission boundary.
  * A delivery wait may carry additional route-publication restrictions;
@@ -22,13 +24,11 @@ public record CapacityBoundary(
         Objects.requireNonNull(status, "status");
         boolean unavailable = status == Status.UNAVAILABLE;
         boolean failed = status == Status.FAILED;
-        if (unavailable != (availability != null)
-                || failed != (cause != null)
-                || (!unavailable
-                        && (availability != null || projectionSemantics != null))) {
-            throw new IllegalArgumentException(
-                    "capacity boundary status requires its exact payload");
-        }
+        checkArgument(unavailable == (availability != null)
+                && failed == (cause != null)
+                && (unavailable
+                || projectionSemantics == null),
+                "capacity boundary status requires its exact payload");
     }
 
     public static CapacityBoundary unavailable(
@@ -80,10 +80,8 @@ public record CapacityBoundary(
     public record Attempt<T>(T value, CapacityBoundary boundary) {
 
         public Attempt {
-            if ((value == null) == (boundary == null)) {
-                throw new IllegalArgumentException(
-                        "capacity attempt requires exactly one value or boundary");
-            }
+            checkArgument((value == null) != (boundary == null),
+                    "capacity attempt requires exactly one value or boundary");
         }
 
         public static <T> Attempt<T> accepted(T value) {

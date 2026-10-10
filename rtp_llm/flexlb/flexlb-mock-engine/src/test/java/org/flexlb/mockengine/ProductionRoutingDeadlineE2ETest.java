@@ -1,15 +1,13 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.config.DecisionPolicyConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Regression coverage for production endpoint selection in the mock-engine loop. */
@@ -37,7 +35,7 @@ class ProductionRoutingDeadlineE2ETest {
 
             long nearDeadlineId = 88_001L;
             long batchFollowerId = 88_002L;
-            BalanceContext nearDeadline = h.context(
+            RequestContext nearDeadline = h.context(
                     nearDeadlineId, 50, 10_000L, 8);
             nearDeadline.setSchedulingMetadata(SchedulingMetadata.explicit(
                     50, System.currentTimeMillis() + 2_000L));

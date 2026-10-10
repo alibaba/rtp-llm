@@ -14,6 +14,7 @@ import uk.org.webcompere.systemstubs.environment.EnvironmentVariables;
 import uk.org.webcompere.systemstubs.jupiter.SystemStub;
 import uk.org.webcompere.systemstubs.jupiter.SystemStubsExtension;
 
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -36,9 +37,18 @@ class OpenTelemetryBootstrapTest {
     private Path originalHostnameFile;
     private final ObjectMapper mapper = new ObjectMapper();
 
+    private static void resetBootstrap() throws Exception {
+        synchronized (OpenTelemetryBootstrap.class) {
+            OpenTelemetryBootstrap.shutdown();
+            Field initialized = OpenTelemetryBootstrap.class.getDeclaredField("initialized");
+            initialized.setAccessible(true);
+            initialized.setBoolean(null, false);
+        }
+    }
+
     @BeforeEach
     void setUp() throws Exception {
-        OpenTelemetryBootstrap.resetForTest();
+        resetBootstrap();
         environment.remove(TraceConfig.ENV);
         originalHostnameFile = OpenTelemetryBootstrap.hostnameFile;
         OpenTelemetryBootstrap.hostnameFile = directory.resolve("hostname");
@@ -46,8 +56,8 @@ class OpenTelemetryBootstrapTest {
     }
 
     @AfterEach
-    void tearDown() {
-        OpenTelemetryBootstrap.resetForTest();
+    void tearDown() throws Exception {
+        resetBootstrap();
         OpenTelemetryBootstrap.hostnameFile = originalHostnameFile;
     }
 
@@ -81,7 +91,7 @@ class OpenTelemetryBootstrapTest {
     }
 
     @Test
-    void disabledAndInvalidConfigurationsCannotCreateSpans() {
+    void disabledAndInvalidConfigurationsCannotCreateSpans() throws Exception {
         environment.set("RTP_LLM_OTEL_TRACE_ENABLE", "1");
         environment.set("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://localhost/ignored");
         assertFalse(OpenTelemetryBootstrap.configureFromEnvironment());
@@ -89,7 +99,7 @@ class OpenTelemetryBootstrapTest {
         // 初始化后修改环境不能重新开启。
         environment.set(TraceConfig.ENV, "{\"enabled\":true}");
         assertFalse(OpenTelemetryBootstrap.configureFromEnvironment());
-        OpenTelemetryBootstrap.resetForTest();
+        resetBootstrap();
         assertFalse(OpenTelemetryBootstrap.configureFromEnvironment());
         assertFalse(FlexlbTrace.isEnabled());
     }

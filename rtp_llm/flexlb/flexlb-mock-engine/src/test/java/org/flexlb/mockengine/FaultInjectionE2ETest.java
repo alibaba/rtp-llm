@@ -308,28 +308,28 @@ class FaultInjectionE2ETest {
 
             AutoTpmE2EHarness.await(prefill::isStopped, 2_000,
                     "the first enqueue must trigger the configured engine crash");
-            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 1
-                            && prefillEndpoint.getInflightBatchCount() == 1
-                            && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
+            AutoTpmE2EHarness.await(() -> h.requests.liveRequestCount() == 1
+                            && prefillEndpoint.ownershipStats().batchCount() == 1
+                            && prefillEndpoint.ownershipStats().locallyOwnedRequests() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");
 
-            assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount(),
+            assertEquals(0, prefillEndpoint.ownershipStats().individuallyOwnedRequests(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(crashedTerminal.await(250, TimeUnit.MILLISECONDS),
                     "missing ACK stays pending before the request inactivity deadline");
             assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
             if (clientCancellation) {
-                h.scheduler.cancelRequest(9902L, 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancel(9902L, 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(0L, engineCancelCalls(prefill),
-                    "uncertain delivery and ordinary cancellation must not send Engine Cancel");
+                    "a crashed Engine cannot receive the cleanup RPC");
 
             // 一个请求等待 Engine 确认时，不得阻塞同集群的健康 Prefill。
             Response healthy = submitTo(h, 1, 9904);
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
-            assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated unconfirmed request");
-            assertEquals(1, prefillEndpoint.getInflightBatchCount());
-            assertEquals(1, prefillEndpoint.getLocallyOwnedRequestCount());
+            if (!clientCancellation) { assertFalse(crashed.isDone(), "healthy delivery cannot settle the unrelated request"); }
+            assertEquals(1, prefillEndpoint.ownershipStats().batchCount());
+            assertEquals(1, prefillEndpoint.ownershipStats().locallyOwnedRequests());
 
             Response expired = crashed.get(5, TimeUnit.SECONDS);
             assertFalse(expired.isSuccess());
@@ -339,15 +339,12 @@ class FaultInjectionE2ETest {
             // Cleanup may wait for inactivity, but it cannot replace an earlier client cancellation.
             assertTrue(expired.getErrorMessage().contains(clientCancellation
                     ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
-            assertEquals(0, prefillEndpoint.getInflightBatchCount());
-            assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
-            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 0
-                            && h.decodeEndpoint(0).getInflightCount() == 0,
-                    2_000, "TTL must release the crashed request's scheduler and Decode accounting");
-            assertTrue(prefill.isStopped(), "cleanup cannot depend on the crashed Engine returning");
-            for (var engine : h.services.values()) {
-                assertEquals(0L, engineCancelCalls(engine), "TTL only releases Master accounting");
-            }
+            assertEquals(1, prefillEndpoint.ownershipStats().batchCount());
+            assertEquals(1, prefillEndpoint.ownershipStats().locallyOwnedRequests());
+            assertTrue(h.requests.liveRequestCount() > 0, "failure response is not cleanup proof");
+            assertTrue(prefill.isStopped());
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalStateException.class, h::close,
+                    "unreachable cleanup must not report successful shutdown");
         }
     }
 

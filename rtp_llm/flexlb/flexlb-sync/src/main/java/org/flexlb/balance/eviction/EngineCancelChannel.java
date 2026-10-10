@@ -1,26 +1,23 @@
 package org.flexlb.balance.eviction;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.scheduler.CancelReason;
 
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Abstraction over the engine-side priority-preemption Cancel RPC.
+ * Transport for ordinary cleanup and priority-preemption Cancel RPCs.
  *
  * <p>Contract highlights:
  * <ul>
- *   <li>the cancel is sent to the victim's original Prefill endpoint, which
+ *   <li>the cancel is sent to the request's original Prefill endpoint, which
  *       owns the P/D connection and propagates cancellation downstream;</li>
  *   <li>{@code ACCEPTED} only proves that Prefill installed the cancel intent;
- *       resource settlement requires typed WorkerStatus {@code CANCELED};</li>
- *   <li>{@code request_id} identifies the victim request.</li>
+ *       resource settlement requires separate, verified cleanup evidence;</li>
+ *   <li>{@code request_id} identifies the request and cannot be reused remotely.</li>
  * </ul>
  */
 public interface EngineCancelChannel {
-
-    /** Whether accepted eviction is enabled for victims held by this Decode endpoint. */
-    boolean isSupported(DecodeEndpoint endpoint);
 
     /**
      * Asynchronously ask the engine to cancel one request. Never throws
@@ -31,6 +28,7 @@ public interface EngineCancelChannel {
      */
     CompletableFuture<CancelAck> cancel(CancelTarget target,
                                         long requestId,
+                                        CancelReason reason,
                                         long timeoutMs);
 
     /**
@@ -47,7 +45,9 @@ public interface EngineCancelChannel {
          * racing later Enqueue is rejected before reaching the scheduler.
          */
         REQUEST_FENCED,
-        /** Endpoint has no cancel path at all — planning-gate violation. */
+        /** Prefill fence plus explicit downstream cleanup proof; sender exit is still required. */
+        REQUEST_CLEANED,
+        /** Endpoint does not support the requested cancellation semantics. */
         UNSUPPORTED,
         /** Transport-layer failure (RPC error/timeout, or unroutable cancel). */
         FAILED

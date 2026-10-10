@@ -10,6 +10,7 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
@@ -45,6 +46,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
+
+import static com.google.common.base.Preconditions.checkArgument;
 
 /**
  * Formula-driven Engine gRPC cluster for FlexLB control-plane and capacity tests.
@@ -515,27 +518,18 @@ public final class JavaMockEngineCluster {
      * 127.1.0.0-127.5.249. Valid for engineIndex in [0, 63749].
      */
     static String derivedLoopbackIp(int engineIndex) {
-        if (engineIndex < 0) {
-            throw new IllegalArgumentException("engine index must be >= 0");
-        }
+        checkArgument(engineIndex >= 0, "engine index must be >= 0");
         int thirdOctet = engineIndex / 250 + 1;
-        if (thirdOctet > 255) {
-            throw new IllegalArgumentException(
-                    "engine index " + engineIndex + " exceeds the unique loopback IP space (max 63749)");
-        }
+        checkArgument(thirdOctet <= 255,
+                "engine index %s exceeds the unique loopback IP space (max 63749)", engineIndex);
         return "127." + thirdOctet + "." + (engineIndex % 250) + ".1";
     }
 
     /** Parses a strict true/false CLI value for {@code flag}. */
     static boolean parseBooleanFlag(String value, String flag) {
-        if ("true".equalsIgnoreCase(value)) {
-            return true;
-        }
-        if ("false".equalsIgnoreCase(value)) {
-            return false;
-        }
-        throw new IllegalArgumentException(
-                "Invalid boolean value for " + flag + ": " + value + " (expected true|false)");
+        checkArgument("true".equalsIgnoreCase(value) || "false".equalsIgnoreCase(value),
+                "Invalid boolean value for %s: %s (expected true|false)", flag, value);
+        return Boolean.parseBoolean(value);
     }
 
     private static void addEngineRecords(List<Map<String, Object>> engines,
@@ -671,6 +665,9 @@ public final class JavaMockEngineCluster {
         // ACTIVE_CANCEL marker, whose cancel retries stay ACCEPTED) and from
         // cancelledRidHistory (terminal history, whose late cancels answer
         // NOT_FOUND — seen-but-terminal, the production recently-seen set).
+        private final Object ordinaryCleanupLock = new Object();
+        private final Map<Long, CancelReason> ordinaryFences = com.google.common.cache.CacheBuilder.newBuilder()
+                .expireAfterWrite(10, TimeUnit.MINUTES).<Long, CancelReason>build().asMap();
         private final LinkedHashSet<Long> fencedRequestIds = new LinkedHashSet<>();
         // Recent execution times for snapshot prefill_ms_*/decode_ms_* fields.
         private final ArrayDeque<Double> recentPrefillTimes = new ArrayDeque<>();
@@ -1099,6 +1096,7 @@ public final class JavaMockEngineCluster {
             }
 
             Runnable process = () -> {
+                synchronized (ordinaryCleanupLock) {
                 // ── Enqueue-ACK fault pre-admission split (enqueue_ack_partial_fail /
                 // enqueue_ack_error_code) ──
                 // Rejected members are diverted to the ack errors BEFORE any
@@ -1155,6 +1153,12 @@ public final class JavaMockEngineCluster {
                         // (PRIORITY_PREEMPTED) error — before the scheduler,
                         // before any engine state is created (the fenced rid
                         // stays unknown to every bookkeeping map).
+                        if (ordinaryFences.containsKey(requestId)) {
+                            response.addErrorsBuilder().setRequestId(requestId)
+                                    .setErrorInfo(ordinaryCancellationError(requestId));
+                            requestStates.put(requestId, "rejected");
+                            continue;
+                        }
                         if (hasFencedRequestId(requestId)) {
                             response.addErrorsBuilder()
                                     .setRequestId(requestId)
@@ -1324,6 +1328,7 @@ public final class JavaMockEngineCluster {
                 }
                 observer.onNext(response.build());
                 observer.onCompleted();
+                }
             };
 
             lastEnqueueTime.set(System.nanoTime());
@@ -1389,6 +1394,7 @@ public final class JavaMockEngineCluster {
             // the same caliber getCacheStatus and /snapshot report, so the master
             // sees one consistent number on every surface.
             EngineRpcService.WorkerStatusPB.Builder status = EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setSupportsRequestCleanup(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                     .setAlive(!stopped)
                     .setRole("RoleType." + roleName)
                     .setRoleType(roleType)
@@ -1828,9 +1834,7 @@ public final class JavaMockEngineCluster {
          * {@link #DEFAULT_RESPONSE_POLL_TIMEOUT_MS} default).
          */
         void setResponsePollTimeoutMs(long responsePollTimeoutMs) {
-            if (responsePollTimeoutMs < 1) {
-                throw new IllegalArgumentException("response poll timeout must be >= 1 ms");
-            }
+            checkArgument(responsePollTimeoutMs >= 1, "response poll timeout must be >= 1 ms");
             this.responsePollTimeoutMs = responsePollTimeoutMs;
         }
 
@@ -1841,9 +1845,7 @@ public final class JavaMockEngineCluster {
          * overridable via env {@code MOCK_COMPLETION_RETAIN_WINDOW}).
          */
         void setCompletionRetainWindow(int completionRetainWindow) {
-            if (completionRetainWindow < 0) {
-                throw new IllegalArgumentException("completion retain window must be >= 0");
-            }
+            checkArgument(completionRetainWindow >= 0, "completion retain window must be >= 0");
             this.completionRetainWindow = completionRetainWindow;
         }
 
@@ -1991,14 +1993,11 @@ public final class JavaMockEngineCluster {
                     // RUNNING remains the fallback when no entry was found.
                     .setPhase(cancelledPhase != null
                             ? cancelledPhase : EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(priorityPreemption
-                                    ? PRIORITY_PREEMPTED_ERROR_CODE
-                                    : EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
-                            .setErrorMessage(priorityPreemption
-                                    ? "preempted by higher-priority request"
-                                    : "cancelled by client")
-                            .build())
+                    .setErrorInfo(priorityPreemption
+                            ? EngineRpcService.ErrorDetailsPB.newBuilder()
+                                    .setErrorCode(PRIORITY_PREEMPTED_ERROR_CODE)
+                                    .setErrorMessage("preempted by higher-priority request").build()
+                            : ordinaryCancellationError(requestId))
                     .setEndTimeMs(System.currentTimeMillis())
                     .setDpRank(0);
             // Same upstream fix as recordPriorityPreemptionCanceled: the typed
@@ -2072,6 +2071,39 @@ public final class JavaMockEngineCluster {
             return null;
         }
 
+        /** Ordinary no-fetch cleanup shares the same exact P-to-D ownership graph. */
+        void cleanUpRequest(long requestId, CancelReason reason) {
+            if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
+                throw new UnsupportedOperationException("request cleanup is owned by the original Prefill");
+            }
+            synchronized (ordinaryCleanupLock) {
+                ordinaryFences.putIfAbsent(requestId, hasPriorityCancelledRequestId(requestId) || hasFencedRequestId(requestId)
+                        ? CancelReason.PRIORITY_PREEMPTED : reason);
+                FastRpcService decode = downstreamDecodeOwners.get(requestId);
+                if (decode != null) { decode.cancelFromClientGone(requestId, this); }
+                if (runningTasks.containsKey(requestId)) { cancel(requestId, false, false); }
+                releaseBlockLease(requestId);
+                releaseReservedDecode(requestId);
+                responseQueues.remove(requestId);
+            }
+        }
+
+        private EngineRpcService.ErrorDetailsPB ordinaryCancellationError(long requestId) {
+            CancelReason reason = ordinaryFences.getOrDefault(requestId, CancelReason.CLIENT_CANCELLED);
+            return EngineRpcService.ErrorDetailsPB.newBuilder()
+                    .setErrorCode(switch (reason) {
+                        case DEADLINE_EXCEEDED -> 603; // Engine ErrorCode::GENERATE_TIMEOUT
+                        case PRIORITY_PREEMPTED -> PRIORITY_PREEMPTED_ERROR_CODE;
+                        default -> EngineRpcService.ErrorCodePB.CANCELLED.getNumber();
+                    })
+                    .setErrorMessage(switch (reason) {
+                        case CLIENT_CANCELLED -> "cancelled by client";
+                        case DEADLINE_EXCEEDED -> "request deadline exceeded";
+                        case SHUTDOWN -> "request cancelled during shutdown";
+                        case PRIORITY_PREEMPTED -> "preempted by higher-priority request";
+                    }).build();
+        }
+
         /**
          * Three-branch cancel used by {@link MockEngineCancelChannel} and the
          * gRPC Cancel handler, mapped to the production C++ Prefill contract:
@@ -2100,6 +2132,9 @@ public final class JavaMockEngineCluster {
             if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL) {
                 throw new UnsupportedOperationException(
                         "priority Cancel is only implemented by the original Prefill");
+            }
+            if (ordinaryFences.containsKey(requestId)) {
+                return new CancelResult(false, null, false);
             }
             if (hasPriorityCancelledRequestId(requestId)) {
                 stats.cancelCensusAlreadyCancelled.increment();
@@ -2171,11 +2206,10 @@ public final class JavaMockEngineCluster {
          * normal Prefill hand-off without teaching the cancel channel to scan.
          */
         void registerDecodeOwnership(long requestId, FastRpcService decode) {
-            if (roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
-                    || decode == null
-                    || decode.roleType != EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE) {
-                throw new IllegalArgumentException("decode ownership requires Prefill -> Decode");
-            }
+            checkArgument(roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL
+                    && decode != null
+                    && decode.roleType == EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE,
+                    "decode ownership requires Prefill -> Decode");
             synchronized (decode.decodeQueueLock) {
                 FastRpcService previousDecode = downstreamDecodeOwners.put(requestId, decode);
                 if (previousDecode != null && previousDecode != decode) {
@@ -2384,10 +2418,7 @@ public final class JavaMockEngineCluster {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
                     .setRequestId(requestId)
                     .setPhase(phase)
-                    .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
-                            .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
-                            .setErrorMessage("cancelled by client (stream gone)")
-                            .build())
+                    .setErrorInfo(ordinaryCancellationError(requestId))
                     .setEndTimeMs(System.currentTimeMillis())
                     .setDpRank(0);
             long batchId = positiveLifecycleBatchId(requestId);
@@ -3306,6 +3337,9 @@ public final class JavaMockEngineCluster {
         }
 
         private boolean startDecode(MockPerformanceModel.RequestShape shape, long batchId) {
+            synchronized (ordinaryCleanupLock) {
+                if (ordinaryFences.containsKey(shape.input().getRequestId())) { return false; }
+
             EngineRpcService.GenerateInputPB input = shape.input();
             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue =
                     responseQueues.get(input.getRequestId());
@@ -3336,6 +3370,7 @@ public final class JavaMockEngineCluster {
                 decodeReservationOwners.remove(input.getRequestId());
             }
             return accepted;
+            }
         }
 
         /**
@@ -4405,6 +4440,21 @@ public final class JavaMockEngineCluster {
                     observer.onCompleted();
                     return;
                 }
+                if (request.getReason() != EngineRpcService.RequestCancelReasonPB.REQUEST_CANCEL_REASON_UNSPECIFIED
+                        && request.getReason() != EngineRpcService.RequestCancelReasonPB.REQUEST_CANCEL_REASON_PRIORITY_PREEMPTED) {
+                    var reason = switch (request.getReason()) {
+                        case REQUEST_CANCEL_REASON_CLIENT_CANCELLED -> CancelReason.CLIENT_CANCELLED;
+                        case REQUEST_CANCEL_REASON_DEADLINE_EXCEEDED -> CancelReason.DEADLINE_EXCEEDED;
+                        case REQUEST_CANCEL_REASON_SHUTDOWN -> CancelReason.SHUTDOWN;
+                        default -> throw new IllegalArgumentException("unknown cancellation reason");
+                    };
+                    cleanUpRequest(request.getRequestId(), reason);
+                    observer.onNext(EngineRpcService.CancelResponsePB.newBuilder()
+                            .setStatus(EngineRpcService.CancelStatusPB.CANCEL_STATUS_TOMBSTONED)
+                            .setDecodeCleanupComplete(true).build());
+                    observer.onCompleted();
+                    return;
+                }
                 CancelResult result = cancelRequest(request.getRequestId());
                 EngineRpcService.CancelStatusPB status;
                 if (result.found()) {
@@ -4619,6 +4669,7 @@ public final class JavaMockEngineCluster {
             requestStates.clear();
             activeBlockLeases.clear();
             cancelledRequests.clear();
+            ordinaryFences.clear();
             // Queued work dies with the process: pending prefill batches,
             // direct-stream parks, decode wait queue and running streams.
             synchronized (prefillQueueLock) {
@@ -5158,8 +5209,7 @@ public final class JavaMockEngineCluster {
                 }
                 List<Double> sorted = new ArrayList<>(values);
                 sorted.sort(Double::compareTo);
-                int idx = Math.max(0, Math.min(sorted.size() - 1,
-                        (int) Math.ceil(0.99 * sorted.size()) - 1));
+                int idx = Math.clamp((int) Math.ceil(0.99 * sorted.size()) - 1, 0, sorted.size() - 1);
                 return sorted.get(idx);
             }
         }
@@ -5480,7 +5530,7 @@ public final class JavaMockEngineCluster {
         }
 
         private static int percentileIndex(int size, double quantile) {
-            return Math.max(0, Math.min(size - 1, (int) Math.ceil(quantile * size) - 1));
+            return Math.clamp((int) Math.ceil(quantile * size) - 1, 0, size - 1);
         }
 
         /** Decode completions since the previous stats sample, with execution-time summary. */
@@ -5641,9 +5691,7 @@ public final class JavaMockEngineCluster {
                             key.substring(UNIQUE_ENGINE_IPS_FLAG.length() + 1), UNIQUE_ENGINE_IPS_FLAG);
                     continue;
                 }
-                if (i + 1 >= args.length) {
-                    throw new IllegalArgumentException("Missing value for " + key);
-                }
+                checkArgument(i + 1 < args.length, "Missing value for %s", key);
                 String value = args[++i];
                 switch (key) {
                     case "--n-prefill" -> config.nPrefill = Integer.parseInt(value);
@@ -5680,31 +5728,20 @@ public final class JavaMockEngineCluster {
                     default -> throw new IllegalArgumentException("Unknown argument: " + key);
                 }
             }
-            if (config.endpointFile == null || config.performanceFile == null
-                    || config.masterConfigFile == null) {
-                throw new IllegalArgumentException(
-                        "--endpoint-file, --performance, and --master-config are required");
-            }
+            checkArgument(config.endpointFile != null && config.performanceFile != null && config.masterConfigFile != null,
+                    "--endpoint-file, --performance, and --master-config are required");
             if (config.discoveryFile == null) {
                 config.discoveryFile = Path.of(config.endpointFile).toAbsolutePath()
                         .resolveSibling("discovery.json").toString();
             }
             // Single-role clusters are allowed (e.g. engine_kill_restart_test victim JVMs
             // hosting only prefill or only decode engines), but at least one engine is required.
-            if (config.nPrefill < 0 || config.nDecode < 0
-                    || config.nPrefill + config.nDecode < 1) {
-                throw new IllegalArgumentException(
-                        "n-prefill/n-decode must be >= 0 with at least one engine in total");
-            }
-            if (config.eventLoopThreads < 1 || config.completionThreads < 1) {
-                throw new IllegalArgumentException("thread counts must be positive");
-            }
-            if (config.decodeMaxConcurrency < 1) {
-                throw new IllegalArgumentException("--decode-max-concurrency must be >= 1");
-            }
-            if (config.statsIntervalMs < 1) {
-                throw new IllegalArgumentException("--stats-interval-ms must be >= 1");
-            }
+            checkArgument(config.nPrefill >= 0 && config.nDecode >= 0 && config.nPrefill + config.nDecode >= 1,
+                    "n-prefill/n-decode must be >= 0 with at least one engine in total");
+            checkArgument(config.eventLoopThreads >= 1 && config.completionThreads >= 1,
+                    "thread counts must be positive");
+            checkArgument(config.decodeMaxConcurrency >= 1, "--decode-max-concurrency must be >= 1");
+            checkArgument(config.statsIntervalMs >= 1, "--stats-interval-ms must be >= 1");
             return config;
         }
     }

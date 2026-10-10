@@ -161,7 +161,7 @@ public class MetricConstant {
 
     /**
      * FlexLB scheduler inflight size — the scheduler's own inflight request count.
-     * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
+     * <p>Reported by DeliveryMetricsReporter using role=PREFILL + engineIp="scheduler" tags.
      * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
      * to avoid tag schema conflict (per-engine vs scheduler-level).
      */
@@ -170,7 +170,7 @@ public class MetricConstant {
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
      * in the per-engine WorkerBatcher queue.
-     * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
+     * <p>Reported by DeliveryMetricsReporter with role and engineIp tags.
      * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
      * (which uses type=batchQueue tag for backward compatibility).
      */
@@ -461,7 +461,7 @@ public class MetricConstant {
     public static final String REQUEST_NETWORK_DELAY_MS = "app.request.network.delay.ms";
 
     /**
-     * gRPC server processing time: from gRPC server entry to BalanceContext creation (startTime), in milliseconds.
+     * gRPC server processing time: from gRPC server entry to RequestContext creation (startTime), in milliseconds.
      * Reported as: startTime - grpcEntryTime
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
@@ -658,12 +658,4 @@ public class MetricConstant {
      * engine-facing load from Prefill-queued reservations.
      */
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
-
-    /**
-     * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry, tags: kind (yielded/preempted).
-     * Harmless in isolation, but a burst points at a registration/cleanup
-     * race — alert-worthy where a warn log is not.
-     */
-    public static final String AUTO_TPM_INFLIGHT_SETTLE_MISS = "auto_tpm.inflight_settle_miss.count";
 }

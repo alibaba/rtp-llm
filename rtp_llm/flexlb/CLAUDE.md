@@ -51,19 +51,25 @@ gRPC client implementation for model service communication. Contains protocol bu
 Core load balancing logic, scheduling strategies, and worker status synchronization. This is the heart of the load balancing system.
 
 Key concepts:
-- **Routing**: `DefaultRouter` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
-- **Queue-based scheduling**: `RequestScheduler` facade + `GlobalQueueCoordinator` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
+- **Routing**: `RequestWorkerSelector` composes the Prefill and Decode cost selectors and the VIT random selector for multi-role requests
+- **Queue-based scheduling**: `RequestScheduler` contract + `QueuedRequestScheduler` ordered placement owner + per-generation `WorkerBatcher` delivery runtime
 - **Resource measurement**: Endpoint resource views used by routing strategies
 - **Worker synchronization**: Periodic gRPC-based status sync (`GrpcWorkerStatusRunner`)
 - **Master election**: ZooKeeper-based leader election (`ZookeeperMasterElectService`)
 - **Graceful lifecycle**: `ApplicationLifecycle` owns the fixed online, health, and shutdown workflow
 
 Queue scheduling components:
-- `RequestScheduler`: Public QUEUE submission/cancellation/query facade with no request-state ownership
-- `GlobalQueueCoordinator`: One ordered placement owner per model; bounded planning and endpoint-conflict-aware commit
-- `RequestRegistry`: Canonical owner of request generations, deadlines, cancellation, delivery claims, and publication
-- `WorkerBatcher`: Endpoint-facing decision-window and delivery runtime after placement
-- `RouteService`: High-level service that delegates queued work to `RequestScheduler`
+- `RequestScheduler`: Public submit, cancel, stopAccepting, and termination contract
+- `AbstractRequestScheduler`: Per-generation admission, protocol effects, publication, and drain responsibilities shared by both modes
+- `DirectRequestScheduler`: Accepts requests and selects and commits one immediate route
+- `QueuedRequestScheduler`: Accepts requests and owns ordering, bounded planning, capacity waits, and commit
+- `RequestRepository`: Shared registration, exact active/terminal identities, queries, and archival; no request protocol
+- `PlacementConfiguration`: Constructs the fixed-mode scheduler at startup
+- `RequestContext`: Private per-request lifecycle, exact admission/route/preemption identities, deadlines, cancellation, and response selection
+- `SchedulerRuntime`: Startup scheduler initialization, maintenance, and ordered shutdown; `ExpirationTimer` schedules exact registrations, while continuation and completion executors drain their own accepted work
+- `WorkerBatcher`: Endpoint-facing queue, capacity revalidation, and delivery runtime after placement
+- `GroupingPolicy`: Stateless SINGLE/FIXED_WINDOW decisions shared by live grouping and route projection
+- `RequestContext.DeliveryClaim`: Exact send outcome, irreversible abandonment and immutable release evidence; `DeliveryCleanupTask` owns remote cleanup retries
 
 Capacity management components:
 - Prefill and Decode selection pipelines evaluate immutable full-fleet snapshots.
@@ -124,10 +130,10 @@ java -jar flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar \
 ./mvnw test -pl flexlb-sync
 
 # Run specific test class
-./mvnw test -Dtest=DefaultRouterTest
+./mvnw test -Dtest=RequestWorkerSelectorTest
 
 # Run specific test method
-./mvnw test -Dtest=DefaultRouterTest#testRouteSuccess
+./mvnw test -Dtest=RequestWorkerSelectorTest#testRouteSuccess
 ```
 
 ### Code Formatting
@@ -159,12 +165,12 @@ FlexLB routes inference requests through multiple worker stages based on model r
 3. **PDFUSION**: Prefill-Decode fusion workers (combined processing)
 4. **VIT**: Vision-language model processing
 
-The `DefaultRouter` orchestrates routing across these stages. If a later stage fails (e.g., DECODE unavailable), the system rolls back local state changes for earlier stages (flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultRouter.java:93).
+The `RequestWorkerSelector` orchestrates routing across these stages. If a later stage fails (e.g., DECODE unavailable), the router closes the generation pins for earlier selections. Resource reservations are acquired and rolled back by the request scheduler after selection.
 
 ### Load Balancing Strategies
 
-`DefaultRouter` uses explicit role selectors: `CostBasedPrefillStrategy` for
-PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `RandomStrategy`
+`RequestWorkerSelector` uses explicit role selectors: `CostBasedPrefillStrategy` for
+PREFILL/PDFUSION, `DecodeSelector` for DECODE, and `VitWorkerSelector`
 for VIT. Both selectors evaluate the complete live fleet before
 reducing to one generation-fenced winner. Prefill uses fixed BEST_ONLY with
 optional cache affinity under `router.roles.prefill.cacheAffinity`. Decode uses
@@ -184,15 +190,14 @@ non-finite preferred tier fails routing with a formula error.
 
 Scheduling and dispatch are independent tagged choices in `FLEXLB_CONFIG`:
 
-- `scheduler.type=DIRECT`: Routes immediately through `DefaultRouter`.
-- `scheduler.type=QUEUE`: Uses `RequestScheduler` and `GlobalQueueCoordinator` for ordered placement; `RequestRegistry` owns cancellation and request/decision lifetimes. Queue ordering is `FIFO` or `PRIORITY`.
+- `scheduler.type=DIRECT`: Routes immediately through `RequestWorkerSelector`.
+- `scheduler.type=QUEUE`: Uses `QueuedRequestScheduler` for ordered placement; `RequestContext` owns cancellation and request/decision lifetime decisions. Queue ordering is `FIFO` or `PRIORITY`.
 - `scheduler.decision.type=SINGLE`: Forms one-request decision groups.
 - `scheduler.decision.type=FIXED_WINDOW`: Forms groups bounded by request count, collection window, and an optional predicted-execution cap.
 - `dispatcher.type=NON_BATCH`: The frontend delivers requests from the formed group.
 - `dispatcher.type=BATCH`: Master delivers the formed group with `EnqueueBatch`.
 
-Every QUEUE combination follows the same lifecycle: `RouteService` submits to
-`RequestScheduler`, `GlobalQueueCoordinator` selects and commits all required
+Every QUEUE combination enters through `RequestScheduler.submit`; `QueuedRequestScheduler` selects and commits all required
 endpoints once, and the selected Prefill `WorkerBatcher` performs the configured
   decision-window and delivery. There is no secondary routing queue, earlier-entry
   scan, or multi-stage placement retry loop. The global decision thread waits only
@@ -204,7 +209,7 @@ on their delivery-capacity, window, and deadline predicates.
 Worker health and capacity information is synchronized asynchronously:
 
 - `GrpcWorkerStatusRunner`: Periodically fetches worker status via gRPC
-- `EndpointRegistry`: Generation-fenced endpoint owner; `WorkerDirectory` exposes immutable routing snapshots and exact captures
+- `EndpointRegistry`: Owns discovered worker identities, generation-fenced endpoint publication, immutable routing snapshots and exact captures
 - `GrpcCacheStatusCheckRunner`: Syncs KV cache information with `KvCacheManager`
 
 Routing reads from these shared data structures which are concurrently updated by background threads.
@@ -230,7 +235,7 @@ request counter to remain quiet, and reports each phase through
 For high availability, FlexLB uses ZooKeeper-based master election:
 
 - `ZookeeperMasterElectService`: Handles leader election
-- `LBStatusConsistencyService`: Manages master-slave state consistency
+- `MasterStatusService`: Manages master-slave state consistency
 - Only the elected master performs routing decisions
 
 ## Configuration
@@ -290,14 +295,14 @@ ZooKeeper connection configuration for distributed coordination.
 ## Important Implementation Details
 
 ### Endpoint Selection
-`DefaultRouter` calls the explicit selector for each required role. Prefill and
+`RequestWorkerSelector` calls the explicit selector for each required role. Prefill and
 Decode selectors consume complete immutable fleet snapshots and return an exact
 generation capability; do not add a second selector pass or endpoint fallback
 after ordered QUEUE commit begins.
 
 ### Rollback Mechanism
-When multi-stage routing partially fails, `DefaultRouter` closes the exact
-`SelectedRole` capabilities that were already selected. Direct-placement owners
+When multi-stage routing partially fails, `RequestWorkerSelector` closes the exact
+`WorkerAssignment` capabilities that were already selected. Direct-placement owners
 also roll back their exact endpoint reservations before returning the failure.
 
 ### Concurrent Data Access
@@ -306,21 +311,23 @@ routing threads. Readers use immutable snapshots and exact generation-fenced
 captures; writers publish status through the endpoint lifecycle transaction.
 
 ### Queue Concurrency
-`RequestRegistry` owns request lifecycle. `dispatcher.maxInflightPerPrefillWorker`
+`RequestContext` owns request event acceptance and lifecycle decisions; `AbstractRequestScheduler` coordinates endpoint ledgers and external effects. `dispatcher.maxInflightPerPrefillWorker`
 limits batches in BATCH and requests in NON_BATCH / DIRECT, default 2.
 `decision.maxRequests` only controls group size. DIRECT has no queue timer.
 The global queue has no request-count cap; TTL bounds queue residence.
 Reservation and release paths must remain idempotent across
 completion, timeout, and cancellation races.
 
-### BalanceContext Extensions
-`BalanceContext` (request state) includes queue-related fields:
+### RequestContext Extensions
+`RequestContext` (request state) includes queue-related fields:
 - `future`: `CompletableFuture<Response>` for async response
 - `enqueueTime`: Timestamp when request entered queue
 - `schedulingMetadata`: Immutable request id, priority, and absolute expiration metadata
 
 Methods:
-- Cancellation and lifecycle state are owned by `RequestRegistry`, keyed by exact request generation rather than request id alone.
+- Lifecycle fields are private. Context behavior methods validate exact request/route/operation identities under its monitor; callers never assemble transitions through setters. Route publication, endpoint cleanup, and user callbacks run outside that monitor. Delivery eligibility, time checks, and local endpoint handoff remain one atomic request operation.
+- `RequestFuture`, `AdmissionHandle`, and `DeliveryClaim` are static Context types with narrow completion callbacks. `AbstractRequestScheduler` executes request effects; `SchedulerRuntime` drains admission, and `RequestRepository` owns active/terminal indexes.
+- `SchedulerRuntime` closes producers before continuations and publications; `closeRequestExecutors()` drains both executors last. Timer shutdown closes registration before detaching handles.
 
 ### Reactive Programming
 The flexlb-api module uses Spring WebFlux for non-blocking reactive request handling. All HTTP endpoints return `Mono` or `Flux` types.
@@ -343,7 +350,7 @@ FlexLB provides comprehensive monitoring through Spring Boot Actuator:
 OpenTelemetry integration for distributed tracing (configured via `RTP_LLM_TRACE_CONFIG`).
 
 Monitoring enhancements:
-- `BatchSchedulerReporter`: Reports canonical worker-queue size and wait-time metrics
+- `DeliveryMetricsReporter`: Reports canonical worker-queue size and wait-time metrics
 - `RequestSchedulerReporter`: Reports admission and lifecycle metrics
 
 Graceful shutdown starts a quiet period only when explicitly stopping the service.
@@ -416,8 +423,10 @@ Most development uses the opensource profile.
 3. Do not proactively create documentation files (*.md) or README files unless explicitly requested.
 4. When fixing issues in code, such as using solution A to fix problem X, don't write comments that explain why solution A was used to fix problem X. Make the code appear as if problem X never existed in the first place. For example, avoid comments like:
 // Request queue (using configured capacity parameter to control queue size, avoiding race conditions)
-private final BlockingDeque<BalanceContext> queue;
+private final BlockingDeque<RequestContext> queue;
 
 The parenthetical content in such comments is unnecessary because it makes readers wonder about a problem X they weren't aware of. The code should look naturally correct from the beginning.
 5. To run Maven commands, use the Maven wrapper from rtp_llm/flexlb directory: `./mvnw`
 6. **IMPORTANT**: Do not repeatedly read the same file multiple times. Once you have sufficient context from a file read, proceed to edit directly. Avoid excessive redundant Read operations on the same file or code snippets.
+
+Spring creates one scheduler at startup. The scheduler and request contexts use the ConfigService startup configuration directly; changes to scheduling and shared WorkerBatcher settings require restart. BATCH abandonment requires sender exit and exact remote cleanup proof before archival; response completion does not release these obligations. Ordinary cancellation capability is checked before using the Engine cleanup protocol.

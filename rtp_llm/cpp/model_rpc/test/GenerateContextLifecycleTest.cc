@@ -114,7 +114,12 @@ TEST(GenerateContextLifecycleTest, CompletedSuccessDoesNotCancelOrWaitForRunning
     EXPECT_EQ(stream->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(stream->hasError());
 
-    const auto runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    auto runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(runtime_info.running_task_info_list.size(), 1);
+    EXPECT_TRUE(runtime_info.finished_task_info_list.empty());
+    stream->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
     EXPECT_TRUE(runtime_info.running_task_info_list.empty());
     ASSERT_EQ(runtime_info.finished_task_info_list.size(), 1);
     EXPECT_EQ(runtime_info.finished_task_info_list[0].request_id, 1001);
@@ -134,7 +139,12 @@ TEST(GenerateContextLifecycleTest, CompletedFailureCancelsOnceWithoutWaiting) {
     ASSERT_TRUE(stream->hasError());
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
 
-    const auto runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    auto runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(runtime_info.running_task_info_list.size(), 1);
+    EXPECT_TRUE(runtime_info.finished_task_info_list.empty());
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(runtime_info.running_task_info_list.empty());
     ASSERT_EQ(runtime_info.finished_task_info_list.size(), 1);
     EXPECT_EQ(runtime_info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::EXECUTION_EXCEPTION));
 }
@@ -188,6 +198,46 @@ TEST(GenerateContextLifecycleTest, RetryReplacementStopsOnlyTheAbandonedAttempt)
     context->markRpcHandlingCompleted();
     ASSERT_TRUE(destroyWithoutSchedulerProgress(std::move(context), new_stream));
     EXPECT_FALSE(new_stream->hasError());
+
+    // A delayed terminal transition from the abandoned attempt must not
+    // retire the replacement under the same request id.
+    EXPECT_EQ(old_stream->moveToNext(), StreamState::FINISHED);
+    auto runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(runtime_info.running_task_info_list.size(), 1);
+    EXPECT_TRUE(runtime_info.finished_task_info_list.empty());
+    new_stream->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_EQ(new_stream->moveToNext(), StreamState::FINISHED);
+    runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(runtime_info.running_task_info_list.empty());
+    ASSERT_EQ(runtime_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(runtime_info.finished_task_info_list.front().error_code, 0);
+}
+
+TEST(GenerateContextLifecycleTest, FinishedStreamWaitsForBookkeepingBeforePublishingTerminal) {
+    auto meta    = std::make_shared<RpcServerRuntimeMeta>();
+    auto stream  = std::make_shared<LifecycleTestStream>(1007);
+    auto context = makeContext(1007, meta);
+    stream->setState(StreamState::RUNNING);
+    stream->incPendingAsyncBookkeeping();
+    stream->reportEvent(StreamEvents::GenerateDone);
+    EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
+    context->setStream(stream);
+    context->markRpcHandlingCompleted();
+
+    auto destroyed = std::async(std::launch::async, [context = std::move(context)]() mutable { context.reset(); });
+    const bool returned = destroyed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+    auto runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(runtime_info.finished_task_info_list.empty());
+    EXPECT_EQ(runtime_info.running_task_info_list.size(), 1);
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    destroyed.get();
+    EXPECT_TRUE(returned);
+
+    runtime_info = meta->getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(runtime_info.running_task_info_list.empty());
+    ASSERT_EQ(runtime_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(runtime_info.finished_task_info_list.front().request_id, 1007);
+    EXPECT_EQ(meta->getEngineScheduleInfo(runtime_info.latest_finished_version).finished_task_info_list.size(), 0);
 }
 
 class PrefillContextLifecycleTest: public ::testing::Test {

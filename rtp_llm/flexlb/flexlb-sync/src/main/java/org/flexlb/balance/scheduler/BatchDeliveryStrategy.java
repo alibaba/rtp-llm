@@ -1,18 +1,18 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.scheduler.DefaultBatchDispatcher.PreparedSubmission;
+import org.flexlb.balance.scheduler.DefaultBatchDispatcher.BatchSender;
 import org.flexlb.balance.delivery.DeliveryResult;
-import org.flexlb.balance.delivery.DeliveryStrategy;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.scheduler.RequestContext.DeliveryClaim;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.util.Failures;
 
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
@@ -24,13 +24,8 @@ import java.util.function.BiConsumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.createCommittedOwner;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.missingEndpoint;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.prepareMember;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.preserveRejectedCause;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rejectedPrefill;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackMember;
-import static org.flexlb.balance.scheduler.PrefillAdmissionResources.rollbackReservation;
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
 
 /** EnqueueBatch admission, ownership, transport, telemetry, and projection. */
 public final class BatchDeliveryStrategy implements DeliveryStrategy {
@@ -40,168 +35,46 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
     private final Supplier<CapacityBoundary.Attempt<PreparedSubmission>>
             prepareSubmission;
     private final LongSupplier batchIds;
-    private final RequestRegistry requests;
-    private final DeliveryMetrics telemetry;
+    private final DeliveryMetricsReporter telemetry;
 
     public BatchDeliveryStrategy(
             Supplier<CapacityBoundary.Attempt<PreparedSubmission>>
                     prepareSubmission,
             LongSupplier batchIds,
-            RequestRegistry requests,
-            DeliveryMetrics telemetry) {
+            DeliveryMetricsReporter telemetry) {
         this.prepareSubmission = Objects.requireNonNull(
                 prepareSubmission, "prepareSubmission");
         this.batchIds = Objects.requireNonNull(batchIds, "batchIds");
-        this.requests = Objects.requireNonNull(requests, "requests");
         this.telemetry = Objects.requireNonNull(telemetry, "telemetry");
     }
 
     @Override
-    public Transaction prepare(
-            List<ScheduledRequest> candidates,
+    public DeliveryTransaction prepare(
+            List<RequestRoute> candidates,
             PrefillTimePredictor.Evaluator evaluator,
             OptionalLong plannedPredictionMs) {
-        if (candidates.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "batch delivery requires at least one candidate");
-        }
-        return admit(candidates, evaluator, plannedPredictionMs);
-    }
-
-    private BatchTransaction admit(
-            List<ScheduledRequest> candidates,
-            PrefillTimePredictor.Evaluator evaluator,
-            OptionalLong plannedPredictionMs) {
-        ScheduledRequest head = candidates.get(0);
-
-        CapacityBoundary.Attempt<BatchTransaction> groupAttempt =
-                requests.prepareBatchDelivery(head, this);
-        if (!groupAttempt.accepted()) {
-            return BatchTransaction.blocked(
-                    this,
-                    head,
-                    groupAttempt.boundary());
-        }
-
-        BatchTransaction transaction = groupAttempt.value();
-        List<ScheduledRequest> admitted = new ArrayList<>(candidates.size());
-        ScheduledRequest blockedItem = null;
-        CapacityBoundary blockedResult = null;
+        checkArgument(!candidates.isEmpty(), "batch delivery requires at least one candidate");
+        var transaction = DeliveryStrategy.prepareMembers(candidates, evaluator, prepareSubmission, batchIds);
         try {
-            for (int index = 0; index < candidates.size(); index++) {
-                ScheduledRequest item = candidates.get(index);
-                CapacityBoundary.Attempt<ScheduledRequest> attempt =
-                        requests.prepareBatchMember(item, transaction);
-                if (attempt.accepted()) {
-                    admitted.add(item);
-                } else {
-                    blockedItem = item;
-                    blockedResult = attempt.boundary();
-                    break;
-                }
+            if (!transaction.items().isEmpty()) {
+                transaction.batch.predictedMs = plannedPredictionMs.isPresent()
+                        && transaction.items().size() == candidates.size()
+                        ? plannedPredictionMs.getAsLong()
+                        : PrefillPredictionBoundary.predictCommittedBatchMs(evaluator,
+                                PrefillBatchFeatures.from(transaction.items(), RequestRoute::seqLen, RequestRoute::hitCache));
             }
-            if (admitted.isEmpty()) {
-                transaction.select(
-                        List.of(), 0L, null, blockedItem, blockedResult);
-                return transaction;
-            }
-            long predictedMs = plannedPredictionMs.isPresent()
-                    && sameIdentitySequence(admitted, candidates)
-                    ? plannedPredictionMs.getAsLong()
-                    : PrefillPredictionBoundary.predictCommittedBatchMs(
-                            evaluator,
-                            PrefillBatchFeatures.from(
-                                    admitted,
-                                    ScheduledRequest::seqLen,
-                                    ScheduledRequest::hitCache));
-            transaction.select(
-                    admitted,
-                    predictedMs,
-                    evaluator,
-                    blockedItem,
-                    blockedResult);
             return transaction;
         } catch (Throwable failure) {
-            Throwable cleanup = close(transaction);
-            if (cleanup != null && cleanup != failure) {
-                failure.addSuppressed(cleanup);
-            }
-            throw propagate(failure);
-        }
-    }
-
-    CapacityBoundary.Attempt<BatchTransaction> prepareAdmission(
-            ScheduledRequest head) {
-        try {
-            CapacityBoundary.Attempt<
-                    PreparedSubmission> submissionAttempt =
-                    Objects.requireNonNull(
-                            prepareSubmission.get(), "submission attempt");
-            if (!submissionAttempt.accepted()) {
-                return rejected(submissionAttempt.boundary());
-            }
-            PreparedSubmission submission =
-                    submissionAttempt.value();
-            final long batchId;
-            final PrefillEndpoint prefill;
-            try {
-                batchId = batchIds.getAsLong();
-                if (batchId <= 0L) {
-                    throw new IllegalStateException(
-                            "batch id supplier returned a non-positive id");
-                }
-                prefill = head.prefillEp();
-                if (prefill == null) {
-                    throw missingEndpoint("Prefill", head);
-                }
-            } catch (Throwable failure) {
-                Throwable cleanup = close(submission);
-                if (cleanup != null) {
-                    if (cleanup != failure) {
-                        cleanup.addSuppressed(failure);
-                    }
-                    return failed(cleanup);
-                }
-                return failed(failure);
-            }
-            try {
-                return accepted(new BatchTransaction(
-                        this,
-                        batchId,
-                        submission,
-                        prefill));
-            } catch (Throwable failure) {
-                Throwable cleanup = close(submission);
-                if (cleanup != null && cleanup != failure) {
-                    failure.addSuppressed(cleanup);
-                }
-                return failed(failure);
-            }
-        } catch (Throwable failure) {
-            return failed(failure);
+            throw Failures.propagate(Failures.append(failure, Failures.close(transaction)), "batch preparation failed");
         }
     }
 
     @Override
-    public double projectGroupDurationMs(
-            List<ScheduledRequest> items,
-            PrefillTimePredictor.Evaluator evaluator) {
-        return PrefillPredictionBoundary.predictDecisionGroupMs(
-                evaluator,
-                PrefillBatchFeatures.from(
-                        items,
-                        ScheduledRequest::seqLen,
-                        ScheduledRequest::hitCache));
-    }
-
-    @Override
-    public GroupPlanner.PrefixPrediction<ScheduledRequest> newGroupPredictor(
+    public GroupPlanner.PrefixPrediction<RequestRoute> newGroupPredictor(
             PrefillTimePredictor.Evaluator evaluator) {
         PrefillTimePredictor.BatchPrediction prediction = evaluator.newBatchPrediction();
-        return (added, items) -> {
-            return PrefillPredictionBoundary.requireValidDecisionGroupMs(
-                    prediction.append(added.seqLen(), added.hitCache()));
-        };
+        return (added, items) -> PrefillPredictionBoundary.requireValidDecisionGroupMs(
+                prediction.append(added.seqLen(), added.hitCache()));
     }
 
     @Override
@@ -209,619 +82,132 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         return PROJECTION;
     }
 
+    @Override
+    public void deliver(DeliveryTransaction transaction, String decisionReason,
+            int remainingQueueDepth, WorkSnapshot precedingWork, PrefillTimePredictor.Evaluator evaluator) {
+        Objects.requireNonNull(precedingWork, "precedingWork");
+        // Transfer before submit: the dispatcher may execute inline.
+        synchronized (transaction) {
+            var submission = transaction.transferToExecutor();
+            try {
+                submission.submit(sender -> {
+                    transaction.requireSubmitted();
+                    try {
+                        deliverCommitted(transaction, decisionReason, remainingQueueDepth, precedingWork, evaluator, sender);
+                    } catch (Throwable failure) {
+                        Failures.run(failure, () -> DeliveryStrategy.failUnsentDelivery(transaction, failure, true));
+                        throw Failures.propagate(failure, "batch delivery failed");
+                    }
+                });
+            } catch (Throwable failure) {
+                Failures.run(failure, () -> DeliveryStrategy.failUnsentDelivery(transaction, failure, true));
+                throw Failures.propagate(failure, "batch delivery failed");
+            }
+        }
+    }
+
     private void deliverCommitted(
-            BatchTransaction batch,
+            DeliveryTransaction transaction,
             String decisionReason,
             int remainingQueueDepth,
             WorkSnapshot precedingWork,
+            PrefillTimePredictor.Evaluator evaluator,
             BatchSender sender) {
-        List<ScheduledRequest> original = batch.items();
-        List<ClaimedMember> claimed = new ArrayList<>(original.size());
+        var batch = transaction.batch;
+        List<RequestRoute> original = transaction.items();
+        List<DeliveryClaim> claimed = new ArrayList<>(original.size());
+        List<RequestRoute> submitted = List.of();
         DispatchGate gate = null;
         Throwable handoffFailure = null;
-        long deliveredPredictionMs = batch.predictedMs();
+        boolean senderAccepted = false;
+        long deliveredPredictionMs = batch.predictedMs;
         try {
-            for (int index = 0; index < original.size(); index++) {
-                ScheduledRequest item = original.get(index);
+            for (var member : transaction.members) {
+                RequestRoute item = member.route();
                 try {
                     DeliveryClaim claim =
-                            requests.claimBatchDelivery(
-                                    item, batch);
-                    if (claim == null) {
-                        continue;
-                    }
-                    claimed.add(new ClaimedMember(item, claim));
+                            item.ctx().scheduler().claimDelivery(item, DeliveryClaimKind.BATCH_ENQUEUE,
+                                    batch.batchId, member.decode());
+                    if (claim != null) { claimed.add(claim); }
                 } catch (Throwable claimFailure) {
-                    requests.failDeliveryPreparation(item, claimFailure);
+                    item.ctx().scheduler().failDeliveryPreparation(item, claimFailure);
                 }
             }
 
             if (!claimed.isEmpty()) {
-                List<ScheduledRequest> submitted = claimed.stream()
-                        .map(ClaimedMember::item)
-                        .toList();
+                submitted = claimed.stream().map(claim -> claim.item).toList();
                 if (submitted.size() != original.size()) {
                     deliveredPredictionMs =
                             PrefillPredictionBoundary.predictCommittedBatchMs(
-                                    batch.evaluator(),
+                                    evaluator,
                                     PrefillBatchFeatures.from(
                                             submitted,
-                                            ScheduledRequest::seqLen,
-                                            ScheduledRequest::hitCache));
+                                            RequestRoute::seqLen,
+                                            RequestRoute::hitCache));
                 }
-                for (ClaimedMember member : claimed) {
-                    requests.setDeliveryPrediction(member.claim(), precedingWork, deliveredPredictionMs);
+                for (DeliveryClaim claim : claimed) {
+                    claim.item.ctx().scheduler().setDeliveryPrediction(claim, precedingWork, deliveredPredictionMs);
                 }
                 gate = new DispatchGate(
-                        claimed, requests);
-                batch.send(
-                        sender, submitted,
-                        deliveredPredictionMs,
-                        decisionReason,
-                        remainingQueueDepth,
-                        gate);
-                batch.transportAccepted();
+                        claimed);
+                checkArgument(remainingQueueDepth >= 0, "remainingQueueDepth must be non-negative");
+                sender.sendBatch(submitted, batch.batchId, deliveredPredictionMs,
+                        decisionReason, gate);
+                senderAccepted = true;
             }
         } catch (Throwable failure) {
             handoffFailure = failure;
         } finally {
-            try {
-                batch.closeCapabilities();
-            } catch (Throwable releaseFailure) {
-                handoffFailure = append(handoffFailure, releaseFailure);
-            }
+            handoffFailure = Failures.append(handoffFailure, transaction.finishDelivery());
             if (gate != null) {
-                try {
-                    gate.open();
-                } catch (Throwable callbackFailure) {
-                    handoffFailure = append(
-                            handoffFailure, callbackFailure);
-                }
+                handoffFailure = Failures.run(handoffFailure, gate::open);
             }
         }
 
         if (handoffFailure != null) {
-            if (batch.transportOwned()) {
-                throw propagate(handoffFailure);
+            if (senderAccepted) {
+                throw Failures.propagate(handoffFailure, "batch delivery failed");
             } else {
                 Throwable completionFailure = null;
-                for (ClaimedMember member : claimed) {
+                for (DeliveryClaim claim : claimed) {
                     try {
-                        member.claim().complete(DeliveryResult.notSent(handoffFailure));
-                    } catch (Throwable memberFailure) {
-                        completionFailure = append(
-                                completionFailure, memberFailure);
+                        claim.item.ctx().scheduler().completeDelivery(claim, DeliveryResult.notSent(handoffFailure));
+                    } catch (Throwable failure) {
+                        completionFailure = Failures.append(completionFailure, failure);
                     }
                 }
-                batch.transportFailed();
                 if (completionFailure != null) {
-                    throw propagate(append(
-                            handoffFailure, completionFailure));
+                    throw Failures.propagate(Failures.append(
+                            handoffFailure, completionFailure), "batch delivery failed");
                 }
             }
         }
 
-        if (batch.transportOwned()) {
-            telemetry.batchDispatched(
-                    batch.batchId(),
+        if (senderAccepted) {
+            telemetry.reportDelivery(
+                    batch.batchId,
                     decisionReason,
                     remainingQueueDepth,
-                    claimed.stream().map(ClaimedMember::item).toList(),
+                    submitted,
                     deliveredPredictionMs);
         }
     }
 
-    private Throwable failCommitted(
-            BatchTransaction batch,
-            Throwable cause) {
-        Throwable cleanup = null;
-        try {
-            batch.closeSubmission();
-        } catch (Throwable failure) {
-            cleanup = append(cleanup, failure);
-        }
-        for (ScheduledRequest item : batch.items()) {
-            try {
-                requests.failDeliveryPreparation(item, cause);
-            } catch (Throwable failure) {
-                cleanup = append(cleanup, failure);
-            }
-        }
-        try {
-            batch.closeAdmission();
-        } catch (Throwable failure) {
-            cleanup = append(cleanup, failure);
-        }
-        return cleanup;
-    }
-
-    private static boolean sameIdentitySequence(
-            List<ScheduledRequest> left,
-            List<ScheduledRequest> right) {
-        if (left.size() != right.size()) {
-            return false;
-        }
-        for (int index = 0; index < left.size(); index++) {
-            if (left.get(index) != right.get(index)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static <T> CapacityBoundary.Attempt<T> accepted(T value) {
-        return CapacityBoundary.Attempt.accepted(value);
-    }
-
-    private static <T> CapacityBoundary.Attempt<T> rejected(
-            CapacityBoundary boundary) {
-        return CapacityBoundary.Attempt.rejected(boundary);
-    }
-
-    private static <T> CapacityBoundary.Attempt<T> failed(Throwable cause) {
-        return rejected(CapacityBoundary.failed(cause));
-    }
-
-    private static Throwable close(AutoCloseable capability) {
-        try {
-            capability.close();
-            return null;
-        } catch (Throwable failure) {
-            return failure;
-        }
-    }
-
-    private static Throwable append(Throwable first, Throwable next) {
-        if (next == null) {
-            return first;
-        }
-        if (first == null) {
-            return next;
-        }
-        if (first != next) {
-            first.addSuppressed(next);
-        }
-        return first;
-    }
-
-    private static RuntimeException propagate(Throwable failure) {
-        if (failure instanceof RuntimeException runtimeFailure) {
-            return runtimeFailure;
-        }
-        if (failure instanceof Error error) {
-            throw error;
-        }
-        return new IllegalStateException("batch delivery failed", failure);
-    }
-
-    /** One owner and one explicit state machine for the complete batch flow. */
-    static final class BatchTransaction implements Transaction {
-        private enum Phase {
-            PREPARED,
-            COMMITTED,
-            SUBMITTED,
-            INFLIGHT,
-            TERMINAL
-        }
-
-        private final BatchDeliveryStrategy owner;
-        private final long batchId;
-        private final PrefillEndpoint prefill;
-        private PreparedSubmission submission;
-        private PrefillState.BatchReservation reservation;
-        private ArrayList<PrefillAdmissionResources.Member> members;
-        private PrefillAdmissionResources.CommittedAdmissionOwner
-                committedAdmission;
-        private List<ScheduledRequest> items = List.of();
-        private long predictedMs;
-        private PrefillTimePredictor.Evaluator evaluator;
-        private ScheduledRequest blockedItem;
-        private CapacityBoundary blockedResult;
-        // After SUBMITTED, only the accepted executor task advances this
-        // transaction. Scheduler abort/close may observe it but cannot reclaim it.
-        private volatile Phase phase;
-
-        private BatchTransaction(
-                BatchDeliveryStrategy owner,
-                long batchId,
-                PreparedSubmission submission,
-                PrefillEndpoint prefill) {
-            this.owner = owner;
-            this.batchId = batchId;
-            this.submission = submission;
-            this.prefill = prefill;
-            this.members = prefill == null ? null : new ArrayList<>(1);
-            this.phase = Phase.PREPARED;
-        }
-
-        private static BatchTransaction blocked(
-                BatchDeliveryStrategy owner,
-                ScheduledRequest blockedItem,
-                CapacityBoundary blockedResult) {
-            BatchTransaction transaction = new BatchTransaction(
-                    owner, 0L, null, null);
-            transaction.blockedItem = blockedItem;
-            transaction.blockedResult = blockedResult;
-            transaction.phase = Phase.TERMINAL;
-            return transaction;
-        }
-
-        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
-                ScheduledRequest exact) {
-            requirePrepared("append");
-            requireAdmissionPrepared("append");
-            try {
-                CapacityBoundary.Attempt<ScheduledRequest> acceptedItem =
-                        accepted(exact);
-                members.ensureCapacity(Math.addExact(members.size(), 1));
-                boolean first = members.isEmpty();
-                if (first) {
-                    PrefillState.ReservationResult<
-                            PrefillState.BatchReservation> result =
-                            prefill.reserveBatch(
-                                    exact,
-                                    batchId,
-                                    exact.maxInflightBatchesPerPrefillWorker());
-                    if (result.status()
-                            != PrefillState.CapacityStatus.ACQUIRED) {
-                        return rejectedPrefill(
-                                exact,
-                                result.status(),
-                                CapacityBoundary.deliveryUnavailable(
-                                        prefill.batchAdmissionAvailability(
-                                                exact.maxInflightBatchesPerPrefillWorker())));
-                    }
-                    reservation = result.reservation();
-                }
-                CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
-                        memberAttempt = prepareMember(exact);
-                CapacityBoundary.Attempt<ScheduledRequest> result;
-                if (memberAttempt.accepted()) {
-                    members.add(memberAttempt.value());
-                    result = acceptedItem;
-                } else {
-                    result = rejected(memberAttempt.boundary());
-                }
-                if (first && !result.accepted()) {
-                    return abortAdmission(result.boundary());
-                }
-                return result;
-            } catch (Throwable failure) {
-                if (members.isEmpty()) {
-                    return abortAdmission(failure);
-                }
-                return failed(failure);
-            }
-        }
-
-        private <T> CapacityBoundary.Attempt<T> abortAdmission(
-                CapacityBoundary boundary) {
-            Throwable rollbackFailure = rollbackAdmission(null);
-            if (rollbackFailure == null) {
-                return rejected(boundary);
-            }
-            preserveRejectedCause(rollbackFailure, boundary);
-            return failed(rollbackFailure);
-        }
-
-        private <T> CapacityBoundary.Attempt<T> abortAdmission(
-                Throwable failure) {
-            return failed(rollbackAdmission(failure));
-        }
-
-        private synchronized void select(
-                List<ScheduledRequest> exactItems,
-                long exactPredictionMs,
-                PrefillTimePredictor.Evaluator exactEvaluator,
-                ScheduledRequest exactBlockedItem,
-                CapacityBoundary exactBlockedResult) {
-            requirePrepared("select");
-            items = List.copyOf(exactItems);
-            predictedMs = exactPredictionMs;
-            evaluator = exactEvaluator;
-            blockedItem = exactBlockedItem;
-            blockedResult = exactBlockedResult;
-        }
-
-        @Override
-        public List<ScheduledRequest> items() {
-            return items;
-        }
-
-        @Override
-        public ScheduledRequest blockedItem() {
-            return blockedItem;
-        }
-
-        @Override
-        public CapacityBoundary blockedResult() {
-            return blockedResult;
-        }
-
-        @Override
-        public synchronized WorkSnapshot commitUnderLock() {
-            requirePrepared("commit");
-            requireAdmissionPrepared("commit");
-            if (items.isEmpty()) {
-                throw new IllegalStateException(
-                        "empty batch transaction cannot commit");
-            }
-            if (!PrefillAdmissionResources.sameIdentitySequence(
-                    members, items)) {
-                throw new IllegalArgumentException(
-                        "batch commit does not match prepared identities");
-            }
-            if (reservation == null || members.isEmpty()) {
-                throw new IllegalStateException(
-                        "batch commit requires at least one prepared member");
-            }
-            PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
-                    createCommittedOwner(members);
-            PrefillState.CommittedHandoff handoff =
-                    reservation.commit(items, predictedMs);
-            exactCommitted.bindPrefillHandoff(handoff);
-            committedAdmission = exactCommitted;
-            reservation = null;
-            members = null;
-            phase = Phase.COMMITTED;
-            return handoff.precedingWork();
-        }
-
-        @Override
-        public synchronized void handoff(
-                String decisionReason, int remainingQueueDepth,
-                WorkSnapshot precedingWork) {
-            requirePhase(Phase.COMMITTED, "submit delivery");
-            Objects.requireNonNull(precedingWork, "precedingWork");
-            phase = Phase.SUBMITTED;
-            try {
-                // The strategy retains admission ownership while waiting for
-                // an executor. Request claims are acquired only when it runs.
-                submission.submit(sender -> deliver(
-                        decisionReason, remainingQueueDepth, precedingWork, sender));
-            } catch (Throwable failure) {
-                failUnsentDelivery(failure);
-                throw propagate(failure);
-            }
-        }
-
-        private void deliver(
-                String decisionReason, int remainingQueueDepth,
-                WorkSnapshot precedingWork, BatchSender sender) {
-            requirePhase(Phase.SUBMITTED, "deliver");
-            try {
-                owner.deliverCommitted(this, decisionReason, remainingQueueDepth,
-                        precedingWork, sender);
-            } catch (Throwable failure) {
-                failUnsentDelivery(failure);
-                throw propagate(failure);
-            }
-            if (phase == Phase.SUBMITTED) {
-                phase = Phase.TERMINAL;
-            }
-        }
-
-        private void failUnsentDelivery(Throwable failure) {
-            if (phase != Phase.SUBMITTED) {
-                return;
-            }
-            Throwable cleanup = owner.failCommitted(this, failure);
-            phase = Phase.TERMINAL;
-            if (cleanup != null && cleanup != failure) {
-                failure.addSuppressed(cleanup);
-            }
-        }
-
-        @Override
-        public synchronized void abort(Throwable cause) {
-            if (phase != Phase.COMMITTED) {
-                return;
-            }
-            Throwable cleanup = owner.failCommitted(this, cause);
-            phase = Phase.TERMINAL;
-            if (cleanup != null) {
-                throw propagate(cleanup);
-            }
-        }
-
-        @Override
-        public synchronized void close() {
-            if (phase != Phase.PREPARED) {
-                return;
-            }
-            phase = Phase.TERMINAL;
-            Throwable failure = rollbackAdmission(null);
-            failure = BatchDeliveryStrategy.append(
-                    failure, BatchDeliveryStrategy.close(submission));
-            submission = null;
-            if (failure != null) {
-                throw propagate(failure);
-            }
-        }
-
-        long batchId() {
-            return batchId;
-        }
-
-        private long predictedMs() {
-            return predictedMs;
-        }
-
-        private PrefillTimePredictor.Evaluator evaluator() {
-            return evaluator;
-        }
-
-        boolean transferToEndpoint(ScheduledRequest exactItem) {
-            requirePhase(Phase.SUBMITTED, "transfer admission");
-            return committedAdmission.transferToEndpoint(exactItem);
-        }
-
-        private void send(
-                BatchSender sender,
-                List<ScheduledRequest> exactItems,
-                long exactPredictionMs,
-                String decisionReason,
-                int remainingQueueDepth,
-                BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-            requirePhase(Phase.SUBMITTED, "send");
-            if (remainingQueueDepth < 0) {
-                throw new IllegalArgumentException(
-                        "remainingQueueDepth must be non-negative");
-            }
-            sender.sendBatch(
-                    exactItems,
-                    batchId,
-                    exactPredictionMs,
-                    decisionReason,
-                    observer);
-        }
-
-        private void transportAccepted() {
-            requirePhase(Phase.SUBMITTED, "accept transport");
-            phase = Phase.INFLIGHT;
-        }
-
-        private void transportFailed() {
-            requirePhase(Phase.SUBMITTED, "fail transport");
-            phase = Phase.TERMINAL;
-        }
-
-        private boolean transportOwned() {
-            return phase == Phase.INFLIGHT;
-        }
-
-        private void closeCapabilities() {
-            Throwable failure = null;
-            try {
-                closeAdmission();
-            } catch (Throwable admissionFailure) {
-                failure = admissionFailure;
-            }
-            try {
-                closeSubmission();
-            } catch (Throwable submissionFailure) {
-                failure = BatchDeliveryStrategy.append(
-                        failure, submissionFailure);
-            }
-            if (failure != null) {
-                throw propagate(failure);
-            }
-        }
-
-        private void closeAdmission() {
-            PrefillAdmissionResources.CommittedAdmissionOwner exactAdmission =
-                    committedAdmission;
-            if (exactAdmission != null) {
-                committedAdmission = null;
-                exactAdmission.close();
-            }
-        }
-
-        private void closeSubmission() {
-            PreparedSubmission exactSubmission = submission;
-            if (exactSubmission != null) {
-                submission = null;
-                exactSubmission.close();
-            }
-        }
-
-        private void requirePrepared(String operation) {
-            if (phase != Phase.PREPARED
-                    || submission == null) {
-                throw new IllegalStateException(
-                        "cannot " + operation + " batch transaction in " + phase);
-            }
-        }
-
-        /** Detach once, then attempt every admission rollback leaf. */
-        private Throwable rollbackAdmission(Throwable priorFailure) {
-            PrefillState.Reservation exactReservation;
-            ArrayList<PrefillAdmissionResources.Member> exactMembers;
-            synchronized (this) {
-                if (members == null) {
-                    return priorFailure;
-                }
-                exactReservation = reservation;
-                reservation = null;
-                exactMembers = members;
-                members = null;
-            }
-            Throwable failure = priorFailure;
-            for (PrefillAdmissionResources.Member member : exactMembers) {
-                failure = rollbackMember(member, failure);
-            }
-            return rollbackReservation(exactReservation, failure);
-        }
-
-        private void requireAdmissionPrepared(String operation) {
-            if (members == null) {
-                throw new IllegalStateException(
-                        operation + " requires PREPARED batch admission");
-            }
-        }
-
-        private void requirePhase(Phase expected, String operation) {
-            if (phase != expected) {
-                throw new IllegalStateException(
-                        "cannot " + operation + " batch transaction in " + phase);
-            }
-        }
-    }
-
-    /**
-     * One executor-capacity permit prepared before commit. Successful submission
-     * transfers the permit to the executor; close then becomes a no-op. The
-     * strategy still owns the batch admission until Delivery runs and settles it.
-     */
-    public interface PreparedSubmission extends AutoCloseable {
-        void submit(Delivery delivery);
-
-        @Override
-        void close();
-    }
-
-    /** Runs once on the dispatch executor, with no further queue before send. */
-    @FunctionalInterface
-    public interface Delivery {
-        void run(BatchSender sender);
-    }
-
-    /** Transport consumes the strategy's final batch; it never selects members. */
-    @FunctionalInterface
-    public interface BatchSender {
-        void sendBatch(
-                List<ScheduledRequest> exactItems,
-                long batchId,
-                long predictedMs,
-                String decisionReason,
-                BiConsumer<ScheduledRequest, DeliveryResult> observer);
-    }
-
-    private record ClaimedMember(
-            ScheduledRequest item,
-            DeliveryClaim claim) {
-    }
-
     private static final class DispatchGate
-            implements BiConsumer<ScheduledRequest, DeliveryResult> {
-        private final Map<ScheduledRequest, DeliveryClaim>
+            implements BiConsumer<RequestRoute, DeliveryResult> {
+        private final Map<RequestRoute, DeliveryClaim>
                 claimsByItem;
-        private final RequestRegistry requests;
         private boolean deferred = true;
         private List<Event> events;
 
         private DispatchGate(
-                List<ClaimedMember> members,
-                RequestRegistry requests) {
-            this.requests = requests;
+                List<DeliveryClaim> members) {
+
             this.claimsByItem = new IdentityHashMap<>(members.size());
-            for (ClaimedMember member : members) {
+            for (DeliveryClaim claim : members) {
                 DeliveryClaim previous = claimsByItem.put(
-                        member.item(), member.claim());
-                if (previous != null) {
-                    throw new IllegalArgumentException(
-                            "duplicate batch delivery identity");
-                }
+                        claim.item, claim);
+                checkArgument(previous == null, "duplicate batch delivery identity");
             }
         }
 
@@ -835,64 +221,45 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             if (pending != null) {
                 Throwable failure = null;
                 for (Event event : pending) {
-                    try {
-                        invoke(event);
-                    } catch (Throwable callbackFailure) {
-                        failure = append(failure, callbackFailure);
-                    }
+                    failure = Failures.run(failure,
+                            () -> invoke(event.item(), event.completion()));
                 }
                 if (failure != null) {
-                    throw propagate(failure);
+                    throw Failures.propagate(failure, "batch delivery failed");
                 }
             }
         }
 
         @Override
         public void accept(
-                ScheduledRequest item,
+                RequestRoute item,
                 DeliveryResult completion) {
-            publish(new Event(item, completion));
-        }
-
-        private void publish(Event event) {
             synchronized (this) {
                 if (deferred) {
                     if (events == null) {
                         events = new ArrayList<>();
                     }
-                    events.add(event);
+                    events.add(new Event(item, completion));
                     return;
                 }
             }
-            invoke(event);
+            invoke(item, completion);
         }
 
-        private void invoke(Event event) {
-            DeliveryClaim claim = claimFor(event.item());
-            if (claim == null) {
-                throw new IllegalStateException(
-                        "batch completion referenced an unsubmitted identity");
-            }
-            claim.complete(event.completion());
-        }
-
-        private DeliveryClaim claimFor(ScheduledRequest item) {
-            return claimsByItem.get(item);
+        private void invoke(RequestRoute item, DeliveryResult completion) {
+            DeliveryClaim claim = claimsByItem.get(item);
+            checkState(claim != null, "batch completion referenced an unsubmitted identity");
+            claim.item.ctx().scheduler().completeDelivery(claim, completion);
         }
     }
 
     private record Event(
-            ScheduledRequest item,
+            RequestRoute item,
             DeliveryResult completion) {
     }
 
     private static final class BatchProjection
             implements RouteProjection.DeliveryProjection {
-
-        private static final ThreadLocal<BatchPlanning> PLANNING =
-                ThreadLocal.withInitial(BatchPlanning::new);
-        private static final ThreadLocal<BatchService> SERVICE =
-                ThreadLocal.withInitial(BatchService::new);
 
         @Override
         public long singletonCompletionOffsetMs(
@@ -909,31 +276,20 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
         @Override
         public RouteProjection.GroupPlanning planning(
                 RouteProjection.Predictions predictions) {
-            PrefillTimePredictor.BatchPrediction incremental = predictions.newBatchPrediction();
-            if (incremental != null) {
-                return new AppendPlanning(incremental);
+            return new AppendPlanning(predictions.newBatchPrediction());
+        }
+
+        @Override
+        public long completionOffsetMs(List<GroupPlanner.Item> items, int memberIndex,
+                RouteProjection.Predictions predictions, RouteProjection.GroupPlanning planning) {
+            Objects.checkIndex(memberIndex, items.size());
+            if (planning != null) {
+                var cached = planning.predictedPrefixMs(memberIndex + 1);
+                if (cached.isPresent()) {
+                    return PrefillPredictionBoundary.committedDecisionGroupMs(cached.getAsDouble());
+                }
             }
-            BatchPlanning planning = PLANNING.get();
-            planning.reset(predictions);
-            return planning;
-        }
-
-        @Override
-        public RouteProjection.GroupService service(
-                GroupPlanner.Plan<GroupPlanner.Item> plan,
-                RouteProjection.Predictions predictions) {
-            BatchService service = SERVICE.get();
-            service.reset(plan, predictions, null);
-            return service;
-        }
-
-        @Override
-        public RouteProjection.GroupService service(
-                GroupPlanner.Plan<GroupPlanner.Item> plan, RouteProjection.Predictions predictions,
-                RouteProjection.GroupPlanning planning) {
-            BatchService service = SERVICE.get();
-            service.reset(plan, predictions, planning);
-            return service;
+            return predictions.batchDurationMs(items.subList(0, memberIndex + 1));
         }
 
         /** One planner invocation; prefixes only grow and the probe boundary never moves backwards. */
@@ -949,9 +305,8 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
 
             @Override
             public double durationMs(List<GroupPlanner.Item> prefix, int through) {
-                if (through < 0 || through >= prefix.size() || through + 1 < size) {
-                    throw new IllegalArgumentException("Prediction requires a growing prefix");
-                }
+                checkArgument(through >= 0 && through < prefix.size() && through + 1 >= size,
+                        "Prediction requires a growing prefix");
                 while (size <= through) {
                     GroupPlanner.Item item = prefix.get(size);
                     double next = prediction.append(item.seqLen(), item.hitCache());
@@ -976,129 +331,5 @@ public final class BatchDeliveryStrategy implements DeliveryStrategy {
             }
         }
 
-        private static final class BatchPlanning
-                implements RouteProjection.GroupPlanning {
-            private GroupPlanner.Item[] previous = new GroupPlanner.Item[0];
-            private double[] durations = new double[0];
-            private boolean[] computed = new boolean[0];
-            private int previousSize;
-            private RouteProjection.Predictions predictions;
-
-            private void reset(RouteProjection.Predictions exactPredictions) {
-                predictions = exactPredictions;
-                if (previousSize != 0) {
-                    java.util.Arrays.fill(computed, 0, previousSize, false);
-                }
-                previousSize = 0;
-            }
-
-            @Override
-            public double durationMs(
-                    List<GroupPlanner.Item> candidatePrefix,
-                    int requiredThroughIndex) {
-                if (requiredThroughIndex < 0
-                        || requiredThroughIndex >= candidatePrefix.size()) {
-                    throw new IndexOutOfBoundsException(requiredThroughIndex);
-                }
-                if (!isIdentityPrefix(candidatePrefix)) {
-                    ensureCapacity(candidatePrefix.size());
-                    for (int index = 0; index < candidatePrefix.size(); index++) {
-                        previous[index] = candidatePrefix.get(index);
-                    }
-                    java.util.Arrays.fill(
-                            computed, 0, candidatePrefix.size(), false);
-                    previousSize = candidatePrefix.size();
-                } else if (previousSize < candidatePrefix.size()) {
-                    ensureCapacity(candidatePrefix.size());
-                    for (int index = previousSize;
-                            index < candidatePrefix.size(); index++) {
-                        previous[index] = candidatePrefix.get(index);
-                        computed[index] = false;
-                    }
-                    previousSize = candidatePrefix.size();
-                }
-                if (!computed[requiredThroughIndex]) {
-                    durations[requiredThroughIndex] =
-                            predictions.batchPlanningDurationMs(
-                                    candidatePrefix.subList(
-                                            0, requiredThroughIndex + 1));
-                    computed[requiredThroughIndex] = true;
-                }
-                return durations[requiredThroughIndex];
-            }
-
-            private boolean isIdentityPrefix(List<GroupPlanner.Item> next) {
-                if (previousSize > next.size()) {
-                    return false;
-                }
-                for (int index = 0; index < previousSize; index++) {
-                    if (previous[index] != next.get(index)) {
-                        return false;
-                    }
-                }
-                return true;
-            }
-
-            private void ensureCapacity(int size) {
-                if (previous.length >= size) {
-                    return;
-                }
-                previous = java.util.Arrays.copyOf(previous, size);
-                durations = java.util.Arrays.copyOf(durations, size);
-                computed = java.util.Arrays.copyOf(computed, size);
-            }
-        }
-
-        private static final class BatchService
-                implements RouteProjection.GroupService {
-            private GroupPlanner.Plan<GroupPlanner.Item> plan;
-            private RouteProjection.Predictions predictions;
-            private RouteProjection.GroupPlanning planning;
-            private long[] completionOffsets = new long[0];
-            private boolean[] computed = new boolean[0];
-
-            private void reset(
-                    GroupPlanner.Plan<GroupPlanner.Item> exactPlan,
-                    RouteProjection.Predictions exactPredictions,
-                    RouteProjection.GroupPlanning exactPlanning) {
-                plan = exactPlan;
-                predictions = exactPredictions;
-                planning = exactPlanning;
-                int size = exactPlan.items().size();
-                if (completionOffsets.length < size) {
-                    completionOffsets = java.util.Arrays.copyOf(
-                            completionOffsets, size);
-                    computed = java.util.Arrays.copyOf(computed, size);
-                }
-                java.util.Arrays.fill(computed, 0, size, false);
-            }
-
-            @Override
-            public long completionOffsetMs(int memberIndex) {
-                if (memberIndex < 0 || memberIndex >= plan.items().size()) {
-                    throw new IndexOutOfBoundsException(memberIndex);
-                }
-                if (!computed[memberIndex] && planning != null) {
-                    var cached = planning.predictedPrefixMs(memberIndex + 1);
-                    if (cached.isPresent()) {
-                        completionOffsets[memberIndex] = PrefillPredictionBoundary.committedDecisionGroupMs(
-                                cached.getAsDouble());
-                        computed[memberIndex] = true;
-                    }
-                }
-                if (!computed[memberIndex]) {
-                    completionOffsets[memberIndex] =
-                            predictions.batchDurationMs(
-                                    plan.items().subList(0, memberIndex + 1));
-                    computed[memberIndex] = true;
-                }
-                return completionOffsets[memberIndex];
-            }
-
-            @Override
-            public long totalDurationMs() {
-                return completionOffsetMs(plan.items().size() - 1);
-            }
-        }
     }
 }

@@ -1,57 +1,52 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
 import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.QueueSnapshot;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.RouteTimelineProjector;
 import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
 import static org.mockito.Mockito.mock;
+import static com.google.common.base.Preconditions.checkArgument;
 
-/** Frozen-value builders shared by canonical route-projection tests. */
-final class RouteProjectionTestSupport {
+/**
+ * Frozen-value builders shared by canonical route-projection tests.
+ */
+public final class RouteProjectionTestSupport {
 
     static final long NOW_MS = 10_000L;
 
     static final Comparator<GroupPlanner.Item> FIFO =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparingLong(GroupPlanner.Item::requestId);
+
     static final Comparator<GroupPlanner.Item> PRIORITY =
             Comparator.comparingInt(GroupPlanner.Item::priority)
                     .reversed()
                     .thenComparingLong(GroupPlanner.Item::enqueueSeq)
                     .thenComparingLong(GroupPlanner.Item::requestId);
 
-    static final RouteProjection.DeliveryProjection ROUTE =
-            new RouteDeliveryStrategy(
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
-                    .projectionPolicy();
-    static final RouteProjection.DeliveryProjection BATCH =
-            new BatchDeliveryStrategy(
-                    () -> CapacityBoundary.Attempt.rejected(
-                            CapacityBoundary.OWNERSHIP_LOST),
-                    () -> 1L,
-                    mock(RequestRegistry.class),
-                    mock(DeliveryMetrics.class))
-                    .projectionPolicy();
+    static final RouteProjection.DeliveryProjection ROUTE = new RouteDeliveryStrategy(mock(DeliveryMetricsReporter.class)).projectionPolicy();
 
-    static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR =
-            new PrefillTimePredictor.Evaluator() {
-                @Override
+    static final RouteProjection.DeliveryProjection BATCH = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST), () -> 1L, mock(DeliveryMetricsReporter.class)).projectionPolicy();
+
+    static final PrefillTimePredictor.Evaluator TOKEN_EVALUATOR = new PrefillTimePredictor.Evaluator() {
+
+        @Override
                 public long estimateMs(long totalTokens, long hitTokens) {
                     long sequence = Math.max(0L, totalTokens);
                     long hit = Math.max(0L, Math.min(hitTokens, sequence));
                     return (long) (sequence - hit + 0.3 * hit);
                 }
 
-                @Override
+        @Override
                 public double predictBatchMs(
                         org.flexlb.balance.prediction.PrefillBatchFeatures
                                 features) {
@@ -60,7 +55,7 @@ final class RouteProjectionTestSupport {
                                     item.seqLen(), item.hitCache()))
                             .sum();
                 }
-            };
+    };
 
     private RouteProjectionTestSupport() {
     }
@@ -94,7 +89,7 @@ final class RouteProjectionTestSupport {
         ordered.sort(ordering);
         return new QueueSnapshot(
                 NOW_MS,
-                queueScheduling,
+                queueScheduling, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW,
                 ordering,
                 constraints,
                 ordered,
@@ -126,7 +121,7 @@ final class RouteProjectionTestSupport {
                 0L);
     }
 
-    static RouteProjection.Probe probe(
+    static Probe probe(
             long requestId,
             int priority,
             long sequenceLength,
@@ -135,14 +130,14 @@ final class RouteProjectionTestSupport {
                 sequenceLength, hitCache);
     }
 
-    static RouteProjection.Probe probe(
+    static Probe probe(
             long requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
             long sequenceLength,
             long hitCache) {
-        return new RouteProjection.Probe(
+        return new Probe(
                 requestId,
                 priority,
                 enqueuedAtMs,
@@ -168,13 +163,67 @@ final class RouteProjectionTestSupport {
             QueueSnapshot queue,
             WorkSnapshot work,
             PrefillTimePredictor.Evaluator evaluator,
-            RouteProjection.Probe probe,
+            Probe probe,
             RouteProjection.DeliveryProjection deliveryProjection) {
-        return RouteProjection.project(
+        return project(
                 new RouteProjection.Inputs(
-                        queue, work),
+                        queue, work, 0L),
                 probe,
                 evaluator,
                 deliveryProjection);
+    }
+
+    /** Virtual request evaluated against one frozen endpoint snapshot. */
+    public record Probe(
+            long requestId,
+            int priority,
+            long enqueuedAtMs,
+            long expiresAtMs,
+            long seqLen,
+            long hitCache,
+            long routingCacheMatchTokens) {
+
+        public Probe {
+            checkArgument(seqLen >= 0L, "seqLen must be non-negative");
+            checkArgument(hitCache >= 0L && hitCache <= seqLen, "hitCache must be in [0, seqLen]");
+            checkArgument(routingCacheMatchTokens >= 0L, "routingCacheMatchTokens must be non-negative");
+        }
+    }
+
+    public static RouteProjection.Candidate project(
+            RouteProjection.Inputs inputs,
+            Probe probe,
+            PrefillTimePredictor.Evaluator evaluator,
+            RouteProjection.DeliveryProjection deliveryProjection) {
+        return project(inputs, probe, evaluator, deliveryProjection,
+                inputs.queue().capturedAtMs());
+    }
+
+    public static RouteProjection.Candidate project(
+            RouteProjection.Inputs inputs,
+            Probe probe,
+            PrefillTimePredictor.Evaluator evaluator,
+            RouteProjection.DeliveryProjection deliveryProjection,
+            long planningAtMs) {
+        RouteProjection.CandidateView view = RouteTimelineProjector.current().projectView(
+                inputs, probe.requestId(), probe.priority(),
+                probe.enqueuedAtMs(), probe.expiresAtMs(), probe.seqLen(),
+                probe.hitCache(), probe.routingCacheMatchTokens(),
+                evaluator, deliveryProjection, planningAtMs);
+        return immutable(view);
+    }
+
+    private static RouteProjection.Candidate immutable(RouteProjection.CandidateView source) {
+        return source instanceof RouteProjection.Candidate candidate
+                ? candidate
+                : new RouteProjection.Candidate(
+                        source.state(),
+                        source.projectedTtftMsValue(),
+                        source.incomingPrefillMs(),
+                        source.initialHeadDisposition(),
+                        source.detail(),
+                        source.blockerRole(),
+                        source.cacheHitTokens(),
+                        source.routingCacheMatchTokens());
     }
 }

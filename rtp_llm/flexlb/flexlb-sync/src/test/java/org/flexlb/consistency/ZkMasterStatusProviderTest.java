@@ -14,13 +14,13 @@ import static org.mockito.Mockito.when;
  * Tests for {@link ZkMasterStatusProvider}.
  *
  * <p>Verifies that the provider correctly delegates to
- * {@link LBStatusConsistencyService#isMaster()} and that the
+ * {@link MasterStatusService#isMaster()} and that the
  * {@code @Lazy} constructor injection pattern (which fixed the
  * Spring circular dependency between ZkMasterStatusProvider and
- * LBStatusConsistencyService) works as expected.
+ * MasterStatusService) works as expected.
  *
  * <p><b>Regression context:</b> Prior to the {@code @Lazy} fix,
- * constructor injection of {@code LBStatusConsistencyService} into
+ * constructor injection of {@code MasterStatusService} into
  * {@code ZkMasterStatusProvider} caused a Spring circular dependency,
  * which prevented {@code KMonitorAdapter} from receiving a
  * {@code MasterStatusProvider} bean — all metrics stopped reporting
@@ -30,19 +30,19 @@ import static org.mockito.Mockito.when;
  */
 class ZkMasterStatusProviderTest {
 
-    private LBStatusConsistencyService lbStatusConsistencyService;
+    private MasterStatusService masterStatusService;
     private ZkMasterStatusProvider provider;
 
     @BeforeEach
     void setUp() {
-        lbStatusConsistencyService = mock(LBStatusConsistencyService.class);
-        provider = new ZkMasterStatusProvider(lbStatusConsistencyService);
+        masterStatusService = mock(MasterStatusService.class);
+        provider = new ZkMasterStatusProvider(masterStatusService);
     }
 
     @Test
     @DisplayName("isMaster returns true when underlying service reports master")
     void isMasterReturnsTrueWhenServiceIsMaster() {
-        when(lbStatusConsistencyService.isMaster()).thenReturn(true);
+        when(masterStatusService.isMaster()).thenReturn(true);
 
         assertTrue(provider.isMaster());
     }
@@ -50,17 +50,17 @@ class ZkMasterStatusProviderTest {
     @Test
     @DisplayName("isMaster returns false when underlying service reports non-master")
     void isMasterReturnsFalseWhenServiceIsNotMaster() {
-        when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+        when(masterStatusService.isMaster()).thenReturn(false);
 
         assertFalse(provider.isMaster());
     }
 
     @Test
-    @DisplayName("isMaster delegates to LBStatusConsistencyService.isMaster()")
+    @DisplayName("isMaster delegates to MasterStatusService.isMaster()")
     void isMasterDelegatesToService() {
         provider.isMaster();
 
-        verify(lbStatusConsistencyService).isMaster();
+        verify(masterStatusService).isMaster();
     }
 
     @Test
@@ -70,7 +70,7 @@ class ZkMasterStatusProviderTest {
         // actual bean creation until a method is called. A Mockito mock
         // simulates this behaviour: it is a proxy whose backing bean is
         // not initialised until stubs are configured.
-        LBStatusConsistencyService lazyProxy = mock(LBStatusConsistencyService.class);
+        MasterStatusService lazyProxy = mock(MasterStatusService.class);
         when(lazyProxy.isMaster()).thenReturn(true);
 
         ZkMasterStatusProvider providerWithLazyProxy = new ZkMasterStatusProvider(lazyProxy);

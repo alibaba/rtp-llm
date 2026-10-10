@@ -1,0 +1,97 @@
+{
+  "date": "2026-10-07",
+  "base_commit": "013c9bce2f3a0d4c8c27402bef8d85340d9854dc",
+  "scope": "Remove production adapters with only test callers; retain resource primitives and distinct send/cancel/settlement protocols",
+  "removed": [
+    "DecodeEndpoint.reserveUnqueued",
+    "DecodeEndpoint.reservationHandle",
+    "DecodeState.reservationHandle",
+    "BalanceContext.DeliveryClaim.cleanupComplete",
+    "BalanceContext.DeliveryClaim.sendOutcome",
+    "SchedulerRuntime.cancelChannel",
+    "PreemptionCancelPhase.requiresOrdinaryReconciliation",
+    "PrefillEndpoint.signalCapacityAvailable forwarding method",
+    "DecodePreemptionCoordinator test-only constructor, constructor forwarding, ownsTimer and close lifecycle",
+    "AbstractRequestScheduler misplaced retention documentation"
+  ],
+  "production_net_lines_removed": 62,
+  "sync_production_java_lines": 25194,
+  "source_diff_manifest_sha256": "2df577c09b3485963cefbb0dd1ca00330660dc6d35a17bd6b20a2c93e8abd7b7",
+  "source_diff_files": [
+    "rtp_llm/flexlb/flexlb-api/src/test/java/org/flexlb/balance/scheduler/SchedulerTestSupport.java",
+    "rtp_llm/flexlb/flexlb-api/src/test/java/org/flexlb/balance/scheduler/TransientCapacityQueueContractTest.java",
+    "rtp_llm/flexlb/flexlb-api/src/test/java/org/flexlb/httpserver/FlexlbForwardHopGuardNettyTest.java",
+    "rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/balance/scheduler/SchedulerTestSupport.java",
+    "rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/LeakCanaryLongRunE2ETest.java",
+    "rtp_llm/flexlb/flexlb-mock-engine/src/test/java/org/flexlb/mockengine/SchedulingErrorCodeMatrixTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeState.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemptionCoordinator.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/PreemptionCancelPhase.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeCapacityPreemptionTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeEndpointAdmissionTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeEndpointLayeredViewTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeEndpointTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeRequestExpirationTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/DecodeStateTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/EndpointRegistryRoleTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/EndpointTestSupport.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/endpoint/TwinOverloadAdmissionTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/eviction/DecodePreemptionCoordinatorTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/eviction/EvictionManagerTryAdmitTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DeliveryClaimTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DeliverySettlementTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DirectAdmissionContractTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/EndpointCleanupDeadlockTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/EndpointCleanupOwnershipTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/QueuedBatchDeliveryTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/QueuedDecodeWithdrawalTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestCompletionPublicationRaceTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestConfirmationTimeoutTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestInactivityTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestResourceAccountingTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestTerminalSettlementTest.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/SchedulerTestSupport.java",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/strategy/DecodeSelectorTest.java"
+  ],
+  "reviews": {
+    "lock_contract_review": "No blocking findings after retaining live-claim late-publication assertion",
+    "state_boundary_review": "No blocking findings; exact pin, generation, token and shadow phase semantics preserved",
+    "regression_hotspot_review": "No blocking findings; Runtime executor lifecycle and IPv4 fixture correction reviewed"
+  },
+  "verification": {
+    "jdk": "21",
+    "full_ut": {
+      "command": "./mvnw -B -P 'opensource,!internal' -pl flexlb-api,flexlb-mock-engine -am test",
+      "tests": 2523,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1,
+      "log": "/tmp/flexlb-api-cleanup-20261007/ut-repeat.log",
+      "note": "Full repeat used production cleanup sources and the original wildcard-bind Netty fixture; the final IPv4 fixture was separately recompiled and verified below"
+    },
+    "final_netty_fixture_ut": {
+      "command": "./mvnw -B -P 'opensource,!internal' -pl flexlb-api -am -Dtest=FlexlbForwardHopGuardNettyTest -Dsurefire.failIfNoSpecifiedTests=false test",
+      "tests": 9,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "log": "/tmp/flexlb-api-cleanup-20261007/netty-ipv4-ut.log"
+    },
+    "first_attempt_failure": {
+      "test": "FlexlbForwardHopGuardNettyTest.remoteTransportErrorsDoNotCancelOrScheduleLocally",
+      "observed": "scheduleCalls expected 1, actual 0; forwarding to IPv4 port 64342 received an HTTP/1 first frame; lsof found IDEA listening on 127.0.0.1:64342",
+      "fix": "Bind the test master explicitly to 127.0.0.1:0, consistent with the client and Node fixtures; preserve all assertions",
+      "log": "/tmp/flexlb-api-cleanup-20261007/ut.log"
+    },
+    "perf": "Not rerun: removed methods had no production callers; production cancellation/resource/selection hot paths are unchanged"
+  },
+  "excluded_existing_changes": [
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillState.java",
+    "rtp_llm/flexlb/docs/scheduler-design/evidence/review-regression-2026-10-06.json"
+  ]
+}

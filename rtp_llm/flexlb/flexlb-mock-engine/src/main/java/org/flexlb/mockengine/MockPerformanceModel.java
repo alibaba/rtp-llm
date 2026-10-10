@@ -15,6 +15,8 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.google.common.base.Preconditions.checkState;
+
 final class MockPerformanceModel {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -283,15 +285,8 @@ final class MockPerformanceModel {
         // that overstated low-batch decode ~5.5x and full-batch ~2.8x versus
         // production. Fail fast with a migration hint instead of silently
         // reinterpreting it.
-        if (decode.has("per_token_ms")) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.per_token_ms is removed — decode is now priced per STEP"
-                    + " (production fit step_base_ms=" + DEFAULT_DECODE_STEP_BASE_MS
-                    + " + step_per_running_ms=" + DEFAULT_DECODE_STEP_PER_RUNNING_MS
-                    + " × running, " + DEFAULT_TOKENS_PER_STEP + " tokens/step by default)."
-                    + " Remove per_token_ms to get the production-fit defaults, or declare"
-                    + " decode.step_ms_by_batch / decode.step_base_ms explicitly.");
-        }
+        checkState(!decode.has("per_token_ms"),
+                "Performance JSON '%s': decode.per_token_ms is removed — decode is now priced per STEP" + " (production fit step_base_ms=" + DEFAULT_DECODE_STEP_BASE_MS + " + step_per_running_ms=" + DEFAULT_DECODE_STEP_PER_RUNNING_MS + " × running, " + DEFAULT_TOKENS_PER_STEP + " tokens/step by default)." + " Remove per_token_ms to get the production-fit defaults, or declare" + " decode.step_ms_by_batch / decode.step_base_ms explicitly.", performanceFile);
         boolean reportQueuedAsKvAllocated =
                 decode.path("report_queued_as_kv_allocated").asBoolean(false);
         List<DecodePoint> points = new ArrayList<>();
@@ -301,13 +296,10 @@ final class MockPerformanceModel {
             }
         }
         boolean hasLinearCoeffs = decode.has("step_base_ms") || decode.has("step_per_running_ms");
-        if (!points.isEmpty() && hasLinearCoeffs) {
-            // Two explicit step-latency declarations are a config conflict;
-            // picking one silently would violate the least-surprise rule.
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms"
-                    + " are mutually exclusive — declare exactly one step-latency source.");
-        }
+        // Two explicit step-latency declarations are a config conflict;
+        // picking one silently would violate the least-surprise rule.
+        checkState(points.isEmpty() || !hasLinearCoeffs,
+                "Performance JSON '%s': decode.step_ms_by_batch and decode.step_base_ms/step_per_running_ms" + " are mutually exclusive — declare exactly one step-latency source.", performanceFile);
         points.sort(Comparator.comparingInt(DecodePoint::batchSize));
         // No decode latency declaration at all -> the linear production fit
         // (same pattern as the prefill fallback: the code default IS the
@@ -319,15 +311,11 @@ final class MockPerformanceModel {
         double stepPerRunningMs = decode.path("step_per_running_ms")
                 .asDouble(DEFAULT_DECODE_STEP_PER_RUNNING_MS);
         double tokensPerStep = decode.path("tokens_per_step").asDouble(DEFAULT_TOKENS_PER_STEP);
-        if (tokensPerStep <= 0) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.tokens_per_step must be > 0 (got " + tokensPerStep + ")");
-        }
+        checkState(!(tokensPerStep <= 0),
+                "Performance JSON '%s': decode.tokens_per_step must be > 0 (got %s)", performanceFile, tokensPerStep);
         int decodeReserveStep = decode.path("reserve_step").asInt(DEFAULT_DECODE_RESERVE_STEP);
-        if (decodeReserveStep < 0) {
-            throw new IllegalStateException("Performance JSON '" + performanceFile
-                    + "': decode.reserve_step must be >= 0 (got " + decodeReserveStep + ")");
-        }
+        checkState(decodeReserveStep >= 0,
+                "Performance JSON '%s': decode.reserve_step must be >= 0 (got %s)", performanceFile, decodeReserveStep);
         double jitterPct = performance.path("jitter_pct").asDouble(0.0);
         return new MockPerformanceModel(blockSize, sleepScale, prefillScale,
                 prefillMinMs, prefillFixedMs, maxWaitingPrefillBatches, directBatchSizeMax,
@@ -366,12 +354,8 @@ final class MockPerformanceModel {
                 if (estimator != null
                         && estimator.getType() == EstimatorType.FORMULA) {
                     String expression = estimator.getExpression();
-                    if (expression == null || expression.isBlank()) {
-                        throw new IllegalStateException("Master config " + masterConfigFile
-                                + ": router.roles.prefill.executionTimeEstimator is FORMULA"
-                                + " with a blank expression — set the expression explicitly or"
-                                + " omit the estimator to use the FlexLB formula default");
-                    }
+                    checkState(expression != null && !expression.isBlank(),
+                            "Master config %s: router.roles.prefill.executionTimeEstimator is FORMULA with a blank expression — set the expression explicitly or omit the estimator to use the FlexLB formula default", masterConfigFile);
                     return expression;
                 }
                 break;  // LEARNING estimator: fall through to the production-fit default

@@ -2,6 +2,7 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.dao.route.RoleType;
 
+import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
@@ -14,30 +15,34 @@ final class EndpointRoundRobin {
 
     int next(RoleType role, String group, int size, IntPredicate eligible, IntFunction<String> address) {
         Cursor cursor = cursors.computeIfAbsent(new Scope(role, group), ignored -> new Cursor());
-        synchronized (cursor) {
-            int firstIndex = -1;
-            int nextIndex = -1;
-            String firstAddress = null;
-            String nextAddress = null;
-            for (int i = 0; i < size; i++) {
-                if (!eligible.test(i)) { continue; }
+        // Eligibility belongs to this routing snapshot. Capture it before the shared cursor lock.
+        String[] eligibleAddresses = new String[size];
+        String[] orderedAddresses = new String[size];
+        int count = 0;
+        for (int i = 0; i < size; i++) {
+            if (eligible.test(i)) {
                 String candidate = address.apply(i);
-                if (firstAddress == null || candidate.compareTo(firstAddress) < 0) {
-                    firstIndex = i;
-                    firstAddress = candidate;
-                }
-                if (cursor.lastSelectedAddress != null && candidate.compareTo(cursor.lastSelectedAddress) > 0
-                        && (nextAddress == null || candidate.compareTo(nextAddress) < 0)) {
-                    nextIndex = i;
-                    nextAddress = candidate;
-                }
+                eligibleAddresses[i] = candidate;
+                orderedAddresses[count++] = candidate;
             }
-            if (nextIndex >= 0) {
-                cursor.lastSelectedAddress = nextAddress;
-                return nextIndex;
-            }
-            if (firstIndex >= 0) { cursor.lastSelectedAddress = firstAddress; }
-            return firstIndex;
         }
+        if (count == 0) { return -1; }
+        Arrays.sort(orderedAddresses, 0, count);
+        String selected;
+        synchronized (cursor) {
+            int index = cursor.lastSelectedAddress == null ? 0
+                    : Arrays.binarySearch(orderedAddresses, 0, count, cursor.lastSelectedAddress);
+            if (cursor.lastSelectedAddress != null) {
+                if (index < 0) { index = -index - 1; }
+                else {
+                    // Advance past the address, including duplicate entries in a captured snapshot.
+                    while (index < count && orderedAddresses[index].equals(cursor.lastSelectedAddress)) { index++; }
+                }
+            }
+            selected = orderedAddresses[index == count ? 0 : index];
+            cursor.lastSelectedAddress = selected;
+        }
+        // Keep the original index so callers can recover their exact captured endpoint.
+        return Arrays.asList(eligibleAddresses).indexOf(selected);
     }
 }

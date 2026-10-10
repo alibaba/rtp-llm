@@ -54,14 +54,11 @@ class SchedulingMetadataTest {
     }
 
     @Test
-    void remainingLifetimeUsesTheSingleAbsoluteExpiration() {
+    void expirationUsesTheSingleAbsoluteDeadline() {
         SchedulingMetadata metadata = SchedulingMetadata.explicit(50, 2_000L);
 
-        assertEquals(500L, metadata.remainingMs(1_500L));
         assertFalse(metadata.expired(1_999L));
-        assertEquals(0L, metadata.remainingMs(2_000L));
         assertTrue(metadata.expired(2_000L));
-        assertEquals(-1L, metadata.remainingMs(2_001L));
         assertTrue(metadata.expired(2_001L));
         assertEquals(2_000L, metadata.expiresAtMs());
     }
