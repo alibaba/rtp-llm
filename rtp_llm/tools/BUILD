@@ -1,6 +1,13 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "dsv41_pp_smoke",
+    testonly = True,
+    srcs = ["dsv41_pp_smoke.py"],
+    deps = [":dsv41_phase_smoke"],
+)
+
+py_library(
     name = "dsv41_phase_smoke",
     testonly = True,
     srcs = ["dsv41_phase_smoke.py"],
