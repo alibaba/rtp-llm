@@ -52,6 +52,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
 
     private static final int MIN_PLANNER_THREADS = 1;
 
+    enum OfferResult {
+        ENQUEUED,
+        QUEUE_FULL,
+        CLOSED
+    }
+
     private final DefaultRouter router;
     private final BatchSchedulerReporter reporter;
     private final EvictionManager evictionManager;
@@ -137,11 +143,10 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
     }
 
-    /** Enqueue without selecting an endpoint on the ingress thread. */
-    boolean offer(
-            BalanceContext context,
-            CompletableFuture<Response> future,
-            int priority) {
+    /**
+     * Enqueue without selecting an endpoint on the ingress thread.
+     */
+    OfferResult offer(BalanceContext context, CompletableFuture<Response> future, int priority) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(future, "future");
         GlobalQueueEntry entry = new GlobalQueueEntry(context, future, normalizePriority(priority),
@@ -149,7 +154,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         lock.lock();
         try {
             if (closed.get()) {
-                return false;
+                return OfferResult.CLOSED;
+            }
+            int maxQueuedRequests = configService.loadBalanceConfig().queueScheduler().getMaxQueuedRequests();
+            if (orderedQueue.size() >= maxQueuedRequests) {
+                return OfferResult.QUEUE_FULL;
             }
             orderedQueue.add(entry);
             registered.put(future, entry);
@@ -157,7 +166,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             // indexes without scanning the backlog.
             future.whenComplete((ignored, failure) -> completeRequest(entry));
             changed.signal();
-            return true;
+            return OfferResult.ENQUEUED;
         } finally {
             lock.unlock();
         }

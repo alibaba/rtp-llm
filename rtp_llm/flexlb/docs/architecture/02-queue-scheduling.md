@@ -37,8 +37,10 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 `BalanceContext`，再按 scheduler 类型分流。QUEUE 路径的关键边界是：
 
 1. `request_id` 是请求代际标识；活跃或已终态的重复 ID 会被拒绝。
-2. `QueueCapacityConfig.maxOutstandingRequestsGlobal`（默认 100000）精确限制
-   Master 当前持有的请求数，包括还未注册进 inflight map 的准入中请求。
+2. `scheduler.maxQueuedRequests`（默认 100000）限制 Generation 全局队列中的请求数，
+   包括等待放置、正在规划和等待资源的请求。`GlobalQueueCoordinator.offer` 在队列锁下检查
+   当前深度；达到上限时返回 `QUEUE_FULL`（8502），不加入队列。成功路由或请求结束后释放
+   队列位置；配置快照更新后，下一次入队按新上限判断。Encoder 使用独立队列。
 3. 调度器在可能向引擎或调用方发布前装配唯一的绝对过期事件。
 4. PRIORITY ordering 进入优先级 plan/commit；FIFO ordering 先调用
    `DefaultRouter`，提交 endpoint 预留后才把请求放入目标 Prefill 的
@@ -82,7 +84,7 @@ Master 不发起此次抢占的 Cancel RPC，也不等待取消完成才返回�
 ## 默认配置
 
 - scheduler：`QUEUE` + `FIFO`，`queueTimeoutMs=3600000`，
-  `maxOutstandingRequestsGlobal=100000`。
+  `maxQueuedRequests=100000`。
 - dispatcher：`BATCH`，`maxRequests=8`，`maxCollectionWaitMs=300`，
   `maxWaitingRequestsPerPrefillWorker=1024`，`enqueueRpcTimeoutMs=5000`。
 - lifecycle：`staleInflightTimeoutMs=300000`，

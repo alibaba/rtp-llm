@@ -159,6 +159,25 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void queue_capacity_is_positive_and_only_valid_for_queue_scheduling() {
+        assertEquals(100_000, ConfigTestFixtures.parse("{}").queueScheduler().getMaxQueuedRequests());
+        assertEquals(2, ConfigTestFixtures.parse("""
+                {"scheduler":{"type":"QUEUE","maxQueuedRequests":2}}
+                """).queueScheduler().getMaxQueuedRequests());
+        for (String value : new String[]{"0", "-1", "\"2\"", "null"}) {
+            var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                    {"scheduler":{"type":"QUEUE","maxQueuedRequests":%s}}
+                    """.formatted(value)));
+            assertTrue(error.getMessage().contains("maxQueuedRequests"), error.getMessage());
+        }
+        var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
+                {"scheduler":{"type":"DIRECT","maxQueuedRequests":2},
+                 "dispatcher":{"type":"NON_BATCH"}}
+                """));
+        assertTrue(error.getMessage().contains("scheduler.maxQueuedRequests"));
+    }
+
+    @Test
     void tagged_unions_reject_parameters_from_inactive_variants() {
         assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse("""
                 {

@@ -126,9 +126,10 @@ public final class RequestScheduler {
 
     private void enqueueGenerationRequest(BalanceContext context, CompletableFuture<Response> future) {
         try {
-            if (!globalQueue.offer(context, future, context.getPriority())) {
-                future.complete(error(StrategyErrorType.DISPATCH_FAILED,
-                        "request scheduler is shutting down"));
+            switch (globalQueue.offer(context, future, context.getPriority())) {
+                case ENQUEUED -> { }
+                case QUEUE_FULL -> future.complete(error(StrategyErrorType.QUEUE_FULL, "Global queue is full"));
+                case CLOSED -> future.complete(error(StrategyErrorType.DISPATCH_FAILED, "request scheduler is shutting down"));
             }
         } catch (Throwable failure) {
             future.complete(error(StrategyErrorType.DISPATCH_FAILED,

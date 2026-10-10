@@ -1,8 +1,9 @@
 # Resource Management
 
-当前实现没有全局的动态许可信号量。容量约束分为三层：
+容量约束分为三层：
 
-1. `PriorityScheduler` 用 `maxOutstandingRequestsGlobal` 限制 Master 拥有的 QUEUE 请求总数。
+1. `GlobalQueueCoordinator` 用 `scheduler.maxQueuedRequests` 限制 Generation 全局队列深度；
+   达到上限时拒绝入队。容量配置热更新后对后续入队生效。
 2. `ResourceMeasure` 在路由时判断单个 worker 是否可选。
 3. `PrefillEndpoint` / `DecodeEndpoint` 用本地预留账本保护尚未反映到引擎
    `WorkerStatus` 中的调度决策。

@@ -207,6 +207,24 @@ class ConfigServiceTest {
     }
 
     @Test
+    void runtimeUpdateChangesGlobalQueueCapacityAndRejectsInvalidThreshold() {
+        FakeConfigSource source = new FakeConfigSource("Nacos", 200, """
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "scheduler":{"type":"QUEUE","maxQueuedRequests":2}}
+                """);
+        ConfigService service = createService(List.of(environmentSource(Map.of()), source));
+        FlexlbConfig initial = service.loadBalanceConfig();
+        assertThat(initial.queueScheduler().getMaxQueuedRequests()).isEqualTo(2);
+
+        source.emit("{\"schemaVersion\":3,\"scheduler\":{\"maxQueuedRequests\":3}}");
+        assertThat(service.loadBalanceConfig()).isNotSameAs(initial);
+        assertThat(service.loadBalanceConfig().queueScheduler().getMaxQueuedRequests()).isEqualTo(3);
+
+        source.emit("{\"schemaVersion\":3,\"scheduler\":{\"maxQueuedRequests\":0}}");
+        assertThat(service.loadBalanceConfig().queueScheduler().getMaxQueuedRequests()).isEqualTo(3);
+    }
+
+    @Test
     void runtimeUpdateLogsTheNewSourceSchemaVersion() {
         ch.qos.logback.classic.Logger logger =
                 (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(ConfigService.class);
