@@ -11,7 +11,36 @@
 # Triton block-dim-64 bring-up comparator still exists in the upstream FLA
 # copy under triton_kernels/fla/.
 
+import os
+
 import torch
+
+
+def _sequence_boundaries(cu_seqlens, token_count):
+    from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+        metadata_cache,
+        tensor_key,
+    )
+
+    cache = (
+        metadata_cache()
+        if os.environ.get("RTP_KDA_SHARED_HOST_METADATA", "1") != "0"
+        else None
+    )
+    key = ("kda_sequence_boundaries", tensor_key(cu_seqlens), token_count)
+    if cache is not None and key in cache:
+        return cache[key]
+    with torch.profiler.record_function("kda.state.sequence_boundaries_d2h"):
+        boundaries = [int(value) for value in cu_seqlens.detach().cpu().tolist()]
+    if not boundaries or boundaries[0] != 0 or boundaries[-1] != token_count:
+        raise ValueError(
+            f"invalid cu_seqlens boundaries {boundaries} for T={token_count}"
+        )
+    if cache is not None:
+        # The context is discarded after every forward, including exceptions.
+        # GPU metadata may be refreshed in-place between requests/graph steps.
+        cache[key] = boundaries
+    return boundaries
 
 
 def chunk_gated_delta_rule_fwd_h_cublas(
@@ -92,11 +121,7 @@ def chunk_gated_delta_rule_fwd_h_cublas(
     else:
         if batch != 1:
             raise ValueError("cu_seqlens requires flattened inputs with batch size 1")
-        boundaries = [int(value) for value in cu_seqlens.detach().cpu().tolist()]
-        if not boundaries or boundaries[0] != 0 or boundaries[-1] != token_count:
-            raise ValueError(
-                f"invalid cu_seqlens boundaries {boundaries} for T={token_count}"
-            )
+        boundaries = _sequence_boundaries(cu_seqlens, token_count)
         sequence_ranges = [
             (0, boundaries[index], boundaries[index + 1])
             for index in range(len(boundaries) - 1)

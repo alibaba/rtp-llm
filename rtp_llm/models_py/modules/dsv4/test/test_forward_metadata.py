@@ -1,6 +1,7 @@
 """Forward cache lifetime, workspace budgeting and geometry isolation."""
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,13 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 meta = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(meta)
+
+_KDA_SPEC = importlib.util.spec_from_file_location(
+    "kda_state_metadata_under_test",
+    Path(__file__).parents[3] / "triton_kernels/kimi_kda/chunk_delta_h.py",
+)
+kda_meta = importlib.util.module_from_spec(_KDA_SPEC)
+_KDA_SPEC.loader.exec_module(kda_meta)
 
 
 class ForwardMetadataTest(unittest.TestCase):
@@ -47,6 +55,41 @@ class ForwardMetadataTest(unittest.TestCase):
         self.assertEqual(self.query.call_count, 1)
         forward(self.model, self.inputs)
         self.assertEqual(self.query.call_count, 2)
+
+    def test_kda_boundaries_shared_and_refreshed_for_reused_tensor(self):
+        self.start_patch(
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv4.forward_metadata": meta,
+                },
+            )
+        )
+        self.start_patch(
+            mock.patch.dict("os.environ", {"RTP_KDA_SHARED_HOST_METADATA": "1"})
+        )
+        boundaries = torch.tensor([0, 32, 64], dtype=torch.int32)
+        transfers = []
+        self.start_patch(
+            mock.patch.object(
+                torch.Tensor, "cpu", lambda tensor: transfers.append(tensor) or tensor
+            )
+        )
+
+        @meta.scoped_forward_metadata
+        def forward(_, inputs, expected):
+            for _ in range(34):
+                self.assertEqual(
+                    kda_meta._sequence_boundaries(boundaries, 64), expected
+                )
+
+        forward(self.model, self.inputs, [0, 32, 64])
+        self.assertEqual(len(transfers), 1)
+        original_ptr = boundaries.data_ptr()
+        boundaries[1] = 16
+        self.assertEqual(boundaries.data_ptr(), original_ptr)
+        forward(self.model, self.inputs, [0, 16, 64])
+        self.assertEqual(len(transfers), 2)
 
     def test_new_scope_for_reused_inputs_and_exception(self):
         scopes = []
