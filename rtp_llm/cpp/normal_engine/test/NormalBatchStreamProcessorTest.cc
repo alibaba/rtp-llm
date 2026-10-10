@@ -217,19 +217,19 @@ TEST_F(NormalBatchStreamProcessorTest, testSpeculativeReserveStepFormula) {
     config.type = SP_TYPE_NONE;
     EXPECT_EQ(config.speculativeReserveStep(), 0);
 
-    config.type = SP_TYPE_MTP;
+    config.type              = SP_TYPE_MTP;
     config.gen_num_per_cycle = 3;
     EXPECT_EQ(config.speculativeReserveStep(), 4);
 
-    config.type = SP_TYPE_DSPARK;
+    config.type              = SP_TYPE_DSPARK;
     config.gen_num_per_cycle = 3;
     EXPECT_EQ(config.speculativeReserveStep(), 9);
 
-    config.type = SP_TYPE_MTP;
+    config.type              = SP_TYPE_MTP;
     config.gen_num_per_cycle = std::numeric_limits<int64_t>::max();
     EXPECT_ANY_THROW((void)config.speculativeReserveStep());
 
-    config.type = SP_TYPE_DSPARK;
+    config.type              = SP_TYPE_DSPARK;
     config.gen_num_per_cycle = static_cast<int64_t>(std::numeric_limits<int>::max()) / 3 + 1;
     EXPECT_ANY_THROW((void)config.speculativeReserveStep());
 }
@@ -253,17 +253,21 @@ TEST_F(NormalBatchStreamProcessorTest, testExecutorPassesFinalGraphWidthOnlyWith
     model.attn_config.kernel_tokens_per_block = 8;
 
     CacheConfig cache_config = makeMhaCacheConfig(
-        /*layer_num=*/1, /*block_num=*/4, /*local_head_num_kv=*/1, /*size_per_head=*/1,
-        /*tokens_per_block=*/8, rtp_llm::DataType::TYPE_INT8);
+        /*layer_num=*/1,
+        /*block_num=*/4,
+        /*local_head_num_kv=*/1,
+        /*size_per_head=*/1,
+        /*tokens_per_block=*/8,
+        rtp_llm::DataType::TYPE_INT8);
     auto manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(manager->init());
 
     EngineInitParams params;
-    params.model_config_                   = model;
-    params.py_model                        = py::none();
+    params.model_config_                      = model;
+    params.py_model                           = py::none();
     params.hw_kernel_config.enable_cuda_graph = true;
-    params.sp_config.type              = SP_TYPE_MTP;
-    params.sp_config.gen_num_per_cycle = 1;
+    params.sp_config.type                     = SP_TYPE_MTP;
+    params.sp_config.gen_num_per_cycle        = 1;
 
     struct CapturedParamsModel: ModelBase {
         GptModelOutputs forward(const GptModelInputs&) override {
@@ -271,8 +275,8 @@ TEST_F(NormalBatchStreamProcessorTest, testExecutorPassesFinalGraphWidthOnlyWith
         }
     };
 
-    int64_t captured_width      = -1;
-    bool    captured_has_layout = false;
+    int64_t captured_width             = -1;
+    bool    captured_has_layout        = false;
     NormalExecutor::test_model_factory = [&](const GptModelInitParams& init_params) {
         captured_width      = init_params.kernel_block_table_width;
         captured_has_layout = init_params.kv_cache_layer_layout.has_value();
@@ -281,14 +285,7 @@ TEST_F(NormalBatchStreamProcessorTest, testExecutorPassesFinalGraphWidthOnlyWith
     FactoryResetGuard factory_reset_guard;
 
     {
-        NormalExecutor executor(params,
-                                manager,
-                                false,
-                                false,
-                                0,
-                                MlaOpsType::AUTO,
-                                nullptr,
-                                nullptr);
+        NormalExecutor executor(params, manager, false, false, 0, MlaOpsType::AUTO, nullptr, nullptr);
         EXPECT_EQ(captured_width, 9);
         EXPECT_TRUE(captured_has_layout);
     }
@@ -303,14 +300,7 @@ TEST_F(NormalBatchStreamProcessorTest, testExecutorPassesFinalGraphWidthOnlyWith
     }
 
     {
-        NormalExecutor executor(params,
-                                nullptr,
-                                false,
-                                false,
-                                0,
-                                MlaOpsType::AUTO,
-                                nullptr,
-                                nullptr);
+        NormalExecutor executor(params, nullptr, false, false, 0, MlaOpsType::AUTO, nullptr, nullptr);
         EXPECT_EQ(captured_width, 0);
         EXPECT_FALSE(captured_has_layout);
     }
@@ -611,8 +601,7 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedEmptyAndNonEmptyOrdinaryResource
         auto query             = std::make_shared<GenerateInput>();
         query->input_ids       = hostIntBuffer({1, 2, 3});
         query->generate_config = std::make_shared<GenerateConfig>();
-        auto stream            = std::make_shared<NormalGenerateStream>(
-            query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        auto stream = std::make_shared<NormalGenerateStream>(query, model, RuntimeConfig{}, ResourceContext{}, nullptr);
         stream->generate_status_->status = StreamState::RUNNING;
         stream->setKVCache(std::move(resource));
         return stream;
@@ -626,12 +615,12 @@ TEST_F(NormalBatchStreamProcessorTest, testMixedEmptyAndNonEmptyOrdinaryResource
     full_resource.initGroups(config.topologyPtr());
     full_resource.setBatchBlocks(0, "default", {1, 2, 3});
 
-    auto empty_stream = make_stream(std::move(empty_resource));
-    auto full_stream  = make_stream(std::move(full_resource));
+    auto         empty_stream = make_stream(std::move(empty_resource));
+    auto         full_stream  = make_stream(std::move(full_resource));
     StreamGroups groups({empty_stream, full_stream});
 
     NormalBatchStreamProcessor processor(model, PDSepConfig{}, ProfilingDebugLoggingConfig{}, config, false);
-    TensorHolder holder;
+    TensorHolder               holder;
 
     auto kernel_table = processor.gatherKvCacheKernelBlockId(groups, {"default"}, holder);
     ASSERT_TRUE(kernel_table.ok());
@@ -841,6 +830,38 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         auto& model_input = merge_input_status.value();
         EXPECT_FALSE(model_input.attention_mask.defined());
     }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, EngramDeviceHistoryAdvancesWithoutHostBookkeeping) {
+    ModelConfig model_config;
+    model_config.max_seq_len                         = 128;
+    model_config.vocab_size                          = 128;
+    model_config.attn_config.v41_kv_source_layer_ids = {0};
+    auto query                                       = std::make_shared<GenerateInput>();
+    query->input_ids                                 = hostIntBuffer({1, 2, 3});
+    query->generate_config                           = std::make_shared<GenerateConfig>();
+    auto stream =
+        std::make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+    EngineInitParams             params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+    SamplerOutput  output;
+    auto           options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    output.token_ids       = torch::full({1}, 42, options);
+    executor.publishNormalDeviceState(stream_groups, output);
+    EXPECT_EQ(toVec<int32_t>(stream->getNormalAsyncDeviceState().engram_token_window_gpu),
+              (std::vector<int32_t>{42, 3, 2, 1}));
+    // Host CompleteTokenIds still ends at three. The second publication must
+    // take its history from the previous device state, not repeat that tail.
+    output.token_ids = torch::full({1}, 43, options);
+    executor.publishNormalDeviceState(stream_groups, output);
+    EXPECT_EQ(toVec<int32_t>(stream->getNormalAsyncDeviceState().engram_token_window_gpu),
+              (std::vector<int32_t>{43, 42, 3, 2}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLogitsProcessorState) {

@@ -118,7 +118,7 @@ public class FlexlbGrpcServer {
                 .executor(grpcExecutor)
                 .addService(ServerInterceptors.intercept(flexlbServiceImpl,
                         new GrpcTraceInterceptor(), grpcServerTimingInterceptor, grpcQosHeaderInterceptor))
-                .maxInboundMessageSize(16 * 1024 * 1024)
+                .maxInboundMessageSize(org.flexlb.constant.GrpcConstants.MAX_MESSAGE_SIZE)
                 .flowControlWindow(4 * 1024 * 1024)
                 .build()
                 .start();

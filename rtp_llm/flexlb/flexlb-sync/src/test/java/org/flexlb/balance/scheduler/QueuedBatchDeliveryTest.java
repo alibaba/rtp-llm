@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.DeliverySettlementTestSupport;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.prediction.FormulaPredictor;
 import org.flexlb.balance.scheduler.ExpirationTimer.InactivityDeadline;
+import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -33,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -169,7 +171,17 @@ class QueuedBatchDeliveryTest {
         assertEquals(0, decode.routingView().engineCapacityUsed());
         assertEquals(0, decode.routingView().inflightHardKv());
         assertEquals(0, decode.routingView().inflightExpectedKv());
-        dispatcher.tryPrepareSubmission().value().close();
+        // In-flight permit contract: the setup delivery's permit is held
+        // until the shared reply future completes. After the @AfterEach
+        // reply completion, admission MUST be available again — the permit
+        // held by the last delivery must be returned exactly once. The
+        // previous conditional (accept-or-reject) tolerated a leaked permit.
+        CapacityBoundary.Attempt<?> admission = dispatcher.tryPrepareSubmission();
+        assertTrue(admission.accepted(),
+                "admission permit must be available after RPC completion; "
+                        + "a rejection here means a permit leaked");
+        assertInstanceOf(BatchDeliveryStrategy.PreparedSubmission.class, admission.value())
+                .close();
     }
 
     @ParameterizedTest

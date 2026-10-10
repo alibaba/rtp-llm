@@ -17,8 +17,8 @@
 namespace rtp_llm {
 
 // Keep the direct client and ViT proxy defaults aligned: 120s worker budget plus 5s margin.
-constexpr int64_t kDefaultVitRpcTimeoutMs  = 125 * 1000;
-constexpr int64_t kVitRpcTimeoutMarginMs   = 5 * 1000;
+constexpr int64_t kDefaultVitRpcTimeoutMs = 125 * 1000;
+constexpr int64_t kVitRpcTimeoutMarginMs  = 5 * 1000;
 
 inline constexpr const char* kMetricSourceInferenceClient = "inference_client";
 
@@ -81,9 +81,10 @@ public:
 };
 
 struct DeliveryContext {
-    const std::string& endpoint;
-    DeadlineBudget&    budget;
-    MMControlClient&   control;
+    const std::string&               endpoint;
+    DeadlineBudget&                  budget;
+    MMControlClient&                 control;
+    std::shared_ptr<MMControlClient> control_owner;
 };
 
 class ConsumeResult {
@@ -160,8 +161,8 @@ public:
 class MMRemoteOutputTransport {
 public:
     MMRemoteOutputTransport(std::vector<std::unique_ptr<MMReceiptReader>> readers,
-                            std::unique_ptr<MMTerminalReceiptReader>     terminal,
-                            std::unique_ptr<MMControlClient>             control,
+                            std::unique_ptr<MMTerminalReceiptReader>      terminal,
+                            std::unique_ptr<MMControlClient>              control,
                             int64_t default_rpc_timeout_ms = kDefaultVitRpcTimeoutMs,
                             int64_t rpc_timeout_margin_ms  = kVitRpcTimeoutMarginMs):
         readers_(std::move(readers)),
@@ -178,7 +179,7 @@ private:
 
     std::vector<std::unique_ptr<MMReceiptReader>> readers_;
     std::unique_ptr<MMTerminalReceiptReader>      terminal_;
-    std::unique_ptr<MMControlClient>              control_;
+    std::shared_ptr<MMControlClient>              control_;
     int64_t                                       default_rpc_timeout_ms_;
     int64_t                                       rpc_timeout_margin_ms_;
 };

@@ -46,10 +46,11 @@ class MegaMoeJitWarmupTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {"DG_JIT_CACHE_DIR": "/tmp/dg-cache"}, clear=True
         ):
-            self.assertEqual(
-                _mega_moe_rank_nvcc_tmpdir(7),
-                "/tmp/dg-cache/rtp_llm_mega_moe_nvcc/rank_7",
-            )
+            scratch = _mega_moe_rank_nvcc_tmpdir(7)
+            self.assertNotEqual(scratch, _mega_moe_rank_nvcc_tmpdir(8))
+            self.assertEqual(scratch, _mega_moe_rank_nvcc_tmpdir(7))
+            self.assertLess(len(os.fsencode(scratch)) + 40, 108)
+            self.assertEqual(os.environ["DG_JIT_CACHE_DIR"], "/tmp/dg-cache")
 
     def test_tmpdir_is_restored_after_warmup_failure(self):
         executor = MegaMoeExecutor.__new__(MegaMoeExecutor)

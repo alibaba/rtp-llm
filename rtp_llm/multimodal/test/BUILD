@@ -119,3 +119,27 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "deepseek_v41_processor_test",
+    srcs = ["deepseek_v41_processor_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)
+
+py_test(
+    name = "deepseek_v41_vision_test",
+    srcs = ["deepseek_v41_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)
+
+py_test(
+    name = "deepseek_vision_test",
+    srcs = ["deepseek_vision_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)

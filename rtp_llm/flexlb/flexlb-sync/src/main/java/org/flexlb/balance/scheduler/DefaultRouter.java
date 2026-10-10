@@ -73,6 +73,20 @@ public class DefaultRouter {
         }
     }
 
+    /** Stateless vision selection: release the generation pin without admitting P/D work. */
+    public Response selectVitOnly(BalanceContext context) {
+        Response validationFailure = validateRequest(context);
+        if (validationFailure != null) {
+            return validationFailure;
+        }
+        try (SelectedRole selection = vitSelector.select(
+                context, RoleType.VIT, resolvePolicyGroup(context))) {
+            return selection == null
+                    ? Response.error(RoleType.VIT.getErrorType())
+                    : buildSuccessResponse(List.of(selection.serverStatus()));
+        }
+    }
+
     private Response validateRequest(BalanceContext context) {
         if (context == null || context.getRequest() == null) {
             Logger.error("masterRequest is null");

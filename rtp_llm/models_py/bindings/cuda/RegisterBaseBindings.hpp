@@ -24,6 +24,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
 #endif
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_bf16.h"
 
 using namespace rtp_llm;
 
@@ -255,6 +256,8 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
     // Per-row TopK over [row_starts[r], row_ends[r]); returned indices
     // are relative to row_starts[r], padded with -1 past the per-row
     // valid count. CUDA-only.
+    rtp_ops_m.def("deepselect_bf16_available", &deepselect_bf16_available);
+    rtp_ops_m.def("deepselect_bf16", &deepselect_bf16, py::arg("logits"), py::arg("ends"), py::arg("output"));
     rtp_ops_m.def("dsv4_top_k_per_row_prefill",
                   &dsv4_top_k_per_row_prefill,
                   "Per-row TopK for DSv4 indexer prefill",

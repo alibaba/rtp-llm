@@ -419,9 +419,8 @@ TEST(LoadAsyncContextTest, AllocatorCallbackPreservesRetryableCapacityStatus) {
     initBackend(*backend, pool);
     auto context = coordinator->create({}, {}, 0, backend, makeRequest(1));
     ASSERT_TRUE(coordinator->registerContext(context));
-    context->setMatchCallback([](LoadAsyncContext&, size_t) {
-        return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED};
-    });
+    context->setMatchCallback(
+        [](LoadAsyncContext&, size_t) { return LoadMatchResult{false, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}; });
 
     context->startBackendMatch();
     backend->completeMatch(1);
@@ -532,6 +531,36 @@ TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFal
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->mallocStatus(), MallocStatus::NONE);
     EXPECT_EQ(commits, 1u);
+    coordinator->shutdown();
+}
+
+TEST(LoadAsyncContextTest, BackendMatchClipsInvalidPrefixBeforeMaterialization) {
+    size_t commits     = 0;
+    size_t aborts      = 0;
+    auto   coordinator = makeCoordinator(commits, aborts);
+    auto   backend     = std::make_shared<ManualBackend>();
+    auto   pool        = std::make_shared<TestBlockPool>();
+    auto   block       = pool->malloc().value();
+    pool->incRef(block);
+    initBackend(*backend, pool);
+    auto context = coordinator->create({}, {}, 0, backend, makeRequest(3));
+    ASSERT_TRUE(coordinator->registerContext(context));
+    context->setValidPrefix([](size_t blocks) { return blocks <= 1 || blocks >= 4; });
+    context->setMatchCallback([&](LoadAsyncContext& current, size_t matched) {
+        EXPECT_EQ(matched, 1u);
+        EXPECT_EQ(current.backendHandles().size(), 1u);
+        current.setBackendTargetBlock(0, 0, block);
+        return current.commit();
+    });
+    context->startBackendMatch();
+    backend->completeMatch(3);
+    ASSERT_TRUE(backend->readPending());
+    backend->completeRead();
+    EXPECT_EQ(backend->readKeys().size(), 1u);
+    EXPECT_TRUE(context->success());
+    EXPECT_EQ(context->matchedBlocks(), 1u);
+    EXPECT_EQ(commits, 1u);
+    pool->decRef(block);
     coordinator->shutdown();
 }
 

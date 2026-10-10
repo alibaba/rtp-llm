@@ -38,6 +38,7 @@ flashinfer_with_cache = [
 flashmla = [
     "fast-hadamard-transform",
     "flash-mla",
+    "flash-mla-legacy",
     "tilelang",
 ]
 
@@ -145,6 +146,7 @@ requirement([
 _JIT_CACHE_SRCS = [
     "utils/jit_cache_manager.py",
     "utils/jit_cache_store.py",
+    "utils/jit_cache_deep_gemm.py",
 ]
 _JIT_CACHE_ENV_SRCS = ["utils/jit_cache_env.py"]
 
@@ -310,7 +312,7 @@ py_library(
         # cubin/jit-cache wheels ride the rtp_llm wheel's Requires-Dist
         # (pip lock) into runtime images and are not bazel test deps.
         "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,

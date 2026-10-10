@@ -13,8 +13,12 @@ from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
-from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
+from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation
+from rtp_llm.server.cache_key_routing import (
+    get_block_cache_keys,
+    get_v41_cache_key_seed,
+    route_cache_keys_for_page_rr,
+)
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
 from rtp_llm.server.misc import format_exception
@@ -74,6 +78,7 @@ class BackendRPCServerVisitor:
         parallelism_config=None,
         prefill_cp_config=None,
         source_role: str = "frontend",
+        model_config=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -91,6 +96,10 @@ class BackendRPCServerVisitor:
             prefill_cp_config: Optional PrefillCPConfig for page-RR route cache keys
             source_role: Caller role used for request-info correlation fields.
         """
+        self.cache_key_seed = (
+            get_v41_cache_key_seed(model_config) if model_config is not None else 0
+        )
+        self.remote_vit = vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
@@ -255,18 +264,63 @@ class BackendRPCServerVisitor:
         # Keep hash generation at the physical KV block granularity. Page-RR
         # routing samples canonical keys from this full logical-block key list;
         # it must not recompute request hashes with the virtual block size.
-        full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        full_block_cache_keys = get_block_cache_keys(
+            token_ids,
+            self.seq_size_per_block,
+            v41_inputs=input.v41_inputs,
+            cache_key_seed=self.cache_key_seed,
+        )
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
         input_pb = trans_input(input)
-
+        routing_input = input
+        schedule_kwargs = {}
         try:
+            if (
+                self.remote_vit
+                and input.v41_inputs is not None
+                and input.v41_inputs.images
+            ):
+                timeout_ms = (
+                    input.generate_config.ttft_timeout_ms
+                    or input.generate_config.timeout_ms
+                )
+                if timeout_ms is None or timeout_ms <= 0:
+                    timeout_ms = (
+                        self.master_client.master_config.master_default_timeout_ms
+                    )
+                deadline = time.monotonic() + timeout_ms / 1000.0
+                vit_route = await self.master_client.get_backend_role_addrs(
+                    block_cache_keys=[],
+                    cache_key_block_size=self._cache_key_block_size(),
+                    input=input,
+                    request_id=input.request_id,
+                    vit_only=True,
+                    timeout_s=timeout_ms / 1000.0,
+                )
+                if not vit_route.is_ok:
+                    return vit_route
+                selected_vit = vit_route.role_addrs[0]
+                routing_input = replace(
+                    input,
+                    generate_config=input.generate_config.model_copy(
+                        update={"role_addrs": [selected_vit]}
+                    ),
+                )
+                input_pb = trans_input(routing_input)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise FtRuntimeException(
+                        ExceptionType.DEADLINE_EXCEEDED, "ViT routing deadline exceeded"
+                    )
+                schedule_kwargs["timeout_s"] = remaining
             route_result = await self.master_client.get_backend_role_addrs(
                 block_cache_keys=block_cache_keys,
                 cache_key_block_size=self._cache_key_block_size(),
-                input=input,
+                input=routing_input,
                 request_id=input.request_id,
                 input_pb=input_pb,
+                **schedule_kwargs,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -278,7 +332,16 @@ class BackendRPCServerVisitor:
             raise
 
         if route_result.is_ok:
-            input.generate_config.role_addrs = route_result.role_addrs
+            role_addrs = list(route_result.role_addrs)
+            if routing_input is not input and not any(
+                addr.role == RoleType.VIT for addr in role_addrs
+            ):
+                role_addrs.extend(
+                    addr
+                    for addr in routing_input.generate_config.role_addrs
+                    if addr.role == RoleType.VIT
+                )
+            input.generate_config.role_addrs = role_addrs
             input.enqueued_by_master = route_result.enqueued_by_master
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
@@ -773,4 +836,5 @@ def create_backend_rpc_server_visitor(
         parallelism_config=engine_config.parallelism_config,
         prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
+        model_config=model_config,
     )

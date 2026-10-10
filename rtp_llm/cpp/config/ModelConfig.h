@@ -37,6 +37,7 @@ public:
     bool                              is_multimodal         = false;
     std::vector<std::vector<int64_t>> mm_sep_tokens         = {};
     bool                              include_sep_tokens    = false;
+    int64_t                           mm_padding_size       = 0;
     int64_t                           mm_position_ids_style = 0;  // 0 for default; 1 for chatglm4v; 2 for qwen2 vl
 };
 
@@ -139,6 +140,9 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // Model policy for prefix recomputation; live P/D transfers are unaffected.
+    int     cache_min_replay_tokens = 1;
+    int64_t cache_key_hash_seed     = 0;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";

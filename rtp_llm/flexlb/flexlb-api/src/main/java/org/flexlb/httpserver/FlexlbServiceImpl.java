@@ -114,7 +114,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (forwardToMaster) {
                 if (request.getForwardHop() != 0) {
                     completeOnce(request.getRequestId(), context,
-                            notMasterResponse(request.getRequestId()),
+                            notMasterResponse(request),
                             responseObserver, ScheduleOrigin.ENTRY_ERROR, completionClaimed);
                     return;
                 }
@@ -142,8 +142,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private FlexlbScheduleProtocol.FlexlbScheduleResponsePB notMasterResponse(long requestId) {
-        RequestState owned = routeService.getRequestState(requestId, 0);
+    private FlexlbScheduleProtocol.FlexlbScheduleResponsePB notMasterResponse(
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB request) {
+        RequestState owned = request.getVitOnly() ? null
+                : routeService.getRequestState(request.getRequestId(), 0);
         if (owned != null) {
             // A repeated request must not be advertised as unaccepted after leadership changes.
             return buildMasterForwardFailureResponse("REQUEST_ALREADY_OWNED", "")
@@ -293,7 +295,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             if (!completionClaimed.compareAndSet(false, true)) {
                 return;
             }
-            cancelUndeliveredRoute(request.getRequestId());
+            if (!request.getVitOnly()) {
+                cancelUndeliveredRoute(request.getRequestId());
+            }
         };
         inboundContext.addListener(cancellationListener, Runnable::run);
         Runnable removeCancellationListener =
@@ -656,7 +660,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             observer.onNext(response);
             observer.onCompleted();
         } catch (RuntimeException deliveryError) {
-            if (response.getSuccess() && ctx != null) {
+            if (response.getSuccess() && ctx != null && !ctx.getRequest().isVitOnly()) {
                 if (ownsLocalRoute(origin)) {
                     cancelUndeliveredRoute(ctx.getRequestId());
                 } else if (origin == ScheduleOrigin.FORWARDED_TO_MASTER) {
@@ -680,7 +684,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         if (ctx != null) {
             engineHealthReporter.reportBalancingService(ctx);
-            reportPrioritySchedule(ctx, response);
+            if (!ctx.getRequest().isVitOnly()) {
+                reportPrioritySchedule(ctx, response);
+            }
         }
     }
 
@@ -844,6 +850,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setMaxNewTokens(pb.getMaxNewTokens());
         request.setNumBeams(pb.getNumBeams());
         request.setForceDisableSpRun(pb.getForceDisableSpRun());
+        request.setVitOnly(pb.getVitOnly());
         request.setModel(pb.getModel());
         request.setApiKey(pb.getApiKey());
         request.setCacheKeyBlockSize(pb.getCacheKeyBlockSize());
@@ -866,7 +873,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setPriority(schedulingMetadata.priority());
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
-        requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
+        if (!pb.getVitOnly()) {
+            requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
+        }
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPb(pb.getGenerateInput());

@@ -326,20 +326,20 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     // (multimodal placeholder ids stay -1 but get unmasked -> out-of-bounds).
     const bool has_explicit_position_ids =
         model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0;
-    const bool need_token_remap = model_input.text_tokens_mask.defined() || model_input.combo_tokens_type_ids.defined()
-                                  || has_explicit_position_ids || has_multimodal_input;
+    const bool has_engram       = model_input.engram_token_windows.defined();
+    const bool need_token_remap = has_engram || model_input.text_tokens_mask.defined()
+                                  || model_input.combo_tokens_type_ids.defined() || has_explicit_position_ids
+                                  || has_multimodal_input;
     const bool           need_source_map = need_token_remap || has_prefix_reuse;
     std::vector<int64_t> cp_select_indices;
     std::vector<uint8_t> cp_valid_mask;
-    RTP_LLM_CHECK_WITH_INFO(
-        !need_source_map || num_decode_stream == 0,
-        "Context parallel supports pure-prefill batches only when multimodal or prefix-reuse remap is required");
+
     if (need_source_map) {
         cp_select_indices.reserve(cp_split_input_tokens.numel());
         cp_valid_mask.reserve(cp_split_input_tokens.numel());
     }
 
-    const bool has_hidden_states = total_hidden_states.defined() && total_hidden_states.numel() > 0;
+    const bool has_hidden_states          = total_hidden_states.defined() && total_hidden_states.numel() > 0;
     bool       should_split_hidden_states = false;
     if (has_hidden_states) {
         RTP_LLM_CHECK_WITH_INFO(
@@ -372,6 +372,12 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         std::memcpy(input_token_ptr,
                     total_input_tokens.data_ptr<int32_t>() + total_input_token_idx,
                     num_decode_stream * sizeof(int));
+        if (need_source_map) {
+            for (size_t i = 0; i < num_decode_stream; ++i) {
+                cp_select_indices.push_back(static_cast<int64_t>(i));
+                cp_valid_mask.push_back(1);
+            }
+        }
         if (should_split_hidden_states) {
             for (size_t i = 0; i < num_decode_stream; ++i) {
                 hidden_select_indices.push_back(static_cast<int64_t>(i));
@@ -425,7 +431,16 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         input_length_ptr[num_decode_stream + p] = input_chunk_length;
     }
 
+    if (has_engram) {
+        auto history  = model_input.engram_token_windows.to(torch::kCPU);
+        auto indexes  = torch::tensor(cp_select_indices, torch::kInt64);
+        auto valid    = torch::tensor(cp_valid_mask, torch::kUInt8).to(torch::kBool);
+        auto selected = history.index_select(0, indexes).contiguous();
+        selected.masked_fill_(valid.logical_not().unsqueeze(1), -1);
+        model_input.engram_token_windows = selected.pin_memory();
+    }
     if (need_token_remap) {
+        cp_params.prefill_mm_spans = model_input.mm_features_spans;
         remapAlignedInputs(model_input,
                            cp_select_indices,
                            cp_valid_mask,
@@ -440,11 +455,16 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     // transformer layer sees the same cache-aware positions without rebuilding
     // offsets in Python.
     if (!has_explicit_position_ids && has_prefix_reuse) {
-        auto absolute_position_ids = torch::empty({local_token_num}, pinned_i32);
-        std::memcpy(
-            absolute_position_ids.data_ptr<int32_t>(), prefill_shuffle_indices_ptr, local_token_num * sizeof(int32_t));
-        auto*  position_ids_ptr = absolute_position_ids.data_ptr<int32_t>();
-        size_t local_offset     = 0;
+        auto  absolute_position_ids = torch::empty({local_token_num}, pinned_i32);
+        auto* position_ids_ptr      = absolute_position_ids.data_ptr<int32_t>();
+        if (num_decode_stream > 0) {
+            auto decode_positions = sequence_lengths.to(torch::kCPU).contiguous();
+            std::memcpy(position_ids_ptr, decode_positions.data_ptr<int32_t>(), num_decode_stream * sizeof(int32_t));
+        }
+        std::memcpy(position_ids_ptr + num_decode_stream,
+                    prefill_shuffle_indices_ptr,
+                    (local_token_num - num_decode_stream) * sizeof(int32_t));
+        size_t local_offset = num_decode_stream;
         for (size_t p = 0; p < num_prefill_stream; ++p) {
             for (int i = 0; i < chunk_lengths[p]; ++i) {
                 auto& position_id = position_ids_ptr[local_offset + i];
@@ -495,6 +515,8 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
     cp_params.prefill_shuffle_indices          = shuffle_indices.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_restore_indice       = qkv_restore_indice.to(torch::kCUDA, /*non_blocking=*/true);
     cp_params.prefill_qkv_padding_mask         = qkv_padding_mask.to(torch::kCUDA, /*non_blocking=*/true);
+    cp_params.prefill_qkv_restore_indice_cpu   = qkv_restore_indice;
+    cp_params.prefill_qkv_padding_mask_cpu     = qkv_padding_mask;
     cp_params.prefill_actual_input_lengths_cpu = input_lengths_cpu_tensor;
     cp_params.prefill_prefix_lengths_cpu       = prefix_lengths;
 #endif

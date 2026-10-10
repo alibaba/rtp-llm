@@ -416,4 +416,58 @@ TEST_F(QueryConverterTest, TimeoutErrorCodeMapsToGrpcDeadline) {
     EXPECT_EQ(transErrorCodeToGrpc(ErrorCode::KEEP_ALIVE_TIMEOUT), grpc::StatusCode::DEADLINE_EXCEEDED);
 }
 
+namespace {
+
+GenerateInputPB v41ImageRequest() {
+    GenerateInputPB request;
+    request.mutable_generate_config()->set_max_new_tokens(256);
+    auto* prepared = request.mutable_v41_inputs();
+    prepared->set_schema_version(1);
+    for (int32_t token : {7, 8, 9, 129264, 129264, 129264, 129264, 10, 11, 12, 13}) {
+        request.add_token_ids(token);
+    }
+    for (int32_t kind : {-1, -1, -1, 0, 1, 2, 3, -1, -1, -1, -1}) {
+        prepared->add_token_types(kind);
+        prepared->add_image_mask(kind != -1);
+    }
+    auto* image = prepared->add_images();
+    image->set_start(3);
+    image->set_n_vit_h(1);
+    image->set_n_vit_w(1);
+    image->set_content_sha256(std::string(64, 'a'));
+    image->set_processor_identity(std::string(64, 'b'));
+    for (int32_t kind : {0, 1, 2, 3}) {
+        image->add_types(kind);
+    }
+    QueryConverter::transTensorPB(image->mutable_patches(), torch::ones({1, 3, 14, 14}, torch::kBFloat16));
+    return request;
+}
+
+}  // namespace
+
+TEST_F(QueryConverterTest, RejectUnsupportedV41SchemaBeforeConvertingImages) {
+    for (int version : {0, -1, 2}) {
+        auto wire = v41ImageRequest();
+        wire.mutable_v41_inputs()->set_schema_version(version);
+        EXPECT_THROW(QueryConverter::transQuery(&wire), std::invalid_argument);
+    }
+    auto wire = v41ImageRequest();
+    EXPECT_NO_THROW(QueryConverter::transQuery(&wire));
+}
+
+TEST_F(QueryConverterTest, V41TypedMetadataRoundTripPreservesCanonicalTokensAndPatches) {
+    auto wire  = v41ImageRequest();
+    auto input = QueryConverter::transQuery(&wire);
+    ASSERT_TRUE(input->v41_inputs);
+    EXPECT_EQ(input->input_ids.numel(), wire.token_ids_size());
+    EXPECT_EQ(input->input_ids[3].item<int32_t>(), 129264);
+    ASSERT_EQ(input->v41_inputs->images.size(), 1);
+    const auto& image = input->v41_inputs->images[0];
+    EXPECT_EQ(image.content_sha256, std::string(64, 'a'));
+    EXPECT_EQ(image.processor_identity, std::string(64, 'b'));
+    EXPECT_EQ(image.patches.scalar_type(), torch::kBFloat16);
+    EXPECT_TRUE(torch::equal(image.types, torch::tensor({0, 1, 2, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(input->v41_inputs->image_mask, input->v41_inputs->token_types.ne(-1)));
+}
+
 }  // namespace rtp_llm
