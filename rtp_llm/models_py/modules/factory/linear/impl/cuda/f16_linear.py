@@ -2,6 +2,8 @@
 
 When USE_ONLINE_FP4GEMM=1, layers with K%128==0 are deferred to
 CudaOnlineMxfp4Linear for online MXFP4 quantization + mm_fp4 GEMM.
+RTP_BF16_LINEAR_BACKEND=deepgemm opts supported SM100 BF16 projections into
+DeepGEMM, whose reduction order is independent of the number of token rows.
 """
 
 import os
@@ -50,6 +52,41 @@ class CudaF16Linear(LinearBase):
         )
         self.weight = weight.T
         self.bias = bias
+        backend = os.environ.get("RTP_BF16_LINEAR_BACKEND", "torch")
+        if backend not in ("torch", "deepgemm"):
+            raise ValueError(f"Unsupported RTP_BF16_LINEAR_BACKEND: {backend}")
+        self._bf16_gemm = None
+        self._bf16_weight = None
+        if (
+            backend == "deepgemm"
+            and self.weight.is_cuda
+            and self.weight.dtype == torch.bfloat16
+            and self.bias is None
+            and self.weight.shape[0] % 8 == 0
+            and self.weight.shape[1] % 128 == 0
+            and torch.cuda.get_device_capability(self.weight.device)[0] == 10
+        ):
+            import deep_gemm
+
+            self._bf16_gemm = getattr(deep_gemm, "bf16_gemm_nt", None)
+            if self._bf16_gemm is not None:
+                # Keep the original weight view for callers that inspect its
+                # layout to decide whether collective GEMM fusion is supported.
+                self._bf16_weight = self.weight.contiguous()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        if (
+            self._bf16_gemm is not None
+            and input.dtype == torch.bfloat16
+            and input.device == self.weight.device
+        ):
+            flat = input.reshape(-1, input.shape[-1]).contiguous()
+            output = torch.empty(
+                (flat.shape[0], self.weight.shape[0]),
+                dtype=input.dtype,
+                device=input.device,
+            )
+            if flat.shape[0]:
+                self._bf16_gemm(flat, self._bf16_weight, output)
+            return output.view(*input.shape[:-1], self.weight.shape[0])
         return F.linear(input, self.weight, self.bias)

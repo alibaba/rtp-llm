@@ -36,9 +36,21 @@ class SparseMlaRegistryTest(unittest.TestCase):
             rope_head_dim=0,
         )
 
-        self.assertFalse(_supports_sparse_prefill_dense_fast_path(glm53_fp8))
-        self.assertTrue(_supports_sparse_prefill_dense_fast_path(ds_fp8))
-        self.assertTrue(_supports_sparse_prefill_dense_fast_path(glm53_bf16))
+        with patch.dict("os.environ", {"GLM53_SPARSE_MLA_DENSE_PREFILL": "1"}):
+            self.assertFalse(_supports_sparse_prefill_dense_fast_path(glm53_fp8))
+            self.assertTrue(_supports_sparse_prefill_dense_fast_path(ds_fp8))
+            self.assertTrue(_supports_sparse_prefill_dense_fast_path(glm53_bf16))
+
+    def test_nope_prefill_can_keep_the_same_algebra_after_cache_restore(self) -> None:
+        glm53 = SimpleNamespace(kv_cache_dtype=KvCacheDataType.BASE, rope_head_dim=0)
+        deepseek = SimpleNamespace(
+            kv_cache_dtype=KvCacheDataType.BASE, rope_head_dim=64
+        )
+        with patch.dict("os.environ", {"GLM53_SPARSE_MLA_DENSE_PREFILL": "0"}):
+            self.assertFalse(_supports_sparse_prefill_dense_fast_path(glm53))
+            self.assertTrue(_supports_sparse_prefill_dense_fast_path(deepseek))
+        with patch.dict("os.environ", {"GLM53_SPARSE_MLA_DENSE_PREFILL": "1"}):
+            self.assertTrue(_supports_sparse_prefill_dense_fast_path(glm53))
 
     def test_tp_page_rr_prefill_selects_sharded_sparse_mla(self) -> None:
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import (

@@ -56,3 +56,12 @@ py_test(
     tags = ["H20"],
     exec_properties = {'gpu': 'H20', 'gpu_count': '1'},
 )
+
+py_test(
+    name = "bf16_deepgemm_linear_sm100_test",
+    srcs = ["bf16_deepgemm_linear_test.py"],
+    main = "bf16_deepgemm_linear_test.py",
+    deps = py_test_deps,
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM"},
+)

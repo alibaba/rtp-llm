@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -42,7 +43,7 @@ def _prefill_cache_is_sharded(
 
 
 def _sparse_prefill_fast_path_limit(attn_configs: AttentionConfigs) -> int:
-    """Return the raw-token width below which dense prefill is exact.
+    """Return the raw-token width below which sparse selection includes all history.
 
     ``indexer_topk`` is normally a token count, but compressed indexers use it
     for the number of selected KPool groups.  Those models publish the expanded
@@ -60,11 +61,18 @@ def _supports_sparse_prefill_dense_fast_path(
     FlashMLA does not consume GLM-5.3's 528-byte FP8 NoPE cache directly.
     Keep that layout on SparseMlaFp8Op, which gathers and dequantizes selected
     entries before attention. FP8 RoPE and unquantized caches remain eligible
-    for the exact dense fast path at short sequence lengths.
+    by default. NoPE can explicitly retain sparse attention to avoid changing
+    floating-point operation order between cold and resumed prefill.
     """
+    # Dense prefill expands KV, while short cache hits use absorbed Q. Their
+    # BF16/FP8 rounding differs even when every logical cache value is equal.
+    # Keep one algebraic path when explicitly validating GLM53 cache precision.
     return not (
-        attn_configs.kv_cache_dtype == KvCacheDataType.FP8
-        and int(attn_configs.rope_head_dim) == 0
+        int(attn_configs.rope_head_dim) == 0
+        and (
+            attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            or os.environ.get("GLM53_SPARSE_MLA_DENSE_PREFILL", "1") == "0"
+        )
     )
 
 
