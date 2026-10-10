@@ -31,6 +31,27 @@ def sha256(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def require_source_exact(expected, actual, label):
+    if expected.is_floating_point():
+        return require_exact(expected, actual, label)
+    exact = (
+        expected.shape == actual.shape
+        and expected.dtype == actual.dtype
+        and torch.equal(expected, actual)
+    )
+    result = {
+        "boundary": label,
+        "shape": list(expected.shape),
+        "reference_dtype": str(expected.dtype),
+        "candidate_dtype": str(actual.dtype),
+        "bitwise_equal": exact,
+    }
+    print(json.dumps(result), flush=True)
+    if not exact:
+        raise AssertionError(f"Engram source changed at {label}")
+    return result
+
+
 @torch.inference_mode()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -184,7 +205,7 @@ def main():
             require_exact(baseline, held[0][2], label + ".fixed_projection_control")
             projection_controls += 1
             for index, (left, right) in enumerate(zip(before, tensors)):
-                require_exact(left, right, f"{label}.source{index}")
+                require_source_exact(left, right, f"{label}.source{index}")
                 source_controls += 1
             for (
                 projection,
