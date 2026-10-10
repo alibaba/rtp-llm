@@ -8,6 +8,7 @@ import json
 import time
 from pathlib import Path
 
+from monitoring.query_plan import DEFAULT_PLAN
 from scenario.runtime import execute_instance
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -159,7 +160,7 @@ class WorkloadPolicy:
             self.options["sample_interval_s"],
             self.options.get("max_sample_gap_s", 5),
             query_plan=ctx.instance.get("test", {}).get("monitoring", {}).get(
-                "query_plan", "workload.yaml"
+                "query_plan", DEFAULT_PLAN
             ),
             target_kinds={name: "mock" if name == "mock" else "master"
                           for name in targets},
@@ -296,7 +297,7 @@ class WorkloadPolicy:
         result["workload"]["monitor_backend"] = "prometheus"
         from monitoring.metric_store import export_metrics
         from monitoring.query_plan import load_plan
-        metric_plan = load_plan(ctx.instance.get("test", {}).get("monitoring", {}).get("query_plan", "workload.yaml"))
+        metric_plan = load_plan(ctx.instance.get("test", {}).get("monitoring", {}).get("query_plan", DEFAULT_PLAN))
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
         metric_store.document["run"] = dict(id=result["id"],
             configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))

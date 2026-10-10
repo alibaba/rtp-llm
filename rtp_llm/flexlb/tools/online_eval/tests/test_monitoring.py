@@ -21,7 +21,7 @@ from scenario.loader import ScenarioError
 
 class ContractTest(unittest.TestCase):
     def test_yaml_query_plan_controls_archive_and_required_series(self):
-        plan = load_plan("workload.yaml")
+        plan = load_plan("default.yaml")
         queries, required = queries_for_targets(
             plan, {"mock": "", "client-sample": "", "master-a": ""},
             lambda source: '{job="' + source + '"}', 1,
@@ -36,10 +36,10 @@ class ContractTest(unittest.TestCase):
             'sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count{job="master-a"}[10000ms]))',
         )
         with self.assertRaises(ScenarioError):
-            load_plan("../workload.yaml")
+            load_plan("../default.yaml")
 
     def test_explicit_target_kinds_cover_dynamic_clients(self):
-        plan = load_plan("workload.yaml")
+        plan = load_plan("default.yaml")
         with self.assertRaisesRegex(ValueError, "target kinds"):
             queries_for_targets(plan, {"mock": "", "client-flow": ""},
                                 lambda source: '{job="' + source + '"}', 1,

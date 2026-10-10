@@ -74,6 +74,7 @@ class SharedRuntimeTests(unittest.TestCase):
         self.assertTrue(names)
         self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
+        self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
 
     def test_prometheus_parser_retains_skip_and_timestamp_semantics(self):
         body = "\n".join(

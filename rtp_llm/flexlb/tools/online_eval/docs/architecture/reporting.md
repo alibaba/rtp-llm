@@ -6,7 +6,7 @@
 
 视图 YAML 在 `config/report_views/` 声明曲线、名称、分组、单位、轴、颜色和面板。曲线用 `metric_id` 与 `labels` 选择冻结指标，面板用稳定的 `curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
 
-报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标配置](../../config/monitoring/README.md)，主报告、全量 opt-in 和产物清单见[结果与指标](../development/results.md#收取产物)。
+报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标契约](metrics.md)，主报告、全量 opt-in 和产物清单见[结果与指标](../development/results.md#收取产物)。
 
 所有生产器直接输出同一 panel 契约：声明 `axes`，每条 series 携带 `points: [{x, y}]`；`timeX: true` 表示时间坐标，缺采以 `y: null` 保留。类目图的 `x` 是字符串，数值图的 `x` 是数值。`spec.py` 严格校验输入，不接受旧的 `x`/`xNums` + `series.data` 或显示模式标志，也不执行格式转换。`pairing.py` 可按归档事件或相对秒平移序列，差值只在同一时刻两侧都有值时产生，不补缺采。
 

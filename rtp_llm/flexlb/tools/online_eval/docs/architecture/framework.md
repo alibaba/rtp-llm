@@ -14,6 +14,20 @@ frozen evidence/metrics  原始证据、指标定义与完整序列
 case analysis/report     明确判定后装配 HTML bundle
 ```
 
+## 格式版本
+
+`schema_version` 表示所属数据格式的版本，各格式独立演进；数字不表示项目版本或代码是否过时。
+
+| 格式 | 当前版本 | 边界 |
+|---|---|---|
+| case YAML | 2 | 用户输入，只声明数据；文件加载器拒绝包含阶段编排的旧格式 |
+| 指标集合、CI suite | 2 | 查询定义和选例目录，各自由所属加载器校验 |
+| Python 生成的内部 program document | 1 | 包含 stages 和 typed reference，由内部编译器读取；不是用户 YAML 的兼容入口 |
+| 实例清单、租约、指标归档、报告 bundle | 1 | 各自产物格式，由对应读写双方校验 |
+| mode profile | 1 | 运行模式与 Master profile 的映射 |
+
+case YAML 会生成内部执行计划，所以外部 `schema_version: 2` 与内部 `schema_version: 1` 可以同时出现。仅在某个格式的字段或语义发生不兼容变化时升级该格式，并同步其读写双方；不能为了数字一致整体替换版本号。配置字段分层见[新增 case](../development/adding-cases.md)。
+
 ## 代码归属
 
 | 目录 | 内容 |
@@ -41,4 +55,4 @@ case analysis/report     明确判定后装配 HTML bundle
 
 请求发出、Schedule ACK、Fetch、业务 FINISHED、取消和资源释放分别取证，不互相推断。服务启动及诊断 API 成功应答不代替业务完成。具体协议见[请求生命周期](request-lifecycle.md)。
 
-指标和报告使用冻结定义与序列，不通过 debug API、日志或文件自动兜底；缺失来源显式报错。采集、门禁与交付规则分别见[指标配置](../../config/monitoring/README.md)、[结果与指标](../development/results.md)和[报告契约](reporting.md)。
+指标和报告使用冻结定义与序列，不通过 debug API、日志或文件自动兜底；缺失来源显式报错。采集、门禁与交付规则分别见[指标契约](metrics.md)、[结果与指标](../development/results.md)和[报告契约](reporting.md)。

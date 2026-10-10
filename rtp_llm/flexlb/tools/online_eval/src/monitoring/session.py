@@ -18,6 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from monitoring import telemetry
+from monitoring.query_plan import DEFAULT_PLAN
 
 def _finite(value):
     number = float(value)
@@ -84,7 +85,7 @@ class PrometheusSource:
 
 class PrometheusSession:
     def __init__(self, directory, targets, interval_s=1, max_gap_s=5, binary=None,
-                 query_plan="workload.yaml", target_kinds=None):
+                 query_plan=DEFAULT_PLAN, target_kinds=None):
         from monitoring.query_plan import load_plan
 
         self.directory = Path(directory).resolve()

@@ -7,6 +7,7 @@ from scenario.loader import ScenarioError, load_document
 
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/monitoring"
+DEFAULT_PLAN = "default.yaml"
 SOURCE_KINDS = ("mock", "client", "master")
 _NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 _PLAN = re.compile(r"[a-z][a-z0-9_]*\.yaml\Z")

@@ -28,6 +28,23 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 每个 case 顶层必须声明 `program: default`，Python 必须提供 `default(case)`。`variants` 只追加额外测试点，不能占用 `id: default`。`test.kind` 为 functional 或 workload，`collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
 
+## 数据、运行策略与参数约束
+
+| 段 | 负责什么 | 主要消费者 |
+|---|---|---|
+| `metadata` | 测试目标、分类与标签，供检索和结果展示 | 实例清单、报告 |
+| `test` | functional/workload、采集档位及监控设置，决定执行和取证策略 | suite 选择、执行器、客户端与采集器 |
+| `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
+| `execution` | 实例、阶段和清理的时间预算 | runner、阶段执行器 |
+| `parameters` | Python program 实际读取的数据，如请求数量、长度、流程预算和门槛 | `CaseBuilder.value/number`、业务输入校验 |
+| `parameter_schema` | 数值参数的整数类型、最小值和最大值约束 | `CaseBuilder.number(path)` |
+
+`environment.n_prefill` 是启动多少个 Prefill worker；`parameters.count` 是 program 发出多少个请求；`parameter_schema.count.maximum` 是请求数量允许的上界。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
+
+`parameter_schema` 只约束 `case.number(path)` 读取的数值参数，不会自动扫描所有 `parameters`；复杂对象由 program 或 action 的输入合同校验。它不提供缺省参数值，也不承担环境配置校验。
+
+`test` 保持独立：将执行与采集策略藏入 `metadata` 会使说明字段承担控制作用。`metadata.description` 描述业务目标，`test.description` 描述测试或取证策略；两者应避免重复。指标绑定和名称的规则见[指标契约](../architecture/metrics.md)。
+
 ## Python 的归属与注册
 
 `src/cases/config.py` 和 `registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：

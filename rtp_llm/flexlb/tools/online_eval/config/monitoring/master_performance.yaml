@@ -1,6 +1,6 @@
 schema_version: 2
 include:
-- workload.yaml
+- default.yaml
 sources:
   mock:
     rtp_llm_context_tps:

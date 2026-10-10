@@ -269,8 +269,8 @@ def _variant_test(config, builder, source):
 
 
 def _bind_metric_dependencies(requirements, test):
-    from monitoring.query_plan import load_plan, definitions
-    declared = definitions(load_plan(test["monitoring"].get("query_plan", "workload.yaml")))
+    from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions
+    declared = definitions(load_plan(test["monitoring"].get("query_plan", DEFAULT_PLAN)))
     missing = set(requirements) - set(declared)
     if missing:
         raise ScenarioError("undeclared metric ids: " + ", ".join(sorted(missing)))

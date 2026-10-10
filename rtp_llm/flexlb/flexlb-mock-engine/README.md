@@ -2,7 +2,7 @@
 
 Java Mock 模拟 Prefill / Decode 的调度、KV 容量、执行耗时、请求生命周期和故障，用于验证 FlexLB。它不执行模型、不分配真实 KV tensor，也不能用模拟耗时证明 GPU 的绝对性能。
 
-功能与 workload 测试统一从 [online_eval](../tools/online_eval/README.md) 进入。编译、Java 21 前置和运行命令见[编译与运行](../tools/online_eval/docs/development/build-and-runtime.md)；实例参数、流量与门禁以场景 YAML 为准。JavaLoadClient 环境变量统一登记在 [load_client_env.txt](../tools/online_eval/config/load_client_env.txt)，这里不维护第二份参数表。
+功能与 workload 测试统一从 [online_eval](../tools/online_eval/README.md) 进入。编译、Java 21 前置和运行命令见[编译与运行](../tools/online_eval/docs/development/build-and-runtime.md)；实例参数、流量与门禁以场景 YAML 为准。JavaLoadClient 环境变量的隔离与字段校验共用 [runtime/load_client.py](../tools/online_eval/src/runtime/load_client.py) 中的名称清单；取值以场景配置为准。
 
 ## 实现与配置入口
 
