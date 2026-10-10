@@ -22,6 +22,45 @@ def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
     return min(decode_test_length, profile_steps) if is_decode else 1
 
 
+def _wait_for_trace_flush(
+    log_path: str, offset: int, budget_s: int
+) -> int:
+    """Wait for the engine's async trace save to complete.
+
+    The save worker exports each profiled window on a background thread
+    and logs ``profiler trace saved: <file>`` exactly when the json is
+    fully written. Poll the server log from the given byte offset for
+    that line instead of the historical blind ``time.sleep(60)`` — on a
+    4-lens binary-search grid the sleep alone cost 24 of the ~31 minutes.
+    The ``budget_s`` cap keeps a stuck export from wedging the test.
+
+    Returns the new byte offset past the detected save line (or the
+    original offset on timeout, so the next call retries from the same
+    position).
+    """
+    if not log_path or not os.path.isfile(log_path):
+        time.sleep(budget_s)
+        return offset
+    marker = "profiler trace saved"
+    deadline = time.monotonic() + budget_s
+    while time.monotonic() < deadline:
+        try:
+            with open(log_path, "r") as f:
+                f.seek(offset)
+                new_content = f.read()
+                new_offset = f.tell()
+            if marker in new_content:
+                logging.info("[PERF_PROFILE_FLUSH] trace save detected")
+                return new_offset
+        except OSError:
+            pass
+        time.sleep(0.25)
+    logging.warning(
+        "[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s
+    )
+    return offset
+
+
 def _curl_server_single_worker(
     i: int,
     base_port: int,
@@ -125,8 +164,11 @@ class BatchPerfImpl(object):
         warmup_runs: Optional[int] = None,
         measure_runs: Optional[int] = None,
         profile_runs: Optional[int] = None,
+        log_path: str = "",
+        log_flush_offset: int = 0,
     ):
         self.base_port = base_port
+        self.log_path = log_path
         self.dp_size = dp_size
         self.batch_size = batch_size
         if isinstance(query, str):
@@ -148,6 +190,10 @@ class BatchPerfImpl(object):
         self.wait_time = wait_time
         self.decode_test_length = decode_test_length
         self.profile = profile
+        # Byte offset into the server log past the last "profiler trace
+        # saved" line; the caller threads it across instances so
+        # consecutive search steps only scan new log content.
+        self.log_flush_offset = log_flush_offset
         self.generate_config = generate_config or {}
         self.profile_trace_name = profile_trace_name
         self.warmup_runs = (
@@ -271,7 +317,11 @@ class BatchPerfImpl(object):
                     self.profile_trace_name,
                 )
                 _ = self._curl_server(True)
-            time.sleep(int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")))
+            self.log_flush_offset = _wait_for_trace_flush(
+                self.log_path,
+                self.log_flush_offset,
+                int(os.environ.get("PERF_PROFILE_FLUSH_SLEEP", "60")),
+            )
         return results
 
     def _set_concurrency(self):

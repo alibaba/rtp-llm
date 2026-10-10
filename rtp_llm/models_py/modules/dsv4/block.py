@@ -477,7 +477,7 @@ class Block(nn.Module):
         implementations directly and skips the debug/shape-check wrapper work
         in :meth:`forward`.  The generic attention fallback is deliberately
         kept on the default path because it has extra layout handling that the
-        B300 DSV4-Pro FP8 path does not need.
+        SM103 DSV4-Pro FP8 path does not need.
         """
         fast_call = self.prefill_fast_callable()
         if fast_call is None:

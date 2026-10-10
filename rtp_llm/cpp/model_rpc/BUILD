@@ -66,16 +66,22 @@ cc_library(
         exclude = [
             "TensorPbConvert.cc",
             "MultimodalPbConverter.cc",
+            "ResponseBuffer.cc",
         ],
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = [
+            "RPCPool.h",
+            # Owned by :response_buffer so its public header has a single cc_library.
+            "ResponseBuffer.h",
+        ],
     ),
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
+        ":response_buffer",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
@@ -120,5 +126,21 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":model_rpc_pool",
+    ],
+)
+
+cc_library(
+    name = "response_buffer",
+    srcs = ["ResponseBuffer.cc"],
+    hdrs = ["ResponseBuffer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        # ResponseBuffer.h includes <grpcpp/...> and exposes grpc:: types in
+        # its public interface; declare grpc explicitly instead of relying on
+        # the proto target's transitive dependency.
+        "@grpc//:grpc++",
+        "@havenask//aios/autil:time",
     ],
 )

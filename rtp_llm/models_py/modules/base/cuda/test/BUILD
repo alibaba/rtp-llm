@@ -6,40 +6,40 @@ py_test (
     name = "norm_test",
     srcs = ["norm_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test (
     name = "rmsresnorm_test",
     srcs = ["rmsresnorm_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test (
     name = "fusedqkrmsnorm_test",
     srcs = ["fusedqkrmsnorm_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test (
     name = "layernorm_test",
     srcs = ["layernorm_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test (
     name = "fused_add_layernorm_test",
     srcs = ["fused_add_layernorm_test.py"],
     deps = py_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test (
@@ -47,10 +47,10 @@ py_test (
     srcs = ["select_topk_op_test.py"],
     deps = py_test_deps,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (
@@ -58,10 +58,10 @@ py_test (
     srcs = ["group_topk_test.py"],
     deps = py_test_deps,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (

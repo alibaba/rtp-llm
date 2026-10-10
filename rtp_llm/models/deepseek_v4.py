@@ -529,7 +529,7 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
                 # ``last_hidden`` to match, dispatching to a f32 simt sgemm
                 # (``cutlass3x_sm100_simt_sgemm_f32_f32_f32_f32_f32`` — CUDA
                 # cores, ~2.3 ms / decode step at bs=128 / vocab=129280 on
-                # B300) instead of the bf16 tensor-core path (~0.1 ms).
+                # SM103) instead of the bf16 tensor-core path (~0.1 ms).
                 # ``None`` falls through to ``load_config.compute_dtype`` in
                 # AtomicWeight._load_raw_tensor (i.e. bf16 for V4), keeping
                 # the ckpt dtype.

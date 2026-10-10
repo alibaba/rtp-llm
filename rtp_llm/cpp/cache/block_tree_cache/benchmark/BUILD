@@ -159,7 +159,7 @@ cc_test(
 cc_test(
     name = "online_tree_scheduler_test",
     target_compatible_with = CUDA_ONLY,
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["OnlineTreeSchedulerTest.cc"],
     copts = copts() + ["-fno-access-control"],
     deps = [
@@ -174,7 +174,7 @@ cc_test(
         "@//:using_cuda": ["//3rdparty:cuda_driver"],
         "//conditions:default": [],
     }),
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_binary(

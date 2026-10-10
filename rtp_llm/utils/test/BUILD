@@ -41,8 +41,8 @@ py_test(
         "@//:using_cuda13_x86": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    tags = ["A10_CU13", "no-cache"],
-    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["L20_CU13", "no-cache"],
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test(
@@ -191,13 +191,6 @@ py_test(
     deps = [
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:rtp_compute_ops",
-        "//:th_transformer",
-        "//:th_transformer_config",
-    ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -209,13 +202,6 @@ py_test(
         ":grpcio",
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:rtp_compute_ops",
-        "//:th_transformer",
-        "//:th_transformer_config",
-    ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(
@@ -243,8 +229,8 @@ py_test(
         "//:th_transformer",
         "//:th_transformer_config",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_test(
@@ -257,13 +243,6 @@ py_test(
         "//rtp_llm:fastapi",
         "//rtp_llm:utils",
     ],
-    data = [
-        "//:rtp_compute_ops",
-        "//:th_transformer",
-        "//:th_transformer_config",
-    ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
 )
 
 py_test(

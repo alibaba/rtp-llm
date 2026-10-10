@@ -1234,7 +1234,7 @@ class V4PerBlockFp8Weight(PerBlockFp8Weight):
         # via ``_repack_v4_fp8_scale_to_int32``.  Repacking eagerly here
         # would balloon scale memory by O(N/32) (each 1-byte UE8M0 entry
         # becomes 4 bytes and gets row-replicated 128×) and OOM the GPU
-        # before forward gets a chance to run — see the v4-flash 1×B300
+        # before forward gets a chance to run — see the v4-flash 1×SM103
         # OOM at KV-cache alloc (256 MiB short on a 267 GiB device with
         # 157 GiB held by the model).
         return CompositeWeight._postprocess(self, tensor, device, load_config)
