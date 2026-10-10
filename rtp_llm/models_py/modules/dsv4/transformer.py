@@ -229,7 +229,9 @@ class V4Transformer(nn.Module):
             # Process-level deployment override, intentionally outside V4Args.
             # Set it consistently in each worker's environment.
             mega_request = _optional_env_bool("DSV4_MEGA")
-            if mega_request is not False:
+            # SWA-only MTP/DSpark drafts share the process switch, but have no
+            # Mega sublayers to initialize or require from the runtime.
+            if mega_request is not False and any(args.compress_ratios[: args.n_layers]):
                 from rtp_llm.models_py.modules.dsv4.fp8.decode.mega_support import (
                     mega_decode_unavailable_reason,
                 )

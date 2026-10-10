@@ -136,6 +136,34 @@ class MegaCSARoutingTest(unittest.TestCase):
         layer.enable_mega_csa.assert_not_called()
         layer.enable_mega_hca.assert_not_called()
 
+    def test_swa_only_draft_ignores_process_mega_enable(self) -> None:
+        for n_layers in (1, 3):
+            for request in (None, "0", "1"):
+                with self.subTest(n_layers=n_layers, request=request):
+                    layers = []
+                    for _ in range(n_layers):
+                        layer = torch.nn.Module()
+                        layer.enable_mega_csa = MagicMock()
+                        layer.enable_mega_hca = MagicMock()
+                        layers.append(layer)
+                    args = V4Args(
+                        n_layers=n_layers,
+                        n_mtp_layers=0,
+                        compress_ratios=[0] * n_layers + [4, 128],
+                    )
+                    environment = {} if request is None else {"DSV4_MEGA": request}
+                    with patch.dict(os.environ, environment, clear=True):
+                        transformer = self._make_transformer(
+                            args,
+                            layers,
+                            unavailable_reason="no CSA or HCA layers require Mega attention",
+                        )
+                    self.assertFalse(transformer._mega_decode_enabled)
+                    self.assertIsNone(transformer._mega_csa_runtime)
+                    for layer in layers:
+                        layer.enable_mega_csa.assert_not_called()
+                        layer.enable_mega_hca.assert_not_called()
+
     def test_unsupported_geometry_does_not_enable_mega_by_default(self) -> None:
         layer = torch.nn.Module()
         layer.enable_mega_csa = MagicMock()
