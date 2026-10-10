@@ -59,6 +59,8 @@ program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `Pr
 
 字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。四组是公开输入语义，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
 
+固定测量能力在 Python 声明指标、单位、窗口和方向，YAML 提供阈值；通用指标检查可由 YAML 选择指标与窗口，但仍验证定义与允许选择。前者保障持续性、cohort 等算法的前提，后者用于无专属测量流程的标量比较。两者复用比较与依赖绑定，不把测量算法复制成 YAML 规则。消费方单位是算法要求，query plan 单位是生产声明；必须相等，不能直接抄生产单位代替消费断言。
+
 数值检查写明 `metric`、`unit`、`window`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `observation`；复杂归因和持续性计算仍由 Python 负责。
 
 QPS 只取 `traffic.client.playback.qps`，编译时核对请求数量和 goodput 下界不超过允许的 offered-load 范围。修改负载不自动缩放绝对阈值，需要同时核对时窗和门槛。priority 由 `traffic.source.parameters.priority` 定义，客户端环境从该值生成；显式客户端 PRIORITY 与来源冲突时报错。
@@ -101,7 +103,7 @@ program 的 `ACTION_HANDLERS` 声明所属能力；分析策略用 `ANALYSIS_POL
 
 handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
 
-基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查结果保留定义、来源、实际窗口和样本信息；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
+基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查结果保留定义、来源、实际窗口和样本信息；观测不足统一通过 `invalid_check` 返回 ERROR，并将 `validity: INVALID` 放在 `evidence`，不当作实际测量值；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
 
 请求集合采用哪个时间字段、如何归属节点、如何判定终态，以及持续异常等业务计算留在 case。请求集合的半开时窗与指标采样点的闭区间选择分别声明，不互相推断；报告展示既定结果，不重新计算门禁。
 

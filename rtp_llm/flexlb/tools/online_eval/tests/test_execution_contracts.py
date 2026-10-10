@@ -172,3 +172,32 @@ def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
         with pytest.raises(RuntimeError, match="budget exceeded"):
             sampler.stop()
     assert len(sampler.path.read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize('name,check', [('cache_scale_in', 'baseline_hit'),
+                                      ('master_performance', 'input_tps'),
+                                      ('master_ha_failover', 'b_success')])
+def test_semantic_program_errors_share_a_configuration_boundary(name, check):
+    data = configuration(name)
+    data['parameters']['checks'][check]['op'] = 'unknown'
+    with pytest.raises(ScenarioError) as caught:
+        configure_program(data, 'source.yaml')
+    assert caught.value.__cause__ is not None
+    assert type(caught.value.__cause__) is ValueError
+    assert str(caught.value).startswith('source.yaml.parameters:')
+
+
+def test_action_field_error_has_one_location_and_preserves_the_cause():
+    from scenario.contracts import StageHandler
+    from scenario.parameters import validate_fields
+    from scenario.stage_compiler import stages
+
+    handler = StageHandler(name='custom', outputs={}, checks=frozenset(),
+        validate=lambda params, plan: validate_fields(params, plan, {'allowed'}),
+        execute=lambda *args: None)
+    with pytest.raises(ScenarioError) as caught:
+        stages([{'id': 'setup', 'action': 'setup'},
+                {'id': 'bad', 'action': 'custom', 'params': {'typo': True}}],
+               'stages', 10, {'custom': handler})
+    assert str(caught.value) == "stages[1].params: unknown configuration fields ['typo']"
+    assert type(caught.value.__cause__) is ValueError

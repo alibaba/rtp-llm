@@ -47,6 +47,14 @@ def anchored_window(data, path, *, anchor):
     return offsets
 
 
+
+def anchored_windows(data, anchors, *, path="parameters.observation.windows"):
+    """Validate named windows against their program-owned runtime event anchors."""
+    fields(data, set(anchors), path)
+    return {name: anchored_window(data[name], path + '.' + name, anchor=anchor)
+            for name, anchor in anchors.items()}
+
+
 def resolve_window(lower, upper, *, lower_offset_s=0, upper_offset_s=0):
     """Resolve seconds without changing cohort membership or boundary inclusion."""
     lo = None if lower is None else lower + lower_offset_s

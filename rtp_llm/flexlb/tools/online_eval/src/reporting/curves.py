@@ -39,7 +39,7 @@ def project_panels(curves, presentation):
     """Keep missing observations visible; configuration lines are added afterward."""
     panels = []
     for descriptor in presentation['charts']['panels']:
-        selected = [dict(curve, hidden=False) for curve_id in descriptor['curve_ids']
+        selected = [dict(curve) for curve_id in descriptor['curve_ids']
                     for curve in curves if curve['curve_id'] == curve_id]
         populated = {curve['curve_id'] for curve in selected if has_data(curve)}
         missing = [presentation['charts']['curves'][curve_id]['name']
@@ -48,7 +48,32 @@ def project_panels(curves, presentation):
                    descriptor.get('empty_caption', '没有有效观测数据；缺失值不补零。'))
         if populated and missing:
             caption += ' 缺少有效曲线：' + '、'.join(missing) + '。'
-        panels.append(dict(id=descriptor['id'], title=descriptor['title'],
-                           timeX=True, axes=copy.deepcopy(descriptor['axes']),
-                           series=selected, caption=caption))
+        panel = dict(id=descriptor['id'], title=descriptor['title'],
+                     timeX=True, axes=copy.deepcopy(descriptor['axes']),
+                     series=selected, caption=caption)
+        apply_panel_presets(panel, descriptor)
+        panels.append(panel)
     return panels
+
+
+def apply_panel_presets(panel, descriptor):
+    """Resolve against final series, including explicitly added configuration lines."""
+    if 'presets' in descriptor:
+        panel['presets'] = {
+            name: [curve['name'] for curve in panel['series']
+                   if _preset_matches(curve, selector)]
+            for name, selector in descriptor['presets'].items()
+        }
+
+
+_PRESET_SELECTORS = {
+    'visible': lambda curve, _: not curve['hidden'],
+    'names': lambda curve, names: curve['name'] in names,
+    'contains': lambda curve, fragments: any(text in curve['name'] for text in fragments),
+    'groups': lambda curve, groups: curve['group'] in groups,
+}
+
+
+def _preset_matches(curve, selector):
+    key, value = next(iter(selector.items()))
+    return _PRESET_SELECTORS[key](curve, value)

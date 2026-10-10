@@ -6,6 +6,37 @@ report:
   producer: workload-ha
 metrics:
   query_plan: master_ha_failover.yaml
+  diagnostic_only:
+  - mock/running_sum
+  - mock/running_avg
+  - mock/running_max
+  - mock/waiting_sum
+  - mock/waiting_avg
+  - mock/waiting_max
+  - mock/engine_count
+  - mock/context_wall_tps
+  - mock/context_completed_qps
+  - mock/cache_hit_ratio
+  - mock/prefill_batch_size_mean
+  - mock/prefill_batch_size_p50
+  - mock/prefill_batch_size_p90
+  - mock/prefill_batch_size_p99
+  - mock/rtp_llm_context_tps_per_engine
+  - mock/rtp_llm_context_tps_engine_mean
+  - mock/rtp_llm_context_tps_with_cache_per_engine
+  - mock/rtp_llm_context_tps_with_cache_engine_mean
+  - mock/rtp_llm_generate_tps_engine_mean
+  - mock/context_execution_tps_avg
+  - mock/context_execution_tps_with_cache_avg
+  - mock/simulated_prefill_ms_avg
+  - mock/simulated_decode_ms_avg
+  - mock/rtp_llm_kv_cache_pool_total_blocks
+  - mock/rtp_llm_kv_cache_pool_available_blocks
+  - mock/mock_engine_held_blocks
+  - mock/mock_engine_referenced_blocks
+  - mock/completed_qps
+  - mock/accepted_qps
+  - mock/output_wall_tps
 charts:
   events:
     kill_a:
@@ -39,123 +70,155 @@ charts:
       labels: {}
       name: 发出
       group: 请求
+      unit: requests/s
       axis: qps
       color: '#2f54eb'
+      hidden: false
     ha/success:
       metric_id: ha/success
       labels: {}
       name: 成功
       group: 请求
+      unit: requests/s
       axis: qps
       color: '#52c41a'
+      hidden: false
     ha/failed:
       metric_id: ha/failed
       labels: {}
       name: 失败
       group: 请求
+      unit: requests/s
       axis: qps
       color: '#f5222d'
+      hidden: false
     ha/prefill_peak_qps:
       metric_id: ha/prefill_peak_qps
       labels: {}
       name: 最热 Prefill
       group: Prefill 分配
+      unit: requests/s
       axis: qps
       color: '#f5222d'
+      hidden: false
     ha/prefill_mean_qps:
       metric_id: ha/prefill_mean_qps
       labels: {}
       name: 全体 Prefill 平均
       group: Prefill 分配
+      unit: requests/s
       axis: qps
       color: '#52c41a'
+      hidden: false
     ha/prefill_skew:
       metric_id: ha/prefill_skew
       labels: {}
       name: 最热 / 平均
       group: Prefill 分配
+      unit: ratio
       axis: skew
       color: '#13c2c2'
+      hidden: false
     ha/http_up/A:
       metric_id: ha/http_up
       labels:
         master: A
       name: '{master} · HTTP 可回读'
       group: '{master}'
+      unit: boolean
       axis: up
       color: '#1677ff'
+      hidden: false
     ha/http_up/B:
       metric_id: ha/http_up
       labels:
         master: B
       name: '{master} · HTTP 可回读'
       group: '{master}'
+      unit: boolean
       axis: up
       color: '#722ed1'
+      hidden: false
     ha/scheduler_inflight/A:
       metric_id: ha/scheduler_inflight
       labels:
         master: A
       name: '{master} · 调度在飞'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#1677ff'
+      hidden: false
     ha/scheduler_inflight/B:
       metric_id: ha/scheduler_inflight
       labels:
         master: B
       name: '{master} · 调度在飞'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#722ed1'
+      hidden: false
     ha/prefill_inflight_requests/A:
       metric_id: ha/prefill_inflight_requests
       labels:
         master: A
       name: '{master} · Prefill 在飞请求'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#13c2c2'
+      hidden: false
     ha/prefill_inflight_requests/B:
       metric_id: ha/prefill_inflight_requests
       labels:
         master: B
       name: '{master} · Prefill 在飞请求'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#eb2f96'
+      hidden: false
     ha/decode_master_queued/A:
       metric_id: ha/decode_master_queued
       labels:
         master: A
       name: '{master} · Decode Master 排队'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#fa8c16'
+      hidden: false
     ha/decode_master_queued/B:
       metric_id: ha/decode_master_queued
       labels:
         master: B
       name: '{master} · Decode Master 排队'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#faad14'
+      hidden: false
     ha/decode_confirmed_running/A:
       metric_id: ha/decode_confirmed_running
       labels:
         master: A
       name: '{master} · Decode 已确认运行'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#52c41a'
+      hidden: false
     ha/decode_confirmed_running/B:
       metric_id: ha/decode_confirmed_running
       labels:
         master: B
       name: '{master} · Decode 已确认运行'
       group: '{master}'
+      unit: requests
       axis: count
       color: '#a0d911'
+      hidden: false
   panels:
   - id: request_qps
     title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态

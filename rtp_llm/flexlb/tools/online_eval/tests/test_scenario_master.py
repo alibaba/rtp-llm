@@ -325,7 +325,7 @@ class MasterActionsTest(unittest.TestCase):
             self.deadline,
         )
         self.assertEqual("ERROR", result.checks[0].status)
-        self.assertEqual("INVALID", result.checks[0].actual["validity"])
+        self.assertEqual("INVALID", result.checks[0].evidence["validity"])
 
     def test_schedule_only_rows_are_not_successful_streams(self):
         handle = self.ctx.register_resource("ha_rows", [{"status": "scheduled"}])
@@ -542,7 +542,7 @@ class MasterActionsTest(unittest.TestCase):
             self.assertEqual(3.0, result.output["actual"])
             missing = ha._client_check(self.ctx, {**params, "min_samples": 10}, self.deadline)
             self.assertEqual("ERROR", missing.checks[0].status)
-            self.assertEqual("INVALID", missing.checks[0].actual["validity"])
+            self.assertEqual("INVALID", missing.checks[0].evidence["validity"])
 
     def test_ha_handover_balance_uses_five_seconds_at_lower_qps(self):
         pool = [f"P{i}" for i in range(125)]

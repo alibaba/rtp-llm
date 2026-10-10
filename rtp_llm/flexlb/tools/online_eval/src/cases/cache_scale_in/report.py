@@ -23,8 +23,11 @@ def prepare_report(directory, evidence):
     series, sources, gaps, errors = archived_series(directory, anchor)
     archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
     presentation = view("cache_scale_in.yaml")
+    from monitoring.metric_store import MetricStore
+    from reporting.metric_binding import monitoring_audit
+    inventory = monitoring_audit(MetricStore.read(directory), presentation)
     metric_defs = presentation["charts"]["curves"]
-    diagnostic_only = set(presentation["metrics"].get("diagnostic_only", []))
+    diagnostic_only = set(presentation["metrics"]["diagnostic_only"])
     curves = []
     audit = []
     found = set()
@@ -35,16 +38,15 @@ def prepare_report(directory, evidence):
         if metric == "up":
             continue
         labels = json.loads(label_json)
-        kind = "mock" if source == "mock" else "client" if source.startswith("client-") else "master"
-        identity = f"{kind}/{metric}"
+        identity = sources[key]["metric_id"]
+        kind, metric = identity.split("/", 1)
         if labels.get("role") == "decode":
             continue
         from reporting.metric_binding import bindings
         selected_styles = bindings(presentation, identity, labels)
         if not selected_styles:
-            if identity not in diagnostic_only:
-                raise ValueError(f"unclassified monitoring metric {identity}")
-            audit.append([identity, "—", "DIAGNOSTIC_ONLY", sources[key]["promql"]])
+            if identity in diagnostic_only:
+                audit.append([identity, "—", "DIAGNOSTIC_ONLY", sources[key]["promql"]])
             continue
         for curve_id, definition in selected_styles:
             name = definition["name"]
@@ -66,10 +68,7 @@ def prepare_report(directory, evidence):
             audit.append([name, f"{coverage:.0%}", "OK" if coverage >= 0.8 else "SPARSE", sources[key]["promql"]])
     for identity, definition in metric_defs.items():
         kind, metric = identity.split("/", 1)
-        if (kind, metric) not in found and identity in {
-            "mock/context_completed_qps",
-            "master/schedule_responses_qps"
-        }:
+        if (kind, metric) not in found and identity == "mock/context_completed_qps":
             audit.append([definition["name"], "0%", "MISSING", "本次归档没有该监控序列"])
 
     by_id = {curve["metric_id"]: curve for curve in curves}
@@ -98,6 +97,7 @@ def prepare_report(directory, evidence):
         )
     monitoring_status = "WARN" if monitor_warnings else "OK"
     return dict(curves=curves, audit=audit, sources=sources, gaps=gaps, errors=errors,
+                metric_classification=inventory,
                 monitoring_status=monitoring_status, monitor_warnings=monitor_warnings)
 
 
@@ -138,7 +138,8 @@ def build_spec(directory, evidence, result, prepared):
                     client_attribution=evidence.get("client_attribution"),
                     removals=evidence.get("removals"),
                     reinterpretation=evidence.get("reinterpretation"))),
-            view_details(presentation, "sources", dict(queries=sources, gaps=gaps, errors=errors)),
+            view_details(presentation, "sources", dict(queries=sources, gaps=gaps, errors=errors,
+                metric_classification=prepared["metric_classification"])),
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
@@ -191,8 +192,6 @@ def validate_view(path, data, fail):
 
     if "time_origin_label" not in data["charts"]:
         fail(str(path) + ".charts", "cache view requires time_origin_label")
-    if "diagnostic_only" not in data["metrics"]:
-        fail(path, "selected gate views require diagnostic_only classification")
     validate_section_contract(path, data, {
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,

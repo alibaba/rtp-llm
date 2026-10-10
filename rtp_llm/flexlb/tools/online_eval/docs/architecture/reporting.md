@@ -1,6 +1,6 @@
 # 报告契约
 
-报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、物化与面板投影、配对、spec 校验、renderer 与 bundle 校验。曲线统一处理单位缩放、时间原点和来源；面板只有有限实测值才算有效，零值有效，null/NaN 不补零，缺测使用 `empty_caption`，部分缺测列出缺少的曲线。配置门禁线由 case 在投影后添加，不算实测数据。case 程序在 `REPORT_VIEWS` 中按文件名声明 `ReportView` 校验与可选渲染能力；`cases.registry` 自动汇集已注册程序的声明，同一视图可以复用相同能力；能力冲突或声明非法直接报错；YAML 只能引用视图文件，不能指定 Python 模块。
+报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、物化与面板投影、配对、spec 校验、renderer 与 bundle 校验。曲线统一处理单位缩放、时间原点和来源；选中面板保留曲线的 `hidden`，不再用生产者另算全局可见性。面板只有有限实测值才算有效，零值有效，null/NaN 不补零，缺测使用 `empty_caption`，部分缺测列出缺少的曲线。配置门禁线由 case 在投影后添加，不算实测数据。case 程序在 `REPORT_VIEWS` 中按文件名声明 `ReportView` 校验与可选渲染能力；`cases.registry` 自动汇集已注册程序的声明，同一视图可以复用相同能力；能力冲突或声明非法直接报错；YAML 只能引用视图文件，不能指定 Python 模块。
 
 ## 输入与装配
 
@@ -43,6 +43,10 @@
 通用 bundle 外的输入保真度诊断由 `reporting/traffic_fidelity.py` 生成 `fidelity.html`，提供阈值、ECDF 与联合密度交互；它不参与运行门禁或 bundle 发现。
 
 ## 展示与交互
+
+专属视图的 `charts.curves` 每条声明都必须被面板的 `curve_ids` 引用，未接入面板的样式报错。所有选中视图都显式声明 `metrics.diagnostic_only`（可以为空）：每个查询与 Python 输出序列必须被实际面板使用或列为诊断；已注册 gate producer 的标量单列为 `GATE_EVIDENCE`。编译检查当前查询集合，报告装配再次检查冻结指标，并在诊断区记录 `metric_classification`；自动 `up` 查询用于采集完整性，Python 产出的门禁标量保留既定判定与有效性证据，不强制画成曲线。
+
+面板可选的 `presets` 使用 `visible`、`names`、`contains` 或 `groups` 选择当前面板的曲线，展开结果进入 spec 和 HTML 的切换按钮。未声明时不生成额外按钮；曲线和面板的默认可见性由视图明确声明，缺采仍按实测值处理。全量默认视图的概要/明细 presets 负责不同的投影，不与专属视图的曲线选择器混用。
 
 单 run 标题统一由运行身份生成 `case : variant : profile`，视图 YAML 不声明或覆盖标题。副标题由视图的 `report.subtitle` 提供；离线重生成使用证据中冻结的运行身份。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
 

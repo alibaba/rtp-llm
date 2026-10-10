@@ -377,9 +377,10 @@ def _client_check(ctx, params, deadline):
     n = len(rows)
     metric = params["metric"].split("/", 1)[1]
     if n < params["min_samples"]:
-        return StageOutput(checks=[CheckResult("criterion", "ERROR", actual=dict(
-            metric=params["metric"], sample_count=n, validity="INVALID"),
-            expected=dict(min_samples=params["min_samples"]))])
+        from analysis.checks import invalid_check
+        return StageOutput(checks=[invalid_check("criterion", detail="insufficient request samples",
+            expected=params["expected"], evidence=dict(metric=params["metric"],
+                sample_count=n, min_samples=params["min_samples"]))])
 
     target = None
     prefill_pool = ()

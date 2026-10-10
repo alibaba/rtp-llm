@@ -56,14 +56,12 @@ RULES = {
 
 def compile_checks(case, checks, inputs):
     from cases.inputs import fields
-    from cases.check_inputs import metric_criterion
+    from cases.check_inputs import metric_criterion, compile_metric_checks
 
     bindings = metric_fields(engine_tps(inputs))
     fields(checks, set(RULES) | {'engine_tps'}, 'parameters.checks')
     result = {}
-    for name, (key, metric, op, unit, window) in RULES.items():
-        result[key], _ = metric_criterion(case, checks[name], metric='performance_gate/'+metric,
-            unit=unit, window=window, op=op, path='parameters.checks.'+name)
+    result.update(compile_metric_checks(case, checks, RULES, namespace='performance_gate'))
     fields(checks['engine_tps'], set(bindings), 'parameters.checks.engine_tps')
     floors, overrides = {}, {}
     for name, binding in bindings.items():
@@ -82,12 +80,11 @@ def compile_checks(case, checks, inputs):
 
 
 def observation_contract(data):
-    from cases.inputs import fields
-    from cases.windows import anchored_window
+    from cases.windows import anchored_windows
     from runtime.observation import capture_limits
-    fields(data["windows"], {"measurement"}, "parameters.observation.windows")
-    bounds = anchored_window(data["windows"]["measurement"],
-        "parameters.observation.windows.measurement", anchor="observation_start")
+    bounds = anchored_windows(data["windows"], {
+        "measurement": "observation_start",
+    })["measurement"]
     if bounds["from"] < 0:
         raise ValueError("measurement cannot start before observation")
     capture_limits(data["capture"], "parameters.observation.capture")

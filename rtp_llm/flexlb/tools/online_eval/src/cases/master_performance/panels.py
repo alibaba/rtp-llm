@@ -2,45 +2,39 @@
 
 
 from monitoring.session import archived_series
-from reporting.curves import materialize, project_panels, has_data
+from reporting.curves import materialize, project_panels, apply_panel_presets
 from reporting.catalog import PALETTE
 
 
-def panel(directory, evidence, result, presentation=None):
+def prepare_curves(directory, evidence, presentation):
     import json
-    from reporting.view_config import view
-
-    presentation = presentation or view("master_performance.yaml")
 
     lo = evidence.get("window", {}).get("start_epoch_ms", 0)
     duration = evidence.get("criteria", {}).get("measure_s", 1)
     curves, audit = [], []
-    axes = {}
-    for descriptor in presentation["charts"]["panels"]:
-        for axis, settings in descriptor["axes"].items():
-            if axis in axes and axes[axis] != settings:
-                raise ValueError("conflicting view axis: " + axis)
-            axes[axis] = dict(settings)
 
-    def add(curve_id, points, description, *, name=None, hidden=True, provenance=None):
+    def add(curve_id, points, description, *, name=None, labels=None, provenance=None):
         style = presentation["charts"]["curves"][curve_id]
         curves.append(materialize(
-            curve_id, style, points, name=name, hidden=hidden,
-            unit=style["unit"] if "unit" in style else axes[style["axis"]]["title"],
+            curve_id, style, points, name=name, labels=labels,
+            unit=store.document["definitions"][style["metric_id"]]["unit"],
             description=description, provenance=provenance,
             color_index=list(presentation["charts"]["curves"]).index(curve_id),
         ))
 
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(directory)
+    from reporting.metric_binding import monitoring_audit
+    inventory = monitoring_audit(store, presentation)
+    from reporting.metric_binding import bindings
     for identity, rows in store.document["metrics"].items():
-        if not identity.startswith("request/") or identity not in presentation["charts"]["curves"]:
+        if not identity.startswith("request/"):
             continue
         for row in rows:
-            add(identity, [(t-lo/1000, value) for t,value in row["points"]],
-                "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
-                provenance=row["provenance"])
-
+            for curve_id, _ in bindings(presentation, identity, row["labels"]):
+                add(curve_id, [(t-lo/1000, value) for t,value in row["points"]],
+                    "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
+                    labels=row["labels"], provenance=row["provenance"])
 
     series, sources, gaps, errors = archived_series(directory, lo / 1000)
     for key, points in series.items():
@@ -50,7 +44,6 @@ def panel(directory, evidence, result, presentation=None):
         if metric == "up":
             continue
         labels = json.loads(label_json)
-        from reporting.metric_binding import bindings
         identity = sources[key]["metric_id"]
         selected = bindings(presentation, identity, labels)
         residual = {k:v for k,v in labels.items() if k != "role"}
@@ -61,26 +54,9 @@ def panel(directory, evidence, result, presentation=None):
             if any(c["name"] == name for c in curves):
                 name += " · epoch " + epoch
             visible = [(t, v) for t, v in points if 0 <= t <= duration]
-            add(curve_id, visible, sources[key]["promql"], name=name,
-                hidden=not style.get("primary", False), provenance=sources[key])
+            add(curve_id, visible, sources[key]["promql"], name=name, labels=labels, provenance=sources[key])
             audit.append(dict(name=name, samples=sum(v is not None for _,v in visible), **sources[key]))
-    # Never open an empty chart when only request-level evidence survived.
-    if not any(not c["hidden"] and has_data(c) for c in curves):
-        for c in curves:
-            if c["group"] == "客户端吞吐": c["hidden"] = False
-    presets = {"核心": [c["name"] for c in curves if not c["hidden"]]}
-    for group in dict.fromkeys(c["group"] for c in curves):
-        presets[group] = [c["name"] for c in curves if c["group"] == group]
-    return dict(
-        id="performance",
-        title="性能与运行状态",
-        timeX=True,
-        axes=axes,
-        series=curves,
-        presets=presets,
-        caption="Prefill TPS 按引擎/DP 汇总 priority，与线上 context TPS、with cache TPS 口径对应；不对引擎执行速率求集群总和。时间按测量起点对齐。Client 曲线来自逐请求证据，mock/master 曲线来自归档 Prometheus（具体查询见审计）。"
-        + (" 本报告缺少监控归档，只有请求级曲线。" if not series else ""),
-    ), dict(queries=audit, gaps=gaps, errors=errors, available=bool(series))
+    return curves, dict(queries=audit, gaps=gaps, errors=errors, available=bool(series), metric_classification=inventory)
 
 
 def report_panels(curves, criteria, presentation):
@@ -109,4 +85,5 @@ def report_panels(curves, criteria, presentation):
                         points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
                         description="场景配置中的绝对下界；不是实测值",
                     ))
+        apply_panel_presets(panel, descriptor)
     return panels

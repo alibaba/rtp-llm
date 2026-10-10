@@ -40,7 +40,7 @@ OBSERVATION_FIELDS = (
 QUERY_FIELDS = ('promql', 'mode', 'producer', 'source_type', 'unit', 'value_kind',
                 'labels', 'measurement', 'exported_metrics', 'required')
 CURVE_FIELDS = ('metric_id', 'labels', 'name', 'group', 'unit', 'axis', 'scale',
-                'color', 'hidden', 'primary')
+                'color', 'hidden')
 
 
 def fields(kind, path):

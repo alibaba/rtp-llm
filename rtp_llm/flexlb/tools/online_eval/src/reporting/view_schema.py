@@ -85,7 +85,7 @@ def validate_curves(path, data, fail):
         if type(identity) is not str or not re.fullmatch(
             r"[a-z][a-z0-9_]*(/[A-Za-z][A-Za-z0-9_]*)*", identity
         ) or not isinstance(style, dict) or not {"name", "group", "axis"} <= set(style) or set(style) - {
-            "name", "group", "axis", "source_unit", "unit", "color", "hidden", "primary", "scale", "metric_id", "labels"
+            "name", "group", "axis", "source_unit", "unit", "color", "hidden", "scale", "metric_id", "labels"
         }:
             fail(path, "invalid metric presentation " + str(identity))
         if any(type(style[field]) is not str or not style[field]
@@ -93,7 +93,7 @@ def validate_curves(path, data, fail):
             fail(path, "invalid metric labels " + identity)
         if any(type(style[field]) is not str for field in ("source_unit", "unit", "color") if field in style):
             fail(path, "invalid metric unit or color " + identity)
-        if any(type(style[field]) is not bool for field in ("hidden", "primary") if field in style):
+        if any(type(style[field]) is not bool for field in ("hidden",) if field in style):
             fail(path, "invalid metric visibility " + identity)
         if "scale" in style and (type(style["scale"]) not in (int, float)
                                  or not 0 < style["scale"] < float("inf")):
@@ -115,6 +115,9 @@ def validate_panels(path, data, metrics, fail):
             fail(path, "invalid panel id")
         ids.add(panel["id"])
         validate_panel(path, panel, metrics, fail)
+    selected = {curve_id for panel in panels for curve_id in panel["curve_ids"]}
+    if set(metrics) - selected:
+        fail(path, "curve declarations must be referenced by a panel")
 
 
 def validate_panel(path, panel, metrics, fail):
@@ -211,20 +214,26 @@ def validate_bindings(path, data, query_plan, fail):
 
 def validate_monitoring_policy(path, data, query_plan, fail):
     policy = data["metrics"]
+    if "diagnostic_only" not in policy:
+        fail(path, "selected views must classify diagnostic_only metrics explicitly")
     metrics = data["charts"]["curves"]
-    if "diagnostic_only" in policy and any(
+    if any(
         not {"unit", "color", "hidden"} <= set(style)
         for style in metrics.values()
     ):
         fail(path, "classified monitoring styles require unit, color and hidden")
     diagnostic = policy.get("diagnostic_only", [])
-    known = {f"{kind}/{metric}" for kind, queries in query_plan["sources"].items()
-             for metric in queries}
+    from monitoring.query_plan import definitions
+    from reporting.metric_binding import metric_classification
+
+    known = {identity: definition for identity, definition in definitions(query_plan).items()
+             if not ("promql" in definition and identity.split('/')[-1] == 'up')}
     if not isinstance(diagnostic, list) or any(
         type(identity) is not str or identity not in known for identity in diagnostic
     ) or len(diagnostic) != len(set(diagnostic)):
         fail(path, "invalid diagnostic_only metrics")
-    if known - {style["metric_id"] for style in metrics.values()} - set(diagnostic):
+    if any(metric_classification(identity, definition, data) is None
+           for identity, definition in known.items()):
         fail(path, "monitoring metrics lack presentation or diagnostic classification")
 
 

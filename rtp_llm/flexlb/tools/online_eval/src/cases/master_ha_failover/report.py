@@ -9,6 +9,8 @@ from reporting.run_context import title, KPI_LABELS, canonical_spec, provenance_
 def build_spec(payload, presentation):
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(payload["metric_directory"])
+    from reporting.metric_binding import monitoring_audit
+    inventory = monitoring_audit(store, presentation)
     anchor = payload["clock_anchor"]["epoch_s"]
     observations = store.document["metrics"]
     metadata = payload["ha_metric_metadata"]
@@ -25,7 +27,7 @@ def build_spec(payload, presentation):
             ))
     panels = project_panels(curves, presentation)
     sections = [
-        view_details(presentation, "sources", dict(metadata,
+        view_details(presentation, "sources", dict(metadata, metric_classification=inventory,
             metrics=payload["metric_directory"] + "/metrics.json",
             monitoring=payload["workload"].get("telemetry_completeness"),
             telemetry_errors=payload["workload"].get("telemetry_integrity_errors", []),

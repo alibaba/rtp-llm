@@ -35,6 +35,21 @@ metrics:
   - mock/admission_open
   - mock/admitted_rpcs_total
   - mock/rejected_rpcs_total
+  - mock/running_max
+  - mock/context_wall_tps
+  - mock/rtp_llm_kv_cache_pool_total_blocks
+  - mock/rtp_llm_kv_cache_pool_available_blocks
+  - mock/mock_engine_held_blocks
+  - mock/mock_engine_referenced_blocks
+  - client/completed_qps
+  - master/arrivals_qps
+  - master/schedule_responses_qps
+  - master/flexlb_app_flexlb_batcher_queue_size
+  - master/flexlb_app_flexlb_scheduler_inflight_size
+  - master/flexlb_app_flexlb_inflight_request_count
+  - master/flexlb_auto_tpm_decode_reserved_count
+  - master/flexlb_auto_tpm_decode_running_count
+  - master/dispatch_qps
 charts:
   time_origin_label: Seconds since observation began
   events:
@@ -89,15 +104,6 @@ charts:
       axis: queue
       color: '#1677ff'
       hidden: false
-    mock/running_max:
-      metric_id: mock/running_max
-      labels: {}
-      name: P Running max
-      group: 队列
-      unit: streams
-      axis: queue
-      color: '#69b1ff'
-      hidden: true
     mock/waiting_avg:
       metric_id: mock/waiting_avg
       labels: {}
@@ -115,7 +121,7 @@ charts:
       unit: streams
       axis: queue
       color: '#ff7875'
-      hidden: true
+      hidden: false
     mock/engine_count:
       metric_id: mock/engine_count
       labels: {}
@@ -134,15 +140,6 @@ charts:
       axis: ratio
       color: '#13c2c2'
       hidden: false
-    mock/context_wall_tps:
-      metric_id: mock/context_wall_tps
-      labels: {}
-      name: P compute token throughput
-      group: 性能
-      unit: tokens/s
-      axis: tokens
-      color: '#52c41a'
-      hidden: true
     mock/context_execution_tps_avg:
       metric_id: mock/context_execution_tps_avg
       labels: {}
@@ -160,7 +157,7 @@ charts:
       unit: tokens/s
       axis: tokens
       color: '#95de64'
-      hidden: true
+      hidden: false
     mock/simulated_prefill_ms_avg:
       metric_id: mock/simulated_prefill_ms_avg
       labels: {}
@@ -169,7 +166,7 @@ charts:
       unit: ms
       axis: ms
       color: '#fa8c16'
-      hidden: true
+      hidden: false
     mock/context_completed_qps:
       metric_id: mock/context_completed_qps
       labels: {}
@@ -187,43 +184,7 @@ charts:
       unit: req/s
       axis: qps
       color: '#36cfc9'
-      hidden: true
-    mock/rtp_llm_kv_cache_pool_total_blocks:
-      metric_id: mock/rtp_llm_kv_cache_pool_total_blocks
-      labels: {}
-      name: P KV total blocks
-      group: KV
-      unit: blocks
-      axis: blocks
-      color: '#531dab'
-      hidden: true
-    mock/rtp_llm_kv_cache_pool_available_blocks:
-      metric_id: mock/rtp_llm_kv_cache_pool_available_blocks
-      labels: {}
-      name: P KV available blocks
-      group: KV
-      unit: blocks
-      axis: blocks
-      color: '#b37feb'
-      hidden: true
-    mock/mock_engine_held_blocks:
-      metric_id: mock/mock_engine_held_blocks
-      labels: {}
-      name: P held blocks
-      group: KV
-      unit: blocks
-      axis: blocks
-      color: '#ad6800'
-      hidden: true
-    mock/mock_engine_referenced_blocks:
-      metric_id: mock/mock_engine_referenced_blocks
-      labels: {}
-      name: P referenced blocks
-      group: KV
-      unit: blocks
-      axis: blocks
-      color: '#d48806'
-      hidden: true
+      hidden: false
     client/actual_send_qps:
       metric_id: client/actual_send_qps
       labels: {}
@@ -251,15 +212,6 @@ charts:
       axis: qps
       color: '#cf1322'
       hidden: false
-    client/completed_qps:
-      metric_id: client/completed_qps
-      labels: {}
-      name: Client completed QPS
-      group: 流量
-      unit: req/s
-      axis: qps
-      color: '#597ef7'
-      hidden: true
     client/ttft_p99_seconds:
       metric_id: client/ttft_p99_seconds
       labels: {}
@@ -268,7 +220,7 @@ charts:
       unit: s
       axis: seconds
       color: '#fa541c'
-      hidden: true
+      hidden: false
     client/total_p99_seconds:
       metric_id: client/total_p99_seconds
       labels: {}
@@ -277,7 +229,7 @@ charts:
       unit: s
       axis: seconds
       color: '#faad14'
-      hidden: true
+      hidden: false
     client/schedule_p99_seconds:
       metric_id: client/schedule_p99_seconds
       labels: {}
@@ -286,79 +238,7 @@ charts:
       unit: s
       axis: seconds
       color: '#d4b106'
-      hidden: true
-    master/arrivals_qps:
-      metric_id: master/arrivals_qps
-      labels: {}
-      name: Master arrival QPS
-      group: 流量
-      unit: req/s
-      axis: qps
-      color: '#1d39c4'
-      hidden: true
-    master/schedule_responses_qps:
-      metric_id: master/schedule_responses_qps
-      labels: {}
-      name: Master schedule response QPS
-      group: 流量
-      unit: req/s
-      axis: qps
-      color: '#237804'
-      hidden: true
-    master/flexlb_app_flexlb_batcher_queue_size:
-      metric_id: master/flexlb_app_flexlb_batcher_queue_size
-      labels: {}
-      name: Master batcher queue
-      group: Master
-      unit: requests
-      axis: count
-      color: '#c41d7f'
-      hidden: true
-    master/flexlb_app_flexlb_scheduler_inflight_size:
-      metric_id: master/flexlb_app_flexlb_scheduler_inflight_size
-      labels: {}
-      name: Master scheduler inflight
-      group: Master
-      unit: requests
-      axis: count
-      color: '#eb2f96'
-      hidden: true
-    master/flexlb_app_flexlb_inflight_request_count:
-      metric_id: master/flexlb_app_flexlb_inflight_request_count
-      labels: {}
-      name: Master inflight requests
-      group: Master
-      unit: requests
-      axis: count
-      color: '#9e1068'
       hidden: false
-    master/flexlb_auto_tpm_decode_reserved_count:
-      metric_id: master/flexlb_auto_tpm_decode_reserved_count
-      labels: {}
-      name: Master decode reserved
-      group: Master
-      unit: requests
-      axis: count
-      color: '#7cb305'
-      hidden: true
-    master/flexlb_auto_tpm_decode_running_count:
-      metric_id: master/flexlb_auto_tpm_decode_running_count
-      labels: {}
-      name: Master decode running
-      group: Master
-      unit: requests
-      axis: count
-      color: '#a0d911'
-      hidden: true
-    master/dispatch_qps:
-      metric_id: master/dispatch_qps
-      labels: {}
-      name: Master dispatch QPS
-      group: 流量
-      unit: req/s
-      axis: qps
-      color: '#52c41a'
-      hidden: true
     derived/survivor_hit_ratio:
       metric_id: derived/survivor_hit_ratio
       labels: {}

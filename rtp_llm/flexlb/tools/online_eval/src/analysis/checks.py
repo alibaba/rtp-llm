@@ -48,6 +48,13 @@ def evaluate(identity, actual, op, expected, *, evidence=None, advisory=False):
                        actual=actual, expected=expected, evidence=evidence or {})
 
 
+
+def invalid_check(identity, *, detail="", actual=None, expected=None, evidence=None):
+    """Insufficient observation cannot become a threshold failure or an advisory pass."""
+    return CheckResult(identity, "ERROR", detail=detail, actual=actual, expected=expected,
+                       evidence=dict(evidence or {}, validity="INVALID"))
+
+
 def check_metric(store, identity, metric_id, *, reduction, op, expected,
                  labels=None, start=None, end=None, source=None, epoch=None,
                  min_samples=1, max_gap_s=None, evidence=None, advisory=False):
@@ -65,8 +72,7 @@ def check_metric(store, identity, metric_id, *, reduction, op, expected,
     try:
         actual = store.reduce(metric_id, op=reduction, **selection)
     except MetricUnavailable as exc:
-        return CheckResult(identity, "ERROR", detail=str(exc), expected=expected,
-                           evidence=dict(provenance, validity="INVALID"))
+        return invalid_check(identity, detail=str(exc), expected=expected, evidence=provenance)
     rows = store.select(metric_id, **selection)
     provenance["definition"] = store.document["definitions"][metric_id]
     provenance["observations"] = [dict(source=row["source"], epoch=row["epoch"],

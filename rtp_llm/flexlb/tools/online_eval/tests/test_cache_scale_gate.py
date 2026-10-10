@@ -28,6 +28,10 @@ def metric_spec(directory, evidence, result, prepared):
     from cases.cache_scale_in.metrics import produce
     from cases.cache_scale_in.report import build_spec
     produce(directory, evidence, result)
+    from monitoring.metric_store import MetricStore
+    from reporting.metric_binding import monitoring_audit
+    prepared = dict(prepared, metric_classification=monitoring_audit(
+        MetricStore.read(directory), view("cache_scale_in.yaml")))
     return build_spec(directory, evidence, result, prepared)
 
 
@@ -44,7 +48,7 @@ class CacheGateTest(unittest.TestCase):
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
 
-    def test_dispatch_query_has_explicit_yaml_presentation(self):
+    def test_dispatch_query_is_explicit_diagnostic_and_remains_archived(self):
         with tempfile.TemporaryDirectory() as d:
             archive = Path(d) / "telemetry/1/queries.json"
             archive.parent.mkdir(parents=True)
@@ -58,11 +62,15 @@ class CacheGateTest(unittest.TestCase):
                 }},
             }))
             result = prepare_report(d, self.evidence())
+            from monitoring.metric_store import MetricStore
+            store = MetricStore.read(d)
+            self.assertEqual(store.select("master/dispatch_qps")[0]["points"][0][1], 3)
         dispatch = [curve for curve in result["curves"]
                     if curve["metric_id"] == "master/dispatch_qps"]
-        self.assertEqual(len(dispatch), 1)
-        self.assertEqual(dispatch[0]["name"], "Master dispatch QPS · cache")
-        self.assertEqual(dispatch[0]["points"][0]["y"], 3)
+        self.assertEqual(dispatch, [])
+        self.assertTrue(any(row["metric_id"] == "master/dispatch_qps" and
+            row["classification"] == "DIAGNOSTIC_ONLY" for row in result["metric_classification"]))
+        self.assertIn(["master/dispatch_qps", "—", "DIAGNOSTIC_ONLY", "rate(dispatch_total[10s])"], result["audit"])
 
     def test_report_layout_follows_yaml_view(self):
         template = copy.deepcopy(view("cache_scale_in.yaml"))
@@ -299,8 +307,11 @@ class CacheGateTest(unittest.TestCase):
             self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "WARN")
-            audit = spec["sections"][0]["rows"]
-            self.assertIn(["Master schedule response QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
+            inventory = spec["sections"][-1]["value"]["metric_classification"]
+            missing = next(row for row in inventory
+                           if row["metric_id"] == "master/schedule_responses_qps")
+            self.assertEqual(missing["classification"], "DIAGNOSTIC_ONLY")
+            self.assertEqual(missing["series_count"], 0)
 
     def test_formula_shared_by_master_and_mock_envelope(self):
         from flexlb_cfg import ConfigOverride, render_env, render_process_config

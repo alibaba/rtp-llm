@@ -249,11 +249,11 @@ class WorkloadReportViewsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, mock.patch(
             "reporting.view_config.view", return_value=presentation
         ), mock.patch(
-            "cases.master_performance.panels.panel",
-            return_value=(dict(id="performance", title="Python title", series=[
+            "cases.master_performance.panels.prepare_curves",
+            return_value=([
                 dict(curve_id="mock/rtp_llm_context_tps_engine_mean/P", metric_id="mock/rtp_llm_context_tps_engine_mean/P", name="P throughput", group="Prefill TPS", axis="forward", hidden=False, points=[]),
                 dict(curve_id="mock/rtp_llm_generate_tps_engine_mean/D", metric_id="mock/rtp_llm_generate_tps_engine_mean/D", name="D detail", group="Decode 逐引擎 TPS", axis="forward", hidden=True, points=[]),
-            ]), {}),
+            ], {}),
         ):
             bundle = report(d, {"criteria": {"measure_s": 1}, "window": {"start_epoch_ms": 0},
                                 "provenance": {"instance": "master_performance::default::single-nonbatch"}},

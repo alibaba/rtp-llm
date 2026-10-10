@@ -43,7 +43,7 @@ def view(name):
         if query_plan is None:
             fail(path, "curves require metrics.query_plan")
         validate_bindings(path, data, query_plan, fail)
-    if "diagnostic_only" in data.get("metrics", {}):
+    if kind == "selected":
         validate_monitoring_policy(path, data, query_plan, fail)
     validate_text(path, data, fail)
     return data

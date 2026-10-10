@@ -18,11 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 
-def metric_panel(directory, evidence, result, presentation=None):
+def metric_curves(directory, evidence, result, presentation=None):
     from cases.master_performance.metrics import produce
-    from cases.master_performance.panels import panel
+    from cases.master_performance.panels import prepare_curves
     produce(directory, evidence, result)
-    return panel(directory, evidence, result, presentation)
+    from reporting.view_config import view
+    return prepare_curves(directory, evidence, presentation or view("master_performance.yaml"))
 
 
 def evidence():
@@ -183,7 +184,7 @@ class PerformanceGateTest(unittest.TestCase):
         return e
 
     def test_html_engine_curves_use_monitor_archive(self):
-        panel = metric_panel
+        prepare = metric_curves
         e = self.engine_evidence()
         with tempfile.TemporaryDirectory() as d:
             archive = Path(d) / "telemetry/1/queries.json"
@@ -197,26 +198,33 @@ class PerformanceGateTest(unittest.TestCase):
                     ),
                 },
             )))
-            chart, audit = panel(d, e, analyze(e))
+            curves, audit = prepare(d, e, analyze(e))
             self.assertTrue(audit["available"])
-            self.assertEqual(len(chart["presets"]["Decode TPS"]), 1)
-            self.assertTrue(set(chart["presets"]["Decode TPS"]) <= set(chart["presets"]["核心"]))
-            self.assertEqual(next(curve for curve in chart["series"]
+            from cases.master_performance.panels import report_panels
+            from reporting.view_config import view
+            panels = report_panels(curves, e["criteria"], view("master_performance.yaml"))
+            engine = next(p for p in panels if p["id"] == "engine-tps")
+            measured = [c for c in engine["series"] if c.get("source_type") != "configuration"]
+            self.assertEqual([c["name"] for c in measured], ["D generate TPS"])
+            self.assertTrue(all(not c["hidden"] for c in measured))
+            self.assertEqual(next(curve for curve in curves
                                   if curve["name"] == "D generate TPS")["points"],
                              [dict(x=0, y=120), dict(x=10, y=130)])
-            self.assertIn("成功 QPS", chart["presets"]["流量"])
+            self.assertIn("成功 QPS", [c["name"] for p in panels for c in p["series"]])
             archive.unlink()
             # A new artifact with neither query evidence nor frozen metrics.
             (Path(d) / "metrics.json").unlink()
-            chart, _ = panel(d, evidence(), analyze(evidence()))
-            self.assertIn("完成输入 TPS", chart["presets"]["核心"])
+            curves, _ = prepare(d, evidence(), analyze(evidence()))
+            panels = report_panels(curves, evidence()["criteria"], view("master_performance.yaml"))
+            self.assertIn("发送 QPS", [c["name"] for p in panels for c in p["series"]])
+            self.assertTrue(any(p['caption'] for p in panels if not p['series']))
             # HTML must still exist for INVALID runs, with embedded plotting code.
             bundle = report(d, e, analyze(e))
             self.assertTrue((bundle / "report.html").is_file())
 
     def test_archived_actual_hit_ratio_is_shown_as_percent(self):
         from cases.master_performance.panels import report_panels
-        panel = metric_panel
+        prepare = metric_curves
         from reporting.view_config import view
 
         e = evidence()
@@ -231,8 +239,8 @@ class PerformanceGateTest(unittest.TestCase):
                                  values=[[100, "0.42"], [101, "NaN"]])],
                 )},
             )))
-            chart, _ = panel(d, e, analyze(e))
-            panels = report_panels(chart["series"], e["criteria"],
+            curves, _ = prepare(d, e, analyze(e))
+            panels = report_panels(curves, e["criteria"],
                                    view("master_performance.yaml"))
             hit = panels[3]
             self.assertEqual(hit["id"], "cache-hit")
@@ -243,7 +251,7 @@ class PerformanceGateTest(unittest.TestCase):
 
     def test_archived_prefill_batch_and_state_panels(self):
         from cases.master_performance.panels import report_panels
-        panel = metric_panel
+        prepare = metric_curves
         from reporting.view_config import view
 
         e = evidence()
@@ -268,8 +276,8 @@ class PerformanceGateTest(unittest.TestCase):
                                  values=[[100, str(value)]])],
                 ) for name, value in metrics.items()},
             )))
-            chart, _ = panel(d, e, analyze(e))
-            panels = report_panels(chart["series"], e["criteria"],
+            curves, _ = prepare(d, e, analyze(e))
+            panels = report_panels(curves, e["criteria"],
                                    view("master_performance.yaml"))
             batch, state = panels[4:]
             self.assertEqual([series["name"] for series in batch["series"]],
@@ -317,15 +325,21 @@ class PerformanceGateTest(unittest.TestCase):
     def test_request_curve_label_comes_from_yaml_presentation(self):
         from reporting.view_config import view
         from cases.master_performance.panels import report_panels
-        panel = metric_panel
+        prepare = metric_curves
 
         presentation = copy.deepcopy(view("master_performance.yaml"))
         presentation["charts"]["curves"]["request/sent_qps"]["name"] = "YAML sent rate"
+        style = presentation["charts"]["curves"].pop("request/sent_qps")
+        presentation["charts"]["curves"]["sent_curve"] = style
+        presentation["charts"]["panels"][1]["curve_ids"][0] = "sent_curve"
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
-            chart, _ = panel(d, e, analyze(e), presentation)
-        selected = report_panels(chart["series"], e["criteria"], presentation)
+            curves, _ = prepare(d, e, analyze(e), presentation)
+        selected = report_panels(curves, e["criteria"], presentation)
         self.assertEqual(selected[1]["series"][0]["name"], "YAML sent rate")
+        self.assertEqual(selected[1]["series"][0]["metric_id"], "request/sent_qps")
+        self.assertEqual(selected[1]["series"][0]["curve_id"], "sent_curve")
+        self.assertTrue(selected[1]["series"][0]["points"])
 
     def test_absolute_success_and_renderer(self):
         e = evidence()
@@ -352,7 +366,7 @@ class PerformanceGateTest(unittest.TestCase):
             )
 
     def test_multiview_ab_preserves_decode_monitoring_and_request_buckets(self):
-        panel = metric_panel
+        prepare = metric_curves
 
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
@@ -389,24 +403,23 @@ class PerformanceGateTest(unittest.TestCase):
                     )
                 )
             )
-            chart, audit = panel(root, e, analyze(e))
+            curves, audit = prepare(root, e, analyze(e))
             self.assertTrue(audit["available"])
-            self.assertNotIn("规模", chart["presets"])
-            self.assertEqual(len(chart["presets"]["Prefill TPS"]), 1)
-            self.assertNotIn("Prefill 逐引擎 TPS", chart["presets"])
-            self.assertTrue(set(chart["presets"]["Prefill TPS"]) <= set(chart["presets"]["核心"]))
-            self.assertNotIn("完成输入 TPS", chart["presets"]["核心"])
-            self.assertIn("完成输入 TPS", chart["presets"]["客户端吞吐"])
-            by_name = {c["name"]: c for c in chart["series"]}
+            from cases.master_performance.panels import report_panels
+            from reporting.view_config import view
+            panels = report_panels(curves, e["criteria"], view("master_performance.yaml"))
+            self.assertTrue(all(not c["hidden"] for p in panels for c in p["series"]))
+            self.assertTrue(all("presets" not in p for p in panels))
+            by_name = {c["name"]: c for c in curves}
             self.assertNotIn("mock · D engine count", by_name)
             from monitoring.metric_store import MetricStore
             store = MetricStore.read(root)
             self.assertEqual(store.select("mock/engine_count", labels={"role": "decode"})[0]["points"][0], [100, 4])
             self.assertEqual(store.select("mock/rtp_llm_context_tps_per_engine", labels={"role": "prefill"})[0]["points"][0], [100, 60000])
             self.assertEqual(by_name["TTFT p99"]["points"][0]["y"], 50)
-            self.assertEqual(by_name["到达 cohort 成功率"]["points"][0]["y"], 1)
+            self.assertEqual(store.select("request/arrival_success_ratio")[0]["points"][0][1], 1)
             self.assertEqual(
-                sum(p["y"] for p in by_name["完成输出 TPS"]["points"]), 792
+                sum(point[1] for point in store.select("request/output_tps")[0]["points"]), 792
             )
 
     def test_tail_cohort_and_actual_tokens_not_requested_budget(self):

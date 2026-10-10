@@ -12,6 +12,11 @@ exclude:
 - master/flexlb_app_flexlb_inflight_request_count
 - master/flexlb_auto_tpm_decode_reserved_count
 - master/flexlb_auto_tpm_decode_running_count
+- master/arrivals_qps
+- master/dispatch_qps
+- master/schedule_responses_qps
+- master/flexlb_app_flexlb_batcher_queue_size
+- client/schedule_p99_seconds
 produced:
   ha/sent:
     producer: ha_evidence

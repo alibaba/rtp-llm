@@ -49,8 +49,11 @@ class ActionContractsTest(unittest.TestCase):
 
     def test_field_validation_rejects_unknown_missing_and_non_mapping_input(self):
         plan = SimpleNamespace(path="case.stage")
-        for value in (None, [], {"extra": 1}, {}):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "case.stage: invalid action parameters"):
+        for value, message in ((None, "case.stage: expected mapping"),
+                               ([], "case.stage: expected mapping"),
+                               ({"extra": 1}, "case.stage: unknown configuration fields"),
+                               ({}, "missing YAML parameter case.stage.required")):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, message):
                 validate_fields(value, plan, {"required"}, {"required"})
         source = {"required": {"nested": [1]}}
         result = validate_fields(source, plan, {"required"}, {"required"})

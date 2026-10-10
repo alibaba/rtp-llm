@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 
 from cases.config_data import mapping
-from scenario.loader import ScenarioError
 
 
 @dataclass(frozen=True)
@@ -41,6 +40,4 @@ class ProgramInputs:
 
 def fields(data, required, path, *, optional=()):
     """Validate case-owned nested mappings with the same strict field semantics."""
-    from input_contract import mapping_fields
-    return mapping_fields(data, set(required) | set(optional), path,
-                          required=required, error=ScenarioError)
+    return mapping(data, set(required) | set(optional), path, required=required)

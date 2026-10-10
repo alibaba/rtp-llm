@@ -1,6 +1,7 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
 import math
+from input_contract import finite_number
 from scenario.parameters import validate_fields
 from cases.metric_inputs import metric_fields
 
@@ -77,14 +78,12 @@ RULES = {
 
 def compile_checks(case, checks, policy):
     from cases.inputs import fields
-    from cases.check_inputs import metric_criterion
+    from cases.check_inputs import metric_criterion, compile_metric_checks
 
     fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
     fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.observation.collapse')
     result = dict(policy)
-    for name, (key, metric, op, unit, window) in RULES.items():
-        result[key], _ = metric_criterion(case, checks[name], metric='cache_gate/'+metric,
-            unit=unit, window=window, op=op, path='parameters.checks.'+name)
+    result.update(compile_metric_checks(case, checks, RULES, namespace='cache_gate'))
     expected, _ = metric_criterion(case, checks['collapse'], metric='cache_gate/collapse_detected',
         unit='boolean', window='post', op='eq', path='parameters.checks.collapse')
     if expected != 0:
@@ -93,14 +92,12 @@ def compile_checks(case, checks, policy):
 
 
 def observation_contract(data):
-    from cases.inputs import fields
-    from cases.windows import anchored_window
+    from cases.windows import anchored_windows
     from runtime.observation import capture_limits
-    fields(data["windows"], {"baseline", "post"}, "parameters.observation.windows")
-    base = anchored_window(data["windows"]["baseline"],
-        "parameters.observation.windows.baseline", anchor="baseline_ready")
-    post = anchored_window(data["windows"]["post"],
-        "parameters.observation.windows.post", anchor="target_topology_observed")
+    windows = anchored_windows(data["windows"], {
+        "baseline": "baseline_ready", "post": "target_topology_observed",
+    })
+    base, post = windows["baseline"], windows["post"]
     if base["until"] != 0 or base["from"] >= 0 or post["from"] != 0:
         raise ValueError("cache windows must end at baseline readiness and start at target readiness")
     capture_limits(data["capture"], "parameters.observation.capture")
@@ -124,7 +121,7 @@ def validate_criteria(params, plan):
     if plan.environment.get("discovery") != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
     for k in FIELDS - {"flow", "removal_mode"}:
-        if type(p[k]) not in (int, float) or not math.isfinite(p[k]) or p[k] < 0:
+        if not finite_number(p[k]) or p[k] < 0:
             raise ValueError(k + " must be finite and nonnegative")
     for k in ("target_p", "min_completed"):
         if type(p[k]) is not int or p[k] < 1:
@@ -147,8 +144,7 @@ def validate_criteria(params, plan):
             )
         hold = p["intermediate_hold_s"]
         if (
-            type(hold) not in (int, float)
-            or not math.isfinite(hold)
+            not finite_number(hold)
             or hold < p["baseline_s"]
         ):
             raise ValueError("intermediate hold must cover a full baseline window")

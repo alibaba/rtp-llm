@@ -14,11 +14,11 @@ def write_report(directory, evidence, result, telemetry_directory=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     p = evidence.get("provenance", {})
-    from cases.master_performance.panels import panel, report_panels
+    from cases.master_performance.panels import prepare_curves, report_panels
 
     metric_directory = Path(telemetry_directory or directory)
-    chart, monitoring = panel(metric_directory, evidence, result, presentation)
-    panels = report_panels(chart["series"], evidence.get("criteria", {}), presentation)
+    curves, monitoring = prepare_curves(metric_directory, evidence, presentation)
+    panels = report_panels(curves, evidence.get("criteria", {}), presentation)
     spec = dict(
         run_id=p["instance"],
         title=title(p["instance"]),
@@ -80,8 +80,6 @@ def refresh_report(directory):
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
-    if "diagnostic_only" not in data["metrics"]:
-        fail(path, "selected gate views require diagnostic_only classification")
     validate_section_contract(path, data, {
         "checks": 4, "monitoring": None, "validity": None, "metrics": None,
     }, fail)

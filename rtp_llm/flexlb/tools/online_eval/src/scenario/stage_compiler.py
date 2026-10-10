@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
+from scenario.loader import ScenarioError
 from scenario.contracts import PlanContext
 from scenario.validation import fail, mapping, identifier, number
 from analysis.checks import validate_comparison
@@ -169,9 +170,16 @@ class _StageCompiler:
     def _handler_params(self, descriptor, params, loc, action):
         if descriptor.owners and self.case not in descriptor.owners:
             fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
-        params = descriptor.validate(params, PlanContext(
-            loc + ".params", dict(self.outputs), copy.deepcopy(self.environment), self.profiles,
-        ))
+        try:
+            params = descriptor.validate(params, PlanContext(
+                loc + ".params", dict(self.outputs), copy.deepcopy(self.environment), self.profiles,
+            ))
+        except ScenarioError:
+            raise
+        except ValueError as exc:
+            detail = str(exc)
+            path = loc + ".params"
+            raise ScenarioError(detail if detail.startswith(path) else f"{path}: {detail}") from exc
         if not isinstance(params, dict):
             fail(loc, "adapter validate must return a mapping")
         return params

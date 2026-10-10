@@ -15,9 +15,12 @@ def merge_data(base, patch):
     return result
 
 
-def mapping(value, allowed, path):
+def mapping(value, allowed, path, *, required=()):
     from input_contract import mapping_fields
-    return mapping_fields(value, allowed, path, error=ScenarioError)
+    try:
+        return mapping_fields(value, allowed, path, required=required)
+    except ValueError as exc:
+        raise ScenarioError(str(exc)) from exc
 
 
 def data_only(value, path):

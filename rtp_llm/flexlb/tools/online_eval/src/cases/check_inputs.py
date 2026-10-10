@@ -26,3 +26,14 @@ def metric_criterion(case, spec, *, metric, unit, window, op, path,
         if type(expected) not in (int, float):
             raise ValueError(path + ": profile threshold must be numeric")
     return spec["expected"], overrides
+
+
+def compile_metric_checks(case, checks, rules, *, namespace, path="parameters.checks"):
+    """Project a fixed measurement table; case-specific policies stay with the case."""
+    result = {}
+    for name, (key, metric, op, unit, window) in rules.items():
+        result[key], _ = metric_criterion(
+            case, checks[name], metric=namespace + '/' + metric,
+            unit=unit, window=window, op=op, path=path + '.' + name,
+        )
+    return result

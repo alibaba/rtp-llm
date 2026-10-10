@@ -35,6 +35,15 @@ metrics:
   - mock/running_sum
   - mock/simulated_decode_ms_avg
   - mock/waiting_sum
+  - request/completed_qps
+  - request/arrival_success_ratio
+  - request/e2e_p99_ms
+  - request/tpot_p99_ms
+  - request/input_tokens_mean
+  - request/output_tokens_mean
+  - request/input_tps
+  - request/output_tps
+  - request/inflight
 charts:
   events:
     measure_start:
@@ -61,7 +70,6 @@ charts:
       axis: forward
       color: '#1677ff'
       hidden: false
-      primary: true
     mock/rtp_llm_context_tps_with_cache_engine_mean/P:
       metric_id: mock/rtp_llm_context_tps_with_cache_engine_mean
       labels:
@@ -72,7 +80,6 @@ charts:
       axis: forward
       color: '#13c2c2'
       hidden: false
-      primary: true
     mock/rtp_llm_generate_tps_engine_mean/D:
       metric_id: mock/rtp_llm_generate_tps_engine_mean
       labels:
@@ -83,7 +90,6 @@ charts:
       axis: forward
       color: '#fa541c'
       hidden: false
-      primary: true
     mock/cache_hit_ratio/P:
       metric_id: mock/cache_hit_ratio
       labels:
@@ -94,8 +100,7 @@ charts:
       axis: hit_pct
       scale: 100
       color: '#722ed1'
-      hidden: true
-      primary: false
+      hidden: false
       source_unit: ratio
     mock/simulated_prefill_ms_avg/P:
       metric_id: mock/simulated_prefill_ms_avg
@@ -106,8 +111,7 @@ charts:
       unit: 毫秒
       axis: ms
       color: '#52c41a'
-      hidden: true
-      primary: false
+      hidden: false
     mock/prefill_batch_size_mean/P:
       metric_id: mock/prefill_batch_size_mean
       labels:
@@ -117,8 +121,7 @@ charts:
       unit: 请求 / 执行批
       axis: batch
       color: '#eb2f96'
-      hidden: true
-      primary: false
+      hidden: false
     mock/prefill_batch_size_p50/P:
       metric_id: mock/prefill_batch_size_p50
       labels:
@@ -128,8 +131,7 @@ charts:
       unit: 请求 / 执行批
       axis: batch
       color: '#faad14'
-      hidden: true
-      primary: false
+      hidden: false
     mock/prefill_batch_size_p90/P:
       metric_id: mock/prefill_batch_size_p90
       labels:
@@ -139,8 +141,7 @@ charts:
       unit: 请求 / 执行批
       axis: batch
       color: '#2f54eb'
-      hidden: true
-      primary: false
+      hidden: false
     mock/prefill_batch_size_p99/P:
       metric_id: mock/prefill_batch_size_p99
       labels:
@@ -150,8 +151,7 @@ charts:
       unit: 请求 / 执行批
       axis: batch
       color: '#1677ff'
-      hidden: true
-      primary: false
+      hidden: false
     mock/running_avg/P:
       metric_id: mock/running_avg
       labels:
@@ -161,8 +161,7 @@ charts:
       unit: 请求数 / P 引擎
       axis: count
       color: '#13c2c2'
-      hidden: true
-      primary: false
+      hidden: false
     mock/running_max/P:
       metric_id: mock/running_max
       labels:
@@ -172,8 +171,7 @@ charts:
       unit: 请求数 / P 引擎
       axis: count
       color: '#fa541c'
-      hidden: true
-      primary: false
+      hidden: false
     mock/waiting_avg/P:
       metric_id: mock/waiting_avg
       labels:
@@ -183,8 +181,7 @@ charts:
       unit: 请求数 / P 引擎
       axis: count
       color: '#722ed1'
-      hidden: true
-      primary: false
+      hidden: false
     mock/waiting_max/P:
       metric_id: mock/waiting_max
       labels:
@@ -194,8 +191,7 @@ charts:
       unit: 请求数 / P 引擎
       axis: count
       color: '#52c41a'
-      hidden: true
-      primary: false
+      hidden: false
     client/schedule_p99_seconds:
       metric_id: client/schedule_p99_seconds
       labels: {}
@@ -205,8 +201,7 @@ charts:
       axis: ms
       scale: 1000
       color: '#eb2f96'
-      hidden: true
-      primary: false
+      hidden: false
       source_unit: s
     request/sent_qps:
       metric_id: request/sent_qps
@@ -216,7 +211,7 @@ charts:
       unit: 请求 / 秒
       axis: qps
       color: '#faad14'
-      hidden: true
+      hidden: false
     request/success_qps:
       metric_id: request/success_qps
       labels: {}
@@ -225,7 +220,7 @@ charts:
       unit: 请求 / 秒
       axis: qps
       color: '#2f54eb'
-      hidden: true
+      hidden: false
     request/error_qps:
       metric_id: request/error_qps
       labels: {}
@@ -234,7 +229,7 @@ charts:
       unit: 请求 / 秒
       axis: qps
       color: '#1677ff'
-      hidden: true
+      hidden: false
     request/ttft_p99_ms:
       metric_id: request/ttft_p99_ms
       labels: {}
@@ -243,88 +238,7 @@ charts:
       unit: 毫秒
       axis: ms
       color: '#13c2c2'
-      hidden: true
-    request/input_tps:
-      metric_id: request/input_tps
-      labels: {}
-      name: 完成输入 TPS
-      group: 客户端吞吐
-      unit: tokens/s
-      axis: input
-      color: '#fa541c'
-      hidden: true
-    request/output_tps:
-      metric_id: request/output_tps
-      labels: {}
-      name: 完成输出 TPS
-      group: 客户端吞吐
-      unit: tokens/s
-      axis: output
-      color: '#722ed1'
-      hidden: true
-    request/inflight:
-      metric_id: request/inflight
-      labels: {}
-      name: Client inflight
-      group: 队列
-      unit: requests
-      axis: count
-      color: '#52c41a'
-      hidden: true
-    request/completed_qps:
-      metric_id: request/completed_qps
-      labels: {}
-      name: 完成 QPS
-      group: 流量
-      unit: requests/s
-      axis: qps
-      color: '#eb2f96'
-      hidden: true
-    request/arrival_success_ratio:
-      metric_id: request/arrival_success_ratio
-      labels: {}
-      name: 到达 cohort 成功率
-      group: 流量
-      unit: ratio
-      axis: ratio
-      color: '#faad14'
-      hidden: true
-    request/e2e_p99_ms:
-      metric_id: request/e2e_p99_ms
-      labels: {}
-      name: E2E p99
-      group: 延迟
-      unit: ms
-      axis: ms
-      color: '#2f54eb'
-      hidden: true
-    request/tpot_p99_ms:
-      metric_id: request/tpot_p99_ms
-      labels: {}
-      name: TPOT p99
-      group: 延迟
-      unit: ms
-      axis: ms
-      color: '#1677ff'
-      hidden: true
-    request/input_tokens_mean:
-      metric_id: request/input_tokens_mean
-      labels: {}
-      name: 输入长度均值
-      group: 流量
-      unit: tokens
-      axis: tokens
-      color: '#13c2c2'
-      hidden: true
-    request/output_tokens_mean:
-      metric_id: request/output_tokens_mean
-      labels: {}
-      name: 实际输出长度均值
-      group: 流量
-      unit: tokens
-      axis: tokens
-      color: '#fa541c'
-      hidden: true
+      hidden: false
   panels:
   - id: engine-tps
     title: 三项引擎 TPS 与门禁线
