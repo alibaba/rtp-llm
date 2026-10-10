@@ -29,6 +29,9 @@ from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_block_norm_reference as block_norm_provider,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_kv_projection_reference as kv_projection_provider,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import (
     load_configuration,
     make_loader,
@@ -131,6 +134,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_collapse = os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
     compare_tilelang = os.environ.get("DSV41_TEST_COMPARE_DECODE_TILELANG") == "1"
     compare_block_norm = os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
+    compare_kv = os.environ.get("DSV41_TEST_COMPARE_KV_PROJECTION") == "1"
+    if compare_kv and not (compare_tilelang and compare_block_norm):
+        raise ValueError("WKV comparison requires both qualified decode recipes")
     if compare_block_norm and not compare_tilelang:
         raise ValueError(
             "Block normalization requires the qualified decode composition"
@@ -176,6 +182,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_collapse
         or compare_tilelang
         or compare_block_norm
+        or compare_kv
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -246,6 +253,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         profiles.append(f"{profiles[-1]}_decode_tilelang_reference")
     if compare_block_norm:
         profiles.append(f"{profiles[-1]}_block_norm_reference")
+    if compare_kv:
+        profiles.extend(f"{profile}_kv_ref" for profile in profiles[-2:])
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError("WKV trace profile exceeds the filesystem name limit")
+    kv_projection_source_hash = (
+        hashlib.sha256(Path(kv_projection_provider.__file__).read_bytes()).hexdigest()
+        if compare_kv
+        else None
+    )
     block_norm_source_hash = (
         hashlib.sha256(Path(block_norm_provider.__file__).read_bytes()).hexdigest()
         if compare_block_norm
@@ -376,8 +392,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                block_norm = profile.endswith("_block_norm_reference")
-                block_norm_base = profile.removesuffix("_block_norm_reference")
+                kv_reference = profile.endswith("_kv_ref")
+                kv_base = profile.removesuffix("_kv_ref")
+                block_norm = kv_base.endswith("_block_norm_reference")
+                block_norm_base = kv_base.removesuffix("_block_norm_reference")
                 tilelang_decode = block_norm_base.endswith("_decode_tilelang_reference")
                 tilelang_base = block_norm_base.removesuffix(
                     "_decode_tilelang_reference"
@@ -480,6 +498,17 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             **({"mhc_collapse_reference": True} if collapse else {}),
                             **(
                                 {
+                                    "kv_projection_reference": True,
+                                    "kv_projection_reference_scope": "explicit-attentions",
+                                    "kv_projection_reference_dim": config.hidden_size,
+                                    "kv_projection_reference_kernel_sha256": reference_hash,
+                                    "kv_projection_provider_sha256": kv_projection_source_hash,
+                                }
+                                if kv_reference
+                                else {}
+                            ),
+                            **(
+                                {
                                     "block_norm_reference": True,
                                     "block_norm_reference_scope": "explicit-blocks",
                                     "block_norm_reference_dim": config.hidden_size,
@@ -546,6 +575,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         else ()
                     ),
                     dim=config.hidden_size,
+                ), kv_projection_provider.kv_projection_reference(
+                    kv_reference,
+                    attentions=(
+                        tuple(layer.attn for layer in model.v4.layers)
+                        if kv_reference
+                        else ()
+                    ),
+                    kernel=reference_kernel,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -709,7 +746,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_block_norm_reference")
+                                or profile.removesuffix("_kv_ref")
+                                .removesuffix("_block_norm_reference")
                                 .removesuffix("_decode_tilelang_reference")
                                 .removesuffix("_mhc_collapse_reference")
                                 .removesuffix("_sparse_prefill_reference")
@@ -722,7 +760,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_block_norm_reference")
+                        or profile.removesuffix("_kv_ref")
+                        .removesuffix("_block_norm_reference")
                         .removesuffix("_decode_tilelang_reference")
                         .removesuffix("_mhc_collapse_reference")
                         .removesuffix("_sparse_prefill_reference")

@@ -417,6 +417,7 @@ py_test(
         ":v41_decode_tilelang_reference_testlib",
         ":v41_mhc_collapse_reference_testlib",
         ":v41_block_norm_reference_testlib",
+        ":v41_kv_projection_reference_testlib",
         ":v41_sparse_prefill_reference_testlib",
         "//rtp_llm/tools:dsv41_trace",
     ],
