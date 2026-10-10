@@ -334,21 +334,25 @@ class ScrVipTest(unittest.TestCase):
                 switch=switch, phase=phase, local_size=local_size
             ), patch.dict(
                 os.environ,
-                {"RTPLLM_ENABLE_SCR": switch, "SCR_PHASE": phase},
+                {
+                    "RTPLLM_ENABLE_SCR": switch,
+                    "SCR_PHASE": phase,
+                    "NCCL_SOCKET_IFNAME": "eth0",
+                    "GLOO_SOCKET_IFNAME": "eth0",
+                },
                 clear=True,
             ):
                 self.pc.local_world_size = local_size
                 scr_vip.configure_network(self.pc)
                 for name in ("NCCL_SOCKET_IFNAME", "GLOO_SOCKET_IFNAME"):
                     self.assertEqual(
-                        os.environ.get(name), "scr_vxlan0" if active else None
+                        os.environ.get(name), "scr_vxlan0" if active else "eth0"
                     )
 
-    def test_conflicting_interface_fails_without_partial_assignment(self):
-        with patch.dict(os.environ, {"GLOO_SOCKET_IFNAME": "eth0"}):
-            with self.assertRaisesRegex(ValueError, "GLOO_SOCKET_IFNAME"):
-                scr_vip.configure_network(self.pc)
-            self.assertNotIn("NCCL_SOCKET_IFNAME", os.environ)
+    def test_interface_selection_without_launcher_defaults(self):
+        scr_vip.configure_network(self.pc)
+        self.assertEqual(os.environ["NCCL_SOCKET_IFNAME"], "scr_vxlan0")
+        self.assertEqual(os.environ["GLOO_SOCKET_IFNAME"], "scr_vxlan0")
 
     def test_cache_advertisement_uses_vip_mapping_and_refreshes_underlay(self):
         from rtp_llm.config.engine_config import update_worker_addrs
