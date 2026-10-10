@@ -46,6 +46,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
     mhc_fp32,
     mhc_post_reference,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_query_precision import (
+    query_projection_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
 )
@@ -104,6 +107,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
     compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
     compare_engram = os.environ.get("DSV41_TEST_COMPARE_ENGRAM") == "1"
+    compare_query = os.environ.get("DSV41_TEST_COMPARE_QUERY") == "1"
     shared_eos_trace = os.environ.get("DSV41_TEST_TRACE_SHARED_EOS") == "1"
     paired = (
         compare_tp8
@@ -114,6 +118,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_down
         or compare_post
         or compare_engram
+        or compare_query
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -161,6 +166,19 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             for profile in profiles.copy()
             if profile.endswith("_mhc_post_reference")
         )
+    if compare_query:
+        query_profiles = [
+            f"{profile}_query_reference"
+            for profile in profiles
+            if profile.endswith("_engram_reference")
+        ]
+        profiles.extend(query_profiles)
+        if query_profiles:
+            profiles.append(
+                query_profiles[-1].replace(
+                    "_sparse_sink_div_rn_prefill_", "_sparse_sink_div_rn_"
+                )
+            )
     trace_steps = dict.fromkeys(profiles, 0)
     post_trace_steps = {}
     post_trace_requests = {}
@@ -194,6 +212,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         if compare_engram and not compare_post:
             raise ValueError(
                 "Engram comparison requires all sixteen preceding controls"
+            )
+        if compare_query and not compare_engram:
+            raise ValueError(
+                "Query comparison requires all eighteen preceding controls"
             )
         reference_kernel = load_reference_kernel() if compare_down else None
         reference_hash = (
@@ -277,8 +299,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                engram = profile.endswith("_engram_reference")
-                post_profile = profile.removesuffix("_engram_reference")
+                query_reference = profile.endswith("_query_reference")
+                query_base = profile.removesuffix("_query_reference")
+                engram = query_base.endswith("_engram_reference")
+                post_profile = query_base.removesuffix("_engram_reference")
                 post = post_profile.endswith("_mhc_post_reference")
                 down_profile = post_profile.removesuffix("_mhc_post_reference")
                 recipe = "compressor_recipe" in profile
@@ -338,6 +362,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 if engram
                                 else {}
                             ),
+                            **(
+                                {
+                                    "query_first_reference": True,
+                                    "query_second_reference": True,
+                                    "query_reference_kernel_sha256": reference_hash,
+                                }
+                                if query_reference
+                                else {}
+                            ),
                         }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
@@ -363,6 +396,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     kernel=reference_kernel,
                 ), engram_gate_reference(
                     engram,
+                ), query_projection_reference(
+                    query_reference,
+                    kernel=reference_kernel,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -526,16 +562,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.endswith("_engram_reference")
+                                or profile.removesuffix("_query_reference").endswith(
+                                    "_engram_reference"
+                                )
                                 else 3
                             ),
                             new_tokens,
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_engram_reference").endswith(
-                            "_mhc_post_reference"
-                        )
+                        or profile.removesuffix("_query_reference")
+                        .removesuffix("_engram_reference")
+                        .endswith("_mhc_post_reference")
                         for prompt in range(len(prompts))
                     }
                     assert post_trace_steps == expected_traces, post_trace_steps
@@ -739,6 +777,10 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
             flush=True,
         )
         with directory_context as directory:
+            print(
+                f"DSV41_ENGINE_ENGRAM_STAGING {directory} reuse_tables={bool(reuse)}",
+                flush=True,
+            )
             self.run_checkpoint(
                 root, directory, prompts, full=True, new_tokens=new_tokens
             )

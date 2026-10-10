@@ -273,6 +273,7 @@ py_test(
         "v41_engram_precision.py",
         "v41_expert_precision.py",
         "v41_mhc_precision.py",
+        "v41_query_precision.py",
         "v41_reference_precision.py",
         "v41_sparse_precision.py",
         "v41_tp8_projection.py",
