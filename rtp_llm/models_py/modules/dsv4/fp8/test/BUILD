@@ -1,6 +1,5 @@
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
-load("@arch_config//:arch_select.bzl", "cuda13_test_exec_properties")
 load("@rules_python//python:defs.bzl", "py_test")
 
 package(default_visibility = ["//visibility:public"])
@@ -184,7 +183,7 @@ test_suite(
         ":test_flash_mla_decode_kernel_layout_x86",
         ":test_fused_compressor_meta_triton_x86",
         ":test_fused_decode_meta_comprehensive_x86",
-        ":test_fused_pool_slot_mapping_contract",
+        ":test_fused_pool_slot_mapping_contract_x86",
         ":test_indexer_cp_padded_gather_distributed_x86",
         ":test_indexer_cp_padded_gather_triton_x86",
         ":test_indexer_fp8_score_x86",
@@ -234,12 +233,10 @@ py_test(
     target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
-py_test(
+cuda13_sm100_py_test(
     name = "test_fused_pool_slot_mapping_contract",
     srcs = ["test_fused_pool_slot_mapping_contract.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    exec_properties = cuda13_test_exec_properties(),
-    target_compatible_with = _DSV4_CUDA13_ONLY,
 )
 
 
