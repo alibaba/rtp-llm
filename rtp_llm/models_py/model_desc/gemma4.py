@@ -1498,6 +1498,12 @@ class Gemma4SwaFlashinferImpl(Gemma4TorchFMHAImpl):
 
     @staticmethod
     def support(geometry: Gemma4LayerGeometry) -> bool:
+        # FULL layers (global_head_dim=512, k_equals_v) are excluded:
+        # flashinfer's ragged prefill rejects head_dim 512 on SM89
+        # ("Error in BatchPrefillWithRaggedKVCacheDispatched", verified
+        # 2026-10-10 with a minimal repro: D=128 OK, D=512 fails). Their
+        # eager chunked attention stays on the reference path; revisit on
+        # platforms whose flashinfer supports 512-dim heads (SM100).
         if geometry.tag != GEMMA4_TAG_SWA or geometry.sliding_window <= 0:
             return False
         if not torch.cuda.is_available():
