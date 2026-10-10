@@ -153,6 +153,162 @@ class Qwen4ExpGatedResidualTest(unittest.TestCase):
                 norm_eps=_EPS,
             )
 
+    def test_injection_norm_cpu_fallback_matches_two_stage_path(self):
+        unit = self._build(self.inject)
+        hyper = torch.randn(3, self.hc_hidden)
+        sublayer = torch.randn(3, _HIDDEN)
+        gates = torch.rand(3, _HC)
+        expected = unit(inject_into_residual(hyper, sublayer, gates))
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "1"}):
+            actual = unit.forward_with_injection(hyper, sublayer, gates)
+        for got, want in zip(actual, expected):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_injection_norm_rounding_and_graph_replay(self):
+        if torch.version.hip or torch.cuda.get_device_capability()[0] < 8:
+            self.skipTest("The fused injection kernel requires NVIDIA SM80 or newer")
+        from rtp_llm.models_py.modules.qwen4_exp.gated_residual_inject_norm_triton import (
+            inject_and_grouped_rms_norm,
+        )
+
+        for hidden in (127, 2560):
+            for rows in (1, 3, 8, 17, 127):
+                with self.subTest(hidden=hidden, rows=rows):
+                    hyper = torch.randn(
+                        rows, 4 * hidden, device="cuda", dtype=torch.bfloat16
+                    )
+                    sublayer = torch.randn(
+                        rows, hidden, device="cuda", dtype=torch.bfloat16
+                    )
+                    gates = torch.rand(rows, 4, device="cuda", dtype=torch.bfloat16) * 2
+                    gamma = (
+                        torch.randn(4 * hidden, device="cuda", dtype=torch.bfloat16)
+                        * 0.1
+                    )
+
+                    def reference():
+                        combined = hyper + (
+                            sublayer.unsqueeze(1) * gates.unsqueeze(-1)
+                        ).flatten(1)
+                        normed = grouped_rms_norm(combined, gamma, hidden, _EPS)
+                        return combined, normed
+
+                    actual = inject_and_grouped_rms_norm(
+                        hyper, sublayer, gates, gamma, hidden, _EPS
+                    )
+                    expected = reference()
+                    torch.testing.assert_close(actual[0], expected[0], atol=0, rtol=0)
+                    torch.testing.assert_close(
+                        actual[1], expected[1], atol=0.016, rtol=0.01
+                    )
+                    from rtp_llm.models_py.modules.qwen4_exp.gated_residual_norm_triton import (
+                        grouped_rms_norm_triton,
+                    )
+
+                    torch.testing.assert_close(
+                        actual[1],
+                        grouped_rms_norm_triton(expected[0], gamma, hidden, _EPS),
+                        atol=0,
+                        rtol=0,
+                    )
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual = inject_and_grouped_rms_norm(
+                            hyper, sublayer, gates, gamma, hidden, _EPS
+                        )
+                    hyper.copy_(torch.randn_like(hyper))
+                    sublayer.copy_(torch.randn_like(sublayer))
+                    gates.copy_(
+                        (torch.arange(rows * 4, device="cuda") % 2)
+                        .reshape(rows, 4)
+                        .to(torch.bfloat16)
+                        * 2
+                    )
+                    graph.replay()
+                    expected = reference()
+                    torch.testing.assert_close(actual[0], expected[0], atol=0, rtol=0)
+                    torch.testing.assert_close(
+                        actual[1], expected[1], atol=0.016, rtol=0.01
+                    )
+                    torch.testing.assert_close(
+                        actual[1],
+                        grouped_rms_norm_triton(expected[0], gamma, hidden, _EPS),
+                        atol=0,
+                        rtol=0,
+                    )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_injection_norm_full_hc_real_width(self):
+        hidden, rank = 2560, 320
+        gamma = torch.randn(4 * hidden, device="cuda", dtype=torch.bfloat16) * 0.1
+        down = torch.randn(rank, 4 * hidden, device="cuda", dtype=torch.bfloat16) * 0.02
+        up = torch.randn(4 * hidden, rank, device="cuda", dtype=torch.bfloat16) * 0.02
+        inject = torch.randn(4, 4 * hidden, device="cuda", dtype=torch.bfloat16) * 0.02
+        unit = Qwen4ExpGatedResidual(gamma, down, up, inject, hc_mult=4, norm_eps=_EPS)
+        hyper = torch.randn(17, 4 * hidden, device="cuda", dtype=torch.bfloat16)
+        sublayer = torch.randn(17, hidden, device="cuda", dtype=torch.bfloat16)
+        gates = torch.rand(17, 4, device="cuda", dtype=torch.bfloat16)
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "0"}):
+            expected = unit.forward_with_injection(hyper, sublayer, gates)
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "1"}):
+            actual = unit.forward_with_injection(hyper, sublayer, gates)
+        for got, want in zip(actual, expected):
+            torch.testing.assert_close(got, want, atol=0.016, rtol=0.01)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_injection_norm_uses_fallback_without_native_bf16_conversion(self):
+        unit = self._build(self.inject)
+        unit.norm_gamma = unit.norm_gamma.cuda().bfloat16()
+        unit.mix_down = unit.mix_down.cuda().bfloat16()
+        unit.mix_up = unit.mix_up.cuda().bfloat16()
+        unit.inject = unit.inject.cuda().bfloat16()
+        hyper = torch.randn(3, self.hc_hidden, device="cuda", dtype=torch.bfloat16)
+        sublayer = torch.randn(3, _HIDDEN, device="cuda", dtype=torch.bfloat16)
+        gates = torch.rand(3, _HC, device="cuda", dtype=torch.bfloat16)
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "0"}):
+            expected = unit.forward_with_injection(hyper, sublayer, gates)
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "1"}), patch(
+            "torch.cuda.get_device_capability", return_value=(7, 0)
+        ):
+            actual = unit.forward_with_injection(hyper, sublayer, gates)
+        for got, want in zip(actual, expected):
+            torch.testing.assert_close(got, want, atol=0, rtol=0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_injection_norm_preserves_forward_hooks(self):
+        hidden, rank = 2560, 320
+        tensors = [
+            torch.randn(*shape, device="cuda", dtype=torch.bfloat16) * 0.05
+            for shape in (
+                (4 * hidden,),
+                (rank, 4 * hidden),
+                (4 * hidden, rank),
+                (4, 4 * hidden),
+            )
+        ]
+        unit = Qwen4ExpGatedResidual(*tensors, hc_mult=4, norm_eps=_EPS)
+        hyper = torch.randn(3, 4 * hidden, device="cuda", dtype=torch.bfloat16)
+        sublayer = torch.randn(3, hidden, device="cuda", dtype=torch.bfloat16)
+        gates = torch.rand(3, 4, device="cuda", dtype=torch.bfloat16)
+        seen = []
+
+        def alter_output(module, inputs, output):
+            seen.append(inputs[0].shape)
+            return output[0] + 1, output[1], output[2]
+
+        handle = unit.register_forward_hook(alter_output)
+        try:
+            with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "0"}):
+                expected = unit.forward_with_injection(hyper, sublayer, gates)
+            with patch.dict(os.environ, {"RTP_LLM_QWEN4_FUSED_INJECT_NORM": "1"}):
+                actual = unit.forward_with_injection(hyper, sublayer, gates)
+            self.assertEqual(seen, [hyper.shape, hyper.shape])
+            for got, want in zip(actual, expected):
+                torch.testing.assert_close(got, want, atol=0, rtol=0)
+        finally:
+            handle.remove()
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_merged_down_epilogue_preserves_bf16_rounding_and_graph_replay(self):
         from rtp_llm.models_py.modules.qwen4_exp.gated_residual_down_triton import (
