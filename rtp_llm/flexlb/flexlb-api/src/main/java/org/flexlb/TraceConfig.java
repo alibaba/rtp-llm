@@ -25,6 +25,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** 与 Python config.py 共享 JSON 配置契约。 */
 @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY,
         setterVisibility = JsonAutoDetect.Visibility.NONE)
@@ -387,12 +389,16 @@ final class TraceConfig {
         try {
             URI uri = new URI(endpoint);
             String scheme = uri.getScheme();
-            if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))
-                    || uri.getHost() == null || uri.getRawUserInfo() != null || uri.getRawFragment() != null
-                    || uri.getPort() == 0 || uri.getPort() > 65535 || uri.getRawAuthority().endsWith(":")
-                    || endpoint.chars().anyMatch(c -> c <= 32 || c >= 127)) {
-                throw new IllegalArgumentException();
-            }
+            checkArgument(("http".equalsIgnoreCase(scheme)
+                    || "https".equalsIgnoreCase(scheme))
+                    && uri.getHost() != null
+                    && uri.getRawUserInfo() == null
+                    && uri.getRawFragment() == null
+                    && uri.getPort() != 0
+                    && uri.getPort() <= 65535
+                    && !uri.getRawAuthority().endsWith(":")
+                    && endpoint.chars().noneMatch(c -> c <= 32
+                    || c >= 127));
         } catch (Exception ignored) {
             throw new ConfigException("endpoint", "invalid_endpoint");
         }

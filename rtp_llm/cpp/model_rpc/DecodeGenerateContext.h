@@ -73,6 +73,8 @@ public:
     int32_t                    prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
     // Guards meta_->finishTask() early-failure reporting: at most once per request.
     bool early_finish_reported = false;
+    bool stream_enqueued = false;
+    void finishUnscheduledStream();
 
     // for debug, will delete in future
     TimeInfo time_info;

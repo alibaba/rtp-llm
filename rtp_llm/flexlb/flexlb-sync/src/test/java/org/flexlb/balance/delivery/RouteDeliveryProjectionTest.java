@@ -1,20 +1,21 @@
 package org.flexlb.balance.delivery;
 
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+
 import org.flexlb.balance.planner.GroupPlanner;
+import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
-import org.flexlb.balance.scheduler.RequestRegistry;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.OptionalDouble;
 import java.util.Set;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
@@ -24,9 +25,8 @@ import static org.mockito.Mockito.mock;
  * {@link RouteProjection.DeliveryProjection} SPI as implemented by
  * {@link RouteDeliveryStrategy} and {@link BatchDeliveryStrategy}.
  *
- * <p>Route service is a lazy cumulative prefix sum (asking for member i
- * evaluates only items 0..i). Batch service independently predicts each
- * prefix length via {@code batchDurationMs(items[0..i+1])}.
+ * <p>Each selected group asks once for either the probe prefix or the complete
+ * group. Completion may reuse the exact prefix evaluated by the planning cursor.
  */
 @DisplayName("Delivery projection contracts")
 class RouteDeliveryProjectionTest {
@@ -36,161 +36,171 @@ class RouteDeliveryProjectionTest {
                 id, 0, id, 1000L, 1_000_000L, seqLen, 0L);
     }
 
-    private static GroupPlanner.Plan<GroupPlanner.Item> plan(
-            List<GroupPlanner.Item> items, OptionalDouble selectedPredictionMs) {
-        GroupPlanner.Shape shape = GroupPlanner.Shape.empty();
-        for (GroupPlanner.Item it : items) shape = shape.add(it.seqLen());
-        return new GroupPlanner.Plan<>(items, shape, 1000L, 1300L, false,
-                selectedPredictionMs, GroupPlanner.BATCH_FULL);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void growingPlanningPrefixReusesOnlyEvaluatedWorkAndResetsForNextQueue(boolean batch) {
+        var requests = mock(AbstractRequestScheduler.class);
+        var metrics = mock(DeliveryMetricsReporter.class);
+        RouteProjection.DeliveryProjection projection = batch
+                ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(
+                        CapacityBoundary.OWNERSHIP_LOST), () -> 1L, metrics).projectionPolicy()
+                : new RouteDeliveryStrategy(metrics).projectionPolicy();
+        var predictions = new CountingPredictions();
+        var first = item(1L, 100L);
+        var second = item(2L, 200L);
+        var cursor = projection.planning(predictions);
+        assertEquals(batch ? 777.0 : 100.0, cursor.durationMs(List.of(first), 0));
+        assertEquals(batch ? 777.0 : 100.0, cursor.durationMs(List.of(first, second), 0));
+        assertEquals(1, batch ? predictions.batchPlanningCalls : predictions.itemCalls(1L));
+        assertEquals(0, predictions.itemCalls(2L));
+        assertEquals(batch ? 777.0 : 300.0, cursor.durationMs(List.of(first, second), 1));
+        assertEquals(2, batch ? predictions.batchPlanningCalls
+                : predictions.itemCalls(1L) + predictions.itemCalls(2L));
+
+        var nextPredictions = new CountingPredictions();
+        var next = projection.planning(nextPredictions);
+        assertEquals(batch ? 777.0 : 900.0, next.durationMs(List.of(item(3L, 900L)), 0));
+        assertEquals(1, batch ? nextPredictions.batchPlanningCalls : nextPredictions.itemCalls(3L));
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    @Nested
-    @DisplayName("Route projection: lazy cumulative cursor")
-    class RouteService {
-
-        private final RouteProjection.DeliveryProjection projection =
-                new RouteDeliveryStrategy(
-                        mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).projectionPolicy();
-
-        @Test
-        void completionOffsetIsTheCumulativePrefixSum() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            // offset(0)=100, offset(1)=100+200=300, offset(2)=300+50=350
-            assertEquals(100L, svc.completionOffsetMs(0));
-            assertEquals(300L, svc.completionOffsetMs(1));
-            assertEquals(350L, svc.completionOffsetMs(2));
-            assertEquals(350L, svc.totalDurationMs());
-        }
-
-        @Test
-        void probePrefixDoesNotEvaluateTheSuffix() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            svc.completionOffsetMs(1);
-            assertEquals(1, pred.itemCalls(1L));
-            assertEquals(1, pred.itemCalls(2L));
-            assertEquals(0, pred.itemCalls(3L),
-                    "suffix must not be predicted for a prefix query");
-        }
-
-        @Test
-        void prefixTtftSurvivesASuffixPredictionFailure() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            pred.failOn(3L);
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            assertEquals(300L, svc.completionOffsetMs(1),
-                    "probe TTFT preserved even when suffix will fail");
-            assertThrows(RuntimeException.class, svc::totalDurationMs,
-                    "drain requires the failing suffix → unknown");
-        }
-
-        @Test
-        void offsetsAreMemoizedAndEvaluatedAtMostOnce() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            svc.completionOffsetMs(1);
-            svc.completionOffsetMs(0);
-            svc.totalDurationMs();
-            assertEquals(1, pred.itemCalls(1L));
-            assertEquals(1, pred.itemCalls(2L));
-        }
-
-        @Test
-        void planningDurationIsThePrefixSumThroughRequiredIndex() {
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupPlanning planning = projection.planning(pred);
-            // Through index 1: items[0]+items[1] = 100+200 = 300
-            assertEquals(300.0, planning.durationMs(items, 1));
-            assertEquals(0, pred.itemCalls(3L), "suffix beyond index not evaluated");
-        }
-
-        @Test
-        void memberIndexIsBoundsChecked() {
-            RouteProjection.GroupService svc = projection.service(
-                    plan(List.of(item(1L, 100L)), OptionalDouble.empty()),
-                    new CountingPredictions());
-            assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(1));
-            assertThrows(IndexOutOfBoundsException.class, () -> svc.completionOffsetMs(-1));
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void eachCompletionEvaluatesOnlyItsRequiredPrefix(boolean batch) {
+        var projection = projection(batch);
+        var items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+        long[] expected = batch ? new long[]{100L, 200L, 300L} : new long[]{100L, 300L, 350L};
+        for (int index = 0; index < items.size(); index++) {
+            var predictions = new CountingPredictions();
+            assertEquals(expected[index], projection.completionOffsetMs(items, index, predictions, null));
+            if (batch) {
+                assertEquals(1, predictions.batchDurationCalls());
+            } else {
+                for (int member = 0; member < items.size(); member++) {
+                    assertEquals(member <= index ? 1 : 0, predictions.itemCalls(member + 1L));
+                }
+            }
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    @Nested
-    @DisplayName("Batch projection: per-prefix independent prediction")
-    class BatchService {
+    @Test
+    void probePrefixSurvivesASuffixPredictionFailure() {
+        var projection = projection(false);
+        var items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+        var predictions = new CountingPredictions();
+        predictions.failOn(3L);
+        assertEquals(300L, projection.completionOffsetMs(items, 1, predictions, null));
+        assertEquals(0, predictions.itemCalls(3L));
+        assertThrows(RuntimeException.class,
+                () -> projection.completionOffsetMs(items, 2, predictions, null));
+    }
 
-        private final RouteProjection.DeliveryProjection projection =
-                new BatchDeliveryStrategy(
-                        () -> CapacityBoundary.Attempt.rejected(
-                                CapacityBoundary.OWNERSHIP_LOST),
-                        () -> 1L,
-                        mock(RequestRegistry.class),
-                        mock(DeliveryMetrics.class)).projectionPolicy();
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void memberIndexIsBoundsChecked(boolean batch) {
+        var projection = projection(batch);
+        var items = List.of(item(1L, 100L));
+        var predictions = new CountingPredictions();
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> projection.completionOffsetMs(items, -1, predictions, null));
+        assertThrows(IndexOutOfBoundsException.class,
+                () -> projection.completionOffsetMs(items, 1, predictions, null));
+        assertEquals(0, predictions.itemCalls(1L));
+        assertEquals(0, predictions.batchDurationCalls());
+    }
 
-        @Test
-        void eachMemberGetsBatchDurationOfItsExactPrefix() {
-            // batchDurationMs returns 100*items.size() for discrimination.
-            List<GroupPlanner.Item> items =
-                    List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            // offset(0) = batchDurationMs([item1]) = 100*1 = 100
-            assertEquals(100L, svc.completionOffsetMs(0));
-            // offset(1) = batchDurationMs([item1,item2]) = 100*2 = 200
-            assertEquals(200L, svc.completionOffsetMs(1));
-            // offset(2) = batchDurationMs([item1,item2,item3]) = 100*3 = 300
-            assertEquals(300L, svc.completionOffsetMs(2));
-            assertEquals(300L, svc.totalDurationMs());
-        }
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void planningEvaluatesOnlyThroughTheRequiredMember(boolean batch) {
+        var projection = projection(batch);
+        var items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+        var predictions = new CountingPredictions();
+        assertEquals(batch ? 777.0 : 300.0, projection.planning(predictions).durationMs(items, 1));
+        assertEquals(0, predictions.itemCalls(3L));
+        assertEquals(batch ? 2 : 0, predictions.batchPlanningCalls);
+    }
 
-        @Test
-        void eachPrefixIsComputedIndependentlyAndMemoized() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupService svc =
-                    projection.service(plan(items, OptionalDouble.empty()), pred);
-            svc.completionOffsetMs(0);
-            svc.completionOffsetMs(0); // repeated
-            svc.completionOffsetMs(1);
-            svc.completionOffsetMs(1); // repeated
-            // Each prefix evaluated exactly once.
-            assertEquals(2, pred.batchDurationCalls());
-        }
+    @Test
+    void routeCompletionReusesThePlannedProbePrefix() {
+        var projection = projection(false);
+        var items = List.of(item(1L, 100L), item(2L, 200L), item(3L, 50L));
+        var predictions = new CountingPredictions();
+        var cursor = projection.planning(predictions);
+        var plan = GroupPlanner.selectWithPrediction(items, new GroupPlanner.Constraints(3, 1_000L, 1_000L, 5_000L, 0L),
+                (added, prefix) -> cursor.durationMs(prefix, Math.min(1, prefix.size() - 1)));
 
-        @Test
-        void planningDurationDelegates() {
-            List<GroupPlanner.Item> items = List.of(item(1L, 100L), item(2L, 200L));
-            CountingPredictions pred = new CountingPredictions();
-            RouteProjection.GroupPlanning planning = projection.planning(pred);
-            // Batch planning returns batchPlanningDurationMs = 777 always.
-            assertEquals(777.0, planning.durationMs(items, items.size() - 1));
+        assertEquals(items, plan.items());
+        assertEquals(300L, projection.completionOffsetMs(plan.items(), 1, predictions, cursor));
+        assertEquals(1, predictions.itemCalls(1L));
+        assertEquals(1, predictions.itemCalls(2L));
+        assertEquals(0, predictions.itemCalls(3L));
+    }
+
+    @Test
+    void routeCompletionReusesTheAcceptedPrefixAfterAnOverBudgetAppend() {
+        var projection = projection(false);
+        var first = item(1L, 100L);
+        var predictions = new CountingPredictions();
+        var cursor = projection.planning(predictions);
+        var plan = GroupPlanner.selectWithPrediction(List.of(first, item(2L, 200L), item(3L, 50L)),
+                new GroupPlanner.Constraints(3, 1_000L, 1_000L, 250L, 0L),
+                (added, prefix) -> cursor.durationMs(prefix, prefix.size() - 1));
+
+        assertEquals(List.of(first), plan.items());
+        assertEquals(100L, projection.completionOffsetMs(plan.items(), 0, predictions, cursor));
+        assertEquals(1, predictions.itemCalls(1L));
+        assertEquals(1, predictions.itemCalls(2L));
+        assertEquals(0, predictions.itemCalls(3L));
+    }
+
+    @Test
+    void routePlanningCacheKeepsExactLongValuesAndSaturates() {
+        var projection = projection(false);
+        long large = (1L << 53) + 3L;
+        var items = List.of(item(1L, large), item(2L, 5L), item(3L, Long.MAX_VALUE));
+        var predictions = new CountingPredictions();
+        var cursor = projection.planning(predictions);
+
+        cursor.durationMs(items, 1);
+        assertEquals(large, projection.completionOffsetMs(items, 0, predictions, cursor));
+        assertEquals(large + 5L, projection.completionOffsetMs(items, 1, predictions, cursor));
+        cursor.durationMs(items, 2);
+        assertEquals(large + 5L, projection.completionOffsetMs(items, 1, predictions, cursor));
+        assertEquals(Long.MAX_VALUE, projection.completionOffsetMs(items, 2, predictions, cursor));
+        for (long requestId = 1L; requestId <= 3L; requestId++) {
+            assertEquals(1, predictions.itemCalls(requestId));
         }
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
+    @Test
+    void routePlanningRetainsCompletedPrefixAcrossFailureAndSaturates() {
+        var predictions = new CountingPredictions();
+        var cursor = projection(false).planning(predictions);
+        var items = List.of(item(1L, Long.MAX_VALUE - 10L), item(2L, 20L));
+        predictions.failOn(2L);
+        assertThrows(RuntimeException.class, () -> cursor.durationMs(items, 1));
+        predictions.failOn();
+        assertEquals((double) Long.MAX_VALUE, cursor.durationMs(items, 1));
+        assertEquals(1, predictions.itemCalls(1L));
+        assertEquals(2, predictions.itemCalls(2L));
+        assertThrows(IllegalArgumentException.class, () -> cursor.durationMs(items, 0));
+    }
+
+    private static RouteProjection.DeliveryProjection projection(boolean batch) {
+        var requests = mock(AbstractRequestScheduler.class);
+        var metrics = mock(DeliveryMetricsReporter.class);
+        return batch
+                ? new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(
+                        CapacityBoundary.OWNERSHIP_LOST), () -> 1L, metrics).projectionPolicy()
+                : new RouteDeliveryStrategy(metrics).projectionPolicy();
+    }
+
     private static final class CountingPredictions
             implements RouteProjection.Predictions {
 
         private final Map<Long, Integer> itemCalls = new HashMap<>();
         private Set<Long> failingIds = Set.of();
         private int batchDurationCalls;
+        private int batchPlanningCalls;
 
         void failOn(long... ids) {
             var set = new java.util.HashSet<Long>();
@@ -216,8 +226,21 @@ class RouteDeliveryProjectionTest {
         }
 
         @Override
-        public double batchPlanningDurationMs(List<GroupPlanner.Item> items) {
-            return 777.0;
+        public long itemDurationMs(long seqLen, long hitCache) {
+            return itemDurationMs(new GroupPlanner.Item(0L, 0, 0L, 0L, Long.MAX_VALUE, seqLen, hitCache));
+        }
+
+        @Override
+        public long singletonBatchDurationMs(long seqLen, long hitCache) {
+            return batchDurationMs(List.of(new GroupPlanner.Item(0L, 0, 0L, 0L, Long.MAX_VALUE, seqLen, hitCache)));
+        }
+
+        @Override
+        public PrefillTimePredictor.BatchPrediction newBatchPrediction() {
+            return (seqLen, hitCache) -> {
+                batchPlanningCalls++;
+                return 777.0;
+            };
         }
 
         @Override

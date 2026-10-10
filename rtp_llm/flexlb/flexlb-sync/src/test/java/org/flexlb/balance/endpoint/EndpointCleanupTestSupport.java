@@ -1,6 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.enums.TaskPhase;
@@ -36,43 +36,49 @@ public final class EndpointCleanupTestSupport {
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state = new PrefillState(lock,
-                PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
-                clock::get, () -> { });
+                PrefillActiveIndex.ordered(4, Comparator.comparingLong(RequestRoute::requestId)),
+                clock::get);
         private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
         public PrefillLedger(boolean batch) {
             this.batch = batch;
         }
 
-        public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) { }
+        public record Owner(RequestRoute item, PrefillState.Reservation reservation, long batchId) { }
 
         public Owner commit(long requestId, long batchId, long predictedMs) {
-            ScheduledRequest item = mock(ScheduledRequest.class);
+            RequestRoute item = mock(RequestRoute.class);
             when(item.requestId()).thenReturn(requestId);
             when(item.seqLen()).thenReturn(100L);
             if (batch) {
                 lock.lock();
                 try {
-                    assertTrue(state.enqueueActiveUnderLock(item, Long.MAX_VALUE));
+                    assertTrue(state.enqueueActiveLocked(item, Long.MAX_VALUE));
                 } finally {
                     lock.unlock();
                 }
-                try (var reservation = state.reserveBatch(item, batchId, 1,
-                        generation.tryAcquireHandoff()).reservation()) {
-                    assertNotNull(reservation, "the expired batch must release its sole capacity slot");
-                    try (var handoff = reservation.commit(List.of(item), predictedMs)) {
-                        assertNotNull(handoff);
+                {
+                    var reservation = state.reserveBatch(item, batchId, 1,
+                        generation.tryAcquireHandoff()).reservation();
+                    try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                        assertNotNull(reservation, "the expired batch must release its sole capacity slot");
+                        try (var handoff = EndpointTestSupport.commitBatch(state, reservation, List.of(item), predictedMs)) {
+                            assertNotNull(handoff);
+                        }
+                        return new Owner(item, reservation, batchId);
                     }
-                    return new Owner(item, reservation);
                 }
             }
-            try (var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation()) {
-                assertNotNull(reservation, "the expired individual must release its sole capacity slot");
-                try (var handoff = state.commitRouteGroup(List.of(item), List.of(reservation),
-                        generation.tryAcquireHandoff())) {
-                    assertNotNull(handoff);
+            {
+                var reservation = state.reserveUnqueuedRoute(item, predictedMs, 1).reservation();
+                try (var preparationReservation = EndpointTestSupport.preparation(reservation)) {
+                    assertNotNull(reservation, "the expired individual must release its sole capacity slot");
+                    try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(item), List.of(reservation),
+                            generation.tryAcquireHandoff())) {
+                        assertNotNull(handoff);
+                    }
+                    return new Owner(item, reservation, batchId);
                 }
-                return new Owner(item, reservation);
             }
         }
 
@@ -81,8 +87,7 @@ public final class EndpointCleanupTestSupport {
         }
 
         public int sweep(LongPredicate retain) {
-            return batch ? state.evictExpiredBatches(10L, retain)
-                    : state.evictExpiredIndividuals(10L, retain);
+            return EndpointTestSupport.evictPrefill(state, 10L, retain);
         }
 
         public void assertOwned(Owner owner, long predictedMs) {
@@ -92,36 +97,34 @@ public final class EndpointCleanupTestSupport {
             assertEquals(batch ? 1 : 0, stats.batchCount());
             var work = state.committedSnapshot();
             assertEquals(predictedMs, work.totalRemainingWorkMs().orElseThrow());
-            assertEquals(0, work.unknownRequestCount());
+            assertFalse(work.hasUnknownWork());
+            assertTrue(work.containsRequest(owner.item().requestId()));
             if (batch) {
-                assertTrue(work.requests().isEmpty());
-                assertEquals(1, work.batches().size());
-                assertEquals(List.of(owner.item().requestId()), work.batches().getFirst().requestIds());
-                assertEquals(((PrefillState.BatchReservation) owner.reservation()).batchId(),
-                        work.batches().getFirst().batchId());
+                lock.lock();
+                try {
+                    Map<?, ?> batches = (Map<?, ?>) org.springframework.test.util.ReflectionTestUtils
+                            .getField(state, "batches");
+                    assertEquals(java.util.Set.of(owner.batchId()), batches.keySet());
+                } finally { lock.unlock(); }
                 // Check the actual admission gate, not just the derived batch count.
-                assertFalse(state.batchAvailability(1).isAvailable());
-                assertTrue(state.batchAvailability(2).isAvailable());
-            } else {
-                assertTrue(work.batches().isEmpty());
-                assertEquals(List.of(owner.item().requestId()), work.requests().stream()
-                        .map(request -> request.requestId()).toList());
+                assertFalse(state.batchCapacityAvailable(1));
+                assertTrue(state.batchCapacityAvailable(2));
             }
         }
 
         public void assertStaleReleaseIsIgnored(Owner old) {
-            assertFalse(state.terminalizeCommittedItem(old.item()));
-            old.reservation().close();
+            assertFalse(EndpointTestSupport.releaseRequest(state, old.item()));
+            EndpointTestSupport.rollback(old.reservation());
         }
 
         public void assertEmpty() {
             assertEquals(0, state.stats().locallyOwnedRequests());
             assertEquals(0, state.stats().individuallyOwnedRequests());
             assertEquals(0, state.stats().batchCount());
-            assertTrue(state.committedSnapshot().requests().isEmpty());
-            assertTrue(state.committedSnapshot().batches().isEmpty());
+            assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
+            assertFalse(state.committedSnapshot().hasUnknownWork());
             assertEquals(0L, state.committedSnapshot().totalRemainingWorkMs().orElseThrow());
-            assertTrue(state.batchAvailability(1).isAvailable());
+            assertTrue(state.batchCapacityAvailable(1));
         }
     }
 }

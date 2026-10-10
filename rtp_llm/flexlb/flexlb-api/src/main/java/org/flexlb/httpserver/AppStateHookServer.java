@@ -83,7 +83,7 @@ public class AppStateHookServer {
         try {
             applicationLifecycle.online();
             long duration = System.currentTimeMillis() - startTime;
-            lifecycleReporter.reportOnlineComplete(duration);
+            lifecycleReporter.reportDuration(GracefulLifecycleReporter.Event.ONLINE_COMPLETE, duration);
             log.info("online service run success.");
             return ServerResponse.ok().body(Mono.just("success"), String.class);
         } catch (Exception e) {

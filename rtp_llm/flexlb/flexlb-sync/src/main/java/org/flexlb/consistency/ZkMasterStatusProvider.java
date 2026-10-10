@@ -13,24 +13,23 @@ import org.springframework.stereotype.Component;
  * {@link org.flexlb.metric.NoOpMasterStatusProvider} (which is guarded by
  * {@code @ConditionalOnMissingBean}).</p>
  *
- * <p>{@link LBStatusConsistencyService#isMaster()} already checks
+ * <p>{@link MasterStatusService#isMaster()} already checks
  * {@code isNeedConsistency()} internally and returns {@code false} for roles
  * that don't participate in ZK election (e.g. frontend).</p>
  *
- * @author saichen.sm
  */
 @Component
 @Primary
 public class ZkMasterStatusProvider implements MasterStatusProvider {
 
-    private final LBStatusConsistencyService lbStatusConsistencyService;
+    private final MasterStatusService masterStatusService;
 
-    public ZkMasterStatusProvider(@Lazy LBStatusConsistencyService lbStatusConsistencyService) {
-        this.lbStatusConsistencyService = lbStatusConsistencyService;
+    public ZkMasterStatusProvider(@Lazy MasterStatusService masterStatusService) {
+        this.masterStatusService = masterStatusService;
     }
 
     @Override
     public boolean isMaster() {
-        return lbStatusConsistencyService.isMaster();
+        return masterStatusService.isMaster();
     }
 }

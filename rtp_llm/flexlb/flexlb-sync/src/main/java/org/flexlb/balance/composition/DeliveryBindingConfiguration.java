@@ -1,19 +1,16 @@
 package org.flexlb.balance.composition;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.balance.scheduler.DeliveryStrategy;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.env.Environment;
-
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -24,6 +21,8 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+
+import static com.google.common.base.Preconditions.checkState;
 
 /** Selects exactly one delivery strategy from the canonical startup config. */
 @Configuration(proxyBeanMethods = false)
@@ -49,14 +48,12 @@ public class DeliveryBindingConfiguration {
     @Bean
     public DeliveryStrategy activePrefillDeliveryStrategy(
             ConfigService configService,
-            RequestRegistry requests,
             DefaultBatchDispatcher batchSubmission,
-            BatchSchedulerReporter reporter,
+            DeliveryMetricsReporter reporter,
             Environment environment) {
         DispatcherConfig dispatcher = Objects.requireNonNull(
                 configService.loadBalanceConfig().getDispatcher(),
                 "dispatcher");
-        DeliveryMetrics telemetry = new DeliveryMetrics(reporter);
         return switch (dispatcher.getType()) {
             case BATCH -> {
                 LongSupplier ids = batchIds(
@@ -64,13 +61,11 @@ public class DeliveryBindingConfiguration {
                 yield new BatchDeliveryStrategy(
                         batchSubmission::tryPrepareSubmission,
                         ids,
-                        requests,
-                        telemetry);
+                        reporter);
             }
             case NON_BATCH ->
                     new RouteDeliveryStrategy(
-                            requests,
-                            telemetry);
+                                reporter);
         };
     }
 
@@ -83,12 +78,8 @@ public class DeliveryBindingConfiguration {
             long timestamp = TimeUnit.MILLISECONDS.toSeconds(
                     System.currentTimeMillis())
                     - BATCH_EPOCH_SECONDS;
-            if (timestamp < 0L || (timestamp >>> TIMESTAMP_BITS) != 0L) {
-                throw new IllegalStateException(
-                        timestamp < 0L
-                                ? "system clock is before the batch ID epoch"
-                                : "batch ID timestamp overflow");
-            }
+            checkState(timestamp >= 0L && (timestamp >>> TIMESTAMP_BITS) == 0L,
+                    timestamp < 0L ? "system clock is before the batch ID epoch" : "batch ID timestamp overflow");
             return (timestamp << TIMESTAMP_SHIFT)
                     | (masterId << MASTER_ID_SHIFT)
                     | (BATCH_SEQUENCE.getAndIncrement()

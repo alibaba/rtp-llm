@@ -18,7 +18,7 @@ import static org.flexlb.constant.MetricConstant.GRPC_RESPONSE_SIZE;
  * Reporter for gRPC channel pool metrics.
  *
  * Note: All gRPC metrics use "engineIp" as the IP tag name (previously "ip"),
- * consistent with other FlexLB reporters (EngineHealthReporter, BatchSchedulerReporter,
+ * consistent with other FlexLB reporters (EngineHealthReporter, DeliveryMetricsReporter,
  * CacheMetricsReporter, etc.). If any Grafana dashboard queries reference the old "ip"
  * tag for these gRPC metrics, they must be updated to use "engineIp" instead.
  */

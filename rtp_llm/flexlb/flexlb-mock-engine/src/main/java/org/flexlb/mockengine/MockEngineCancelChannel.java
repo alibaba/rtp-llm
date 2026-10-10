@@ -1,8 +1,8 @@
 package org.flexlb.mockengine;
 
-import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.preemption.CancelTarget;
+import org.flexlb.balance.scheduler.CancelReason;
 
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -47,18 +47,14 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
     }
 
     @Override
-    public boolean isSupported(DecodeEndpoint endpoint) {
-        return endpoint != null && services.containsKey(endpoint.getGrpcPort());
-    }
-
-    @Override
     public CompletableFuture<CancelAck> cancel(CancelTarget target, long requestId,
-                                               long timeoutMs) {
+                                               CancelReason reason, long timeoutMs) {
         JavaMockEngineCluster.FastRpcService service = target == null
                 ? null : services.get(target.prefillGrpcPort());
         if (service == null) {
             return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
         }
+        if (service.isStopped()) { return CompletableFuture.completedFuture(CancelAck.FAILED); }
         // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as the
         // gRPC Cancel handler and the HTTP /cancel_request surface: an armed
         // fault short-circuits BEFORE cancelRequest so the engine cancel
@@ -89,6 +85,10 @@ public final class MockEngineCancelChannel implements EngineCancelChannel {
         try {
             // Deliberately inspect only the addressed Prefill. Scanning other
             // workers would hide an incorrect Prefill route in tests.
+            if (reason != CancelReason.PRIORITY_PREEMPTED) {
+                service.cleanUpRequest(requestId, reason);
+                return CompletableFuture.completedFuture(CancelAck.REQUEST_CLEANED);
+            }
             JavaMockEngineCluster.CancelResult result = service.cancelRequest(requestId);
             if (result.found()) {
                 return CompletableFuture.completedFuture(CancelAck.ACCEPTED);

@@ -6,6 +6,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static org.flexlb.balance.prediction.ArithmeticFormulaAst.*;
 
 /** Recursive-descent grammar and binding/aggregate validation. */
@@ -29,9 +30,7 @@ final class ArithmeticFormulaParser {
         this.allowAggregates = allowAggregates;
         int count = 0;
         for (int index : this.variables.values()) {
-            if (index < 0 || index == Integer.MAX_VALUE) {
-                throw new IllegalArgumentException("Variable index is outside its domain: " + index);
-            }
+            checkArgument(index >= 0 && index != Integer.MAX_VALUE, "Variable index is outside its domain: %s", index);
             count = Math.max(count, index + 1);
         }
         this.variableCount = count;

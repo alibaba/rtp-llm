@@ -4,7 +4,6 @@ import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.api.trace.SpanBuilder;
-import io.opentelemetry.api.trace.SpanContext;
 import io.opentelemetry.api.trace.SpanKind;
 import io.opentelemetry.api.trace.StatusCode;
 import io.opentelemetry.api.trace.Tracer;
@@ -112,10 +111,6 @@ public final class FlexlbTrace {
         return start(name, parent, SpanKind.SERVER);
     }
 
-    public static Span startInternal(String name, Context parent) {
-        return start(name, parent, SpanKind.INTERNAL);
-    }
-
     public static Span startClient(String name, Context parent) {
         return start(name, parent, SpanKind.CLIENT);
     }
@@ -126,18 +121,6 @@ public final class FlexlbTrace {
             return !enabled || span == null ? base : span.storeInContext(base);
         } catch (Throwable ignored) {
             return fallback == null ? Context.current() : fallback;
-        }
-    }
-
-    public static SpanContext spanContext(Context context) {
-        try {
-            if (context == null) {
-                return null;
-            }
-            SpanContext spanContext = Span.fromContext(context).getSpanContext();
-            return spanContext.isValid() ? spanContext : null;
-        } catch (Throwable ignored) {
-            return null;
         }
     }
 

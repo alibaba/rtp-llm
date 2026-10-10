@@ -1,5 +1,6 @@
 package org.flexlb.mockengine;
 
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.engine.grpc.EngineRpcService.EnqueueBatchRequestPB;
 import org.junit.jupiter.api.Test;
@@ -40,9 +41,6 @@ class BaselineParityE2ETest {
     void singlePlannerWithPriorityDisabledPreservesFifoBatchDecisions() throws Exception {
         // autoTpm=false：批队列用 FIFO 序（构造时冻结），全部开关保持默认关闭
         try (AutoTpmE2EHarness h = singlePlannerHarness()) {
-            h.fixedWindowDecision().setMaxCollectionWaitMs(5);
-            h.fixedWindowDecision().setMaxRequests(2);
-            h.config.getDispatcher().setMaxInflightPerPrefillWorker(1);
             h.startAutoPump(10);
 
             // 预热首笔调度与引擎调用，并从测量记录中排除。
@@ -103,7 +101,6 @@ class BaselineParityE2ETest {
             // 无任何抢占痕迹
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());
-            verify(h.requestReporter, never()).reportPriorityPreempt(anyString());
 
             // 对照数据：三档平均调度延迟应该同量级（仅输出，不做脆断言）
             Map<Integer, Double> avgLatencyMs = new HashMap<>();
@@ -131,7 +128,12 @@ class BaselineParityE2ETest {
         String previous = System.getProperty("flexlb.queue.planner.threads");
         try {
             System.setProperty("flexlb.queue.planner.threads", "1");
-            return new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false);
+            var config = new org.flexlb.config.FlexlbConfig();
+            var decision = config.decisionPolicy();
+            decision.setMaxCollectionWaitMs(5);
+            decision.setMaxRequests(2);
+            config.getDispatcher().setMaxInflightPerPrefillWorker(1);
+            return new AutoTpmE2EHarness(BASE_PORT, 1, 1, "5", 1.0, false, false, decision, false, config);
         } finally {
             if (previous == null) {
                 System.clearProperty("flexlb.queue.planner.threads");

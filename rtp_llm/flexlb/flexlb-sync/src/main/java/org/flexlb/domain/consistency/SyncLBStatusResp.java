@@ -3,11 +3,7 @@ package org.flexlb.domain.consistency;
 import lombok.Getter;
 import lombok.Setter;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/31
- */
+/** Leadership snapshot response. */
 @Getter
 @Setter
 public class SyncLBStatusResp {

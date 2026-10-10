@@ -1,10 +1,9 @@
 package org.flexlb.httpserver;
 
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.TreeMap;
@@ -32,7 +31,7 @@ public class ServerScheduleLatencyRecorder {
         window.arrivals.record(arrivalNanos);
     }
 
-    public void recordCompletion(BalanceContext context, long responseCompletedNanos) {
+    public void recordCompletion(RequestContext context, long responseCompletedNanos) {
         if (context == null) {
             return;
         }
@@ -120,12 +119,12 @@ public class ServerScheduleLatencyRecorder {
 
     /**
      * Normalized priority used as the batch-wait histogram bucket key.
-     * Delegates to {@link BalanceContext#getPriority()} (immutable scheduling
+     * Delegates to {@link RequestContext#getPriority()} (immutable scheduling
      * metadata first, then {@code request.priority}); falls back to 0 when
      * neither source is present.
      */
-    private static int resolvePriority(BalanceContext context) {
-        if (context.schedulingMetadata() == null && context.getRequest() == null) {
+    private static int resolvePriority(RequestContext context) {
+        if (context.getSchedulingMetadata() == null && context.getRequest() == null) {
             return 0;
         }
         return context.getPriority();

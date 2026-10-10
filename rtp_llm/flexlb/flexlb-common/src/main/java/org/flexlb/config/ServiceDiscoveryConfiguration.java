@@ -7,6 +7,8 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 @Configuration
 public class ServiceDiscoveryConfiguration {
 
@@ -18,9 +20,7 @@ public class ServiceDiscoveryConfiguration {
         if (file == null || file.isBlank()) {
             return new LocalServiceDiscovery(route.getHosts());
         }
-        if (!route.getHosts().isEmpty()) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must use either hosts or discovery_file");
-        }
+        checkArgument(route.getHosts().isEmpty(), "MODEL_SERVICE_CONFIG must use either hosts or discovery_file");
         return new LocalServiceDiscovery(file);
     }
 }

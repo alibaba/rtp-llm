@@ -43,11 +43,12 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a1_priority_queue_retains_lower_priority_work_without_token_eviction() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "50", 1.0, false)) {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxCollectionWaitMs(10_000);
+        decision.setMaxRequests(100);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT, 1, 1, "50", 1.0, false, decision)) {
             // Priority ordering retains lower-priority queued work without an eviction policy.
             // 大窗口停住派发：队列状态稳定可断言
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
-            h.fixedWindowDecision().setMaxRequests(100);
 
             CompletableFuture<Response> low1 = h.scheduler.submit(h.context(101, 30));
             CompletableFuture<Response> low2 = h.scheduler.submit(h.context(102, 40));
@@ -76,12 +77,14 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a2_queued_decode_withdrawal_preserves_request_and_transfers_capacity() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false)) {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxCollectionWaitMs(1);
+        decision.setMaxRequests(1);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 10, 1, 1, "50", 1.0, false, decision)) {
+            h.pauseDelivery();
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
-            h.fixedWindowDecision().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
             // Keep reported expected-KV usage below the final 90% gate while the
@@ -89,11 +92,11 @@ class PreemptionPhasesE2ETest {
             h.setDecodeKvCapacity(0, 255, 256);
             CompletableFuture<Response> low = h.scheduler.submit(h.context(201, 30));
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.resourceSnapshot().reserved().containsKey(201L),
+                    () -> MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L),
                     5_000,
                     "low-priority request must publish its Decode reservation");
             assertFalse(low.isDone());
-            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(201L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
             // victim 仍由 Master 排队持有，因此走本地 queued eviction，无需 Engine Cancel。
             long hardKvBefore = decodeEp.routingView().inflightHardKv();
             assertTrue(hardKvBefore > 0);
@@ -101,7 +104,7 @@ class PreemptionPhasesE2ETest {
             CompletableFuture<Response> high = h.scheduler.submit(h.context(202, 70));
 
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.resourceSnapshot().reserved().containsKey(202L),
+                    () -> MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 202L),
                     5_000, "the higher-priority request must acquire the withdrawn capacity");
             // Schema v3 withdraws the queued route, not the request: no terminal error or Engine Cancel.
             assertFalse(low.isDone(), "the original low-priority future must remain pending");
@@ -110,21 +113,20 @@ class PreemptionPhasesE2ETest {
 
             // 账目正确：victim 影子预留释放，高优恰好占据一份
             assertFalse(high.isDone(), "high-priority request should sit in the queue after eviction");
-            assertFalse(decodeEp.resourceSnapshot().reserved().containsKey(201L));
-            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(202L));
-            assertEquals(1, decodeEp.getInflightCount());
+            assertFalse(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 201L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 202L));
+            assertEquals(1, decodeEp.resourceSnapshot().reservedCount());
             assertEquals(hardKvBefore, decodeEp.routingView().inflightHardKv(),
                     "hard KV must transfer 1:1 from victim to incoming");
 
             h.setDecodeKvCapacity(0, 1_000_000, 1_000_000);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(1);
-            h.fixedWindowDecision().setMaxRequests(1);
+            h.resumeDelivery();
             h.startAutoPump(10);
             // Both original requests eventually succeed (200), with high priority dispatched first.
             assertTrue(high.get(5, TimeUnit.SECONDS).isSuccess());
             assertTrue(low.get(5, TimeUnit.SECONDS).isSuccess());
             assertEquals(List.of(202L, 201L), new java.util.ArrayList<>(h.engineArrivalOrder));
-            AutoTpmE2EHarness.await(() -> decodeEp.getInflightCount() == 0,
+            AutoTpmE2EHarness.await(() -> decodeEp.resourceSnapshot().reservedCount() == 0,
                     5_000, "both requests must release their Decode ownership");
         }
     }
@@ -134,13 +136,14 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a3_accepted_eviction_cancels_via_real_channel_victim_8429_in_order() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "50", 10_000.0, true)) {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxCollectionWaitMs(10_000);
+        decision.setMaxRequests(1);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 20, 1, 1, "50", 10_000.0, true, decision)) {
             // decode 驱逐入口由 reserved-evict 总开关把门（Phase 4 gate）
             h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
-            h.fixedWindowDecision().setMaxRequests(1);
             h.config.priorityOrdering().getPreemption().setTimeoutMs(3_000L);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
@@ -160,7 +163,7 @@ class PreemptionPhasesE2ETest {
                 assertFalse(low.isDone(), "victim frontend future must still await its ACK");
 
                 // Hold subsequent traffic in the queue after the victim is canonical.
-                h.fixedWindowDecision().setMaxRequests(100);
+                h.pauseDelivery();
 
                 // 高优提交放到后台线程：commit 会同步等待 cancel 释放确认
                 CompletableFuture<Response> high;
@@ -212,12 +215,13 @@ class PreemptionPhasesE2ETest {
                                 + victim.getErrorMessage());
 
                 // 顺序断言第 2 段：确认后高优才拿到容量（reserve 成功、进入队列待派发）
-                assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(302L),
+                assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 302L),
                         "incoming may take the freed capacity only after confirmed release");
-                assertFalse(decodeEp.resourceSnapshot().confirmed().stream()
+                assertFalse(decodeEp.resourceSnapshot().requests().values().stream()
+                .filter(request -> request.phase().isEngineConfirmed())
                         .anyMatch(task -> task.requestId() == 301L));
-                assertFalse(high.isDone(), "high request waits in the batcher (window held open)");
-                assertEquals(1, decodeEp.getInflightCount());
+                assertFalse(high.isDone(), "high request waits for dispatch capacity");
+                assertEquals(1, decodeEp.resourceSnapshot().reservedCount());
 
                 // Decode's duplicate terminal is stale after the authoritative
                 // Prefill priority terminal and must not reopen any ownership.
@@ -235,12 +239,13 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a3_cancel_timeout_fails_incoming_without_dispatch_and_without_leak() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 1, 1, "50", 10_000.0, true)) {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxCollectionWaitMs(10_000);
+        decision.setMaxRequests(1);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 30, 1, 1, "50", 10_000.0, true, decision)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED, VictimStage.DECODE_ENGINE_OWNED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
-            h.fixedWindowDecision().setMaxRequests(1);
             // 短等待窗口 + 不泵 → 引擎释放永远得不到确认 → 超时
             h.config.priorityOrdering().getPreemption().setTimeoutMs(100L);
 
@@ -257,7 +262,7 @@ class PreemptionPhasesE2ETest {
                 assertEquals(0, decodeEp.resourceSnapshot().acceptedCount());
                 assertEquals(1, decodeEp.resourceSnapshot().runningCount());
                 assertFalse(low.isDone(), "victim frontend future must still await its ACK");
-                h.fixedWindowDecision().setMaxRequests(100);
+                h.pauseDelivery();
 
                 CompletableFuture<Response> high = h.scheduler.submit(h.context(312, 70));
 
@@ -269,7 +274,7 @@ class PreemptionPhasesE2ETest {
                         highResp.getAdmissionRejectReason());
                 assertTrue(highResp.getErrorMessage().contains("cancel_terminal_unknown"),
                         "timeout must be explicit: " + highResp.getErrorMessage());
-                assertFalse(decodeEp.resourceSnapshot().reserved().containsKey(312L),
+                assertFalse(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 312L),
                         "incoming must NOT take capacity on cancel timeout");
 
                 // victim 保持 CANCEL_REQUESTED，等 WorkerStatus 迟到确认 → 8429 late confirm
@@ -282,10 +287,11 @@ class PreemptionPhasesE2ETest {
                 h.pumpDecodeOnce(0);
 
                 // 无泄漏：确认层清空、引擎无 running、调度器 inflight 只剩尚未派发的项
-                assertFalse(decodeEp.resourceSnapshot().confirmed().stream()
+                assertFalse(decodeEp.resourceSnapshot().requests().values().stream()
+                .filter(request -> request.phase().isEngineConfirmed())
                         .anyMatch(task -> task.requestId() == 311L));
                 assertEquals(0, decodeEngine.getRunningCount());
-                assertEquals(0, decodeEp.getInflightCount());
+                assertEquals(0, decodeEp.resourceSnapshot().reservedCount());
                 assertEquals(0L, decodeEp.routingView().inflightHardKv());
                 assertEquals(0, prefillEngine.getDownstreamOwnershipCount());
                 assertEquals(0, decodeEngine.getUpstreamOwnershipCount());
@@ -298,15 +304,16 @@ class PreemptionPhasesE2ETest {
     @Test
     @Timeout(30)
     void a5_equal_priority_never_preempts_queue_or_reserved_victims() throws Exception {
-        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 50, 1, 1, "50", 1.0, false)) {
+        var decision = new org.flexlb.config.DecisionPolicyConfig();
+        decision.setMaxCollectionWaitMs(10_000);
+        decision.setMaxRequests(100);
+        try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(BASE_PORT + 50, 1, 1, "50", 1.0, false, decision)) {
             h.allowPreemption(VictimStage.DECODE_RESERVED);
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxEngineRequests(1L);
-            h.fixedWindowDecision().setMaxCollectionWaitMs(10_000);
-            h.fixedWindowDecision().setMaxRequests(100);
 
             DecodeEndpoint decodeEp = h.decodeEndpoint(0);
-            // Isolate the request-slot contract with enough KV for the full
+            // Isolate the request-context contract with enough KV for the full
             // prompt plus output reservation.
             h.config.getRouter().getRoles().getDecode().getAvailability()
                     .setMaxKvUsagePercent(100);
@@ -314,11 +321,11 @@ class PreemptionPhasesE2ETest {
             // P50 占据 decode 唯一槽位
             CompletableFuture<Response> holder = h.scheduler.submit(h.context(501, 50));
             AutoTpmE2EHarness.await(
-                    () -> decodeEp.resourceSnapshot().reserved().containsKey(501L),
+                    () -> MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L),
                     5_000,
                     "equal-priority holder must publish its Decode reservation");
             assertFalse(holder.isDone());
-            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(501L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L));
 
             // 同优新请求不能抢占，也不能把瞬时容量不足变成终态 8403；
             // 它保持未绑定，等待精确 Decode 容量变化。
@@ -327,7 +334,7 @@ class PreemptionPhasesE2ETest {
 
             // victim 完全不受影响
             assertFalse(holder.isDone());
-            assertTrue(decodeEp.resourceSnapshot().reserved().containsKey(501L));
+            assertTrue(MockEngineTestSupport.isReserved(decodeEp.resourceSnapshot(), 501L));
             assertEquals(1, h.prefillEndpoint(0).queuedRequestCount());
             verify(h.requestReporter, never()).reportVictim(anyInt(), anyInt(),
                     anyString(), anyString());

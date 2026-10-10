@@ -1,8 +1,10 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.eviction.DecodeEndpointSnapshot;
+import org.flexlb.balance.endpoint.DecodeResources.CapacityRelease;
+
+import org.flexlb.config.FlexlbConfig;
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.decodeRequirements;
 import org.flexlb.balance.eviction.DecodeEvictionProposal;
-import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionPlanner;
 import org.flexlb.config.PreemptionConfig;
 import org.flexlb.config.VictimStage;
@@ -30,85 +32,84 @@ class DecodeCapacityPreemptionTest {
     @ValueSource(booleans = {false, true})
     void outputBudgetRejectionProducesAPlanAndCommitRechecksCurrentUsage(boolean usageChanged) {
         DecodeEndpoint endpoint = endpoint(400L);
-        DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
+        DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 250L;
-        DecodeEndpoint.ReservationHandle victim;
+        DecodeResources.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserveUnqueued(pin, 1L, 100L, 200L, 30);
-            var reservation = endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70);
+            victim = endpoint.tryReserveQueuedRequest(pin, 1L, 100L, 200L, 30, null);
+            assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                    endpoint.acquireDispatchPermit(victim, new DecodeResources.AdmissionCapacity(0, 100L)).permit().dispatch());
+            var reservation = endpoint.tryReserveQueuedRequest(pin, 9L, hardKvTokens, expectedKvTokens, 70, null);
             assertNotNull(reservation);
-            assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
+            assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
                     endpoint.acquireDispatchPermit(reservation, policy).status());
-            endpoint.release(reservation, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+            endpoint.release(reservation, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
         }
         var view = endpoint.routingView();
         assertTrue(view.realKvAvailable() >= hardKvTokens);
-        assertFalse(policy.evaluate(view.dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
+        assertFalse(policy.evaluate(view.dispatchUsage(), hardKvTokens, expectedKvTokens, CapacityRelease.NONE).fits());
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_ENGINE_OWNED);
         assertEquals(DecodeEvictionProposal.CASE_KV, proposal.evictionCase());
-        assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
+        assertEquals(List.of(1L), proposal.victims().stream().map(DecodeResources.DecodeRequestView::requestId).toList());
         if (usageChanged) { updateCapacity(endpoint, 250L); }
-        assertEquals(usageChanged ? DecodeEndpoint.PreemptionBeginResult.INFEASIBLE
-                        : DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+        assertEquals(usageChanged ? DecodeResources.PreemptionBeginResult.INFEASIBLE
+                        : DecodeResources.PreemptionBeginResult.SUCCESS,
                 endpoint.beginPreemption(1L, List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertNotNull(endpoint.reservationHandle(1L));
-        if (usageChanged) { assertNull(endpoint.reservationHandle(9L)); }
+        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
+        if (usageChanged) { assertNull(EndpointTestSupport.decodeReservation(endpoint, 9L)); }
     }
 
     @Test
     void queuedReservationReleasesThePlacementRequestCharge() {
         DecodeEndpoint endpoint = endpoint(1000L);
-        DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
+        DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(1L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 100L;
-        DecodeEndpoint.ReservationHandle victim;
+        DecodeResources.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, 1L, 100L, 200L, 30);
-            assertNull(endpoint.reserve(pin, 9L, hardKvTokens, expectedKvTokens, 70, policy));
+            victim = endpoint.tryReserveQueuedRequest(pin, 1L, 100L, 200L, 30, null);
+            assertNull(endpoint.tryReserveQueuedRequest(pin, 9L, hardKvTokens, expectedKvTokens, 70, policy));
         }
         // The same queued reservation remains soft for ordinary Engine dispatch.
-        assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens).fits());
+        assertTrue(policy.evaluate(endpoint.routingView().dispatchUsage(), hardKvTokens, expectedKvTokens, CapacityRelease.NONE).fits());
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
         assertEquals(DecodeEvictionProposal.CASE_SLOT, proposal.evictionCase());
-        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertNull(endpoint.reservationHandle(1L));
-        assertNotNull(endpoint.reservationHandle(9L));
+        assertNotNull(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+        assertNull(EndpointTestSupport.decodeReservation(endpoint, 1L));
+        assertNotNull(EndpointTestSupport.decodeReservation(endpoint, 9L));
     }
 
     @Test
     void zeroPromptVictimCanReleaseItsFullOutputReservation() {
         DecodeEndpoint endpoint = endpoint(1000L);
-        DecodeEndpoint.AdmissionCapacity policy = new DecodeEndpoint.AdmissionCapacity(0L, 90L);
+        DecodeResources.AdmissionCapacity policy = new DecodeResources.AdmissionCapacity(0L, 90L);
         long hardKvTokens = 100L;
         long expectedKvTokens = 200L;
-        DecodeEndpoint.ReservationHandle victim;
+        DecodeResources.ReservationHandle victim;
         try (var pin = endpoint.tryPinGeneration()) {
-            victim = endpoint.reserve(pin, 1L, 0L, 900L, 30);
+            victim = endpoint.tryReserveQueuedRequest(pin, 1L, 0L, 900L, 30, null);
         }
         DecodeEvictionProposal proposal = plan(endpoint, hardKvTokens, expectedKvTokens, policy, VictimStage.DECODE_RESERVED);
-        assertEquals(List.of(1L), proposal.victims().stream().map(DecodeEndpoint.DecodeRequestView::requestId).toList());
-        assertTrue(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
-        assertEquals(200L, endpoint.routingView().inflightExpectedKv());
+        assertEquals(List.of(1L), proposal.victims().stream().map(DecodeResources.DecodeRequestView::requestId).toList());
+        assertNotNull(endpoint.replaceQueuedRequests(List.of(victim), 9L, hardKvTokens, expectedKvTokens, 70, policy));
+        assertEquals(200L, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
     }
 
     private static DecodeEvictionProposal plan(DecodeEndpoint endpoint, long hardKvTokens, long expectedKvTokens,
-                                                DecodeEndpoint.AdmissionCapacity policy, VictimStage stage) {
+                                                DecodeResources.AdmissionCapacity policy, VictimStage stage) {
         PreemptionConfig preemption = new PreemptionConfig();
         preemption.setAllowedVictimStages(EnumSet.of(stage));
-        EngineCancelChannel channel = mock(EngineCancelChannel.class);
-        when(channel.isSupported(endpoint)).thenReturn(true);
         var failures = new HashMap<String, String>();
-        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(70, hardKvTokens, expectedKvTokens,
-                List.of(DecodeEndpointSnapshot.capture(endpoint, policy)), preemption, channel, failures);
+        var request = decodeRequirements(70, hardKvTokens, expectedKvTokens, policy);
+        var snapshot = endpoint.resourceSnapshot();
+        DecodeEvictionProposal proposal = EvictionPlanner.planDecode(request, snapshot, preemption, failures).proposal();
         assertNotNull(proposal, failures.toString());
         return proposal;
     }
 
     private static DecodeEndpoint endpoint(long availableKv) {
-        DecodeEndpoint endpoint = new DecodeEndpoint(
-                EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081),
-                EndpointTestSupport.noopEventSink());
+        DecodeEndpoint endpoint = EndpointTestSupport.decode(EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         updateCapacity(endpoint, availableKv);
         return endpoint;
     }

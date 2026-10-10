@@ -1,3 +1,6 @@
+import org.flexlb.balance.scheduler.RouteProjectionTestSupport;
+
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import com.sun.management.ThreadMXBean;
 import java.lang.management.ManagementFactory;
 import java.nio.file.*;
@@ -34,7 +37,7 @@ public class PlanningBench {
     static double select(List<GroupPlanner.Item> items, int size) {
         // INCREMENTAL_BEGIN
         var batch = model.newBatchPrediction();
-        var selected = GroupPlanner.selectWithPrediction(items, GroupPlanner.itemAccess(), constraints(size),
+        var selected = GroupPlanner.selectWithPrediction(items, constraints(size),
                 (added, prefix) -> batch.append(added.seqLen(), added.hitCache()));
         // INCREMENTAL_END
         return selected.items().size() + selected.selectedPredictionMs().orElse(0);
@@ -61,7 +64,7 @@ public class PlanningBench {
     public static void main(String[] args) throws Exception {
         model = new FormulaPredictor(Files.readString(Path.of(args[0])));
         policy = new BatchDeliveryStrategy(() -> CapacityBoundary.Attempt.rejected(CapacityBoundary.OWNERSHIP_LOST),
-                () -> 1L, mock(RequestRegistry.class), mock(DeliveryMetrics.class)).projectionPolicy();
+                () -> 1L, mock(DeliveryMetricsReporter.class)).projectionPolicy();
         for (int size : new int[]{1, 8, 32, 64}) {
             var inputs = new ArrayList<List<GroupPlanner.Item>>();
             for (int i = 0; i < 64; i++) inputs.add(items(size, i));
@@ -71,20 +74,20 @@ public class PlanningBench {
         for (int depth : new int[]{0, 32, 128, 512}) {
             var endpoints = new ArrayList<RouteProjection.Inputs>();
             for (int i = 0; i < 5; i++) {
-                endpoints.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true, ORDER,
+                endpoints.add(new RouteProjection.Inputs(new QueueSnapshot(1000, true, org.flexlb.balance.planner.GroupingPolicy.FIXED_WINDOW, ORDER,
                         constraints(64), items(depth, i), null),
-                        new WorkSnapshot(1000, List.of(), List.of(), 0)));
+                        new WorkSnapshot(1000, List.of(), List.of(), 0), 0L));
             }
-            var probes = new ArrayList<RouteProjection.Probe>();
-            for (int i = 0; i < 64; i++) probes.add(new RouteProjection.Probe(99999, 0, 1000, 61_000,
+            var probes = new ArrayList<RouteProjectionTestSupport.Probe>();
+            for (int i = 0; i < 64; i++) probes.add(new RouteProjectionTestSupport.Probe(99999, 0, 1000, 61_000,
                     1024 + i * 32, i * 8, i * 8));
             int[] index = {0};
             bench("fleet5_depth_" + depth, () -> {
                 var probe = probes.get(index[0]++ & 63);
                 double total = 0;
                 for (var endpoint : endpoints) {
-                    var candidate = RouteProjection.project(endpoint, probe, model, policy);
-                    total += candidate.requiredProjectedTtftMs();
+                    var candidate = RouteProjectionTestSupport.project(endpoint, probe, model, policy);
+                    total += candidate.projectedTtftMsValue();
                 }
                 return total;
             });

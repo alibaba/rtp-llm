@@ -1,27 +1,25 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
-import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
+import org.flexlb.balance.scheduler.DeliveryStrategy;
+import org.flexlb.balance.scheduler.DeliveryTransaction;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.balance.scheduler.ScheduledRequest;
+import org.flexlb.balance.scheduler.RequestRoute;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.mockito.Mockito;
-
 import java.util.List;
 import java.util.Map;
 
@@ -41,12 +39,7 @@ final class StrategyTestSupport {
     static EndpointRegistry endpointRegistry(ConfigService configService) {
         TestRequestRuntime runtime = new TestRequestRuntime();
         DeliveryStrategy delivery = parkedDelivery(runtime.requests());
-        return new EndpointRegistry(
-                configService,
-                runtime.events(),
-                Mockito.mock(BatchSchedulerReporter.class),
-                delivery,
-                new PlacementAvailability());
+        return new EndpointRegistry(configService, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(runtime.events()), Mockito.mock(DeliveryMetricsReporter.class), delivery, new PlacementAvailability());
     }
 
     static WorkerStatus workerStatus(
@@ -120,17 +113,18 @@ final class StrategyTestSupport {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(observation);
             return registry.publishPreparedEndpoint(
-                    address, status, prepared).endpoint();
+                    address, status, prepared);
         } finally {
             status.lock.unlock();
         }
     }
 
     static boolean offer(
-            PrefillEndpoint endpoint, ScheduledRequest exactItem) {
+            PrefillEndpoint endpoint, RequestRoute exactItem) {
+        org.flexlb.balance.scheduler.SchedulerTestSupport.bindEndpointOwner(endpoint, exactItem);
         try (WorkerEndpoint.GenerationPin pin =
                      endpoint.tryPinGeneration()) {
-            return pin != null && endpoint.offerPinned(pin, exactItem);
+            return pin != null && endpoint.offerPinned(pin, exactItem, org.flexlb.balance.scheduler.QueueExecutionSettings.capture(exactItem.ctx().getConfig()));
         }
     }
 
@@ -138,12 +132,12 @@ final class StrategyTestSupport {
             PrefillEndpoint endpoint,
             long batchId,
             long predictedMs,
-            List<? extends ScheduledRequest> exactItems) {
+            List<? extends RequestRoute> exactItems) {
         if (exactItems.isEmpty()) {
             throw new IllegalArgumentException(
                     "committed batch requires at least one item");
         }
-        List<ScheduledRequest> items = List.copyOf(exactItems);
+        List<RequestRoute> items = List.copyOf(exactItems);
         PrefillState.ReservationResult<PrefillState.BatchReservation> result =
                 endpoint.reserveBatch(
                         items.getFirst(), batchId, Integer.MAX_VALUE);
@@ -151,9 +145,18 @@ final class StrategyTestSupport {
             throw new IllegalStateException(
                     "batch reservation rejected: " + result.status());
         }
-        try (PrefillState.BatchReservation reservation =
-                     result.reservation()) {
-            return reservation.commit(items, predictedMs);
+        {
+            PrefillState.BatchReservation reservation =
+                     result.reservation();
+            try (var preparationReservation = org.flexlb.balance.endpoint.EndpointTestSupport.preparation(reservation)) {
+                PrefillState state = (PrefillState) org.springframework.test.util.ReflectionTestUtils.getField(endpoint, "prefillState");
+                state.ownershipLock().lock();
+                try {
+                    return reservation.commitLocked(items, predictedMs, null, System.currentTimeMillis());
+                } finally {
+                    state.ownershipLock().unlock();
+                }
+            }
         }
     }
 
@@ -174,37 +177,34 @@ final class StrategyTestSupport {
     }
 
     private static final class TestRequestRuntime {
-        private final RequestRegistry requests =
-                Mockito.mock(RequestRegistry.class);
-        private final EndpointEventProjector events =
-                Mockito.mock(EndpointEventProjector.class);
+        private final AbstractRequestScheduler requests =
+                Mockito.mock(AbstractRequestScheduler.class);
+        private final AbstractRequestScheduler events =
+                Mockito.mock(AbstractRequestScheduler.class);
 
-        RequestRegistry requests() {
+        AbstractRequestScheduler requests() {
             return requests;
         }
 
-        EndpointEventProjector events() {
+        AbstractRequestScheduler events() {
             return events;
         }
     }
 
     /** Keep selection-owned queues parked without replacing admission internals. */
-    private static DeliveryStrategy parkedDelivery(RequestRegistry requests) {
-        RouteDeliveryStrategy route = new RouteDeliveryStrategy(
-                requests, NOOP_METRICS);
+    private static DeliveryStrategy parkedDelivery(AbstractRequestScheduler requests) {
+        RouteDeliveryStrategy route = new RouteDeliveryStrategy(NOOP_METRICS);
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
         Mockito.when(delivery.projectionPolicy())
                 .thenReturn(route.projectionPolicy());
-        Mockito.when(delivery.projectGroupDurationMs(
-                        Mockito.anyList(), Mockito.any()))
-                .thenAnswer(invocation -> route.projectGroupDurationMs(
-                        invocation.getArgument(0), invocation.getArgument(1)));
+        Mockito.when(delivery.newGroupPredictor(Mockito.any()))
+                .thenAnswer(invocation -> route.newGroupPredictor(invocation.getArgument(0)));
         Mockito.when(delivery.prepare(
                         Mockito.anyList(), Mockito.any(), Mockito.any()))
                 .thenAnswer(invocation -> {
-                    List<ScheduledRequest> candidates = invocation.getArgument(0);
-                    DeliveryStrategy.Transaction transaction =
-                            Mockito.mock(DeliveryStrategy.Transaction.class);
+                    List<RequestRoute> candidates = invocation.getArgument(0);
+                    DeliveryTransaction transaction =
+                            Mockito.mock(DeliveryTransaction.class);
                     Mockito.when(transaction.items()).thenReturn(List.of());
                     Mockito.when(transaction.blockedItem())
                             .thenReturn(candidates.getFirst());
@@ -237,6 +237,6 @@ final class StrategyTestSupport {
                             "test delivery parked",
                             RoleType.PREFILL));
 
-    private static final DeliveryMetrics NOOP_METRICS =
-            Mockito.mock(DeliveryMetrics.class);
+    private static final DeliveryMetricsReporter NOOP_METRICS =
+            Mockito.mock(DeliveryMetricsReporter.class);
 }

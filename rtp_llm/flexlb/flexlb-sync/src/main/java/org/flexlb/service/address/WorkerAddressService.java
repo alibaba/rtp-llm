@@ -55,7 +55,7 @@ public class WorkerAddressService {
                 60L,
                 TimeUnit.SECONDS, new LinkedBlockingQueue<>(1000),
                 new NamedThreadFactory("service-discovery-executor"),
-                new ThreadPoolExecutor.CallerRunsPolicy()
+                new ThreadPoolExecutor.AbortPolicy()
         );
     }
 
@@ -99,23 +99,20 @@ public class WorkerAddressService {
     }
 
     private List<WorkerHost> getServiceHosts(String modelName, String address) {
-        Future<List<WorkerHost>> future = serviceDiscoveryExecutor.submit(
-                () -> queryServiceHosts(modelName, address));
+        Future<List<WorkerHost>> future = null;
         try {
-            // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
+            future = serviceDiscoveryExecutor.submit(() -> queryServiceHosts(modelName, address));
             return future.get(500, TimeUnit.MILLISECONDS);
-        } catch (Exception e) {
-            if (e instanceof TimeoutException) {
-                logger.error("query service discovery timeout, model={}, address={}, msg:{}", modelName, address, "timeout");
-                engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
-            } else {
-                logger.error("query service discovery error, model={}, address={}, msg:{}", modelName, address, e.getMessage());
-                engineHealthReporter.reportStatusCheckerFail(
-                        modelName, BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
-            }
-            future.cancel(true);
-            return new ArrayList<>();
+        } catch (Exception failure) {
+            if (failure instanceof InterruptedException) { Thread.currentThread().interrupt(); }
+            boolean timeout = failure instanceof TimeoutException;
+            logger.error("query service discovery {}, model={}, address={}, msg:{}",
+                    timeout ? "timeout" : "error", modelName, address, failure.getMessage());
+            engineHealthReporter.reportStatusCheckerFail(modelName,
+                    timeout ? BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT : BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
+            return List.of();
+        } finally {
+            if (future != null && !future.isDone()) { future.cancel(true); }
         }
     }
 

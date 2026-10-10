@@ -7,7 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Contracts of the immutable request view exposed by RequestRegistry. */
+/** Contracts of the immutable request view exposed by RequestRepository. */
 class RequestStateTest {
 
     @Test

@@ -1,14 +1,15 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryMetrics;
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointTestSupport;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.scheduler.RequestContext.DeliveryClaim;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.loadbalance.Response;
@@ -16,7 +17,8 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -26,6 +28,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.flexlb.balance.scheduler.SchedulingTestConfig.freezeInputs;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -50,13 +53,13 @@ class RequestConfirmationTimeoutTest {
                 waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
-        var reporter = mock(BatchSchedulerReporter.class);
+        var reporter = mock(DeliveryMetricsReporter.class);
         var requestReporter = mock(RequestSchedulerReporter.class);
-        var requests = new RequestRegistry(service, reporter, requestReporter);
-        var projector = new EndpointEventProjector(requests);
-        var endpoints = new EndpointRegistry(service, projector, reporter,
-                new RouteDeliveryStrategy(requests, new DeliveryMetrics(reporter)), new PlacementAvailability());
-        var runtime = new SchedulerRuntime(requests, endpoints, reporter, requestReporter);
+        var requests = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, reporter, requestReporter,
+                mock(RecentCacheKeyTraceReporter.class));
+        var projector = requests;
+        var endpoints = new EndpointRegistry(service, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector), reporter, new RouteDeliveryStrategy(reporter), new PlacementAvailability());
+        var runtime = new SchedulerRuntime(org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests), endpoints, reporter, requestReporter, org.mockito.Mockito.mock(DefaultBatchDispatcher.class), service, org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class), org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class));
         DecodeEndpoint decode = null;
         try {
             WorkerStatus prefillWorker = worker(RoleType.PREFILL, "127.0.0.1");
@@ -65,42 +68,43 @@ class RequestConfirmationTimeoutTest {
             try {
                 prefill = (PrefillEndpoint) endpoints.publishPreparedEndpoint(prefillWorker.getIpPort(),
                         prefillWorker, prefillWorker.prepareNewStatus(
-                                prefillWorker.freezeStatusResponse(status(RoleType.PREFILL)))).endpoint();
+                                prefillWorker.freezeStatusResponse(status(RoleType.PREFILL))));
             } finally {
                 prefillWorker.lock.unlock();
             }
-            decode = new DecodeEndpoint(worker(RoleType.DECODE, "127.0.0.2"), projector);
+            decode = EndpointTestSupport.decode(worker(RoleType.DECODE, "127.0.0.2"), org.flexlb.balance.scheduler.SchedulerTestSupport.repository(projector));
             applyStatus(decode, status(RoleType.DECODE));
-            var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
-            DecodeEndpoint.ReservationHandle reservation;
+            var capacity = new DecodeResources.AdmissionCapacity(1L, 90L);
+            DecodeResources.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, REQUEST_ID, 16L, 32L, 50, capacity);
+                reservation = decode.tryReserveQueuedRequest(pin, REQUEST_ID, 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
-                assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                         acquired.permit().dispatch());
             }
-            var context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
-            var future = requests.register(context);
-            RequestSlot slot = requests.requestSlot(REQUEST_ID);
+            var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
+            var future = RequestProtocolTestSupport.register(requests, context);
+            RequestContext requestContext = requests.findRequestContext(REQUEST_ID);
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
             prefillMetadata.setGrpcPort(8081);
-            ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
-                    null, prefill, decode, reservation, slot.createdAtMs());
+            context.setFuture(future);
+            RequestRoute item = org.flexlb.balance.scheduler.SchedulingTestConfig.createRoute(freezeInputs(context), new Response(), prefillMetadata,
+                    null, prefill, decode, reservation, requestContext.createdAtMs());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future);
+            try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future); var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(mutation);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
-                assertTrue(requests.commitItemForPublication(item, () -> {
+                assertTrue((requests.commitRoute(item, RequestProtocolTestSupport.publication(() -> {
                     var reserved = prefill.reserveUnqueuedRoute(pin, item, 30_000L);
                     assertEquals(PrefillState.CapacityStatus.ACQUIRED, reserved.status());
                     routeReservation.set(reserved.reservation());
                     return true;
-                }));
+                })) == org.flexlb.balance.PlacementResult.Status.SUCCESS));
             }
             DeliveryClaim claim;
             try (var routeCommit = prefill.tryBeginRouteCommitAdmission()) {
@@ -111,50 +115,57 @@ class RequestConfirmationTimeoutTest {
                     }
                 };
                 claim = waiting == ConfirmationWait.UNCERTAIN_REPLY
-                        ? RequestLifecycleTestSupport.claimBatchWithoutPrediction(requests, item, 1L, commitPrefill)
-                        : RequestLifecycleTestSupport.claimRouteWithoutPrediction(requests, item, commitPrefill);
+                        ? RequestProtocolTestSupport.claimBatchWithoutPrediction(requests, item, 1L, commitPrefill)
+                        : RequestProtocolTestSupport.claimRouteWithoutPrediction(requests, item, commitPrefill);
                 assertNotNull(claim);
                 requests.setDeliveryPrediction(claim, new WorkSnapshot(System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L);
             }
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
-                claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
+                org.mockito.Mockito.when(SchedulerTestSupport.cancelChannel(requests).cancel(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong(),
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyLong()))
+                        .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(org.flexlb.balance.eviction.EngineCancelChannel.CancelAck.REQUEST_CLEANED));
+                assertTrue(claim.item.ctx().scheduler().tryStartSend(claim));
+                claim.item.ctx().scheduler().completeDelivery(claim, DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
             }
-            assertEquals(1, requests.liveRequestCount());
+            assertEquals(1, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
             assertFalse(future.isDone());
-            assertEquals(1L, prefill.observedRequestCount());
+            assertEquals(1L, prefill.admissionSummary(0).occupiedRequests());
             assertEquals(16L, decode.routingView().inflightHardKv());
-            assertEquals(32L, decode.routingView().inflightExpectedKv());
+            assertEquals(32L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
             if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
-                requests.expireInactiveRequest(slot,
-                        RequestLifecycleTestSupport.<Long>inspect(slot, "inactivityExpiresAtMsLocked"));
+                RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext,
+                        RequestProtocolTestSupport.<Long>inspect(requests, requestContext, "inactivityExpiresAtMsLocked"));
             }
 
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
-            assertEquals(0L, prefill.observedRequestCount());
-            assertEquals(0, prefill.getLocallyOwnedRequestCount());
+            assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(REQUEST_ID, 0L).state());
+            SchedulerTestSupport.runtime(requests).continuations().awaitIdle();
+            assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
+            assertEquals(0L, prefill.admissionSummary(0).occupiedRequests());
+            assertEquals(0, prefill.ownershipStats().locallyOwnedRequests());
             assertEquals(0L, decode.routingView().inflightHardKv());
-            assertEquals(0L, decode.routingView().inflightExpectedKv());
+            assertEquals(0L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(0, decode.routingView().engineCapacityUsed());
 
-            // Local expiration restores admission capacity without an Engine Cancel channel.
+            // Admission resumes only after delivery settlement and exact local cleanup.
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
+                var next = decode.tryReserveQueuedRequest(pin, 102L, 16L, 32L, 50, capacity);
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
-                assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
                 assertTrue(acquired.permit().release());
-                decode.release(next, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
+                decode.release(next, DecodeResources.ReleaseReason.LOCAL_ROLLBACK);
             }
-            requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
-            requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
-            assertEquals(0L, prefill.observedRequestCount());
+            RequestProtocolTestSupport.applyPrefillStatus(requests, prefill, RoleType.PREFILL, PrefillState.PrefillRequestStatus.active(item));
+            RequestProtocolTestSupport.applyDecodeStatus(requests, decode, DecodeResources.DecodeRequestStatus.active(reservation));
+            assertEquals(RequestState.Phase.TIMED_OUT, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).getRequestState(REQUEST_ID, 0L).state());
+            SchedulerTestSupport.runtime(requests).continuations().awaitIdle();
+            assertEquals(0, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(requests).liveRequestCount());
+            assertEquals(0L, prefill.admissionSummary(0).occupiedRequests());
             assertEquals(0, decode.routingView().engineCapacityUsed());
         } finally {
             try {

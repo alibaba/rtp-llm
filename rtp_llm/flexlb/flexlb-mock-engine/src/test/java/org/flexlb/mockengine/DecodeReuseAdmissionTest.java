@@ -97,7 +97,7 @@ class DecodeReuseAdmissionTest {
         // net-new 2: hits are REFERENCED in the LRU layer, net-new goes to
         // the RUNNING layer.
         MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
+                cache.acquireWithReuseDetailed(5, List.of(1L, 2L, 3L, 4L, 5L)).lease();
         assertNotNull(lease, "5-block demand against a 10-block pool must admit");
         assertEquals(3, lease.hitKeys.size(), "3 LRU hits are referenced, not re-allocated");
         assertEquals(2, lease.nakedBlocks, "net new allocation = total − hit_blocks");
@@ -113,12 +113,12 @@ class DecodeReuseAdmissionTest {
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
         assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
         MockLruBlockCache.BlockLease owner =
-                cache.acquireWithReuse(5, List.of(1L, 2L, 3L, 4L, 5L));
+                cache.acquireWithReuseDetailed(5, List.of(1L, 2L, 3L, 4L, 5L)).lease();
         assertNotNull(owner);
         assertEquals(5, cache.availableBlocks());
 
         MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(6, List.of(1L, 2L, 3L, 4L, 5L, 6L));
+                cache.acquireWithReuseDetailed(6, List.of(1L, 2L, 3L, 4L, 5L, 6L)).lease();
         assertNotNull(lease,
                 "already-referenced hits consume no additional availability");
         assertEquals(5, lease.hitKeys.size());
@@ -138,7 +138,7 @@ class DecodeReuseAdmissionTest {
         assertEquals(5, cache.availableBlocks());
 
         MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(6, List.of(1L, 2L, 3L, 4L, 5L, 6L));
+                cache.acquireWithReuseDetailed(6, List.of(1L, 2L, 3L, 4L, 5L, 6L)).lease();
 
         assertNull(lease, "pinning five pure-LRU hits leaves no room for the net-new block");
         assertEquals(5, cache.heldBlocks());
@@ -154,7 +154,7 @@ class DecodeReuseAdmissionTest {
         assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L)));
 
         MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(9, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L));
+                cache.acquireWithReuseDetailed(9, List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L)).lease();
 
         assertNotNull(lease, "zero net-new blocks must not be rejected by the reserve gate");
         assertEquals(9, lease.hitKeys.size());
@@ -169,7 +169,7 @@ class DecodeReuseAdmissionTest {
         // Demand 3 fully covered by a longer parked prefix: reuse is clamped
         // to the demand, net allocation floors at 0.
         MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(3, List.of(1L, 2L, 3L, 4L, 5L));
+                cache.acquireWithReuseDetailed(3, List.of(1L, 2L, 3L, 4L, 5L)).lease();
         assertNotNull(lease);
         assertEquals(3, lease.hitKeys.size(), "reuse is clamped to the demand");
         assertEquals(0, lease.nakedBlocks, "net allocation floors at zero");
@@ -178,7 +178,7 @@ class DecodeReuseAdmissionTest {
 
         // Empty keys (empty-bh traffic): no reuse possible, full net demand.
         MockLruBlockCache.BlockLease keyless =
-                cache.acquireWithReuse(4, List.of());
+                cache.acquireWithReuseDetailed(4, List.of()).lease();
         assertNotNull(keyless);
         assertEquals(0, keyless.hitKeys.size());
         assertEquals(4, keyless.nakedBlocks);
@@ -219,7 +219,7 @@ class DecodeReuseAdmissionTest {
         // nets 1 block, but completion must park BOTH keys — the pool has room.
         MockLruBlockCache cache = new MockLruBlockCache(10, 0.0);
         MockLruBlockCache.BlockLease lease =
-                cache.acquireWithReuse(1, List.of(401L, 402L));
+                cache.acquireWithReuseDetailed(1, List.of(401L, 402L)).lease();
         assertNotNull(lease);
         assertEquals(1, lease.nakedBlocks);
         assertEquals(0, lease.hitKeys.size());
@@ -233,7 +233,7 @@ class DecodeReuseAdmissionTest {
         // the pool at capacity, never above.
         MockLruBlockCache tiny = new MockLruBlockCache(3, 0.0);
         assertTrue(tiny.admit(List.of(1L, 2L)));
-        MockLruBlockCache.BlockLease over = tiny.acquireWithReuse(1, List.of(7L));
+        MockLruBlockCache.BlockLease over = tiny.acquireWithReuseDetailed(1, List.of(7L)).lease();
         assertNotNull(over);
         assertEquals(1, tiny.heldBlocks());
         assertTrue(tiny.admit(over, List.of(7L, 8L, 9L, 10L)));

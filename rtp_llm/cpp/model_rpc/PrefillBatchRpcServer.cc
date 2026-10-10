@@ -25,13 +25,13 @@
 using namespace std;
 namespace rtp_llm {
 
-// Dedicated managed executor for idle priority-cancel cleanup. Tasks submitted
+// Dedicated managed executor for idle request-cancel cleanup. Tasks submitted
 // here never wait for a prepare/Fetch operation to exit; operation owners only
 // submit after they have exited. This prevents Cancel storms from consuming
 // the finite prepare pool with waiters.
-class PriorityCancelExecutor {
+class RequestCancelExecutor {
 public:
-    explicit PriorityCancelExecutor(size_t worker_count) {
+    explicit RequestCancelExecutor(size_t worker_count) {
         worker_count = std::max<size_t>(worker_count, 1);
         workers_.reserve(worker_count);
         for (size_t i = 0; i < worker_count; ++i) {
@@ -39,7 +39,7 @@ public:
         }
     }
 
-    ~PriorityCancelExecutor() {
+    ~RequestCancelExecutor() {
         stop();
     }
 
@@ -88,9 +88,9 @@ private:
             try {
                 task();
             } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("priority-cancel finalizer failed: %s", e.what());
+                RTP_LLM_LOG_ERROR("request-cancel finalizer failed: %s", e.what());
             } catch (...) {
-                RTP_LLM_LOG_ERROR("priority-cancel finalizer failed with unknown exception");
+                RTP_LLM_LOG_ERROR("request-cancel finalizer failed with unknown exception");
             }
         }
     }
@@ -149,7 +149,7 @@ int64_t batchErrorCode(const grpc::Status& status) {
 // Both cancel-before-register fences and recently completed request ids only
 // need to cover the rolling dispatch/reconciliation window. Keeping the two
 // registries on the same bounded lifetime also prevents unbounded id history.
-constexpr int64_t kPriorityCancelRegistryTtlMs = 10 * 60 * 1000;
+constexpr int64_t kCancelRegistryTtlMs = 10 * 60 * 1000;
 
 constexpr size_t kMaxTraceparentLength = 512;
 constexpr size_t kMaxTracestateLength  = 512;
@@ -267,19 +267,20 @@ void DeferredPrefillContext::commitTerminalStatus(const grpc::Status& status) {
     if (trace_finished_) {
         return;
     }
-    const bool priority_status = batchErrorCode(status) == static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED);
-    if (logical_status.ok() || priority_status) {
+    const bool cancellation_status = context && context->isCancellationRequested()
+        && batchErrorCode(status) == static_cast<int64_t>(context->cancellationError().code());
+    if (logical_status.ok() || cancellation_status) {
         logical_status = status;
     }
 }
 
 bool DeferredPrefillContext::requestLogicalFinalization() {
     std::lock_guard<std::mutex> lock(operation_mu_);
-    // A priority terminal cause has a distinct finalizer which must own stream
+    // A cancellation terminal cause has a distinct finalizer which must own stream
     // teardown and the final timing snapshot. Only ordinary terminal work may
     // claim the logical finalizer here.
     if (!context || context->terminalCause() != PrefillTerminalCause::OTHER || operation_active_
-        || priority_finalize_requested_ || priority_finalize_claimed_ || logical_finalize_claimed_) {
+        || cancel_finalize_requested_ || cancel_finalize_claimed_ || logical_finalize_claimed_) {
         return false;
     }
     logical_finalize_claimed_ = true;
@@ -303,9 +304,9 @@ void DeferredPrefillContext::finishLogicalTrace(const GenerateStream::TimeInfo* 
             if (!context || !context->trace_span_guard || !context->trace_span_guard->valid()) {
                 return;
             }
-            if (context->isPriorityPreempted() && logical_status.ok()) {
+            if (context->isCancellationRequested() && logical_status.ok()) {
                 logical_status = statusFromErrorInfo(
-                    ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+                    context->cancellationError());
             }
             request_ok = logical_status.ok();
             const bool priority_preempted =
@@ -377,9 +378,9 @@ void DeferredPrefillContext::cancel(const grpc::Status& status) {
     // succeeding on other threads (finishSlotOperation, cancelAll) and one of
     // them can close the logical span while logical_status is still OK, which
     // reports a failed request as a success and drops this status at the
-    // trace_finished_ check. A priority terminal still wins after this point:
+    // trace_finished_ check. A cancellation terminal still wins after this point:
     // commitTerminalStatus() always lets a PRIORITY_PREEMPTED status overwrite,
-    // and finalizePriorityPreemption() commits one explicitly.
+    // and finalizeCancellation() commits one explicitly.
     commitTerminalStatus(status);
     if (!context->tryMarkOtherTerminal()) {
         return;
@@ -404,8 +405,8 @@ bool DeferredPrefillContext::finishOperation() {
         return false;
     }
     operation_active_ = false;
-    if (priority_finalize_requested_ && !priority_finalize_claimed_) {
-        priority_finalize_claimed_ = true;
+    if (cancel_finalize_requested_ && !cancel_finalize_claimed_) {
+        cancel_finalize_claimed_ = true;
         return true;
     }
     return false;
@@ -416,25 +417,25 @@ DeferredPrefillContext::StartOperationResult DeferredPrefillContext::tryStartOpe
     if (operation_active_) {
         return {};
     }
-    if (priority_finalize_requested_) {
-        if (!priority_finalize_claimed_) {
-            priority_finalize_claimed_ = true;
-            return {/*started=*/false, /*priority_finalizer_claimed=*/true};
+    if (cancel_finalize_requested_) {
+        if (!cancel_finalize_claimed_) {
+            cancel_finalize_claimed_ = true;
+            return {/*started=*/false, /*cancel_finalizer_claimed=*/true};
         }
         return {};
     }
-    if (!context || context->terminalCause() != PrefillTerminalCause::ACTIVE || priority_finalize_claimed_) {
+    if (!context || context->terminalCause() != PrefillTerminalCause::ACTIVE || cancel_finalize_claimed_) {
         return {};
     }
     operation_active_ = true;
-    return {/*started=*/true, /*priority_finalizer_claimed=*/false};
+    return {/*started=*/true, /*cancel_finalizer_claimed=*/false};
 }
 
-bool DeferredPrefillContext::requestPriorityFinalization() {
+bool DeferredPrefillContext::requestCancellationFinalization() {
     std::lock_guard<std::mutex> lock(operation_mu_);
-    priority_finalize_requested_ = true;
-    if (!operation_active_ && !priority_finalize_claimed_) {
-        priority_finalize_claimed_ = true;
+    cancel_finalize_requested_ = true;
+    if (!operation_active_ && !cancel_finalize_claimed_) {
+        cancel_finalize_claimed_ = true;
         return true;
     }
     return false;
@@ -450,10 +451,11 @@ grpc::Status DeferredPrefillContextMap::registerActive(int64_t                  
         return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill batch server is shutting down");
     }
     const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-    sweepPriorityPreemptionTombstones(now_ms);
+    sweepCancellationTombstones(now_ms);
     sweepRecentlySeenRequests(now_ms);
-    if (priority_preemption_tombstones_.find(request_id) != priority_preemption_tombstones_.end()) {
-        return statusFromErrorInfo(ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+    if (cancellation_tombstones_.find(request_id) != cancellation_tombstones_.end()) {
+        return statusFromErrorInfo(
+            cancellation_tombstones_.at(request_id).error);
     }
     auto active = active_contexts_.find(request_id);
     if (active != active_contexts_.end()) {
@@ -515,10 +517,10 @@ grpc::Status DeferredPrefillContextMap::take(int64_t request_id, std::shared_ptr
     deferred.reset();
     {
         std::lock_guard<std::mutex> lock(mu_);
-        sweepPriorityPreemptionTombstones(autil::TimeUtility::currentTimeInMilliSeconds());
-        if (priority_preemption_tombstones_.find(request_id) != priority_preemption_tombstones_.end()) {
+        sweepCancellationTombstones(autil::TimeUtility::currentTimeInMilliSeconds());
+        if (cancellation_tombstones_.find(request_id) != cancellation_tombstones_.end()) {
             return statusFromErrorInfo(
-                ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request"));
+                cancellation_tombstones_.at(request_id).error);
         }
         auto it = contexts_.find(request_id);
         if (it == contexts_.end()) {
@@ -527,9 +529,9 @@ grpc::Status DeferredPrefillContextMap::take(int64_t request_id, std::shared_ptr
         }
         auto start_result = it->second->tryStartOperation();
         if (!start_result.started) {
-            return it->second->context && it->second->context->isPriorityPreempted() ?
+            return it->second->context && it->second->context->isCancellationRequested() ?
                        statusFromErrorInfo(
-                           ErrorInfo(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request")) :
+                           it->second->context->cancellationError()) :
                        grpc::Status(grpc::StatusCode::FAILED_PRECONDITION, "request context is already terminal");
         }
         deferred = std::move(it->second);
@@ -570,8 +572,8 @@ std::shared_ptr<DeferredPrefillContext> DeferredPrefillContextMap::remove(int64_
     return deferred;
 }
 
-PriorityCancelResult DeferredPrefillContextMap::cancelByPriorityPreemption(
-    int64_t request_id, std::shared_ptr<DeferredPrefillContext>& deferred, bool* newly_installed) {
+RequestCancelResult DeferredPrefillContextMap::cancelRequest(
+    int64_t request_id, std::shared_ptr<DeferredPrefillContext>& deferred, bool* newly_installed, RequestCancelReasonPB reason) {
     if (newly_installed) {
         *newly_installed = false;
     }
@@ -579,27 +581,42 @@ PriorityCancelResult DeferredPrefillContextMap::cancelByPriorityPreemption(
     {
         std::lock_guard<std::mutex> lock(mu_);
         if (stopping_) {
-            return PriorityCancelResult::NOT_FOUND;
+            return RequestCancelResult::NOT_FOUND;
         }
-        const int64_t now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
-        sweepPriorityPreemptionTombstones(now_ms);
+        const int64_t               now_ms = autil::TimeUtility::currentTimeInMilliSeconds();
+        sweepCancellationTombstones(now_ms);
         sweepRecentlySeenRequests(now_ms);
-        auto tombstone = priority_preemption_tombstones_.find(request_id);
-        if (tombstone != priority_preemption_tombstones_.end()) {
+        auto tombstone = cancellation_tombstones_.find(request_id);
+        if (tombstone != cancellation_tombstones_.end()) {
             deferred.reset();
-            return tombstone->second.kind == PriorityPreemptionTombstoneKind::ACTIVE_CANCEL ?
-                       PriorityCancelResult::ACCEPTED :
-                       PriorityCancelResult::TOMBSTONED;
+            return tombstone->second.kind == CancellationTombstoneKind::ACTIVE_CANCEL ?
+                       RequestCancelResult::ACCEPTED :
+                       RequestCancelResult::TOMBSTONED;
         }
         auto it = active_contexts_.find(request_id);
         if (it == active_contexts_.end()) {
             if (recently_seen_requests_.find(request_id) != recently_seen_requests_.end()) {
                 deferred.reset();
-                return PriorityCancelResult::NOT_FOUND;
+                return RequestCancelResult::NOT_FOUND;
             }
-            installPriorityPreemptionTombstone(request_id, now_ms, PriorityPreemptionTombstoneKind::ABSENT_FENCE);
+            ErrorInfo error(ErrorCode::PRIORITY_PREEMPTED, "preempted before enqueue");
+            switch (reason) {
+                case REQUEST_CANCEL_REASON_CLIENT_CANCELLED:
+                    error = ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client before enqueue");
+                    break;
+                case REQUEST_CANCEL_REASON_DEADLINE_EXCEEDED:
+                    error = ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "request deadline exceeded before enqueue");
+                    break;
+                case REQUEST_CANCEL_REASON_SHUTDOWN:
+                    error = ErrorInfo(ErrorCode::CANCELLED, "request cancelled during shutdown before enqueue");
+                    break;
+                default:
+                    break;  // Unspecified retains the original priority-preemption behavior.
+            }
+            installCancellationTombstone(request_id, now_ms, CancellationTombstoneKind::ABSENT_FENCE,
+                                         std::move(error));
             deferred.reset();
-            return PriorityCancelResult::TOMBSTONED;
+            return RequestCancelResult::TOMBSTONED;
         }
         deferred = it->second.lock();
         if (!deferred) {
@@ -609,21 +626,22 @@ PriorityCancelResult DeferredPrefillContextMap::cancelByPriorityPreemption(
             // Refresh that evidence instead of misclassifying it as an
             // enqueue that never reached this Engine.
             rememberRecentlySeenRequest(request_id, now_ms);
-            return PriorityCancelResult::NOT_FOUND;
+            return RequestCancelResult::NOT_FOUND;
         }
 
         // The terminal-cause CAS below is the first-cause linearization point.
         // Holding the registry lock also prevents Fetch/finish from moving the
-        // context while the priority latch and tombstone are installed.
-        const auto preempt_result = deferred->context->requestPriorityPreempt();
-        if (preempt_result == PriorityPreemptionRequestResult::REJECTED) {
+        // context while the cancellation latch and tombstone are installed.
+        const auto cancel_result = deferred->context->requestCancellation(reason);
+        if (cancel_result == CancellationRequestResult::REJECTED) {
             deferred.reset();
-            return PriorityCancelResult::NOT_FOUND;
+            return RequestCancelResult::NOT_FOUND;
         }
         if (newly_installed) {
-            *newly_installed = preempt_result == PriorityPreemptionRequestResult::INSTALLED;
+            *newly_installed = cancel_result == CancellationRequestResult::INSTALLED;
         }
-        installPriorityPreemptionTombstone(request_id, now_ms, PriorityPreemptionTombstoneKind::ACTIVE_CANCEL);
+        installCancellationTombstone(
+            request_id, now_ms, CancellationTombstoneKind::ACTIVE_CANCEL, deferred->context->cancellationError());
         auto fetchable = contexts_.find(request_id);
         if (fetchable != contexts_.end() && fetchable->second.get() == deferred.get()) {
             contexts_.erase(fetchable);
@@ -633,31 +651,32 @@ PriorityCancelResult DeferredPrefillContextMap::cancelByPriorityPreemption(
     if (alarm) {
         alarm->Cancel();
     }
-    return PriorityCancelResult::ACCEPTED;
+    return RequestCancelResult::ACCEPTED;
 }
 
-void DeferredPrefillContextMap::installPriorityPreemptionTombstone(int64_t                         request_id,
-                                                                   int64_t                         now_ms,
-                                                                   PriorityPreemptionTombstoneKind kind) {
-    const int64_t expires_at_ms                 = now_ms + kPriorityCancelRegistryTtlMs;
-    priority_preemption_tombstones_[request_id] = PriorityPreemptionTombstone{expires_at_ms, kind};
-    priority_preemption_tombstone_expiries_.emplace_back(expires_at_ms, request_id);
+void DeferredPrefillContextMap::installCancellationTombstone(
+    int64_t request_id, int64_t now_ms, CancellationTombstoneKind kind, ErrorInfo error) {
+    const int64_t expires_at_ms = now_ms + kCancelRegistryTtlMs;
+    cancellation_tombstones_[request_id] = CancellationTombstone{expires_at_ms, kind, std::move(error),
+                                                                               kind == CancellationTombstoneKind::ABSENT_FENCE};
+    cancellation_tombstone_expiries_.emplace_back(expires_at_ms, request_id);
 }
 
-void DeferredPrefillContextMap::sweepPriorityPreemptionTombstones(int64_t now_ms) {
-    while (!priority_preemption_tombstone_expiries_.empty()
-           && priority_preemption_tombstone_expiries_.front().first <= now_ms) {
-        const auto [expires_at_ms, request_id] = priority_preemption_tombstone_expiries_.front();
-        priority_preemption_tombstone_expiries_.pop_front();
-        auto tombstone = priority_preemption_tombstones_.find(request_id);
-        if (tombstone != priority_preemption_tombstones_.end() && tombstone->second.expires_at_ms == expires_at_ms) {
-            priority_preemption_tombstones_.erase(tombstone);
+void DeferredPrefillContextMap::sweepCancellationTombstones(int64_t now_ms) {
+    while (!cancellation_tombstone_expiries_.empty()
+           && cancellation_tombstone_expiries_.front().first <= now_ms) {
+        const auto [expires_at_ms, request_id] = cancellation_tombstone_expiries_.front();
+        cancellation_tombstone_expiries_.pop_front();
+        auto tombstone = cancellation_tombstones_.find(request_id);
+        if (tombstone != cancellation_tombstones_.end()
+            && tombstone->second.expires_at_ms == expires_at_ms) {
+            cancellation_tombstones_.erase(tombstone);
         }
     }
 }
 
 void DeferredPrefillContextMap::rememberRecentlySeenRequest(int64_t request_id, int64_t now_ms) {
-    const int64_t expires_at_ms         = now_ms + kPriorityCancelRegistryTtlMs;
+    const int64_t expires_at_ms = now_ms + kCancelRegistryTtlMs;
     recently_seen_requests_[request_id] = expires_at_ms;
     recently_seen_request_expiries_.emplace_back(expires_at_ms, request_id);
 }
@@ -673,24 +692,33 @@ void DeferredPrefillContextMap::sweepRecentlySeenRequests(int64_t now_ms) {
     }
 }
 
-void DeferredPrefillContextMap::publishPriorityPreemptionCanceled(int64_t                       request_id,
-                                                                  const DeferredPrefillContext* expected) {
+void DeferredPrefillContextMap::publishCancellationFinished(int64_t request_id,
+                                                           const DeferredPrefillContext* expected, bool decode_cleanup_complete) {
     std::lock_guard<std::mutex> lock(mu_);
-    auto                        tombstone = priority_preemption_tombstones_.find(request_id);
-    if (tombstone != priority_preemption_tombstones_.end()
-        && tombstone->second.kind == PriorityPreemptionTombstoneKind::ACTIVE_CANCEL) {
-        // Typed CANCELED is now observable in WorkerStatus. Retain the same
-        // expiry but downgrade the weak active ACK to an absent-request fence.
-        tombstone->second.kind = PriorityPreemptionTombstoneKind::ABSENT_FENCE;
-    }
     auto active = active_contexts_.find(request_id);
     if (active == active_contexts_.end()) {
         return;
     }
     auto current = active->second.lock();
-    if (!current || current.get() == expected) {
-        active_contexts_.erase(active);
+    if (!current || current.get() != expected) {
+        return;
     }
+    auto tombstone = cancellation_tombstones_.find(request_id);
+    if (tombstone != cancellation_tombstones_.end()
+        && tombstone->second.kind == CancellationTombstoneKind::ACTIVE_CANCEL) {
+        // Only this exact context's completed cleanup upgrades a weak ACK to a fence.
+        tombstone->second.kind = CancellationTombstoneKind::ABSENT_FENCE;
+        tombstone->second.decode_cleanup_complete = decode_cleanup_complete;
+    }
+    active_contexts_.erase(active);
+}
+
+bool DeferredPrefillContextMap::isDecodeCleanupComplete(int64_t request_id) const {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto found = cancellation_tombstones_.find(request_id);
+    return found != cancellation_tombstones_.end()
+           && found->second.kind == CancellationTombstoneKind::ABSENT_FENCE
+           && found->second.decode_cleanup_complete;
 }
 
 void DeferredPrefillContextMap::finish(int64_t request_id, const DeferredPrefillContext* expected) {
@@ -788,14 +816,14 @@ void DeferredPrefillContextMap::cancelAll(const grpc::Status& status) {
     }
 }
 
-PriorityCancelResult PrefillBatchRpcServer::onCancelRequest(int64_t request_id) {
+RequestCancelResult PrefillBatchRpcServer::onCancelRequest(int64_t request_id, RequestCancelReasonPB reason) {
     std::shared_ptr<DeferredPrefillContext> deferred;
-    const auto result = deferred_contexts_->cancelByPriorityPreemption(request_id, deferred);
+    const auto result = deferred_contexts_->cancelRequest(request_id, deferred, nullptr, reason);
     // Active Stage 2/4 operations own their exit and submit finalization only
     // after quiescing. An idle Stage 3 context is submitted immediately. No
     // waiter is ever placed on the prepare pool.
-    if (result == PriorityCancelResult::ACCEPTED && deferred && deferred->requestPriorityFinalization()) {
-        schedulePriorityFinalization(request_id, deferred);
+    if (result == RequestCancelResult::ACCEPTED && deferred && deferred->requestCancellationFinalization()) {
+        scheduleCancellationFinalization(request_id, deferred);
     }
     return result;
 }
@@ -806,7 +834,7 @@ void PrefillBatchRpcServer::finishSlotOperation(int64_t                         
         return;
     }
     if (deferred->finishOperation()) {
-        schedulePriorityFinalization(request_id, deferred);
+        scheduleCancellationFinalization(request_id, deferred);
         return;
     }
     if (deferred->context && deferred->context->terminalCause() != PrefillTerminalCause::ACTIVE
@@ -815,7 +843,7 @@ void PrefillBatchRpcServer::finishSlotOperation(int64_t                         
     }
 }
 
-void PrefillBatchRpcServer::finalizePriorityPreemption(int64_t                                 request_id,
+void PrefillBatchRpcServer::finalizeCancellation(int64_t                                 request_id,
                                                        std::shared_ptr<DeferredPrefillContext> deferred) {
     auto                     stream = deferred->context->getStream();
     GenerateStream::TimeInfo time_info;
@@ -823,24 +851,27 @@ void PrefillBatchRpcServer::finalizePriorityPreemption(int64_t                  
     if (has_stream) {
         time_info = stream->getTimeInfo();
     }
-    if (!deferred->context->finalizePriorityPreemption()) {
+    if (!deferred->context->finalizeCancellation()) {
         // The scheduler still owns the local stream. Retry in a later executor
         // turn rather than occupying a worker in an unbounded polling loop.
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        schedulePriorityFinalization(request_id, std::move(deferred));
+        scheduleCancellationFinalization(request_id, std::move(deferred));
         return;
     }
     deferred->commitTerminalStatus(deferred->context->error_status);
     deferred->finishLogicalTrace(has_stream ? &time_info : nullptr);
-    deferred_contexts_->publishPriorityPreemptionCanceled(request_id, deferred.get());
+    // The execution has quiesced; retained diagnostic references must not keep it inflight.
+    deferred->request_guard.reset();
+    deferred_contexts_->publishCancellationFinished(request_id, deferred.get(),
+        !deferred->context->client_stream || deferred->context->last_grpc_stream_closed_status.ok());
 }
 
-void PrefillBatchRpcServer::schedulePriorityFinalization(int64_t                                 request_id,
-                                                         std::shared_ptr<DeferredPrefillContext> deferred) {
-    if (!priority_cancel_executor_ || !priority_cancel_executor_->submit([this, request_id, deferred] {
-            finalizePriorityPreemption(request_id, deferred);
-        })) {
-        RTP_LLM_LOG_WARNING("request [%ld] priority-preemption finalizer executor is stopping", request_id);
+void PrefillBatchRpcServer::scheduleCancellationFinalization(
+    int64_t request_id, std::shared_ptr<DeferredPrefillContext> deferred) {
+    if (!cancel_executor_
+        || !cancel_executor_->submit(
+            [this, request_id, deferred] { finalizeCancellation(request_id, deferred); })) {
+        RTP_LLM_LOG_WARNING("request [%ld] request-cancel finalizer executor is stopping", request_id);
     }
 }
 
@@ -858,9 +889,9 @@ PrefillBatchRpcServer::~PrefillBatchRpcServer() {
         prepare_resource_worker_pool_->stop();
         prepare_resource_worker_pool_.reset();
     }
-    if (priority_cancel_executor_) {
-        priority_cancel_executor_->stop();
-        priority_cancel_executor_.reset();
+    if (cancel_executor_) {
+        cancel_executor_->stop();
+        cancel_executor_.reset();
     }
 }
 
@@ -908,7 +939,7 @@ void PrefillBatchRpcServer::initThreadPools() {
                      concurrency_limit);
 
     const size_t cancel_workers = static_cast<size_t>(std::min<int64_t>(16, std::max<int64_t>(2, concurrency_limit)));
-    priority_cancel_executor_   = std::make_unique<PriorityCancelExecutor>(cancel_workers);
+    cancel_executor_   = std::make_unique<RequestCancelExecutor>(cancel_workers);
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1131,7 @@ grpc::Status PrefillBatchRpcServer::acceptGroup(std::vector<BatchSlot> slots, En
             // every prepare error/exception; if finish won, Cancel returns
             // NOT_FOUND.
             deferred_contexts_->finish(request_id, slot.deferred.get());
-            result.stage_status = preferPriorityPreemption(prefill_context, result.stage_status);
+            result.stage_status = preferCancellation(prefill_context, result.stage_status);
             slot.deferred->commitTerminalStatus(result.stage_status);
             addBatchError(
                 response, request_id, batchErrorCode(result.stage_status), result.stage_status.error_message());
@@ -1108,17 +1139,17 @@ grpc::Status PrefillBatchRpcServer::acceptGroup(std::vector<BatchSlot> slots, En
         }
 
         // PREPARE ownership ended in its own future. Claim a new group-phase
-        // operation before touching the context again. A priority finalizer
+        // operation before touching the context again. A cancellation finalizer
         // that won the gap owns the context and this slot must not continue.
         const auto start_result = slot.deferred->tryStartOperation();
-        if (start_result.priority_finalizer_claimed) {
-            schedulePriorityFinalization(request_id, slot.deferred);
+        if (start_result.cancel_finalizer_claimed) {
+            scheduleCancellationFinalization(request_id, slot.deferred);
         }
         if (!start_result.started) {
             deferred_contexts_->finish(request_id, slot.deferred.get());
             auto terminal_status =
-                prefill_context.isPriorityPreempted() ?
-                    preferPriorityPreemption(prefill_context, grpc::Status::OK) :
+                prefill_context.isCancellationRequested() ?
+                    preferCancellation(prefill_context, grpc::Status::OK) :
                     grpc::Status(grpc::StatusCode::UNAVAILABLE, "request became terminal before group admission");
             slot.deferred->commitTerminalStatus(terminal_status);
             if (slot.deferred->requestLogicalFinalization()) {
@@ -1190,8 +1221,8 @@ PrefillBatchRpcServer::prepareSlotWithRetry(PrefillGenerateContext& prefill_cont
     prefill_context.setRetryTimeoutMs(max_retry_timeout_ms);
     const auto stage = prefill_context.stat_info.saveStage();
     for (int64_t attempt = 0; attempt <= retry_attempts; ++attempt) {
-        if (prefill_context.isPriorityPreempted()) {
-            result.stage_status = preferPriorityPreemption(prefill_context, grpc::Status::OK);
+        if (prefill_context.isCancellationRequested()) {
+            result.stage_status = preferCancellation(prefill_context, grpc::Status::OK);
             break;
         }
         if (prefill_context.isRequestCancelled()) {
@@ -1211,8 +1242,8 @@ PrefillBatchRpcServer::prepareSlotWithRetry(PrefillGenerateContext& prefill_cont
         prefill_context.stat_info.restoreStage(stage);
         prefill_context.retry_times++;
         prepareAllocateResource(prefill_context);
-        if (prefill_context.isPriorityPreempted()) {
-            result.stage_status = preferPriorityPreemption(prefill_context, prefill_context.error_status);
+        if (prefill_context.isCancellationRequested()) {
+            result.stage_status = preferCancellation(prefill_context, prefill_context.error_status);
             break;
         }
         if (prefill_context.ok()) {
@@ -1287,12 +1318,12 @@ std::vector<PrefillBatchRpcServer::PrepareResult> PrefillBatchRpcServer::prepare
                         slot->deferred->commitTerminalStatus(result->stage_status);
                     }
                     if (!result->prepared && !prefill_context.tryMarkOtherTerminal()) {
-                        // A priority terminal cause was already published, so it
+                        // A cancellation terminal cause was already published, so it
                         // owns the outcome. commitTerminalStatus() lets a
                         // PRIORITY_PREEMPTED status overwrite the one committed
                         // above, which is why the mark's result can still be
                         // honoured after the fact.
-                        result->stage_status = preferPriorityPreemption(prefill_context, result->stage_status);
+                        result->stage_status = preferCancellation(prefill_context, result->stage_status);
                         slot->deferred->commitTerminalStatus(result->stage_status);
                     }
                     // PREPARE is owned per slot. A canceled slot can now hand
@@ -1326,14 +1357,16 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
         return grpc::Status::OK;
     }
     // Context-local R1 checkpoint. Active registration precedes prepare, so
-    // an accepted priority Cancel is already latched here; no global
+    // an accepted Cancel is already latched here; no global
     // scheduler intent or full-stream scan is needed.
     std::vector<ReadySlot> live_slots;
     live_slots.reserve(ready_slots.size());
     for (auto& ready_slot : ready_slots) {
         auto& prefill_context = *ready_slot.deferred->context;
-        if (prefill_context.isPriorityPreempted()) {
-            rejectSlot(ready_slot, preferPriorityPreemption(prefill_context, grpc::Status::OK), response);
+        if (prefill_context.isCancellationRequested()) {
+            rejectSlot(ready_slot,
+                       preferCancellation(prefill_context, grpc::Status::OK),
+                       response);
             continue;
         }
         live_slots.push_back(std::move(ready_slot));
@@ -1396,7 +1429,7 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
         ready_slot.deferred->context->setStream(stream);
         ready_slot.deferred->context->setLocalStreamSchedulerOwned(enqueue_successes[i]);
         if (!enqueue_successes[i]) {
-            // The scheduler rejection and priority Cancel arbitrate through
+            // The scheduler rejection and Cancel arbitrate through
             // the same terminal-cause CAS. Whichever wins determines the
             // outward error; processing order below cannot rewrite it.
             ready_slot.deferred->context->tryMarkOtherTerminal();
@@ -1407,8 +1440,10 @@ grpc::Status PrefillBatchRpcServer::enqueueGroupStreams(std::vector<ReadySlot>& 
             rejectSlot(ready_slot, status, response);
             continue;
         }
-        if (ready_slot.deferred->context->isPriorityPreempted()) {
-            rejectSlot(ready_slot, preferPriorityPreemption(*ready_slot.deferred->context, grpc::Status::OK), response);
+        if (ready_slot.deferred->context->isCancellationRequested()) {
+            rejectSlot(ready_slot,
+                       preferCancellation(*ready_slot.deferred->context, grpc::Status::OK),
+                       response);
             continue;
         }
         admitted_slots.push_back(std::move(ready_slot));
@@ -1425,8 +1460,8 @@ std::shared_ptr<DeferredPrefillContext> PrefillBatchRpcServer::storeSlot(BatchSl
     const auto store_status = deferred_contexts_->store(request_id, deferred);
     if (!store_status.ok()) {
         deferred_contexts_->finish(request_id, deferred.get());
-        const auto outward_status = preferPriorityPreemption(*deferred->context, store_status);
-        if (!deferred->context->isPriorityPreempted()) {
+        const auto outward_status = preferCancellation(*deferred->context, store_status);
+        if (!deferred->context->isCancellationRequested()) {
             deferred->cancel(store_status);
         }
         addBatchError(response, request_id, batchErrorCode(outward_status), outward_status.error_message());
@@ -1437,11 +1472,13 @@ std::shared_ptr<DeferredPrefillContext> PrefillBatchRpcServer::storeSlot(BatchSl
 }
 
 void PrefillBatchRpcServer::publishSlot(ReadySlot& ready_slot, EnqueueBatchResponsePB* response) {
-    auto&       slot       = *ready_slot.slot;
-    const auto  request_id = slot.input->request_id();
-    const auto& deferred   = ready_slot.deferred;
-    if (deferred->context->isPriorityPreempted()) {
-        rejectSlot(ready_slot, preferPriorityPreemption(*deferred->context, grpc::Status::OK), response);
+    auto&             slot                 = *ready_slot.slot;
+    const auto        request_id           = slot.input->request_id();
+    const auto&       deferred             = ready_slot.deferred;
+    if (deferred->context->isCancellationRequested()) {
+        rejectSlot(ready_slot,
+                   preferCancellation(*deferred->context, grpc::Status::OK),
+                   response);
         return;
     }
     constexpr int64_t kDefaultContextTtlMs = 10 * 60 * 1000;
@@ -1477,8 +1514,8 @@ void PrefillBatchRpcServer::rejectSlot(ReadySlot&              ready_slot,
         deferred = ready_slot.deferred;
     }
     const auto outward_status =
-        deferred && deferred->context ? preferPriorityPreemption(*deferred->context, status) : status;
-    if (deferred && deferred->context && !deferred->context->isPriorityPreempted()
+        deferred && deferred->context ? preferCancellation(*deferred->context, status) : status;
+    if (deferred && deferred->context && !deferred->context->isCancellationRequested()
         && !deferred->context->cancel_state->load()) {
         deferred->cancel(outward_status);
     }
@@ -1514,7 +1551,7 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
     {
         // These pointers belong to this handler, not to the deferred request.
         // Detach while we still own the operation, before finishSlotOperation
-        // can hand it to the asynchronous priority finalizer, including on exceptions.
+        // can hand it to the asynchronous cancellation finalizer, including on exceptions.
         autil::ScopeGuard rpc_context_guard([&prefill_context, context] {
             if (context && context->IsCancelled()) {
                 prefill_context.cancel_state->store(true);
@@ -1537,7 +1574,7 @@ grpc::Status PrefillBatchRpcServer::FetchResponse(grpc::ServerContext*          
         // has already latched its reason; a later Cancel no longer targets a
         // completed FetchResponse.
         deferred_contexts_->finish(request_id, deferred.get());
-        status = preferPriorityPreemption(prefill_context, status);
+        status = preferCancellation(prefill_context, status);
         deferred->commitTerminalStatus(status);
         if (!status.ok()) {
             prefill_context.error_status = status;

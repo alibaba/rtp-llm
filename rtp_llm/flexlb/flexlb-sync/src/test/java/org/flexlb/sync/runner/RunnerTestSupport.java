@@ -1,16 +1,16 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.balance.delivery.DeliveryStrategy;
+import org.flexlb.balance.scheduler.DeliveryStrategy;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
+import org.flexlb.balance.scheduler.RequestRepository;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.mockito.Mockito;
 
 import java.util.Map;
@@ -18,24 +18,13 @@ import java.util.Map;
 /** Package-local fixtures for the frozen status/endpoint composition boundary. */
 public final class RunnerTestSupport {
 
-    private static final EndpointEventProjector NOOP_EVENT_SINK =
-            Mockito.mock(EndpointEventProjector.class);
-
     private RunnerTestSupport() {
-    }
-
-    public static EndpointEventProjector eventSink() {
-        return NOOP_EVENT_SINK;
     }
 
     public static EndpointRegistry endpointRegistry(ConfigService configService) {
         DeliveryStrategy delivery = Mockito.mock(DeliveryStrategy.class);
-        return new EndpointRegistry(
-                configService,
-                NOOP_EVENT_SINK,
-                Mockito.mock(BatchSchedulerReporter.class),
-                delivery,
-                new PlacementAvailability());
+        return new EndpointRegistry(configService, new RequestRepository(),
+                Mockito.mock(DeliveryMetricsReporter.class), delivery, new PlacementAvailability());
     }
 
     public static WorkerStatus discovered(
@@ -113,8 +102,7 @@ public final class RunnerTestSupport {
             WorkerStatus.PreparedStatus prepared = status.prepareNewStatus(
                     status.freezeStatusResponse(response));
             WorkerEndpoint endpoint = registry
-                    .publishPreparedEndpoint(address, status, prepared)
-                    .endpoint();
+                    .publishPreparedEndpoint(address, status, prepared);
             status.recordSuccessfulPoll(true);
             return endpoint;
         } finally {

@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.endpoint.DecodeResources.ReservationReleaseResult;
 import org.flexlb.balance.preemption.PreemptionCancelPhase;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
@@ -13,6 +14,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -22,135 +24,133 @@ class DecodeRequestExpirationTest {
 
     private WorkerStatus status;
     private DecodeEndpoint endpoint;
-    private final Map<Long, DecodeEndpoint.ReservationHandle> reservations =
+    private final Map<Long, DecodeResources.ReservationHandle> reservations =
             new HashMap<>();
 
     @BeforeEach
     void setUp() {
         status = EndpointTestSupport.workerStatus(
                 RoleType.DECODE, "10.0.0.8", 8080, 8081);
-        endpoint = new DecodeEndpoint(
-                status, EndpointTestSupport.noopEventSink());
+        endpoint = EndpointTestSupport.decode(status, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(EndpointTestSupport.noopEventSink()));
         updateStatus(Map.of(), Map.of(), 10_000);
     }
 
     @Test
     void expireUnobservedShadowReleasesAllAccountingAndBlocksStaleStatus() {
-        DecodeEndpoint.ReservationHandle reservation = reserve(1L, 500, 700, 0);
+        DecodeResources.ReservationHandle reservation = reserve(1L, 500, 700, 0);
         markQueued(1L);
 
-        assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         assertEquals(0, endpoint.routingView().totalLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
+        assertEquals(0, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
         assertEquals(0, endpoint.resourceSnapshot().queuedCount());
 
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertFalse(isConfirmed(1L), "late status cannot recreate expired local ownership");
-        assertEquals(9_500, endpoint.realKvAvailable(), "physical KV remains Engine-reported");
+        assertEquals(9_500, endpoint.routingView().realKvAvailable(), "physical KV remains Engine-reported");
     }
 
     @Test
     void expirationReleasesDispatchPermitAndMakesLateReleaseHarmless() {
-        DecodeEndpoint.ReservationHandle reservation = reserve(1L, 500, 700, 0);
+        DecodeResources.ReservationHandle reservation = reserve(1L, 500, 700, 0);
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermitAcquisition acquired =
-                endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(1, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
+                endpoint.acquireDispatchPermit(reservation, new DecodeResources.AdmissionCapacity(1, 100L));
+        assertEquals(DecodeResources.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
         assertEquals(1, endpoint.resourceSnapshot().activeDispatchPermits());
 
-        assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
         assertFalse(acquired.permit().release());
         assertEquals(0, endpoint.resourceSnapshot().activeDispatchPermits());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertEquals(10_000, endpoint.realKvAvailable());
+        assertEquals(10_000, endpoint.routingView().realKvAvailable());
     }
 
     @Test
     void sentButUnobservedRequestExpiresWithoutAnyEngineReply() {
-        DecodeEndpoint.ReservationHandle reservation = reserve(1L, 500, 700, 0);
+        DecodeResources.ReservationHandle reservation = reserve(1L, 500, 700, 0);
         markQueued(1L);
         DecodeEndpoint.EngineDispatchPermitAcquisition acquired =
-                endpoint.acquireDispatchPermit(reservation, new DecodeEndpoint.AdmissionCapacity(1, 100L));
-        assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
+                endpoint.acquireDispatchPermit(reservation, new DecodeResources.AdmissionCapacity(1, 100L));
+        assertEquals(DecodeResources.EngineDispatchPermitTransferStatus.TRANSFERRED,
                 acquired.permit().dispatch());
         assertEquals(1, endpoint.routingView().engineLoad());
 
-        assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
         assertEquals(0, endpoint.routingView().engineLoad());
         assertEquals(0, endpoint.routingView().inflightHardKv());
-        assertEquals(0, endpoint.routingView().inflightExpectedKv());
-        assertFalse(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(0, EndpointTestSupport.expectedReservedKv(endpoint.resourceSnapshot()));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
     }
 
     @Test
     void confirmedLeaseExpirationPreservesPhysicalKvSample() {
-        DecodeEndpoint.ReservationHandle reservation = reserve(1L, 500, 700, 0);
+        DecodeResources.ReservationHandle reservation = reserve(1L, 500, 700, 0);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertEquals(1, confirmedCount());
 
-        assertTrue(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.release(reservation, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(reservation, DecodeResources.ReleaseReason.EXPIRED));
         assertEquals(0, confirmedCount());
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertEquals(9_500, endpoint.realKvAvailable());
+        assertEquals(9_500, endpoint.routingView().realKvAvailable());
         assertEquals(500, endpoint.routingView().realKvUsed());
     }
 
     @Test
     void staleEndpointAndReservationTokensCannotExpireNewOwnership() {
-        DecodeEndpoint.ReservationHandle original = reserve(1L, 500, 700, 0);
-        assertFalse(endpoint.release(new DecodeEndpoint.ReservationHandle(
-                original.endpointGenerationId() + 1L, 1L, original.reservationToken()), DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.release(new DecodeEndpoint.ReservationHandle(
-                original.endpointGenerationId(), 1L, original.reservationToken() + 1L), DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertEquals(1, endpoint.getInflightCount());
+        DecodeResources.ReservationHandle original = reserve(1L, 500, 700, 0);
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(new DecodeResources.ReservationHandle(
+                original.endpointGenerationId() + 1L, 1L, original.reservationToken()), DecodeResources.ReleaseReason.EXPIRED));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(new DecodeResources.ReservationHandle(
+                original.endpointGenerationId(), 1L, original.reservationToken() + 1L), DecodeResources.ReleaseReason.EXPIRED));
+        assertEquals(1, endpoint.resourceSnapshot().reservedCount());
 
-        assertTrue(endpoint.release(original, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(original, DecodeResources.ReleaseReason.EXPIRED));
         endpoint.evictExpiredRequests(-1L, requestId -> false);
-        DecodeEndpoint.ReservationHandle replacement = reserve(1L, 300, 450, 0);
-        assertFalse(endpoint.release(original, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        DecodeResources.ReservationHandle replacement = reserve(1L, 300, 450, 0);
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(original, DecodeResources.ReleaseReason.EXPIRED));
         assertEquals(300, endpoint.routingView().inflightHardKv());
-        assertTrue(endpoint.release(replacement, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(replacement, DecodeResources.ReleaseReason.EXPIRED));
     }
 
     @Test
     void missingConfirmedPriorityOwnerExpiresSyntheticHoldExactlyOnce() {
-        DecodeEndpoint.ReservationHandle victim = reserve(1L, 500, 700, 30);
+        DecodeResources.ReservationHandle victim = reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+        assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L), 9L, 100, 120, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
+        assertTrue(EndpointTestSupport.handoffPreemption(endpoint, 101L));
         updateStatus(Map.of(), Map.of(), 10_000);
-        endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
+        endpoint.abortPreemption(101L);
         assertEquals(1, endpoint.routingView().totalLoad());
-        assertEquals(9_500, endpoint.realKvAvailable());
+        assertEquals(9_500, endpoint.routingView().realKvAvailable());
 
-        assertTrue(endpoint.release(victim, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.release(victim, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.canceled(victim)));
-        assertFalse(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.finished(victim)));
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED));
+        assertFalse(endpoint.updatePreemption(101L, DecodeResources.PreemptionUpdate.canceled(victim)));
+        assertFalse(endpoint.updatePreemption(101L, DecodeResources.PreemptionUpdate.finished(victim)));
         assertEquals(0, endpoint.routingView().totalLoad());
-        assertEquals(10_000, endpoint.realKvAvailable());
+        assertEquals(10_000, endpoint.routingView().realKvAvailable());
         assertEquals(0, endpoint.routingView().realKvUsed());
     }
 
     @Test
     void incomingLeaseExpirationAbortsOnlyItsAdmissionAttempt() {
-        DecodeEndpoint.ReservationHandle victim = reserve(1L, 500, 700, 30);
+        DecodeResources.ReservationHandle victim = reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+        assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L), 9L, 100, 120, 70));
-        DecodeEndpoint.ReservationHandle incoming = endpoint.reservationHandle(9L);
-        assertTrue(endpoint.release(incoming, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        assertFalse(endpoint.release(incoming, DecodeEndpoint.ReleaseReason.EXPIRED).released());
-        endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
+        DecodeResources.ReservationHandle incoming = EndpointTestSupport.decodeReservation(endpoint, 9L);
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(incoming, DecodeResources.ReleaseReason.EXPIRED));
+        assertNotEquals(ReservationReleaseResult.RELEASED, endpoint.release(incoming, DecodeResources.ReleaseReason.EXPIRED));
+        endpoint.abortPreemption(101L);
         assertEquals(1, endpoint.routingView().totalLoad());
-        assertEquals(0, endpoint.getInflightCount());
-        assertTrue(endpoint.release(victim, DecodeEndpoint.ReleaseReason.EXPIRED).released());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
+        assertEquals(ReservationReleaseResult.RELEASED, endpoint.release(victim, DecodeResources.ReleaseReason.EXPIRED));
     }
 
     @Test
@@ -165,7 +165,7 @@ class DecodeRequestExpirationTest {
 
         updateStatus(Map.of(), finished, 10_000);
 
-        assertEquals(0, endpoint.getInflightCount());
+        assertEquals(0, endpoint.resourceSnapshot().reservedCount());
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 1)), Map.of(), 9_999);
         assertTrue(isConfirmed(1L),
                 "a later fresh active observation is not blocked by an ordinary completion");
@@ -175,14 +175,13 @@ class DecodeRequestExpirationTest {
     void priorityNotFoundOrdinaryFinishedDoesNotRetainGenerationFence() {
         reserve(1L, 500, 700, 30);
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
-        assertEquals(DecodeEndpoint.PreemptionBeginResult.SUCCESS,
+        assertEquals(DecodeResources.PreemptionBeginResult.SUCCESS,
                 beginPreemption(101L, List.of(1L),
                         9L, 100, 120, 70));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelSending()));
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.cancelReply(1L, PreemptionCancelPhase.NOT_FOUND_STALE)));
-        endpoint.finishPreemption(101L, DecodeEndpoint.PreemptionDecision.ABORT);
+        assertTrue(EndpointTestSupport.handoffPreemption(endpoint, 101L));
+        endpoint.abortPreemption(101L);
 
-        assertTrue(endpoint.updatePreemption(101L, DecodeEndpoint.PreemptionUpdate.finished(reservations.get(1L))));
+        assertTrue(endpoint.updatePreemption(101L, DecodeResources.PreemptionUpdate.finished(reservations.get(1L))));
 
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertTrue(isConfirmed(1L));
@@ -199,15 +198,15 @@ class DecodeRequestExpirationTest {
         EndpointTestSupport.applyStatus(endpoint, response);
     }
 
-    private DecodeEndpoint.ReservationHandle reserve(
+    private DecodeResources.ReservationHandle reserve(
             long requestId,
             long hardKv,
             long expectedKv,
             int priority) {
         try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
             assertTrue(pin != null);
-            DecodeEndpoint.ReservationHandle reservation =
-                    endpoint.reserveUnqueued(pin, requestId, hardKv, expectedKv, priority);
+            DecodeResources.ReservationHandle reservation =
+                    EndpointTestSupport.reserveUnqueuedDecode(endpoint, pin, requestId, hardKv, expectedKv, priority);
             reservations.put(requestId, reservation);
             return reservation;
         }
@@ -221,22 +220,23 @@ class DecodeRequestExpirationTest {
     }
 
     private boolean isConfirmed(long requestId) {
-        return endpoint.resourceSnapshot().confirmed().stream()
+        return endpoint.resourceSnapshot().requests().values().stream()
+                .filter(request -> request.phase().isEngineConfirmed())
                 .anyMatch(view -> view.requestId() == requestId);
     }
 
     private int confirmedCount() {
-        return endpoint.resourceSnapshot().confirmed().size();
+        return endpoint.resourceSnapshot().confirmedCount();
     }
 
-    private DecodeEndpoint.PreemptionBeginResult beginPreemption(
+    private DecodeResources.PreemptionBeginResult beginPreemption(
             long attemptToken,
             List<Long> victimIds,
             long incomingRequestId,
             long hardKv,
             long expectedKv,
             int priority) {
-        return endpoint.beginPreemption(attemptToken, victimIds.stream().map(reservations::get).toList(), incomingRequestId, hardKv, expectedKv, priority, new DecodeEndpoint.AdmissionCapacity(
+        return endpoint.beginPreemption(attemptToken, victimIds.stream().map(reservations::get).toList(), incomingRequestId, hardKv, expectedKv, priority, new DecodeResources.AdmissionCapacity(
                         Math.max(1, endpoint.routingView().totalLoad()), 100));
     }
 

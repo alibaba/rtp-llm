@@ -6,9 +6,10 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.List;
-import java.util.OptionalLong;
 
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.ROUTE;
 import static org.flexlb.balance.scheduler.RouteProjectionTestSupport.TOKEN_EVALUATOR;
@@ -34,7 +35,7 @@ class RouteAdmissionPolicyTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(120L), result.projectedTtftMs());
+        assertEquals(120L, result.projectedTtftMsValue());
         assertEquals(RouteProjection.Candidate.InitialHeadDisposition.BEFORE_PROBE,
                 result.initialHeadDisposition());
     }
@@ -50,7 +51,7 @@ class RouteAdmissionPolicyTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
+        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
         assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
         assertFalse(result.selectable());
     }
@@ -100,7 +101,7 @@ class RouteAdmissionPolicyTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.UNAVAILABLE, result.state());
-        assertEquals(OptionalLong.empty(), result.projectedTtftMs());
+        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
         assertEquals("AFTER_PROBE_CAPACITY_UNKNOWN", result.detail());
         assertEquals(RoleType.DECODE, result.blockerRole());
     }
@@ -122,21 +123,27 @@ class RouteAdmissionPolicyTest {
         assertEquals(RoleType.DECODE, result.blockerRole());
     }
 
-    @Test
-    void unknownEngineCursorCannotProveOvertakeOfBlockedHead() {
+    @ParameterizedTest
+    @EnumSource(RouteProjection.AfterProbeAdmission.class)
+    void unknownEngineCursorCannotProveOvertakeOfBlockedHead(RouteProjection.AfterProbeAdmission afterProbe) {
         GroupPlanner.Item head = item(1L, 50, 1L, 100L);
         WorkSnapshot unknownWork = RouteProjectionTestSupport.work(
                 List.of(), List.of(), 1L);
         RouteProjection.Candidate result = project(
-                blockedQueue(true, head, semantics(
-                        RouteProjection.AfterProbeAdmission
-                                .BLOCKED)),
+                blockedQueue(true, head, semantics(afterProbe, RoleType.DECODE)),
                 unknownWork, TOKEN_EVALUATOR,
-                probe(99L, 90, 20L, 0L),
+                new RouteProjectionTestSupport.Probe(99L, 90, RouteProjectionTestSupport.NOW_MS,
+                        Long.MAX_VALUE, 20L, 7L, 11L),
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.BLOCKED, result.state());
         assertEquals("HEAD_CAPACITY_BLOCKED", result.detail());
+        assertEquals(RouteProjection.Candidate.UNKNOWN, result.projectedTtftMsValue());
+        assertEquals(afterProbe == RouteProjection.AfterProbeAdmission.UNAVAILABLE ? RoleType.DECODE : null,
+                result.blockerRole());
+        assertEquals(15L, result.incomingPrefillMs());
+        assertEquals(7L, result.cacheHitTokens());
+        assertEquals(11L, result.routingCacheMatchTokens());
     }
 
     @Test
@@ -152,7 +159,7 @@ class RouteAdmissionPolicyTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(20L, result.projectedTtftMsValue());
         assertEquals(RouteProjection.Candidate.InitialHeadDisposition
                         .TERMINAL_PRUNED,
                 result.initialHeadDisposition());
@@ -175,7 +182,7 @@ class RouteAdmissionPolicyTest {
                 ROUTE);
 
         assertEquals(RouteProjection.Candidate.State.MODELED, result.state());
-        assertEquals(OptionalLong.of(20L), result.projectedTtftMs());
+        assertEquals(20L, result.projectedTtftMsValue());
         assertEquals(RouteProjection.Candidate.InitialHeadDisposition.NONE,
                 result.initialHeadDisposition());
     }

@@ -223,6 +223,14 @@ GenerateInputPB lifecycleRequest() {
 
 class RpcHandlerLifecycleTest: public DeviceTestBase {
 protected:
+    void expectRetainedUntilSchedulerCompletion(const std::shared_ptr<RpcServerRuntimeMeta>& meta) {
+        const auto info = meta->getEngineScheduleInfo(-1);
+        ASSERT_EQ(info.running_task_info_list.size(), 1);
+        EXPECT_EQ(info.running_task_info_list.front().request_id, kRequestId);
+        EXPECT_EQ(info.running_task_info_list.front().batch_id, kBatchId);
+        EXPECT_TRUE(info.finished_task_info_list.empty());
+    }
+
     void expectFinishedOnce(const std::shared_ptr<RpcServerRuntimeMeta>& meta, ErrorCode error) {
         const auto info = meta->getEngineScheduleInfo(-1);
         EXPECT_TRUE(info.running_task_info_list.empty());
@@ -303,7 +311,7 @@ protected:
                                     kind == Handler::LOCAL           ? ErrorCode::CANCELLED :
                                                                        ErrorCode::EXECUTION_EXCEPTION;
         EXPECT_EQ(engine->stream->statusInfo().code(), expected_error);
-        expectFinishedOnce(meta, expected_error);
+        expectRetainedUntilSchedulerCompletion(meta);
         const auto diagnostic = capture.content().find(kUnexpectedExit);
         if (kind == Handler::LOCAL && action == OutputAction::THROW) {
             EXPECT_NE(diagnostic, std::string::npos);
@@ -316,6 +324,7 @@ protected:
             engine->stream->reportEvent(StreamEvents::GenerateDone);
         }
         reap(engine, free_before);
+        expectFinishedOnce(meta, expected_error);
     }
 
     void runDecodeHandler(OutputAction action) {
@@ -393,7 +402,7 @@ protected:
         EXPECT_EQ(running_tasks.front().request_id, kRequestId);
         EXPECT_EQ(running_tasks.front().batch_id, kBatchId);
         EXPECT_LT(engine->getCacheManager()->freeBlocksNum(), free_before);
-        expectFinishedOnce(meta, expected_error);
+        expectRetainedUntilSchedulerCompletion(meta);
         EXPECT_EQ(capture.content().find(kUnexpectedExit), std::string::npos);
         if (action == OutputAction::COMPLETE) {
             engine->stream->reportEvent(StreamEvents::GenerateDone);

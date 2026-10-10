@@ -85,7 +85,9 @@ class ServiceRouteTest {
 
         Assertions.assertTrue(serviceRoute.getAllRoleTypes().containsAll(
                 List.of(RoleType.PDFUSION, RoleType.VIT)));
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.PDFUSION).size());
-        Assertions.assertEquals(1, serviceRoute.getRoleEndpoints(RoleType.VIT).size());
+        Assertions.assertEquals("pd", serviceRoute.getAllEndpointsWithGroup(RoleType.PDFUSION)
+                .getFirst().getRight().getAddress());
+        Assertions.assertEquals("vit", serviceRoute.getAllEndpointsWithGroup(RoleType.VIT)
+                .getFirst().getRight().getAddress());
     }
 }

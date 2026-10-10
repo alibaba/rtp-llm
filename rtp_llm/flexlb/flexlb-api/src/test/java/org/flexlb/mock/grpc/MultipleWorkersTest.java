@@ -1,7 +1,7 @@
 package org.flexlb.mock.grpc;
 
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -10,12 +10,10 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,7 +27,7 @@ import static org.mockito.Mockito.when;
  * <p>Flow:
  * 1. Worker A is started by the base class (default behavior)
  * 2. Worker B is started via {@link #addPrefillWorker} (registered in EndpointRegistry)
- * 3. Reconfigure the mock DefaultRouter to alternate between A and B
+ * 3. Reconfigure the mock RequestWorkerSelector to alternate between A and B
  * 4. Submit 4 requests
  * 5. Verify: both workers received at least 1 EnqueueBatch call
  * 6. Verify: total EnqueueBatch count matches the number of submitted requests
@@ -37,10 +35,10 @@ import static org.mockito.Mockito.when;
  * <p>Key mechanism:
  * <ul>
  *   <li>The base class starts one prefill worker (worker A) and registers it in
- *       {@code EndpointRegistry} and {@code WorkerDirectory}</li>
+ *       {@code EndpointRegistry} and {@code EndpointRegistry}</li>
  *   <li>{@link #addPrefillWorker} starts an additional worker B, creates its
  *       {@code WorkerStatus} and {@code PrefillEndpoint}, and registers both</li>
- *   <li>The mock {@code DefaultRouter} is reset and reconfigured to return routing
+ *   <li>The mock {@code RequestWorkerSelector} is reset and reconfigured to return routing
  *       responses that alternate between A and B</li>
  *   <li>Each routing response contains {@code ServerStatus} entries for the
  *       selected prefill worker and the shared decode worker</li>
@@ -69,11 +67,11 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
         workerBHttpPort = workerB.getHttpPort();
         workerBIpPort = workerIpPort(workerB);
 
-        // 2. Reconfigure DefaultRouter to alternate between worker A and B
+        // 2. Reconfigure RequestWorkerSelector to alternate between worker A and B
         AtomicInteger routeCounter = new AtomicInteger(0);
         reset(router);
-        when(router.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
+        when(router.select(any(RequestContext.class), any())).thenAnswer(inv -> {
+            RequestContext ctx = inv.getArgument(0);
             boolean useB = routeCounter.getAndIncrement() % 2 == 1;
             return admittedRoute(
                     ctx, buildRouteResponse(ctx.getRequestId(), useB));

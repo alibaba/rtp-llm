@@ -20,19 +20,12 @@ public final class PrefillPredictionBoundary {
         return predictedMs;
     }
 
-    /** Evaluate a group while retaining fractional milliseconds for planning. */
-    public static double predictDecisionGroupMs(
-            PrefillTimePredictor.Evaluator evaluator,
-            PrefillBatchFeatures features) {
-        return requireValidDecisionGroupMs(evaluator.predictBatchMs(features));
-    }
-
     /** Evaluate committed work and convert it to lifecycle milliseconds. */
     public static long predictCommittedBatchMs(
             PrefillTimePredictor.Evaluator evaluator,
             PrefillBatchFeatures features) {
         return committedDecisionGroupMs(
-                predictDecisionGroupMs(evaluator, features));
+                evaluator.predictBatchMs(features));
     }
 
     /** Convert an already planned group duration to lifecycle milliseconds. */

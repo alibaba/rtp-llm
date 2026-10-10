@@ -43,6 +43,49 @@ class EndpointRoundRobinTest {
         }
     }
 
+    @Test
+    void capturingOneSnapshotDoesNotBlockAnotherSelection() throws Exception {
+        var rotation = new EndpointRoundRobin();
+        var captureEntered = new java.util.concurrent.CountDownLatch(1);
+        var releaseCapture = new java.util.concurrent.CountDownLatch(1);
+        List<String> addresses = List.of("c", "a", "b");
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var delayed = executor.submit(() -> rotation.next(RoleType.PREFILL, "g", addresses.size(), i -> {
+                if (i == 0) {
+                    captureEntered.countDown();
+                    try { releaseCapture.await(); }
+                    catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IllegalStateException(interrupted);
+                    }
+                }
+                return true;
+            }, addresses::get));
+            try {
+                org.junit.jupiter.api.Assertions.assertTrue(captureEntered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+                var independent = executor.submit(() -> pick(rotation, "g", addresses));
+                assertEquals("a", independent.get(5, java.util.concurrent.TimeUnit.SECONDS));
+            } finally {
+                releaseCapture.countDown();
+            }
+            assertEquals("b", addresses.get(delayed.get(5, java.util.concurrent.TimeUnit.SECONDS)));
+        }
+    }
+
+    @Test
+    void emptyAndFailedCapturesDoNotAdvanceCursor() {
+        var rotation = new EndpointRoundRobin();
+        List<String> addresses = List.of("b", "a", "c");
+        assertEquals("a", pick(rotation, "g", addresses));
+        assertEquals(-1, rotation.next(RoleType.PREFILL, "g", addresses.size(), i -> false, addresses::get));
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> rotation.next(RoleType.PREFILL, "g", addresses.size(), i -> {
+                    if (i == 1) { throw new IllegalArgumentException("capture failed"); }
+                    return true;
+                }, addresses::get));
+        assertEquals("b", pick(rotation, "g", addresses));
+    }
+
     private static String pick(EndpointRoundRobin rotation, String group, List<String> candidates) {
         return candidates.get(rotation.next(RoleType.PREFILL, group, candidates.size(), i -> true, candidates::get));
     }

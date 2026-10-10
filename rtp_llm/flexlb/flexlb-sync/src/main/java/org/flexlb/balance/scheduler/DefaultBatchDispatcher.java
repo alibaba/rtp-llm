@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
@@ -10,11 +9,9 @@ import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.projection.RouteProjection;
-import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.constant.MetricConstant;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -28,11 +25,10 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArraySet;
@@ -46,6 +42,9 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.BiConsumer;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkState;
+
 /**
  * Default batch-submission execution adapter.
  * <p>
@@ -56,6 +55,37 @@ import java.util.function.BiConsumer;
  */
 @Component
 public class DefaultBatchDispatcher {
+
+    /**
+     * One executor-capacity permit prepared before commit. Successful submission
+     * transfers the permit to the executor; close then becomes a no-op. The
+     * strategy still owns the batch admission until Delivery runs and settles it.
+     */
+    public interface PreparedSubmission extends AutoCloseable {
+        void submit(Delivery delivery);
+
+        @Override
+        void close();
+    }
+
+    /** Runs once on the dispatch executor, with no further queue before send. */
+    @FunctionalInterface
+    public interface Delivery {
+        void run(BatchSender sender);
+    }
+
+    /** Transport consumes the strategy's final batch; it never selects members. */
+    @FunctionalInterface
+    public interface BatchSender {
+        void sendBatch(
+                List<RequestRoute> exactItems,
+                long batchId,
+                long predictedMs,
+                String decisionReason,
+                BiConsumer<RequestRoute, DeliveryResult> observer);
+    }
+
+
 
     private static final String METRIC_PREFIX = "flexlb.";
     private static final long EXECUTOR_KEEP_ALIVE_SECONDS = 60L;
@@ -76,7 +106,7 @@ public class DefaultBatchDispatcher {
     // Admission ends at RPC handoff; this separate count keeps the callback
     // executor alive while accepted RPCs are still awaiting completion.
     private final AtomicInteger pendingCompletions = new AtomicInteger();
-    private final MeterRegistry meterRegistry;
+    private final Object drain = new Object();
     private final ReentrantReadWriteLock admissionLifecycle =
             new ReentrantReadWriteLock(true);
     private final Lock admissionReadLock = admissionLifecycle.readLock();
@@ -109,19 +139,10 @@ public class DefaultBatchDispatcher {
     @Autowired
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
                                   @Autowired(required = false) MeterRegistry meterRegistry) {
-        this(grpcClient, configService, meterRegistry,
-                configService.loadBalanceConfig().getInternalRuntime()
-                        .getBatchDispatchThreads(),
-                configService.loadBalanceConfig().getInternalRuntime()
-                        .getBatchDispatchQueueCapacity());
-    }
-
-    /** Package-visible sizing injection keeps integration fixtures bounded and deterministic. */
-    DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                           MeterRegistry meterRegistry, int poolSize, int queueSize) {
+        int poolSize = configService.loadBalanceConfig().getInternalRuntime().getBatchDispatchThreads();
+        int queueSize = configService.loadBalanceConfig().getInternalRuntime().getBatchDispatchQueueCapacity();
         this.grpcClient = grpcClient;
         this.configService = configService;
-        this.meterRegistry = meterRegistry;
         this.admissionCapacity = Math.addExact(poolSize, queueSize);
         this.admissionPermits = new Semaphore(admissionCapacity);
         Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
@@ -135,16 +156,15 @@ public class DefaultBatchDispatcher {
                 new LinkedBlockingQueue<>(),
                 new NamedThreadFactory("flexlb-dispatch-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
-        int completionThreads = Math.max(1,
-                configService.loadBalanceConfig().getInternalRuntime()
-                        .getBatchDispatchCompletionThreads());
+        int completionThreads = configService.loadBalanceConfig().getInternalRuntime()
+                .getBatchDispatchCompletionThreads();
         this.completionExecutor = new ThreadPoolExecutor(
                 completionThreads, completionThreads,
                 EXECUTOR_KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
                 new LinkedBlockingQueue<>(),
                 new NamedThreadFactory("flexlb-dispatch-completion"),
                 new ThreadPoolExecutor.AbortPolicy());
-        registerMetrics();
+        registerMetrics(meterRegistry);
     }
 
     /**
@@ -160,7 +180,7 @@ public class DefaultBatchDispatcher {
      *
      * <p>When {@link MeterRegistry} is not available, metric registration is silently skipped.
      */
-    private void registerMetrics() {
+    private void registerMetrics(MeterRegistry meterRegistry) {
         if (meterRegistry == null) {
             Logger.info("MeterRegistry not available, skipping dispatch executor metrics");
             return;
@@ -194,9 +214,8 @@ public class DefaultBatchDispatcher {
         admissionReadLock.lock();
         try {
             if (!acceptingSubmissions) {
-                return rejectedFailure(
-                        new IllegalStateException(
-                                "batch dispatcher is shut down"));
+                return CapacityBoundary.Attempt.rejected(CapacityBoundary.failed(
+                        new IllegalStateException("batch dispatcher is shut down")));
             }
             if (!admissionPermits.tryAcquire()) {
                 return CapacityBoundary.Attempt.rejected(
@@ -209,12 +228,6 @@ public class DefaultBatchDispatcher {
         } finally {
             admissionReadLock.unlock();
         }
-    }
-
-    private static CapacityBoundary.Attempt<PreparedSubmission> rejectedFailure(
-            Throwable cause) {
-        return CapacityBoundary.Attempt.rejected(
-                CapacityBoundary.failed(cause));
     }
 
     @PreDestroy
@@ -230,6 +243,27 @@ public class DefaultBatchDispatcher {
             admissionWriteLock.unlock();
         }
         signalCapacityAvailable();
+    }
+
+    /** Stop admission and wait for submitted dispatches and RPC observers. */
+    void shutdownAndAwait() {
+        shutdown();
+        boolean interrupted = false;
+        synchronized (drain) {
+            while (admissionPermits.availablePermits() != admissionCapacity
+                    || pendingCompletions.get() != 0) {
+                try { drain.wait(); }
+                catch (InterruptedException ignored) { interrupted = true; }
+            }
+        }
+        tryShutdownExecutor();
+        while (!dispatchExecutor.isTerminated() || !completionExecutor.isTerminated()) {
+            try {
+                dispatchExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+                completionExecutor.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+            } catch (InterruptedException ignored) { interrupted = true; }
+        }
+        if (interrupted) { Thread.currentThread().interrupt(); }
     }
 
     private void releasePermit() {
@@ -250,6 +284,7 @@ public class DefaultBatchDispatcher {
                 && pendingCompletions.get() == 0) {
             dispatchExecutor.shutdown();
             completionExecutor.shutdown();
+            synchronized (drain) { drain.notifyAll(); }
         }
     }
 
@@ -277,7 +312,7 @@ public class DefaultBatchDispatcher {
                 new AtomicReference<>(PermitPhase.PREPARED);
 
         @Override
-        public void submit(BatchDeliveryStrategy.Delivery delivery) {
+        public void submit(DefaultBatchDispatcher.Delivery delivery) {
             Objects.requireNonNull(delivery, "delivery");
             if (!phase.compareAndSet(
                     PermitPhase.PREPARED, PermitPhase.SUBMITTED)) {
@@ -288,8 +323,7 @@ public class DefaultBatchDispatcher {
             try {
                 dispatchExecutor.execute(() -> {
                     try {
-                        delivery.run((items, batchId, predictedMs, reason, observer) ->
-                                doDispatch(dispatchTask(items, batchId, predictedMs, reason, observer)));
+                        delivery.run(DefaultBatchDispatcher.this::dispatchBatch);
                     } catch (Throwable deliveryFailure) {
                         // Delivery owns admission cleanup; do not infer a
                         // second per-request outcome from task failure.
@@ -320,169 +354,122 @@ public class DefaultBatchDispatcher {
         }
     }
 
-    private static DispatchTask dispatchTask(
-            List<ScheduledRequest> exactItems,
+    private void dispatchBatch(
+            List<RequestRoute> exactItems,
             long batchId,
             long predictedMs,
             String decisionReason,
-            BiConsumer<ScheduledRequest, DeliveryResult> observer) {
-        List<ScheduledRequest> frozenItems = List.copyOf(exactItems);
-        if (frozenItems.isEmpty()) {
-            throw new IllegalArgumentException("batch cannot be empty");
-        }
-        if (batchId <= 0L || predictedMs < 0L) {
-            throw new IllegalArgumentException(
-                    "batchId must be positive and predictedMs non-negative");
-        }
-        return new DispatchTask(
-                frozenItems,
-                frozenItems.getFirst().prefillEp(),
-                batchId,
-                predictedMs,
-                Objects.requireNonNull(decisionReason, "decisionReason"),
-                Objects.requireNonNull(observer, "observer"));
-    }
-
-    private record DispatchTask(List<ScheduledRequest> items,
-                                PrefillEndpoint prefillEndpoint,
-                                long batchId,
-                                long predictedMs,
-                                String reason,
-                                BiConsumer<ScheduledRequest,
-                                        DeliveryResult> observer) {
-    }
-
-    // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
-
-    private void doDispatch(DispatchTask task) {
-        DispatchAttempt attempt = new DispatchAttempt();
+            BiConsumer<RequestRoute, DeliveryResult> observer) {
+        List<RequestRoute> items = List.copyOf(exactItems);
+        checkArgument(!items.isEmpty(), "batch cannot be empty");
+        checkArgument(batchId > 0L && predictedMs >= 0L, "batchId must be positive and predictedMs non-negative");
+        Objects.requireNonNull(decisionReason, "decisionReason");
+        Objects.requireNonNull(observer, "observer");
+        boolean invoked = false;
         try {
-            doDispatchInternal(task, attempt);
-        } catch (Throwable unexpectedFailure) {
-            Logger.error("Unexpected dispatch failure batch_id={} rpc_invocation_started={}",
-                    task.batchId(), attempt.rpcInvocationStarted, unexpectedFailure);
-            if (attempt.rpcInvocationStarted) {
-                // Once invocation starts, cleanup is unsafe even if the
-                // exception escaped an otherwise defensive post-send path.
-                markUncertain(task.items(), task.batchId(),
-                        unexpectedFailure, task.observer());
-            } else {
-                failItems(task.items(), task.batchId(),
-                        unexpectedFailure, task.observer());
+            PrefillEndpoint endpoint = items.getFirst().prefillEp();
+            EngineRpcService.EnqueueBatchRequestPB request;
+            try {
+                request = buildBatchRequest(batchId, items);
+            } catch (Exception failure) {
+                throw new IllegalArgumentException("Batch request build failed: " + failure.getMessage(), failure);
             }
-        }
-    }
-
-    private void doDispatchInternal(DispatchTask task,
-                                    DispatchAttempt attempt) {
-        List<ScheduledRequest> items = task.items();
-        PrefillEndpoint prefillEp = task.prefillEndpoint();
-        long batchId = task.batchId();
-        BiConsumer<ScheduledRequest, DeliveryResult> observer =
-                task.observer();
-
-        // 1. Build gRPC request
-        EngineRpcService.EnqueueBatchRequestPB request;
-        try {
-            request = buildBatchRequest(batchId, items);
-        } catch (Exception e) {
-            Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(items, batchId,
-                    "Batch request build failed: " + e.getMessage(), observer);
-            return;
-        }
-
-        // 2. Log dispatch
-        try {
-            logDispatch(batchId, items, prefillEp,
-                    task.predictedMs(), task.reason());
-        } catch (Throwable loggingFailure) {
-            // Reporting is not part of transport ownership. A logger failure
-            // cannot turn an otherwise valid committed batch into a delivery
-            // failure.
-            Logger.warn("Batch dispatch logging failed batch_id={}",
-                    batchId, loggingFailure);
-        }
-
-        // 3. Send gRPC (async)
-        // Resolve every potentially fallible argument before entering the RPC
-        // invocation block. A failure here is definitely pre-send and is
-        // handled by doDispatch's outer guard.
-        requireBatchDispatcher();
-        String prefillIp = prefillEp.getIp();
-        int prefillGrpcPort = prefillEp.getGrpcPort();
-        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
-        try {
+            requireBatchDispatcher();
+            String ip = endpoint.getIp();
+            int port = endpoint.getGrpcPort();
+            // Recheck each exact claim at the RPC boundary, then remove refused members from the payload.
+            List<RequestRoute> sending = null;
+            for (int index = 0; index < items.size(); index++) {
+                RequestRoute item = items.get(index);
+                var claim = item.ctx().delivery();
+                if (claim != null && item.ctx().scheduler().tryStartSend(claim)) {
+                    if (sending != null) { sending.add(item); }
+                } else {
+                    if (sending == null) {
+                        sending = new ArrayList<>(items.size());
+                        sending.addAll(items.subList(0, index));
+                    }
+                    observer.accept(item, DeliveryResult.notSent(new java.util.concurrent.CancellationException("delivery abandoned before send")));
+                }
+            }
+            if (sending != null && sending.isEmpty()) { return; }
+            if (sending != null) {
+                java.util.Set<Long> ids = new java.util.HashSet<>();
+                sending.forEach(item -> ids.add(item.requestId()));
+                var filtered = request.toBuilder().clearDpSlots();
+                for (var slot : request.getDpSlotsList()) {
+                    var selected = slot.toBuilder().clearRequests();
+                    slot.getRequestsList().stream().filter(member -> ids.contains(member.getInput().getRequestId()))
+                            .forEach(selected::addRequests);
+                    if (selected.getRequestsCount() != 0) { filtered.addDpSlots(selected); }
+                }
+                request = filtered.build();
+                items = List.copyOf(sending);
+            }
+            try {
+                logDispatch(batchId, items, endpoint, predictedMs, decisionReason);
+            } catch (Throwable loggingFailure) {
+                logFailure("Batch dispatch logging failed", batchId, loggingFailure);
+            }
             long dispatchedNanos = System.nanoTime();
-            for (ScheduledRequest item : items) {
+            for (RequestRoute item : items) {
                 item.ctx().setBatchDispatchedNanos(dispatchedNanos);
                 FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.BATCH_ID, batchId);
                 FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.BATCH_SIZE,
                         (long) items.size());
-                FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.DISPATCH_REASON,
-                        task.reason());
+                FlexlbTrace.setScheduleAttribute(item.ctx().getTraceContext(), FlexlbTrace.DISPATCH_REASON, decisionReason);
             }
-            attempt.rpcInvocationStarted = true;
-            rpcFuture = grpcClient.batchEnqueueAsync(
-                    prefillIp, prefillGrpcPort, request);
-        } catch (Throwable invocationFailure) {
-            // Once client invocation starts, a synchronous exception does not
-            // prove that no bytes were written. Treat it as ambiguous.
-            markUncertain(items, batchId, invocationFailure, observer);
-            return;
-        }
-        if (rpcFuture == null) {
-            RuntimeException missingFuture = new RuntimeException(
+            invoked = true;
+            var response = Objects.requireNonNull(grpcClient.batchEnqueueAsync(ip, port, request),
                     "EnqueueBatch client returned null future after invocation");
-            markUncertain(items, batchId, missingFuture, observer);
-            return;
+            registerEnqueueBatchCallback(items, batchId, observer, response);
+        } catch (Throwable failure) {
+            logFailure("Batch dispatch failed", batchId, failure);
+            publishResult(items, batchId,
+                    invoked ? DeliveryResult.uncertain(failure) : DeliveryResult.notSent(failure), observer);
         }
-        // Increment while this dispatch still owns its admission permit. That
-        // prevents shutdown from observing both zero pending completions and
-        // all permits returned before the completion observer is registered.
+    }
+
+    /** Register EnqueueBatch result publication and track callback completion for shutdown. */
+    private void registerEnqueueBatchCallback(List<RequestRoute> items, long batchId,
+                                   BiConsumer<RequestRoute, DeliveryResult> observer,
+                                   CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> response) {
+        // The dispatch permit is still held: shutdown cannot pass this observer registration.
         pendingCompletions.incrementAndGet();
+        boolean registered = false;
         try {
-            CompletableFuture<Void> completionObserver = rpcFuture.handleAsync(
-                    (response, ex) -> {
-                        try {
-                            if (ex != null) {
-                                Throwable cause = unwrapCompletionFailure(ex);
-                                Logger.debug("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                                        batchId, prefillIp, prefillGrpcPort, cause.getMessage());
-                                // Once the asynchronous RPC is invoked, no
-                                // transport status proves the server did not
-                                // accept the request. Reconcile every transport
-                                // failure through the Engine-side request-id fence.
-                                markUncertain(items, batchId, cause, observer);
-                            } else if (response == null) {
-                                markUncertain(items, batchId, new RuntimeException(
-                                        "EnqueueBatch returned null response"), observer);
-                            } else {
-                                handleResponse(batchId, items, response, observer);
-                            }
-                        } catch (Throwable completionFailure) {
-                            // This callback is unconditionally post-invocation. Never
-                            // let an unexpected response-processing failure fall back
-                            // to definite failure/cleanup.
-                            markUncertain(items, batchId, completionFailure, observer);
-                        }
-                        return null;
-                    }, completionExecutor);
-            completionObserver.whenComplete((ignored, observerFailure) -> {
+            response.handleAsync((reply, failure) -> {
+                if (failure != null) {
+                    publishResult(items, batchId,
+                            DeliveryResult.uncertain(unwrapCompletionFailure(failure)), observer);
+                } else {
+                    handleResponse(batchId, items,
+                            Objects.requireNonNull(reply, "EnqueueBatch returned null response"), observer);
+                }
+                return null;
+            }, completionExecutor).whenComplete((ignored, failure) -> {
                 try {
-                    if (observerFailure != null) {
-                        markUncertain(items, batchId,
-                                unwrapCompletionFailure(observerFailure), observer);
+                    if (failure != null) {
+                        publishResult(items, batchId,
+                                DeliveryResult.uncertain(unwrapCompletionFailure(failure)), observer);
                     }
                 } finally {
                     finishCompletion();
                 }
             });
-        } catch (Throwable registrationFailure) {
-            finishCompletion();
-            // Callback registration is post-invocation. The RPC may already
-            // be in flight even though no completion observer was installed.
-            markUncertain(items, batchId, registrationFailure, observer);
+            registered = true;
+        } finally {
+            if (!registered) {
+                finishCompletion();
+            }
+        }
+    }
+
+    private static void logFailure(String operation, long batchId, Throwable failure) {
+        try {
+            Logger.error("{} batch_id={}", operation, batchId, failure);
+        } catch (Throwable ignored) {
+            // Logging cannot change transport ownership or interrupt remaining item callbacks.
         }
     }
 
@@ -494,115 +481,63 @@ public class DefaultBatchDispatcher {
     private void requireBatchDispatcher() {
         DispatcherConfig dispatcher =
                 configService.loadBalanceConfig().getDispatcher();
-        if (dispatcher.getType() == DispatcherConfig.Type.BATCH) {
-            return;
-        }
-        throw new IllegalStateException(
+        checkState(dispatcher.getType() == DispatcherConfig.Type.BATCH,
                 "batch submission requires BATCH dispatcher configuration");
     }
 
-    private static void markUncertain(List<ScheduledRequest> items, long batchId,
-                                      Throwable error,
-                                      BiConsumer<ScheduledRequest,
-                                              DeliveryResult> observer) {
-        for (ScheduledRequest item : items) {
+    /** Publish the same transport fact to every member, isolating each observer. */
+    private static void publishResult(List<RequestRoute> items, long batchId,
+                                      DeliveryResult result,
+                                      BiConsumer<RequestRoute, DeliveryResult> observer) {
+        for (RequestRoute item : items) {
             try {
-                observer.accept(
-                        item, DeliveryResult.uncertain(error));
+                observer.accept(item, result);
             } catch (Throwable callbackFailure) {
-                Logger.error("Dispatch-uncertain callback failed request_id={} batch_id={}",
-                        item.requestId(), batchId, callbackFailure);
-            }
-        }
-    }
-
-    private void failItems(List<ScheduledRequest> items,
-                           long batchId, String message,
-                           BiConsumer<ScheduledRequest,
-                                   DeliveryResult> observer) {
-        failItems(items, batchId, new RuntimeException(message), observer);
-    }
-
-    private void failItems(List<ScheduledRequest> items,
-                           long batchId, Throwable error,
-                           BiConsumer<ScheduledRequest,
-                                   DeliveryResult> observer) {
-        for (ScheduledRequest item : items) {
-            try {
-                observer.accept(
-                        item, DeliveryResult.notSent(error));
-            } catch (Throwable callbackFailure) {
-                Logger.error("Dispatch-failure callback failed request_id={} batch_id={}",
-                        item.requestId(), batchId, callbackFailure);
+                logFailure("Dispatch callback failed request_id=" + item.requestId(), batchId, callbackFailure);
             }
         }
     }
 
     // ==================== Response parsing ====================
 
-    private void handleResponse(long batchId, List<ScheduledRequest> items,
+    private void handleResponse(long batchId, List<RequestRoute> items,
                                 EngineRpcService.EnqueueBatchResponsePB response,
-                                BiConsumer<ScheduledRequest,
+                                BiConsumer<RequestRoute,
                                         DeliveryResult> observer) {
         if (response.getBatchId() != batchId) {
             RuntimeException mismatch = new RuntimeException(
                     "EnqueueBatch batch_id mismatch: expected " + batchId
                             + " but got " + response.getBatchId());
-            markUncertain(items, batchId, mismatch, observer);
+            publishResult(items, batchId, DeliveryResult.uncertain(mismatch), observer);
             return;
         }
-        Set<Long> expectedIds = new HashSet<>();
+        Map<Long, DeliveryResult> acknowledgements = HashMap.newHashMap(items.size());
         List<String> protocolViolations = new ArrayList<>();
-        for (ScheduledRequest item : items) {
-            expectedIds.add(item.requestId());
+        for (RequestRoute item : items) {
+            acknowledgements.put(item.requestId(), null);
         }
-
-        Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId =
-                new HashMap<>();
-        for (EngineRpcService.EnqueueBatchErrorPB error : response.getErrorsList()) {
-            long requestId = error.getRequestId();
-            if (!expectedIds.contains(requestId)) {
-                protocolViolations.add(
-                        "error references unknown request_id=" + requestId);
-            }
-            if (errorByRequestId.putIfAbsent(requestId, error) != null) {
-                protocolViolations.add(
-                        "duplicate error for request_id=" + requestId);
-            }
+        for (var error : response.getErrorsList()) {
+            long code = error.hasErrorInfo() ? error.getErrorInfo().getErrorCode() : 0L;
+            String message = error.hasErrorInfo() ? error.getErrorInfo().getErrorMessage() : "missing error_info";
+            acknowledge(acknowledgements, error.getRequestId(), DeliveryResult.prefillRejected(new RuntimeException(
+                    "EnqueueBatch rejected request " + error.getRequestId() + " error_code=" + code + ": " + message)),
+                    protocolViolations);
         }
-        Set<Long> successIds = new HashSet<>();
-        for (EngineRpcService.EnqueueBatchSuccessPB success : response.getSuccessesList()) {
-            long requestId = success.getRequestId();
-            if (!expectedIds.contains(requestId)) {
-                protocolViolations.add(
-                        "success references unknown request_id=" + requestId);
-            }
-            if (!successIds.add(requestId)) {
-                protocolViolations.add(
-                        "duplicate success for request_id=" + requestId);
-            }
+        for (var success : response.getSuccessesList()) {
+            acknowledge(acknowledgements, success.getRequestId(), DeliveryResult.delivered(), protocolViolations);
         }
-        for (Long requestId : successIds) {
-            if (errorByRequestId.containsKey(requestId)) {
-                protocolViolations.add(
-                        "request_id appears in both success and error: "
-                                + requestId);
+        acknowledgements.forEach((requestId, result) -> {
+            if (result == null) {
+                protocolViolations.add("response is missing request_id=" + requestId);
             }
-        }
-        for (Long requestId : expectedIds) {
-            if (!successIds.contains(requestId)
-                    && !errorByRequestId.containsKey(requestId)) {
-                protocolViolations.add(
-                        "response is missing request_id=" + requestId);
-            }
-        }
+        });
         if (!protocolViolations.isEmpty()) {
-            markUncertain(
+            publishResult(
                     items,
                     batchId,
-                    new RuntimeException(
+                    DeliveryResult.uncertain(new RuntimeException(
                             "Malformed EnqueueBatch response: "
-                                    + String.join("; ", protocolViolations)),
+                                    + String.join("; ", protocolViolations))),
                     observer);
             return;
         }
@@ -610,117 +545,82 @@ public class DefaultBatchDispatcher {
         // Record a validated RPC response before callbacks can publish a
         // Schedule response and end the request's SERVER span.
         long responseNanos = System.nanoTime();
-        for (ScheduledRequest item : items) {
+        for (RequestRoute item : items) {
             FlexlbTrace.setScheduleDuration(item.ctx().getTraceContext(), FlexlbTrace.ENQUEUE_BATCH_MS,
                     item.ctx().getBatchDispatchedNanos(), responseNanos);
+        }
+        for (RequestRoute item : items) {
             try {
-                if (successIds.contains(item.requestId())) {
-                    observer.accept(
-                            item,
-                            DeliveryResult.delivered());
-                } else if (errorByRequestId.containsKey(item.requestId())) {
-                    EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
-                    long errorCode = error.hasErrorInfo()
-                            ? error.getErrorInfo().getErrorCode()
-                            : 0L;
-                    String errorMessage = error.hasErrorInfo()
-                            ? error.getErrorInfo().getErrorMessage()
-                            : "missing error_info";
-                    observer.accept(
-                            item,
-                            DeliveryResult.prefillRejected(
-                                    new RuntimeException(
-                                            "EnqueueBatch rejected request "
-                                                    + item.requestId()
-                                                    + " error_code=" + errorCode
-                                                    + ": " + errorMessage)));
-                } else {
-                    observer.accept(
-                            item,
-                            DeliveryResult.uncertain(
-                                    new RuntimeException(
-                                            "EnqueueBatch missing ack for request "
-                                                    + item.requestId())));
-                }
+                observer.accept(item, acknowledgements.get(item.requestId()));
             } catch (Throwable callbackFailure) {
                 // The callback may already have committed this item's state
                 // before throwing. Never issue a second, contradictory
                 // callback for it, and never let it reclassify earlier items.
-                Logger.error("EnqueueBatch item callback failed request_id={} batch_id={}",
-                        item.requestId(), batchId, callbackFailure);
+                logFailure("EnqueueBatch callback failed request_id=" + item.requestId(), batchId, callbackFailure);
             }
+        }
+    }
+
+    /** Null is an expected member awaiting ACK; a result can be installed exactly once. */
+    private static void acknowledge(Map<Long, DeliveryResult> acknowledgements, long requestId,
+                                    DeliveryResult result, List<String> violations) {
+        String kind = result.status() == DeliveryResult.Status.DELIVERED ? "success" : "error";
+        if (!acknowledgements.containsKey(requestId)) {
+            violations.add(kind + " references unknown request_id=" + requestId);
+        }
+        DeliveryResult previous = acknowledgements.putIfAbsent(requestId, result);
+        if (previous != null) {
+            violations.add(previous.status() == result.status()
+                    ? "duplicate " + kind + " for request_id=" + requestId
+                    : "request_id appears in both success and error: " + requestId);
         }
     }
 
     // ==================== gRPC request building ====================
 
-    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<ScheduledRequest> items)
-            throws InvalidProtocolBufferException {
+    private EngineRpcService.EnqueueBatchRequestPB buildBatchRequest(long batchId, List<RequestRoute> items)
+            throws InvalidProtocolBufferException, InterruptedException {
         EngineRpcService.EnqueueBatchRequestPB.Builder builder =
                 EngineRpcService.EnqueueBatchRequestPB.newBuilder()
                         .setBatchId(batchId)
-                        .setFetchAttachTimeoutMs(configService.loadBalanceConfig()
-                                .getDispatcher().getFetchAttachTimeoutMs());
+                        .setFetchAttachTimeoutMs(items.getFirst().ctx().getConfig().getDispatcher().getFetchAttachTimeoutMs());
         BatchRoleAddressCache roleAddresses = new BatchRoleAddressCache();
-        if (!items.isEmpty()) {
-            long dpRank = items.get(0).prefill().getDpRank();
-            boolean singleDpRank = true;
-            for (int i = 1; i < items.size(); i++) {
-                if (items.get(i).prefill().getDpRank() != dpRank) {
-                    singleDpRank = false;
-                    break;
+        long firstRank = items.getFirst().prefill().getDpRank();
+        var firstSlot = EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank((int) firstRank);
+        Map<Long, EngineRpcService.EnqueueBatchDpSlotPB.Builder> slots = null;
+        for (RequestRoute item : items) {
+            long rank = item.prefill().getDpRank();
+            var slot = firstSlot;
+            if (rank != firstRank) {
+                if (slots == null) {
+                    slots = new TreeMap<>();
+                    slots.put(firstRank, firstSlot);
                 }
+                slot = slots.computeIfAbsent(rank, key ->
+                        EngineRpcService.EnqueueBatchDpSlotPB.newBuilder().setDpRank(key.intValue()));
             }
-            if (singleDpRank) {
-                builder.addDpSlots(buildDpSlot(dpRank, items, roleAddresses));
-                return builder.build();
-            }
+            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
+                    .setInput(buildInput(item, roleAddresses)));
         }
-
-        Map<Long, List<ScheduledRequest>> byDpRank = new HashMap<>();
-        for (ScheduledRequest item : items) {
-            byDpRank.computeIfAbsent(item.prefill().getDpRank(), ignored -> new ArrayList<>()).add(item);
-        }
-        List<Map.Entry<Long, List<ScheduledRequest>>> ranks =
-                new ArrayList<>(byDpRank.entrySet());
-        ranks.sort(Map.Entry.comparingByKey());
-        for (Map.Entry<Long, List<ScheduledRequest>> entry : ranks) {
-            builder.addDpSlots(buildDpSlot(
-                    entry.getKey(), entry.getValue(), roleAddresses));
+        if (slots == null) {
+            builder.addDpSlots(firstSlot);
+        } else {
+            slots.values().forEach(builder::addDpSlots);
         }
         return builder.build();
     }
 
-    private EngineRpcService.EnqueueBatchDpSlotPB buildDpSlot(
-            long dpRank,
-            List<ScheduledRequest> items,
-            BatchRoleAddressCache roleAddresses)
-            throws InvalidProtocolBufferException {
-        EngineRpcService.EnqueueBatchDpSlotPB.Builder slot =
-                EngineRpcService.EnqueueBatchDpSlotPB.newBuilder()
-                        .setDpRank((int) dpRank);
-        for (ScheduledRequest item : items) {
-            slot.addRequests(EngineRpcService.EnqueueBatchExternalInputPB.newBuilder()
-                    .setInput(buildInput(item, roleAddresses))
-                    .build());
-        }
-        return slot.build();
-    }
-
     private EngineRpcService.GenerateInputPB buildInput(
-            ScheduledRequest item,
+            RequestRoute item,
             BatchRoleAddressCache roleAddresses)
-            throws InvalidProtocolBufferException {
-        ByteString generateInput = item.ctx().getGenerateInputPb();
-        if (generateInput == null || generateInput.isEmpty()) {
+            throws InvalidProtocolBufferException, InterruptedException {
+        EngineRpcService.GenerateInputPB generateInput = item.ctx().getGenerateInput();
+        if (generateInput == null) {
             throw new IllegalArgumentException("generateInputPb is missing for request " + item.requestId());
         }
-        EngineRpcService.GenerateInputPB.Builder input =
-                EngineRpcService.GenerateInputPB.newBuilder();
-        input.mergeFrom(generateInput);
-        if (input.getRequestId() != item.requestId()) {
-            throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
-        }
+        EngineRpcService.GenerateInputPB.Builder input = generateInput.toBuilder();
+        checkArgument(input.getRequestId() == item.requestId(),
+                "request_id mismatch between schedule request and GenerateInputPB");
         // This batch RPC carries independent requests. Propagate each Schedule
         // parent in its own payload, never in the shared RPC metadata.
         if (FlexlbTrace.isEnabled() && item.ctx().getTraceContext() != null) {
@@ -740,25 +640,24 @@ public class DefaultBatchDispatcher {
         }
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
         config.clearRoleAddrs();
-        addRoleAddr(config, roleAddresses.prefill(item.prefill()));
-        addRoleAddr(config, roleAddresses.decode(item.decode()));
-        // Pass the normalized Auto-TPM priority through to the engine
-        // (metrics tagging only). normalize() always sets 1-100, so every
-        // dispatched request carries its priority into the proto field.
-        Request request = item.ctx().getRequest();
-        if (request != null) {
-            input.setPriority(request.getPriority());
-        }
+        roleAddresses.prefill = addRoleAddr(config, item.prefill(), roleAddresses.prefill);
+        roleAddresses.decode = addRoleAddr(config, item.decode(), roleAddresses.decode);
+        // Preserve the priority frozen for Decode admission, including the zero sentinel.
+        input.setPriority(item.priority());
         return input.build();
     }
 
-    private static void addRoleAddr(
+    private static EngineRpcService.RoleAddrPB addRoleAddr(
             EngineRpcService.GenerateConfigPB.Builder config,
-            EngineRpcService.RoleAddrPB roleAddress) {
-        if (roleAddress == null) {
-            return;
+            ServerStatus status,
+            EngineRpcService.RoleAddrPB cached) {
+        if (status != null) {
+            if (cached == null || !sameRoleAddr(cached, status)) {
+                cached = buildRoleAddr(status);
+            }
+            config.addRoleAddrs(cached);
         }
-        config.addRoleAddrs(roleAddress);
+        return cached;
     }
 
     private static EngineRpcService.RoleAddrPB buildRoleAddr(ServerStatus serverStatus) {
@@ -776,8 +675,7 @@ public class DefaultBatchDispatcher {
             EngineRpcService.RoleAddrPB cached,
             ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
-        return cached.getRole() == RoleTypeProtoConverter.toLegacyProto(role)
-                && cached.getRoleStr().equals(role.getCode())
+        return cached.getRoleStr().equals(role.getCode())
                 && cached.getIp().equals(serverStatus.getServerIp())
                 && cached.getHttpPort() == serverStatus.getHttpPort()
                 && cached.getGrpcPort() == serverStatus.getGrpcPort();
@@ -787,31 +685,11 @@ public class DefaultBatchDispatcher {
     private static final class BatchRoleAddressCache {
         private EngineRpcService.RoleAddrPB prefill;
         private EngineRpcService.RoleAddrPB decode;
-
-        private EngineRpcService.RoleAddrPB prefill(ServerStatus serverStatus) {
-            if (serverStatus == null) {
-                return null;
-            }
-            if (prefill == null || !sameRoleAddr(prefill, serverStatus)) {
-                prefill = buildRoleAddr(serverStatus);
-            }
-            return prefill;
-        }
-
-        private EngineRpcService.RoleAddrPB decode(ServerStatus serverStatus) {
-            if (serverStatus == null) {
-                return null;
-            }
-            if (decode == null || !sameRoleAddr(decode, serverStatus)) {
-                decode = buildRoleAddr(serverStatus);
-            }
-            return decode;
-        }
     }
 
     // ==================== Logging ====================
 
-    private void logDispatch(long batchId, List<ScheduledRequest> items,
+    private void logDispatch(long batchId, List<RequestRoute> items,
                              PrefillEndpoint prefillEp, long predMs, String reason) {
         if (!Logger.isDebugEnabled()) {
             return;
@@ -820,7 +698,7 @@ public class DefaultBatchDispatcher {
         long totalHit = 0;
         StringBuilder itemDetail = new StringBuilder();
         for (int i = 0; i < items.size(); i++) {
-            ScheduledRequest item = items.get(i);
+            RequestRoute item = items.get(i);
             long seqLen = item.seqLen();
             long hitCache = item.hitCache();
             totalTokens += seqLen;
@@ -833,7 +711,7 @@ public class DefaultBatchDispatcher {
                     .append(" hit_cache=").append(hitCache).append('}');
         }
 
-        ScheduledRequest head = items.get(0);
+        RequestRoute head = items.get(0);
         long now = System.currentTimeMillis();
         long waitMs = now - head.enqueuedAtMs();
         long remainingMs = head.expiresAtMs() - now;
@@ -847,8 +725,4 @@ public class DefaultBatchDispatcher {
                 itemDetail);
     }
 
-    /** Per-dispatch phase marker used only by the executor thread. */
-    private static final class DispatchAttempt {
-        private boolean rpcInvocationStarted;
-    }
 }
