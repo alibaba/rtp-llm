@@ -415,7 +415,8 @@ class CacheGateTest(unittest.TestCase):
         import sys
         from cases.cache_scale_in.replay import cache_main as main
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "evidence.json"
+            source = Path(directory) / "source" / "evidence.json"
+            source.parent.mkdir()
             source.write_text(json.dumps(self.evidence()))
             frozen = source.read_bytes()
             destination = Path(directory) / "new"

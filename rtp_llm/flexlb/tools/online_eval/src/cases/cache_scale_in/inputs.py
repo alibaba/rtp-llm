@@ -145,13 +145,11 @@ def observation_contract(data):
 
 
 FIELDS = PROCEDURE_FIELDS | OBSERVATION_FIELDS | {"baseline_s", "observe_s"} | CHECK_FIELDS | {"flow", "qps"}
-INTERMEDIATE_FIELDS = {"intermediate_p", "intermediate_hold_s"}
-OPTIONAL_FIELDS = INTERMEDIATE_FIELDS
 
 
 def validate_criteria(params, plan):
     p = validate_fields(
-        params, plan, FIELDS | OPTIONAL_FIELDS | {"gate_input"}, FIELDS | {"gate_input"}
+        params, plan, FIELDS | {"gate_input"}, FIELDS | {"gate_input"}
     )
     from cases.cache_scale_in.inputs import engine_counters
     engine_counters(p["gate_input"])
@@ -168,26 +166,6 @@ def validate_criteria(params, plan):
             raise ValueError(k + " must be a positive integer")
     if not 1 <= p["target_p"] < plan.environment["n_prefill"] <= 512:
         raise ValueError("scale-in requires fewer target P and at most 512 initial P")
-    if INTERMEDIATE_FIELDS & p.keys():
-        if not INTERMEDIATE_FIELDS <= p.keys():
-            raise ValueError(
-                "intermediate P and hold duration must be specified together"
-            )
-        if (
-            type(p["intermediate_p"]) is not int
-            or not p["target_p"]
-            < p["intermediate_p"]
-            < plan.environment["n_prefill"]
-        ):
-            raise ValueError(
-                "intermediate P must lie strictly between initial and target P"
-            )
-        hold = p["intermediate_hold_s"]
-        if (
-            not finite_number(hold)
-            or hold < p["baseline_s"]
-        ):
-            raise ValueError("intermediate hold must cover a full baseline window")
     for k in (
         "qps_tolerance",
         "baseline_min_hit",

@@ -20,11 +20,8 @@ def cache_main():
     parser.add_argument("--client-snapshot", type=Path,
                         help="complete java_flow evidence_snapshot JSON for historical attribution")
     args = parser.parse_args()
-    evidence = json.loads(args.evidence.read_text())
-    if not args.reinterpret:
-        parser.error("offline adjudication requires --reinterpret; comparisons use frozen bundles")
-    if args.output.exists() and any(args.output.iterdir()):
-        parser.error("reinterpretation requires an empty output directory; frozen reports cannot be overwritten")
+    from workload.reinterpretation import load_reinterpretation, import_metrics
+    evidence = load_reinterpretation(parser, args, cache_analysis.__file__)
     original_errors = list(evidence.get("errors", []))
     if args.client_snapshot:
         snapshot = json.loads(args.client_snapshot.read_text())
@@ -33,10 +30,7 @@ def cache_main():
         else:
             evidence.setdefault("errors", []).append("issued send accounting incomplete")
         attribute_client(evidence, snapshot)
-    evidence["reinterpretation"] = dict(
-        source=str(args.evidence.resolve()),
-        source_sha256=hashlib.sha256(args.evidence.read_bytes()).hexdigest(),
-        analyzer_sha256=hashlib.sha256(Path(cache_analysis.__file__).read_bytes()).hexdigest(),
+    evidence["reinterpretation"].update(
         client_snapshot=(dict(path=str(args.client_snapshot.resolve()),
                               sha256=hashlib.sha256(args.client_snapshot.read_bytes()).hexdigest())
                          if args.client_snapshot else None),
@@ -48,9 +42,7 @@ def cache_main():
     )
     args.output.mkdir(parents=True, exist_ok=True)
     result = analyze(evidence)
-    from monitoring.metric_store import export_metrics
-    from monitoring.query_plan import load_plan
-    export_metrics(args.output, load_plan("cache_scale_in.yaml"), archive_directory=args.evidence.parent)
+    import_metrics(args.output, args.evidence.parent, "cache_scale_in.yaml")
     publish_cache(args.output, evidence, result,
                  prepared=prepare_report(args.output, evidence))
     print(result["verdict"])

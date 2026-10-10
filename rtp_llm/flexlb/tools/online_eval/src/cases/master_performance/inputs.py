@@ -23,6 +23,7 @@ NUMERIC_PARAMETERS = {
     **JAVA_FLOW_NUMBERS,
     **CAPTURE_NUMBERS,
     **number_fields(NONNEGATIVE,
+        'procedure.analysis_timeout_s',
         'checks.e2e.expected',
         'checks.engine_tps.rtp_llm_context_tps.expected',
         'checks.engine_tps.rtp_llm_context_tps_with_cache.expected',

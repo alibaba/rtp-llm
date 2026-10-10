@@ -115,12 +115,13 @@ def test_ha_metrics_use_explicit_targets_and_topology():
 def test_performance_cli_replays_evidence_explicitly():
     evidence = performance_evidence()
     with tempfile.TemporaryDirectory() as directory:
-        source = Path(directory)/'input.json'
+        source = Path(directory)/'source'/'input.json'
+        source.parent.mkdir()
         source.write_text(json.dumps(evidence))
         original = source.read_bytes()
         output = Path(directory)/'output'
         process = subprocess.run([sys.executable, str(ROOT/'scripts/commands/analyze_performance.py'),
-                                  str(source), '--output', str(output), '--json-only'],
+                                  str(source), '--reinterpret', '--output', str(output), '--json-only'],
                                  text=True, capture_output=True)
         assert process.returncode == 0, process.stderr
         assert json.loads(process.stdout) == analyze_performance(evidence)

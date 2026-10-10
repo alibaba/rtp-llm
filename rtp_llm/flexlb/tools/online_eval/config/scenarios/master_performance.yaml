@@ -64,6 +64,8 @@ parameters:
     poll_s: 0.1
     jvm_xms: 8g
     jvm_xmx: 8g
+  procedure:
+    analysis_timeout_s: 165
   observation:
     sample_s: 1
     max_gap_s: 3

@@ -7,7 +7,7 @@ from reporting.run_context import title
 from reporting.view_sections import view_details, view_table
 
 
-def write_report(directory, evidence, result, telemetry_directory=None):
+def write_report(directory, evidence, result):
     from reporting.view_config import view
 
     presentation = view("master_performance.yaml")
@@ -16,8 +16,7 @@ def write_report(directory, evidence, result, telemetry_directory=None):
     p = evidence.get("provenance", {})
     from cases.master_performance.panels import prepare_curves, report_panels
 
-    metric_directory = Path(telemetry_directory or directory)
-    curves, monitoring = prepare_curves(metric_directory, evidence, presentation)
+    curves, monitoring = prepare_curves(directory, evidence, presentation)
     panels = report_panels(curves, evidence.get("criteria", {}), presentation)
     spec = dict(
         run_id=p["instance"],

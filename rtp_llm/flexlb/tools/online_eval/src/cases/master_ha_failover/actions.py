@@ -137,18 +137,32 @@ class OwnedHaClient:
         )
 
     def cleanup(self, deadline):
-        sampler = getattr(self.flow, "state_sampler", None)
-        if sampler is not None:
-            sampler.stop()
-        process = self.flow.proc
-        if process is not None:
+        from runtime.cleanup import cleanup_all
+
+        def stop_client():
+            process = self.flow.proc
+            if process is None:
+                return
             if process.alive():
                 process.proc.terminate()
                 try:
                     process.proc.wait(timeout=min(2, deadline.remaining()))
-                except subprocess.TimeoutExpired:
+                except (subprocess.TimeoutExpired, TimeoutError):
                     process.proc.kill()
-            process.proc.wait(timeout=deadline.remaining())
+            try:
+                remaining = deadline.remaining()
+            except TimeoutError:
+                # Cancellation must still reach the owned process when the
+                # cleanup deadline expired before this callback was invoked.
+                process.proc.wait(timeout=0)
+                raise
+            process.proc.wait(timeout=remaining)
+
+        sampler = getattr(self.flow, "state_sampler", None)
+        operations = [("HA client", stop_client)]
+        if sampler is not None:
+            operations.append(("HA state sampler", sampler.stop))
+        cleanup_all(operations)
 
     def finish(self, deadline, *, stop_sending=False):
         if self.flow.proc is None:

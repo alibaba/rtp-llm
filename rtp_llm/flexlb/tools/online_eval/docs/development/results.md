@@ -47,6 +47,6 @@ workload 默认交付一份主报告。专属视图包含门禁、有效性、�
 
 `compare_runs.py` 校验并展示冻结 run bundle，不重新分析原始证据，不产生整体 verdict。对比退出码只说明报告是否生成成功。配置、负载、拓扑、窗口及模型差异逐项展示；来源缺失标 UNKNOWN，不据此认定一致。曲线单位或口径不一致时独立展示。
 
-`analyze_performance.py` 从完整冻结请求证据显式复算，PASS/FAIL/INVALID 分别返回 0/1/2。`reinterpret_cache.py` 还要求 `--reinterpret` 与新的空输出目录；可用 `--client-snapshot` 补充完整历史请求归属。新产物记录源证据和分析器 SHA，保留历史能力限制，不能凭现有配置补造旧观察。
+`analyze_performance.py` 从完整冻结请求证据显式复算，PASS/FAIL/INVALID 分别返回 0/1/2。两个入口都遵守[报告契约](../architecture/reporting.md)中的显式重判、输出目录保护与溯源规则。`reinterpret_cache.py` 可用 `--client-snapshot` 补充完整历史请求归属；历史能力限制必须保留，不能凭现有配置补造旧观察。
 
 对比和离线命令见[命令入口](entrypoints.md)；报告写入及交互契约见[报告装配](../architecture/reporting.md)。
