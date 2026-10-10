@@ -153,7 +153,7 @@ class InstanceRunnerTest(unittest.TestCase):
         self.assertIn(f"planned reports {identity}: master_ha_core.yaml", self.stdout)
 
         paths = {
-            "workload.yaml": "/tmp/run/reports/run/default/report.html",
+            "default.yaml": "/tmp/run/reports/run/default/report.html",
             "master_ha_core.yaml": "/tmp/run/reports/run/ha-core/report.html",
         }
 

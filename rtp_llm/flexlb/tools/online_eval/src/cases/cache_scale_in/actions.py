@@ -136,6 +136,7 @@ def observe(ctx, p, deadline):
     origin = ctx.clock()
     evidence = dict(
         measurement_policy=MEASUREMENT_POLICY,
+        observation_origin_epoch_s=time.time(),
         criteria={k: v for k, v in p.items() if k not in ("flow", "gate_input")},
         gate_input=p["gate_input"],
         samples=[],
@@ -187,7 +188,7 @@ def observe(ctx, p, deadline):
 
     def event(name):
         evidence["events"].append(
-            dict(name=name, t=ctx.clock() - origin, epoch_s=time.time())
+            dict(ctx.record_event(name), t=ctx.clock() - origin)
         )
 
     def sample():

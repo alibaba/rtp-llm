@@ -28,7 +28,7 @@ class ReportComparisonTest(unittest.TestCase):
         result = dict(verdict=verdict, metrics=dict(latency=value), criteria=dict(limit=20))
         spec = dict(title=name, subtitle=verdict, timeOriginLabel='run start',
                     timeAxis=dict(min=0, max=30),
-                    events=[] if event is None else [dict(name='checkpoint', t=event)],
+                    events=[] if event is None else [dict(id='checkpoint', name='checkpoint', epoch_s=1000+event, t=event)],
                     kpis=[dict(label='run verdict', value=verdict)],
                     sections=[dict(type='details', title='missing samples', value=['latency gap'])],
                     panels=[dict(id='latency', title='Latency', type='line', unit=unit, timeX=True,
@@ -183,7 +183,7 @@ class ReportComparisonTest(unittest.TestCase):
         paths, expected = [], []
         for name, hit in (('a', .1), ('b', .8)):
             e = cache_fixtures.CacheGateTest().evidence(hit)
-            e['events'] = [dict(name='checkpoint', t=20)]
+            e['events'] = [dict(id='checkpoint', name='checkpoint', epoch_s=1020, t=20)]
             result = analyze_cache(e)
             expected.append(result)
             root = self.root/name

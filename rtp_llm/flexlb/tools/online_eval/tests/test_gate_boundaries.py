@@ -143,16 +143,19 @@ def test_report_finalizer_is_a_registered_program_capability():
 
 
 def test_registered_view_extension_needs_no_workload_case_branch():
-    from cases.registry import VIEW_KINDS
+    from cases.registry import VIEW_RENDERERS, VIEW_VALIDATORS
     from workload.report import write_views
 
     render = mock.Mock(return_value=Path('/unused/new/report.html'))
     validator = mock.Mock()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        (root/'another.yaml').write_text('report_view_schema_version: 1\nkind: another\nreport:\n  subtitle: explanation\n')
-        extension = dict(validator='test_extension.validate', renderer='test_extension.render')
-        with mock.patch.dict(VIEW_KINDS, {'another': extension}), \
+        from reporting.view_config import view
+        import yaml
+        definition = view('master_ha_core.yaml')
+        (root/'another.yaml').write_text(yaml.safe_dump(definition))
+        with mock.patch.dict(VIEW_RENDERERS, {'another.yaml': 'test_extension.render'}), \
+             mock.patch.dict(VIEW_VALIDATORS, {'another.yaml': 'test_extension.validate'}), \
              mock.patch('reporting.view_config.VIEWS', root), \
              mock.patch('reporting.view_config.load_capability', return_value=validator), \
              mock.patch('workload.report.load_capability', return_value=render):

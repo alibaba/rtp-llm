@@ -73,7 +73,7 @@ def attribute_client(evidence, snapshot):
                for group in ("survivor", "removed", "unknown")}
     failures, invalid, before_removal = [], [], []
     withdrawal = min((event["epoch_s"] * 1000 for event in evidence.get("events", [])
-                      if event.get("name") in {"withdraw_start", "intermediate_withdraw_start"}),
+                      if event.get("id") in {"withdraw_start", "intermediate_withdraw_start"}),
                      default=None)
     closed_at = {r.get("engine"): r.get("admission", {}).get("admission_closed_epoch_ms")
                  for r in evidence.get("removals", [])}

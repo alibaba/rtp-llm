@@ -17,6 +17,9 @@ def validate(spec, *, versioned=False):
     if (versioned or version_fields(spec)) and not matches_schema(
             spec, "report_spec_schema_version", REPORT_SPEC_SCHEMA_VERSION):
         raise ValueError("unsupported report spec version")
+    if "timeOriginEpochS" in spec and not _finite(spec["timeOriginEpochS"]):
+        raise ValueError("invalid report time origin")
+    _validate_events(spec.get("events", []))
     if spec.get("timeAxis") is not None:
         bounds = spec["timeAxis"]
         if (not isinstance(bounds, dict) or not _finite(bounds.get("min"))
@@ -28,6 +31,7 @@ def validate(spec, *, versioned=False):
         if identity in ids:
             raise ValueError("duplicate panel id: " + identity)
         ids.add(identity)
+        _validate_events(panel.get("events", []))
         kind = panel.get("type", "line")
         if kind not in {"line", "bar", "scatter"}:
             raise ValueError("unsupported panel type")
@@ -54,3 +58,12 @@ def validate(spec, *, versioned=False):
                             or not (_finite(point["x"]) or not panel.get("timeX") and type(point["x"]) is str)
                             or point["y"] is not None and not _finite(point["y"])):
                         raise ValueError(f"panel {identity}: invalid {field} coordinate")
+
+
+def _validate_events(events):
+    if not isinstance(events, list) or any(
+        not isinstance(event, dict) or type(event.get("id")) is not str or not event["id"]
+        or type(event.get("name")) is not str or not event["name"] or not _finite(event.get("t"))
+        for event in events
+    ):
+        raise ValueError("report events require id, name and finite time")

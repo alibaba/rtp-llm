@@ -31,8 +31,7 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
         del style['metric_id']
     else:
         style['metric_id'] = metric_id
-    # HA requires an exact field set; produced views check the shared binding.
-    message = 'invalid HA metric presentation' if filename == 'master_ha_core.yaml' and metric_id is None else 'curve must bind'
+    message = 'curve must bind'
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match=message):
             view(filename)

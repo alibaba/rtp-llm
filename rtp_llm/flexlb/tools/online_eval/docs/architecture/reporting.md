@@ -1,6 +1,6 @@
 # 报告契约
 
-报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、配对、spec 校验、renderer 与 bundle 校验。case 视图种类通过 `cases.registry.VIEW_KINDS` 注册校验和渲染实现；YAML 只能引用视图文件，不能指定 Python 模块。
+报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、配对、spec 校验、renderer 与 bundle 校验。case 视图按文件名通过 `cases.registry.VIEW_VALIDATORS`、`VIEW_RENDERERS` 注册校验和渲染实现；YAML 只能引用视图文件，不能指定 Python 模块。
 
 ## 输入与装配
 
@@ -8,7 +8,7 @@
 
 | 块 | 职责 |
 |---|---|
-| `kind` | 由 Python 注册的视图能力；不能在 YAML 指定模块 |
+| `kind` | `default` 展示全部已归档指标，`selected` 展示 YAML 选择的指标；不能在 YAML 指定 Python 模块 |
 | `report` | `subtitle`；已生产报告另声明 `id`、`producer`，用于定位和校验 bundle |
 | `metrics` | `query_plan` 选择指标集合；`diagnostic_only` 明确哪些已采指标不绘图 |
 | `charts` | `curves`、`panels`、事件显示名和时间轴文案；全量视图在这里声明分组、采样和曲线可见性 |
@@ -20,9 +20,17 @@
 
 视图不声明运行元信息，不用固定字符串宣称采样或来源；运行信息由归档的 `run_meta` 提供，曲线来源由冻结的 provenance 提供。新增展示项放入相应块并同时补充 Python 字段合同，不保留旧扁平字段或转换适配器。
 
-报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标契约](metrics.md)，主报告、全量 opt-in 和产物清单见[结果与指标](../development/results.md#收取产物)。
+报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标契约](metrics.md)，主报告、默认视图和产物清单见[结果与指标](../development/results.md#收取产物)。
 
 所有生产器直接输出同一 panel 契约：声明 `axes`，每条 series 携带 `points: [{x, y}]`；`timeX: true` 表示时间坐标，缺采以 `y: null` 保留。类目图的 `x` 是字符串，数值图的 `x` 是数值。`spec.py` 严格校验输入，不接受旧的 `x`/`xNums` + `series.data` 或显示模式标志，也不执行格式转换。`pairing.py` 可按归档事件或相对秒平移序列，差值只在同一时刻两侧都有值时产生，不补缺采。
+
+## 事件
+
+事件标记使用稳定 ID，显示文案不参与匹配或对齐。`charts.events.<id>` 声明 `label` 和 `source`：阶段边界使用 `source: stage`、`stage`、`boundary: start | end`；case 内事件使用 `source: case`、`event`。编译时校验阶段引用，阶段边界由运行框架自动记录；复杂程序在真实事件发生处调用 `ctx.record_event(id)`。归档保存事件 ID、epoch 秒与 monotonic 秒；阶段结束记录还保留状态，失败标记附带状态文案，阶段结束不代表操作成功。
+
+`charts.event_ids` 显式声明所有面板的事件选择；`charts.panels[].event_ids` 可以覆盖它，空列表表示该面板不显示事件。未选中事件仍保留在运行证据中，不在图上绘制；未发生的事件不补造。默认视图的指标面板共享它声明的事件选择。
+
+公共投影按真实 `epoch_s` 和图表的 `timeOriginEpochS` 计算相对秒，冻结到 spec 的 `events` 与各 panel 的 `events`。专属图表可使用自己的观测或测量原点，重新装配不得改成 workload 原点。事件源缺少有效时间直接失败，不读取日志、文件或其他来源兜底。对照报告按事件 ID 对齐；同 ID 多次发生时不能推断唯一对齐点。
 
 ## Bundle 与发现
 
@@ -30,7 +38,7 @@
 
 `kind` 为 run 或 comparison，表示单 run 或运行对照；`role` 由生产者明确声明。`discover_reports(root, kind=..., role=...)` 按这两个字段发现并校验报告，不从目录名猜测。门禁使用 `role="gate"`。
 
-生产阶段未完成的失败运行生成精简报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
+生产阶段未完成的失败运行生成默认报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
 
 通用 bundle 外的输入保真度诊断由 `reporting/traffic_fidelity.py` 生成 `fidelity.html`，提供阈值、ECDF 与联合密度交互；它不参与运行门禁或 bundle 发现。
 

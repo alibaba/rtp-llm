@@ -7,7 +7,7 @@ from unittest import mock
 
 from cases.config import configure_program
 from reporting import discover_reports, load_analysis, read_bundle, write_bundle
-from reporting.view_config import DEFAULT_VIEW, CHECKS_VIEW, declaration, view
+from reporting.view_config import DEFAULT_VIEW, declaration, view
 from scenario.loader import ScenarioError, load_document
 from workload.report import write_report, write_views
 from workload.report_panels import build_panels
@@ -78,7 +78,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             produce(root, analysis)
             requests.unlink()
             state.unlink()
-            paths = write_views(root, analysis, ["workload.yaml", "master_ha_core.yaml"])
+            paths = write_views(root, analysis, ["default.yaml", "master_ha_core.yaml"])
             path = paths["master_ha_core.yaml"]
             spec = json.loads((path.parent / "report-spec.json").read_text())
             panels = {panel["id"]: panel for panel in spec["panels"]}
@@ -100,7 +100,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual(5, spec["timeAxis"]["max"])
             self.assertEqual(spec["title"], "master_ha_failover : default : batch-window")
             self.assertEqual(spec["subtitle"], view("master_ha_core.yaml")["report"]["subtitle"])
-            default = json.loads((paths["workload.yaml"].parent / "report-spec.json").read_text())
+            default = json.loads((paths["default.yaml"].parent / "report-spec.json").read_text())
             self.assertNotIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
 
     def test_ha_balance_chart_matches_five_second_gate_window(self):
@@ -189,14 +189,14 @@ class WorkloadReportViewsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             gate = write_bundle(d, "run", "cache-scale-in", {"verdict": "PASS", "threshold": 0.5},
                          dict(title="Gate evidence", timeAxis=dict(min=0, max=2),
-                              timeOriginLabel="observation", panels=[dict(
+                              timeOriginLabel="observation", timeOriginEpochS=10, panels=[dict(
                                   id="gate", title="All", timeX=True,
                                   axes={"count": {}, "ratio": {}, "queue": {}}, series=curves,
                               )]), producer="cache-gate", role="gate")
             data = payload({'1/mock/running/{"engine_name":"p0"}': [[0, 1]]},
                            discover_reports(d, role="gate"))
-            links = write_views(d, data, ["workload.yaml", "cache_scale_in_overview.yaml"])
-            default = links["workload.yaml"].parent
+            links = write_views(d, data, ["default.yaml", "cache_scale_in_overview.yaml"])
+            default = links["default.yaml"].parent
             self.assertEqual(links["cache_scale_in_overview.yaml"].resolve(),
                              (gate / "report.html").resolve())
             read_bundle(default)
@@ -207,10 +207,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_missing_view_source_and_invalid_declarations_fail_loud(self):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(OSError):
-            write_views(d, payload(), ["workload.yaml", "cache_scale_in_overview.yaml"])
-        for names in ([], ["missing.yaml", "workload.yaml"], ["../workload.yaml"],
-                      ["workload.yaml", "workload.yaml"],
-                      ["workload.yaml", {"action": "render"}]):
+            write_views(d, payload(), ["default.yaml", "cache_scale_in_overview.yaml"])
+        for names in ([], ["missing.yaml", "default.yaml"], ["../default.yaml"],
+                      ["default.yaml", "default.yaml"],
+                      ["default.yaml", {"action": "render"}]):
             with self.subTest(names=names), self.assertRaises(ScenarioError):
                 declaration(names, kind="workload")
         with self.assertRaisesRegex(ScenarioError, "test.kind=workload"):
@@ -222,15 +222,15 @@ class WorkloadReportViewsTest(unittest.TestCase):
             data.update(status="TIMEOUT", checks=[])
             data["workload"]["runtime_validity"] = "INVALID"
             paths = write_views(d, data, ["cache_scale_in_overview.yaml"])
-            self.assertEqual({CHECKS_VIEW}, set(paths))
-            frozen = load_analysis(paths[CHECKS_VIEW].parent)
+            self.assertEqual({DEFAULT_VIEW}, set(paths))
+            frozen = load_analysis(paths[DEFAULT_VIEW].parent)
             self.assertEqual("TIMEOUT", frozen["status"])
             self.assertEqual("INVALID", frozen["workload"]["runtime_validity"])
             self.assertEqual("NOT_PRODUCED", frozen["unavailable_report_views"][0]["status"])
             self.assertEqual(data["series"], frozen["series"])
             self.assertNotIn("verdict", frozen)
             self.assertFalse((Path(d) / "reports/run/cache-scale-in").exists())
-            self.assertIn("未生成的报告视角", paths[CHECKS_VIEW].read_text())
+            self.assertIn("未生成的报告视角", paths[DEFAULT_VIEW].read_text())
 
     def test_failed_run_does_not_hide_corrupt_produced_report(self):
         with tempfile.TemporaryDirectory() as d:
@@ -240,7 +240,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             data = payload()
             data["status"] = "ERROR"
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
-                write_views(d, data, ["workload.yaml", "cache_scale_in_overview.yaml"])
+                write_views(d, data, ["default.yaml", "cache_scale_in_overview.yaml"])
 
     def test_performance_report_title_follows_frozen_run_identity(self):
         from cases.master_performance.report import write_report as report
@@ -255,7 +255,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 dict(curve_id="mock/rtp_llm_generate_tps_engine_mean/D", metric_id="mock/rtp_llm_generate_tps_engine_mean/D", name="D detail", group="Decode 逐引擎 TPS", axis="forward", hidden=True, points=[]),
             ]), {}),
         ):
-            bundle = report(d, {"criteria": {"measure_s": 1},
+            bundle = report(d, {"criteria": {"measure_s": 1}, "window": {"start_epoch_ms": 0},
                                 "provenance": {"instance": "master_performance::default::single-nonbatch"}},
                             {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}, "windows": []})
             spec = json.loads((bundle / "report-spec.json").read_text())

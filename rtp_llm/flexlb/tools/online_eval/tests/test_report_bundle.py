@@ -144,11 +144,13 @@ class ReportBundleTest(unittest.TestCase):
         self.assertEqual(counter_delta([10, None]), (None, "MISSING_COUNTER"))
 
     def test_shared_pairing_supports_stage_and_event_anchors_without_zero_fill(self):
-        self.assertEqual(event_anchor([dict(name="start", t=12)], "start"), 12)
-        self.assertIsNone(event_anchor([dict(name="start", t=12), dict(name="start", t=13)], "start"))
-        panel = dict(timeX=True, series=[dict(name="hit", color="#123456",
+        self.assertEqual(event_anchor([dict(id="start", name="start", t=12)], "start"), 12)
+        self.assertIsNone(event_anchor([dict(id="start", name="start", t=12), dict(id="start", name="start", t=13)], "start"))
+        panel = dict(timeX=True, events=[dict(id="start", name="开始", t=12)], series=[dict(name="hit", color="#123456",
                                   points=[dict(x=12, y=None), dict(x=13, y=2)])])
         aligned = shifted_panel(panel, 12)
+        self.assertEqual(panel["events"][0]["t"], 12)
+        self.assertEqual(aligned["events"][0]["t"], 0)
         self.assertEqual(panel["series"][0]["points"][0]["x"], 12)
         self.assertEqual(aligned["series"][0]["points"],
                          [dict(x=0, y=None), dict(x=1, y=2)])

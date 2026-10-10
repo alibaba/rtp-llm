@@ -49,12 +49,12 @@ def test_nested_blocks_are_not_an_unvalidated_options_bag(block, key):
                                      {'report_view_schema_version': True},
                                      {'report_view_schema_version': 1.0}])
 def test_view_loader_rejects_other_version_one_formats(header):
-    data = copy.deepcopy(view('execution.yaml'))
+    data = copy.deepcopy(view('default.yaml'))
     data.pop('report_view_schema_version')
     data.update(header)
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='version'):
-            view('execution.yaml')
+            view('default.yaml')
 
 
 @pytest.mark.parametrize('filename, key', [

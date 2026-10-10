@@ -16,7 +16,7 @@
 
 ## 收取产物
 
-workload 默认交付一份主报告，专属视图包含门禁、有效性、运行信息与相关曲线；未声明视图时生成 `execution.yaml` 精简报告。只有显式选择 `workload.yaml` 才生成全量指标 HTML。运行前用 `--dry-run` 或 YAML 的 `reports` 查看视图，运行后以 `result.json → workload.report` 定位主报告，**遍历 `workload.reports`（视图文件名 → HTML 绝对路径）取齐所有报告**。stdout 也枚举该清单。功能实例读取执行结果报告。
+workload 默认交付一份主报告。专属视图包含门禁、有效性、运行信息与所选曲线；未声明视图时生成 `default.yaml`，没有归档序列时不生成指标面板，有序列时展示全部已归档指标。专属视图不会附带额外默认报告；需要全指标诊断时显式追加 `default.yaml`。运行前用 `--dry-run` 或 YAML 的 `reports` 查看视图，运行后以 `result.json → workload.report` 定位主报告，**遍历 `workload.reports`（视图文件名 → HTML 绝对路径）取齐所有报告**。stdout 也枚举该清单。功能实例读取执行结果报告。
 
 | 产物 | 用途 |
 |---|---|

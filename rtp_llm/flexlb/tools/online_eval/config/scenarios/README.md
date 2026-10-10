@@ -6,4 +6,4 @@
 
 `test.monitoring.query_plan` 选择[指标集合](../monitoring/README.md)，公共集合为 `config/monitoring/default.yaml`。
 
-`reports` 选择报告视图。未声明 workload 视图时生成精简门禁报告；全量视图 `workload.yaml` 需显式选择。运行后遍历 `result.json → workload.reports` 取齐 HTML，见[结果与指标](../../docs/development/results.md#收取产物)。
+`reports` 选择报告视图。未声明时使用 `default.yaml`，按归档数据决定是否显示指标；声明专属视图时只生成所选报告。运行后遍历 `result.json → workload.reports` 取齐 HTML，见[结果与指标](../../docs/development/results.md#收取产物)。

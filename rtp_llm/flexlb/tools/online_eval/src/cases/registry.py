@@ -20,15 +20,13 @@ def finalize_reports(program, directory):
         finalizer(directory)
 
 
-VIEW_KINDS = {
-    "ha": {
-        "validator": "cases.master_ha_failover.view.validate",
-        "renderer": "cases.master_ha_failover.report.write_report",
-    },
+VIEW_RENDERERS = {
+    "master_ha_core.yaml": "cases.master_ha_failover.report.write_report",
 }
 
 
 VIEW_VALIDATORS = {
+    "master_ha_core.yaml": "cases.master_ha_failover.report.validate_view",
     "cache_scale_in_overview.yaml": "cases.cache_scale_in.report.validate_view",
     "master_performance.yaml": "cases.master_performance.report.validate_view",
 }

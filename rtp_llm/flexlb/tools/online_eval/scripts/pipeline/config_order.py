@@ -15,7 +15,7 @@ VIEW_FIELDS = ('report_view_schema_version', 'kind', 'report', 'metrics', 'chart
 VIEW_BLOCK_FIELDS = {
     ('report',): ('subtitle', 'id', 'producer'),
     ('metrics',): ('query_plan', 'diagnostic_only'),
-    ('charts',): ('time_origin_label', 'events', 'curves', 'panels', 'group_by',
+    ('charts',): ('time_origin_label', 'events', 'event_ids', 'curves', 'panels', 'group_by',
                   'detail_labels', 'summaries', 'default_visible', 'max_points_per_series', 'presets'),
 }
 BLOCK_FIELDS = {

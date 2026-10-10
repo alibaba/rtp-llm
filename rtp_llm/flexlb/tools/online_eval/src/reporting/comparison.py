@@ -154,6 +154,8 @@ def compare(paths, output, *, alignment_event=None):
             continue
         overlay = copy.deepcopy(first)
         overlay.update(id="overlay:" + key, title="合图 · " + key)
+        overlay["events"] = [dict(event, name=label + " · " + event["name"])
+                             for label, panel, _ in group for event in panel.get("events", [])]
         # The shared multi-curve renderer preserves line styles and presets.
         overlay["series"], overlay["presets"] = paired_overlay(
             [p for _, p, _ in group], labels=[label for label, _, _ in group],
@@ -176,7 +178,7 @@ def compare(paths, output, *, alignment_event=None):
     spec = dict(
         title="运行报告对照", subtitle="展示归档时冻结的数据与各 run 独立结论。",
         timeOriginLabel=caption, timeAxis=dict(min=min(bounds, default=0), max=max(max(bounds, default=1), min(bounds, default=0) + 1)),
-        events=[dict(name=alignment_event, t=0)] if aligned else [],
+        events=[dict(id=alignment_event, name=alignment_event, t=0)] if aligned else [],
         panels=overlays + panels, kpis=kpis,
         sections=[details("控制变量（以 A 为参照）", result["controls"]),
                   details("时间轴对齐", time_alignment), details("图表配对", pairing), *sections],

@@ -26,6 +26,8 @@ def prepare_report(directory, evidence):
     audit = []
     found = set()
     for key, points in series.items():
+        if sources[key]["source_type"] != "prometheus":
+            continue
         _, source, metric, label_json = key.split("/", 3)
         if metric == "up":
             continue
@@ -144,13 +146,12 @@ def build_spec(directory, evidence, result, prepared):
     sources, gaps, errors = (prepared[key] for key in ("sources", "gaps", "errors"))
     monitoring_status = prepared["monitoring_status"]
     monitor_warnings = prepared["monitor_warnings"]
-    return dict(
+    spec = dict(
         run_id=evidence["provenance"]["instance"],
         title=title(evidence["provenance"]["instance"]),
         subtitle=presentation["report"]["subtitle"].format(
             verdict=result["verdict"], monitoring_status=monitoring_status),
         timeOriginLabel=presentation["charts"]["time_origin_label"],
-        events=evidence.get("events", []),
         kpis=[
             dict(label=KPI_LABELS["verdict"], value=result["verdict"]),
             dict(label=KPI_LABELS["monitoring"], value=monitoring_status,
@@ -169,6 +170,9 @@ def build_spec(directory, evidence, result, prepared):
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
+    from reporting.events import attach_events
+    origin = rows[0]["epoch_s"] - rows[0]["t"] if rows else evidence["observation_origin_epoch_s"]
+    return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
 
 
 def write_report(directory, evidence, result, prepared=None):
@@ -215,6 +219,8 @@ def validate_view(path, data, fail):
 
     if "time_origin_label" not in data["charts"]:
         fail(str(path) + ".charts", "cache view requires time_origin_label")
+    if "diagnostic_only" not in data["metrics"]:
+        fail(path, "selected gate views require diagnostic_only classification")
     validate_section_contract(path, data, {
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,

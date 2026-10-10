@@ -72,7 +72,7 @@ def test_named_collections_keep_their_order():
   panels:
   - id: second
     curve_ids: [second, first]
-kind: produced
+kind: selected
 report_view_schema_version: 1
 report:
   subtitle: selected

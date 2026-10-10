@@ -303,6 +303,7 @@ def analyze_report(directory, result, evidence):
         stages=result["stages"],
         clock_anchor=evidence["clock_anchor"],
         phases=evidence["phases"],
+        events=evidence.get("events", []),
         series=series,
         statistic_sources=statistic_sources,
         request_sources=[],

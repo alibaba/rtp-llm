@@ -1,5 +1,5 @@
 report_view_schema_version: 1
-kind: produced
+kind: selected
 report:
   subtitle: '{verdict}'
   id: master-performance
@@ -42,6 +42,20 @@ metrics:
   - mock/simulated_decode_ms_avg
   - mock/waiting_sum
 charts:
+  events:
+    measure_start:
+      label: 测量阶段开始
+      source: stage
+      stage: measure
+      boundary: start
+    measure_end:
+      label: 测量阶段结束
+      source: stage
+      stage: measure
+      boundary: end
+  event_ids:
+  - measure_start
+  - measure_end
   curves:
     mock/rtp_llm_context_tps_engine_mean/P:
       metric_id: mock/rtp_llm_context_tps_engine_mean

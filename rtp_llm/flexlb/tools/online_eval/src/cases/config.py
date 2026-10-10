@@ -264,7 +264,7 @@ def _variant_test(config, builder, source):
     test = normalize_test(copy.deepcopy(config.get("test", {})))
     if builder.metric_dependencies:
         _bind_metric_dependencies(builder.metric_dependencies, test)
-    _bind_reports(config, test, source)
+    _bind_reports(config, test, source, builder.steps)
     return test
 
 
@@ -282,7 +282,7 @@ def _bind_metric_dependencies(requirements, test):
             raise ScenarioError("metric dependency unit, mode or identity labels mismatch: " + metric_id)
 
 
-def _bind_reports(config, test, source):
+def _bind_reports(config, test, source, stages):
     from reporting.view_config import declaration
 
     reports = config.get("reports") if test["kind"] == "workload" else None
@@ -293,7 +293,10 @@ def _bind_reports(config, test, source):
         from reporting.view_config import view
 
         for report_name in reports:
-            required_plan = view(report_name).get("metrics", {}).get("query_plan")
+            presentation = view(report_name)
+            from reporting.events import validate_stage_sources
+            validate_stage_sources(presentation, {stage["id"] for stage in stages}, source + ".reports")
+            required_plan = presentation.get("metrics", {}).get("query_plan")
             if required_plan and required_plan != test["monitoring"].get("query_plan"):
                 raise ScenarioError(
                     f"{source}.reports: {report_name} requires monitoring query plan {required_plan}"

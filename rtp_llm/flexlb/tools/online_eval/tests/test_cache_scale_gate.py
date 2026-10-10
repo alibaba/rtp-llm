@@ -370,7 +370,7 @@ class CacheGateTest(unittest.TestCase):
                 row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1",
                                                 waiting=9999, admission_open=0)
         self.assertTrue(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
-        evidence["events"] = [dict(name="withdraw_start", epoch_s=1020)]
+        evidence["events"] = [dict(id="withdraw_start", epoch_s=1020)]
         records = [dict(rid=1, prefill="p1", status="exception", error="removed",
                         send_start_epoch_ms=1021000, total_ms=200)]
         attribute_client(evidence, dict(complete=True, records=records))

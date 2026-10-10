@@ -11,7 +11,9 @@ from workload.run_provenance import collect
 
 
 def analysis():
-    return dict(id="case::variant::profile", status="FAIL", series={"raw": [[0, None], [1, 3]]},
+    return dict(id="case::variant::profile", status="FAIL", series={'1/mock/qps/{"role":"prefill"}': [[0, None], [1, 3]]},
+                statistic_sources={'1/mock/qps/{"role":"prefill"}': dict(unit="requests/s")},
+                clock_anchor=dict(epoch_s=10),
                 workload={"runtime_validity": "VALID"},
                 checks=[dict(stage="end", id="inflight", status="PASS",
                              actual={"endpoint_loads": {"PREFILL": [0] * 125, "DECODE": [0] * 536}},
@@ -20,15 +22,15 @@ def analysis():
 
 
 class ReportPresentationTest(unittest.TestCase):
-    def test_default_is_single_small_report_with_complete_frozen_data(self):
+    def test_default_is_single_report_with_all_archived_metrics(self):
         with tempfile.TemporaryDirectory() as directory:
             source = analysis()
             paths = write_views(directory, source)
-            self.assertEqual(["execution.yaml"], list(paths))
+            self.assertEqual(["default.yaml"], list(paths))
             self.assertEqual([str(next(iter(paths.values())).resolve())], discover_reports(directory))
             bundle = read_bundle(next(iter(paths.values())))
             spec = json.loads((bundle / "report-spec.json").read_text())
-            self.assertEqual([], spec["panels"])
+            self.assertEqual(1, len(spec["panels"]))
             self.assertEqual("case : variant : profile", spec["title"])
             self.assertEqual(source["series"], load_analysis(bundle)["series"])
             self.assertEqual("FAIL", load_analysis(bundle)["status"])
@@ -42,12 +44,12 @@ class ReportPresentationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             original = {"verdict": "FAIL", "checks": [], "threshold": 0.3}
             bundle = write_bundle(directory, "run", "cache-scale-in", original,
-                                  dict(title="old", panels=[], kpis=[]),
+                                  dict(title="old", panels=[], kpis=[], timeOriginEpochS=10),
                                   producer="cache-gate", role="gate")
             source = analysis()
             with mock.patch("workload.report.build_panels", return_value=[]):
-                paths = write_views(directory, source, ["workload.yaml", "cache_scale_in_overview.yaml"])
-            self.assertEqual(["cache_scale_in_overview.yaml", "workload.yaml"], list(paths))
+                paths = write_views(directory, source, ["default.yaml", "cache_scale_in_overview.yaml"])
+            self.assertEqual(["cache_scale_in_overview.yaml", "default.yaml"], list(paths))
             frozen = load_analysis(bundle)
             self.assertEqual(original, {key: frozen[key] for key in original})
             self.assertEqual(source, frozen["run"])

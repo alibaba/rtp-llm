@@ -256,6 +256,7 @@ class WorkloadPolicy:
             instance_id=result["id"],
             clock_anchor=self.anchor,
             phases=self.events,
+            events=ctx.report_events,
             request_resources=records,
             incomplete_request_resources=incomplete,
             expected_telemetry=self.expected_telemetry,
@@ -312,6 +313,9 @@ class WorkloadPolicy:
         analysis = analyze_report(ctx.artifact_dir, result, payload)
         from monitoring.producers import produce
         produce(ctx.artifact_dir, analysis)
+        from monitoring.metric_store import MetricStore
+        analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
+            self.anchor["epoch_s"])
         view_links = write_views(ctx.artifact_dir, analysis, self.reports)
         result["workload"]["report"] = str(next(iter(view_links.values())))
         result["workload"]["reports"] = {name: str(path) for name, path in view_links.items()}

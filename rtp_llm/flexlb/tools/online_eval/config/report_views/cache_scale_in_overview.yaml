@@ -1,5 +1,5 @@
 report_view_schema_version: 1
-kind: produced
+kind: selected
 report:
   subtitle: '{verdict} · monitoring {monitoring_status}'
   id: cache-scale-in
@@ -37,6 +37,48 @@ metrics:
   - mock/rejected_rpcs_total
 charts:
   time_origin_label: Seconds since observation began
+  events:
+    warmup_start:
+      label: 预热开始
+      source: case
+      event: warmup_start
+    baseline_ready:
+      label: 基线就绪
+      source: case
+      event: baseline_ready
+    intermediate_withdraw_start:
+      label: 中间撤出开始
+      source: case
+      event: intermediate_withdraw_start
+    intermediate_topology_observed:
+      label: 中间拓扑已观测
+      source: case
+      event: intermediate_topology_observed
+    withdraw_start:
+      label: 目标撤出开始
+      source: case
+      event: withdraw_start
+    target_topology_observed:
+      label: 目标拓扑已观测
+      source: case
+      event: target_topology_observed
+    observation_end:
+      label: 观测结束
+      source: case
+      event: observation_end
+    sending_stopped:
+      label: 发流停止
+      source: case
+      event: sending_stopped
+  event_ids:
+  - warmup_start
+  - baseline_ready
+  - intermediate_withdraw_start
+  - intermediate_topology_observed
+  - withdraw_start
+  - target_topology_observed
+  - observation_end
+  - sending_stopped
   curves:
     mock/running_avg:
       metric_id: mock/running_avg

@@ -104,8 +104,13 @@ class MetricStore:
         for observations in self.document["metrics"].values():
             for row in observations:
                 key = row.get("series_key")
-                if key is None or not row["points"]:
+                if not row["points"]:
                     continue
+                if key is None:
+                    key = "/".join((str(row["epoch"]), row["source"], row["metric_id"],
+                                    json.dumps(row["labels"], sort_keys=True)))
+                if key in series:
+                    raise MetricContractError("duplicate archived series key: " + key)
                 series[key] = [[t - anchor, value] for t, value in row["points"]]
                 sources[key] = dict(row["provenance"], metric_id=row["metric_id"],
                                     unit=self.document["definitions"][row["metric_id"]]["unit"])

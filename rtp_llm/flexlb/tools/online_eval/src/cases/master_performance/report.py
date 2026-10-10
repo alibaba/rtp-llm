@@ -43,6 +43,9 @@ def write_report(directory, evidence, result, telemetry_directory=None):
             view_details(presentation, "metrics", result["metrics"]),
         ],
     )
+    from reporting.events import attach_events
+    attach_events(spec, presentation, origin=evidence["window"]["start_epoch_ms"] / 1000,
+                  phases=evidence.get("phases", []), events=evidence.get("events", []))
     return write_bundle(
         directory,
         "run",
@@ -77,6 +80,8 @@ def refresh_report(directory):
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
+    if "diagnostic_only" not in data["metrics"]:
+        fail(path, "selected gate views require diagnostic_only classification")
     validate_section_contract(path, data, {
         "checks": 4, "monitoring": None, "validity": None, "metrics": None,
     }, fail)

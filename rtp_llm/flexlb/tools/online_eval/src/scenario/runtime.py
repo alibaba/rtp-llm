@@ -89,10 +89,20 @@ class RuntimeContext:
         self.env_epoch = 0
         self.env = self.ops = None
         self.outputs = {}
+        self.report_events = []
         self._resources = {}
         self._cleanup = []
         self.cleanup_results = []
         self.enforce_deadlines = enforce_deadlines
+
+    def record_event(self, identity):
+        """Record the actual case event time; presentation names belong to views."""
+        import re
+        if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", identity):
+            raise ValueError("invalid case event identity")
+        event = dict(id=identity, epoch_s=time.time(), monotonic_s=self.clock())
+        self.report_events.append(event)
+        return dict(event)
 
     def add_cleanup(self, name, callback):
         self._cleanup.append((name, callback))

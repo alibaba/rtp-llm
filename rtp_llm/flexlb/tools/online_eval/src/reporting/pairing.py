@@ -8,7 +8,7 @@ def event_anchor(events, name):
     """Return a unique finite event time, or None when alignment is unavailable."""
     if name is None:
         return None
-    times = [event.get("t") for event in events if event.get("name") == name]
+    times = [event.get("t") for event in events if event.get("id") == name]
     if len(times) != 1 or type(times[0]) not in (int, float) or not math.isfinite(times[0]):
         return None
     return times[0]
@@ -19,6 +19,8 @@ def shifted_panel(panel, anchor):
     result = copy.deepcopy(panel)
     if anchor is None or not panel.get("timeX"):
         return result
+    for event in result.get("events", []):
+        event["t"] -= anchor
     for series in result.get("series", []):
         if series.get("points") is not None:
             for point in series["points"]:

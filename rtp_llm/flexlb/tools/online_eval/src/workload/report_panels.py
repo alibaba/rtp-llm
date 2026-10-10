@@ -27,10 +27,11 @@ def _sample(points, limit):
 
 
 def _identity(key):
-    parts = key.split("/", 3)
-    if len(parts) != 4:
+    parts = key.split("/", 2)
+    if len(parts) != 3 or "/" not in parts[2]:
         raise ValueError("invalid archived series key: " + key)
-    epoch, source, metric, raw_labels = parts
+    epoch, source, tail = parts
+    metric, raw_labels = tail.rsplit("/", 1)
     if not raw_labels.startswith("{"):
         return (epoch, source, metric + "/" + raw_labels), {}
     labels = json.loads(raw_labels)

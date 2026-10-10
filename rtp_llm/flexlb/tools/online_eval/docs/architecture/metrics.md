@@ -26,7 +26,7 @@ Prometheus 查询的完整 ID 由 `sources` 的来源种类和查询键组成；
 
 ## 指标集合与查询
 
-场景通过 `test.monitoring.query_plan` 选择 `config/monitoring/` 中的集合。`default.yaml` 是公共默认集合，case 集合通过 `include` 引用；它与 `config/report_views/workload.yaml` 全量诊断视图是独立配置。默认集合的文件名由 `monitoring.query_plan.DEFAULT_PLAN` 声明。
+场景通过 `test.monitoring.query_plan` 选择 `config/monitoring/` 中的集合。`default.yaml` 是公共默认集合，case 集合通过 `include` 引用；它与 `config/report_views/default.yaml` 全量诊断视图是独立配置。默认集合的文件名由 `monitoring.query_plan.DEFAULT_PLAN` 声明。
 
 ```yaml
 metric_plan_schema_version: 2

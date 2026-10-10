@@ -42,19 +42,13 @@ def validate_structure(path, data, fail):
                 fail(location, "invalid section columns")
 
 
-def validate_checks(path, data, fail):
-    if (set(data) != {"report_view_schema_version", "kind", "report"}
-            or data["kind"] != "checks" or set(data["report"]) != {"subtitle"}):
-        fail(path, "invalid execution view")
-
-
 def validate_default(path, data, fail):
     if (set(data) != {"report_view_schema_version", "kind", "report", "charts"}
             or data["kind"] != "default" or set(data["report"]) != {"subtitle"}):
         fail(path, "invalid default view")
     charts = data["charts"]
     required = {"group_by", "detail_labels", "summaries", "default_visible", "max_points_per_series", "presets"}
-    if set(charts) != required:
+    if set(charts) - {"events", "event_ids"} != required:
         fail(str(path) + ".charts", "invalid default chart fields")
     if charts["group_by"] != ["epoch", "source", "metric"]:
         fail(path, "default view must retain metric identity")
@@ -125,7 +119,7 @@ def validate_panels(path, data, metrics, fail):
 
 def validate_panel(path, panel, metrics, fail):
     if (not isinstance(panel, dict) or "title" not in panel or set(panel) - {
-        "title", "caption", "empty_caption", "presets", "axes", "id", "curve_ids",
+        "title", "caption", "empty_caption", "presets", "axes", "id", "curve_ids", "event_ids",
     }):
         fail(path, "invalid panel presentation")
     for field in ("title", "caption", "empty_caption"):
@@ -138,11 +132,16 @@ def validate_panel(path, panel, metrics, fail):
     ):
         fail(path, "invalid panel presets")
     if "axes" in panel and (not isinstance(panel["axes"], dict) or any(
-        not isinstance(axis, dict) or set(axis) != {"title", "position"}
+        not isinstance(axis, dict) or not {"title", "position"} <= set(axis)
+        or set(axis) - {"title", "position", "min", "max"}
         or type(axis["title"]) is not str or axis["position"] not in ("left", "right")
         for axis in panel["axes"].values()
     )):
         fail(path, "invalid panel axes")
+    for axis in panel.get("axes", {}).values():
+        if any(type(axis[field]) not in (int, float) or not -float("inf") < axis[field] < float("inf")
+               for field in ("min", "max") if field in axis):
+            fail(path, "invalid panel axis bounds")
     if "curve_ids" in panel and (not isinstance(panel["curve_ids"], list)
             or not panel["curve_ids"] or any(type(name) is not str or name not in metrics
                                             for name in panel["curve_ids"])):
@@ -164,20 +163,20 @@ def _valid_preset(selector):
             and bool(values) and all(type(item) is str and item for item in values))
 
 
-def validate_produced(path, data, fail):
+def validate_selected(path, data, fail):
     required = {"report_view_schema_version", "kind", "report", "metrics", "charts", "sections"}
-    if set(data) != required or data["kind"] != "produced":
-        fail(path, "invalid produced report view")
+    if set(data) != required or data["kind"] != "selected":
+        fail(path, "invalid selected report view")
     report = data["report"]
     if set(report) != {"subtitle", "id", "producer"}:
-        fail(str(path) + ".report", "produced reports require id and producer")
+        fail(str(path) + ".report", "selected reports require id and producer")
     for field in ("id", "producer"):
         if type(report[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", report[field]):
             fail(str(path) + ".report", "invalid " + field)
     charts = data["charts"]
     if (not {"curves", "panels"} <= charts.keys()
-            or charts.keys() - {"curves", "panels", "time_origin_label"}):
-        fail(str(path) + ".charts", "invalid produced chart fields")
+            or charts.keys() - {"curves", "panels", "time_origin_label", "events", "event_ids"}):
+        fail(str(path) + ".charts", "invalid selected chart fields")
     metrics = validate_curves(path, charts, fail)
     validate_panels(path, charts, metrics, fail)
     if "time_origin_label" in charts and (type(charts["time_origin_label"]) is not str
@@ -233,7 +232,7 @@ def validate_text(path, data, fail):
     subtitle = data["report"]["subtitle"]
     if type(subtitle) is not str or not subtitle.strip():
         fail(path, "subtitle is required")
-    if data["kind"] != "produced":
+    if data["kind"] != "selected":
         return
     try:
         fields = [field for _, field, _, _ in string.Formatter().parse(data["report"]["subtitle"])
