@@ -34,6 +34,10 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import f
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
     compressor_bf16,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
+    engram_gate_reference,
+    engram_projection_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
     expert_down_reference,
     load_reference_kernel,
@@ -99,6 +103,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
     compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
     compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
+    compare_engram = os.environ.get("DSV41_TEST_COMPARE_ENGRAM") == "1"
     shared_eos_trace = os.environ.get("DSV41_TEST_TRACE_SHARED_EOS") == "1"
     paired = (
         compare_tp8
@@ -108,6 +113,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_sparse
         or compare_down
         or compare_post
+        or compare_engram
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -149,6 +155,12 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
         ):
             profiles.append(f"{base}_expert_down_reference_mhc_post_reference")
+    if compare_engram:
+        profiles.extend(
+            f"{profile}_engram_reference"
+            for profile in profiles.copy()
+            if profile.endswith("_mhc_post_reference")
+        )
     trace_steps = dict.fromkeys(profiles, 0)
     post_trace_steps = {}
     post_trace_requests = {}
@@ -178,6 +190,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         if compare_post and not compare_down:
             raise ValueError(
                 "mHC post comparison requires all fourteen preceding controls"
+            )
+        if compare_engram and not compare_post:
+            raise ValueError(
+                "Engram comparison requires all sixteen preceding controls"
             )
         reference_kernel = load_reference_kernel() if compare_down else None
         reference_hash = (
@@ -261,8 +277,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                post = profile.endswith("_mhc_post_reference")
-                down_profile = profile.removesuffix("_mhc_post_reference")
+                engram = profile.endswith("_engram_reference")
+                post_profile = profile.removesuffix("_engram_reference")
+                post = post_profile.endswith("_mhc_post_reference")
+                down_profile = post_profile.removesuffix("_mhc_post_reference")
                 recipe = "compressor_recipe" in profile
                 sparse = "sparse_sink_div_rn" in profile
                 sparse_decode = sparse and "sparse_sink_div_rn_prefill" not in profile
@@ -296,7 +314,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         trace_request = post_trace_requests.setdefault(
                             (profile, prompt_index), request_id
                         )
-                        limit = 4 if shared_eos_trace else 3
+                        limit = 4 if shared_eos_trace or engram else 3
                         tracing = trace_step < limit and request_id == trace_request
                         post_metadata = {
                             "prompt_index": prompt_index,
@@ -310,6 +328,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 }
                                 if shared_eos_trace
                                 else {"mhc_post_reference": True}
+                            ),
+                            **(
+                                {
+                                    "engram_projection_reference": True,
+                                    "engram_gate_reference": True,
+                                    "engram_reference_kernel_sha256": reference_hash,
+                                }
+                                if engram
+                                else {}
                             ),
                         }
                 with (
@@ -331,6 +358,11 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     kernel=reference_kernel,
                 ), mhc_post_reference(
                     post,
+                ), engram_projection_reference(
+                    engram,
+                    kernel=reference_kernel,
+                ), engram_gate_reference(
+                    engram,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -490,9 +522,20 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     and os.environ.get("DSV41_TEST_TRACE_DIR")
                 ):
                     expected_traces = {
-                        (profile, prompt): min(4 if shared_eos_trace else 3, new_tokens)
+                        (profile, prompt): min(
+                            (
+                                4
+                                if shared_eos_trace
+                                or profile.endswith("_engram_reference")
+                                else 3
+                            ),
+                            new_tokens,
+                        )
                         for profile in profiles
-                        if shared_eos_trace or profile.endswith("_mhc_post_reference")
+                        if shared_eos_trace
+                        or profile.removesuffix("_engram_reference").endswith(
+                            "_mhc_post_reference"
+                        )
                         for prompt in range(len(prompts))
                     }
                     assert post_trace_steps == expected_traces, post_trace_steps
