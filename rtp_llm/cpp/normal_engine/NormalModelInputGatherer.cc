@@ -403,11 +403,12 @@ void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolde
 
 }  // anonymous namespace
 
-NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config): config_(config) {}
+NormalModelInputGatherer::NormalModelInputGatherer(const NormalModelInputGathererConfig& config):
+    config_(config), device_input_enabled_(deviceInputEnabled()) {}
 
 StreamGroups::NormalDeviceStates
 NormalModelInputGatherer::prepareDeviceStateInputs(const std::list<GenerateStreamPtr>& streams) const {
-    if (!deviceInputEnabled() || streams.empty()) {
+    if (!device_input_enabled_ || streams.empty()) {
         return {};
     }
     const bool needs_positions = needsGatherPositions(config_);
@@ -591,7 +592,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     const bool has_normal_snapshot = stream_groups.hasNormalDeviceStates();
     bool       use_normal_device_state = has_normal_snapshot;
     if (!has_normal_snapshot) {
-        use_normal_device_state = deviceInputEnabled() && stream_groups.totalContextBatchSize() == 0
+        use_normal_device_state = device_input_enabled_ && stream_groups.totalContextBatchSize() == 0
                                   && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
         if (use_normal_device_state) {
             for (const auto& stream : stream_groups.decodeStreams()) {
@@ -906,7 +907,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
         model_input.mm_features_spans = model_input.mm_features_spans.slice(0, 0, ctx.mm_feature_index);
     }
     model_input.prefix_lengths =
-        deviceInputEnabled() ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
+        device_input_enabled_ ? publishInt32ToCuda(prefix_lengths_host, host_holder) : prefix_lengths_host;
     if (model_input.custom_output_indexes.defined()) {
         model_input.custom_output_indexes = model_input.custom_output_indexes.narrow(0, 0, custom_output_count);
     }
@@ -1071,7 +1072,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     // No host mirrors are kept for ModelInputsLogger: it snapshots every tensor
     // in place (device-side clone + per-device c10::Event) and only pays the D2H
     // on its own worker thread, so it reads post-publish CUDA members directly.
-    if (deviceInputEnabled()) {
+    if (device_input_enabled_) {
         publishModelInputCoreTensorsToCuda(model_input, host_holder);
         if (stream_groups.hasNormalDeviceStates()) {
             // Shared MTP gather still expands host positions. Only the normal
