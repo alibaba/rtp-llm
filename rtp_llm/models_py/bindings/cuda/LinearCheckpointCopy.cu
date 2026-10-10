@@ -5,6 +5,39 @@
 namespace rtp_llm {
 namespace {
 
+// One FP32 scale per K channel; recurrence and conv history remain full precision.
+// INT16 uses the same symmetric per-channel layout with a wider integer range.
+template<bool Unpack, typename Quant>
+__device__ void
+quantizedCheckpointCopy(const LinearCheckpointDeviceTile& tile, int lane, int channel, size_t elements, size_t base) {
+    constexpr float limit  = sizeof(Quant) == 2 ? 32767.f : 127.f;
+    auto*           packed = reinterpret_cast<Quant*>(tile.packed);
+    auto*           scales = reinterpret_cast<float*>(tile.packed + elements * sizeof(Quant));
+    if constexpr (Unpack) {
+        const float scale = scales[channel];
+        for (int v = lane; v < tile.value_dim; v += 32) {
+            tile.state[base + v] = static_cast<float>(packed[base + v]) * scale;
+        }
+    } else {
+        float amax = 0.f;
+        for (int v = lane; v < tile.value_dim; v += 32) {
+            amax = fmaxf(amax, fabsf(tile.state[base + v]));
+        }
+        for (int offset = 16; offset > 0; offset /= 2) {
+            amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset));
+        }
+        // Preserve small recurrent channels; only guard against FP32 underflow.
+        const float scale = fmaxf(amax / limit, FLT_MIN);
+        if (lane == 0) {
+            scales[channel] = scale;
+        }
+        for (int v = lane; v < tile.value_dim; v += 32) {
+            const int value  = __float2int_rn(fminf(limit, fmaxf(-limit, tile.state[base + v] / scale)));
+            packed[base + v] = static_cast<Quant>(value);
+        }
+    }
+}
+
 // RTP stores recurrent states as [H, K, V]. Each warp reduces one contiguous
 // V row; quantization is applied only when an idle checkpoint is inserted.
 template<bool Unpack>
@@ -29,30 +62,10 @@ __global__ void checkpointCopy(const LinearCheckpointDeviceTile* tiles) {
         }
         return;
     }
-    constexpr float limit  = 127.f;
-    auto*           scales = reinterpret_cast<float*>(tile.packed + elements);
-    if constexpr (Unpack) {
-        const float scale = scales[channel];
-        for (int v = lane; v < tile.value_dim; v += 32) {
-            tile.state[base + v] = static_cast<float>(tile.packed[base + v]) * scale;
-        }
+    if (tile.dtype == LinearCheckpointDType::INT16) {
+        quantizedCheckpointCopy<Unpack, int16_t>(tile, lane, channel, elements, base);
     } else {
-        float amax = 0.f;
-        for (int v = lane; v < tile.value_dim; v += 32) {
-            amax = fmaxf(amax, fabsf(tile.state[base + v]));
-        }
-        for (int offset = 16; offset > 0; offset /= 2) {
-            amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset));
-        }
-        // Preserve small recurrent channels; only guard against FP32 underflow.
-        const float scale = fmaxf(amax / limit, FLT_MIN);
-        if (lane == 0) {
-            scales[channel] = scale;
-        }
-        for (int v = lane; v < tile.value_dim; v += 32) {
-            const int value       = __float2int_rn(fminf(limit, fmaxf(-limit, tile.state[base + v] / scale)));
-            tile.packed[base + v] = static_cast<int8_t>(value);
-        }
+        quantizedCheckpointCopy<Unpack, int8_t>(tile, lane, channel, elements, base);
     }
 }
 

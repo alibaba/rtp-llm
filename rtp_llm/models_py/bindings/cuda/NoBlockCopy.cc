@@ -439,9 +439,7 @@ bool execLinearCheckpointCopy(const BatchedMemoryCopyParams&               param
         return false;
     }
     const auto packedBytes = [](const LinearCheckpointCopyTile& tile) {
-        return static_cast<size_t>(tile.heads) * tile.key_dim
-               * (tile.dtype == LinearCheckpointDType::BF16 ? tile.value_dim * sizeof(uint16_t) :
-                                                              tile.value_dim * sizeof(int8_t) + sizeof(float));
+        return linearCheckpointPackedBytes(tile.heads, tile.key_dim, tile.value_dim, tile.dtype);
     };
     size_t bytes        = 0;
     int    max_channels = 0;

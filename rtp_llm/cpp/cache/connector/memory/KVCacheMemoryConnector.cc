@@ -23,6 +23,13 @@
 namespace rtp_llm {
 namespace {
 
+LinearCheckpointDType checkpointDType(const std::string& value) {
+    if (value == "bf16") {
+        return LinearCheckpointDType::BF16;
+    }
+    return value == "int16" ? LinearCheckpointDType::INT16 : LinearCheckpointDType::INT8;
+}
+
 enum class MemoryCacheCopyMode {
     AUTO,
     LEGACY,
@@ -227,8 +234,9 @@ bool KVCacheMemoryConnector::init() {
 
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.linear_cache_dtype == "auto"
                                 || kv_cache_config_.linear_cache_dtype == "int8"
+                                || kv_cache_config_.linear_cache_dtype == "int16"
                                 || kv_cache_config_.linear_cache_dtype == "bf16",
-                            "linear_cache_dtype must be auto, bf16 or int8");
+                            "linear_cache_dtype must be auto, bf16, int8 or int16");
     if (kv_cache_config_.linear_cache_dtype != "auto") {
         RTP_LLM_CHECK_WITH_INFO(wholeStateRequestCache(), "quantized checkpoints require Linear request cache");
         for (const auto& spec : cache_config_.cache_specs) {
@@ -703,10 +711,10 @@ std::vector<KVCacheMemoryConnector::LayerRegionSlot> KVCacheMemoryConnector::lay
             auto spec = std::dynamic_pointer_cast<LinearKVCacheSpec>(cache_config_.cache_specs[slot.group_id]);
             if (spec) {
                 const size_t state_bytes =
-                    kv_cache_config_.linear_cache_dtype == "bf16" ?
-                        spec->ssm_state_size() * sizeof(uint16_t) :
-                        spec->ssm_state_size()
-                            + static_cast<size_t>(spec->local_num_v_heads) * spec->head_k_dim * sizeof(float);
+                    linearCheckpointPackedBytes(spec->local_num_v_heads,
+                                                spec->head_k_dim,
+                                                spec->head_v_dim,
+                                                checkpointDType(kv_cache_config_.linear_cache_dtype));
                 slot.stride_bytes = state_bytes + spec->v_block_size_bytes();
             }
         }
@@ -2280,8 +2288,7 @@ bool KVCacheMemoryConnector::copyPrefixMemoryItems(const MemoryOperationRequestP
                                        static_cast<int>(linear_spec->local_num_v_heads),
                                        static_cast<int>(linear_spec->head_v_dim),
                                        static_cast<int>(linear_spec->head_k_dim),
-                                       kv_cache_config_.linear_cache_dtype == "bf16" ? LinearCheckpointDType::BF16 :
-                                                                                       LinearCheckpointDType::INT8});
+                                       checkpointDType(kv_cache_config_.linear_cache_dtype)});
                 // The small convolution history retains its original dtype.
                 BlockInfo conv  = gpu;
                 conv.addr       = static_cast<char*>(gpu.addr) + linear_spec->k_block_size_bytes();

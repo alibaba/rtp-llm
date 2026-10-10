@@ -10,11 +10,15 @@
 
 namespace rtp_llm::test {
 
-TEST(LinearCheckpointCopyTest, QuantizesOncePerChannelAndPreservesConvolutionBytes) {
+class QuantizedLinearCheckpointCopyTest: public ::testing::TestWithParam<LinearCheckpointDType> {};
+
+TEST_P(QuantizedLinearCheckpointCopyTest, QuantizesOncePerChannelAndPreservesConvolutionBytes) {
     ASSERT_TRUE(torch::cuda::is_available());
     torch::manual_seed(42);
-    const float      limit        = 127.f;
-    const size_t     scalar_bytes = sizeof(int8_t);
+    const auto       dtype        = GetParam();
+    const bool       wide         = dtype == LinearCheckpointDType::INT16;
+    const float      limit        = wide ? 32767.f : 127.f;
+    const size_t     scalar_bytes = wide ? sizeof(int16_t) : sizeof(int8_t);
     constexpr int    count = 7, heads = 3, values = 128, keys = 64, conv_bytes = 1536;
     constexpr size_t elements     = heads * values * keys;
     const size_t     packed_bytes = elements * scalar_bytes + heads * keys * sizeof(float);
@@ -35,17 +39,17 @@ TEST(LinearCheckpointCopyTest, QuantizesOncePerChannelAndPreservesConvolutionByt
     std::vector<LinearCheckpointCopyTile> checkpoints;
     for (int i = 0; i < count; ++i) {
         auto* out = packed.data_ptr<uint8_t>() + i * (packed_bytes + conv_bytes);
-        checkpoints.push_back(
-            {state.data_ptr<float>() + i * elements, out, heads, values, keys, LinearCheckpointDType::INT8});
+        checkpoints.push_back({state.data_ptr<float>() + i * elements, out, heads, values, keys, dtype});
         copies.tiles.push_back({out + packed_bytes, history.data_ptr<uint8_t>() + i * conv_bytes, conv_bytes});
     }
     ASSERT_TRUE(execLinearCheckpointCopy(copies, checkpoints, false));
     auto cpu_original = original.cpu();
     for (int i = 0; i < count; ++i) {
         auto* bytes = packed.data_ptr<uint8_t>() + i * (packed_bytes + conv_bytes);
-        auto  quant = torch::from_blob(bytes, {heads, keys, values}, torch::kInt8).to(torch::kFloat32);
-        auto  scale = torch::from_blob(bytes + elements * scalar_bytes, {heads, keys, 1}, torch::kFloat32);
-        auto  expected_scale =
+        auto  quant =
+            torch::from_blob(bytes, {heads, keys, values}, wide ? torch::kInt16 : torch::kInt8).to(torch::kFloat32);
+        auto scale = torch::from_blob(bytes + elements * scalar_bytes, {heads, keys, 1}, torch::kFloat32);
+        auto expected_scale =
             (cpu_original[i].abs().amax(2, true) / limit).clamp_min(std::numeric_limits<float>::min());
         ASSERT_TRUE(torch::allclose(scale, expected_scale, 1.e-6, 0));
         auto error = (quant * scale - cpu_original[i]).abs();
@@ -67,6 +71,10 @@ TEST(LinearCheckpointCopyTest, QuantizesOncePerChannelAndPreservesConvolutionByt
     ASSERT_TRUE(torch::equal(state[0], original[0]));
 }
 
+INSTANTIATE_TEST_SUITE_P(StorageDTypes,
+                         QuantizedLinearCheckpointCopyTest,
+                         ::testing::Values(LinearCheckpointDType::INT8, LinearCheckpointDType::INT16));
+
 TEST(LinearCheckpointCopyTest, BFloat16RetainsSmallChannelsAndRounding) {
     ASSERT_TRUE(torch::cuda::is_available());
     torch::manual_seed(43);
@@ -78,7 +86,7 @@ TEST(LinearCheckpointCopyTest, BFloat16RetainsSmallChannelsAndRounding) {
     state[1].mul_(1.e10);
     auto                    expected = state.to(torch::kBFloat16).to(torch::kFloat32);
     auto                    host     = torch::empty({count, static_cast<int64_t>(elements * 2)},
-                             torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+                                                    torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
     BatchedMemoryCopyParams params;
     params.device_index = state.get_device();
     std::vector<LinearCheckpointCopyTile> checkpoints;
