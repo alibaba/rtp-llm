@@ -55,7 +55,9 @@ def decode_output_proj(
     """
     rd = attn.rope_head_dim
 
-    if o.is_cuda and o.numel() > 0:
+    if attn.wo_a is not None:
+        o = attn._wo_a_from_bf16(o, freqs_cis, bsz, q_len)
+    elif o.is_cuda and o.numel() > 0:
         o_fp8, o_scale = fused_inv_rope_fp8_quant(
             o,
             freqs_cis,

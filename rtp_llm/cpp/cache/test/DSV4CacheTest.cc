@@ -1907,6 +1907,28 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
     EXPECT_EQ(decode_state->seq_size_per_block, 256u);
 }
 
+TEST(CacheConfigTest, NativeStateRingAlignmentPreservesSpeculativeRollbackWindow) {
+    KVCacheSpecDesc desc;
+    desc.tag = "indexer_state";
+    desc.cache_type = KVCacheSpecType::OpaqueState;
+    desc.entry_elems = 512;
+    desc.entry_dtype = DataType::TYPE_FP32;
+    desc.entry_count_mode = OpaqueBlockEntryCountMode::STATE_RING;
+    desc.compression_ratio = 4;
+    desc.state_ring_overlap = 1;
+    desc.state_ring_include_gen_num_per_cycle = true;
+    desc.state_ring_entry_alignment = 4;
+    for (uint32_t gamma : {0u, 1u, 3u}) {
+        SpecBuildContext ctx;
+        ctx.gen_num_per_cycle = gamma;
+        ctx.seq_size_per_block = 256;
+        ctx.kernel_tokens_per_block = 256;
+        auto spec = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(desc, ctx));
+        ASSERT_NE(spec, nullptr);
+        EXPECT_EQ(opaqueEntriesPerBlock(*spec, 512u * sizeof(float)), gamma == 0 ? 8u : 12u);
+    }
+}
+
 TEST(CacheConfigTest, ExactBlockBudgetHandlesStepAndRoundingBoundaries) {
     const KVCacheBlockBudget budget{/*explicit_pool_reserve_bytes=*/10,
                                     /*paged_block_bytes=*/3,

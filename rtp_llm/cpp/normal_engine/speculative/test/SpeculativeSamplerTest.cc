@@ -16,13 +16,16 @@ TEST(FastTopKSamplerTest, TopKOneReturnsArgmaxIndex) {
     ASSERT_EQ(out.token_ids.size(0), 1);
     ASSERT_EQ(out.token_ids.size(1), 1);
     EXPECT_EQ(out.token_ids[0][0].item<int64_t>(), 2);
-    EXPECT_TRUE(torch::equal(out.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}})));
+    EXPECT_TRUE(out.token_ids_are_point_mass);
+    EXPECT_FALSE(out.all_probs.defined());
 }
 
 TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {
     FastTopKSampler sampler;
     auto            logits = torch::tensor({{1.0f, 2.0f, 5.0f, 3.0f}});
     auto            out    = sampler.forward(logits, 2);
+    EXPECT_FALSE(out.token_ids_are_point_mass);
+    EXPECT_TRUE(torch::allclose(out.all_probs, torch::softmax(logits, -1)));
 
     ASSERT_EQ(out.token_ids.dim(), 2);
     ASSERT_EQ(out.token_ids.size(0), 1);

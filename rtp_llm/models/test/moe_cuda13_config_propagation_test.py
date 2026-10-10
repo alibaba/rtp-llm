@@ -38,7 +38,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_se
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     resolve_moe_max_tokens_per_rank,
 )
-from rtp_llm.ops import MoeConfig, ParallelismConfig
+from rtp_llm.ops import MoeConfig, ParallelismConfig, RoleType
 
 
 class Dsv4MoeConfigTest(unittest.TestCase):
@@ -90,7 +90,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
 
     def test_block_decode_marks_the_actual_moe_forward_phase(self):
         class PassThroughHC(nn.Module):
-            def pre(self, x, **_kwargs):
+            def pre_norm(self, x, _norm, **_kwargs):
                 return x, None, None
 
             def post(self, output, *_args):
@@ -112,6 +112,8 @@ class Dsv4MoeConfigTest(unittest.TestCase):
         block = Block.__new__(Block)
         nn.Module.__init__(block)
         block.layer_id = 0
+        block.tp_size = 1
+        block.tp_rank = 0
         block.attn_hc = PassThroughHC()
         block.ffn_hc = PassThroughHC()
         block.attn_norm = nn.Identity()
@@ -229,11 +231,16 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 scheduler = SimpleNamespace(
                     max_context_batch_size=3,
                     max_batch_tokens_size=configured_cap,
+                    prefill_chunk_size=0,
+                    prefill_chunk_batch_tokens=0,
                 )
                 engine_config = SimpleNamespace(
                     runtime_config=SimpleNamespace(
-                        fifo_scheduler_config=scheduler, model_name=""
-                    )
+                        fifo_scheduler_config=scheduler,
+                        model_name="",
+                        use_batch_decode_scheduler=False,
+                    ),
+                    pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
                 )
                 ModelFactory.update_engine_config_from_model_config(
                     engine_config, model_config
@@ -317,13 +324,19 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                 config = self._load_minimal_model_config(1)
                 config.max_seq_len = seq_len
                 scheduler = SimpleNamespace(
-                    max_context_batch_size=3, max_batch_tokens_size=budget
+                    max_context_batch_size=3,
+                    max_batch_tokens_size=budget,
+                    prefill_chunk_size=0,
+                    prefill_chunk_batch_tokens=0,
                 )
                 ModelFactory.update_engine_config_from_model_config(
                     SimpleNamespace(
                         runtime_config=SimpleNamespace(
-                            fifo_scheduler_config=scheduler, model_name=""
-                        )
+                            fifo_scheduler_config=scheduler,
+                            model_name="",
+                            use_batch_decode_scheduler=False,
+                        ),
+                        pd_sep_config=SimpleNamespace(role_type=RoleType.PREFILL),
                     ),
                     config,
                 )
@@ -647,7 +660,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
                         return_value=(lambda: None,) * 4,
                     ),
                     patch(
-                        "rtp_llm.models_py.modules.dsv4.block.ChunkedFp8Fp4MoeLayer",
+                        "rtp_llm.models_py.modules.dsv4.moe_builder.ChunkedFp8Fp4MoeLayer",
                         DummyMoe,
                     ),
                 ):

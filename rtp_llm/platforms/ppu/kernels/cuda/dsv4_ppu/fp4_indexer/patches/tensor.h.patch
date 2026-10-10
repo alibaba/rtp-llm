@@ -1,0 +1,6 @@
+--- include/sgl_kernel/tensor.h
++++ compat/sgl_kernel/tensor.h
+@@ -132 +132,2 @@
+-  constexpr auto max_type = stdr::max(map | stdv::keys);
++  // PPU clang13 / GCC10 crashes on the ranges projection in this host-only table.
++  constexpr auto max_type = DLDeviceType::kDLTrn;

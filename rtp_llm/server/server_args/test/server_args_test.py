@@ -210,6 +210,30 @@ class CacheConfigArgumentsTest(TestCase):
             "unrecognized arguments: --enable_memory_cache_sm_copy", stderr.getvalue()
         )
 
+    def test_legacy_prefix_tree_flags_do_not_select_cache_tiers(self):
+        legacy = {
+            "ENABLE_GPU_PREFIX_TREE": "1",
+            "ENABLE_TIERED_MEMORY_CACHE": "1",
+            "ENABLE_PREFIX_TREE_MEMORY_CACHE": "1",
+        }
+        for args in (None, []):
+            with self.subTest(args=args):
+                config = self.parse_cache_config(args, legacy)
+                self.assertFalse(config.reuse_cache)
+                self.assertTrue(config.enable_device_cache)
+                self.assertFalse(config.enable_memory_cache)
+                config = self.parse_cache_config(args, {
+                    **legacy,
+                    "REUSE_CACHE": "1",
+                    "ENABLE_DEVICE_CACHE": "0",
+                    "ENABLE_MEMORY_CACHE": "1",
+                    "MEMORY_CACHE_SIZE_MB": "8192",
+                })
+                self.assertTrue(config.reuse_cache)
+                self.assertFalse(config.enable_device_cache)
+                self.assertTrue(config.enable_memory_cache)
+                self.assertEqual(config.memory_cache_size_mb, 8192)
+
     def test_removed_sm_copy_env_does_not_enable_disk_cache(self):
         defaults = self.parse_cache_config([], {})
         for value in ("0", "1"):
@@ -437,6 +461,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["MAX_BATCH_TOKENS_WITHOUT_CACHE"] = "2048"
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
+        os.environ["PREFILL_CHUNK_SIZE"] = "256"
+        os.environ["PREFILL_CHUNK_BATCH_TOKENS"] = "1024"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit/cache"
@@ -498,6 +524,10 @@ class ServerArgsSetTest(TestCase):
             2048,
         )
         self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.prefill_chunk_size,
+            256,
+        )
+        self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,
             False,
         )
@@ -505,6 +535,8 @@ class ServerArgsSetTest(TestCase):
             pickle.dumps(py_env_configs.runtime_config.fifo_scheduler_config)
         )
         self.assertEqual(restored_fifo_config.max_batch_tokens_without_cache, 2048)
+        self.assertEqual(restored_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(restored_fifo_config.prefill_chunk_batch_tokens, 1024)
         # Old pickles carry only the two original slots; every field added later
         # must fall back to its default instead of raising.
         fifo_config_type = type(py_env_configs.runtime_config.fifo_scheduler_config)
@@ -514,6 +546,17 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(legacy_fifo_config.max_batch_tokens_size, 8192)
         self.assertEqual(legacy_fifo_config.max_inited_kv_cache_streams, 0)
         self.assertEqual(legacy_fifo_config.max_batch_tokens_without_cache, 0)
+        seven_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        seven_slot_fifo_config.__setstate__(
+            (32, 8192, "ratio", "2", False, 16, 2048)
+        )
+        self.assertEqual(seven_slot_fifo_config.max_batch_tokens_without_cache, 2048)
+        self.assertEqual(seven_slot_fifo_config.prefill_chunk_size, 0)
+        self.assertEqual(seven_slot_fifo_config.prefill_chunk_batch_tokens, 0)
+        eight_slot_fifo_config = fifo_config_type.__new__(fifo_config_type)
+        eight_slot_fifo_config.__setstate__((32, 8192, "ratio", "2", False, 16, 2048, 256))
+        self.assertEqual(eight_slot_fifo_config.prefill_chunk_size, 256)
+        self.assertEqual(eight_slot_fifo_config.prefill_chunk_batch_tokens, 0)
 
         # Verify frontend and DashSc pre-stop windows are configured independently.
         self.assertEqual(
@@ -595,6 +638,10 @@ class ServerArgsSetTest(TestCase):
             "64",
             "--max_batch_tokens_without_cache",
             "4096",
+            "--prefill_chunk_size",
+            "512",
+            "--prefill_chunk_batch_tokens",
+            "2048",
             "--cp_force_single_prefill",
             "false",
             "--max_inited_kv_cache_streams",
@@ -655,6 +702,14 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache,
             4096,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.prefill_chunk_size,
+            512,
+        )
+        self.assertEqual(
+            py_env_configs.runtime_config.fifo_scheduler_config.prefill_chunk_batch_tokens,
+            2048,
         )
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.cp_force_single_prefill,

@@ -30,6 +30,7 @@ public:
                 const RequiredPositions& required_positions   = {}) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    void           removeSkippedBlocksBefore(BlockIds& block_ids, int prefix_len, bool enable_reuse_cache);
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
@@ -51,6 +52,7 @@ public:
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 
 private:
+    void removeSkippedBlocksThrough(BlockIds& block_ids, int last_position, bool enable_reuse_cache);
     void filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const;
     int  materializedTailBlockCount() const;
     int  retainedTailBlockCount() const;

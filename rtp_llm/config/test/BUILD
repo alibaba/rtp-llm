@@ -66,6 +66,19 @@ py_test(
 )
 
 py_test(
+    name = "engine_config_test",
+    srcs = [
+        "engine_config_test.py",
+    ],
+    data = [
+        "//:th_transformer_config",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+    ],
+)
+
+py_test(
     name = "model_size_test",
     srcs = ["model_size_test.py"],
     deps = ["//rtp_llm:testlib"],

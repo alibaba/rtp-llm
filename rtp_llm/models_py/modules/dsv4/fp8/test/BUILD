@@ -1,7 +1,15 @@
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_py_test")
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+load("@rules_python//python:defs.bzl", "py_test")
 
 package(default_visibility = ["//visibility:public"])
+
+# Both CUDA13 pools build these hand-written contract tests.
+_DSV4_CUDA13_ONLY = select({
+    "@//:using_cuda13_x86": [],
+    "@//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
 
 _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -14,6 +22,7 @@ _GPU_TESTS = [
     "test_compressor_disable_raw_path",
     "test_compressor_forward_flat_input",
     "test_compressor_fp8_per_token",
+    "test_compressor_norm_dispatch",
     "test_compressor_prepare_metadata_varlen",
     "test_compressor_raw_dispatch",
     "test_compressor_state_pool_cpu",
@@ -64,6 +73,8 @@ _CONTRACT_TESTS = [
     "test_decode_topk_length",
     "test_indexer_forward_with_pending_nested",
     "test_prefill_mixed_layer_cache_store",
+    "test_mtp_swa_ring_page",
+    "test_pool_slot_mapping_contract",
     "test_fp8_sparse_attn_decode_op",
     "test_compressor_cp_merged_gather",
 ]
@@ -71,6 +82,8 @@ _CONTRACT_TESTS = [
 [
     dsv4_py_test(
         name = name,
+        # This contract test constructs the PPU provider on CUDA workers too.
+        data = ["//rtp_llm/platforms:ppu_sources"] if name == "test_indexer_fp8_score" else [],
         # Do not let the local integer-arithmetic assertion hide a skipped
         # large-stride CUDA regression when the worker lacks memory.
         args = [
@@ -156,6 +169,8 @@ test_suite(
     name = "dsv4_fp8_cuda13_unit",
     tests = [":" + name for name in _GPU_TESTS + _CONTRACT_TESTS] + [
         ":test_indexer_cp_padded_gather_distributed",
+        ":test_model1_layout_contract",
+        ":test_fused_pool_slot_mapping_contract",
     ],
 )
 
@@ -164,15 +179,75 @@ test_suite(
 test_suite(
     name = "dsv4_fp8_cuda13_cross_arch",
     tests = [
+        ":test_compressor_norm_dispatch_x86",
         ":test_flash_mla_decode_kernel_layout_x86",
         ":test_fused_compressor_meta_triton_x86",
         ":test_fused_decode_meta_comprehensive_x86",
+        ":test_fused_pool_slot_mapping_contract_x86",
         ":test_indexer_cp_padded_gather_distributed_x86",
         ":test_indexer_cp_padded_gather_triton_x86",
         ":test_indexer_fp8_score_x86",
+        ":test_model1_layout_contract",
         ":test_no_recompile_x86",
         ":test_prefill_common_metadata_cuda_x86",
         ":test_swa_cp_packed_gather_triton_x86",
         ":test_swa_fp8_kv_roundtrip_x86",
     ],
 )
+
+
+alias(
+    name = "test_rich_contract",
+    actual = ":test_rich_contract_source_only",
+)
+
+py_test(
+    name = "test_rich_contract_source_only",
+    srcs = ["test_rich_contract.py"],
+    data = ["//rtp_llm/models_py:dsv4_rich_attention_contract_sources"],
+    main = "test_rich_contract.py",
+)
+
+py_test(
+    name = "test_indexer_topk_routing_ppu_cpu",
+    srcs = ["test_indexer_topk_v3_routing.py"],
+    data = ["//rtp_llm/models_py:dsv4_indexer_source"],
+    deps = ["@pip_ppu_torch//torch"],
+    env = {
+        "CUDA_VISIBLE_DEVICES": "",
+        "DSV4_INDEXER_TOPK_SOURCE_ONLY": "1",
+    },
+    main = "test_indexer_topk_v3_routing.py",
+    tags = ["ppu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+py_test(
+    name = "test_model1_layout_contract",
+    srcs = ["test_model1_layout_contract.py"],
+    data = ["testdata/dsv4_model1_golden_v1.json"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+cuda13_sm100_py_test(
+    name = "test_fused_pool_slot_mapping_contract",
+    srcs = ["test_fused_pool_slot_mapping_contract.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+)
+
+
+[
+    py_test(
+        name = name + "_ppu",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = _DSV4_FP8_TEST_DEPS,
+        tags = ["ppu"],
+        target_compatible_with = select({"@//:using_ppu": [], "//conditions:default": ["@platforms//:incompatible"]}),
+    )
+    for name in ["test_compressor_cp_merged_gather", "test_compressor_prepare_metadata_varlen"]
+]

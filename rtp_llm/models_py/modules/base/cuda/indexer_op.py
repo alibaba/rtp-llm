@@ -523,8 +523,8 @@ class IndexerOp(nn.Module):
             fast_topk_transform_ragged_fused,
         )
 
-        # Gather quantized key from cache for prefill
-        num_tokens = q_fp8.shape[0]
+        # Q contains only the current window; K includes each request's prefix.
+        num_tokens = attention_inputs.context_total_kv_length
         k_fp8 = torch.empty(
             (num_tokens, self.index_head_dim),
             dtype=torch.float8_e4m3fn,

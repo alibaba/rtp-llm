@@ -1,6 +1,30 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "chunked_mla_engine_test",
+    srcs = ["chunked_mla_engine_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/utils:maga_server_manager",
+    ],
+    tags = ["open_skip"],
+    exec_properties = {"gpu": "L20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "chunked_mla_engine_tp2_test",
+    srcs = ["chunked_mla_engine_test.py"],
+    main = "chunked_mla_engine_test.py",
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/utils:maga_server_manager",
+    ],
+    env = {"MLA_TEST_TP_SIZE": "2", "GPU_COUNT": "2"},
+    tags = ["open_skip", "H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "2"},
+)
+
 # Framework source files for cross-package smoke tests.
 # Used as data dep (not srcs/deps) so internal smoke targets can merge their
 # own smoke/ children through smoke.__path__ without duplicating runner srcs.
