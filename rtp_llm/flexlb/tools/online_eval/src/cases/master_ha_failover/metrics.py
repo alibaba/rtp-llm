@@ -85,6 +85,32 @@ def _prefill_balance_series(rows, anchor, fleet_size):
     return values
 
 
+def metric_contract(producer, identity, calculation):
+    from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
+    from monitoring.measurement import implementation_measurement
+    if calculation is not None:
+        raise ValueError('HA producer owns its case-specific calculation')
+    if producer == 'ha_gates' and identity in {'ha_gate/' + name for name in HA_METRICS}:
+        function, source, population = measure_client_metric, 'client_journal', 'declared_request_window_and_selection'
+    elif producer == 'ha_evidence':
+        key = identity.removeprefix('ha/')
+        if not identity.startswith('ha/'):
+            raise ValueError('unknown HA evidence metric: ' + identity)
+        if key in STATE_FIELDS:
+            function, source, population = _state_series, 'debug_api', 'master_instance'
+        elif key in {'sent', 'success', 'failed'}:
+            function, source, population = _request_series, 'client_journal', 'ha_requests_by_send_time'
+        elif key in {'prefill_peak_qps', 'prefill_mean_qps', 'prefill_skew'}:
+            function, source, population = _prefill_balance_series, 'client_journal', 'declared_prefill_fleet'
+        else:
+            raise ValueError('unknown HA evidence metric: ' + identity)
+    else:
+        raise ValueError('unknown HA metric: ' + identity)
+    return dict(source_type=source, measurement=implementation_measurement(function,
+        population=population, accuracy='sampled' if source == 'debug_api' else 'request_ledger',
+        request_identity=source == 'client_journal'))
+
+
 def produce(directory, payload):
     from monitoring.metric_store import MetricStore, publish
     store = MetricStore.read(directory)

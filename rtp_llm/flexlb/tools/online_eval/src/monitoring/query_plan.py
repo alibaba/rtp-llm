@@ -15,7 +15,7 @@ from monitoring.identity import NAME as _NAME, METRIC_ID
 SOURCE_KINDS = ("mock", "client", "master")
 _PLAN = re.compile(r"[a-z][a-z0-9_]*\.yaml\Z")
 _TOKENS = re.compile(r"\$\{([^}]+)\}")
-PLAN_VERSION = 3
+PLAN_VERSION = 4
 
 
 def load_plan(name, _stack=()):
@@ -106,21 +106,25 @@ def _add_produced(produced, own, path):
     for metric, spec in own.items():
         if metric in produced:
             raise ScenarioError(f"{path}: invalid produced metric {metric}")
-        _validate_produced(spec, metric, path)
-        produced[metric] = spec
+        produced[metric] = _validate_produced(spec, metric, path)
 
 
 def _validate_produced(spec, metric, path):
     if (type(metric) is not str or not METRIC_ID.fullmatch(metric)
             or not isinstance(spec, dict)
-            or set(spec) != {"producer", "source_type", "unit", "value_kind", "labels", "measurement"}
+            or not {"producer", "source_type", "unit", "value_kind", "labels"} <= set(spec)
+            or set(spec) - {"producer", "source_type", "unit", "value_kind", "labels", "calculation"}
             or spec["source_type"] not in ("prometheus", "debug_api", "client_journal")
             or type(spec["producer"]) is not str or not _NAME.fullmatch(spec["producer"])):
         raise ScenarioError(f"{path}: invalid produced metric {metric}")
     _metadata(spec, path)
-    from monitoring.producers import PRODUCERS
-    if spec["producer"] not in PRODUCERS:
-        raise ScenarioError(f"{path}: unknown metric producer {spec['producer']}")
+    from monitoring.producers import metric_contract
+    try:
+        measurement = metric_contract(metric, spec)
+    except ValueError as exc:
+        raise ScenarioError(f"{path}: {exc}") from exc
+    validate_measurement(measurement, path)
+    return dict(spec, measurement=measurement)
 
 
 def _exclude(sources, produced, value, path):

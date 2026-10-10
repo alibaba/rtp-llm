@@ -21,7 +21,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | 格式 | 版本字段 | 当前值 |
 |---|---|---|
 | case YAML | `case_schema_version` | 2 |
-| 指标集合 | `metric_plan_schema_version` | 3 |
+| 指标集合 | `metric_plan_schema_version` | 4 |
 | 报告视图 YAML | `report_view_schema_version` | 1 |
 | CI suite | `suite_schema_version` | 2 |
 | mode profile | `mode_profiles_schema_version` | 1 |

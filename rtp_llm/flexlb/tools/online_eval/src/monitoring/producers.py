@@ -13,6 +13,22 @@ PRODUCERS = {
 }
 
 
+def metric_contract(metric_id, spec):
+    """Resolve executable capabilities, not user-provided measurement labels."""
+    producer = spec['producer']
+    if producer not in PRODUCERS:
+        raise ValueError('unknown metric producer ' + str(producer))
+    module = import_module(PRODUCERS[producer][0])
+    describe = getattr(module, 'metric_contract', None)
+    if not callable(describe):
+        raise ValueError('metric producer lacks an output contract: ' + producer)
+    contract = describe(producer, metric_id, spec.get('calculation'))
+    for key, value in contract.items():
+        if key != 'measurement' and spec.get(key) != value:
+            raise ValueError(metric_id + ': producer ' + key + ' mismatch')
+    return contract['measurement']
+
+
 def produce(directory, context):
     store = MetricStore.read(directory)
     selected = {definition["producer"] for definition in store.document["definitions"].values()

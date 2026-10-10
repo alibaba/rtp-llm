@@ -42,9 +42,9 @@ def test_arrival_cohort_is_not_the_completion_window():
     issued = dict(rid='one', send_start_epoch_ms=10250, input_len=100)
     terminal = dict(issued, status='ok', total_ms=1250, ttft_ms=123.456,
                     observed_output_tokens=2)
-    evidence = dict(window=dict(start_epoch_ms=10250), criteria=dict(measure_s=2),
+    evidence = dict(window=dict(start_epoch_ms=10250, end_epoch_ms=12250), criteria=dict(measure_s=2),
                     flow=dict(issued=[issued], records=[terminal]))
-    perf = values(evidence, dict(windows=[]))
+    perf = values(evidence)
     assert perf['request/sent_qps'] == [[10.25, 1], [11.25, 0]]
     assert perf['request/success_qps'] == [[10.25, 0], [11.25, 1]]
     assert perf['request/ttft_p99_ms'] == [[10.25, 123.456], [11.25, None]]

@@ -226,11 +226,19 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
     """A declared Python producer publishes numeric data with explicit provenance."""
     import hashlib
     from importlib.util import find_spec
-    from monitoring.producers import PRODUCERS
+    from monitoring.producers import PRODUCERS, metric_contract
 
     declared = store.document["definitions"].get(metric_id)
     if declared is None or declared != definition or declared.get("producer") != producer or producer not in PRODUCERS:
         raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)
+    try:
+        if metric_contract(metric_id, definition) != definition['measurement']:
+            raise MetricContractError('published measurement does not match its implementation: ' + metric_id)
+    except ValueError as exc:
+        raise MetricContractError(str(exc)) from exc
+    calculation_module = ('analysis.request_metrics' if 'calculation' in definition
+                          else definition['measurement']['method'].rsplit('.', 1)[0])
+    calculation_sha256 = hashlib.sha256(Path(find_spec(calculation_module).origin).read_bytes()).hexdigest()
     module = PRODUCERS[producer][0]
     producer_sha256 = hashlib.sha256(Path(find_spec(module).origin).read_bytes()).hexdigest()
     result, identities = [], set()
@@ -250,5 +258,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
             labels=row["labels"], points=points, status="PRESENT" if any(v is not None for _, v in points) else "ABSENT",
             provenance=dict(source_type=definition["source_type"], producer=producer,
                             producer_module=module, producer_sha256=producer_sha256,
+                            calculation_module=calculation_module, calculation_sha256=calculation_sha256,
+                            calculation=copy.deepcopy(definition.get("calculation")),
                             measurement=copy.deepcopy(definition["measurement"]), evidence=evidence)))
     store.document["metrics"][metric_id] = result

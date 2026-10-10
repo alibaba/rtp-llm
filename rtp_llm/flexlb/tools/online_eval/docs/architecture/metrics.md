@@ -31,7 +31,7 @@ Prometheus 查询的完整 ID 由 `sources` 的来源种类和查询键组成；
 `config/monitoring` 定义指标身份、采集查询及单位、标签、测量口径元数据。`parameters.observation.inputs` 将这些指标按标签映射为 case 使用的本地字段；`observation.windows`、采样与 capture 设置限定取证范围和完整性要求。`parameters.analysis` 定义证据的解释规则，`parameters.checks` 绑定结果指标、窗口集合及门槛。指标采集、输入投影、测量计算与判定分别由其拥有者校验，输入绑定不创建新的采集后端。
 
 ```yaml
-metric_plan_schema_version: 3
+metric_plan_schema_version: 4
 include: [default.yaml]
 sources:
   mock:
@@ -46,7 +46,7 @@ sources:
 
 `include` 合并集合，`exclude` 按完整指标 ID 显式删除。重复定义、循环引用和删除不存在的指标均失败；本契约不支持同 ID 覆盖，要调整口径时修改所属集合，或新增不同 ID 并排除旧指标。展开后的定义及 SHA 写入编译产物与运行归档。
 
-难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind`、`labels` 和 `measurement`。`source_type` 记录实际来源：`prometheus`、`client_journal` 或 `debug_api`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。是否执行生产器由 `producer` 决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
+难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind` 和 `labels`。请求窗口计算额外声明 `calculation`；专属计算由 producer 的输出契约提供。`source_type` 记录实际来源：`prometheus`、`client_journal` 或 `debug_api`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。是否执行生产器由 `producer` 决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
 
 `measurement` 将来源与统计语义分开：
 
@@ -57,9 +57,28 @@ sources:
 | `accuracy` | `request_ledger`、`sampled`、`histogram_estimate` 或 `counter_delta` |
 | `requires_request_identity` | 是否依赖请求身份进行归因、去重或终态核对 |
 
-`produced` 必须完整声明这些属性；公共查询集合也显式记录口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
+`produced` 的 `measurement` 由计算实现生成，YAML 不接受手写覆盖；加载时校验 producer 输出契约，发布时再次校验。公共查询集合显式记录 PromQL 口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
 
 直方图 p99 与逐请求 nearest-rank p99、PromQL 的 lookback 均值与按实际 scrape 时刻计算的整窗引擎等权均值、全 fleet hit ratio 与 survivor 过滤后的 counter 差分分别使用不同 ID。门禁声明自己使用的 ID、单位和时窗，view 选择需要展示的投影，不把相近曲线作为门禁替身。已由请求流水覆盖且没有展示消费者的查询在所属 case 集合中用 `exclude` 去掉；公共默认集合保留供其他用途选择。
+
+## 可执行请求计算
+
+`calculation.calculator` 选择 `analysis.request_metrics.CALCULATORS` 中的注册函数，不解析任意表达式。支持 `token_throughput`、`request_rate`、`mean`、`quantile`、`success_share` 和 `inflight`。`window` 引用 producer 支持的观测窗口，`selection.time_basis` 选择 `arrival`、`completion` 或 `lifetimes`，`selection.status` 选择 `all`、`ok` 或 `non_ok`，`bucket_s` 指定桶宽。字段、单位、选择组合、百分位和窗口引用在加载时校验；未知字段、缺字段、非法组合或不完整账本失败。
+
+```yaml
+calculation:
+  calculator: token_throughput
+  window: measurement
+  selection:
+    time_basis: completion
+    status: ok
+  token_field: input_len
+  bucket_s: 1
+```
+
+计算器实际按窗口及选择条件读取请求，使用半开时间桶；最后不足一桶时按实际桶宽归一化。请求 ID 必须唯一，完成时间由发送时间与耗时计算，不回退到另一时钟。`inflight` 使用完整请求生命周期，在桶末边界计数；空均值或分位数为缺失，完整账本证明的零计数才是零。
+
+`method` 自动记录注册 calculator，`population` 自动记录窗口、时间基准和状态选择，来源、单位与测量分类由计算器声明。修改选择或桶宽会改变实际计算与归档口径。复杂的路由、survivor 差分及冻结门禁仍由 case Python 实现，通过 `metric_contract` 绑定真实实现函数并生成口径；YAML 不能覆盖它们的方法或统计对象。归档保留展开的计算参数、实现模块及源码 SHA；报告读取冻结结果，不按当前配置重新计算。
 
 ## 选择统计口径
 

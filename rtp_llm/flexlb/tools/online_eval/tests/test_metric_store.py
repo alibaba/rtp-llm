@@ -53,9 +53,9 @@ class MetricPlanTest(unittest.TestCase):
     def test_sets_compose_exclude_and_pin_expanded_content(self):
         with tempfile.TemporaryDirectory() as d, patch("monitoring.query_plan.CATALOG", Path(d)):
             root = Path(d)
-            base = dict(metric_plan_schema_version=3, sources=dict(mock=dict(temperature=definition())))
+            base = dict(metric_plan_schema_version=4, sources=dict(mock=dict(temperature=definition())))
             (root / "base.yaml").write_text(json.dumps(base))
-            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=3, include=["base.yaml"],
+            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4, include=["base.yaml"],
                 sources=dict(mock=dict(second=definition())))))
             original = load_plan("case.yaml")
             self.assertEqual(set(original["sources"]["mock"]), {"temperature", "second"})
@@ -64,7 +64,7 @@ class MetricPlanTest(unittest.TestCase):
             (root / "base.yaml").write_text(json.dumps(base))
             self.assertNotEqual(plan_hash(load_plan("case.yaml")), pinned)
             self.assertEqual(original["sources"]["mock"]["temperature"]["unit"], "K")
-            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=3, include=["base.yaml"],
+            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4, include=["base.yaml"],
                 exclude=["mock/temperature"], sources=dict(mock=dict(second=definition())))))
             self.assertEqual(set(load_plan("case.yaml")["sources"]["mock"]), {"second"})
 
@@ -73,13 +73,13 @@ class MetricPlanTest(unittest.TestCase):
             (dict(include=["base.yaml"], sources=dict(mock=dict(temperature=definition()))), "duplicate"),
             (dict(include=["case.yaml"]), "cycle"),
             (dict(include=["base.yaml"], exclude=["mock/missing"]), "does not exist"),
-            (dict(produced={"derived/x": dict(producer="unknown", source_type="client_journal", measurement=dict(method="fixture", population="requests", accuracy="request_ledger", requires_request_identity=True), unit="K",
+            (dict(produced={"derived/x": dict(producer="unknown", source_type="client_journal", unit="K",
                                              value_kind="scalar", labels=[])}), "unknown metric producer"),
         ]:
             with self.subTest(changes=changes), tempfile.TemporaryDirectory() as d, patch("monitoring.query_plan.CATALOG", Path(d)):
-                (Path(d)/"base.yaml").write_text(json.dumps(dict(metric_plan_schema_version=3,
+                (Path(d)/"base.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4,
                     sources=dict(mock=dict(temperature=definition())))))
-                (Path(d)/"case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=3, **changes)))
+                (Path(d)/"case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4, **changes)))
                 with self.assertRaisesRegex(ScenarioError, pattern):
                     load_plan("case.yaml")
 
@@ -117,7 +117,7 @@ class MetricArtifactTest(unittest.TestCase):
             self.assertTrue(all(len(row["provenance"]["producer_sha256"]) == 64 for row in rows))
 
     def plan(self):
-        return dict(metric_plan_schema_version=3, sources=dict(mock=dict(temperature=definition()),client={},master={}), produced={})
+        return dict(metric_plan_schema_version=4, sources=dict(mock=dict(temperature=definition()),client={},master={}), produced={})
 
     def test_query_id_survives_exported_name_and_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as d:
@@ -169,20 +169,20 @@ class MetricArtifactTest(unittest.TestCase):
 
     def test_producer_ownership_labels_and_atomic_publication(self):
         with tempfile.TemporaryDirectory() as d:
-            plan=self.plan(); spec=dict(producer="ha_evidence",source_type="debug_api",measurement=dict(method="http_state_poll", population="master", accuracy="sampled", requires_request_identity=False),unit="requests",value_kind="gauge",labels=["master"])
-            plan["produced"]["ha/custom"]=spec
+            plan=self.plan(); spec=load_plan("master_ha_failover.yaml")["produced"]["ha/scheduler_inflight"]
+            plan["produced"]["ha/scheduler_inflight"]=spec
             store=export_metrics(d,plan)
             original=(Path(d)/"metrics.json").read_bytes()
             rows=[dict(epoch="1",source="ha",labels={"master":"A"},points=[[1,2],[2,None]])]
-            with self.assertRaises(MetricContractError): publish(store,"ha/custom",spec,rows,producer="wrong",evidence={})
+            with self.assertRaises(MetricContractError): publish(store,"ha/scheduler_inflight",spec,rows,producer="wrong",evidence={})
             with self.assertRaisesRegex(MetricContractError,"duplicate"):
-                publish(store,"ha/custom",spec,rows*2,producer="ha_evidence",evidence={})
+                publish(store,"ha/scheduler_inflight",spec,rows*2,producer="ha_evidence",evidence={})
             self.assertEqual((Path(d)/"metrics.json").read_bytes(),original)
-            publish(store,"ha/custom",spec,rows,producer="ha_evidence",evidence={"endpoint":"/debug"})
+            publish(store,"ha/scheduler_inflight",spec,rows,producer="ha_evidence",evidence={"endpoint":"/debug"})
             store.save(d)
             frozen=MetricStore.read(d)
-            self.assertEqual(frozen.document["metrics"]["ha/custom"][0]["provenance"]["source_type"],"debug_api")
-            with self.assertRaises(MetricUnavailable): frozen.select("ha/custom")
+            self.assertEqual(frozen.document["metrics"]["ha/scheduler_inflight"][0]["provenance"]["source_type"],"debug_api")
+            with self.assertRaises(MetricUnavailable): frozen.select("ha/scheduler_inflight")
 
     def test_view_has_local_curve_ids_and_independent_label_filters(self):
         presentation=dict(charts=dict(curves={"p_curve":dict(metric_id="mock/temperature",labels={"role":"prefill"},color="red"),

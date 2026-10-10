@@ -1,4 +1,4 @@
-metric_plan_schema_version: 3
+metric_plan_schema_version: 4
 include:
 - default.yaml
 exclude:
@@ -59,415 +59,326 @@ produced:
     unit: tokens/s
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: token_throughput
+      window: measurement
+      selection:
+        time_basis: completion
+        status: ok
+      token_field: input_len
+      bucket_s: 1
   request/output_tps:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: token_throughput
+      window: measurement
+      selection:
+        time_basis: completion
+        status: ok
+      token_field: observed_output_tokens
+      bucket_s: 1
   request/inflight:
     producer: performance_requests
     source_type: client_journal
     unit: requests
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: full_request_lifetimes
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: inflight
+      window: measurement
+      selection:
+        time_basis: lifetimes
+        status: all
+      bucket_s: 1
   request/sent_qps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: request_rate
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: all
+      bucket_s: 1
   request/completed_qps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: request_rate
+      window: measurement
+      selection:
+        time_basis: completion
+        status: all
+      bucket_s: 1
   request/success_qps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: request_rate
+      window: measurement
+      selection:
+        time_basis: completion
+        status: ok
+      bucket_s: 1
   request/error_qps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: request_rate
+      window: measurement
+      selection:
+        time_basis: completion
+        status: non_ok
+      bucket_s: 1
   request/arrival_success_ratio:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: success_share
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: all
+      bucket_s: 1
   request/ttft_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: gauge
     labels: []
-    measurement:
-      method: nearest_rank_p99
-      population: arrival_cohort_successes
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: quantile
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: ok
+      field: ttft_ms
+      percentile: 0.99
+      bucket_s: 1
   request/e2e_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: gauge
     labels: []
-    measurement:
-      method: nearest_rank_p99
-      population: arrival_cohort_successes
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: quantile
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: ok
+      field: total_ms
+      percentile: 0.99
+      bucket_s: 1
   request/tpot_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: gauge
     labels: []
-    measurement:
-      method: nearest_rank_p99
-      population: arrival_cohort_successes
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: quantile
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: ok
+      field: tpot_ms
+      percentile: 0.99
+      bucket_s: 1
   request/input_tokens_mean:
     producer: performance_requests
     source_type: client_journal
     unit: tokens
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: mean
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: all
+      field: input_len
+      bucket_s: 1
   request/output_tokens_mean:
     producer: performance_requests
     source_type: client_journal
     unit: tokens
     value_kind: gauge
     labels: []
-    measurement:
-      method: request_one_second_buckets
-      population: arrival_cohort_successes
-      accuracy: request_ledger
-      requires_request_identity: true
+    calculation:
+      calculator: mean
+      window: measurement
+      selection:
+        time_basis: arrival
+        status: ok
+      field: observed_output_tokens
+      bucket_s: 1
   performance_gate/sent_qps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/cohort_requests:
     producer: performance_requests
     source_type: client_journal
     unit: requests
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/success_requests:
     producer: performance_requests
     source_type: client_journal
     unit: requests
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/error_rate:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: whole_run_terminals
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/cohort_error_rate:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/slo_fraction:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/goodput_rps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/input_goodput:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/output_goodput:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/input_tps:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/output_tps:
     producer: performance_requests
     source_type: client_journal
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: completion_window
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/ttft_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
     labels: []
-    measurement:
-      method: nearest_rank_p99
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/e2e_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
     labels: []
-    measurement:
-      method: nearest_rank_p99
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/tpot_p99_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
     labels: []
-    measurement:
-      method: nearest_rank_p99
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/inflight_start:
     producer: performance_requests
     source_type: client_journal
     unit: requests
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: full_request_lifetimes
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/inflight_end:
     producer: performance_requests
     source_type: client_journal
     unit: requests
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: full_request_lifetimes
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/inflight_growth_rps:
     producer: performance_requests
     source_type: client_journal
     unit: requests/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: full_request_lifetimes
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/rtp_llm_context_tps_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: priority_sum_then_sample_mean_then_engine_mean
-      population: measurement_window_engine_incarnations
-      accuracy: sampled
-      requires_request_identity: false
   performance_gate/rtp_llm_context_tps_with_cache_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: priority_sum_then_sample_mean_then_engine_mean
-      population: measurement_window_engine_incarnations
-      accuracy: sampled
-      requires_request_identity: false
   performance_gate/rtp_llm_generate_tps_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
     value_kind: scalar
     labels: []
-    measurement:
-      method: priority_sum_then_sample_mean_then_engine_mean
-      population: measurement_window_engine_incarnations
-      accuracy: sampled
-      requires_request_identity: false
   performance_gate/rtp_llm_context_tps_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines
     value_kind: scalar
     labels: []
-    measurement:
-      method: covered_engine_count
-      population: measurement_window_engine_incarnations
-      accuracy: sampled
-      requires_request_identity: false
   performance_gate/rtp_llm_context_tps_with_cache_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines
     value_kind: scalar
     labels: []
-    measurement:
-      method: covered_engine_count
-      population: measurement_window_engine_incarnations
-      accuracy: sampled
-      requires_request_identity: false
   performance_gate/rtp_llm_generate_tps_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines
     value_kind: scalar
     labels: []
-    measurement:
-      method: covered_engine_count
-      population: measurement_window_engine_incarnations
-      accuracy: sampled
-      requires_request_identity: false
   performance_gate/offered_qps_deviation:
     producer: performance_requests
     source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true
   performance_gate/pacing_lag_max_ms:
     producer: performance_requests
     source_type: client_journal
     unit: ms
     value_kind: scalar
     labels: []
-    measurement:
-      method: frozen_request_window_summary
-      population: arrival_cohort
-      accuracy: request_ledger
-      requires_request_identity: true

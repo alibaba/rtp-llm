@@ -38,7 +38,7 @@ OBSERVATION_FIELDS = (
 )
 
 QUERY_FIELDS = ('promql', 'mode', 'producer', 'source_type', 'unit', 'value_kind',
-                'labels', 'measurement', 'exported_metrics', 'required')
+                'labels', 'calculation', 'measurement', 'exported_metrics', 'required')
 CURVE_FIELDS = ('metric_id', 'labels', 'name', 'group', 'unit', 'axis', 'scale',
                 'color', 'hidden')
 
@@ -52,6 +52,8 @@ def fields(kind, path):
     if kind == 'monitoring' and (len(path) == 3 and path[0] == 'sources'
                                  or len(path) == 2 and path[0] == 'produced'):
         return QUERY_FIELDS
+    if kind == 'monitoring' and len(path) == 3 and path[0] == 'produced' and path[-1] == 'calculation':
+        return ('calculator', 'window', 'selection', 'token_field', 'field', 'percentile', 'bucket_s')
     if kind == 'report_views':
         if path in VIEW_BLOCK_FIELDS:
             return VIEW_BLOCK_FIELDS[path]

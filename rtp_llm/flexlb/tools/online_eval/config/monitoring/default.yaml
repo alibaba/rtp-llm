@@ -1,4 +1,4 @@
-metric_plan_schema_version: 3
+metric_plan_schema_version: 4
 sources:
   mock:
     running_sum:
