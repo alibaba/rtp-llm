@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include <cstdint>
 #include <deque>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -34,11 +35,14 @@ private:
     GenerateOutputs              prepareGenerateOutput(const StreamUpdateInfo& update_info);
     void                         enqueueGenerateOutput(GenerateOutputs&& generate_results);
     bool                         consumerReadyWithoutLock() const override;
+    void                         collectPPPrefillHiddenStates(const StreamUpdateInfo& update_info) override;
 
     static constexpr size_t kOutputCapacity = 1000;
 
     int64_t                     request_id_{0};
     bool                        finished_{false};
     std::deque<GenerateOutputs> generate_outputs_;
+    std::vector<torch::Tensor>  pp_prefill_hidden_chunks_;
+    torch::Tensor              pp_prefill_hidden_states_;
 };
 }  // namespace rtp_llm

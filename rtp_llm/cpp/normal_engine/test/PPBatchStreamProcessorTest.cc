@@ -3218,6 +3218,55 @@ TEST_F(PPBatchStreamProcessorTest, DelayedChunkResultUsesDispatchSnapshot) {
     EXPECT_EQ(stream->seqLength(), 9);
 }
 
+TEST_F(PPBatchStreamProcessorTest, DelayedChunksReturnCompletePromptHiddenStates) {
+    ResourceContext resources;
+    const auto      model_config = makeModelConfig();
+    auto            stream       = makeStream(resources, model_config, 906, {1, 2, 3, 4, 5, 6, 7, 8}, 1);
+    stream->generateConfig()->max_new_tokens = 1;
+    stream->generateConfig()->return_hidden_states = true;
+    stream->generateConfig()->return_all_hidden_states = true;
+    stream->setReturnLastHiddenStates(true);
+    stream->enable_fast_gen_ = true;
+    stream->resetChunkLen(8, 8);
+    stream->step();
+    stream->step();
+    ASSERT_GT(stream->iterCount(), 1);
+    ASSERT_FALSE(stream->isChunkStream());
+    PPBatchStreamProcessor processor(model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, true);
+    PPExecutionResult result;
+    result.request_ids = torch::tensor({906}, torch::kInt64);
+    result.new_token_ids = intTensor({12}).reshape({1, 1});
+    result.hidden_states = torch::tensor({6.0f, 7.0f}).reshape({1, 2});
+    result.all_hidden_states = torch::arange(8, torch::kFloat32).reshape({4, 2});
+    result.prompt_logits.resize(1);
+    result.request_errors.resize(1);
+    stream->ppChunkDispatched();
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 4, true, true}}).ok());
+    EXPECT_EQ(stream->seqLength(), 8);
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_FALSE(stream->hasOutput());
+    EXPECT_EQ(stream->ppOutstandingResults(), 0);
+    // Reusing an older result's buffer cannot alter retained prompt rows.
+    result.all_hidden_states.fill_(-1);
+    result.all_hidden_states = torch::arange(8, 16, torch::kFloat32).reshape({4, 2});
+    result.hidden_states = result.all_hidden_states.narrow(0, 3, 1).clone();
+    stream->ppChunkDispatched();
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 4, false, true}}).ok());
+    EXPECT_EQ(stream->seqLength(), 9);
+    EXPECT_EQ(stream->ppOutstandingResults(), 0);
+    auto output = stream->nextOutput(1000);
+    ASSERT_TRUE(output.ok());
+    const auto& generated = output.value().generate_outputs.front();
+    ASSERT_TRUE(generated.all_hidden_states.has_value());
+    EXPECT_TRUE(torch::equal(*generated.all_hidden_states, torch::arange(16, torch::kFloat32).reshape({8, 2})));
+    ASSERT_TRUE(generated.hidden_states.has_value());
+    EXPECT_TRUE(torch::equal(*generated.hidden_states, result.hidden_states));
+    auto* normal_stream = dynamic_cast<NormalGenerateStream*>(stream.get());
+    ASSERT_NE(normal_stream, nullptr);
+    EXPECT_TRUE(normal_stream->pp_prefill_hidden_chunks_.empty());
+    EXPECT_FALSE(normal_stream->pp_prefill_hidden_states_.defined());
+}
+
 TEST_F(PPBatchStreamProcessorTest, SnapshotCardinalityRejectsBeforeDispatch) {
     ResourceContext        resources;
     const auto             model_config = makeModelConfig();

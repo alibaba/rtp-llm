@@ -1234,6 +1234,9 @@ void GenerateStream::updateFromPP(const StreamUpdateInfo& update_info) {
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
     }
+    if (update_info.intermediate_chunk || isContextStream()) {
+        collectPPPrefillHiddenStates(update_info);
+    }
     if (update_info.intermediate_chunk) {
         // Use dispatch-time chunk state: overlapping cursors have already advanced.
         // An intermediate result must not append tokens or end context mode.

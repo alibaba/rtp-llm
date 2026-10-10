@@ -801,6 +801,7 @@ protected:
     ErrorInfo    statusInfoWithoutLock() const;
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
+    virtual void collectPPPrefillHiddenStates(const StreamUpdateInfo&) {}
 
     int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
     bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
