@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 
 import zstandard as zstd
 
+from rtp_llm.utils.fuser import _fuse_mount_options
+
 SNAPSHOT_SUFFIX, MTIME_MANIFEST = ".jit_snapshot.tar.zst", ".jit_mtime_ns.json"
 SNAPSHOT_KEEP, STALE_REMOTE_TMP_S, STALE_BATON_S = 20, 1800.0, 7200.0
 REMOTE_READY_TIMEOUT_S = 120.0
@@ -183,10 +185,14 @@ class RemoteSnapshotStore:
                 remote_tmp = self.remote_root / f"{name}.tmp"
                 try:
                     shutil.copyfile(archive, remote_tmp)
-                    # A local directory needs an explicit shared mode. FUSE-backed
-                    # object storage may not support chmod and can expose a created
-                    # path only after the upload has become readable.
-                    if not self._mounted:
+                    # _mounted tracks cleanup ownership, not filesystem type:
+                    # an externally mounted FUSE directory has no owned mount.
+                    # Recheck the visible mount after restore; FUSE may expose
+                    # new objects only after upload and may not support chmod.
+                    if (
+                        not self._mounted
+                        and _fuse_mount_options(str(self.remote_root)) is None
+                    ):
                         remote_tmp.chmod(0o644)
                     self._wait_remote_ready(remote_tmp, archive)
                     os.rename(remote_tmp, self.remote_root / name)
