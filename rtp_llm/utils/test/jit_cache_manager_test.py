@@ -15,6 +15,7 @@ from unittest import mock
 
 from rtp_llm import start_backend_server as backend
 from rtp_llm.model_loader.tipc import ffi as tipc_ffi
+from rtp_llm.utils import fuser
 from rtp_llm.utils import jit_cache_manager as jit
 from rtp_llm.utils import jit_cache_store as store
 from rtp_llm.utils.util import COMPILE_FLAG_ENVS, torch_abi_fingerprint
@@ -133,6 +134,63 @@ class StoreTest(JitCacheTestBase):
         ):
             self.publish(snap_store, {"triton/op.so": b"x"})
         self.assertEqual(len(snapshots(snap_store)), 1)
+
+    def test_external_fuse_path_publishes_without_chmod_or_unmount(self):
+        remote = self.root / "external"
+        remote.mkdir()
+        mountinfo = (
+            "1 0 0:1 / / rw - ext4 /dev/root rw\n"
+            f"2 1 0:2 / {remote} rw - fuse.fsfuse fsfuse rw\n"
+        )
+        events = []
+        with mock.patch.object(
+            fuser, "open", mock.mock_open(read_data=mountinfo), create=True
+        ):
+            snap_store = store.resolve_remote(str(remote), "v1", "scope")
+            self.assertIsNotNone(snap_store)
+            self.assertEqual(snap_store._mounted, "")
+            real_ready = snap_store._wait_remote_ready
+            real_rename = os.rename
+
+            def ready(*args):
+                events.append("ready")
+                return real_ready(*args)
+
+            def rename(*args):
+                self.assertEqual(events, ["ready"])
+                events.append("rename")
+                return real_rename(*args)
+
+            with mock.patch.object(
+                Path, "chmod", side_effect=FileNotFoundError("FUSE object not visible")
+            ), mock.patch.object(
+                snap_store, "_wait_remote_ready", side_effect=ready
+            ), mock.patch.object(
+                store.os, "rename", side_effect=rename
+            ):
+                self.publish(snap_store, {"triton/op.so": b"compiled"})
+            self.assertEqual(events, ["ready", "rename"])
+            self.assertEqual(len(snapshots(snap_store)), 1)
+            with mock.patch.object(fuser, "umount_file") as unmount:
+                snap_store.close()
+            unmount.assert_not_called()
+
+    def test_fuse_detection_uses_current_mount_at_publish(self):
+        snap_store = self.make_store()
+        self.publish(snap_store, {"triton/before.so": b"before"})
+        # The store may survive checkpoint/restore into a new mount namespace.
+        # Do not cache the source host's filesystem classification in __init__.
+        mountinfo = (
+            "1 0 0:1 / / rw - ext4 /dev/root rw\n"
+            f"2 1 0:2 / {snap_store.remote_root} rw - fuse.fsfuse fsfuse rw\n"
+        )
+        with mock.patch.object(
+            fuser, "open", mock.mock_open(read_data=mountinfo), create=True
+        ), mock.patch.object(
+            Path, "chmod", side_effect=FileNotFoundError("FUSE object not visible")
+        ):
+            self.publish(snap_store, {"triton/after.so": b"after"})
+        self.assertEqual(len(snapshots(snap_store)), 2)
 
     def test_extract_strips_setuid_bits(self):
         source = self.root / "suid.so"
