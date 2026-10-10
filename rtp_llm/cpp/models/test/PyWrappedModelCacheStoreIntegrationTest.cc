@@ -557,6 +557,7 @@ py::dict serializeResult(const RecordingCacheStore& store, const std::map<std::s
 py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::string& scenario_name) {
     static std::once_flag runtime_once;
     std::call_once(runtime_once, []() {
+        AUTIL_ROOT_LOG_CONFIG();
         initRuntime(/*device_id=*/0,
                     /*trace_memory=*/false,
                     /*enable_comm_overlap=*/false,
@@ -570,6 +571,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                                                     /*metrics_reporter=*/nullptr,
                                                     KVCacheConfig{},
                                                     scenario.parallelism);
+    RTP_LLM_CHECK_WITH_INFO(manager->init(), "cache-store fixture manager initialization failed");
     manager->setCacheStore(cache_store);
 
     Weights weights;
