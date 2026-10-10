@@ -8,7 +8,7 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 
 | 顺序 | 字段 | 阅读目的 |
 |---|---|---|
-| 1 | `schema_version`、`case`、`program` | 格式、身份与默认入口 |
+| 1 | `case_schema_version`、`case`、`program` | 格式、身份与默认入口 |
 | 2 | `metadata`、`test`、`profiles` | 用途、测试性质、采集与运行形态 |
 | 3 | `environment`、`execution` | 模型/拓扑、配置与时间预算 |
 | 4 | `parameters`、`parameter_schema` | 流量输入、指标绑定、门槛及约束 |

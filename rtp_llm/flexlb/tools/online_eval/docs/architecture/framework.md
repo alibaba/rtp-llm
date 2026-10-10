@@ -16,17 +16,33 @@ case analysis/report     明确判定后装配 HTML bundle
 
 ## 格式版本
 
-`schema_version` 表示所属数据格式的版本，各格式独立演进；数字不表示项目版本或代码是否过时。
+版本字段采用 `<format>_schema_version`，字段名标明格式，整数标明该格式的版本。各格式独立演进，数字不表示项目版本或代码是否过时。
 
-| 格式 | 当前版本 | 边界 |
+| 格式 | 版本字段 | 当前值 |
 |---|---|---|
-| case YAML | 2 | 用户输入，只声明数据；文件加载器拒绝包含阶段编排的旧格式 |
-| 指标集合、CI suite | 2 | 查询定义和选例目录，各自由所属加载器校验 |
-| Python 生成的内部 program document | 1 | 包含 stages 和 typed reference，由内部编译器读取；不是用户 YAML 的兼容入口 |
-| 实例清单、租约、指标归档、报告 bundle | 1 | 各自产物格式，由对应读写双方校验 |
-| mode profile | 1 | 运行模式与 Master profile 的映射 |
+| case YAML | `case_schema_version` | 2 |
+| 指标集合 | `metric_plan_schema_version` | 2 |
+| CI suite | `suite_schema_version` | 2 |
+| mode profile | `mode_profiles_schema_version` | 1 |
+| Python 内部 program document | `program_schema_version` | 1 |
+| 编译 / 列举的实例清单 | `instance_catalog_schema_version` | 1 |
+| 子执行器结果 / 父 runner 汇总 | `scenario_results_schema_version` / `run_summary_schema_version` | 1 |
+| runner 计划 / 端口租约 / 耗时缓存 | `runner_plan_schema_version` / `lease_schema_version` / `timings_schema_version` | 1 |
+| 冻结指标归档 | `metrics_schema_version` | 1 |
+| 报告图表 / bundle manifest / 分析封装 | `report_spec_schema_version` / `report_manifest_schema_version` / `report_analysis_schema_version` | 1 |
+| 报告运行信息 | `run_meta_schema_version` | 1 |
+| workload 证据 / 分析 | `workload_evidence_schema_version` / `workload_analysis_schema_version` | 1 |
+| 请求与引擎关联证据 / 客户端请求记录 | `request_engine_evidence_schema_version` / `client_record_schema_version` | 1 |
+| 观测快照 / 冻结观测窗口 | `observation_snapshot_schema_version` / `observation_window_schema_version` | 1 |
+| 性能证据 / 性能分析 / cache 分析 | `performance_evidence_schema_version` / `performance_analysis_schema_version` / `cache_scale_in_analysis_schema_version` | 1 |
+| 实验归档 manifest / 请求计划 manifest | `archive_manifest_schema_version` / `request_plan_manifest_schema_version` | 1 |
+| Master 模板 / 流量保真度分析 | `master_template_schema_version` / `traffic_fidelity_schema_version` | 1 |
 
-case YAML 会生成内部执行计划，所以外部 `schema_version: 2` 与内部 `schema_version: 1` 可以同时出现。仅在某个格式的字段或语义发生不兼容变化时升级该格式，并同步其读写双方；不能为了数字一致整体替换版本号。配置字段分层见[新增 case](../development/adding-cases.md)。
+case YAML 通过 `program: default` 生成内部 program document；后者包含 stages 和 typed reference，不是旧用户 YAML 的兼容入口。读取方校验本格式的版本字段及整数类型，拒绝其他格式或旧通用版本字段，不能根据文件名或版本数字猜测格式。报告生产器组装的内存图表可以暂不带版本字段，由 bundle 写入器明确标记；落盘文件和离线读取必须带有相应字段。
+
+真实采集输入、固定合成流量 profile 及 Java 共享性能 / 流控协议保留它们原有的 `schema_version`，由相应协议读取器校验，不进入 case、执行计划、指标和报告的读取边界。它们的语义与准入见[数据目录](../../data/README.md)。调整这类字段需要同步固定输入及协议双方。
+
+版本字段的名称属于格式身份；字段或语义发生不兼容变化时升级该格式，并同步其读写双方，不为数字一致整体替换。配置分层见[新增 case](../development/adding-cases.md)。
 
 ## 代码归属
 

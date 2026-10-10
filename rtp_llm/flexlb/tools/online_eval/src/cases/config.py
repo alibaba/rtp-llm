@@ -107,8 +107,8 @@ def program_module(name, source):
 def validate_analysis(config, source, *, module=None):
     """Resolve analysis capability from registered Python code, never YAML flags."""
     data_only(config, source)
-    if type(config.get("schema_version")) is not int or config["schema_version"] != 2:
-        raise ScenarioError(f"{source}: analysis requires schema_version 2")
+    if type(config.get("case_schema_version")) is not int or config["case_schema_version"] != 2:
+        raise ScenarioError(f"{source}: analysis requires case_schema_version 2")
     module = module or program_module(config.get("case"), source)
     validator = getattr(module, "ANALYSIS_POLICY_VALIDATOR", None)
     if not callable(validator):
@@ -157,7 +157,7 @@ def _validate_configuration(config, source):
     mapping(
         config,
         {
-            "schema_version",
+            "case_schema_version",
             "case",
             "program",
             "variant_axis",
@@ -175,9 +175,9 @@ def _validate_configuration(config, source):
         },
         source,
     )
-    if type(config.get("schema_version")) is not int or config["schema_version"] != 2:
+    if type(config.get("case_schema_version")) is not int or config["case_schema_version"] != 2:
         raise ScenarioError(
-            f"{source}: only data-only schema_version 2 is accepted; move orchestration into Python"
+            f"{source}: only data-only case_schema_version 2 is accepted; move orchestration into Python"
         )
 
 
@@ -188,7 +188,7 @@ def _program_document(config, name, source):
         raise ScenarioError(f"{source}.metadata: expected mapping")
     document = ProgramDocument(copy.deepcopy(metadata))
     document.update(
-        schema_version=1, environment=copy.deepcopy(environment), variants=[]
+        program_schema_version=1, environment=copy.deepcopy(environment), variants=[]
     )
     document["id"] = config.get("id", name)
     for key in ("profiles", "execution"):

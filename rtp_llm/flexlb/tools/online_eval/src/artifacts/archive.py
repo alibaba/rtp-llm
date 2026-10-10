@@ -15,7 +15,7 @@ from pathlib import Path
 import tempfile
 import zipfile
 
-SCHEMA_VERSION = 1
+ARCHIVE_MANIFEST_SCHEMA_VERSION = 1
 STRUCTURED = {".json", ".yaml", ".yml", ".html", ".csv"}
 RAW_LIMIT = 2 * 1024 * 1024
 HEAD_TAIL = 256 * 1024
@@ -47,7 +47,7 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
     output.parent.mkdir(parents=True, exist_ok=True)
     if status not in {"complete", "incomplete"}:
         raise ValueError("status must be complete or incomplete")
-    manifest = {"schema_version": SCHEMA_VERSION, "kind": kind, "status": status,
+    manifest = {"archive_manifest_schema_version": ARCHIVE_MANIFEST_SCHEMA_VERSION, "kind": kind, "status": status,
                 "metadata": metadata or {}, "files": [], "omitted": []}
     fd, temp_name = tempfile.mkstemp(prefix=".experiment-", suffix=".zip", dir=output.parent)
     os.close(fd)

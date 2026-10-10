@@ -5,6 +5,8 @@ import json
 import math
 from pathlib import Path
 
+from schema_contract import matches_schema
+
 
 class MetricContractError(ValueError):
     """An ID, identity or definition violates the declared metric contract."""
@@ -27,7 +29,7 @@ class MetricStore:
     """Read a frozen artifact; never query a source or reinterpret current YAML."""
 
     def __init__(self, document):
-        if document.get("schema_version") != 1:
+        if not matches_schema(document, "metrics_schema_version", 1):
             raise MetricContractError("unsupported metric artifact schema")
         if (not isinstance(document.get("definitions"), dict)
                 or not isinstance(document.get("metrics"), dict)
@@ -193,7 +195,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     metadata = previous.get("run", {}) if destination.exists() else {}
     for identity in declared:
         observations.setdefault(identity, [])
-    document = dict(schema_version=1, run=metadata, plans=plans, definitions=declared,
+    document = dict(metrics_schema_version=1, run=metadata, plans=plans, definitions=declared,
                     metrics=observations, collection_gaps=gaps, errors=errors)
     atomic_json(destination, document)
     return MetricStore(document)

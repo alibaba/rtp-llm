@@ -26,7 +26,7 @@ class SuiteOwnershipTest(unittest.TestCase):
     def test_ci_can_select_one_workload_independent_of_directory_or_kind(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'suites.yaml'
-            path.write_text(yaml.safe_dump(dict(schema_version=2, default_suite='smoke',
+            path.write_text(yaml.safe_dump(dict(suite_schema_version=2, default_suite='smoke',
                                                ci_suites={'smoke': ['custom::load']})))
             test = dict(kind='workload', description='Load under restart', collection='request')
             plan = dict(scenario_id='custom', variant_id='load', source_path='/any/core/place.yaml', test=test)
@@ -38,7 +38,7 @@ class SuiteOwnershipTest(unittest.TestCase):
             self.assertEqual('workload', classify([plan], 'smoke', path)[0]['test_kind'])
             with self.assertRaisesRegex(ScenarioError, 'missing: custom::load'):
                 classify([], 'smoke', path)
-            path.write_text(yaml.safe_dump(dict(schema_version=2, default_suite='smoke',
+            path.write_text(yaml.safe_dump(dict(suite_schema_version=2, default_suite='smoke',
                                                ci_suites={'smoke': ['custom::load', 'custom::load']})))
             with self.assertRaisesRegex(ScenarioError, 'unique'):
                 suite_names(path)

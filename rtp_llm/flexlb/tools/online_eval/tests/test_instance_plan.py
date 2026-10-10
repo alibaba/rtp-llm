@@ -15,7 +15,7 @@ from runtime.resource_plan import ResourcePlanError
 
 def catalog():
     return {
-        "schema_version": 1,
+        "instance_catalog_schema_version": 1,
         "instances": [
             {
                 "id": f"scenario{i}::default::batch-window",
@@ -117,7 +117,7 @@ class InstancePlanTest(unittest.TestCase):
 
     def test_wrong_schema_profile_and_invalid_time_rejected(self):
         data = catalog()
-        data["schema_version"] = True
+        data["instance_catalog_schema_version"] = True
         with self.assertRaises(InstancePlanError):
             parse(data)
         for key, value in [

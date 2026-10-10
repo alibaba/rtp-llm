@@ -111,7 +111,7 @@ def lease_manifest():
         FLEXLB_FT_MOCK_BASE_GRPC_PORT=str(b),
     )
     return dict(
-        schema_version=1,
+        lease_schema_version=1,
         lane=0,
         backend="java_mock",
         master_base=m,

@@ -1,5 +1,5 @@
 # 指标定义采用原生 PromQL；占位符由运行实例注入。
-schema_version: 2
+metric_plan_schema_version: 2
 sources:
   mock:
     running_sum:

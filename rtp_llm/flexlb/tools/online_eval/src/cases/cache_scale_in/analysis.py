@@ -313,7 +313,7 @@ def analyze(evidence):
         "INVALID" if errors else ("FAIL" if first_collapse is not None else "PASS")
     )
     return dict(
-        schema_version=1,
+        cache_scale_in_analysis_schema_version=1,
         measurement_scope=scope_contract(evidence) if scoped else {
             "policy": "historical-detach-window", "drain": "diagnostic only"},
         excluded_drain_diagnostics=[e for e in evidence.get("errors", []) if e in DRAIN_DIAGNOSTICS],

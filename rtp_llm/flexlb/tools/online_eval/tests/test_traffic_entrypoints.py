@@ -62,7 +62,7 @@ class TrafficEntrypointTest(unittest.TestCase):
         core = {key: value for key, value in generated.items() if key != "transformations"}
         legacy_bytes = (json.dumps(core, separators=(",", ":")) + "\n").encode()
         self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(),
-                         "8b5a033c707489c598dd6d2d1c77690ebb7251b96e5f65027313221d9969df24")
+                         "44b68a7c6912281b7059aaa77ac2c45b2134ad1c7040efbc466e32e6285a298f")
         transformations = generated["transformations"]
         self.assertEqual(transformations["source_sha256"], generated["source_sha256"])
         self.assertEqual(transformations["selected_requests"], len(generated["templates"]))

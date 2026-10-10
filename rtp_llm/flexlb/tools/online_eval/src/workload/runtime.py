@@ -252,7 +252,7 @@ class WorkloadPolicy:
             if epoch in self.environment_metadata:
                 self.environment_metadata[epoch]["load_client_workers"] = len(values)
         payload = dict(
-            schema_version=1,
+            workload_evidence_schema_version=1,
             instance_id=result["id"],
             clock_anchor=self.anchor,
             phases=self.events,

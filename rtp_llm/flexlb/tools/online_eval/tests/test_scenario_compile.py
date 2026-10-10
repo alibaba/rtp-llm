@@ -22,7 +22,7 @@ from scenario.loader import load_document
 
 def scenario():
     return {
-        "schema_version": 1,
+        "program_schema_version": 1,
         "id": "completion",
         "description": "A submitted request reaches terminal state",
         "category": "status",
@@ -110,8 +110,8 @@ class CompileTest(unittest.TestCase):
 
     def test_unknown_field_and_version_are_errors_with_source(self):
         for patch in (
-            {"schema_version": True},
-            {"schema_version": 2},
+            {"program_schema_version": True},
+            {"program_schema_version": 2},
             {"python": "exec()"},
             {1: "bad"},
         ):

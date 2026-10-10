@@ -1,4 +1,4 @@
-schema_version: 1
+mode_profiles_schema_version: 1
 
 # Runtime selects only transport, resource ownership, and observation defaults.
 # Master mode selects the existing, fully validated FlexLB config profile.

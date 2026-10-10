@@ -117,7 +117,7 @@ def materialize(path, specification, namespace, base_dir, *, max_requests=None):
         digest = sha256_file(temporary)
         temporary.replace(path)
         manifest = dict(
-            schema_version=1,
+            request_plan_manifest_schema_version=1,
             source=specification,
             base_dir=str(Path(base_dir).resolve()),
             namespace=namespace,

@@ -5,6 +5,8 @@ import math
 import re
 from pathlib import Path
 
+from schema_contract import matches_schema
+
 from scenario.loader import ScenarioError, load_document
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/suites.yaml"
@@ -54,8 +56,8 @@ def normalize_test(value):
 
 def _catalog(path=CATALOG):
     data = load_document(path)
-    if set(data) != {"schema_version", "default_suite", "ci_suites"} or data["schema_version"] != 2:
-        raise ScenarioError("invalid CI suite catalog: expected schema_version 2")
+    if set(data) != {"suite_schema_version", "default_suite", "ci_suites"} or not matches_schema(data, "suite_schema_version", 2):
+        raise ScenarioError("invalid CI suite catalog: expected suite_schema_version 2")
     suites = data["ci_suites"]
     if not isinstance(suites, dict) or not suites:
         raise ScenarioError("ci_suites must be a nonempty mapping")

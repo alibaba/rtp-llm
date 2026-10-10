@@ -290,7 +290,7 @@ def analyze_report(directory, result, evidence):
         flow = json.loads(flow_input.read_text())
         traffic.append(flow.get("trace", {}))
     payload = dict(
-        schema_version=1,
+        workload_analysis_schema_version=1,
         traffic_manifests=traffic,
         iterations=iterations,
         configuration=result.get("implementation", {}).get("configuration"),

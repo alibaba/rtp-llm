@@ -48,7 +48,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             doc,
             source,
             {
-                "schema_version",
+                "program_schema_version",
                 "id",
                 "description",
                 "category",
@@ -63,15 +63,15 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 "estimated_duration_s",
             },
             {
-                "schema_version",
+                "program_schema_version",
                 "id",
                 "description",
                 "category",
                 "environment",
             },
         )
-        if type(doc["schema_version"]) is not int or doc["schema_version"] != 1:
-            fail(source + ".schema_version", "only schema_version 1 is supported")
+        if type(doc["program_schema_version"]) is not int or doc["program_schema_version"] != 1:
+            fail(source + ".program_schema_version", "only program_schema_version 1 is supported")
         sid = identifier(doc["id"], source + ".id")
         if sid in seen:
             fail(source, f"duplicate scenario id {sid}")

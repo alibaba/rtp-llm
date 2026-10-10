@@ -3,6 +3,8 @@
 import bisect
 import math
 
+from schema_contract import matches_schema
+
 
 NUMERIC = {
     "warmup_s",
@@ -177,7 +179,7 @@ def percentile(values, q=0.99):
 def analyze(evidence):
     errors = []
     result = dict(
-        schema_version=1,
+        performance_analysis_schema_version=1,
         verdict="INVALID",
         errors=errors,
         checks=[],
@@ -191,7 +193,7 @@ def analyze(evidence):
             raise ValueError("errors must be a list")
         errors.extend(evidence.get("errors", []))
         c = validate(evidence["criteria"], evidence.get("gate_input"))
-        if evidence.get("schema_version") != 1:
+        if not matches_schema(evidence, "performance_evidence_schema_version", 1):
             raise ValueError("unsupported evidence version")
         p = evidence["provenance"]
         for k in REQUIRED_PROVENANCE:

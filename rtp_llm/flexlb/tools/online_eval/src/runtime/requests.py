@@ -26,7 +26,7 @@ class ClientRecords:
             error=None,
         )
         record = dict(
-            schema_version=1,
+            client_record_schema_version=1,
             wire_request_id=rid,
             attempt=1,
             env_epoch=self.env_epoch,

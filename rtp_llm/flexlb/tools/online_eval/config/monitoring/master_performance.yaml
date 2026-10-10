@@ -1,4 +1,4 @@
-schema_version: 2
+metric_plan_schema_version: 2
 include:
 - default.yaml
 sources:

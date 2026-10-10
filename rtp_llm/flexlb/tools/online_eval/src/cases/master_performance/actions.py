@@ -73,7 +73,7 @@ def observe(ctx, p, deadline):
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000
     evidence = dict(
-        schema_version=1,
+        performance_evidence_schema_version=1,
         criteria=c,
         gate_input=p["gate_input"],
         errors=[],

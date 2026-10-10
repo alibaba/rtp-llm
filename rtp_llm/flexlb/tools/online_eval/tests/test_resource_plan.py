@@ -45,7 +45,7 @@ else:
     raise AssertionError('overlapping large lanes accepted')
 with tempfile.TemporaryDirectory() as d:
     path=Path(d)/'lease.json'
-    path.write_text(json.dumps(dict(schema_version=1, **lease.to_manifest())))
+    path.write_text(json.dumps(dict(lease_schema_version=1, **lease.to_manifest())))
     validate_lease(path, dict(backend='java_mock', bounded=True, initial_workers=661, max_dynamic_additions=0), lease.child_env())
 """
         env = dict(

@@ -7,7 +7,7 @@ from yaml.nodes import MappingNode, SequenceNode
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FIELDS = (
-    'schema_version', 'case', 'program', 'metadata', 'test', 'profiles',
+    'case_schema_version', 'case', 'program', 'metadata', 'test', 'profiles',
     'environment', 'execution', 'parameters', 'parameter_schema',
     'variant_axis', 'variants', 'profile_overrides', 'analysis', 'reports',
 )
@@ -40,9 +40,9 @@ CURVE_FIELDS = ('metric_id', 'labels', 'name', 'group', 'unit', 'axis', 'scale',
 def fields(kind, path):
     if not path:
         return {'scenarios': SCENARIO_FIELDS, 'report_views': VIEW_FIELDS,
-                'monitoring': ('schema_version', 'include', 'exclude', 'sources', 'produced'),
-                'suite': ('schema_version', 'default_suite', 'ci_suites'),
-                'mode': ('schema_version', 'runtime_modes', 'master_modes')}[kind]
+                'monitoring': ('metric_plan_schema_version', 'include', 'exclude', 'sources', 'produced'),
+                'suite': ('suite_schema_version', 'default_suite', 'ci_suites'),
+                'mode': ('mode_profiles_schema_version', 'runtime_modes', 'master_modes')}[kind]
     if kind == 'monitoring' and (len(path) == 3 and path[0] == 'sources'
                                  or len(path) == 2 and path[0] == 'produced'):
         return QUERY_FIELDS

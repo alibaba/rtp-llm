@@ -20,7 +20,7 @@ parameters:
           second
     targets: [B, A]
     loop: false
-schema_version: 2
+case_schema_version: 2
 case: sample
 program: default
 variants:
@@ -31,7 +31,7 @@ variants:
 '''
     result = ordered_yaml(source, 'scenarios')
     assert yaml.safe_load(result) == yaml.safe_load(source)
-    assert list(yaml.safe_load(result)) == ['schema_version', 'case', 'program', 'parameters', 'variants', 'reports']
+    assert list(yaml.safe_load(result)) == ['case_schema_version', 'case', 'program', 'parameters', 'variants', 'reports']
     assert "quoted: 'false'" in result
     assert 'timeout_ms: 10 # budget' in result
     assert '# describes the chosen source\n    source:' in result
@@ -40,7 +40,7 @@ variants:
 
 
 def test_nested_mapping_does_not_take_fields_from_its_next_sibling():
-    source = '''schema_version: 2
+    source = '''metric_plan_schema_version: 2
 sources:
   mock:
     one:

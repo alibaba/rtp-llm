@@ -291,7 +291,7 @@ class CaseConfigTest(unittest.TestCase):
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for source, _ in documents:
             config = load_document(source)
-            self.assertEqual(config["schema_version"], 2)
+            self.assertEqual(config["case_schema_version"], 2)
             self.assertEqual(config["program"], "default")
             self.assertNotIn("default", [v["id"] for v in config.get("variants", [])])
             self.assertNotIn('"$ref"', json.dumps(config))

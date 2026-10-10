@@ -23,7 +23,7 @@ from scenario.runtime import (
 
 def source():
     return {
-        "schema_version": 1,
+        "program_schema_version": 1,
         "id": "lifecycle",
         "description": "Request lifecycle",
         "category": "status",

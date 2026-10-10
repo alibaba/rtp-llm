@@ -74,7 +74,7 @@ def test_query_definition_errors_are_strict_and_path_aware(tmp_path, change, mes
     spec = dict(promql='metric${selector}', unit='count', value_kind='gauge', labels=[])
     spec.update(change)
     filename = tmp_path/'test.yaml'
-    filename.write_text(json.dumps(dict(schema_version=2, sources={'mock': {'metric': spec}})))
+    filename.write_text(json.dumps(dict(metric_plan_schema_version=2, sources={'mock': {'metric': spec}})))
     with patch('monitoring.query_plan.CATALOG', tmp_path):
         with pytest.raises(ScenarioError, match=message) as error:
             load_plan('test.yaml')
@@ -89,7 +89,7 @@ def test_query_definition_errors_are_strict_and_path_aware(tmp_path, change, mes
 def test_produced_definition_errors_are_configuration_errors(tmp_path, change, message):
     spec = dict(producer='ha_evidence', source_type='derived', unit='count', value_kind='scalar', labels=[])
     spec.update(change)
-    (tmp_path/'test.yaml').write_text(json.dumps(dict(schema_version=2, produced={'derived/count': spec})))
+    (tmp_path/'test.yaml').write_text(json.dumps(dict(metric_plan_schema_version=2, produced={'derived/count': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path):
         with pytest.raises(ScenarioError, match=message):
             load_plan('test.yaml')

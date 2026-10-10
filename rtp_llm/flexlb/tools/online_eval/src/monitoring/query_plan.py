@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+from schema_contract import matches_schema
+
 from scenario.loader import ScenarioError, load_document
 
 
@@ -22,8 +24,8 @@ def load_plan(name, _stack=()):
         raise ScenarioError("metric set include cycle: " + " -> ".join((*_stack, name)))
     path = CATALOG / name
     data = load_document(path)
-    if (set(data) - {"schema_version", "sources", "include", "exclude", "produced"}
-            or data.get("schema_version") != 2):
+    if (set(data) - {"metric_plan_schema_version", "sources", "include", "exclude", "produced"}
+            or not matches_schema(data, "metric_plan_schema_version", 2)):
         raise ScenarioError(f"{path}: invalid query plan header")
     sources = {kind: {} for kind in SOURCE_KINDS}
     produced = {}
@@ -39,7 +41,7 @@ def load_plan(name, _stack=()):
     _exclude(sources, produced, data.get("exclude", []), path)
     if not any(sources.values()) and not produced:
         raise ScenarioError(f"{path}: metric plan is empty")
-    plan = dict(schema_version=2, sources=sources, produced=produced)
+    plan = dict(metric_plan_schema_version=2, sources=sources, produced=produced)
     definitions(plan)
     return plan
 

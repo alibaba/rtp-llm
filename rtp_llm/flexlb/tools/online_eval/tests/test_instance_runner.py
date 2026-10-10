@@ -85,7 +85,7 @@ class InstanceRunnerTest(unittest.TestCase):
         if "--instances" in command:
             lease_path = Path(command[command.index("--lease-json") + 1])
             lease = json.loads(lease_path.read_text())
-            self.assertEqual(1, lease["schema_version"])
+            self.assertEqual(1, lease["lease_schema_version"])
             self.assertEqual(
                 lease["child_env"], {key: env[key] for key in lease["child_env"]}
             )
@@ -110,7 +110,7 @@ class InstanceRunnerTest(unittest.TestCase):
             ]
             path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
             payload = {
-                "schema_version": 1,
+                "scenario_results_schema_version": 1,
                 "summary": {"exit_code": 0},
                 "instances": rows,
             }
@@ -220,7 +220,7 @@ raise SystemExit(child.main())
         source.mkdir(parents=True)
         (source / "grade.yaml").write_text(
             """
-schema_version: 2
+case_schema_version: 2
 case: grade_protocol
 metadata: {description: Grade protocol fixture, category: status}
 test: {kind: functional, description: Grade protocol fixture, collection: diagnostic}
@@ -319,7 +319,7 @@ program: default
                 lease["child_env"], {key: env[key] for key in lease["child_env"]}
             )
         timings = json.loads((self.root / "timing.json").read_text())
-        self.assertEqual(1, timings["schema_version"])
+        self.assertEqual(1, timings["timings_schema_version"])
         self.assertEqual(7, len(timings["instances"]))
 
     def test_dry_run_never_creates_results_or_starts_child(self):
@@ -345,7 +345,7 @@ program: default
             [rows[0].metadata] * 2,
             [{"id": "unselected", "status": "PASS"}],
         ]:
-            path.write_text(json.dumps({"schema_version": 1, "instances": fixture}))
+            path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": fixture}))
             result = runner._read_results(path, rows)
             self.assertEqual(2, len(result))
             self.assertTrue(all(row["status"] == "ERROR" for row in result))
@@ -359,7 +359,7 @@ program: default
             "cleanup": [{"status": "ERROR", "error": "leaked resource"}],
             "stages": [],
         }
-        path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+        path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
         result = runner._read_results(path, rows)
         self.assertEqual("ERROR", result[0]["status"])
         self.assertEqual("FINDING-CONFIRMED", result[0]["original_status"])
@@ -374,7 +374,7 @@ program: default
             [{"status": "BLOCKED", "checks": []}],
         ):
             payload = {**rows[0].metadata, "status": "PASS", "stages": stages}
-            path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+            path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
             result = runner._read_results(path, rows)
             self.assertEqual("ERROR", result[0]["status"])
             self.assertTrue(result[0]["error"])
@@ -404,7 +404,7 @@ program: default
                 "stages": stages,
                 "cleanup": [],
             }
-            path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+            path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
             result = runner._read_results(path, group)
             self.assertEqual(expected, result[0]["status"])
 
@@ -421,7 +421,7 @@ program: default
         for execution_error, expected in ((None, "PASS"), ("query failed", "ERROR")):
             payload = copy.deepcopy(base)
             payload["stages"][0]["checks"][0]["error"] = execution_error
-            path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+            path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
             rows = runner._read_results(path, group)
             self.assertEqual(expected, rows[0]["status"])
             self.assertEqual("WARNING", rows[0]["stages"][0]["checks"][0]["status"])
@@ -461,7 +461,7 @@ program: default
         for payload in mutations:
             with self.subTest(payload=payload):
                 path.write_text(
-                    json.dumps({"schema_version": 1, "instances": [payload]})
+                    json.dumps({"scenario_results_schema_version": 1, "instances": [payload]})
                 )
                 rows = runner._read_results(path, group)
                 aggregate = runner._aggregate(
@@ -489,14 +489,14 @@ program: default
             ],
             "finding_confirmed": ["verify.known"],
         }
-        path.write_text(json.dumps({"schema_version": 1, "instances": [payload]}))
+        path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
         self.assertEqual(
             "FINDING-CONFIRMED", runner._read_results(path, group)[0]["status"]
         )
         for bad in ("ERROR", "TIMEOUT"):
             broken = copy.deepcopy(payload)
             broken["stages"][0]["checks"].append({"id": "bad", "status": bad})
-            path.write_text(json.dumps({"schema_version": 1, "instances": [broken]}))
+            path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [broken]}))
             self.assertEqual("ERROR", runner._read_results(path, group)[0]["status"])
 
     def test_child_nonzero_exit_cannot_be_hidden_by_pass_rows(self):

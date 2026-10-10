@@ -58,7 +58,7 @@ def inventory(plans):
             key: plan["execution"][key] for key in ("timeout_s", "cleanup_timeout_s")
         }
         rows.append(row)
-    return dict(schema_version=1, counts=plan_counts(plans), instances=rows)
+    return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows)
 
 
 def select(plans, exact_ids):
@@ -184,7 +184,7 @@ def main(argv=None):
                     enforce_deadlines=True,
                 )
             )
-            payload = dict(schema_version=1, summary=summarize(rows), instances=rows)
+            payload = dict(scenario_results_schema_version=1, summary=summarize(rows), instances=rows)
             target = args.out_dir / "scenarios.json"
             temporary = args.out_dir / "scenarios.json.tmp"
             temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
+from schema_contract import matches_schema
 from typing import Mapping, Sequence
 
 from runtime.resource_plan import JavaMockBudget
@@ -37,11 +39,9 @@ class Instance:
 
 def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]:
     if (
-        not isinstance(payload, dict)
-        or type(payload.get("schema_version")) is not int
-        or payload["schema_version"] != 1
+        not matches_schema(payload, "instance_catalog_schema_version", 1)
     ):
-        raise InstancePlanError("unsupported instance list schema_version")
+        raise InstancePlanError("unsupported instance list instance_catalog_schema_version")
     rows = payload.get("instances")
     if not isinstance(rows, list):
         raise InstancePlanError("instance list must contain an instances array")

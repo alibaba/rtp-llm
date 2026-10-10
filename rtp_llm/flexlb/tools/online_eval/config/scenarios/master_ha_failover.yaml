@@ -1,4 +1,4 @@
-schema_version: 2
+case_schema_version: 2
 case: master_ha_failover
 program: default
 metadata:

@@ -164,7 +164,7 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
                          role='fit_source' if refit or cap is fit else 'other_window',
                          interpretation='in_sample' if refit or cap is fit else 'cross_window_drift_expected_not_profile_bug',
                          audit=selected_identity,real=summarize(cap['shape']),methods=methods))
-    return dict(schema_version=1,profile=str(profile_file.resolve()),profile_sha256=hashlib.sha256(raw).hexdigest(),
+    return dict(traffic_fidelity_schema_version=1,profile=str(profile_file.resolve()),profile_sha256=hashlib.sha256(raw).hexdigest(),
                 profile_schema=profile.get('schema_version',1),seed=seed,requested_count=count,
                 mode='refit_each_capture' if refit else 'fixed_profile',thresholds=thresholds(limits),bins=BINS,
                 identity=identity,profile_validation='VALID_PARAMETERS_ONLY',fit_source=fit['name'] if fit else None,

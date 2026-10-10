@@ -12,7 +12,7 @@
 
 ## Bundle 与发现
 
-`write_bundle` 写出自包含 HTML、`analysis.json`、`report-spec.json` 和最后写入的 `manifest.json`。`read_bundle` 校验 identity、manifest 与 SHA，`load_analysis` 接受已有分析 JSON 或 bundle，不改写旧归档。
+`write_bundle` 写出自包含 HTML、`analysis.json`、`report-spec.json` 和最后写入的 `manifest.json`。`read_bundle` 校验 identity、manifest 与 SHA，`load_analysis` 接受带 `report_analysis_schema_version` 的分析封装或 bundle；原始 case 分析不是报告封装。三类落盘 JSON 分别校验自己的版本字段，不按相同的版本数字推断格式，也不改写归档。
 
 `kind` 为 run 或 comparison，表示单 run 或运行对照；`role` 由生产者明确声明。`discover_reports(root, kind=..., role=...)` 按这两个字段发现并校验报告，不从目录名猜测。门禁使用 `role="gate"`。
 

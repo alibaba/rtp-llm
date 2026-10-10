@@ -2,15 +2,20 @@
 
 import math
 
-SCHEMA_VERSION = 1
+from schema_contract import matches_schema, version_fields
+
+REPORT_SPEC_SCHEMA_VERSION = 1
 
 
 def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def validate(spec):
-    if spec.get("schema_version", SCHEMA_VERSION) != SCHEMA_VERSION:
+def validate(spec, *, versioned=False):
+    if not isinstance(spec, dict):
+        raise ValueError("report spec must be an object")
+    if (versioned or version_fields(spec)) and not matches_schema(
+            spec, "report_spec_schema_version", REPORT_SPEC_SCHEMA_VERSION):
         raise ValueError("unsupported report spec version")
     if spec.get("timeAxis") is not None:
         bounds = spec["timeAxis"]

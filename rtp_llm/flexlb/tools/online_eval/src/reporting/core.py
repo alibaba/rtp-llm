@@ -4,7 +4,8 @@ import json
 import re
 from pathlib import Path
 
-from reporting.spec import SCHEMA_VERSION
+from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
+from schema_contract import matches_schema
 
 
 def details(title, value, *, opened=False):
@@ -32,7 +33,7 @@ def run_meta(
 ):
     """None means unknown, never proof of matching experiment conditions."""
     metadata = dict(
-        schema_version=1,
+        run_meta_schema_version=1,
         identity=identity,
         implementation=implementation,
         workload=workload,
@@ -131,10 +132,9 @@ def _atomic(path, content):
 
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None):
     """Publish one canonical report; manifest is written last as the commit record."""
-    directory = bundle_path(root, kind, identity)
-    directory.mkdir(parents=True, exist_ok=True)
+    validate(spec)
     spec = copy.deepcopy(spec)
-    spec["schema_version"] = SCHEMA_VERSION
+    spec["report_spec_schema_version"] = REPORT_SPEC_SCHEMA_VERSION
     legacy_meta = spec.get("meta") or {}
     spec["run_meta"] = meta or run_meta(
         dict(id=str(identity), kind=kind),
@@ -145,8 +145,11 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
         evidence=legacy_meta.get("sources"),
     )
+    _validate_run_meta(spec["run_meta"])
+    directory = bundle_path(root, kind, identity)
+    directory.mkdir(parents=True, exist_ok=True)
     result = dict(
-        schema_version=SCHEMA_VERSION,
+        report_analysis_schema_version=1,
         kind=kind,
         producer=producer,
         run_meta=spec["run_meta"],
@@ -161,7 +164,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     for name, content in outputs.items():
         _atomic(directory / name, content)
     manifest = dict(
-        schema_version=SCHEMA_VERSION,
+        report_manifest_schema_version=1,
         kind=kind,
         id=str(identity),
         producer=producer,
@@ -199,15 +202,37 @@ def read_bundle(path):
     path = Path(path)
     directory = path if path.is_dir() else path.parent
     manifest = json.loads((directory / "manifest.json").read_text())
-    if manifest.get("schema_version") != SCHEMA_VERSION:
+    if not matches_schema(manifest, "report_manifest_schema_version", 1):
         raise ValueError("unsupported report manifest version")
-    for entry in manifest["files"].values():
+    files = manifest.get("files")
+    required = {"analysis.json", "report-spec.json", "report.html"}
+    if (not isinstance(files, dict) or not required <= files.keys()
+            or any(files[name].get("path") != name for name in required)):
+        raise ValueError("report manifest lacks required bundle files")
+    for entry in files.values():
         target = directory / entry["path"]
         if target.resolve().parent != directory.resolve():
             raise ValueError("report file escapes bundle")
         if hashlib.sha256(target.read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError("report checksum mismatch: " + entry["path"])
+    spec = json.loads((directory / "report-spec.json").read_text())
+    validate(spec, versioned=True)
+    _validate_run_meta(spec.get("run_meta"))
+    analysis = json.loads((directory / "analysis.json").read_text())
+    if not matches_schema(analysis, "report_analysis_schema_version", 1):
+        raise ValueError("unsupported report analysis version")
+    _validate_run_meta(analysis.get("run_meta"))
     return directory
+
+
+def _validate_run_meta(meta):
+    if not matches_schema(meta, "run_meta_schema_version", 1):
+        raise ValueError("unsupported run metadata version")
+    runs = meta.get("runs", {})
+    if not isinstance(runs, dict):
+        raise ValueError("run metadata runs must be a mapping")
+    for value in runs.values():
+        _validate_run_meta(value)
 
 
 def load_analysis(path):
@@ -217,8 +242,7 @@ def load_analysis(path):
     if path.name == "analysis.json" and (path.parent / "manifest.json").exists():
         read_bundle(path.parent)
     value = json.loads(path.read_text())
-    if "run_meta" in value and "result" in value:
-        if value.get("schema_version") != SCHEMA_VERSION:
-            raise ValueError("unsupported report analysis version")
-        return value["result"]
-    return value  # Explicit read adapter for pre-bundle archives; never dual-write.
+    if not matches_schema(value, "report_analysis_schema_version", 1):
+        raise ValueError("unsupported report analysis version")
+    _validate_run_meta(value.get("run_meta"))
+    return value["result"]

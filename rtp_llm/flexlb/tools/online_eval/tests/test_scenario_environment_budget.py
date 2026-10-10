@@ -67,7 +67,7 @@ class EnvironmentBudgetTest(unittest.TestCase):
         lease = plan_lane_leases([[budget]], master_base=28000, mock_base=55000)[
             0
         ].to_manifest()
-        lease["schema_version"] = 1
+        lease["lease_schema_version"] = 1
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "lease.json"
             path.write_text(json.dumps(lease))

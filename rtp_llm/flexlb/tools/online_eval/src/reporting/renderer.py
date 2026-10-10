@@ -19,7 +19,7 @@ def _present(value):
     """Remove absent metadata without treating zero or false as missing."""
     if isinstance(value, dict):
         cleaned = {k: item for k, v in value.items()
-                   if (item := _present(v)) is not None and k != "schema_version"}
+                   if (item := _present(v)) is not None and not k.endswith("_schema_version")}
         return cleaned or None
     if isinstance(value, list):
         cleaned = [item for v in value if (item := _present(v)) is not None]

@@ -50,7 +50,7 @@ def derive(model, count=128, max_tokens=32768, output_tokens=420):
             length = min(length, max_tokens)
             templates.append(dict(il=length, ol=output_tokens,
                                   labels=labels[:(length + BLOCK - 1) // BLOCK]))
-    return dict(schema_version=1, source_sha256=pinned["sha256"],
+    return dict(master_template_schema_version=1, source_sha256=pinned["sha256"],
                 block_size=BLOCK, templates=templates,
                 transformations=dict(source_sha256=pinned["sha256"],
                     source_requests=len(events), selected_requests=count, applied=[

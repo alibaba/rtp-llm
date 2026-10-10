@@ -65,7 +65,7 @@ def evidence():
             dict(r, status="ok", total_ms=100, ttft_ms=50, observed_output_tokens=8)
         )
     return dict(
-        schema_version=1,
+        performance_evidence_schema_version=1,
         criteria=c,
         errors=[],
         window=dict(start_epoch_ms=100000, end_epoch_ms=110000),

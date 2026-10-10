@@ -21,6 +21,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from schema_contract import matches_schema
+
 from reporting.view_config import CHECKS_VIEW
 from runtime.instance_plan import (
     InstancePlanError,
@@ -145,7 +147,7 @@ def _read_timings(path):
         return {}
     try:
         data = json.loads(path.read_text())
-        if data.get("schema_version") != 1 or not isinstance(
+        if not matches_schema(data, "timings_schema_version", 1) or not isinstance(
             data.get("instances"), list
         ):
             raise ValueError("expected versioned instance timings")
@@ -183,7 +185,7 @@ def _write_timings(rows):
             ):
                 merged[row["id"]] = row["duration_ms"] / 1000
         doc = {
-            "schema_version": 1,
+            "timings_schema_version": 1,
             "instances": [
                 {"id": key, "duration_ms": value * 1000}
                 for (key, value) in sorted(merged.items())
@@ -281,8 +283,7 @@ def _read_results(path, group):
     try:
         data = json.loads(path.read_text())
         if (
-            type(data.get("schema_version")) is not int
-            or data["schema_version"] != 1
+            not matches_schema(data, "scenario_results_schema_version", 1)
             or (not isinstance(data.get("instances"), list))
         ):
             raise ValueError("unsupported scenario result schema")
@@ -355,7 +356,7 @@ def _run_lane(index, lane, lease, args, out, children):
     segment.mkdir(parents=True, exist_ok=True)
     result_path = segment / "scenarios.json"
     lease_path = segment / "lease.json"
-    _write_json(lease_path, {"schema_version": 1, **lease.to_manifest()})
+    _write_json(lease_path, {"lease_schema_version": 1, **lease.to_manifest()})
     command = [
         sys.executable,
         str(SCENARIO_RUNNER),
@@ -423,7 +424,7 @@ def _aggregate(lanes, instances, args, elapsed):
         )
     )
     return {
-        "schema_version": 1,
+        "run_summary_schema_version": 1,
         "source": args.source,
         "summary": {
             "total": len(rows),
@@ -508,7 +509,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         from mode_profiles import master_mode_for_profile, resolve_mode
         runtime_plan = resolve_mode("scenario", master_mode_for_profile(args.profile))
         manifest = {
-            "schema_version": 1,
+            "runner_plan_schema_version": 1,
             "source": args.source,
             "profile": args.profile,
             "runtime_plan": runtime_plan,
