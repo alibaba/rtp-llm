@@ -187,6 +187,7 @@ class EmbeddingEndpoint(object):
                 max_frames=feature.mm_preprocess_config.max_frames,
                 crop_positions=feature.mm_preprocess_config.crop_positions,
                 mm_timeout_ms=feature.mm_preprocess_config.mm_timeout_ms,
+                max_long_side_pixel=(feature.mm_preprocess_config.max_long_side_pixel),
             )
             multimodal_features.append(
                 pb2.MultimodalInputPB(

@@ -39,6 +39,7 @@ from rtp_llm.config.response_format_compiler import (
     ReasoningFormat,
     restore_final_constraint,
 )
+from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import (
     GrpcAccessRecord,
@@ -123,7 +124,6 @@ _EMPTY_THINK_BODY = "\n"
 _DEFAULT_TERMINATE_TOKEN_ID = 1
 # Model types whose dash_sc protocol uses the empty-think second pass.
 _EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
-_INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
 GrpcMetadata = Iterable[tuple[object, object]]
 _DASH_RPC_METHOD = "GRPCInferenceService/ModelStreamInfer"
@@ -313,6 +313,13 @@ def _dash_error_mapping_for_ft_exception(
     """
 
     exception_type = exc.exception_type
+    if exception_type in (
+        ExceptionType.UNSAFE_INPUT_CONTENT,
+        ExceptionType.UNSAFE_OUTPUT_CONTENT,
+    ):
+        return _DashFtErrorMapping(
+            DASH_ERROR_BAD_REQUEST, f"DataInspectionFailed: {exc.message}"
+        )
     raw_reason = getattr(
         exc,
         "admission_reject_reason",
@@ -744,7 +751,7 @@ def _apply_dash_sc_controls_to_generate_config(
         request_max_think = request_controls.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+        generate_config.max_thinking_tokens = INT32_MAX if max_think < 0 else max_think
     elif runtime.thinking_uses_output_budget:
         generate_config.max_thinking_tokens = max(
             generate_config.max_thinking_tokens, generate_config.max_new_tokens
@@ -871,6 +878,7 @@ async def iter_real_model_stream_infer(
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
+    log_input_output = request_controls.log_input_output
     logging.debug(
         "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
         tag,
@@ -892,6 +900,15 @@ async def iter_real_model_stream_infer(
             else ThinkingMode.DISABLED
         )
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
+        env_budget = (
+            generate_env_config.max_thinking_tokens
+            if generate_env_config is not None
+            else None
+        )
+        if env_budget is not None:
+            generate_config.max_thinking_tokens = (
+                INT32_MAX if int(env_budget) < 0 else int(env_budget)
+            )
         _apply_dash_sc_controls_to_generate_config(
             generate_config,
             sampling,
@@ -978,7 +995,11 @@ async def iter_real_model_stream_infer(
             input_ids_tensor=input_ids_tensor,
         )
         is_streaming = bool(generate_config.is_streaming)
-        logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
+        logging.debug(
+            "[DashScGrpc] [%s] generate_input: %s",
+            tag,
+            generate_input if log_input_output else None,
+        )
         # Every streaming frame repeats the same tensor descriptors, request identity and
         # generation limits. The builder materializes that protobuf template once and
         # patches only the per-frame values (see ``StreamResponseBuilder``).
@@ -986,6 +1007,7 @@ async def iter_real_model_stream_infer(
             dash_sc_request_id=request.id,
             model_name=request.model_name,
             request_log_tag=tag,
+            log_input_output=log_input_output,
             request_input_ids=input_ids_list,
             return_input_ids=request_controls.return_input_ids,
             is_streaming=is_streaming,
@@ -1274,13 +1296,14 @@ async def iter_real_model_stream_infer(
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
                 phase2_tag,
-                phase2_generate_input,
+                phase2_generate_input if log_input_output else None,
             )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
             phase2_response_builder = StreamResponseBuilder(
                 dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
                 model_name=request.model_name,
                 request_log_tag=phase2_tag,
+                log_input_output=log_input_output,
                 request_input_ids=phase2_input_ids,
                 return_input_ids=request_controls.return_input_ids,
                 is_streaming=is_streaming,
@@ -1681,7 +1704,9 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 _ensure_span(body_headers)
                 try:
                     parsed_input_ids, sampling, request_controls = (
-                        parse_dash_sc_grpc_request(request)
+                        parse_dash_sc_grpc_request(
+                            request, invocation_metadata=invocation_metadata or ()
+                        )
                     )
                     mm_inputs = _build_mm_inputs_from_request(request)
                     traceparent_new = _lookup_ds_request_control(
@@ -1742,6 +1767,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
                 input_ids_list = parsed_input_ids.values
+                record.log_input_output = request_controls.log_input_output
                 if first_request:
                     # Hand the record the payload we just parsed so it does not
                     # decode the same request proto again (the input_ids tensor

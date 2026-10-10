@@ -23,6 +23,7 @@ from rtp_llm.config.py_config_modules import (
 )
 from rtp_llm.config.response_format import ResponseFormat, normalize_think_tag
 from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -53,8 +54,6 @@ from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
-
-_INT32_MAX = 2_147_483_647
 
 
 def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
@@ -333,7 +332,7 @@ class OpenaiEndpoint(object):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
-            config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+            config.max_thinking_tokens = INT32_MAX if budget < 0 else budget
         config.thinking_mode = renderer.resolve_thinking_mode(request)
         config.in_think_mode = config.thinking_mode == ThinkingMode.ENABLED
         if config.thinking_mode == ThinkingMode.DISABLED:

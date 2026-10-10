@@ -60,6 +60,7 @@ class MMPreprocessConfigPart(BaseModel):
     resized_height: Optional[int] = None
     min_pixels: Optional[int] = None
     max_pixels: Optional[int] = None
+    max_long_side_pixel: Optional[int] = None
     fps: Optional[int] = None
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None

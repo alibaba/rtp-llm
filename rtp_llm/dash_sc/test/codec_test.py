@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import struct
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
+from rtp_llm.dash_sc import codec
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,
@@ -23,6 +25,7 @@ from rtp_llm.dash_sc.codec import (
     SamplingParams,
     StreamResponseBuilder,
     build_dash_error_response,
+    is_logging_consent_allowed,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
     parse_multimodal_parts_from_request,
@@ -46,6 +49,137 @@ def _unpack_int32_le(raw: bytes) -> list[int]:
 
 def _unpack_int64_le(raw: bytes) -> list[int]:
     return [int(x) for x in struct.unpack("<%dq" % (len(raw) // 8), raw)]
+
+
+class LoggingConsentTest(TestCase):
+    def test_consent_rules(self) -> None:
+        external = "X-DashScope-LoggingConsent"
+        inner = "X-DashScope-Inner-LoggingConsent"
+        cases = [
+            ({}, True),
+            ({external: "all"}, True),
+            ({inner: "ALL"}, True),
+            ({external: "aLl", inner.lower(): "All"}, True),
+            ({external: None, inner: None}, True),
+            ({external: "all", inner: "none"}, False),
+            ({external: "none", inner: "all"}, False),
+        ]
+        for name in (external, inner):
+            for value in (
+                "none",
+                "input",
+                "output",
+                "",
+                "unknown",
+                "null",
+                "None",
+                " all ",
+            ):
+                cases.append(({name: value}, False))
+        for headers, allowed in cases:
+            with self.subTest(headers=headers):
+                self.assertEqual(is_logging_consent_allowed(headers.items()), allowed)
+
+    def test_request_parser_resolves_consent_once(self) -> None:
+        for attributes, metadata, allowed in (
+            ({}, (), True),
+            (
+                {
+                    "X-DashScope-LoggingConsent": "ALL",
+                    "x-dashscope-inner-loggingconsent": "all",
+                },
+                (("x-dashscope-inner-loggingconsent", "ALL"),),
+                True,
+            ),
+            (
+                {
+                    "X-DashScope-LoggingConsent": "all",
+                    "X-DashScope-Inner-LoggingConsent": "none",
+                },
+                (("x-dashscope-inner-loggingconsent", "all"),),
+                False,
+            ),
+            (
+                {
+                    "X-DashScope-LoggingConsent": "none",
+                    "X-DashScope-Inner-LoggingConsent": "all",
+                },
+                (),
+                False,
+            ),
+            ({"X-DashScope-Inner-LoggingConsent": None}, (), True),
+            (
+                {"X-DashScope-LoggingConsent": "all"},
+                (("x-dashscope-inner-loggingconsent", "none"),),
+                False,
+            ),
+            ({}, (("x-dashscope-loggingconsent", "none"),), False),
+            (
+                {},
+                (
+                    ("x-dashscope-loggingconsent", "output"),
+                    ("x-dashscope-loggingconsent", "all"),
+                ),
+                False,
+            ),
+        ):
+            with self.subTest(attributes=attributes, metadata=metadata):
+                request = build_model_infer_request(
+                    request_id="consent",
+                    model_name="default",
+                    input_ids=[1, 2],
+                    sampling=SamplingParams(max_new_tokens=2),
+                )
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    {**attributes, "X-DashScope-Inner-Timeout": "3"}
+                )
+                with patch.object(
+                    codec,
+                    "parse_ds_header_attributes",
+                    wraps=codec.parse_ds_header_attributes,
+                ) as parse_headers, patch.object(
+                    codec,
+                    "is_logging_consent_allowed",
+                    wraps=codec.is_logging_consent_allowed,
+                ) as check_consent, patch.object(
+                    codec,
+                    "parse_sampling_params",
+                    wraps=codec.parse_sampling_params,
+                ) as parse_sampling, patch.object(
+                    codec,
+                    "parse_request_controls",
+                    wraps=codec.parse_request_controls,
+                ) as parse_controls:
+                    _, _, controls = parse_dash_sc_grpc_request(
+                        request, invocation_metadata=metadata
+                    )
+                self.assertEqual(controls.log_input_output, allowed)
+                self.assertEqual(controls.timeout_ms, 3000)
+                parse_headers.assert_called_once()
+                check_consent.assert_called_once()
+                parse_controls.assert_called_once()
+                parse_sampling.assert_called_once()
+                self.assertIs(
+                    parse_sampling.call_args.args[1], parse_controls.call_args.args[1]
+                )
+
+    def test_sampling_errors_keep_precedence_over_invalid_controls(self) -> None:
+        for timeout in (float("inf"), float("nan")):
+            with self.subTest(timeout=timeout):
+                request = build_model_infer_request(
+                    request_id="consent",
+                    model_name="default",
+                    input_ids=[1, 2],
+                    sampling=SamplingParams(max_new_tokens=2),
+                )
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    {"x-dashscope-inner-timeout": timeout}
+                )
+                request.parameters["response_format"].string_param = "{"
+                with self.assertRaisesRegex(
+                    DashScParameterError, "invalid response_format"
+                ):
+                    parse_dash_sc_grpc_request(request)
 
 
 def _tool_call_structural_tag() -> dict:
@@ -675,6 +809,28 @@ class DashScGrpcRequestTest(TestCase):
                 self.assertEqual(sp.max_new_tokens, value)
                 self.assertTrue(sp.max_new_tokens_from_completion_alias)
 
+    def test_default_thinking_budget_follows_max_new_tokens(self) -> None:
+        generate_config = SamplingParams(max_new_tokens=123).to_generate_config(
+            request_controls=DashScRequestControls(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 123)
+        self.assertEqual(generate_config.max_thinking_tokens, 123)
+
+    def test_default_thinking_budget_follows_resolved_completion_alias(self) -> None:
+        sampling = SamplingParams(
+            max_new_tokens=100,
+            max_new_tokens_from_completion_alias=True,
+            max_total_tokens=80,
+        )
+
+        generate_config = sampling.to_generate_config(
+            request_controls=DashScRequestControls(enable_thinking=True)
+        )
+
+        self.assertEqual(generate_config.max_new_tokens, 80)
+        self.assertEqual(generate_config.max_thinking_tokens, 80)
+
     def test_completion_alias_thinking_budget_keeps_backend_limit(
         self,
     ) -> None:
@@ -900,7 +1056,6 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(parsed.values, [7, 8, 9])
         self.assertEqual(parse_input_ids_from_request(req), [7, 8, 9])
 
-
     def test_inference_input_ids_from_int64_converts_to_engine_dtype(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "input_ids", "INT64", [2], struct.pack("<2q", 10, 11))
@@ -911,7 +1066,6 @@ class DashScGrpcRequestTest(TestCase):
         assert parsed is not None
         self.assertEqual(parsed.tensor.dtype, torch.int32)
         self.assertEqual(parsed.tensor.tolist(), [10, 11])
-
 
     def test_inference_input_ids_from_int64_accepts_int32_boundaries(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
@@ -929,7 +1083,6 @@ class DashScGrpcRequestTest(TestCase):
         assert parsed is not None
         self.assertEqual(parsed.tensor.tolist(), [-(2**31), 2**31 - 1])
 
-
     def test_inference_input_ids_from_int64_rejects_int32_overflow(self) -> None:
         for value in (-(2**40), 2**40):
             with self.subTest(value=value):
@@ -939,7 +1092,6 @@ class DashScGrpcRequestTest(TestCase):
                     DashScInputIdsError, "outside the INT32 range"
                 ):
                     parse_dash_sc_grpc_request(req)
-
 
     def test_inference_input_ids_rejects_misaligned_wire_buffer(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()

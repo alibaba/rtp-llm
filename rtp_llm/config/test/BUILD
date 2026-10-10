@@ -77,3 +77,9 @@ py_test(
         "//rtp_llm:config_ops",
     ],
 )
+
+py_test(
+    name = "model_size_test",
+    srcs = ["model_size_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

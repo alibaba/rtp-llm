@@ -10,10 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from rtp_llm.config.thinking_mode import INT32_MAX
+
 THINK_MODE_AUTO = "auto"
 THINK_MODE_FORCE = "force"
 DEFAULT_MAX_THINKING_TOKENS = 32000
-INT32_MAX = 2_147_483_647
 
 
 def normalize_think_mode(mode: object) -> str:

@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
@@ -43,13 +43,22 @@ class VitParameters:
     """Vit parameters for multimodal models."""
 
     # config includes origin vit config in ckpt/config.json
-    config: Dict[str, Any] = {}
-    special_token_ids: Dict[str, Any] = {}
-    special_tokens: Dict[str, Any] = {}
-    vit_weights: Any = None
-    preprocess_batch_size: int = 1
-    eval_param_count = None
-    eval_model_size = None
+    config: Dict[str, Any]
+    special_token_ids: Dict[str, Any]
+    special_tokens: Dict[str, Any]
+    vit_weights: Any
+    preprocess_batch_size: int
+    eval_param_count: Any
+    eval_model_size: Any
+
+    def __init__(self):
+        self.config = {}
+        self.special_token_ids = {}
+        self.special_tokens = {}
+        self.vit_weights = None
+        self.preprocess_batch_size = 1
+        self.eval_param_count = None
+        self.eval_model_size = None
 
 
 # single batch prompt input
@@ -60,6 +69,13 @@ class RequestInfo:
     trace_id: str = ""
     request_id: str = ""
     source_role: str = ""
+
+
+@dataclass
+class MultimodalTokenExpansion:
+    token_ids: Sequence[int]
+    # (offset, length) in the expanded sequence, in ViT output segment order.
+    spans: List[Tuple[int, int]]
 
 
 @dataclass
@@ -76,6 +92,14 @@ class GenerateInput:
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
+    # Internal receipt from ViT metadata, bound to the selected worker and media.
+    # It is not accepted from request headers/config or sent to the model RPC.
+    greennet_verified_vit: Optional[Tuple[str, int, Tuple[str, ...]]] = field(
+        default=None, init=False, repr=False
+    )
+    mm_token_expansion: Optional[MultimodalTokenExpansion] = field(
+        default=None, init=False, repr=False
+    )
 
     class Config:
         arbitrary_types_allowed = True
@@ -89,6 +113,7 @@ class GenerateInput:
         return self.token_ids.shape[-1] - self.prefix_length
 
     def update_prefix(self, prefix_tokens: torch.Tensor):
+        self.mm_token_expansion = None
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
 

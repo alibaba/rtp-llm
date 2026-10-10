@@ -1,6 +1,7 @@
 package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.flexlb.dao.route.RoleType;
@@ -8,6 +9,10 @@ import org.flexlb.dao.route.RoleType;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class ServerStatus {
+    /** Exact ViT endpoint generation retained across routing and status copies. */
+    @JsonProperty("worker_generation")
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    private long workerGeneration;
     @JsonProperty("role")
     private RoleType role;
 
@@ -45,7 +50,10 @@ public class ServerStatus {
     private String message;
 
 
-    /** Return an independent copy, or null when the source is null. */
+    /**
+     * Returns an independent copy, or null when the source is null.
+     * The ViT generation remains part of the copied selection identity.
+     */
     public static ServerStatus copyOf(ServerStatus source) {
         if (source == null) {
             return null;
@@ -58,6 +66,7 @@ public class ServerStatus {
         copy.dpRank = source.dpRank;
         copy.prefillTime = source.prefillTime;
         copy.group = source.group;
+        copy.workerGeneration = source.workerGeneration;
         copy.debugInfo = DebugInfo.copyOf(source.debugInfo);
         copy.requestId = source.requestId;
         copy.success = source.success;
