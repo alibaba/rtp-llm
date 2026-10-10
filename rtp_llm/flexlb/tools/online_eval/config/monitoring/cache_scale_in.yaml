@@ -1,4 +1,4 @@
-metric_plan_schema_version: 2
+metric_plan_schema_version: 3
 include:
 - default.yaml
 sources:
@@ -12,6 +12,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     waiting:
       promql: rtp_llm_wait_stream_size${selector}
       mode: scrape
@@ -21,6 +26,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     hit_tokens_total:
       promql: mock_hit_tokens_total${selector}
       mode: scrape
@@ -30,6 +40,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     context_tokens_total:
       promql: mock_context_tokens_total${selector}
       mode: scrape
@@ -39,6 +54,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     context_requests_total:
       promql: mock_context_requests_total${selector}
       mode: scrape
@@ -48,6 +68,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     cache_evictions:
       promql: mock_engine_cache_evictions_total${selector}
       mode: scrape
@@ -57,6 +82,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     prefill_ms_avg:
       promql: mock_engine_prefill_ms_avg${selector}
       mode: scrape
@@ -66,6 +96,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     prefill_batches:
       promql: mock_prefill_batch_size_count${selector}
       mode: scrape
@@ -75,6 +110,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     prefill_batch_requests:
       promql: mock_prefill_batch_size_sum${selector}
       mode: scrape
@@ -84,6 +124,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     cache_key_hits:
       promql: mock_engine_cache_key_hits_total${selector}
       mode: scrape
@@ -93,6 +138,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     cache_keys_requested:
       promql: mock_engine_cache_keys_requested_total${selector}
       mode: scrape
@@ -102,6 +152,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     admission_open:
       promql: mock_engine_admission_open${selector}
       mode: scrape
@@ -111,6 +166,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     admitted_rpcs_total:
       promql: mock_engine_admitted_rpcs_total${selector}
       mode: scrape
@@ -120,6 +180,11 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rejected_rpcs_total:
       promql: mock_engine_rejected_rpcs_total${selector}
       mode: scrape
@@ -129,10 +194,75 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
 produced:
   derived/survivor_hit_ratio:
     producer: cache_windows
-    source_type: derived
+    source_type: prometheus
     unit: ratio
     value_kind: gauge
     labels: []
+    measurement:
+      method: sum_counter_deltas_ratio
+      population: surviving_prefill_engines
+      accuracy: counter_delta
+      requires_request_identity: false
+  cache_gate/offered_qps_deviation:
+    producer: cache_windows
+    source_type: client_journal
+    unit: ratio
+    value_kind: scalar
+    labels: []
+    measurement:
+      method: counter_delta_and_rolling_window_summary
+      population: baseline_initial_fleet_and_post_survivors
+      accuracy: request_ledger
+      requires_request_identity: true
+  cache_gate/baseline_min_half_hit:
+    producer: cache_windows
+    source_type: prometheus
+    unit: ratio
+    value_kind: scalar
+    labels: []
+    measurement:
+      method: counter_delta_and_rolling_window_summary
+      population: baseline_initial_fleet_and_post_survivors
+      accuracy: counter_delta
+      requires_request_identity: false
+  cache_gate/baseline_half_spread:
+    producer: cache_windows
+    source_type: prometheus
+    unit: ratio
+    value_kind: scalar
+    labels: []
+    measurement:
+      method: counter_delta_and_rolling_window_summary
+      population: baseline_initial_fleet_and_post_survivors
+      accuracy: counter_delta
+      requires_request_identity: false
+  cache_gate/min_window_completed:
+    producer: cache_windows
+    source_type: prometheus
+    unit: requests
+    value_kind: scalar
+    labels: []
+    measurement:
+      method: counter_delta_and_rolling_window_summary
+      population: baseline_initial_fleet_and_post_survivors
+      accuracy: counter_delta
+      requires_request_identity: false
+  cache_gate/collapse_detected:
+    producer: cache_windows
+    source_type: prometheus
+    unit: boolean
+    value_kind: scalar
+    labels: []
+    measurement:
+      method: sustained_survivor_hit_collapse
+      population: baseline_initial_fleet_and_post_survivors
+      accuracy: counter_delta
+      requires_request_identity: false

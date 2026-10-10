@@ -40,7 +40,7 @@ variants:
 
 
 def test_nested_mapping_does_not_take_fields_from_its_next_sibling():
-    source = '''metric_plan_schema_version: 2
+    source = '''metric_plan_schema_version: 3
 sources:
   mock:
     one:

@@ -5,25 +5,33 @@ from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 from cases.config import output
 from traffic.playback_config import normalize
 from cases.master_performance.analysis import validate
-from cases.master_performance.inputs import OBSERVATION_FIELDS, CHECK_FIELDS
+from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks
 from runtime.java_flow import JAVA_FLOW_INPUT_FIELDS
+from traffic.contracts import driver
 
 
 def default(case):
     data = case.inputs(
-        traffic=JAVA_FLOW_INPUT_FIELDS,
-        observation=OBSERVATION_FIELDS | {"inputs"},
-        checks=CHECK_FIELDS,
-        optional={"checks": {"engine_tps", "engine_tps_by_profile"}},
+        traffic=JAVA_FLOW_INPUT_FIELDS | {"kind"},
+        observation=OBSERVATION_FIELDS | {"inputs", "slo"},
+        checks=set(RULES) | {"engine_tps"},
     )
     inputs = data.observation["inputs"]
     if not isinstance(inputs, dict) or set(inputs) != {"engine_tps"}:
         raise ValueError("performance gate requires engine_tps input")
-    flow = data.traffic
+    flow = driver(data.traffic, "java_flow")
     client, _ = normalize(flow["client"])
-    c = validate(dict({k: v for k, v in data.observation.items() if k != "inputs"}, **data.checks,
+    from cases.inputs import fields
+    slo = fields(data.observation["slo"], {"ttft_ms", "e2e_ms", "tpot_ms"}, "parameters.observation.slo")
+    c = validate(dict({k: data.observation[k] for k in OBSERVATION_FIELDS},
+                      **compile_checks(case, data.checks, inputs["engine_tps"]),
+                      **{"slo_"+key: value for key, value in slo.items()},
                       qps=float(client["SEND_MODE_QPS"])), inputs["engine_tps"])
-    for identity in inputs["engine_tps"]["metric_roles"]:
+    allowed = c["qps"] * (1 + c["qps_tolerance"])
+    if c["min_requests"] > allowed * c["measure_s"] or c["min_goodput_rps"] > allowed:
+        raise ValueError("request/goodput floors exceed the declared offered-load envelope; review thresholds after changing playback.qps")
+    for binding in inputs["engine_tps"]["fields"].values():
+        identity = binding["metric"]
         case.metric(identity, unit="tokens/s",
                     labels=("role", "engine_name", "engine_incarnation"), mode="scrape")
     if client.get("SEND_MODE") != "uniform":

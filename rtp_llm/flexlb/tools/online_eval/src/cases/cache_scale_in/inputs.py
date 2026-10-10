@@ -1,9 +1,6 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
-import re
-
-
-METRIC = re.compile(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*\Z")
+from cases.metric_inputs import metric_fields
 
 PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s"})
 OBSERVATION_FIELDS = frozenset({"warmup_timeout_s", "baseline_s", "observe_s", "sample_s",
@@ -23,23 +20,14 @@ def engine_counters(spec):
     from cases.cache_scale_in.analysis import COUNTERS
 
     required = set(COUNTERS) | {"waiting", "running", "cache_evictions", "prefill_ms_avg"}
+    fields = metric_fields(spec)
     if (
-        not isinstance(spec, dict)
-        or set(spec) != {"source", "fields"}
-        or spec["source"] != "metric_store"
-    ):
-        raise ValueError("engine counter input requires metric_store and fields")
-    fields = spec["fields"]
-    if (
-        not isinstance(fields, dict)
-        or not required <= set(fields)
+        not required <= set(fields)
         or any(
-            not isinstance(k, str)
-            or not isinstance(v, str)
-            or not METRIC.fullmatch(v)
-            for k, v in fields.items()
+            v["labels"] != {"role": "prefill"}
+            for v in fields.values()
         )
-        or len(set(fields.values())) != len(fields)
+        or len({v["metric"] for v in fields.values()}) != len(fields)
     ):
         raise ValueError("engine counter input has missing or invalid metric bindings")
     return spec
@@ -48,7 +36,7 @@ def engine_counters(spec):
 def engine_snapshot(monitor, fields, timeout=5):
     """Strict field projection from the declared, TSDB-owned raw metric IDs."""
     import math
-    bindings = dict(fields)
+    bindings = {name: spec["metric"] for name, spec in fields.items()}
     rows = monitor.metric_snapshot(bindings.values(), source="mock", timeout=timeout)
     reverse = {identity: field for field, identity in bindings.items()}
     engines = {}
@@ -73,3 +61,28 @@ def engine_snapshot(monitor, fields, timeout=5):
     if not engines or any(set(fields) - set(row) for row in engines.values()):
         raise ValueError("incomplete engine monitoring contract")
     return engines
+
+
+RULES = {
+    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', 'baseline_and_post'),
+    'baseline_hit': ('baseline_min_hit', 'baseline_min_half_hit', 'ge', 'ratio', 'baseline'),
+    'baseline_stability': ('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', 'baseline'),
+    'completed': ('min_completed', 'min_window_completed', 'ge', 'requests', 'baseline_and_post'),
+}
+
+
+def compile_checks(case, checks, policy):
+    from cases.inputs import fields
+    from cases.check_inputs import metric_criterion
+
+    fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
+    fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.observation.collapse')
+    result = dict(policy)
+    for name, (key, metric, op, unit, window) in RULES.items():
+        result[key], _ = metric_criterion(case, checks[name], metric='cache_gate/'+metric,
+            unit=unit, window=window, op=op, path='parameters.checks.'+name)
+    expected, _ = metric_criterion(case, checks['collapse'], metric='cache_gate/collapse_detected',
+        unit='boolean', window='post', op='eq', path='parameters.checks.collapse')
+    if expected != 0:
+        raise ValueError('cache gate requires absence of sustained collapse')
+    return result

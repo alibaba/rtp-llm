@@ -10,6 +10,7 @@ from runtime.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
 from traffic.traffic_source import materialize
 from traffic.playback_config import normalize
+from traffic.contracts import java_client_priority
 
 from runtime.java_client import ClientOps
 from scenario.contracts import CheckResult, StageHandler, StageOutput
@@ -36,7 +37,7 @@ def _start_validate(params, plan):
         or p["poll_s"] <= 0
     ):
         raise ValueError("invalid flow polling interval")
-    client, _ = normalize(p["client"])
+    client, _ = normalize(java_client_priority(p["source"], p["client"]))
     if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
         raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")
     if (
@@ -80,7 +81,7 @@ def _start(ctx, p, deadline):
         ctx.instance["id"] + ":" + p["group_id"],
         Path(ctx.instance["source_path"]).parent,
     )
-    environment, playback = normalize(p["client"])
+    environment, playback = normalize(java_client_priority(p["source"], p["client"]))
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']
     laps = int(environment.get('MAX_LAPS', 0 if environment.get('LOOP')=='true' else 1))

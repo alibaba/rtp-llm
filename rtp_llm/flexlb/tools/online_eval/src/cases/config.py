@@ -30,7 +30,7 @@ class CaseBuilder:
     def __init__(self, environment, parameters, parameter_schema=None):
         self.environment = copy.deepcopy(environment)
         self.parameters = copy.deepcopy(parameters)
-        self.parameter_schema = copy.deepcopy(parameter_schema or {})
+        self.parameter_schema = copy.deepcopy(parameter_schema if parameter_schema is not None else {})
         self.steps = []
         self.read_parameters = set()
         self.metric_dependencies = {}
@@ -79,6 +79,24 @@ class CaseBuilder:
         ):
             raise ScenarioError(f"parameter {name!r}: invalid value {value!r}")
         return value
+
+    def validate_numbers(self):
+        """Apply every declared boundary, without marking unused inputs as read."""
+        if not isinstance(self.parameter_schema, dict):
+            raise ScenarioError("parameter_schema must be a mapping")
+        reads = set(self.read_parameters)
+        for name, rule in self.parameter_schema.items():
+            if type(name) is not str or not name:
+                raise ScenarioError("parameter_schema requires dotted parameter paths")
+            mapping(rule, {"integer", "minimum", "maximum"}, "parameter_schema." + name)
+            if "integer" in rule and type(rule["integer"]) is not bool:
+                raise ScenarioError("parameter_schema integer must be boolean")
+            bounds = [rule.get(key) for key in ("minimum", "maximum")]
+            if any(value is not None and (type(value) not in (int, float) or not math.isfinite(value))
+                   for value in bounds) or (all(value is not None for value in bounds) and bounds[0] > bounds[1]):
+                raise ScenarioError("parameter_schema requires finite, increasing bounds")
+            self.number(name)
+        self.read_parameters = reads
 
     def step(self, name, action, *, params=None, timeout_s=None):
         step = {"id": name, "action": action}
@@ -248,6 +266,7 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
         merge_data(parameters, variant_parameters),
         config.get("parameter_schema", {}),
     )
+    builder.validate_numbers()
     build(builder)
     for field in leaf_paths(builder.parameters):
         if not path_in_scope(field, builder.read_parameters):
@@ -267,15 +286,18 @@ def _variant_test(config, builder, source):
     if not isinstance(config.get("test", {}), dict):
         raise ScenarioError(f"{source}.test: expected mapping")
     test = normalize_test(copy.deepcopy(config.get("test", {})))
-    if builder.metric_dependencies:
-        _bind_metric_dependencies(builder.metric_dependencies, test)
+    if (builder.metric_dependencies or "metric_whitelist" in builder.environment
+            or any("metric_whitelist" in patch for patch in builder.environment.get("profile_overrides", {}).values())):
+        _bind_metric_dependencies(builder.metric_dependencies, test, builder.environment)
     _bind_reports(config, test, source, builder.steps)
     return test
 
 
-def _bind_metric_dependencies(requirements, test):
-    from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions
-    declared = definitions(load_plan(test["monitoring"].get("query_plan", DEFAULT_PLAN)))
+def _bind_metric_dependencies(requirements, test, environment):
+    from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions, validate_export_filter
+    plan = load_plan(test["monitoring"].get("query_plan", DEFAULT_PLAN))
+    validate_export_filter(plan, environment)
+    declared = definitions(plan)
     missing = set(requirements) - set(declared)
     if missing:
         raise ScenarioError("undeclared metric ids: " + ", ".join(sorted(missing)))

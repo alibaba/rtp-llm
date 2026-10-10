@@ -2,9 +2,9 @@ case_schema_version: 2
 case: cache_scale_in
 program: default
 metadata:
-  description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known 125P to 64P control point.
+  description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known 125P to 64P
+    control point.
   category: kv
-
 test:
   kind: workload
   description: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
@@ -24,13 +24,13 @@ environment:
   prefill_cache_policy:
     device_tree: false
     memory_tree: false
-
 execution:
   timeout_s: 1800
   stage_timeout_s: 60
   cleanup_timeout_s: 660
 parameters:
   traffic:
+    kind: java_flow
     group_id: scale_in
     phase_id: continuous
     source:
@@ -58,7 +58,6 @@ parameters:
       N_CHANNELS: '16'
       EVENT_LOOP_THREADS: '16'
       SKIP_SERVER_LATENCY: 'true'
-      PRIORITY: '50'
     poll_s: 0.1
     jvm_xms: 1g
     jvm_xmx: 48g
@@ -66,12 +65,12 @@ parameters:
     target_p: 64
     removal_mode: graceful
     drain_timeout_ms: 30000
-    topology_timeout_s: 37  # discovery convergence budget, independent of drain
+    topology_timeout_s: 37
     analysis_timeout_s: 300
   observation:
     warmup_timeout_s: 450
     baseline_s: 60
-    observe_s: 60  # Diagnostic window; full 240s acceptance needs a longer traffic plan.
+    observe_s: 60
     sample_s: 1
     window_s: 10
     step_s: 1
@@ -80,28 +79,177 @@ parameters:
       engine_counters:
         source: metric_store
         fields:
-          running: mock/running
-          waiting: mock/waiting
-          hit_tokens_total: mock/hit_tokens_total
-          context_tokens_total: mock/context_tokens_total
-          context_requests_total: mock/context_requests_total
-          cache_evictions: mock/cache_evictions
-          prefill_ms_avg: mock/prefill_ms_avg
-          prefill_batches: mock/prefill_batches
-          prefill_batch_requests: mock/prefill_batch_requests
-          cache_key_hits: mock/cache_key_hits
-          cache_keys_requested: mock/cache_keys_requested
-          admission_open: mock/admission_open
-          admitted_rpcs_total: mock/admitted_rpcs_total
-          rejected_rpcs_total: mock/rejected_rpcs_total
+          running:
+            metric: mock/running
+            labels:
+              role: prefill
+          waiting:
+            metric: mock/waiting
+            labels:
+              role: prefill
+          hit_tokens_total:
+            metric: mock/hit_tokens_total
+            labels:
+              role: prefill
+          context_tokens_total:
+            metric: mock/context_tokens_total
+            labels:
+              role: prefill
+          context_requests_total:
+            metric: mock/context_requests_total
+            labels:
+              role: prefill
+          cache_evictions:
+            metric: mock/cache_evictions
+            labels:
+              role: prefill
+          prefill_ms_avg:
+            metric: mock/prefill_ms_avg
+            labels:
+              role: prefill
+          prefill_batches:
+            metric: mock/prefill_batches
+            labels:
+              role: prefill
+          prefill_batch_requests:
+            metric: mock/prefill_batch_requests
+            labels:
+              role: prefill
+          cache_key_hits:
+            metric: mock/cache_key_hits
+            labels:
+              role: prefill
+          cache_keys_requested:
+            metric: mock/cache_keys_requested
+            labels:
+              role: prefill
+          admission_open:
+            metric: mock/admission_open
+            labels:
+              role: prefill
+          admitted_rpcs_total:
+            metric: mock/admitted_rpcs_total
+            labels:
+              role: prefill
+          rejected_rpcs_total:
+            metric: mock/rejected_rpcs_total
+            labels:
+              role: prefill
+    collapse:
+      absolute_min_hit: 0.45
+      max_drop: 0.25
+      sustain_s: 30
   checks:
-    qps_tolerance: 0.1
-    baseline_min_hit: 0.85
-    baseline_max_spread: 0.05
-    absolute_min_hit: 0.45
-    max_drop: 0.25
-    min_completed: 20
-    sustain_s: 30
+    offered_load:
+      metric: cache_gate/offered_qps_deviation
+      window: baseline_and_post
+      unit: ratio
+      op: le
+      expected: 0.1
+    baseline_hit:
+      metric: cache_gate/baseline_min_half_hit
+      window: baseline
+      unit: ratio
+      op: ge
+      expected: 0.85
+    baseline_stability:
+      metric: cache_gate/baseline_half_spread
+      window: baseline
+      unit: ratio
+      op: le
+      expected: 0.05
+    completed:
+      metric: cache_gate/min_window_completed
+      window: baseline_and_post
+      unit: requests
+      op: ge
+      expected: 20
+    collapse:
+      metric: cache_gate/collapse_detected
+      window: post
+      unit: boolean
+      op: eq
+      expected: 0
+parameter_schema:
+  traffic.source.parameters.count:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_tokens:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.priority:
+    minimum: 1
+    integer: true
+    maximum: 100
+  traffic.client.playback.qps:
+    minimum: 0
+    integer: false
+  traffic.client.playback.max_laps:
+    minimum: 0
+    integer: true
+  traffic.poll_s:
+    minimum: 0
+    integer: false
+  procedure.target_p:
+    minimum: 0
+    integer: true
+  procedure.drain_timeout_ms:
+    minimum: 0
+    integer: true
+  procedure.topology_timeout_s:
+    minimum: 0
+    integer: false
+  procedure.analysis_timeout_s:
+    minimum: 0
+    integer: false
+  observation.warmup_timeout_s:
+    minimum: 0
+    integer: false
+  observation.baseline_s:
+    minimum: 0
+    integer: false
+  observation.observe_s:
+    minimum: 0
+    integer: false
+  observation.sample_s:
+    minimum: 0
+    integer: false
+  observation.window_s:
+    minimum: 0
+    integer: false
+  observation.step_s:
+    minimum: 0
+    integer: false
+  observation.max_gap_s:
+    minimum: 0
+    integer: false
+  observation.collapse.absolute_min_hit:
+    minimum: 0
+    integer: false
+  observation.collapse.max_drop:
+    minimum: 0
+    integer: false
+  observation.collapse.sustain_s:
+    minimum: 0
+    integer: false
+  checks.offered_load.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.baseline_hit.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.baseline_stability.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.completed.expected:
+    minimum: 0
+    integer: true
+  checks.collapse.expected:
+    minimum: 0
+    integer: false
 analysis:
   alignment_event: withdraw_start
 reports:

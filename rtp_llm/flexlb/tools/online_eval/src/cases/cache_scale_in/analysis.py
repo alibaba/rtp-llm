@@ -312,8 +312,22 @@ def analyze(evidence):
     verdict = (
         "INVALID" if errors else ("FAIL" if first_collapse is not None else "PASS")
     )
+    half = (evidence["baseline_start"] + evidence["baseline_end"]) / 2
+    halves = [window(rows, lo, hi, evidence["initial_engines"], p["max_gap_s"])
+              for lo, hi in ((evidence["baseline_start"], half), (half, evidence["baseline_end"]))]
+    hits = [w["hit"] for w in halves]
+    measured = [*halves, *windows]
+    rates = [abs(w["sent_qps"] / p["qps"] - 1) if w["sent_qps"] is not None else None for w in measured]
+    gate_metrics = dict(
+        baseline_min_half_hit=min(hits) if all(v is not None for v in hits) else None,
+        baseline_half_spread=abs(hits[0]-hits[1]) if all(v is not None for v in hits) else None,
+        min_window_completed=min(w["completed"] for w in measured),
+        offered_qps_deviation=max(rates) if rates and all(v is not None for v in rates) else None,
+        collapse_detected=int(first_collapse is not None),
+    )
     return dict(
         cache_scale_in_analysis_schema_version=1,
+        gate_metrics=gate_metrics,
         measurement_scope=scope_contract(evidence) if scoped else {
             "policy": "historical-detach-window", "drain": "diagnostic only"},
         excluded_drain_diagnostics=[e for e in evidence.get("errors", []) if e in DRAIN_DIAGNOSTICS],

@@ -7,12 +7,6 @@ report:
 metrics:
   query_plan: master_performance.yaml
   diagnostic_only:
-  - client/actual_send_qps
-  - client/completed_qps
-  - client/error_qps
-  - client/success_qps
-  - client/total_p99_seconds
-  - client/ttft_p99_seconds
   - master/arrivals_qps
   - master/dispatch_qps
   - master/flexlb_app_flexlb_batcher_queue_size

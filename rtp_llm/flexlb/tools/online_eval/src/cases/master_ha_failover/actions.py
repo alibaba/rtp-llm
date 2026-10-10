@@ -54,6 +54,8 @@ def _ha_validate(params, plan):
     ):
         raise ValueError("invalid HA max_concurrency")
     if "source" in p:
+        from traffic.contracts import source_priority
+        source_priority(p["source"])
         source = p["source"]
         if (
             not isinstance(source, dict)

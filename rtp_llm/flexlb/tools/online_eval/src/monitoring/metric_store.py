@@ -172,7 +172,8 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
                 seen.add(key)
                 points = series.get(key, [])
                 provenance = dict(sources.get(key, {}), source_type="prometheus",
-                                  timestamp_kind="scrape" if spec.get("mode") == "scrape" else "evaluation")
+                                  timestamp_kind="scrape" if spec.get("mode") == "scrape" else "evaluation",
+                                  measurement=copy.deepcopy(spec.get("measurement", {})))
                 observations.setdefault(identity, []).append(dict(metric_id=identity,
                     epoch=epoch, source=source, labels=labels, points=points, series_key=key,
                     status="ERROR" if any(e.get("query") == query_id for e in data.get("errors", []))
@@ -192,7 +193,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     if destination.exists():
         previous = MetricStore.read(directory).document
         for identity, spec in previous["definitions"].items():
-            if spec["source_type"] != "prometheus" or not archives:
+            if "producer" in spec or not archives:
                 if identity in declared and declared[identity] != spec:
                     raise MetricContractError("conflicting producer definition: " + identity)
                 declared[identity] = spec
@@ -233,5 +234,6 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
         result.append(dict(metric_id=metric_id, epoch=str(row["epoch"]), source=row["source"],
             labels=row["labels"], points=points, status="PRESENT" if points else "ABSENT",
             provenance=dict(source_type=definition["source_type"], producer=producer,
-                            producer_module=module, producer_sha256=producer_sha256, evidence=evidence)))
+                            producer_module=module, producer_sha256=producer_sha256,
+                            measurement=copy.deepcopy(definition["measurement"]), evidence=evidence)))
     store.document["metrics"][metric_id] = result

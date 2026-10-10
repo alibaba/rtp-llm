@@ -56,7 +56,7 @@ def test_query_plan_reader_checks_included_format_too(tmp_path, monkeypatch, hea
     }}}}
     (tmp_path / 'wrong.yaml').write_text(yaml.safe_dump(document))
     (tmp_path / 'outer.yaml').write_text(yaml.safe_dump({
-        'metric_plan_schema_version': 2, 'include': ['wrong.yaml'],
+        'metric_plan_schema_version': 3, 'include': ['wrong.yaml'],
     }))
     with pytest.raises(ScenarioError, match='invalid query plan header'):
         load_plan('outer.yaml')

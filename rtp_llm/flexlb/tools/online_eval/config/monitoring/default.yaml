@@ -1,5 +1,4 @@
-# 指标定义采用原生 PromQL；占位符由运行实例注入。
-metric_plan_schema_version: 2
+metric_plan_schema_version: 3
 sources:
   mock:
     running_sum:
@@ -8,12 +7,22 @@ sources:
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     running_avg:
       promql: avg by (role) (rtp_llm_running_stream_size${selector})
       unit: requests
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
       required: true
     running_max:
       promql: max by (role) (rtp_llm_running_stream_size${selector})
@@ -21,18 +30,33 @@ sources:
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     waiting_sum:
       promql: sum by (role) (rtp_llm_wait_stream_size${selector})
       unit: requests
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     waiting_avg:
       promql: avg by (role) (rtp_llm_wait_stream_size${selector})
       unit: requests
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
       required: true
     waiting_max:
       promql: max by (role) (rtp_llm_wait_stream_size${selector})
@@ -40,56 +64,99 @@ sources:
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     engine_count:
       promql: count by (role) (rtp_llm_running_stream_size${selector})
       unit: engines
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     context_wall_tps:
       promql: sum by (role) (rate(mock_context_tokens_total${selector}[${window_ms}ms]))
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     context_completed_qps:
       promql: sum by (role) (rate(mock_context_requests_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     cache_hit_ratio:
-      promql: sum by (role) (rate(mock_hit_tokens_total${selector}[${window_ms}ms]))
-        / sum by (role) (rate(mock_context_tokens_total${selector}[${window_ms}ms]))
+      promql: sum by (role) (rate(mock_hit_tokens_total${selector}[${window_ms}ms])) / sum by (role) (rate(mock_context_tokens_total${selector}[${window_ms}ms]))
       unit: ratio
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     prefill_batch_size_mean:
-      promql: (sum by (role) (rate(mock_prefill_batch_size_sum${selector}[${window_ms}ms])))
-        / (sum by (role) (rate(mock_prefill_batch_size_count${selector}[${window_ms}ms])))
+      promql: (sum by (role) (rate(mock_prefill_batch_size_sum${selector}[${window_ms}ms]))) / (sum by (role) (rate(mock_prefill_batch_size_count${selector}[${window_ms}ms])))
       unit: requests/batch
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     prefill_batch_size_p50:
       promql: histogram_quantile(0.5, sum by (role, le) (rate(mock_prefill_batch_size_bucket${selector}[${window_ms}ms])))
       unit: requests/batch
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: histogram_estimate
+        requires_request_identity: false
     prefill_batch_size_p90:
       promql: histogram_quantile(0.9, sum by (role, le) (rate(mock_prefill_batch_size_bucket${selector}[${window_ms}ms])))
       unit: requests/batch
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: histogram_estimate
+        requires_request_identity: false
     prefill_batch_size_p99:
       promql: histogram_quantile(0.99, sum by (role, le) (rate(mock_prefill_batch_size_bucket${selector}[${window_ms}ms])))
       unit: requests/batch
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: histogram_estimate
+        requires_request_identity: false
     rtp_llm_context_tps_per_engine:
       promql: sum without (priority) (rtp_llm_context_tps${selector})
       unit: tokens/s
@@ -98,12 +165,22 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rtp_llm_context_tps_engine_mean:
       promql: avg by (role) (sum without (priority) (rtp_llm_context_tps${selector}))
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rtp_llm_context_tps_with_cache_per_engine:
       promql: sum without (priority) (rtp_llm_context_tps_with_cache${selector})
       unit: tokens/s
@@ -112,120 +189,225 @@ sources:
       - role
       - engine_name
       - engine_incarnation
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rtp_llm_context_tps_with_cache_engine_mean:
       promql: avg by (role) (sum without (priority) (rtp_llm_context_tps_with_cache${selector}))
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rtp_llm_generate_tps_engine_mean:
       promql: avg by (role) (rtp_llm_generate_tps${selector})
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     context_execution_tps_avg:
       promql: avg by (role) (rtp_llm_context_tps${selector})
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     context_execution_tps_with_cache_avg:
       promql: avg by (role) (rtp_llm_context_tps_with_cache${selector})
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     simulated_prefill_ms_avg:
       promql: avg by (role) (mock_engine_prefill_ms_avg${selector})
       unit: ms
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     simulated_decode_ms_avg:
       promql: avg by (role) (mock_engine_decode_ms_avg${selector})
       unit: ms
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rtp_llm_kv_cache_pool_total_blocks:
       promql: sum by (role) (rtp_llm_kv_cache_pool_total_blocks${selector})
       unit: blocks
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     rtp_llm_kv_cache_pool_available_blocks:
       promql: sum by (role) (rtp_llm_kv_cache_pool_available_blocks${selector})
       unit: blocks
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     mock_engine_held_blocks:
       promql: sum by (role) (mock_engine_held_blocks${selector})
       unit: blocks
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     mock_engine_referenced_blocks:
       promql: sum by (role) (mock_engine_referenced_blocks${selector})
       unit: blocks
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     completed_qps:
       promql: sum by (role) (rate(mock_engine_completed_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     accepted_qps:
       promql: sum by (role) (rate(mock_engine_accepted_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
     output_wall_tps:
       promql: sum by (role) (rate(mock_generate_tokens_total${selector}[${window_ms}ms]))
       unit: tokens/s
       value_kind: gauge
       labels:
       - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
   client:
     actual_send_qps:
       promql: sum(rate(flexlb_client_actual_send_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: sampled
+        requires_request_identity: false
     success_qps:
       promql: sum(rate(flexlb_client_success_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: sampled
+        requires_request_identity: false
     error_qps:
       promql: sum(rate(flexlb_client_error_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: sampled
+        requires_request_identity: false
     completed_qps:
       promql: sum(rate(flexlb_client_completed_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: sampled
+        requires_request_identity: false
     ttft_p99_seconds:
       promql: histogram_quantile(0.99, sum by (le) (rate(flexlb_client_ttft_seconds_bucket${selector}[${window_ms}ms])))
       unit: s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: histogram_estimate
+        requires_request_identity: false
     total_p99_seconds:
       promql: histogram_quantile(0.99, sum by (le) (rate(flexlb_client_total_seconds_bucket${selector}[${window_ms}ms])))
       unit: s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: histogram_estimate
+        requires_request_identity: false
     schedule_p99_seconds:
       promql: histogram_quantile(0.99, sum by (le) (rate(flexlb_client_schedule_seconds_bucket${selector}[${window_ms}ms])))
       unit: s
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: client_selector
+        accuracy: histogram_estimate
+        requires_request_identity: false
   master:
     arrivals_qps:
       promql: sum by (priority) (rate(flexlb_auto_tpm_request_count_total${selector}[${window_ms}ms]))
@@ -233,40 +415,96 @@ sources:
       value_kind: gauge
       labels:
       - priority
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_auto_tpm_request_count_total
     schedule_responses_qps:
       promql: sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels:
       - result
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_auto_tpm_schedule_latency_ms_seconds_count
     dispatch_qps:
       promql: sum by (reason) (rate(flexlb_app_engine_balancing_master_dispatch_reason_total${selector}[${window_ms}ms]))
       unit: requests/s
       value_kind: gauge
       labels:
       - reason
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_engine_balancing_master_dispatch_reason_total
     flexlb_app_flexlb_batcher_queue_size:
       promql: sum(flexlb_app_flexlb_batcher_queue_size${selector})
       unit: requests
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_flexlb_batcher_queue_size
     flexlb_app_flexlb_scheduler_inflight_size:
       promql: sum(flexlb_app_flexlb_scheduler_inflight_size${selector})
       unit: requests
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_flexlb_scheduler_inflight_size
     flexlb_app_flexlb_inflight_request_count:
       promql: sum(flexlb_app_flexlb_inflight_request_count${selector})
       unit: requests
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_app_flexlb_inflight_request_count
     flexlb_auto_tpm_decode_reserved_count:
       promql: sum(flexlb_auto_tpm_decode_reserved_count${selector})
       unit: requests
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_auto_tpm_decode_reserved_count
     flexlb_auto_tpm_decode_running_count:
       promql: sum(flexlb_auto_tpm_decode_running_count${selector})
       unit: requests
       value_kind: gauge
       labels: []
+      measurement:
+        method: promql_evaluation
+        population: master_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - flexlb_auto_tpm_decode_running_count

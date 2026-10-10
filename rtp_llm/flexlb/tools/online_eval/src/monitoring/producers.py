@@ -16,7 +16,7 @@ PRODUCERS = {
 def produce(directory, context):
     store = MetricStore.read(directory)
     selected = {definition["producer"] for definition in store.document["definitions"].values()
-                if definition["source_type"] != "prometheus"}
+                if "producer" in definition}
     if selected - set(PRODUCERS):
         raise MetricContractError("unknown metric producers: " + ", ".join(sorted(selected - set(PRODUCERS))))
     context["metric_directory"] = str(directory)

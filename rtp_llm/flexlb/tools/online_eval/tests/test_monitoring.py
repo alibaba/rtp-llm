@@ -88,7 +88,7 @@ class ContractTest(unittest.TestCase):
             dict(metric=dict(labels, __name__="rtp_llm_wait_stream_size"), value=[1, "128"]),
             dict(metric=dict(labels, __name__="mock_engine_running"), value=[1, "130"]),
         ])
-        fields = {"running": "mock/running", "waiting": "mock/waiting"}
+        fields = {name: dict(metric="mock/"+name, labels=dict(role="prefill")) for name in ("running", "waiting")}
         row = engine_snapshot(monitor, fields)["P0"]
         self.assertEqual((row["running"], row["waiting"]), (2, 128))
         monitor.instant.assert_called_once_with("mock", 5)
@@ -103,9 +103,9 @@ class ContractTest(unittest.TestCase):
                                     query_plan="cache_scale_in.yaml")
         monitor.instant = Mock(return_value=[])
         with self.assertRaisesRegex(ValueError, "undeclared"):
-            engine_snapshot(monitor, {"running": "mock/unknown"})
+            engine_snapshot(monitor, {"running": dict(metric="mock/unknown", labels=dict(role="prefill"))})
         with self.assertRaisesRegex(ValueError, "incomplete"):
-            engine_snapshot(monitor, {"running": "mock/running"})
+            engine_snapshot(monitor, {"running": dict(metric="mock/running", labels=dict(role="prefill"))})
 
     def test_snapshot_files_never_supply_curves(self):
         with tempfile.TemporaryDirectory() as tmp:

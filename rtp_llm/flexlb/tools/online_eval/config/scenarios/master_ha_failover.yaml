@@ -25,6 +25,7 @@ execution:
   cleanup_timeout_s: 300
 parameters:
   traffic:
+    kind: ha_replay
     source:
       kind: trace
       model: prefix_lineage
@@ -51,59 +52,365 @@ parameters:
     fallback: false
   procedure:
     setup_timeout_s: 600
-    kill_a: {mode: kill, target: A}
-    kill_b: {mode: kill, target: B}
-    b_ready: {target: B, inflight_zero: false}
-    a_ready: {target: A, inflight_zero: false}
+    kill_a:
+      mode: kill
+      target: A
+    kill_b:
+      mode: kill
+      target: B
+    b_ready:
+      target: B
+      inflight_zero: false
+    a_ready:
+      target: A
+      inflight_zero: false
     restart_timeout_s: 300
     finish_timeout_s: 150
   observation:
-    baseline_wait: {wait_s: 20}
-    settle: {wait_s: 5}
-    survivor_wait: {wait_s: 20}
-    outage_wait: {wait_s: 30}
-    both_wait: {wait_s: 20}
+    baseline_wait:
+      wait_s: 20
+    settle:
+      wait_s: 5
+    survivor_wait:
+      wait_s: 20
+    outage_wait:
+      wait_s: 30
+    both_wait:
+      wait_s: 20
     windows:
       baseline:
-        until: {stage: baseline_end, field: epoch_s, offset_s: -2}
+        until:
+          stage: baseline_end
+          field: epoch_s
+          offset_s: -2
       b_only:
-        from: {stage: b_start, field: epoch_s}
-        until: {stage: b_end, field: epoch_s}
+        from:
+          stage: b_start
+          field: epoch_s
+        until:
+          stage: b_end
+          field: epoch_s
       a_only:
-        from: {stage: a_start, field: epoch_s}
-        until: {stage: a_end, field: epoch_s}
+        from:
+          stage: a_start
+          field: epoch_s
+        until:
+          stage: a_end
+          field: epoch_s
       both:
-        from: {stage: both_start, field: epoch_s}
-        until: {stage: both_end, field: epoch_s}
+        from:
+          stage: both_start
+          field: epoch_s
+        until:
+          stage: both_end
+          field: epoch_s
       outage:
-        from: {stage: outage_start, field: epoch_s}
-        until: {stage: outage_end, field: epoch_s}
+        from:
+          stage: outage_start
+          field: epoch_s
+        until:
+          stage: outage_end
+          field: epoch_s
       a_handover:
-        from: {stage: b_end, field: epoch_s}
-        until: {stage: a_start, field: epoch_s}
+        from:
+          stage: b_end
+          field: epoch_s
+        until:
+          stage: a_start
+          field: epoch_s
       post_recovery:
-        from: {stage: both_start, field: epoch_s}
+        from:
+          stage: both_start
+          field: epoch_s
       all_requests: {}
   checks:
-    baseline_success: {window: baseline, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-    b_success: {window: b_only, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-    b_route: {window: b_only, metric: ha_gate/target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
-    b_balance: {window: b_only, metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-    outage_failures: {window: outage, metric: ha_gate/failed_count, op: ge, expected: 1, min_samples: 50}
-    outage_no_master: {window: outage, metric: ha_gate/route_count, route: master, op: eq, expected: 0, min_samples: 50}
-    outage_terminal: {window: outage, metric: ha_gate/visible_terminal_share, op: eq, expected: 1, min_samples: 50}
-    a_success: {window: a_only, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-    a_route: {window: a_only, metric: ha_gate/target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
-    a_balance: {window: a_only, metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-    both_success: {window: both, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-    both_balance: {window: both, metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-    handover_errors: {window: a_handover, metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
-    late_errors: {window: post_recovery, metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100}
-    rolling_errors: {window: all_requests, metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
-    unique_requests: {window: full_run, metric: ha_gate/duplicate_ids, op: eq, expected: 0, min_samples: 1}
+    baseline_success:
+      window: baseline
+      metric: ha_gate/success_rate
+      op: ge
+      expected: 0.95
+      min_samples: 100
+      unit: ratio
+    b_success:
+      window: b_only
+      metric: ha_gate/success_rate
+      op: ge
+      expected: 0.95
+      min_samples: 100
+      unit: ratio
+    b_route:
+      window: b_only
+      metric: ha_gate/target_share
+      target: B
+      op: ge
+      expected: 0.95
+      min_samples: 100
+      unit: ratio
+    b_balance:
+      window: b_only
+      metric: ha_gate/prefill_max_share
+      op: le
+      expected: 0.25
+      min_samples: 100
+      unit: ratio
+    outage_failures:
+      window: outage
+      metric: ha_gate/failed_count
+      op: ge
+      expected: 1
+      min_samples: 50
+      unit: requests
+    outage_no_master:
+      window: outage
+      metric: ha_gate/route_count
+      route: master
+      op: eq
+      expected: 0
+      min_samples: 50
+      unit: requests
+    outage_terminal:
+      window: outage
+      metric: ha_gate/visible_terminal_share
+      op: eq
+      expected: 1
+      min_samples: 50
+      unit: ratio
+    a_success:
+      window: a_only
+      metric: ha_gate/success_rate
+      op: ge
+      expected: 0.95
+      min_samples: 100
+      unit: ratio
+    a_route:
+      window: a_only
+      metric: ha_gate/target_share
+      target: A
+      op: ge
+      expected: 0.95
+      min_samples: 100
+      unit: ratio
+    a_balance:
+      window: a_only
+      metric: ha_gate/prefill_max_share
+      op: le
+      expected: 0.25
+      min_samples: 100
+      unit: ratio
+    both_success:
+      window: both
+      metric: ha_gate/success_rate
+      op: ge
+      expected: 0.95
+      min_samples: 100
+      unit: ratio
+    both_balance:
+      window: both
+      metric: ha_gate/prefill_max_share
+      op: le
+      expected: 0.25
+      min_samples: 100
+      unit: ratio
+    handover_errors:
+      window: a_handover
+      metric: ha_gate/non_ok_count
+      op: eq
+      expected: 0
+      min_samples: 100
+      warning_profiles:
+      - batch-window
+      unit: requests
+    late_errors:
+      window: post_recovery
+      metric: ha_gate/non_ok_count
+      op: eq
+      expected: 0
+      min_samples: 100
+      unit: requests
+    rolling_errors:
+      window: all_requests
+      metric: ha_gate/non_ok_count
+      op: eq
+      expected: 0
+      min_samples: 100
+      warning_profiles:
+      - batch-window
+      unit: requests
+    unique_requests:
+      window: full_run
+      metric: ha_gate/duplicate_ids
+      op: eq
+      expected: 0
+      min_samples: 1
+      unit: requests
+parameter_schema:
+  traffic.source.parameters.count:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_tokens:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_distribution.mean_tokens:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_distribution.seed:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.priority:
+    minimum: 1
+    integer: true
+    maximum: 100
+  traffic.duration_s:
+    minimum: 0
+    integer: false
+  traffic.timeout_ms:
+    minimum: 0
+    integer: true
+  traffic.replay_speed:
+    minimum: 0
+    integer: true
+  traffic.max_concurrency:
+    minimum: 0
+    integer: true
+  traffic.max_requests:
+    minimum: 0
+    integer: true
+  procedure.setup_timeout_s:
+    minimum: 0
+    integer: false
+  procedure.restart_timeout_s:
+    minimum: 0
+    integer: false
+  procedure.finish_timeout_s:
+    minimum: 0
+    integer: false
+  observation.baseline_wait.wait_s:
+    minimum: 0
+    integer: false
+  observation.settle.wait_s:
+    minimum: 0
+    integer: false
+  observation.survivor_wait.wait_s:
+    minimum: 0
+    integer: false
+  observation.outage_wait.wait_s:
+    minimum: 0
+    integer: false
+  observation.both_wait.wait_s:
+    minimum: 0
+    integer: false
+  observation.windows.baseline.until.offset_s:
+    integer: false
+  checks.baseline_success.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.baseline_success.min_samples:
+    minimum: 1
+    integer: true
+  checks.b_success.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.b_success.min_samples:
+    minimum: 1
+    integer: true
+  checks.b_route.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.b_route.min_samples:
+    minimum: 1
+    integer: true
+  checks.b_balance.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.b_balance.min_samples:
+    minimum: 1
+    integer: true
+  checks.outage_failures.expected:
+    minimum: 0
+    integer: true
+  checks.outage_failures.min_samples:
+    minimum: 1
+    integer: true
+  checks.outage_no_master.expected:
+    minimum: 0
+    integer: true
+  checks.outage_no_master.min_samples:
+    minimum: 1
+    integer: true
+  checks.outage_terminal.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.outage_terminal.min_samples:
+    minimum: 1
+    integer: true
+  checks.a_success.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.a_success.min_samples:
+    minimum: 1
+    integer: true
+  checks.a_route.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.a_route.min_samples:
+    minimum: 1
+    integer: true
+  checks.a_balance.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.a_balance.min_samples:
+    minimum: 1
+    integer: true
+  checks.both_success.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.both_success.min_samples:
+    minimum: 1
+    integer: true
+  checks.both_balance.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.both_balance.min_samples:
+    minimum: 1
+    integer: true
+  checks.handover_errors.expected:
+    minimum: 0
+    integer: true
+  checks.handover_errors.min_samples:
+    minimum: 1
+    integer: true
+  checks.late_errors.expected:
+    minimum: 0
+    integer: true
+  checks.late_errors.min_samples:
+    minimum: 1
+    integer: true
+  checks.rolling_errors.expected:
+    minimum: 0
+    integer: true
+  checks.rolling_errors.min_samples:
+    minimum: 1
+    integer: true
+  checks.unique_requests.expected:
+    minimum: 0
+    integer: true
+  checks.unique_requests.min_samples:
+    minimum: 1
+    integer: true
 variant_axis:
   kind: flow
-  fields: [program]
+  fields:
+  - program
 variants:
 - id: non_rolling
   program: non_rolling

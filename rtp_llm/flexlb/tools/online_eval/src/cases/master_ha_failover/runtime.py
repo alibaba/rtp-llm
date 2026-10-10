@@ -13,7 +13,9 @@ from typing import Optional
 from cases.master_ha_failover.analysis import row_ts_ms
 from runtime.java_client import ClientOps
 from runtime.network import http_get_json
+from traffic.contracts import source_priority
 
+HA_TRACE_PRIORITY = 50
 HA_TRACE_ROWS = 20
 HA_TRACE_SPACING_MS = 100
 HA_TRACE_IL = 16
@@ -95,7 +97,7 @@ def write_ha_trace(case_dir: Path) -> Path:
                     "il": HA_TRACE_IL,
                     "ol": HA_TRACE_OL,
                     "bh": [i * 1_000_003 + 7],
-                    "priority": 50,
+                    "priority": HA_TRACE_PRIORITY,
                 },
                 separators=(",", ":"),
             )
@@ -203,7 +205,7 @@ class HaTrafficRunner:
             "N_CHANNELS": "8" if source is not None else "2",
             "EVENT_LOOP_THREADS": "8" if source is not None else "4",
             "SKIP_SERVER_LATENCY": "true",
-            "PRIORITY": "50",
+            "PRIORITY": str(source_priority(source)) if source is not None else str(HA_TRACE_PRIORITY),
         }
         if enable_fallback:
             # Direct-connect engine addresses: the mock's endpoints.json

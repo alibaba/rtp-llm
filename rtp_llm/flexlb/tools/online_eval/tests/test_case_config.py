@@ -52,8 +52,8 @@ class CaseConfigTest(unittest.TestCase):
             configure_program(config, "cache_scale_in.yaml")
 
         config = load_document(ROOT / "config/scenarios/master_performance.yaml")
-        del config["parameters"]["observation"]["inputs"]["engine_tps"]["metric_roles"]["mock/rtp_llm_generate_tps"]
-        with self.assertRaisesRegex(ValueError, "match YAML metric_roles"):
+        del config["parameters"]["observation"]["inputs"]["engine_tps"]["fields"]["rtp_llm_generate_tps"]
+        with self.assertRaisesRegex(ValueError, "match YAML metric fields"):
             configure_program(config, "master_performance.yaml")
 
     def test_core_contract_keeps_production_master_configuration(self):

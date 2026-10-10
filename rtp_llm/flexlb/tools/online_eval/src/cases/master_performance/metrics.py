@@ -100,7 +100,10 @@ def produce(directory, evidence, result):
                     window=evidence.get("window"), algorithm="request_cohort_seconds"))
 
     for name, value in result["metrics"].items():
-        identity = "performance_gate/" + name.split("/")[-1]
+        key = name.split("/")[-1]
+        identity = "performance_gate/" + key
+        if name.startswith("mock/") and not key.endswith("_engine_count"):
+            identity += "_scrape_engine_mean"
         publish(store, identity, store.document["definitions"][identity],
                 [dict(epoch="1", source="performance_gate", labels={},
                       points=[[evidence["window"]["end_epoch_ms"]/1000, value]])],

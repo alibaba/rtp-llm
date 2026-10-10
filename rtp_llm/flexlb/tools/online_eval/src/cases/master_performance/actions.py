@@ -10,7 +10,7 @@ from scenario.parameters import validate_fields
 from cases.master_performance.analysis import analyze, validate, for_profile
 from workload.gate_evidence import compact_flow, trace_workload_sha, write_evidence
 from cases.master_performance.publication import publish_performance
-from cases.master_performance.inputs import engine_tps
+from cases.master_performance.inputs import engine_tps, engine_roles
 from traffic.traffic_source import sha256_file
 
 
@@ -135,7 +135,7 @@ def finish(ctx, p, deadline):
             # Query only the contract metrics; fetching all 240 engines' series
             # and discarding most of them after JSON decoding is unbounded work.
             e["engine_tps_samples"] = []
-            names = engine_tps(e["gate_input"], e["criteria"]["engine_tps"])["metric_roles"]
+            names = engine_roles(e["gate_input"], e["criteria"]["engine_tps"])
             for metric_id in names:
                 e["engine_tps_samples"].extend(ctx.monitor.metric_rows(
                     metric_id, source="mock", start=e["window"]["start_epoch_ms"] / 1000,

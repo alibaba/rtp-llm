@@ -6,28 +6,31 @@ from cases.config import output
 from traffic.playback_config import normalize
 from cases.cache_scale_in.comparison import validate_policy
 from cases.cache_scale_in.inputs import (
-    engine_counters, ENGINE_COUNTER_UNITS, PROCEDURE_FIELDS, OBSERVATION_FIELDS, CHECK_FIELDS,
+    engine_counters, ENGINE_COUNTER_UNITS, PROCEDURE_FIELDS, OBSERVATION_FIELDS, RULES, compile_checks,
 )
 from runtime.java_flow import JAVA_FLOW_INPUT_FIELDS
+from traffic.contracts import driver
 
 ANALYSIS_POLICY_VALIDATOR = validate_policy
 
 
 def default(case):
     data = case.inputs(
-        traffic=JAVA_FLOW_INPUT_FIELDS,
+        traffic=JAVA_FLOW_INPUT_FIELDS | {"kind"},
         procedure=PROCEDURE_FIELDS | {"analysis_timeout_s"},
-        observation=OBSERVATION_FIELDS | {"inputs"},
-        checks=CHECK_FIELDS,
+        observation=OBSERVATION_FIELDS | {"inputs", "collapse"},
+        checks=set(RULES) | {"collapse"},
     )
-    flow = data.traffic
+    flow = driver(data.traffic, "java_flow")
     inputs = data.observation["inputs"]
     gate = dict({k: v for k, v in data.procedure.items() if k != "analysis_timeout_s"},
-                **{k: v for k, v in data.observation.items() if k != "inputs"}, **data.checks)
+                **{k: data.observation[k] for k in OBSERVATION_FIELDS},
+                **compile_checks(case, data.checks, data.observation["collapse"]))
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])
-    for field, identity in inputs["engine_counters"]["fields"].items():
+    for field, binding in inputs["engine_counters"]["fields"].items():
+        identity = binding["metric"]
         if field not in ENGINE_COUNTER_UNITS:
             raise ValueError("unknown engine gate field: " + field)
         case.metric(identity, unit=ENGINE_COUNTER_UNITS[field],

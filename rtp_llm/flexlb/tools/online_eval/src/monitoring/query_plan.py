@@ -14,6 +14,7 @@ SOURCE_KINDS = ("mock", "client", "master")
 _NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 _PLAN = re.compile(r"[a-z][a-z0-9_]*\.yaml\Z")
 _TOKENS = re.compile(r"\$\{([^}]+)\}")
+PLAN_VERSION = 3
 
 
 def load_plan(name, _stack=()):
@@ -25,7 +26,7 @@ def load_plan(name, _stack=()):
     path = CATALOG / name
     data = load_document(path)
     if (set(data) - {"metric_plan_schema_version", "sources", "include", "exclude", "produced"}
-            or not matches_schema(data, "metric_plan_schema_version", 2)):
+            or not matches_schema(data, "metric_plan_schema_version", PLAN_VERSION)):
         raise ScenarioError(f"{path}: invalid query plan header")
     sources = {kind: {} for kind in SOURCE_KINDS}
     produced = {}
@@ -41,7 +42,7 @@ def load_plan(name, _stack=()):
     _exclude(sources, produced, data.get("exclude", []), path)
     if not any(sources.values()) and not produced:
         raise ScenarioError(f"{path}: metric plan is empty")
-    plan = dict(metric_plan_schema_version=2, sources=sources, produced=produced)
+    plan = dict(metric_plan_schema_version=PLAN_VERSION, sources=sources, produced=produced)
     definitions(plan)
     return plan
 
@@ -76,7 +77,7 @@ def _add_sources(sources, own, path):
 
 
 def _validate_query(spec, kind, metric, path):
-    if not isinstance(spec, dict) or set(spec) - {"promql", "required", "unit", "value_kind", "labels", "mode"}:
+    if not isinstance(spec, dict) or set(spec) - {"promql", "required", "unit", "value_kind", "labels", "mode", "measurement", "exported_metrics"}:
         raise ScenarioError(f"{path}: invalid query definition {kind}/{metric}")
     expression = spec.get("promql")
     if not isinstance(expression, str) or not expression.strip():
@@ -86,6 +87,12 @@ def _validate_query(spec, kind, metric, path):
     if "required" in spec and type(spec["required"]) is not bool:
         raise ScenarioError(f"{path}: required must be boolean for {kind}/{metric}")
     _metadata(spec, path)
+    if kind == "master" and "exported_metrics" not in spec:
+        raise ScenarioError(f"{path}: master query requires exported_metrics: {metric}")
+    if "exported_metrics" in spec:
+        names = _unique_strings(spec["exported_metrics"], path, "exported_metrics must be unique names")
+        if not names or any(not re.fullmatch(r"[a-zA-Z_:][a-zA-Z0-9_:]*", name) for name in names):
+            raise ScenarioError(f"{path}: invalid exported_metrics")
     if spec.get("mode", "evaluated") not in ("evaluated", "scrape"):
         raise ScenarioError(f"{path}: invalid timestamp mode")
     if spec.get("mode") == "scrape" and not re.fullmatch(r"[a-zA-Z_:][a-zA-Z0-9_:]*\$\{selector\}", expression):
@@ -105,8 +112,8 @@ def _add_produced(produced, own, path):
 def _validate_produced(spec, metric, path):
     if (type(metric) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*", metric)
             or not isinstance(spec, dict)
-            or set(spec) != {"producer", "source_type", "unit", "value_kind", "labels"}
-            or spec["source_type"] not in ("derived", "debug_api", "client_journal")
+            or set(spec) != {"producer", "source_type", "unit", "value_kind", "labels", "measurement"}
+            or spec["source_type"] not in ("prometheus", "debug_api", "client_journal")
             or type(spec["producer"]) is not str or not _NAME.fullmatch(spec["producer"])):
         raise ScenarioError(f"{path}: invalid produced metric {metric}")
     _metadata(spec, path)
@@ -134,6 +141,19 @@ def _metadata(spec, path):
             or any(type(x) is not str or not _NAME.fullmatch(x) for x in spec["labels"])
             or len(set(spec["labels"])) != len(spec["labels"])):
         raise ScenarioError(f"{path}: metric requires unit, value_kind and unique labels")
+    if "measurement" in spec:
+        validate_measurement(spec["measurement"], path)
+
+
+def validate_measurement(value, path):
+    """Describe evidence semantics; this is metadata, never an expression language."""
+    if (not isinstance(value, dict)
+            or set(value) != {"method", "population", "accuracy", "requires_request_identity"}
+            or any(type(value[key]) is not str or not value[key].strip()
+                   for key in ("method", "population"))
+            or value["accuracy"] not in ("request_ledger", "sampled", "histogram_estimate", "counter_delta")
+            or type(value["requires_request_identity"]) is not bool):
+        raise ScenarioError(f"{path}: invalid measurement semantics")
 
 
 def definitions(plan):
@@ -141,7 +161,9 @@ def definitions(plan):
               for kind, queries in plan["sources"].items() for metric, spec in queries.items()}
     for kind in SOURCE_KINDS:
         result[kind + "/up"] = dict(source_type="prometheus", source_kind=kind,
-            promql="up${selector}", required=True, unit="boolean", value_kind="gauge", labels=[])
+            promql="up${selector}", required=True, unit="boolean", value_kind="gauge", labels=[],
+            measurement=dict(method="promql_evaluation", population=kind + "_selector",
+                             accuracy="sampled", requires_request_identity=False))
     if set(result) & set(plan["produced"]):
         raise ScenarioError("produced metric conflicts with a Prometheus metric")
     return {**result, **plan["produced"]}
@@ -151,6 +173,26 @@ def plan_hash(plan):
     import hashlib
     import json
     return hashlib.sha256(json.dumps(plan, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+
+
+def validate_export_filter(plan, environment):
+    """A declared Master export filter cannot exclude a selected query's inputs.
+
+    Physical dependencies are declared data; this does not parse/rewrite PromQL.
+    An absent override keeps the Java export policy, with runtime required-query
+    validation still responsible for proving actual metric availability.
+    """
+    filters = [environment.get("metric_whitelist")]
+    filters.extend(patch.get("metric_whitelist") for patch in
+                   environment.get("profile_overrides", {}).values() if "metric_whitelist" in patch)
+    for value in filters:
+        if value is None:
+            continue
+        prefixes = value.split(",")
+        for metric, spec in plan["sources"]["master"].items():
+            for name in spec.get("exported_metrics", []):
+                if name.startswith("flexlb_") and not any(name.startswith(prefix) for prefix in prefixes):
+                    raise ScenarioError(f"master/{metric}: exported metric {name} excluded by metric_whitelist; exclude the query or allow its inputs")
 
 
 def queries_for_targets(plan, targets, selector, interval, target_kinds=None):

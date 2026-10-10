@@ -26,14 +26,14 @@ BLOCK_FIELDS = {
                     'config_overrides', 'metric_whitelist'),
     'execution': ('timeout_s', 'stage_timeout_s', 'cleanup_timeout_s'),
     'parameters': ('traffic', 'procedure', 'observation', 'checks'),
-    'traffic': ('group_id', 'phase_id', 'source', 'client', 'targets', 'duration_s',
+    'traffic': ('kind', 'group_id', 'phase_id', 'source', 'client', 'targets', 'duration_s',
              'timeout_ms', 'replay_speed', 'loop', 'max_concurrency', 'max_requests',
              'fallback', 'live_events', 'poll_s', 'jvm_xms', 'jvm_xmx'),
     'source': ('kind', 'model', 'version', 'parameters'),
     'client': ('playback',),
 }
 QUERY_FIELDS = ('promql', 'mode', 'producer', 'source_type', 'unit', 'value_kind',
-                'labels', 'required')
+                'labels', 'measurement', 'exported_metrics', 'required')
 CURVE_FIELDS = ('metric_id', 'labels', 'name', 'group', 'unit', 'axis', 'scale',
                 'color', 'hidden', 'primary')
 

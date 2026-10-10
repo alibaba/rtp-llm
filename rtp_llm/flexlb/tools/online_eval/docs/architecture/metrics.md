@@ -29,7 +29,7 @@ Prometheus 查询的完整 ID 由 `sources` 的来源种类和查询键组成；
 场景通过 `test.monitoring.query_plan` 选择 `config/monitoring/` 中的集合。`default.yaml` 是公共默认集合，case 集合通过 `include` 引用；它与 `config/report_views/default.yaml` 全量诊断视图是独立配置。默认集合的文件名由 `monitoring.query_plan.DEFAULT_PLAN` 声明。
 
 ```yaml
-metric_plan_schema_version: 2
+metric_plan_schema_version: 3
 include: [default.yaml]
 sources:
   mock:
@@ -44,6 +44,21 @@ sources:
 
 `include` 合并集合，`exclude` 按完整指标 ID 显式删除。重复定义、循环引用和删除不存在的指标均失败；本契约不支持同 ID 覆盖，要调整口径时修改所属集合，或新增不同 ID 并排除旧指标。展开后的定义及 SHA 写入编译产物与运行归档。
 
-难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind`、`labels`。来源类型为 `derived`、`client_journal` 或 `debug_api`；产物记录 producer 模块及源码 SHA。原始证据保留供审计，不能作为缺失 Prometheus 指标的自动替代。
+难以用 PromQL 表达的请求归因、阶段统计由注册 Python producer 实现，在 `produced` 声明输出 ID、`producer`、`source_type`、`unit`、`value_kind`、`labels` 和 `measurement`。`source_type` 记录实际来源：`prometheus`、`client_journal` 或 `debug_api`；计算后的数值仍保留原始来源，不用 `derived` 代替来源。是否执行生产器由 `producer` 决定，与来源标签无关。产物记录模块、源码 SHA、计算口径和证据引用；原始证据不能作为缺失 Prometheus 指标的自动替代。
+
+`measurement` 将来源与统计语义分开：
+
+| 字段 | 含义 |
+|---|---|
+| `method` | 计算方法名称；实现由 PromQL 或注册 Python 能力负责，不是表达式 DSL |
+| `population` | 请求 cohort、完成窗口、角色/引擎群体等统计对象 |
+| `accuracy` | `request_ledger`、`sampled`、`histogram_estimate` 或 `counter_delta` |
+| `requires_request_identity` | 是否依赖请求身份进行归因、去重或终态核对 |
+
+`produced` 必须完整声明这些属性；公共查询集合也显式记录口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
+
+直方图 p99 与逐请求 nearest-rank p99、PromQL 的 lookback 均值与按实际 scrape 时刻计算的整窗引擎等权均值、全 fleet hit ratio 与 survivor 过滤后的 counter 差分分别使用不同 ID。门禁声明自己使用的 ID、单位和时窗，view 选择需要展示的投影，不把相近曲线作为门禁替身。已由请求流水覆盖且没有展示消费者的查询在所属 case 集合中用 `exclude` 去掉；公共默认集合保留供其他用途选择。
+
+Master 查询必须用 `exported_metrics` 列出依赖的物理指标名称。`environment.metric_whitelist` 是 Java exporter 的暴露过滤器，query plan 是查询选择，两者不合并。编译期检查显式过滤器及其 profile 覆盖不会排除所选查询的依赖；未声明过滤覆盖时保留 Java 策略，运行时仍需按查询的 `required` 和覆盖契约核验实际数据。
 
 视图 YAML 的 `curves` 用本地曲线 ID 声明 `metric_id` 和 `labels` 选择，并设置名称、颜色、轴和换算；面板用 `curve_ids` 选曲线。Python program 用 `case.metric(id)` 声明依赖，编译时拒绝未定义 ID。运行时 `MetricStore.select` 显式选择标签与时间窗、检查样本数及最大间隔，`reduce` 只对单条已选序列归约；缺失数据抛出 `MetricUnavailable`，定义冲突抛出 `MetricContractError`，均不能补零。

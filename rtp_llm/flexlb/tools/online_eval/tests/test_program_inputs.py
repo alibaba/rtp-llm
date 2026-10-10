@@ -46,7 +46,7 @@ def test_numeric_constraints_apply_to_nested_traffic_paths():
 ])
 def test_qps_has_one_yaml_source_and_is_frozen_into_observation(name, stage):
     data = config(name)
-    qps = data["parameters"]["traffic"]["client"]["playback"]["qps"] / 2
+    qps = data["parameters"]["traffic"]["client"]["playback"]["qps"] * 1.01
     data["parameters"]["traffic"]["client"]["playback"]["qps"] = qps
     plan = configure_program(data, "case.yaml")
     params = next(s for s in plan["variants"][0]["stages"] if s["id"] == stage)["params"]

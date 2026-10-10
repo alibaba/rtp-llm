@@ -314,7 +314,7 @@ class PrometheusSession:
         from monitoring.query_plan import definitions
         from monitoring.metric_store import MetricContractError
         definition = definitions(self.query_plan).get(metric_id)
-        if definition is None or definition["source_type"] != "prometheus":
+        if definition is None or "promql" not in definition:
             raise MetricContractError("undeclared Prometheus metric: " + metric_id)
         return definition
 

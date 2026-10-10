@@ -60,7 +60,7 @@ def panel(directory, evidence, result, presentation=None):
 
     series, sources, gaps, errors = archived_series(directory, lo / 1000)
     for key, points in series.items():
-        if sources[key]["source_type"] != "prometheus":
+        if "promql" not in sources[key]:
             continue
         epoch, source, metric, label_json = key.split("/", 3)
         if metric == "up":

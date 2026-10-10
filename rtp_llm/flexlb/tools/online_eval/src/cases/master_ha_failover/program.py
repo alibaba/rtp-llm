@@ -5,6 +5,7 @@ from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 from cases.config import output
 from cases.master_ha_failover.inputs import read_cycle
 from scenario.loader import ScenarioError
+from traffic.contracts import driver
 
 
 FLOW_PROGRAMS = ("non_rolling",)
@@ -21,7 +22,7 @@ def non_rolling(case):
 def _cycle(case, restart_mode):
     data, windows = read_cycle(case)
     case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
-    case.step("flow", "master_client_start", params=data.traffic)
+    case.step("flow", "master_client_start", params=driver(data.traffic, "ha_replay"))
 
     # The producer keeps running while A and B are killed and restarted in order.
     case.step("baseline_end", "master_mark", params=data.observation["baseline_wait"])
@@ -69,10 +70,10 @@ def _cycle(case, restart_mode):
     for name in checks:
         params = dict(data.checks[name])
         window = params.pop("window")
+        params.pop("unit")
         if window not in rows:
             raise ScenarioError(f"parameters.checks.{name}: window unavailable in {restart_mode}")
         params["rows"] = rows[window]
-        case.metric(params["metric"])
         case.observe(name, "master_client_check", params=params)
     case.step("clean_a", "master_inflight_clean", params={"target": "A"})
     case.step("clean_b", "master_inflight_clean", params={"target": "B"})

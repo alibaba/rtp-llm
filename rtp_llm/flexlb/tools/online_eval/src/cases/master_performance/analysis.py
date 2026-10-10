@@ -76,7 +76,7 @@ def validate(criteria, gate_input=None):
         engine_tps(gate_input, bounds)
     overrides = criteria.get("engine_tps_by_profile", {})
     if (not isinstance(overrides, dict)
-            or any(not isinstance(k, str) or not k for k in overrides)):
+            or any(type(k) is not str or not k for k in overrides)):
         raise ValueError("engine_tps_by_profile requires registered profiles")
     for bounds in overrides.values():
         if (not isinstance(bounds, dict) or not bounds
@@ -108,8 +108,8 @@ def engine_tps_checks(evidence):
     lo = evidence["window"]["start_epoch_ms"] / 1000
     hi = evidence["window"]["end_epoch_ms"] / 1000
     gap = evidence["criteria"]["max_gap_s"]
-    from cases.master_performance.inputs import engine_tps
-    roles = engine_tps(evidence.get("gate_input"), bounds)["metric_roles"]
+    from cases.master_performance.inputs import engine_roles
+    roles = engine_roles(evidence.get("gate_input"), bounds)
     groups = {name: {} for name in roles}
     for row in evidence.get("engine_tps_samples", []):
         labels = row["metric"]
@@ -314,6 +314,8 @@ def analyze(evidence):
     done = completions(lo, hi)
     m = dict(
         sent_qps=sent_qps,
+        offered_qps_deviation=abs(sent_qps / c["qps"] - 1),
+        pacing_lag_max_ms=max((a[r["rid"]]["pacing_lag_ms"] for r in cohort), default=None),
         cohort_requests=len(cohort),
         success_requests=len(ok),
         error_rate=sum(r["status"] != "ok" for r in all_rows) / len(all_rows),

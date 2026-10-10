@@ -2,14 +2,13 @@ case_schema_version: 2
 case: master_performance
 program: default
 metadata:
-  description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash
-    frontend capture from 16/20 pods, output mean from real Decode monitoring.
-    Absolute provisional contract, not production capacity.
+  description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash frontend capture from 16/20 pods,
+    output mean from real Decode monitoring. Absolute provisional contract, not production capacity.
   category: master
 test:
   kind: workload
-  description: Frozen trace/model absolute regression gate; provisional floors, 100%
-    full-Fetch success, optional batch/single observation
+  description: Frozen trace/model absolute regression gate; provisional floors, 100% full-Fetch success, optional
+    batch/single observation
   collection: request
   monitoring:
     query_plan: master_performance.yaml
@@ -31,6 +30,7 @@ execution:
   cleanup_timeout_s: 90
 parameters:
   traffic:
+    kind: java_flow
     group_id: performance
     phase_id: continuous
     source:
@@ -64,7 +64,6 @@ parameters:
       N_CHANNELS: '8'
       EVENT_LOOP_THREADS: '8'
       SKIP_SERVER_LATENCY: 'true'
-      PRIORITY: '50'
     poll_s: 0.1
     jvm_xms: 8g
     jvm_xmx: 8g
@@ -77,33 +76,219 @@ parameters:
     inputs:
       engine_tps:
         source: metric_store
-        metric_roles:
-          mock/rtp_llm_context_tps: prefill
-          mock/rtp_llm_context_tps_with_cache: prefill
-          mock/rtp_llm_generate_tps: decode
+        fields:
+          rtp_llm_context_tps:
+            metric: mock/rtp_llm_context_tps
+            labels:
+              role: prefill
+          rtp_llm_context_tps_with_cache:
+            metric: mock/rtp_llm_context_tps_with_cache
+            labels:
+              role: prefill
+          rtp_llm_generate_tps:
+            metric: mock/rtp_llm_generate_tps
+            labels:
+              role: decode
+    slo:
+      ttft_ms: 2000
+      e2e_ms: 30000
+      tpot_ms: 50
   checks:
-    qps_tolerance: 0.05
-    min_requests: 260000
-    max_pacing_lag_ms: 250
-    min_input_tps: 4290000
-    min_output_tps: 429000
-    min_goodput_rps: 1440
-    min_slo_fraction: 0.95
-    max_error_rate: 0
-    max_ttft_p99_ms: 2000
-    max_e2e_p99_ms: 30000
-    max_tpot_p99_ms: 50
-    slo_ttft_ms: 2000
-    slo_e2e_ms: 30000
-    slo_tpot_ms: 50
-    max_inflight_growth_rps: 10
-    engine_tps_by_profile:
-      single-nonbatch:
-        mock/rtp_llm_context_tps: 45000
-        mock/rtp_llm_context_tps_with_cache: 90000
+    offered_load:
+      metric: performance_gate/offered_qps_deviation
+      window: measurement
+      unit: ratio
+      op: le
+      expected: 0.05
+    requests:
+      metric: performance_gate/cohort_requests
+      window: measurement
+      unit: requests
+      op: ge
+      expected: 260000
+    pacing_lag:
+      metric: performance_gate/pacing_lag_max_ms
+      window: measurement
+      unit: ms
+      op: le
+      expected: 250
+    input_tps:
+      metric: performance_gate/input_tps
+      window: measurement
+      unit: tokens/s
+      op: ge
+      expected: 4290000
+    output_tps:
+      metric: performance_gate/output_tps
+      window: measurement
+      unit: tokens/s
+      op: ge
+      expected: 429000
+    goodput:
+      metric: performance_gate/goodput_rps
+      window: measurement
+      unit: requests/s
+      op: ge
+      expected: 1440
+    slo_fraction:
+      metric: performance_gate/slo_fraction
+      window: measurement
+      unit: ratio
+      op: ge
+      expected: 0.95
+    errors:
+      metric: performance_gate/error_rate
+      window: full_run
+      unit: ratio
+      op: le
+      expected: 0
+    ttft:
+      metric: performance_gate/ttft_p99_ms
+      window: measurement
+      unit: ms
+      op: le
+      expected: 2000
+    e2e:
+      metric: performance_gate/e2e_p99_ms
+      window: measurement
+      unit: ms
+      op: le
+      expected: 30000
+    tpot:
+      metric: performance_gate/tpot_p99_ms
+      window: measurement
+      unit: ms
+      op: le
+      expected: 50
+    inflight_growth:
+      metric: performance_gate/inflight_growth_rps
+      window: measurement
+      unit: requests/s
+      op: le
+      expected: 10
     engine_tps:
-      mock/rtp_llm_context_tps: 50000
-      mock/rtp_llm_context_tps_with_cache: 100000
-      mock/rtp_llm_generate_tps: 2230
+      rtp_llm_context_tps:
+        metric: performance_gate/rtp_llm_context_tps_scrape_engine_mean
+        window: measurement
+        unit: tokens/s
+        op: ge
+        expected: 50000
+        expected_by_profile:
+          single-nonbatch: 45000
+      rtp_llm_context_tps_with_cache:
+        metric: performance_gate/rtp_llm_context_tps_with_cache_scrape_engine_mean
+        window: measurement
+        unit: tokens/s
+        op: ge
+        expected: 100000
+        expected_by_profile:
+          single-nonbatch: 90000
+      rtp_llm_generate_tps:
+        metric: performance_gate/rtp_llm_generate_tps_scrape_engine_mean
+        window: measurement
+        unit: tokens/s
+        op: ge
+        expected: 2230
+parameter_schema:
+  traffic.source.parameters.count:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_tokens:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_distribution.mean_tokens:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.output_distribution.seed:
+    minimum: 0
+    integer: true
+  traffic.source.parameters.priority:
+    minimum: 1
+    integer: true
+    maximum: 100
+  traffic.source.parameters.max_input_tokens:
+    minimum: 0
+    integer: true
+  traffic.client.playback.qps:
+    minimum: 0
+    integer: false
+  traffic.client.playback.ramp_up_seconds:
+    minimum: 0
+    integer: false
+  traffic.client.playback.max_laps:
+    minimum: 0
+    integer: true
+  traffic.poll_s:
+    minimum: 0
+    integer: false
+  observation.warmup_s:
+    minimum: 0
+    integer: false
+  observation.measure_s:
+    minimum: 0
+    integer: false
+  observation.sample_s:
+    minimum: 0
+    integer: false
+  observation.max_gap_s:
+    minimum: 0
+    integer: false
+  observation.slo.ttft_ms:
+    minimum: 0
+    integer: true
+  observation.slo.e2e_ms:
+    minimum: 0
+    integer: true
+  observation.slo.tpot_ms:
+    minimum: 0
+    integer: true
+  checks.offered_load.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.requests.expected:
+    minimum: 0
+    integer: true
+  checks.pacing_lag.expected:
+    minimum: 0
+    integer: false
+  checks.input_tps.expected:
+    minimum: 0
+    integer: false
+  checks.output_tps.expected:
+    minimum: 0
+    integer: false
+  checks.goodput.expected:
+    minimum: 0
+    integer: false
+  checks.slo_fraction.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.errors.expected:
+    minimum: 0
+    integer: false
+    maximum: 1
+  checks.ttft.expected:
+    minimum: 0
+    integer: false
+  checks.e2e.expected:
+    minimum: 0
+    integer: false
+  checks.tpot.expected:
+    minimum: 0
+    integer: false
+  checks.inflight_growth.expected:
+    minimum: 0
+    integer: false
+  checks.engine_tps.rtp_llm_context_tps.expected:
+    minimum: 0
+    integer: false
+  checks.engine_tps.rtp_llm_context_tps_with_cache.expected:
+    minimum: 0
+    integer: false
+  checks.engine_tps.rtp_llm_generate_tps.expected:
+    minimum: 0
+    integer: false
 reports:
 - master_performance.yaml

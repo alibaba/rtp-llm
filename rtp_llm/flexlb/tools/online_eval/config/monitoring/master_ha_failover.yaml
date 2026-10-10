@@ -1,43 +1,84 @@
-metric_plan_schema_version: 2
+metric_plan_schema_version: 3
 include:
 - default.yaml
+exclude:
+- client/actual_send_qps
+- client/success_qps
+- client/error_qps
+- client/completed_qps
+- client/ttft_p99_seconds
+- client/total_p99_seconds
+- master/flexlb_app_flexlb_scheduler_inflight_size
+- master/flexlb_app_flexlb_inflight_request_count
+- master/flexlb_auto_tpm_decode_reserved_count
+- master/flexlb_auto_tpm_decode_running_count
 produced:
   ha/sent:
     producer: ha_evidence
-    source_type: derived
+    source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
+    measurement:
+      method: arrival_cohort_one_second_buckets
+      population: ha_requests_by_send_time
+      accuracy: request_ledger
+      requires_request_identity: true
   ha/success:
     producer: ha_evidence
-    source_type: derived
+    source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
+    measurement:
+      method: arrival_cohort_one_second_buckets
+      population: ha_requests_by_send_time
+      accuracy: request_ledger
+      requires_request_identity: true
   ha/failed:
     producer: ha_evidence
-    source_type: derived
+    source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
+    measurement:
+      method: arrival_cohort_one_second_buckets
+      population: ha_requests_by_send_time
+      accuracy: request_ledger
+      requires_request_identity: true
   ha/prefill_peak_qps:
     producer: ha_evidence
-    source_type: derived
+    source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
+    measurement:
+      method: prefill_assignment_five_second_buckets
+      population: declared_prefill_fleet
+      accuracy: request_ledger
+      requires_request_identity: true
   ha/prefill_mean_qps:
     producer: ha_evidence
-    source_type: derived
+    source_type: client_journal
     unit: requests/s
     value_kind: gauge
     labels: []
+    measurement:
+      method: prefill_assignment_five_second_buckets
+      population: declared_prefill_fleet
+      accuracy: request_ledger
+      requires_request_identity: true
   ha/prefill_skew:
     producer: ha_evidence
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: gauge
     labels: []
+    measurement:
+      method: prefill_assignment_five_second_buckets
+      population: declared_prefill_fleet
+      accuracy: request_ledger
+      requires_request_identity: true
   ha/http_up:
     producer: ha_evidence
     source_type: debug_api
@@ -45,6 +86,11 @@ produced:
     value_kind: gauge
     labels:
     - master
+    measurement:
+      method: http_state_poll
+      population: master_instance
+      accuracy: sampled
+      requires_request_identity: false
   ha/scheduler_inflight:
     producer: ha_evidence
     source_type: debug_api
@@ -52,6 +98,11 @@ produced:
     value_kind: gauge
     labels:
     - master
+    measurement:
+      method: http_state_poll
+      population: master_instance
+      accuracy: sampled
+      requires_request_identity: false
   ha/prefill_inflight_requests:
     producer: ha_evidence
     source_type: debug_api
@@ -59,6 +110,11 @@ produced:
     value_kind: gauge
     labels:
     - master
+    measurement:
+      method: http_state_poll
+      population: master_instance
+      accuracy: sampled
+      requires_request_identity: false
   ha/decode_master_queued:
     producer: ha_evidence
     source_type: debug_api
@@ -66,6 +122,11 @@ produced:
     value_kind: gauge
     labels:
     - master
+    measurement:
+      method: http_state_poll
+      population: master_instance
+      accuracy: sampled
+      requires_request_identity: false
   ha/decode_confirmed_running:
     producer: ha_evidence
     source_type: debug_api
@@ -73,147 +134,242 @@ produced:
     value_kind: gauge
     labels:
     - master
+    measurement:
+      method: http_state_poll
+      population: master_instance
+      accuracy: sampled
+      requires_request_identity: false
   ha_gate/business_rate_above_one:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/duplicate_ids:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/error_kind_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/failed_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/failed_rate_above_one:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/failover_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/non_ok_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/prefill_max_share:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/prefill_peak_skew:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/route_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/route_share:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/sample_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/success_rate:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/target_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/target_share:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/visible_terminal_count:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/visible_terminal_share:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: ratio
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true
   ha_gate/wrong_error_code:
     producer: ha_gates
-    source_type: derived
+    source_type: client_journal
     unit: requests
     value_kind: scalar
     labels:
     - window
     - selection
+    measurement:
+      method: selected_cohort_predicate
+      population: declared_request_window_and_selection
+      accuracy: request_ledger
+      requires_request_identity: true

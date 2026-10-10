@@ -92,9 +92,8 @@ class PerformanceGateTest(unittest.TestCase):
         from cases.master_performance.inputs import engine_tps
         e = self.engine_evidence()
         renamed = copy.deepcopy(e["gate_input"])
-        roles = renamed["metric_roles"]
-        roles["mock/replacement_context_tps"] = roles.pop("mock/rtp_llm_context_tps")
-        with self.assertRaisesRegex(ValueError, "match YAML metric_roles"):
+        renamed["fields"]["rtp_llm_context_tps"]["metric"] = "mock/replacement_context_tps"
+        with self.assertRaisesRegex(ValueError, "match YAML metric fields"):
             validate(e["criteria"], renamed)
         e["criteria"]["engine_tps"]["mock/replacement_context_tps"] = e["criteria"]["engine_tps"].pop(
             "mock/rtp_llm_context_tps")
@@ -159,7 +158,7 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(analyze(archived)["metrics"], analyze(dict(e, flow=snapshot))["metrics"])
             self.assertEqual(len(archived["flow"]["journal"]["sha256"]), 64)
             self.assertEqual(archived["engine_tps_samples"], raw)
-            self.assertEqual([call.args[0] for call in monitor.metric_rows.call_args_list], list(e["gate_input"]["metric_roles"]))
+            self.assertEqual([call.args[0] for call in monitor.metric_rows.call_args_list], [b["metric"] for b in e["gate_input"]["fields"].values()])
             monitor.query.assert_not_called()
             monitor.raw.assert_not_called()
 
@@ -167,7 +166,7 @@ class PerformanceGateTest(unittest.TestCase):
         import yaml
         gate_input = yaml.safe_load((ROOT / "config/scenarios/master_performance.yaml").read_text())[
             "parameters"]["observation"]["inputs"]["engine_tps"]
-        roles = gate_input["metric_roles"]
+        roles = {b["metric"]: b["labels"]["role"] for b in gate_input["fields"].values()}
         e = evidence()
         e["gate_input"] = gate_input
         e["criteria"]["engine_tps"] = {name: 100 for name in roles}

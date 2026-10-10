@@ -26,7 +26,7 @@ def prepare_report(directory, evidence):
     audit = []
     found = set()
     for key, points in series.items():
-        if sources[key]["source_type"] != "prometheus":
+        if "promql" not in sources[key]:
             continue
         _, source, metric, label_json = key.split("/", 3)
         if metric == "up":

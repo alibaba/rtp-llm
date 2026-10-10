@@ -37,17 +37,23 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
 | `execution` | 实例、阶段和清理的时间预算 | runner、阶段执行器 |
 | `parameters` | 按流量、流程、观测与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
-| `parameter_schema` | 数值参数的整数类型、最小值和最大值约束 | `CaseBuilder.number(path)` |
+| `parameter_schema` | 数值参数的整数类型、最小值和最大值约束 | program 构建前统一校验；`CaseBuilder.number(path)` 可显式读取 |
 
 `environment.n_prefill` 是启动多少个 Prefill worker；`parameters.traffic.count` 是 program 发出多少个请求；`parameter_schema["traffic.count"].maximum` 是该数量允许的上界。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
 
-`traffic` 保存请求、来源与发流条件；`procedure` 保存操作及流程预算；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
+`traffic.kind` 显式选择 `request_batch`、`java_flow` 或 `ha_replay`，各 program 只接受自己的字段合同。`traffic` 保存请求、来源与发流条件；`procedure` 保存操作及流程预算；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
 
 program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `ProgramInputs`。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
 
 需要具名窗口时，`observation.windows` 保存边界的 `stage`、`field: epoch_s` 和可选 `offset_s`；program 通过 `ObservationWindow` 将它们编译成有类型的输出引用，并选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
 
-`parameter_schema` 只约束 `case.number(path)` 读取的数值参数，不会自动扫描所有 `parameters`；复杂对象由 program 或 action 的输入合同校验。它不提供缺省参数值，也不承担环境配置校验。
+`parameter_schema` 的每条 dotted path 在 program 构建前统一校验，variant 合并后的值也受约束。未声明字段不会推断边界；缺字段、错误类型、非有限或越界值失败。校验本身不把字段标为“业务已使用”，未被 program 读取的输入仍会被拒绝。复杂对象和跨字段关系由 program 或 action 合同校验；schema 不提供缺省值，也不承担环境配置校验。
+
+观测输入统一使用 `source: metric_store` 和 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。角色、单位、覆盖要求和允许的字段由测量能力校验。
+
+数值检查写明 `metric`、`unit`、`window`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `observation`；复杂归因和持续性计算仍由 Python 负责。
+
+QPS 只取 `traffic.client.playback.qps`，编译时核对请求数量和 goodput 下界不超过允许的 offered-load 范围。修改负载不自动缩放绝对阈值，需要同时核对时窗和门槛。priority 由 `traffic.source.parameters.priority` 定义，客户端环境从该值生成；显式客户端 PRIORITY 与来源冲突时报错。
 
 `test` 保持独立：将执行与采集策略藏入 `metadata` 会使说明字段承担控制作用。`metadata.description` 描述业务目标，`test.description` 描述测试或取证策略；两者应避免重复。指标绑定和名称的规则见[指标契约](../architecture/metrics.md)。
 
@@ -96,6 +102,8 @@ handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知�
 `FUNCTIONAL_DEFAULTS` 提供模式无关基线，`FUNCTIONAL_PROFILE_KWARGS` 提供模式相关模板。窗口字段只在 FIXED_WINDOW 输出，SINGLE 不携带；`GENERATOR_DEFAULTS` 只用于低层 schema 构造。字段允许范围以配置 schema 和校验器为准，文档不维护第二份字段清单。`queue_timeout_ms: {omit: true}` 表示使用 Java 默认期限，不表示无限等待。
 
 `perf_preset` 引用固定采集档案。模式相关 Master 配对参数由 profile 解释；case 的非身份覆盖优先。测试派生的模型、容量或拓扑偏离用 `environment.model_override` 声明基线与原因，不能改写采集档案冒充现场观测；规则见[数据目录](../../data/README.md)。
+
+`profiles` 选择运行形态；`environment.profile_overrides` 覆盖非身份环境字段；检查的 `expected_by_profile` 声明形态相关阈值；`warning_profiles` 只将指定形态下的普通阈值失败标为警告，不能豁免缺失数据。所有 profile 名均验证，包括未被选中的规则。
 
 变体选择已注册的 Python program 或经 `parameter_schema` 校验的数据覆盖。维度、字段与身份必须一致，不把多项无关偏离包装成同一个参数变体；字段合并以加载器契约为准。未知或隐藏兜底值必须失败，不能靠 program 补齐未声明的输入。
 
