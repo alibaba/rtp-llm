@@ -22,31 +22,31 @@ def non_rolling(case):
 def _cycle(case, restart_mode):
     data, windows = read_cycle(case)
     case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
-    case.step("flow", "master_client_start", params=driver(data.traffic, "ha_replay"))
+    case.step("flow", "master_client_start", params=dict(driver(data.traffic, "ha_replay"), capture=data.observation["capture"]))
 
     # The producer keeps running while A and B are killed and restarted in order.
-    case.step("baseline_end", "master_mark", params=data.observation["baseline_wait"])
+    case.step("baseline_end", "master_mark", params=dict(data.observation["baseline_wait"], event="baseline_end"))
     case.step("kill_a", "master_fault", params=data.procedure["kill_a"])
     case.step("b_ready", "master_ready", params=data.procedure["b_ready"])
-    case.step("b_start", "master_mark", params=data.observation["settle"])
-    case.step("b_end", "master_mark", params=data.observation["survivor_wait"])
+    case.step("b_start", "master_mark", params=dict(data.observation["settle"], event="b_start"))
+    case.step("b_end", "master_mark", params=dict(data.observation["survivor_wait"], event="b_end"))
     if restart_mode == "non_rolling":
         case.step("kill_b", "master_fault", params=data.procedure["kill_b"])
-        case.step("outage_start", "master_mark", params=data.observation["settle"])
-        case.step("outage_end", "master_mark", params=data.observation["outage_wait"])
+        case.step("outage_start", "master_mark", params=dict(data.observation["settle"], event="outage_start"))
+        case.step("outage_end", "master_mark", params=dict(data.observation["outage_wait"], event="outage_end"))
     case.step("restart_a", "master_restore", timeout_s=data.procedure["restart_timeout_s"],
               params={"fault": output("kill_a", "fault")})
     case.step("a_ready", "master_ready", params=data.procedure["a_ready"])
     if restart_mode == "rolling":
         case.step("kill_b", "master_fault", params=data.procedure["kill_b"])
-    case.step("a_start", "master_mark", params=data.observation["settle"])
-    case.step("a_end", "master_mark", params=data.observation["survivor_wait"])
+    case.step("a_start", "master_mark", params=dict(data.observation["settle"], event="a_start"))
+    case.step("a_end", "master_mark", params=dict(data.observation["survivor_wait"], event="a_end"))
     case.step("restart_b", "master_restore", timeout_s=data.procedure["restart_timeout_s"],
               params={"fault": output("kill_b", "fault")})
     case.step("a_ready_final", "master_ready", params=data.procedure["a_ready"])
     case.step("b_ready_final", "master_ready", params=data.procedure["b_ready"])
-    case.step("both_start", "master_mark", params=data.observation["settle"])
-    case.step("both_end", "master_mark", params=data.observation["both_wait"])
+    case.step("both_start", "master_mark", params=dict(data.observation["settle"], event="both_start"))
+    case.step("both_end", "master_mark", params=dict(data.observation["both_wait"], event="both_end"))
     case.step("finish", "master_client_finish", timeout_s=data.procedure["finish_timeout_s"],
               params={"client": output("flow", "client"), "stop_sending": True})
 

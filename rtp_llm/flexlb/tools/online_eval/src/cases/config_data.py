@@ -16,12 +16,8 @@ def merge_data(base, patch):
 
 
 def mapping(value, allowed, path):
-    if not isinstance(value, dict):
-        raise ScenarioError(f"{path}: expected mapping")
-    extra = set(value) - set(allowed)
-    if extra:
-        raise ScenarioError(f"{path}: unknown configuration fields {sorted(extra)}")
-    return value
+    from input_contract import mapping_fields
+    return mapping_fields(value, allowed, path, error=ScenarioError)
 
 
 def data_only(value, path):

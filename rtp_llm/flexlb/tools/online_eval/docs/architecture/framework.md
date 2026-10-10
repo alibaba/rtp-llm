@@ -73,3 +73,17 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 请求发出、Schedule ACK、Fetch、业务 FINISHED、取消和资源释放分别取证，不互相推断。服务启动及诊断 API 成功应答不代替业务完成。具体协议见[请求生命周期](request-lifecycle.md)。
 
 指标和报告使用冻结定义与序列，不通过 debug API、日志或文件自动兜底；缺失来源显式报错。采集、门禁与交付规则分别见[指标契约](metrics.md)、[结果与指标](../development/results.md)和[报告契约](reporting.md)。
+
+## 现场观测与冻结证据
+
+持续时间和轮询由阶段的单调时钟控制；epoch 秒用于关联客户端流水和 Prometheus。`ObservationClock` 冻结观测起点的两种时钟，样本用同一锚点加单调时间差生成 `epoch_s`、`monotonic_s`、`elapsed_s`。已有证据中的毫秒字段与相对 `t` 是格式投影，不形成第二个时钟来源。
+
+`RuntimeContext.record_event` 是事件时间的权威记录。证据内事件保存同一记录及相对时间投影，供独立离线重判；stage 的起止记录描述执行生命周期，不能代替采样点或业务事件。具名窗口声明负责边界，测量实现负责 cohort 与统计口径。
+
+采样复用 `poll_samples` 和 `SampleBudget`。`observation.capture` 显式声明样本数与字节上限；超限保留已有现场和错误，证据不完整时不得判 PASS。先保留已获得的失效现场再检查流量状态，允许诊断停止原因；错误样本不能被当作有效门禁证据。HTTP 请求复用 `runtime.network`，timeout 受当前 deadline 或可停止的短请求预算约束。
+
+门禁的获取、终态补全和发布均通过 `write_evidence` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
+
+`run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`runtime.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
+
+停止发流和排空由 program 显式编排，判定与指标发布由所属门禁 handler 完成。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或发布实现异常直接成为 stage ERROR。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。

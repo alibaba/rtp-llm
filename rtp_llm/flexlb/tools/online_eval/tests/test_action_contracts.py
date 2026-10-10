@@ -71,8 +71,10 @@ class ActionContractsTest(unittest.TestCase):
 
     def test_ha_time_marker_uses_bounded_wait_and_epoch_clock(self):
         deadline = SimpleNamespace(sleep=Mock())
-        with patch("cases.master_ha_failover.actions.time.time", return_value=1234):
-            result = master_ha._mark(SimpleNamespace(), {"wait_s": 2}, deadline)
+        from scenario.runtime import RuntimeContext
+        ctx = RuntimeContext({}, None, ".", lambda: 10, lambda _: None, wall_clock=lambda: 1234)
+        result = master_ha._mark(ctx, {"wait_s": 2, "event": "baseline_end"}, deadline)
+        self.assertEqual("baseline_end", ctx.report_events[0]["id"])
         deadline.sleep.assert_called_once_with(2)
         self.assertEqual({"epoch_s": 1234}, result.output)
 

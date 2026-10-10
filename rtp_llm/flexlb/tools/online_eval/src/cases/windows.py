@@ -29,3 +29,28 @@ class ObservationWindow:
                     raise ScenarioError(f"{loc}: offset_s must be finite")
                 params[side + "_offset_s"] = offset
         return cls(params)
+
+
+def anchored_window(data, path, *, anchor):
+    """A bounded window around one runtime event, with explicit signed offsets."""
+    fields(data, {"from", "until"}, path)
+    offsets = {}
+    for side, boundary in data.items():
+        fields(boundary, {"event", "offset_s"}, path + "." + side)
+        offset = boundary["offset_s"]
+        if (boundary["event"] != anchor or type(offset) not in (int, float)
+                or not math.isfinite(offset)):
+            raise ScenarioError(f"{path}.{side}: requires {anchor} and finite offset_s")
+        offsets[side] = offset
+    if offsets["from"] >= offsets["until"]:
+        raise ScenarioError(path + ": observation window is empty or inverted")
+    return offsets
+
+
+def resolve_window(lower, upper, *, lower_offset_s=0, upper_offset_s=0):
+    """Resolve seconds without changing cohort membership or boundary inclusion."""
+    lo = None if lower is None else lower + lower_offset_s
+    hi = None if upper is None else upper + upper_offset_s
+    if lo is not None and hi is not None and lo >= hi:
+        raise ValueError("observation window is empty or inverted")
+    return lo, hi

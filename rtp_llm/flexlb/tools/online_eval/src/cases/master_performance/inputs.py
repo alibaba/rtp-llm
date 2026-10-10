@@ -2,7 +2,7 @@
 
 from cases.metric_inputs import metric_fields
 
-OBSERVATION_FIELDS = frozenset({"benchmark_id", "warmup_s", "measure_s", "sample_s", "max_gap_s"})
+OBSERVATION_FIELDS = frozenset({"benchmark_id", "sample_s", "max_gap_s"})
 CHECK_FIELDS = frozenset({
     "qps_tolerance", "min_requests", "max_pacing_lag_ms", "min_input_tps",
     "min_output_tps", "min_goodput_rps", "min_slo_fraction", "max_error_rate",
@@ -78,3 +78,16 @@ def compile_checks(case, checks, inputs):
     if overrides:
         result['engine_tps_by_profile'] = overrides
     return result
+
+
+def observation_contract(data):
+    from cases.inputs import fields
+    from cases.windows import anchored_window
+    from runtime.observation import capture_limits
+    fields(data["windows"], {"measurement"}, "parameters.observation.windows")
+    bounds = anchored_window(data["windows"]["measurement"],
+        "parameters.observation.windows.measurement", anchor="observation_start")
+    if bounds["from"] < 0:
+        raise ValueError("measurement cannot start before observation")
+    capture_limits(data["capture"], "parameters.observation.capture")
+    return dict(warmup_s=bounds["from"], measure_s=bounds["until"]-bounds["from"])

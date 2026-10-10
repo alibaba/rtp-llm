@@ -2,8 +2,8 @@ case_schema_version: 2
 case: cache_scale_in
 program: default
 metadata:
-  description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known 125P to 64P
-    control point.
+  description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known
+    125P to 64P control point.
   category: kv
 test:
   kind: workload
@@ -69,8 +69,6 @@ parameters:
     analysis_timeout_s: 300
   observation:
     warmup_timeout_s: 450
-    baseline_s: 60
-    observe_s: 60
     sample_s: 1
     window_s: 10
     step_s: 1
@@ -139,6 +137,24 @@ parameters:
       absolute_min_hit: 0.45
       max_drop: 0.25
       sustain_s: 30
+    capture:
+      max_samples: 1000
+      max_bytes: 67108864
+    windows:
+      baseline:
+        from:
+          event: baseline_ready
+          offset_s: -60
+        until:
+          event: baseline_ready
+          offset_s: 0
+      post:
+        from:
+          event: target_topology_observed
+          offset_s: 0
+        until:
+          event: target_topology_observed
+          offset_s: 60
   checks:
     offered_load:
       metric: cache_gate/offered_qps_deviation
@@ -205,12 +221,6 @@ parameter_schema:
   observation.warmup_timeout_s:
     minimum: 0
     integer: false
-  observation.baseline_s:
-    minimum: 0
-    integer: false
-  observation.observe_s:
-    minimum: 0
-    integer: false
   observation.sample_s:
     minimum: 0
     integer: false
@@ -249,6 +259,20 @@ parameter_schema:
     integer: true
   checks.collapse.expected:
     minimum: 0
+    integer: false
+  observation.capture.max_samples:
+    minimum: 1
+    integer: true
+  observation.capture.max_bytes:
+    minimum: 1
+    integer: true
+  observation.windows.baseline.from.offset_s:
+    integer: false
+  observation.windows.baseline.until.offset_s:
+    integer: false
+  observation.windows.post.from.offset_s:
+    integer: false
+  observation.windows.post.until.offset_s:
     integer: false
 analysis:
   alignment_event: withdraw_start

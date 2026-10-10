@@ -12,7 +12,8 @@ from typing import Optional
 
 from cases.master_ha_failover.analysis import row_ts_ms
 from runtime.java_client import ClientOps
-from runtime.network import http_get_json
+from runtime.network import http_get_json, master_url
+from runtime.observation import ObservationClock, SampleBudget
 from traffic.contracts import source_priority
 
 HA_TRACE_PRIORITY = 50
@@ -48,12 +49,17 @@ def master_state_fields(data):
 class HaMasterStateSampler:
     """Record both Masters' HTTP inflight state during the traffic window."""
 
-    def __init__(self, env, path: Path, interval_s: float = 1.0):
+    def __init__(self, env, path: Path, interval_s: float = 1.0, *,
+                 limits=None, clock=time.monotonic, wall_clock=time.time):
         self.path = path
         self.urls = {
-            name: f"http://{spec.bind_ip}:{spec.http_port}/rtp_llm/inflight_status"
+            name: master_url(spec.bind_ip, spec.http_port, "inflight")
             for name, spec in env.master_specs.items()
         }
+        self.clock, self.wall_clock = clock, wall_clock
+        self.budget = SampleBudget(limits if limits is not None else
+            dict(max_samples=10000, max_bytes=67108864))
+        self.error = None
         self.interval_s = interval_s
         self._stop = threading.Event()
         self._thread = None
@@ -68,22 +74,33 @@ class HaMasterStateSampler:
             self._thread.join(timeout=5)
             if self._thread.is_alive():
                 raise TimeoutError("HA Master state sampler did not stop")
+            if self.error is not None:
+                raise RuntimeError("HA Master state sampling failed: " + self.error)
 
     def _run(self):
-        with self.path.open("w", encoding="utf-8") as stream:
-            while not self._stop.is_set():
-                started = time.monotonic()
-                for name, url in self.urls.items():
-                    data = http_get_json(url, timeout=0.4)
-                    row = {"epoch_s": time.time(), "master": name, "http_up": int(data is not None)}
-                    if data is not None:
-                        try:
-                            row.update(master_state_fields(data))
-                        except ValueError as exc:
-                            row["state_error"] = str(exc)
-                    stream.write(json.dumps(row, allow_nan=False) + "\n")
-                stream.flush()
-                self._stop.wait(max(0, self.interval_s - (time.monotonic() - started)))
+        anchor = ObservationClock(self.wall_clock(), self.clock())
+        try:
+            with self.path.open("w", encoding="utf-8") as stream:
+                while not self._stop.is_set():
+                    started = self.clock()
+                    for name, url in self.urls.items():
+                        if self._stop.is_set():
+                            break
+                        data = http_get_json(url, timeout=min(0.4, self.interval_s))
+                        elapsed = self.clock() - anchor.origin_monotonic_s
+                        row = dict(epoch_s=anchor.origin_epoch_s + elapsed, elapsed_s=elapsed,
+                                   monotonic_s=self.clock(), master=name, http_up=int(data is not None))
+                        if data is not None:
+                            try:
+                                row.update(master_state_fields(data))
+                            except ValueError as exc:
+                                row["state_error"] = str(exc)
+                        stream.write(self.budget.append(row) + "\n")
+                    stream.flush()
+                    self._stop.wait(max(0, self.interval_s - (self.clock() - started)))
+        except Exception as exc:
+            self.error = str(exc)
+            self._stop.set()
 
 
 def write_ha_trace(case_dir: Path) -> Path:
@@ -137,6 +154,7 @@ class HaTrafficRunner:
         source_dir: Path | None = None,
         max_requests: int | None = None,
         loop: bool = False,
+        sampler_limits=None, clock=time.monotonic, wall_clock=time.time,
     ):
         self.manager = manager
         self.env = env
@@ -145,7 +163,8 @@ class HaTrafficRunner:
         self.loop = loop
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
-        self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl")
+        self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl",
+            limits=sampler_limits, clock=clock, wall_clock=wall_clock)
         specs_by_target = {
             manager.master_instance_target(env, master_name): spec
             for master_name, spec in env.master_specs.items()

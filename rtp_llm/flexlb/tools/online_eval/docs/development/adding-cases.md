@@ -45,11 +45,13 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `ProgramInputs`。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
 
-需要具名窗口时，`observation.windows` 保存边界的 `stage`、`field: epoch_s` 和可选 `offset_s`；program 通过 `ObservationWindow` 将它们编译成有类型的输出引用，并选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
+`observation.windows` 是观测边界的权威声明。跨阶段窗口使用 `stage`、`field: epoch_s` 和可选 `offset_s`，经 `ObservationWindow` 编译成有类型的输出引用；单次观测内的窗口使用 `event` 和显式 `offset_s`，测量能力验证允许的锚点及边界方向。时长从边界计算，不再另写同义的时长参数。program 选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
 
 `parameter_schema` 的每条 dotted path 在 program 构建前统一校验，variant 合并后的值也受约束。未声明字段不会推断边界；缺字段、错误类型、非有限或越界值失败。校验本身不把字段标为“业务已使用”，未被 program 读取的输入仍会被拒绝。复杂对象和跨字段关系由 program 或 action 合同校验；schema 不提供缺省值，也不承担环境配置校验。
 
-观测输入统一使用 `source: metric_store` 和 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。角色、单位、覆盖要求和允许的字段由测量能力校验。
+观测输入统一使用 `source: metric_store` 和 `fields: {本地字段: {metric: namespace/name, labels: {...}}}`。绑定方向不因 case 改变；同一物理指标的不同标签投影可以共存，同一 ID 和标签选择重复绑定时报错。`metric_store` 指定读取后端，运行时来源实例另由采集目标决定。query plan 是实际单位、标签与采样模式的权威定义；Python 消费合同声明所需维度，绑定时比对，防止定义被误标。身份标签按必需子集校验，允许 exporter 附加标签；测量能力另行校验角色、基数、允许字段和必需字段。
+
+字段集合校验统一由 `input_contract.mapping_fields` 实现；case 与 action 提供字段集和定位路径。配置入口将输入错误包装为带来源路径的 `ScenarioError`，运行时协议或执行错误保持原始异常类型。四组是公开输入语义，内部分析器可以接收经编译的数值投影；投影不得提供缺省值，也不得成为第二份配置来源。历史证据的数值 criteria 字段保持其重判含义。
 
 数值检查写明 `metric`、`unit`、`window`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `observation`；复杂归因和持续性计算仍由 Python 负责。
 

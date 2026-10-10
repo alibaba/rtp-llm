@@ -95,3 +95,9 @@ def port_accepting(port: int, host: str = "127.0.0.1") -> bool:
 # JVM servers bind all interfaces; a pre-start loopback-only probe misses
 # listeners on other interfaces. Post-start connection probes use loopback.
 PROBE_BIND_HOST = "0.0.0.0"
+
+
+def master_url(host, port, endpoint):
+    """One definition of Master control routes; transport failures remain explicit."""
+    routes = {"info": "master/info", "inflight": "inflight_status"}
+    return f"http://{host}:{port}/rtp_llm/{routes[endpoint]}"

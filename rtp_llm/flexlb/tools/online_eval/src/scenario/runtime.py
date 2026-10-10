@@ -80,12 +80,14 @@ class Deadline:
 
 class RuntimeContext:
     def __init__(
-        self, instance, backend, artifact_dir, clock, sleeper, enforce_deadlines=False
+        self, instance, backend, artifact_dir, clock, sleeper, enforce_deadlines=False,
+        wall_clock=None,
     ):
         self.instance = instance
         self.backend = backend
         self.artifact_dir = Path(artifact_dir)
         self.clock, self.sleeper = clock, sleeper
+        self.wall_clock = wall_clock if wall_clock is not None else lambda: time.time()
         self.env_epoch = 0
         self.env = self.ops = None
         self.outputs = {}
@@ -95,12 +97,19 @@ class RuntimeContext:
         self.cleanup_results = []
         self.enforce_deadlines = enforce_deadlines
 
-    def record_event(self, identity):
+    def record_event(self, identity, *, timestamp=None):
         """Record the actual case event time; presentation names belong to views."""
         import re
         if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", identity):
             raise ValueError("invalid case event identity")
-        event = dict(id=identity, epoch_s=time.time(), monotonic_s=self.clock())
+        if timestamp is None:
+            timestamp = dict(epoch_s=self.wall_clock(), monotonic_s=self.clock())
+        import math
+        if (set(timestamp) != {"epoch_s", "monotonic_s"}
+                or any(type(value) not in (int, float) or not math.isfinite(value)
+                       for value in timestamp.values())):
+            raise ValueError("event requires finite epoch_s and monotonic_s")
+        event = dict(id=identity, **timestamp)
         self.report_events.append(event)
         return dict(event)
 

@@ -11,6 +11,14 @@ from traffic.playback_config import normalize
 
 JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
 
+RUN_LOCAL_ENVIRONMENT = frozenset({"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID",
+    "GRPC_TARGET", "GRPC_TARGETS", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"})
+
+
+def evidence_environment(environment):
+    """Launch producer owns the omission of run-local paths, targets and identities."""
+    return {key: value for key, value in environment.items() if key not in RUN_LOCAL_ENVIRONMENT}
+
 
 class JavaFlowGroup:
     def __init__(

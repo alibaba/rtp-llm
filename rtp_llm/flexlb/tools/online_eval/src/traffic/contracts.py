@@ -18,6 +18,19 @@ def java_client_priority(source, client):
     return dict(client, PRIORITY=priority)
 
 
+def uniform_gate_flow(flow, *, duration_s, trace_duration_s):
+    """Validate the shared Java sender contract; case code declares its coverage budget."""
+    from traffic.playback_config import normalize
+    client, _ = normalize(flow["client"])
+    if client.get("SEND_MODE") != "uniform" or client.get("LOOP") != "false":
+        raise ValueError("gate requires a nonlooping uniform Java workload")
+    qps = float(client["SEND_MODE_QPS"])
+    if (int(client["DURATION_S"]) < duration_s
+            or flow["source"]["parameters"]["count"] < trace_duration_s * qps):
+        raise ValueError("traffic plan must cover worst-case observation duration")
+    return client
+
+
 def driver(spec, expected):
     value = copy.deepcopy(spec)
     if type(value.get("kind")) is not str or value.pop("kind") != expected:

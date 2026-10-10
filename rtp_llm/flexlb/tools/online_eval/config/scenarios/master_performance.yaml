@@ -2,13 +2,14 @@ case_schema_version: 2
 case: master_performance
 program: default
 metadata:
-  description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash frontend capture from 16/20 pods,
-    output mean from real Decode monitoring. Absolute provisional contract, not production capacity.
+  description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash frontend capture from
+    16/20 pods, output mean from real Decode monitoring. Absolute provisional contract, not production
+    capacity.
   category: master
 test:
   kind: workload
-  description: Frozen trace/model absolute regression gate; provisional floors, 100% full-Fetch success, optional
-    batch/single observation
+  description: Frozen trace/model absolute regression gate; provisional floors, 100% full-Fetch success,
+    optional batch/single observation
   collection: request
   monitoring:
     query_plan: master_performance.yaml
@@ -69,8 +70,6 @@ parameters:
     jvm_xmx: 8g
   observation:
     benchmark_id: flash-whale-mock-20260923-capture0920-output294-v3-ramp10
-    warmup_s: 180
-    measure_s: 180
     sample_s: 1
     max_gap_s: 3
     inputs:
@@ -93,6 +92,17 @@ parameters:
       ttft_ms: 2000
       e2e_ms: 30000
       tpot_ms: 50
+    capture:
+      max_samples: 1000
+      max_bytes: 67108864
+    windows:
+      measurement:
+        from:
+          event: observation_start
+          offset_s: 180
+        until:
+          event: observation_start
+          offset_s: 360
   checks:
     offered_load:
       metric: performance_gate/offered_qps_deviation
@@ -221,12 +231,6 @@ parameter_schema:
   traffic.poll_s:
     minimum: 0
     integer: false
-  observation.warmup_s:
-    minimum: 0
-    integer: false
-  observation.measure_s:
-    minimum: 0
-    integer: false
   observation.sample_s:
     minimum: 0
     integer: false
@@ -289,6 +293,16 @@ parameter_schema:
     integer: false
   checks.engine_tps.rtp_llm_generate_tps.expected:
     minimum: 0
+    integer: false
+  observation.capture.max_samples:
+    minimum: 1
+    integer: true
+  observation.capture.max_bytes:
+    minimum: 1
+    integer: true
+  observation.windows.measurement.from.offset_s:
+    integer: false
+  observation.windows.measurement.until.offset_s:
     integer: false
 reports:
 - master_performance.yaml

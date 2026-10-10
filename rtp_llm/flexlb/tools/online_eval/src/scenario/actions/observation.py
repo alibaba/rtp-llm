@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from runtime.debug_client import DebugClient, DebugUnavailable
+from runtime.observation import SampleBudget
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 
 SOURCES = frozenset(
@@ -380,6 +381,7 @@ class Observer:
         self.thread = None
         self.samples = []
         self.bytes = 0
+        self.budget = SampleBudget({key: params[key] for key in ("max_samples", "max_bytes")})
         self.error = None
         self.frozen = None
         self.stopped_at = None
@@ -388,16 +390,14 @@ class Observer:
         self.artifact = None
 
     def append(self, sample):
-        size = len(sample.encoded.encode())
-        if (
-            len(self.samples) >= self.params["max_samples"]
-            or self.bytes + size > self.params["max_bytes"]
-        ):
+        try:
+            self.budget.append_encoded(sample.encoded)
+        except ValueError:
             self.error = "observation sample/byte budget exhausted"
             self.stop_event.set()
             return False
         self.samples.append(sample.encoded)
-        self.bytes += size
+        self.bytes = self.budget.bytes
         return True
 
     def start(self, deadline):

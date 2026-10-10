@@ -10,8 +10,9 @@ from scenario.loader import ScenarioError, load_document
 
 CATALOG = Path(__file__).resolve().parents[2] / "config/monitoring"
 DEFAULT_PLAN = "default.yaml"
+from monitoring.identity import NAME as _NAME, METRIC_ID
+
 SOURCE_KINDS = ("mock", "client", "master")
-_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 _PLAN = re.compile(r"[a-z][a-z0-9_]*\.yaml\Z")
 _TOKENS = re.compile(r"\$\{([^}]+)\}")
 PLAN_VERSION = 3
@@ -110,7 +111,7 @@ def _add_produced(produced, own, path):
 
 
 def _validate_produced(spec, metric, path):
-    if (type(metric) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*", metric)
+    if (type(metric) is not str or not METRIC_ID.fullmatch(metric)
             or not isinstance(spec, dict)
             or set(spec) != {"producer", "source_type", "unit", "value_kind", "labels", "measurement"}
             or spec["source_type"] not in ("prometheus", "debug_api", "client_journal")

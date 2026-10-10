@@ -28,8 +28,12 @@ def _ha_validate(params, plan):
             "source",
             "max_requests",
             "loop",
+            "capture",
         },
     )
+    if "capture" in p:
+        from runtime.observation import capture_limits
+        capture_limits(p["capture"], plan.path + ".capture")
     environment = getattr(plan, "environment", {})
     if environment.get("master_layout", "single") != "dual_standalone":
         raise ValueError("HA traffic requires compiled dual_standalone environment")
@@ -211,6 +215,8 @@ def _ha_start(ctx, params, deadline):
         "traffic",
         targets,
         duration_s=params["duration_s"],
+        sampler_limits=params.get("capture"),
+        clock=ctx.clock, wall_clock=ctx.wall_clock,
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],
         live_events=params["live_events"],
@@ -259,12 +265,17 @@ def _ha_finish(ctx, params, deadline):
 
 
 def _mark_validate(params, plan):
-    return validate_wait(params, path=plan.path)
+    p = validate_fields(params, plan, {"wait_s", "event"}, {"wait_s", "event"})
+    validate_wait({"wait_s": p["wait_s"]}, path=plan.path)
+    from monitoring.identity import NAME
+    if type(p["event"]) is not str or not NAME.fullmatch(p["event"]):
+        raise ValueError("invalid mark event identity")
+    return p
 
 
 def _mark(ctx, params, deadline):
     deadline.sleep(params["wait_s"])
-    return StageOutput({"epoch_s": time.time()})
+    return StageOutput({"epoch_s": ctx.record_event(params["event"])["epoch_s"]})
 
 
 def _window_validate(params, plan):
@@ -321,12 +332,9 @@ def _window(ctx, params, deadline):
     rows = ctx.resource(params["rows"], "ha_rows")
     lower = ctx.resolve(params["from"]) if "from" in params else None
     upper = ctx.resolve(params["until"]) if "until" in params else None
-    if lower is not None:
-        lower += params.get("from_offset_s", 0)
-    if upper is not None:
-        upper += params.get("until_offset_s", 0)
-    if lower is not None and upper is not None and lower >= upper:
-        raise ValueError("HA observation window is empty or inverted")
+    from cases.windows import resolve_window
+    lower, upper = resolve_window(lower, upper,
+        lower_offset_s=params.get("from_offset_s", 0), upper_offset_s=params.get("until_offset_s", 0))
     selected = rows_between(rows, lower, upper)
     for param, field in (
         ("route", "route_path"),

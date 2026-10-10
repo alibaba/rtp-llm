@@ -50,7 +50,7 @@ def test_qps_has_one_yaml_source_and_is_frozen_into_observation(name, stage):
     data["parameters"]["traffic"]["client"]["playback"]["qps"] = qps
     plan = configure_program(data, "case.yaml")
     params = next(s for s in plan["variants"][0]["stages"] if s["id"] == stage)["params"]
-    assert (params["criteria"] if name == "master_performance" else params)["qps"] == qps
+    assert params["criteria"]["qps"] == qps
     data["parameters"]["checks"]["qps"] = qps
     with pytest.raises(ScenarioError, match="unknown configuration fields"):
         configure_program(data, "case.yaml")

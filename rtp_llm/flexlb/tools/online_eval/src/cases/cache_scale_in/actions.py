@@ -1,13 +1,13 @@
 """Continuous Java traffic across a concurrent Prefill scale-in."""
 
-import json
 import math
-import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
+from runtime.observation import ObservationClock, SampleBudget, poll_samples, verdict_status
+from workload.gate_evidence import write_evidence, new_evidence
+from workload.run_provenance import gate_provenance
 from runtime.mock_control import mock_json
 from cases.cache_scale_in.analysis import (
     MEASUREMENT_POLICY,
@@ -19,93 +19,27 @@ from cases.cache_scale_in.analysis import (
     window,
 )
 from cases.cache_scale_in.publication import publish_cache
-from cases.cache_scale_in.inputs import PROCEDURE_FIELDS, OBSERVATION_FIELDS, CHECK_FIELDS
 
-FIELDS = (PROCEDURE_FIELDS - {"removal_mode"}) | OBSERVATION_FIELDS | CHECK_FIELDS | {"flow", "qps"}
-INTERMEDIATE_FIELDS = {"intermediate_p", "intermediate_hold_s"}
-OPTIONAL_FIELDS = INTERMEDIATE_FIELDS | {"removal_mode"}
+from cases.cache_scale_in.inputs import validate_criteria
 
 
 def validate(params, plan):
-    p = validate_fields(
-        params, plan, FIELDS | OPTIONAL_FIELDS | {"gate_input"}, FIELDS | {"gate_input"}
-    )
-    from cases.cache_scale_in.inputs import engine_counters
-    engine_counters(p["gate_input"])
-    if p.get("removal_mode", "graceful") not in ("graceful", "abrupt"):
-        raise ValueError("removal_mode must be graceful or abrupt")
-    plan.reference(p["flow"], "java_flow")
-    if plan.environment.get("discovery") != "discovery_file":
-        raise ValueError("scale-in requires dynamic discovery_file")
-    for k in FIELDS - {"flow"}:
-        if type(p[k]) not in (int, float) or not math.isfinite(p[k]) or p[k] < 0:
-            raise ValueError(k + " must be finite and nonnegative")
-    for k in ("target_p", "min_completed"):
-        if type(p[k]) is not int or p[k] < 1:
-            raise ValueError(k + " must be a positive integer")
-    if not 1 <= p["target_p"] < plan.environment["n_prefill"] <= 512:
-        raise ValueError("scale-in requires fewer target P and at most 512 initial P")
-    if INTERMEDIATE_FIELDS & p.keys():
-        if not INTERMEDIATE_FIELDS <= p.keys():
-            raise ValueError(
-                "intermediate P and hold duration must be specified together"
-            )
-        if (
-            type(p["intermediate_p"]) is not int
-            or not p["target_p"]
-            < p["intermediate_p"]
-            < plan.environment["n_prefill"]
-        ):
-            raise ValueError(
-                "intermediate P must lie strictly between initial and target P"
-            )
-        hold = p["intermediate_hold_s"]
-        if (
-            type(hold) not in (int, float)
-            or not math.isfinite(hold)
-            or hold < p["baseline_s"]
-        ):
-            raise ValueError("intermediate hold must cover a full baseline window")
-    for k in (
-        "qps_tolerance",
-        "baseline_min_hit",
-        "baseline_max_spread",
-        "absolute_min_hit",
-        "max_drop",
-    ):
-        if p[k] > 1:
-            raise ValueError(k + " must be a fraction")
-    if not 0 < p["sample_s"] <= p["step_s"] <= p["window_s"] <= p["baseline_s"] / 2:
-        raise ValueError("sampling/window/baseline durations are inconsistent")
-    if p["max_gap_s"] < p["sample_s"] or p["warmup_timeout_s"] < p["baseline_s"]:
-        raise ValueError("insufficient warmup or sample gap budget")
-    if p["observe_s"] < p["window_s"] + p["sustain_s"] or p["qps"] <= 0:
-        raise ValueError("observation cannot cover sustained collapse")
-    if (type(p["drain_timeout_ms"]) is not int
-            or not 0 <= p["drain_timeout_ms"] <= 30000
-            or (p.get("removal_mode", "graceful") == "graceful" and p["drain_timeout_ms"] == 0)
-            or p["topology_timeout_s"] <= 0):
-        raise ValueError("removal must have bounded drain and topology budgets")
-    from scenario.compiler import environment
-
-    for profile in plan.profiles:
-        resolved = environment(plan.environment, plan.path, profile)["resolved_config"]
-        stale_ms = resolved["workerRegistry"]["health"]["statusStaleAfterMs"]
-        if p["topology_timeout_s"] * 1000 <= stale_ms:
-            raise ValueError(
-                "topology budget must exceed Master status staleness"
-            )
-    return p
+    grouped = validate_fields(params, plan,
+        {"flow", "criteria", "gate_input", "observation"}, {"flow", "criteria", "gate_input", "observation"})
+    from cases.cache_scale_in.inputs import observation_contract
+    durations = observation_contract(grouped["observation"])
+    if any(grouped["criteria"].get(key) != value for key, value in durations.items()):
+        raise ValueError("observation windows disagree with frozen criteria")
+    validate_criteria(dict(grouped["criteria"], flow=grouped["flow"], gate_input=grouped["gate_input"]), plan)
+    return grouped
 
 
 def _master_count(ctx, deadline):
-    req = urllib.request.Request(
-        f"http://127.0.0.1:{ctx.env.master_http_port}/rtp_llm/master/info",
-        data=b"{}",
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=min(3, deadline.remaining())) as response:
-        data = json.load(response)
+    from runtime.network import master_url, http_post_json
+    code, data = http_post_json(master_url("127.0.0.1", ctx.env.master_http_port, "info"),
+                                {}, timeout=min(3, deadline.remaining()))
+    if code != 200 or not isinstance(data, dict):
+        raise ValueError("master topology HTTP unavailable")
     value = data["worker_summary"]["PREFILL"]["alive"]
     if type(value) is not int:
         raise ValueError("master topology missing")
@@ -113,16 +47,20 @@ def _master_count(ctx, deadline):
 
 
 def observe(ctx, p, deadline):
+    observation = p["observation"]
+    p = dict(p["criteria"], flow=p["flow"], gate_input=p["gate_input"])
     flow = ctx.resource(p["flow"], "java_flow")
-    origin = ctx.clock()
-    evidence = dict(
+    clock = ObservationClock.start(ctx)
+    origin = clock.origin_monotonic_s
+    budget = SampleBudget(observation["capture"])
+    evidence = new_evidence("cache_evidence_schema_version", clock,
+        {k: v for k, v in p.items() if k not in ("flow", "gate_input")},
+        instance=ctx.instance["id"],
         measurement_policy=MEASUREMENT_POLICY,
-        observation_origin_epoch_s=time.time(),
-        criteria={k: v for k, v in p.items() if k not in ("flow", "gate_input")},
+        window_declarations=observation["windows"],
+        observation_origin_epoch_s=clock.origin_epoch_s,
         gate_input=p["gate_input"],
-        samples=[],
         events=[],
-        errors=[],
         initial_engines=[],
         survivors=[],
         baseline_start=0,
@@ -131,56 +69,26 @@ def observe(ctx, p, deadline):
         post_end=0,
         max_pacing_lag_ms=None,
     )
-    from traffic.traffic_source import sha256_file
-    from runtime.paths import API_JAR, MOCK_JAR
-    from cases.cache_scale_in import analysis as cache_gate
-
-    evidence["provenance"] = dict(
-        instance=ctx.instance["id"],
-        topology=dict(prefill=ctx.env.spec.n_prefill, decode=ctx.env.spec.n_decode),
-        capacity=dict(prefill_cache_blocks=ctx.env.spec.prefill_cache_blocks,
-                      decode_cache_blocks=ctx.env.spec.decode_cache_blocks),
-        configuration_sha256=ctx.instance.get("implementation", {}).get(
-            "configuration_sha256"
-        ),
-        trace=flow.trace_manifest,
-        files={
-            str(path): sha256_file(path)
-            for path in (API_JAR, MOCK_JAR, __file__, cache_gate.__file__)
-        },
-        performance=json.loads(ctx.env.perf_file.read_text()),
-        master_config=json.loads((ctx.env.run_dir / "master_config.json").read_text()),
-    )
-    evidence["provenance"]["actual_master_config"] = json.loads(
-        (ctx.env.run_dir / "actual-master-config.json").read_text()
-    )
-    evidence["provenance"]["master_artifact"] = json.loads(
-        (ctx.env.run_dir / "master-artifact.json").read_text()
-    )
-    client_env = json.loads((flow.directory / "flow-input.json").read_text())["environment"]
-    evidence["provenance"]["client_environment"] = {
-        key: value for key, value in client_env.items()
-        if key not in {"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID",
-                       "GRPC_TARGET", "OUTPUT_DIR"}
-    }
+    from cases.cache_scale_in import analysis as cache_gate, program
     path = ctx.artifact_dir / "cache-gate-evidence.json"
     futures = []
     intermediate_removals = []
 
-    def event(name):
-        evidence["events"].append(
-            dict(ctx.record_event(name), t=ctx.clock() - origin)
-        )
+    def event(name, row=None):
+        timestamp = None if row is None else {key: row[key] for key in ("epoch_s", "monotonic_s")}
+        recorded = ctx.record_event(name, timestamp=timestamp)
+        evidence["events"].append(dict(recorded, t=recorded["monotonic_s"] - origin))
 
     def sample():
         deadline.check()
-        from cases.cache_scale_in.inputs import engine_snapshot
-        engines = engine_snapshot(ctx.monitor, p["gate_input"]["fields"],
+        from cases.cache_scale_in.inputs import engine_metric_snapshot
+        engines = engine_metric_snapshot(ctx.monitor, p["gate_input"]["fields"],
                                   timeout=min(3, deadline.remaining()))
         state = flow.status()
+        stamp = clock.stamp(ctx)
         row = dict(
-            t=ctx.clock() - origin,
-            epoch_s=time.time(),
+            t=stamp["elapsed_s"],
+            **stamp,
             engines=engines,
             started=state["observed_started"],
             terminal=state["observed_terminal"],
@@ -188,6 +96,7 @@ def observe(ctx, p, deadline):
             waiting=sum(e["waiting"] for e in engines.values()),
             running=sum(e["running"] for e in engines.values()),
         )
+        budget.append(row)
         evidence["samples"].append(row)
         if state["process_returncode"] is not None or state.get("state") != "SENDING":
             raise ValueError("Java traffic stopped before observation completed")
@@ -196,6 +105,7 @@ def observe(ctx, p, deadline):
     pool = None
     futures = []
     try:
+        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=(__file__, cache_gate.__file__, program.__file__)))
         first = sample()
         initial = sorted(first["engines"])
         evidence["initial_engines"] = initial
@@ -203,9 +113,7 @@ def observe(ctx, p, deadline):
         if first["master_p"] != len(initial):
             raise ValueError("initial discovery not converged")
         event("warmup_start")
-        while True:
-            deadline.sleep(p["sample_s"])
-            row = sample()
+        for row in poll_samples(deadline, p["sample_s"], sample):
             t = row["t"]
             if t >= p["baseline_s"]:
                 left = window(
@@ -236,7 +144,7 @@ def observe(ctx, p, deadline):
                     and abs(left["hit"] - right["hit"]) <= p["baseline_max_spread"]
                 ):
                     evidence.update(baseline_start=t - p["baseline_s"], baseline_end=t)
-                    event("baseline_ready")
+                    event("baseline_ready", row)
                     break
             if t >= p["warmup_timeout_s"]:
                 raise ValueError("stable warm baseline not reached")
@@ -263,18 +171,14 @@ def observe(ctx, p, deadline):
                     for name in initial[intermediate:]
                 ]
                 topology_end = ctx.clock() + p["topology_timeout_s"]
-                while True:
-                    deadline.sleep(p["sample_s"])
-                    row = sample()
+                for row in poll_samples(deadline, p["sample_s"], sample):
                     if topology_ready(row, initial[:intermediate], evidence["initial_engines"]):
                         event("intermediate_topology_observed")
                         break
                     if ctx.clock() >= topology_end:
                         raise ValueError("intermediate topology did not converge")
                 hold_end = row["t"] + p["intermediate_hold_s"]
-                while row["t"] < hold_end:
-                    deadline.sleep(min(p["sample_s"], hold_end - row["t"]))
-                    row = sample()
+                for row in poll_samples(deadline, p["sample_s"], sample, until=origin + hold_end):
                     if not topology_ready(row, initial[:intermediate], evidence["initial_engines"]):
                         raise ValueError(
                             "intermediate topology changed during hold"
@@ -310,21 +214,18 @@ def observe(ctx, p, deadline):
             for n in removed
         ]
         topology_end = ctx.clock() + p["topology_timeout_s"]
-        while True:
-            deadline.sleep(p["sample_s"])
-            row = sample()
+        for row in poll_samples(deadline, p["sample_s"], sample):
             if topology_ready(row, evidence["survivors"], evidence["initial_engines"]):
                 evidence["post_start"] = row["t"]
-                event("target_topology_observed")
+                event("target_topology_observed", row)
                 break
             if ctx.clock() >= topology_end:
                 raise ValueError("target topology did not converge")
         end = evidence["post_start"] + p["observe_s"]
-        while row["t"] < end:
-            deadline.sleep(min(p["sample_s"], end - row["t"]))
-            row = sample()
+        for row in poll_samples(deadline, p["sample_s"], sample, until=origin + end):
+            pass
         evidence["post_end"] = row["t"]
-        event("observation_end")
+        event("observation_end", row)
         flow.stop_sending(deadline)
         event("sending_stopped")
         evidence["removals"] = intermediate_removals + [
@@ -344,9 +245,9 @@ def observe(ctx, p, deadline):
             except Exception as exc:
                 evidence.setdefault("removal_errors", []).append(dict(index=index, error=str(exc)))
         evidence["measurement_scope"] = scope_contract(evidence)
-        path.write_text(json.dumps(evidence, indent=2))
+        write_evidence(path, evidence)
     return StageOutput(
-        {"evidence": ctx.register_resource("snapshot", evidence, historical=True)},
+        {"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)},
         artifacts=[str(path)],
     )
 
@@ -354,12 +255,12 @@ def observe(ctx, p, deadline):
 def check_validate(params, plan):
     p = validate_fields(params, plan, {"flow", "evidence"}, {"flow", "evidence"})
     plan.reference(p["flow"], "java_flow")
-    plan.reference(p["evidence"], "snapshot")
+    plan.reference(p["evidence"], "gate_evidence")
     return p
 
 
 def check(ctx, p, deadline):
-    evidence = ctx.resource(p["evidence"], "snapshot")
+    evidence = ctx.resource(p["evidence"], "gate_evidence")
     flow = ctx.resource(p["flow"], "java_flow")
     snapshot = flow.evidence_snapshot()
     # Terminal request failures do not decide whether survivor cache counters
@@ -388,12 +289,15 @@ def check(ctx, p, deadline):
     lags = [r.get("pacing_lag_ms") for r in issued]
     if lags and all(type(v) in (int, float) and math.isfinite(v) for v in lags):
         evidence["max_pacing_lag_ms"] = max(lags)
-    if getattr(ctx, "monitor", None) is not None:
+    try:
         ctx.monitor.archive()
+    except Exception as exc:
+        evidence["errors"].append("monitor archive: " + str(exc))
+    write_evidence(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
     evidence["curve_source"] = "prometheus"
     result = analyze(evidence)
     publish_cache(ctx.artifact_dir, evidence, result)
-    status = {"INVALID": "ERROR", "FAIL": "FAIL", "PASS": "PASS"}[result["verdict"]]
+    status = verdict_status(result["verdict"])
     return StageOutput(
         checks=[
             CheckResult(
@@ -415,7 +319,7 @@ def check(ctx, p, deadline):
 
 
 HANDLERS = [
-    StageHandler("cache_scale_in_observe", validate, observe, {"evidence": "snapshot"}),
+    StageHandler("cache_scale_in_observe", validate, observe, {"evidence": "gate_evidence"}),
     StageHandler(
         "cache_scale_in_check",
         check_validate,

@@ -9,7 +9,7 @@ from analysis.statistics import percentile_nr
 from cases.master_performance.inputs import OBSERVATION_FIELDS, CHECK_FIELDS
 
 
-NUMERIC = (OBSERVATION_FIELDS - {"benchmark_id"}) | CHECK_FIELDS | {"qps"}
+NUMERIC = (OBSERVATION_FIELDS - {"benchmark_id"}) | CHECK_FIELDS | {"qps", "warmup_s", "measure_s"}
 
 
 REQUIRED_PROVENANCE = (

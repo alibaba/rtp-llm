@@ -22,7 +22,8 @@ def validate_client_criterion(params, *, path="client criterion"):
     warnings = p.get("warning_profiles", [])
     if not isinstance(warnings, list) or any(type(profile) is not str or profile not in PROFILES for profile in warnings):
         raise ValueError("warning_profiles must contain registered profiles")
-    p.setdefault("min_samples", 1)
+    if "min_samples" not in p:
+        raise ValueError(path + ": min_samples is required")
     if type(p["min_samples"]) is not int or p["min_samples"] < 1:
         raise ValueError("client check must require actual samples")
     required = {
@@ -61,12 +62,14 @@ def read_cycle(case):
                  "max_concurrency", "max_requests", "fallback"},
         procedure={"setup_timeout_s", "kill_a", "kill_b", "b_ready", "a_ready",
                    "restart_timeout_s", "finish_timeout_s"},
-        observation={"baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait", "windows"},
+        observation={"baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait", "windows", "capture"},
         checks={"baseline_success", "b_success", "b_route", "b_balance", "outage_failures",
                 "outage_no_master", "outage_terminal", "a_success", "a_route", "a_balance",
                 "both_success", "both_balance", "handover_errors", "late_errors",
                 "rolling_errors", "unique_requests"},
     )
+    from runtime.observation import capture_limits
+    capture_limits(data.observation["capture"], "parameters.observation.capture")
     for name in ("baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait"):
         fields(data.observation[name], {"wait_s"}, "parameters.observation." + name)
         validate_wait(data.observation[name], path="parameters.observation." + name)
@@ -90,8 +93,7 @@ def read_cycle(case):
 
 
 def validate_wait(params, *, path):
-    p = copy.deepcopy(fields(params, (), path, optional={"wait_s"}))
-    p.setdefault("wait_s", 0)
+    p = copy.deepcopy(fields(params, {"wait_s"}, path))
     if (type(p["wait_s"]) not in (int, float) or not math.isfinite(p["wait_s"])
             or not 0 <= p["wait_s"] <= 180):
         raise ValueError("wait_s must be finite in [0,180]")

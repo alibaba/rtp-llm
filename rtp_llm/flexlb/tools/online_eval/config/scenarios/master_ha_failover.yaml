@@ -6,7 +6,8 @@ metadata:
   category: master
 test:
   kind: workload
-  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master restart cycle
+  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master
+    restart cycle
   collection: request
   monitoring:
     query_plan: master_ha_failover.yaml
@@ -123,6 +124,9 @@ parameters:
           stage: both_start
           field: epoch_s
       all_requests: {}
+    capture:
+      max_samples: 1000
+      max_bytes: 67108864
   checks:
     baseline_success:
       window: baseline
@@ -405,6 +409,12 @@ parameter_schema:
     minimum: 0
     integer: true
   checks.unique_requests.min_samples:
+    minimum: 1
+    integer: true
+  observation.capture.max_samples:
+    minimum: 1
+    integer: true
+  observation.capture.max_bytes:
     minimum: 1
     integer: true
 variant_axis:

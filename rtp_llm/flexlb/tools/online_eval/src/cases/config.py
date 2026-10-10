@@ -5,7 +5,7 @@ import hashlib
 import importlib
 import json
 import math
-import re
+from monitoring.identity import METRIC_ID, NAME
 from pathlib import Path
 
 from scenario.loader import ScenarioError
@@ -52,7 +52,7 @@ class CaseBuilder:
 
     def metric(self, identity, *, unit=None, labels=(), mode=None):
         """Declare a numeric dependency; compilation binds it to the selected plan."""
-        if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*", identity):
+        if type(identity) is not str or not METRIC_ID.fullmatch(identity):
             raise ScenarioError("invalid metric id: " + str(identity))
         requirement = dict(unit=unit, labels=tuple(labels), mode=mode)
         if identity in self.metric_dependencies and self.metric_dependencies[identity] != requirement:
@@ -165,7 +165,7 @@ def configure_program(config, source):
         if index and axis is not None:
             axis.validate_patch(row, source)
         identity = row.get("id")
-        if not isinstance(identity, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", identity) or identity in seen:
+        if not isinstance(identity, str) or not NAME.fullmatch(identity) or identity in seen:
             raise ScenarioError(f"{source}: missing or duplicate configuration id {identity!r}")
         seen.add(identity)
         document["variants"].append(_build_variant(
@@ -267,7 +267,10 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
         config.get("parameter_schema", {}),
     )
     builder.validate_numbers()
-    build(builder)
+    try:
+        build(builder)
+    except ValueError as exc:
+        raise ScenarioError(f"{source}.parameters: {exc}") from exc
     for field in leaf_paths(builder.parameters):
         if not path_in_scope(field, builder.read_parameters):
             raise ScenarioError(f"{source}: unused YAML parameter {field!r}")

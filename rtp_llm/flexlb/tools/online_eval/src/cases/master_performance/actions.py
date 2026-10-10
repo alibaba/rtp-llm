@@ -1,24 +1,26 @@
 """Fixed-window observation over the existing Java flow and runtime lifecycle."""
 
 import json
-import math
-import time
-from pathlib import Path
 
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from cases.master_performance.analysis import analyze, validate, for_profile
-from workload.gate_evidence import compact_flow, trace_workload_sha, write_evidence
+from workload.gate_evidence import compact_flow, write_evidence, new_evidence
 from cases.master_performance.publication import publish_performance
-from cases.master_performance.inputs import engine_tps, engine_roles
+from cases.master_performance.inputs import engine_roles
 from traffic.traffic_source import sha256_file
+from runtime.observation import ObservationClock, SampleBudget, poll_samples, verdict_status
 
 
 def observe_validate(params, plan):
-    fields = {"flow", "criteria", "gate_input"}
+    fields = {"flow", "criteria", "gate_input", "observation"}
     p = validate_fields(params, plan, fields, fields)
     plan.reference(p["flow"], "java_flow")
     validate(p["criteria"], p["gate_input"])
+    from cases.master_performance.inputs import observation_contract
+    durations = observation_contract(p["observation"])
+    if any(p["criteria"][key] != value for key, value in durations.items()):
+        raise ValueError("observation windows disagree with frozen criteria")
     from flexlb_profile_data import PROFILES
     if set(p["criteria"].get("engine_tps_by_profile", {})) - set(PROFILES):
         raise ValueError("engine_tps_by_profile requires registered profiles")
@@ -27,73 +29,43 @@ def observe_validate(params, plan):
 
 def provenance(ctx, flow, criteria):
     from runtime.paths import MOCK_JAR
-
-    trace = dict(flow.trace_manifest)
-    trace["workload_sha256"] = trace_workload_sha(trace["path"])
-    env = json.loads((flow.directory / "flow-input.json").read_text())["environment"]
-    return dict(
-        benchmark_id=criteria["benchmark_id"],
-        master_artifact=json.loads(
-            (ctx.env.run_dir / "master-artifact.json").read_text()
-        ),
-        actual_master_config=json.loads(
-            (ctx.env.run_dir / "actual-master-config.json").read_text()
-        ),
-        mock_jar_sha256=sha256_file(MOCK_JAR),
-        performance=json.loads(ctx.env.perf_file.read_text()),
-        topology=dict(prefill=ctx.env.spec.n_prefill, decode=ctx.env.spec.n_decode),
-        capacity=dict(
-            prefill_cache_blocks=ctx.env.spec.prefill_cache_blocks,
-            decode_cache_blocks=ctx.env.spec.decode_cache_blocks,
-            mock_extra_args=ctx.env.spec.mock_extra_args,
-        ),
-        trace=trace,
-        client_environment={
-            k: v
-            for k, v in env.items()
-            if k
-            not in {
-                "TRACE_FILE",
-                "FLOW_CONTROL_DIR",
-                "FLOW_RUN_ID",
-                "GRPC_TARGET",
-                "OUTPUT_DIR",
-            }
-        },
-        analyzer_sha256=sha256_file(
-            Path(__file__).parents[2] / "cases/master_performance/analysis.py"
-        ),
-    )
+    from workload.run_provenance import gate_provenance
+    from cases.master_performance import analysis, program
+    value = gate_provenance(ctx, flow, source_files=(__file__, analysis.__file__, program.__file__))
+    value.update(benchmark_id=criteria["benchmark_id"],
+                 mock_jar_sha256=value["files"][str(MOCK_JAR)],
+                 analyzer_sha256=value["files"][str(analysis.__file__)])
+    return value
 
 
 def observe(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     c = for_profile(p["criteria"], ctx.instance["profile"], p["gate_input"])
-    origin = time.time() * 1000
+    clock = ObservationClock.start(ctx)
+    origin = clock.origin_epoch_s * 1000
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000
-    evidence = dict(
-        performance_evidence_schema_version=1,
-        criteria=c,
+    evidence = new_evidence("performance_evidence_schema_version", clock, c,
+        instance=ctx.instance["id"],
         gate_input=p["gate_input"],
-        errors=[],
-        samples=[],
         window=dict(start_epoch_ms=lo, end_epoch_ms=hi),
-        provenance=dict(instance=ctx.instance["id"]),
     )
     try:
         evidence["provenance"].update(provenance(ctx, flow, c))
-        while True:
-            deadline.check()
+        budget = SampleBudget(p["observation"]["capture"])
+        evidence["window_declarations"] = p["observation"]["windows"]
+        def sample():
             state = flow.control_status()
-            epoch = time.time() * 1000
-            evidence["samples"].append(
-                dict(
-                    epoch_ms=epoch,
-                    state=state.get("state"),
-                    process_returncode=state.get("process_returncode"),
-                )
-            )
+            row = dict(clock.stamp(ctx), state=state.get("state"),
+                       process_returncode=state.get("process_returncode"))
+            row["epoch_ms"] = row["epoch_s"] * 1000
+            budget.append(row)
+            evidence["samples"].append(row)
+            return row
+        end = clock.origin_monotonic_s + c["warmup_s"] + c["measure_s"]
+        for row in poll_samples(deadline, c["sample_s"], sample, until=end, immediate=True):
+            state = row
+            epoch = row["epoch_ms"]
             if (
                 state.get("state") != "SENDING"
                 or state.get("process_returncode") is not None
@@ -101,13 +73,13 @@ def observe(ctx, p, deadline):
                 raise ValueError("traffic ended before measurement completed")
             if epoch >= hi:
                 break
-            deadline.sleep(max(0, min(c["sample_s"], (hi - time.time() * 1000) / 1000)))
+        ctx.record_event("observation_end")
     except Exception as exc:
         evidence["errors"].append(str(exc))
     path = ctx.artifact_dir / "performance-gate-evidence.json"
-    path.write_text(json.dumps(evidence, indent=2))
+    write_evidence(path, evidence)
     return StageOutput(
-        {"evidence": ctx.register_resource("snapshot", evidence, historical=True)},
+        {"evidence": ctx.register_resource("gate_evidence", evidence, historical=True)},
         artifacts=[str(path)],
     )
 
@@ -115,18 +87,13 @@ def observe(ctx, p, deadline):
 def finish_validate(params, plan):
     p = validate_fields(params, plan, {"flow", "evidence"}, {"flow", "evidence"})
     plan.reference(p["flow"], "java_flow")
-    plan.reference(p["evidence"], "snapshot")
+    plan.reference(p["evidence"], "gate_evidence")
     return p
 
 
 def finish(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
-    e = ctx.resource(p["evidence"], "snapshot")
-    try:
-        flow.stop_sending(deadline)
-        flow.drain(deadline)
-    except Exception as exc:
-        e["errors"].append("drain: " + str(exc))
+    e = ctx.resource(p["evidence"], "gate_evidence")
     e["flow"] = compact_flow(flow.evidence_snapshot())
     journal = flow.directory / "client_lifecycle.jsonl"
     e["flow"]["journal"] = dict(path=str(journal), sha256=sha256_file(journal))
@@ -154,7 +121,7 @@ def finish(ctx, p, deadline):
         checks=[
             CheckResult(
                 "absolute_performance",
-                "ERROR" if result["verdict"] == "INVALID" else result["verdict"],
+                verdict_status(result["verdict"]),
                 actual=result,
                 expected="single run satisfies all absolute criteria",
             )
@@ -169,7 +136,7 @@ def finish(ctx, p, deadline):
 
 HANDLERS = [
     StageHandler(
-        "performance_observe", observe_validate, observe, {"evidence": "snapshot"}
+        "performance_observe", observe_validate, observe, {"evidence": "gate_evidence"}
     ),
     StageHandler(
         "performance_finish",

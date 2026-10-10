@@ -77,7 +77,7 @@ class ContractTest(unittest.TestCase):
                 'sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count{job="master"}[10000ms]))')
 
     def test_gate_snapshot_uses_declared_tsdb_metrics(self):
-        from cases.cache_scale_in.inputs import engine_snapshot
+        from cases.cache_scale_in.inputs import engine_metric_snapshot
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
                                     query_plan="cache_scale_in.yaml")
@@ -89,23 +89,23 @@ class ContractTest(unittest.TestCase):
             dict(metric=dict(labels, __name__="mock_engine_running"), value=[1, "130"]),
         ])
         fields = {name: dict(metric="mock/"+name, labels=dict(role="prefill")) for name in ("running", "waiting")}
-        row = engine_snapshot(monitor, fields)["P0"]
+        row = engine_metric_snapshot(monitor, fields)["P0"]
         self.assertEqual((row["running"], row["waiting"]), (2, 128))
         monitor.instant.assert_called_once_with("mock", 5)
         del monitor.instant.return_value[0]["metric"]["engine_incarnation"]
         with self.assertRaisesRegex(ValueError, "labels"):
-            engine_snapshot(monitor, fields)
+            engine_metric_snapshot(monitor, fields)
 
     def test_gate_rejects_undeclared_id_and_missing_samples(self):
-        from cases.cache_scale_in.inputs import engine_snapshot
+        from cases.cache_scale_in.inputs import engine_metric_snapshot
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
                                     query_plan="cache_scale_in.yaml")
         monitor.instant = Mock(return_value=[])
         with self.assertRaisesRegex(ValueError, "undeclared"):
-            engine_snapshot(monitor, {"running": dict(metric="mock/unknown", labels=dict(role="prefill"))})
+            engine_metric_snapshot(monitor, {"running": dict(metric="mock/unknown", labels=dict(role="prefill"))})
         with self.assertRaisesRegex(ValueError, "incomplete"):
-            engine_snapshot(monitor, {"running": dict(metric="mock/running", labels=dict(role="prefill"))})
+            engine_metric_snapshot(monitor, {"running": dict(metric="mock/running", labels=dict(role="prefill"))})
 
     def test_snapshot_files_never_supply_curves(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,9 +1,6 @@
 """Local field names bind explicit metric IDs and label projections."""
 
-import re
-
-METRIC_ID = re.compile(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*\Z")
-FIELD = re.compile(r"[a-z][a-z0-9_]*\Z")
+from monitoring.identity import METRIC_ID, NAME as FIELD
 
 
 def metric_fields(spec):
@@ -25,3 +22,19 @@ def metric_fields(spec):
             raise ValueError("duplicate metric field projection: " + name)
         identities.add(identity)
     return spec["fields"]
+
+
+ENGINE_IDENTITY_LABELS = ("role", "engine_name", "engine_incarnation")
+
+
+def bind_engine_metrics(case, spec, units):
+    """Assert consumer dimensions against the selected plan's authoritative metadata.
+
+    Extra identity labels are valid; a consumer states the minimum it needs.
+    The mock target is the registered TSDB target, not the metric-store backend.
+    """
+    bindings = metric_fields(spec)
+    for field, binding in bindings.items():
+        if field not in units or not binding["metric"].startswith("mock/"):
+            raise ValueError("unknown raw engine metric binding: " + field)
+        case.metric(binding["metric"], unit=units[field], labels=ENGINE_IDENTITY_LABELS, mode="scrape")

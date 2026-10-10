@@ -85,8 +85,8 @@ def test_numeric_schema_does_not_hide_unused_program_fields():
     with pytest.raises(ScenarioError, match='unknown configuration fields'):
         configure_program(data, 'case.yaml')
     data = config('master_performance')
-    data['parameters']['observation']['measure_s'] = -1
-    with pytest.raises(ScenarioError, match='observation.measure_s'):
+    data['parameters']['observation']['windows']['measurement']['until']['offset_s'] = -1
+    with pytest.raises(ScenarioError, match='observation.windows.measurement'):
         configure_program(data, 'case.yaml')
 
 

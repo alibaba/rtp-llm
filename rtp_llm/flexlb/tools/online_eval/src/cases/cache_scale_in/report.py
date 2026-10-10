@@ -1,5 +1,7 @@
 """Present frozen cache-gate results and published metrics; never adjudicate."""
 
+from runtime.observation import evidence_origin
+
 import hashlib
 import json
 from pathlib import Path
@@ -16,7 +18,7 @@ def prepare_report(directory, evidence):
     from statistics import median
 
     rows = evidence["samples"]
-    anchor = rows[0]["epoch_s"] - rows[0]["t"] if rows else 0
+    anchor = evidence_origin(evidence)
     series, sources, gaps, errors = archived_series(directory, anchor)
     archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
     presentation = view("cache_scale_in_overview.yaml")
@@ -139,7 +141,7 @@ def build_spec(directory, evidence, result, prepared):
                        **{field: survivor_style[field]
                           for field in ("name", "group", "axis", "unit", "color", "hidden")},
                        description="冻结门禁窗口：仅 survivors 的 hit/context counter delta，x 为窗口结束时刻",
-                       points=[dict(x=t-(rows[0]["epoch_s"]-rows[0]["t"] if rows else 0), y=value)
+                       points=[dict(x=t-evidence_origin(evidence), y=value)
                                for observation in MetricStore.read(directory).document["metrics"].get("derived/survivor_hit_ratio", [])
                                for t, value in observation["points"]]))
     audit = prepared["audit"]
@@ -171,7 +173,7 @@ def build_spec(directory, evidence, result, prepared):
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
     from reporting.events import attach_events
-    origin = rows[0]["epoch_s"] - rows[0]["t"] if rows else evidence["observation_origin_epoch_s"]
+    origin = evidence_origin(evidence)
     return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
 
 

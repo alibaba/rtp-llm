@@ -125,6 +125,8 @@ class PerformanceGateTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ctx = SimpleNamespace(
                 artifact_dir=Path(d), instance=dict(id=identity, profile="single-nonbatch"),
+                clock=lambda: 1, wall_clock=lambda: 100,
+                record_event=lambda identity: dict(id=identity, epoch_s=100, monotonic_s=1),
                 resource=lambda name, kind: mock.Mock(),
                 register_resource=lambda kind, value, **kwargs: value,
             )

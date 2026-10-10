@@ -34,18 +34,13 @@ class ProgramInputs:
             if name not in groups:
                 continue
             data = case.value(name)
-            mapping(data, required[name] | set(optional.get(name, ())), f"parameters.{name}")
-            missing = required[name] - set(data)
-            if missing:
-                raise ScenarioError(f"missing YAML parameter {name}.{sorted(missing)[0]}")
+            fields(data, required[name], f"parameters.{name}", optional=optional.get(name, ()))
             values[name] = data
         return cls(**values)
 
 
 def fields(data, required, path, *, optional=()):
     """Validate case-owned nested mappings with the same strict field semantics."""
-    mapping(data, set(required) | set(optional), path)
-    missing = set(required) - set(data)
-    if missing:
-        raise ScenarioError(f"missing YAML parameter {path}.{sorted(missing)[0]}")
-    return data
+    from input_contract import mapping_fields
+    return mapping_fields(data, set(required) | set(optional), path,
+                          required=required, error=ScenarioError)
