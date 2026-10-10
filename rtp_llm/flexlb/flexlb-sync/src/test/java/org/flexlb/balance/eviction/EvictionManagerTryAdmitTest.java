@@ -79,9 +79,11 @@ class EvictionManagerTryAdmitTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1000,RPC", "2750,RPC", "1000,RETURN"})
-    void enginePreemptionUsesFrozenAdmissionAndConfiguredCompletionTimeout(
-            long completionTimeoutMs, EngineCancellationConfig.Mode cancellationMode) {
+    @CsvSource({"1000,RPC,ACCEPTED_NOT_RUNNING", "1000,RPC,RUNNING",
+            "2750,RPC,ACCEPTED_NOT_RUNNING", "1000,RETURN,ACCEPTED_NOT_RUNNING"})
+    void enginePreemptionUsesFrozenAdmission(long completionTimeoutMs,
+                                             EngineCancellationConfig.Mode cancellationMode,
+                                             DecodeTaskPhase victimPhase) {
         var config = SchedulingTestConfig.newConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         PreemptionConfig preemption = new PreemptionConfig();
@@ -97,7 +99,7 @@ class EvictionManagerTryAdmitTest {
         var routing = mock(DecodeEndpoint.DecodeRoutingView.class);
         var view = mock(DecodeEndpoint.LayeredAdmissionView.class);
         var victim = new DecodeEndpoint.DecodeRequestView("901", 30, 128L, 128L,
-                DecodeTaskPhase.ACCEPTED_NOT_RUNNING, true, 11L, false, false);
+                victimPhase, true, 11L, false, false);
         when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
         when(endpoint.resourceSnapshot()).thenReturn(view);
         when(view.routing()).thenReturn(routing);

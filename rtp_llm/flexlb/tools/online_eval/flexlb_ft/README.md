@@ -234,7 +234,7 @@ master 自身进程级故障与冷启动行为，以及双实例 HA 链路（冻
 | --- | --- | --- |
 | `admission_queue_depth_reject` | 引擎队列深度超限（仅 BATCH 投递） | 快速拒绝（DISPATCH_FAILED）；注入清除后恢复 |
 | `admission_slo_queue_deadline` | KV 压力门触发 WAIT 后排队超时 | ~1.5s 内带类型的 deadline 错误；恢复 |
-| `admission_global_queue_ttl` | SINGLE 组批、1 个 batch credit、Prefill 模拟 3s，6 请求突发，queueTimeout=1.5s | 1 个执行、5 个以 8511 排队到期；不得出现 8502/QUEUE_FULL；排空后恢复 |
+| `admission_global_queue_ttl` | SINGLE 组批、1 个 batch credit、Prefill 模拟 3s，6 请求突发，queueTimeout=1.5s | 1 个执行、5 个以 8511 排队到期；不得出现 503/QUEUE_FULL；排空后恢复 |
 | `engine_prefill_concurrency_gate_park` | 单 prefill 并发门=1 下连发 4 请求，后续批整批驻留引擎等待队列 | 门为 WAIT 语义：零拒绝、等待可见；FIFO 全部完成；排空后账目干净并恢复 |
 | `engine_decode_hard_gate_unbounded_park` | decode 硬并发门=128、master 路由上限放开，150 请求溢出 | 无界 park 不拒绝：Schedule 全部成功、等待可见；≥95% 完成后排空、账目干净并恢复 |
 | `admission_priority_concurrent_decode` | Decode 准入容量被低优先级请求占用，无抢占块 | 验证 Decode 资源不足的既有拒绝契约；占用者完成后恢复 |

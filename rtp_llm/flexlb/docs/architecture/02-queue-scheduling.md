@@ -39,8 +39,16 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 1. `request_id` 是请求代际标识；活跃或已终态的重复 ID 会被拒绝。
 2. `scheduler.maxQueuedRequests`（默认 100000）限制 Generation 全局队列中的请求数，
    包括等待放置、正在规划和等待资源的请求。`GlobalQueueCoordinator.offer` 在队列锁下检查
-   当前深度；达到上限时返回 `QUEUE_FULL`（8502），不加入队列。成功路由或请求结束后释放
-   队列位置；配置快照更新后，下一次入队按新上限判断。Encoder 使用独立队列。
+   当前深度。PRIORITY 模式下，低于 `scheduler.ordering.highPriorityThreshold`（默认 50）的
+   新请求直接返回 `QUEUE_PRIORITY_THROTTLED`（429），错误信息为“低优先级限流”。
+   达到阈值的新请求从队列中选择优先级严格低于自己的可抢占请求，先选择优先级最低的
+   一档；如果这一档有多个请求，就抢占最晚入队的一个，保留更早入队的请求。
+   被抢占的请求也返回 429。没有可抢占请求时，新请求返回 `QUEUE_FULL`（503），
+   错误信息为“队列满”；FIFO 模式满队列时也返回该错误。调度器已选中、正在选 worker
+   或处理选路结果的请求仍占队列名额，处理结束前不参与队列抢占；因资源不足继续排队的
+   请求可以参与。成功路由或请求结束后释放队列位置；容量与阈值配置快照更新后对后续
+   入队生效。
+   Encoder 使用独立队列。
 3. 调度器在可能向引擎或调用方发布前装配唯一的绝对过期事件。
 4. PRIORITY ordering 进入优先级 plan/commit；FIFO ordering 先调用
    `DefaultRouter`，提交 endpoint 预留后才把请求放入目标 Prefill 的
@@ -77,6 +85,9 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 `engineCancellation.mode` 选择 `RPC`（默认）或 `RETURN`。RPC 由
 `DecodePreemptionCoordinator` 发起 Cancel 并等待权威终态；RETURN 只原子占有精确的
 victim 代际和新请求预留，随后通过 `QueueRouteAdmission` 发布普通路由结果。
+已进入 Decode 运行阶段的较低优先级请求在 `DECODE_ENGINE_OWNED` 允许且目标引擎支持取消时，
+可被已进入全局队列的更高优先级请求通过该流程抢占。运行中的 Decode 请求不占用全局队列
+位置；取消它本身不会释放 `scheduler.maxQueuedRequests` 的队列位置。
 
 RETURN 要求 NON_BATCH。客户端将指令透传给目标 Decode，由 Decode 完成所有老请求取消及资源释放后执行新请求。
 Master 不发起此次抢占的 Cancel RPC，也不等待取消完成才返回。

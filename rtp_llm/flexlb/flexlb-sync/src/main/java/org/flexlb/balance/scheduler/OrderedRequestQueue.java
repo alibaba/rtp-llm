@@ -7,6 +7,7 @@ import java.util.BitSet;
 import java.util.Comparator;
 import java.util.List;
 import java.util.NavigableSet;
+import java.util.Set;
 import java.util.TreeSet;
 import java.util.function.Predicate;
 
@@ -65,6 +66,26 @@ final class OrderedRequestQueue {
 
     int size() {
         return size;
+    }
+
+    /**
+     * Find a lower-priority request to preempt without removing it.
+     * Check lower priority levels first; within a level, choose the newest request
+     * that is not being planned or already completed. Caller holds the queue lock.
+     */
+    GlobalQueueEntry findQueuedRequestToPreempt(int incomingPriority, Set<GlobalQueueEntry> requestsBeingPlanned) {
+        for (int priority = PriorityNormalizer.MIN_PRIORITY; priority < incomingPriority; priority++) {
+            Bucket bucket = priorityBuckets[priority];
+            if (bucket == null) {
+                continue;
+            }
+            for (GlobalQueueEntry entry = bucket.tail; entry != null; entry = entry.previous) {
+                if (!requestsBeingPlanned.contains(entry) && !entry.future.isDone()) {
+                    return entry;
+                }
+            }
+        }
+        return null;
     }
 
     /** Rare route withdrawal: restore the original position without issuing a new sequence. */

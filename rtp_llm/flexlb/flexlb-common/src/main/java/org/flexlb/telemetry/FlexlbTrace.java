@@ -99,6 +99,7 @@ public final class FlexlbTrace {
             return "FLEXLB_INTERNAL_ERROR";
         }
         if (code == StrategyErrorType.QUEUE_FULL.getErrorCode()
+                || code == StrategyErrorType.QUEUE_PRIORITY_THROTTLED.getErrorCode()
                 || code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
                 || code == StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode()
                 || code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()

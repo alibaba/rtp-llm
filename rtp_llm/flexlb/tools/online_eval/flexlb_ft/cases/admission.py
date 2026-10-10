@@ -327,7 +327,7 @@ def _request_capacity_wave(ctx: CaseContext, *, label: str, dispatcher: str,
         sampler.stop()
         served = [item for item in outcomes if item[0]]
         rejected = [item for item in outcomes if not item[0]]
-        no_count_rejection = all(code != 8502 and "queue_full" not in error.lower()
+        no_count_rejection = all(code != 503 and "队列满" not in error
                                  for _, code, error, _ in outcomes)
         if queue_timeout_ms < 3000:
             expected = len(served) == 1 and len(rejected) == 5 and all(
