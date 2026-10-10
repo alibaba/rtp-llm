@@ -108,6 +108,8 @@ CREATED = CLOSED | {"created"}
 COMPONENTS = (
     Component("flashinfer", "FLASHINFER_WORKSPACE_BASE", (rule(CREATED, ".cu", ".inc", ".h"), rule(CLOSED, *NINJA)), ("torch", "@flashinfer-python"), CUDA),
     Component("deep_gemm", "DG_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin", "meta.json", ".committed"),), ("accelerator", "@deep_gemm"), CUDA, empty_files=(".committed",)),
+    # rtp_kernel.cuda_xqa DeepJIT: same on-disk layout as DeepGEMM.
+    Component("rtp_kernel", "RTP_KERNEL_JIT_CACHE_DIR", (rule(CREATED, "kernel.cu", "kernel.cubin", "meta.json", ".committed"),), ("torch", "@rtp_kernel"), CUDA, empty_files=(".committed",)),
     Component("trtllm_deep_gemm", "TRTLLM_DG_CACHE_DIR", (rule(CREATED, "nvcc_kernel.cubin"),), ("accelerator", "@flashinfer-python"), CUDA),
     Component("tilelang", "TILELANG_CACHE_DIR", (rule(CLOSED, ".so", ".pkl", ".cu", ".json", ".cubin", ".py"),), ("torch", "@tilelang"), CUDA),
     # rtp_kernel is the only producer here whose outputs are not self-keyed (TIPC content-hashes its subdir).

@@ -6,13 +6,14 @@ from librtp_compute_ops.rtp_llm_ops import *
 from rtp_llm.device.device_type import is_cuda
 
 if is_cuda():
-    logging.info("Use rtp_kernel FusedRopeKVCacheOp on CUDA device.")
+    logging.info("Use rtp_kernel FusedRopeKVCacheOp and XQAAttnOp on CUDA device.")
 
     from .fused_rope_kvcache_op import (
         FusedRopeKVCacheDecodeOp,
         FusedRopeKVCachePrefillOpQKVOut,
         FusedRopeKVCachePrefillOpQOut,
     )
+    from .cuda_xqa_op import XQAAttnOp, XQAParams
 else:
     logging.info(
         "Fallback to default implementation of FusedRopeKVCacheOp on non-CUDA device."

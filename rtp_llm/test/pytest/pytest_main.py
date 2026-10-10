@@ -41,6 +41,13 @@ def main():
             os.environ.get("DG_JIT_CACHE_DIR") or os.path.join(cache_root, "deep_gemm")
         ),
     )
+    configure_cache_env(
+        "RTP_KERNEL_JIT_CACHE_DIR",
+        os.path.abspath(
+            os.environ.get("RTP_KERNEL_JIT_CACHE_DIR")
+            or os.path.join(cache_root, "rtp_kernel")
+        ),
+    )
 
     if options.cuda_devices:
         import torch

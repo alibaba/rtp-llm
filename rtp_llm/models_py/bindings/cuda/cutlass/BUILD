@@ -9,11 +9,7 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
 
 cc_library(
     name = "fp4_gemm_cu",
-    srcs = glob([
-        "cutlass_kernels/fp4_gemm/*.cu",
-    ]),
     hdrs = glob([
-        "cutlass_kernels/fp4_gemm/*.h",
         "cutlass_kernels/fp4_gemm/*.cuh",
     ]),
     deps = [
