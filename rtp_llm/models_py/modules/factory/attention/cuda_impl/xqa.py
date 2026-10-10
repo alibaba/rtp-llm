@@ -71,7 +71,7 @@ class XQAImpl(FMHAImplBase):
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
-        # C++ XQAParams keeps the host pinned sequence-length mirror captured
+        # XQAParams keeps the host pinned sequence-length mirror captured
         # here. CudaGraphRunner refreshes this exact storage before each replay.
         self._fmha_sequence_lengths_ptr = attn_inputs.sequence_lengths.data_ptr()
 
@@ -79,11 +79,8 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
-        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
-        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
-        # passes sm_120 erroneously — short-circuit here so dispatch falls
-        # through to PyFlashinferPaged. See blockers.md R-4.
+        # rtp_kernel.cuda_xqa JIT is sm_90a only. Keep the sm12x short-circuit
+        # so dispatch falls through to PyFlashinferPaged on consumer Blackwell.
         if is_sm12x():
             return False
         fmha_impl = XQAAttnOp(attn_configs)
@@ -113,7 +110,7 @@ class XQAImpl(FMHAImplBase):
             )
 
         update_params = getattr(self.fmha_impl, "update", None)
-        # The C++ fast-path update consumes device-resident inputs published by
+        # The fast-path update consumes device-resident inputs published by
         # the RTP_LLM_DEVICE_INPUT pipeline; fall back to the host update when
         # the gatherer kept metadata host-resident (default).
         block_id_device = attn_inputs.kv_cache_kernel_block_id_device

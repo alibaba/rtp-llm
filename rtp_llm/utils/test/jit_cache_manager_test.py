@@ -634,7 +634,9 @@ class ScopeTest(JitCacheTestBase):
             scope = jit.resolve_scope(self.root)
         names = {item.name for item in scope.components}
         self.assertLessEqual({"aiter", "flydsl", "triton"}, names)
-        self.assertFalse(names & {"flashinfer", "deep_gemm", "tvm_ffi", "cute_dsl"})
+        self.assertFalse(
+            names & {"flashinfer", "deep_gemm", "tvm_ffi", "cute_dsl", "rtp_kernel"}
+        )
 
     def test_setup_env_redirects_and_respects_presets(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")

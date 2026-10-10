@@ -235,16 +235,8 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         ":bf16_gemm_op",
         ":cuda_bindings_base",
-        ":cuda_attn_bindings_base"
-    ] + select({
-        "@//:using_cuda12_9": [
-            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
-        ],
-        "@//:using_cuda13_x86": [
-            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
-        ],
-        "//conditions:default": [],
-    }),
+        ":cuda_attn_bindings_base",
+    ],
     visibility = ["//visibility:public"],
     alwayslink = 1,
 )

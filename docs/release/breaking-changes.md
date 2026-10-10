@@ -20,8 +20,8 @@ it governs remote access only, so local redirection stays on when it is empty.
 **Impact and migration:** Component cache variables you do not set explicitly are
 redirected: `FLASHINFER_WORKSPACE_BASE`, `DG_JIT_CACHE_DIR`,
 `TRTLLM_DG_CACHE_DIR`, `TILELANG_CACHE_DIR`, `TORCH_EXTENSIONS_DIR`,
-`AITER_JIT_DIR`, `FLYDSL_RUNTIME_CACHE_DIR`, `TVM_FFI_CACHE_DIR`,
-`CUTE_DSL_CACHE_DIR`, and `TRITON_CACHE_DIR` — preset one to keep its existing
+`RTP_KERNEL_JIT_CACHE_DIR`, `AITER_JIT_DIR`, `FLYDSL_RUNTIME_CACHE_DIR`,
+`TVM_FFI_CACHE_DIR`, `CUTE_DSL_CACHE_DIR`, and `TRITON_CACHE_DIR` — preset one to keep its existing
 path. Retain old caches until the new layout is verified, and copy artifacts only
 between identical `scope_id`s. `DG_JIT_REMOTE_CACHE_DIR` and `deep_gemm_python/`
 are not migrated.

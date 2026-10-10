@@ -11,7 +11,7 @@ from base_attention_test import BaseAttentionTest, compare_tensors
 from rtp_llm.models_py.modules.factory.attention import attn_factory
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.xqa import XQAImpl
 from rtp_llm.ops import RopeStyle
-from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp, XQAParams
+from rtp_llm.ops.compute_ops import PyAttentionInputs, XQAAttnOp
 from rtp_llm.ops.fused_rope_kvcache_op import (
     DecodeRopeContractError,
     FusedRopeAttnParams,
@@ -74,25 +74,21 @@ class TestXQAAttnOp(BaseAttentionTest):
             # a green run. Only a genuinely unsuitable device is a skip.
             major, minor = torch.cuda.get_device_capability()
             sm = major * 10 + minor
-            self.assertLess(
+            self.assertNotEqual(
                 sm,
                 90,
-                f"XQAAttnOp.support() returned False on sm{sm}, but XQA is "
-                f"compiled for sm_90a and XQAAttnOp::support only requires "
-                f"get_sm() >= 90 -- on this device it should be supported. "
+                f"XQAAttnOp.support() returned False on sm{sm}, but CUDA XQA "
+                f"JIT is sm_90a-only and this device should be supported. "
                 f"Treating this as a failure rather than a skip, because this "
                 f"target is dedicated to XQA correctness.",
             )
             self.skipTest(
-                f"XQA is compiled for sm_90a only and XQAAttnOp::support requires "
-                f"get_sm() >= 90; this device is sm{sm}. Skipping instead of "
-                f"returning so the missing coverage cannot masquerade as a pass."
+                f"CUDA XQA JIT is sm_90a only; this device is sm{sm}. Skipping "
+                f"instead of returning so the missing coverage cannot masquerade "
+                f"as a pass."
             )
 
-        # Prepare parameters
-        params_base = attn_op.prepare(attn_inputs)
-        # Cast to XQAParams for forward call
-        params = XQAParams() if not isinstance(params_base, XQAParams) else params_base
+        params = attn_op.prepare(attn_inputs)
 
         # Create query input [batch_size, head_num, head_dim]
         local_head_num = config.head_num // config.tp_size
@@ -149,7 +145,7 @@ class TestXQAAttnOp(BaseAttentionTest):
     def test_support(self):
         """Test XQAAttnOp support function comprehensively
 
-        Based on CudaXqa.cc supportXqa function:
+        Based on rtp_kernel.cuda_xqa.support_xqa:
         - input_type: BF16 or FP16
         - output_type: BF16, FP16, or FP8_E4M3
         - kv_cache_type: BF16, FP16, or FP8_E4M3

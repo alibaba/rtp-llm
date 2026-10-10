@@ -44,11 +44,13 @@ class XQAAttnOp:
     def __init__(
         self, attn_configs: typing.Any
     ) -> None: ...
+    def support(
+        self, attn_inputs: libth_transformer.PyAttentionInputs
+    ) -> bool: ...
     def forward(
         self,
         input: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
+        kv_cache: typing.Any | None,
         params: XQAParams,
     ) -> torch.Tensor: ...
     def prepare(
@@ -62,13 +64,12 @@ class XQAAttnOp:
     ) -> None: ...
 
 class XQAParams:
-    def __init__(self) -> None: ...
-    def fill_decode_cuda_graph_params(
-        self,
-        sequence_lengths_plus_1_d: torch.Tensor,
-        kv_cache_block_id_device: torch.Tensor,
-        seq_size_per_block: int,
-    ) -> None: ...
+    kv_cache_offset: torch.Tensor
+    sequence_lengths: torch.Tensor
+    batch_size: int
+    max_seq_len: int
+    max_blocks_per_seq: int
+    is_kv_cache_fp8: bool
 
 def embedding(
     output: torch.Tensor,
