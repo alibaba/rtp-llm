@@ -2,6 +2,7 @@
 #include <bitset>
 #include <algorithm>
 #include <typeinfo>
+#include <limits>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -485,6 +486,13 @@ bool FullOtherGroupPolicy::init() {
 bool FullOtherGroupPolicy::getNeedWriteGroups(const StorageRequest&     request,
                                               size_t                    valid_keys_size,
                                               std::vector<std::string>& location_spec_group_names) const {
+    if (std::any_of(other_group_tags_.begin(), other_group_tags_.end(), [&](const auto& tag) {
+            return topology_.group(tag).policy.group_type == CacheGroupType::SWA;
+        })) {
+        // A sliding window needs each available tail block, rather than one
+        // LINEAR checkpoint. Preserve the actual per-key group mask.
+        return DefaultLayerGroupPolicy::getNeedWriteGroups(request, valid_keys_size, location_spec_group_names);
+    }
     RTP_LLM_CHECK(request.keys != nullptr);
     RTP_LLM_CHECK_WITH_INFO(valid_keys_size <= request.keys->size() && request.handles.size() == request.keys->size(),
                             "invalid hybrid storage write shape: valid=%zu keys=%zu handles=%zu",
@@ -555,7 +563,42 @@ void FullOtherGroupPolicy::rebuildDerivedSpecInfo() {
 std::vector<uint64_t> FullOtherGroupPolicy::reachableAggregateMasks() const {
     RTP_LLM_CHECK_WITH_INFO(valid_full_bithash_ != 0 && valid_full_other_bithash_ != 0,
                             "FullOtherGroupPolicy must be initialized before reading masks");
-    return {valid_full_bithash_, valid_full_other_bithash_};
+    const bool has_swa = std::any_of(other_group_tags_.begin(), other_group_tags_.end(), [&](const auto& tag) {
+        return topology_.group(tag).policy.group_type == CacheGroupType::SWA;
+    });
+    if (!has_swa) {
+        return {valid_full_bithash_, valid_full_other_bithash_};
+    }
+    std::set<size_t> distances{1};
+    for (const auto& tag : other_group_tags_) {
+        const auto count = topology_.group(tag).reuseBlockCount(std::numeric_limits<size_t>::max());
+        if (count < std::numeric_limits<size_t>::max()) {
+            distances.insert(count + 1);
+        }
+    }
+    std::set<uint64_t> masks;
+    uint64_t full_linear_mask = valid_full_bithash_;
+    for (const auto& [id, group] : groups_) {
+        (void)id;
+        if (topology_.group(group.tag).policy.group_type == CacheGroupType::LINEAR) {
+            full_linear_mask |= group.group_name_bithash;
+        }
+    }
+    // A complete LINEAR state can precede SWA materialization. Register that
+    // partial write shape; readers still require the complete SWA window.
+    masks.insert(full_linear_mask);
+    for (const auto distance : distances) {
+        uint64_t mask = valid_full_bithash_;
+        for (const auto& [id, group] : groups_) {
+            (void)id;
+            if (!group.is_full
+                && topology_.group(group.tag).reuseBlockCount(std::numeric_limits<size_t>::max()) >= distance) {
+                mask |= group.group_name_bithash;
+            }
+        }
+        masks.insert(mask);
+    }
+    return {masks.begin(), masks.end()};
 }
 
 std::string FullOtherGroupPolicy::debugString() const {

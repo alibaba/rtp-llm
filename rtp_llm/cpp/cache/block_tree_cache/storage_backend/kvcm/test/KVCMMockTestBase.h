@@ -42,6 +42,7 @@ struct KVCMBroadcastState {
     std::mutex                            mutex;
     std::vector<RemoteOperationRequestPB> requests;
     bool                                  fail{false};
+    std::function<void()>                 before_reply;
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -61,6 +62,9 @@ public:
         }
         if (state_->fail) {
             return grpc::Status(grpc::StatusCode::INTERNAL, "injected KVCM broadcast failure");
+        }
+        if (state_->before_reply) {
+            state_->before_reply();
         }
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
             auto* remote_response = response->mutable_remote_response();
@@ -140,8 +144,29 @@ public:
                  const std::vector<int64_t>&,
                  const std::vector<int64_t>&,
                  const std::vector<std::string>&,
-                 int64_t),
+                 int64_t,
+                 int32_t),
                 (override));
+    MOCK_METHOD((std::pair<bool, int64_t>), matchLocationLen,
+                (const std::string&, const std::string&, kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&, const std::vector<int64_t>&, int32_t), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::Locations>), queryLocations,
+                (const std::string&, const std::string&, kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&, const std::vector<int64_t>&,
+                 const kv_cache_manager::BlockMask&, int32_t, const std::vector<std::string>&), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::Metas>), matchMeta,
+                (const std::string&, const std::string&, const std::vector<int64_t>&,
+                 const std::vector<int64_t>&, const kv_cache_manager::BlockMask&, int32_t), (override));
+    MOCK_METHOD(bool, removeCache,
+                (const std::string&, const std::string&, const std::vector<int64_t>&,
+                 const std::vector<int64_t>&, const kv_cache_manager::BlockMask&), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::HostCacheState>), getHostCacheState,
+                (const std::string&, const std::string&, kv_cache_manager::QueryType,
+                 const std::vector<int64_t>&, const std::vector<std::string>&, int32_t), (override));
+    MOCK_METHOD((std::pair<bool, kv_cache_manager::BackendLocations>), getCacheLocationsByBackend,
+                (const std::string&, const std::string&, const std::vector<int64_t>&,
+                 const std::vector<int64_t>&, const kv_cache_manager::BlockMask&,
+                 const std::vector<std::string>&, kv_cache_manager::StorageType), (override));
     MOCK_METHOD(bool,
                 finishWrite,
                 (const std::string&,

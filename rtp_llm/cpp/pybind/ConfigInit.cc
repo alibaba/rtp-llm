@@ -503,6 +503,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("kvcm_vipserver_domain", &KVCacheConfig::kvcm_vipserver_domain)
         .def_readwrite("kvcm_server_address", &KVCacheConfig::kvcm_server_address)
         .def_readwrite("kvcm_instance_group", &KVCacheConfig::kvcm_instance_group)
+        .def_readwrite("kvcm_default_query_type", &KVCacheConfig::kvcm_default_query_type)
+        .def_readwrite("kvcm_query_type", &KVCacheConfig::kvcm_query_type)
+        .def_readwrite("kvcm_sw_size", &KVCacheConfig::kvcm_sw_size)
+        .def_readwrite("kvcm_read_backend_type", &KVCacheConfig::kvcm_read_backend_type)
+        .def_readwrite("kvcm_min_replica_count", &KVCacheConfig::kvcm_min_replica_count)
         .def_readwrite("kvcm_meta_channel_retry_time", &KVCacheConfig::kvcm_meta_channel_retry_time)
         .def_readwrite("kvcm_meta_channel_connection_timeout", &KVCacheConfig::kvcm_meta_channel_connection_timeout)
         .def_readwrite("kvcm_meta_channel_call_timeout", &KVCacheConfig::kvcm_meta_channel_call_timeout)
@@ -552,7 +557,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      7,
+                                      8,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -619,11 +624,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
-                                      self.kv_cache_event_host_ip_port);
+                                      self.kv_cache_event_host_ip_port,
+                                      self.kvcm_default_query_type,
+                                      self.kvcm_query_type,
+                                      self.kvcm_sw_size,
+                                      self.kvcm_read_backend_type,
+                                      self.kvcm_min_replica_count);
             },
             [](py::tuple t) {
                 const py::tuple event_state = t;
-                const bool has_event_fields = t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7;
+                const bool has_kvcm_fields = t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                const bool has_event_fields = has_kvcm_fields
+                    || (t.size() == 69 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 7);
                 if (has_event_fields) {
                     t    = t[py::slice(0, 64, 1)].cast<py::tuple>();
                     t[1] = py::int_(6);
@@ -730,6 +742,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_instance_group   = event_state[66].cast<std::string>();
                     c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
+                }
+                if (has_kvcm_fields) {
+                    c.kvcm_default_query_type = event_state[69].cast<int32_t>();
+                    c.kvcm_query_type         = event_state[70].cast<int32_t>();
+                    c.kvcm_sw_size            = event_state[71].cast<int32_t>();
+                    c.kvcm_read_backend_type  = event_state[72].cast<int32_t>();
+                    c.kvcm_min_replica_count  = event_state[73].cast<int32_t>();
                 }
                 return c;
             }));
