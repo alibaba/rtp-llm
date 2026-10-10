@@ -17,8 +17,8 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     compare_generation_logits = True
     prefill_cp_size = 2
     decode_dp_size = 1
-    # Decode reuse includes the freshly transferred prefill cache. Only the
-    # prefill's initial reuse measures a hit from an earlier request.
+    # Prefill owns request-level historical-cache accounting. Decode has its
+    # own cache history and excludes the current request's P/D transfer.
     reuse_field = "prefill_total_reuse_len"
 
     def start_servers(self):
