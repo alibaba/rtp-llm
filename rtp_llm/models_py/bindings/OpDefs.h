@@ -42,6 +42,7 @@ struct LayerKVCache {
 // Whole-model KV cache holding tensors for all layers.
 // Call getLayerCache(global_layer_id) to obtain a per-layer LayerKVCache.
 struct KVCache {
+    bool                       linear_replay = false;
     size_t                     dsa_mla_resident_tokens = 0;
     size_t                     dsa_mla_hbm_blocks      = 0;
     std::vector<torch::Tensor> mla_hbm_cache_by_layer;

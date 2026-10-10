@@ -31,6 +31,7 @@ struct BlockBufferPtrInfo {
 };
 
 struct CacheLayerLayout {
+    bool                          linear_replay = false;
     size_t                        dsa_mla_resident_tokens = 0;
     size_t                        dsa_mla_hbm_blocks      = 0;
     std::vector<torch::Tensor>    mla_hbm_cache_by_layer;

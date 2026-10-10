@@ -45,7 +45,10 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    exec_properties = select({
+        "//:using_cuda13_arm": {"gpu": "L20A_DEV"},
+        "//conditions:default": {"gpu": "H20"},
+    }),
 )
 
 cc_test(
@@ -59,7 +62,10 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = select({
+        "//:using_cuda13_arm": {"gpu": "L20A_DEV"},
+        "//conditions:default": {"gpu": "A10"},
+    }),
 )
 
 cc_test(

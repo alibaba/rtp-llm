@@ -358,6 +358,7 @@ CacheLayerLayout KVCacheManager::allLayerCacheBase() const {
 
 CacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
     CacheLayerLayout layout;
+    layout.linear_replay = config_.linear_replay;
 
     auto  all_layout        = allocator_->allLayerCacheBase();
     layout.dsa_mla_resident_tokens = all_layout.dsa_mla_resident_tokens;

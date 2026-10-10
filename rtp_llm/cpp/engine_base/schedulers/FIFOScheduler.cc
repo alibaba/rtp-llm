@@ -25,17 +25,17 @@ bool workerStatusSnapshotEnabled() {
     return env != nullptr && std::strcmp(env, "1") == 0;
 }
 
-bool asyncCachePrepareEnabled() {
+bool asyncCachePrepareEnabled(bool glm53) {
     const char* env = std::getenv("RTP_LLM_ASYNC_PREPARE_CACHE");
-    return env != nullptr && std::strcmp(env, "1") == 0;
+    return env != nullptr ? std::strcmp(env, "1") == 0 : glm53;
 }
 
-// Opt-in workload threshold: short cached tails can lose throughput when
+// Workload threshold: short cached tails can lose throughput when
 // only a few requests are batched, but large backlogs amortize model launches.
-size_t prefillSumQuotaMinStreams() {
+size_t prefillSumQuotaMinStreams(bool glm53) {
     const char* env = std::getenv("RTP_LLM_PREFILL_SUM_QUOTA_MIN_STREAMS");
     if (env == nullptr) {
-        return 0;
+        return glm53 ? 8 : 0;
     }
     char*      end   = nullptr;
     const long value = std::strtol(env, &end, 10);
@@ -58,6 +58,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                              const kmonitor::MetricsReporterPtr     metrics_reporter,
                              const int                              max_score_len):
     pd_sep_config_(pd_sep_config),
+    glm53_(model_config.model_type == "glm5_3_flash"),
     model_specific_config_(model_specific_config),
     cache_manager_(cache_manager),
     max_seq_len_(model_config.max_seq_len),
@@ -88,7 +89,7 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      cp_force_single_prefill_,
                      max_inited_kv_cache_streams_,
                      worker_status_snapshot_enabled_);
-    if (asyncCachePrepareEnabled() && pd_sep_config_.role_type != RoleType::DECODE && parallelism_config.tp_rank == 0) {
+    if (asyncCachePrepareEnabled(glm53_) && pd_sep_config_.role_type != RoleType::DECODE && parallelism_config.tp_rank == 0) {
         try {
             async_cache_prepare_enabled_ = true;
             cache_prepare_thread_        = std::thread([this]() { cachePrepareLoop(); });
@@ -382,7 +383,7 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
         const bool fits_kv = fits_strict_sum(admitted_tokens, candidate_tokens, max_batch_kv_len_);
         const bool fits_q =
             fits_strict_sum(admitted_tokens_without_cache, candidate_tokens_without_cache, max_batch_tokens_size_);
-        const size_t min_streams = prefillSumQuotaMinStreams();
+        const size_t min_streams = prefillSumQuotaMinStreams(glm53_);
         // schedule() owns lock_. Normal and explicit-group admission track
         // admitted streams differently; max avoids counting them twice.
         const size_t pending_streams = waiting_streams_.size() + loading_cache_streams_.size()

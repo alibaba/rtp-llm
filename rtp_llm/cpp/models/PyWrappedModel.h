@@ -233,6 +233,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         kv_cache.seq_size_per_block        = params.tokens_per_block;
         kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
         const auto& layout                 = params.kv_cache_layer_layout.value();
+        kv_cache.linear_replay             = layout.linear_replay;
         kv_cache.dsa_mla_resident_tokens    = layout.dsa_mla_resident_tokens;
         kv_cache.dsa_mla_hbm_blocks         = layout.dsa_mla_hbm_blocks;
         kv_cache.mla_hbm_cache_by_layer     = layout.mla_hbm_cache_by_layer;

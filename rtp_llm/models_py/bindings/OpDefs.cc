@@ -37,6 +37,7 @@ void registerPyOpDefs(pybind11::module& m) {
 
     pybind11::class_<KVCache>(m, "KVCache")
         .def(pybind11::init<>())
+        .def_readonly("linear_replay", &KVCache::linear_replay, "Allocator selected KDA accepted-chain replay")
         .def_readonly("dsa_mla_resident_tokens", &KVCache::dsa_mla_resident_tokens)
         .def_readonly("dsa_mla_hbm_blocks", &KVCache::dsa_mla_hbm_blocks)
         .def_readonly("mla_hbm_cache_by_layer", &KVCache::mla_hbm_cache_by_layer)

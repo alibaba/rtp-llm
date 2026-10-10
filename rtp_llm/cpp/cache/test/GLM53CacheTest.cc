@@ -27,7 +27,11 @@ public:
             old_value_ = old_value;
             had_value_ = true;
         }
-        setenv(name_, value, 1);
+        if (value != nullptr) {
+            setenv(name_, value, 1);
+        } else {
+            unsetenv(name_);
+        }
     }
 
     ~ScopedEnvVar() {
@@ -716,6 +720,50 @@ TEST(GLM53CacheConfigTest, DiskCheckpointsReserveTransientBatchesWithAverageLeng
     EXPECT_EQ(config.linear_disk_checkpoint_blocks, 0u);
     config.finalizeBlockNums(10000, runtime);
     EXPECT_EQ(config.group_block_nums[1], 13u);
+}
+
+TEST(GLM53CacheConfigTest, ReplayDefaultsToSupportedTargetAndHonorsOptOut) {
+    ScopedEnvVar replay("GLM53_KDA_REPLAY", nullptr);
+    ScopedEnvVar request_cache("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0");
+    auto model = makeGlm53Config();
+    model.model_type = "glm5_3_flash";
+    model.data_type = DataType::TYPE_BF16;
+    model.linear_attention_config.linear_key_head_dim = 128;
+    model.linear_attention_config.linear_value_head_dim = 128;
+    auto options = makeKvConfig();
+    options.reuse_cache = false;
+    ParallelismConfig pc;
+    pc.role_type = RoleType::DECODE;
+    const auto create = [&](int drafts = 3, bool mtp = false) {
+        return HybridPoolConfigCreator::createConfig(model, pc, options, mtp, drafts);
+    };
+    EXPECT_TRUE(create().linear_replay);
+    EXPECT_FALSE(create(0).linear_replay);
+    EXPECT_FALSE(create(8).linear_replay);
+    EXPECT_FALSE(create(3, true).linear_replay);
+    pc.role_type = RoleType::PREFILL;
+    EXPECT_FALSE(create().linear_replay);
+    pc.role_type = RoleType::DECODE;
+    options.reuse_cache = true;
+    EXPECT_FALSE(create().linear_replay);
+    {
+        ScopedEnvVar supported_reuse("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "1");
+        EXPECT_TRUE(create().linear_replay);
+    }
+    options.reuse_cache = false;
+    model.linear_attention_config.ssm_state_dtype = DataType::TYPE_BF16;
+    EXPECT_FALSE(create().linear_replay);
+    model.linear_attention_config.ssm_state_dtype = DataType::TYPE_FP32;
+    model.linear_attention_config.linear_key_head_dim = 64;
+    model.linear_attention_config.linear_value_head_dim = 64;
+    EXPECT_FALSE(create().linear_replay);
+    model.linear_attention_config.linear_key_head_dim = 128;
+    model.linear_attention_config.linear_value_head_dim = 128;
+    model.model_type = "kimi_linear";
+    EXPECT_FALSE(create().linear_replay);
+    model.model_type = "glm5_3_flash";
+    ScopedEnvVar disabled("GLM53_KDA_REPLAY", "0");
+    EXPECT_FALSE(create().linear_replay);
 }
 
 TEST(GLM53CacheConfigTest, OfficialShapeCacheBytesMatchOneMillionTokenAccounting) {

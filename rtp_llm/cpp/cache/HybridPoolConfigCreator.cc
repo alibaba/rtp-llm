@@ -339,16 +339,26 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
     config.role_type                       = parallelism_config.role_type;
     const char* replay_env                 = std::getenv("GLM53_KDA_REPLAY");
-    config.linear_replay = replay_env != nullptr && std::string(replay_env) == "1"
-                           && model_config.model_type == "glm5_3_flash" && !is_mtp && gen_num_per_cycle > 0
-                           && config.role_type != RoleType::PREFILL;
+    const char* linear_request_cache_env = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
+    config.enable_linear_attention_request_cache =
+        linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
+    const auto& linear = model_config.linear_attention_config;
+    const bool replay_supported =
+        model_config.data_type == DataType::TYPE_BF16 && linear.linear_key_head_dim == 128
+        && linear.linear_value_head_dim == 128 && linear.linear_conv_kernel_dim == 4
+        && linear.linear_num_key_heads == linear.linear_num_value_heads
+        && linear.ssm_state_dtype == DataType::TYPE_FP32 && linear.conv_state_dtype == DataType::TYPE_BF16
+        && gen_num_per_cycle < 8 && config.seq_size_per_block >= 8
+        && (!kv_cache_config.reuse_cache || config.enable_linear_attention_request_cache);
+    // Explicit opt-in retains strict validation. Default-on replay must fall
+    // back before allocation, so Python and the cache reserve the same states.
+    const bool replay_requested = replay_env != nullptr ? std::string(replay_env) == "1" : replay_supported;
+    config.linear_replay = replay_requested && model_config.model_type == "glm5_3_flash" && !is_mtp
+                           && gen_num_per_cycle > 0 && config.role_type != RoleType::PREFILL;
     if (config.linear_replay) {
         RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle < 8 && config.seq_size_per_block >= 8,
                                 "GLM53 KDA replay supports verify widths <=8 and cache pages >=8 tokens");
     }
-    const char* linear_request_cache_env = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
-    config.enable_linear_attention_request_cache =
-        linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
     if (config.linear_replay) {
         RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.reuse_cache || config.enable_linear_attention_request_cache,
                                 "KDA replay with Decode prefix reuse requires ENABLE_LINEAR_ATTN_REQUEST_CACHE=1");

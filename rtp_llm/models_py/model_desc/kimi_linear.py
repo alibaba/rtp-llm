@@ -619,8 +619,13 @@ class KimiLinearKDADecode(KimiLinearKDABase):
         super().__init__(
             linear_attn_config, parallelism_config, weights, gate_lower_bound
         )
-        self.fuse_decode = os.environ.get("GLM53_KDA_DECODE_FUSION", "0") == "1"
-        self.fuse_verify = os.environ.get("GLM53_KDA_VERIFY_FUSION", "0") == "1"
+        fusion_default = "1" if gate_lower_bound == -5.0 else "0"
+        self.fuse_decode = (
+            os.environ.get("GLM53_KDA_DECODE_FUSION", fusion_default) == "1"
+        )
+        self.fuse_verify = (
+            os.environ.get("GLM53_KDA_VERIFY_FUSION", fusion_default) == "1"
+        )
         self.replay_workspace = None
         self._verify_fusion_logged = False
         self.decode_low_warps = (
@@ -815,6 +820,9 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             and self.linear_conv_kernel_dim == 4
             and self.local_num_k_heads == self.local_num_v_heads
             and mixed_qkv.stride(-1) == 1
+            and mixed_qkv.dtype == torch.bfloat16
+            and self.conv_weights.dtype in (torch.bfloat16, torch.float32)
+            and self.conv_state_dtype in (torch.bfloat16, torch.float32)
         ):
             from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_short_conv import (
                 glm53_kda_short_conv_decode,
@@ -946,7 +954,11 @@ class KimiLinearKDA(nn.Module):
         self.register_buffer("packed_input_weight", None, persistent=False)
         self.packed_input_widths = None
         self.fuse_input_projection = (
-            os.environ.get("GLM53_KDA_INPUT_PROJECTION_FUSION", "0") == "1"
+            os.environ.get(
+                "GLM53_KDA_INPUT_PROJECTION_FUSION",
+                "1" if gate_lower_bound == -5.0 else "0",
+            )
+            == "1"
         )
         if gate_lower_bound is not None and (
             parallelism_config.role_type == RoleType.PREFILL
@@ -974,9 +986,11 @@ class KimiLinearKDA(nn.Module):
                 self.packed_input_weight = packed
 
         if self.fuse_input_projection and self.packed_input_weight is None:
-            raise ValueError(
-                "GLM53 packed input projection requires BF16 unquantized KDA weights"
-            )
+            if os.environ.get("GLM53_KDA_INPUT_PROJECTION_FUSION") == "1":
+                raise ValueError(
+                    "GLM53 packed input projection requires BF16 unquantized KDA weights"
+                )
+            self.fuse_input_projection = False
 
         self.head_k_dim = linear_attn_config.linear_key_head_dim
         if self.fuse_input_projection:
@@ -1574,14 +1588,24 @@ class KimiLinearModel(GptModelBase):
         )
         self.hc_enabled = model_config.hc_mult > 1
         self.kda_replay_enabled = False
-        self._kda_replay_requested = os.environ.get("GLM53_KDA_REPLAY", "0") == "1"
+        self._kda_replay_requested = (
+            os.environ.get(
+                "GLM53_KDA_REPLAY",
+                "1" if model_config.model_type == "glm5_3_flash" else "0",
+            )
+            == "1"
+        )
         self._kda_replay_batch_capacity = max_generate_batch_size
         self._kda_replay_workspaces = []
         self._kda_replay_descriptors = None
         self._kda_replay_page_size = 0
         self.enable_kda_reuse_fusion = (
             os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1"
-            and os.environ.get("GLM5_KDA_REUSE_FUSION", "1") != "0"
+            and os.environ.get(
+                "GLM5_KDA_REUSE_FUSION",
+                "0" if model_config.model_type == "glm5_3_flash" else "1",
+            )
+            != "0"
         )
         self.kda_chunk_size = get_kda_chunk_size()
         logging.info("KDA chunk size: %d", self.kda_chunk_size)
@@ -1606,9 +1630,10 @@ class KimiLinearModel(GptModelBase):
         bind_indexer_block_table_group_ids(self.layers, self.kv_cache)
         if (
             self._kda_replay_requested
+            and self.kv_cache is not None
+            and self.kv_cache.linear_replay
             and self.parallelism_config.role_type != RoleType.PREFILL
             and init_resource.is_speculative
-            and self.kv_cache is not None
         ):
             from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_replay import (
                 KDAReplayWorkspace,

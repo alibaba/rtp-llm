@@ -25,7 +25,11 @@ public:
             had_old_value_ = true;
             old_value_     = old_value;
         }
-        setenv(name, value, 1);
+        if (value != nullptr) {
+            setenv(name, value, 1);
+        } else {
+            unsetenv(name);
+        }
     }
 
     ~ScopedEnvVar() {
@@ -2857,14 +2861,41 @@ TEST_F(FIFOSchedulerTest, testDifferentGroupMetadataDoesNotIsolateWaitingStreams
     ASSERT_EQ(scheduler.runningStreamsSize(), 4);
 }
 
+TEST_F(FIFOSchedulerTest, testAsyncCachePrepareDefaultsToGlm53AndHonorsOptOut) {
+    ScopedEnvVar async_prepare("RTP_LLM_ASYNC_PREPARE_CACHE", nullptr);
+    auto cache_manager = std::make_shared<KVCacheManager>(makeMhaCacheConfig(1, 64, 1, 4, 8, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache_manager->init());
+    ModelConfig model;
+    RuntimeConfig runtime;
+    PDSepConfig pd;
+    ParallelismConfig parallelism;
+    ModelSpecificConfig specific;
+    const auto create = [&]() {
+        return std::make_unique<FIFOScheduler>(runtime, model, pd, parallelism, specific, cache_manager);
+    };
+    EXPECT_FALSE(create()->async_cache_prepare_enabled_);
+    model.model_type = "glm5_3_flash";
+    EXPECT_TRUE(create()->async_cache_prepare_enabled_);
+    pd.role_type = RoleType::DECODE;
+    EXPECT_FALSE(create()->async_cache_prepare_enabled_);
+    pd.role_type = RoleType::PREFILL;
+    parallelism.tp_rank = 1;
+    EXPECT_FALSE(create()->async_cache_prepare_enabled_);
+    parallelism.tp_rank = 0;
+    ScopedEnvVar disabled("RTP_LLM_ASYNC_PREPARE_CACHE", "0");
+    EXPECT_FALSE(create()->async_cache_prepare_enabled_);
+}
+
 TEST_F(FIFOSchedulerTest, testSumQuotaBacklogThresholdPreservesSmallBatchesAndBothCaps) {
-    ScopedEnvVar threshold("RTP_LLM_PREFILL_SUM_QUOTA_MIN_STREAMS", "8");
+    ScopedEnvVar threshold("RTP_LLM_PREFILL_SUM_QUOTA_MIN_STREAMS", nullptr);
+    ScopedEnvVar async_prepare("RTP_LLM_ASYNC_PREPARE_CACHE", "0");
     CacheConfig  cache_config  = makeMhaCacheConfig(1, 64, 1, 4, 8, DataType::TYPE_FP16);
     auto         cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
     ModelConfig model_config;
+    model_config.model_type = "glm5_3_flash";
     model_config.max_seq_len = 1000;
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                     = 100;

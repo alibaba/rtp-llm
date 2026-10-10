@@ -102,6 +102,7 @@ protected:
 
 protected:
     PDSepConfig                     pd_sep_config_;
+    bool                            glm53_ = false;
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
     std::list<GenerateStreamPtr>    loading_cache_streams_;
