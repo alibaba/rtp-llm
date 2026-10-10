@@ -53,7 +53,6 @@ void registerEmbeddingOutput(const py::module& m) {
 }
 
 PYBIND11_MODULE(libth_transformer, m) {
-    m.def("log_startup_event", [](const std::string& message) { RTP_LLM_LOG_INFO("%s", message.c_str()); });
     m.def("refresh_logger_after_scr", &Logger::refreshRuntimeIdentity, py::arg("pod_ip"));
     m.def("resume_kmonitor_after_scr", &resumeKmonitorAfterScr, py::call_guard<py::gil_scoped_release>());
     registerRtpLLMOp(m);

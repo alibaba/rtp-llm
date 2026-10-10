@@ -11,8 +11,6 @@
 #include "gmock/gmock-actions.h"
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
-#include "autil/EnvUtil.h"
-#include "rtp_llm/cpp/normal_engine/ScrPrefillWarmup.h"
 #include <memory>
 
 using namespace std;
@@ -23,75 +21,6 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
-
-TEST(ScrPrefillWarmupPlanTest, StartupShapesAndSpeculativeReserve) {
-    EXPECT_EQ(scrPrefillWarmupTokenLens("", 16, 4), (std::vector<int64_t>{2, 4, 8, 12}));
-    EXPECT_EQ(scrPrefillWarmupTokenLens("", 13, 0), (std::vector<int64_t>{2, 4, 8, 12}));
-    EXPECT_EQ(scrPrefillWarmupTokenLens("", 2, 0), (std::vector<int64_t>{1}));
-    EXPECT_EQ(scrPrefillWarmupTokenLens("", 8, 5), (std::vector<int64_t>{2, 3}));
-    EXPECT_EQ(scrPrefillWarmupTokenLens("2, 8,16,16", 16, 4), (std::vector<int64_t>{2, 8, 12}));
-    EXPECT_EQ(scrPrefillWarmupTokenLens("16", 16, 0), (std::vector<int64_t>{15}));
-    for (const auto* invalid : {"0", "-2", "1", "17", "2x", "2,", "2,,4"}) {
-        EXPECT_THROW(scrPrefillWarmupTokenLens(invalid, 16, 4), std::exception);
-    }
-    EXPECT_THROW(scrPrefillWarmupTokenLens("", 4, 4), std::invalid_argument);
-}
-
-TEST_F(NormalEngineTest, ScrTemplatePrefillRunsBeforeLoopAndReleasesCache) {
-    autil::EnvGuard enabled("RTP_LLM_SCR_PREFILL_WARMUP", "1");
-    autil::EnvGuard shapes("RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS", "2,8");
-    autil::EnvGuard pool_limit("TORCH_CUDA_POOL_PREALLOC_MB", "1024");
-    ModelConfig     model;
-    RuntimeConfig   runtime;
-    KVCacheConfig   cache;
-    CustomConfig    config;
-    config.reuse_cache             = true;
-    auto params                    = createEngineInitParams(config, model, runtime, cache);
-    params.pd_sep_config.role_type = RoleType::PREFILL;
-    int forwards                   = 0;
-    class CountingModel: public MockModel {
-    public:
-        CountingModel(size_t vocab, int& forwards): MockModel(vocab), forwards_(forwards) {}
-        GptModelOutputs forward(const GptModelInputs& inputs) override {
-            ++forwards_;
-            return MockModel::forward(inputs);
-        }
-
-    private:
-        int& forwards_;
-    };
-    NormalExecutor::test_model_factory = [&](const GptModelInitParams&) {
-        return std::make_unique<CountingModel>(model.vocab_size, forwards);
-    };
-    std::shared_ptr<NormalEngine> engine;
-    try {
-        engine = std::make_shared<NormalEngine>(params, nullptr, true);
-    } catch (...) {
-        NormalExecutor::test_model_factory = nullptr;
-        throw;
-    }
-    NormalExecutor::test_model_factory = nullptr;
-    EXPECT_EQ(forwards, 2);
-    EXPECT_FALSE(engine->running_);
-    EXPECT_FALSE(engine->loop_thread_);
-    EXPECT_FALSE(engine->resourceContext().cache_manager->coordinator_);
-    EXPECT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(),
-              engine->resourceContext().cache_manager->availableBlocksNum());
-    EXPECT_EQ(engine->resourceContext().cache_manager->freeBlocksNum(), cache.test_block_num - 1);
-    ASSERT_TRUE(engine->startLoop().ok());
-    EXPECT_TRUE(engine->running_);
-    EXPECT_TRUE(engine->resourceContext().cache_manager->coordinator_);
-    auto first_thread = engine->loop_thread_;
-    ASSERT_TRUE(engine->startLoop().ok());
-    EXPECT_EQ(engine->loop_thread_, first_thread);
-    auto input                             = std::make_shared<GenerateInput>();
-    input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
-    input->generate_config                 = std::make_shared<GenerateConfig>();
-    input->generate_config->max_new_tokens = 1;
-    auto output                            = engine->enqueue(input)->nextOutput();
-    ASSERT_TRUE(output.ok()) << output.status().ToString();
-    EXPECT_GT(forwards, 2);
-}
 
 TEST_F(NormalEngineTest, testInt8KVCache) {
     CustomConfig config;
@@ -299,8 +228,7 @@ TEST_F(NormalEngineTest, testSystemPrompt) {
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.output_len, 1);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.prefix_len, 6);
         ASSERT_EQ(output1.value().generate_outputs[0].aux_info.reuse_len, 6);
-        // input_len includes the six materialized system-prompt tokens.
-        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 13);
+        ASSERT_EQ(output1.value().generate_outputs[0].aux_info.input_len, 7);
 
         ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         auto output2 = stream->nextOutput();

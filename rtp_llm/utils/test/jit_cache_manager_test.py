@@ -1411,28 +1411,6 @@ class BackendTest(JitCacheTestBase):
             self.assertEqual(backend.start_backend_server(None, configs), "served")
         self.assertEqual(events, ["rank", "stop"])
 
-    def test_jit_bootstrap_is_timed_before_rank_start(self):
-        events = []
-        manager = mock.Mock()
-        manager.stop.side_effect = lambda: events.append("stop")
-        configs = self.make_configs(remote="/r")
-        with self.patched_backend(), mock.patch.object(
-            jit,
-            "start_from_config",
-            side_effect=lambda _: events.append("bootstrap") or manager,
-        ), mock.patch.object(
-            backend,
-            "local_rank_start",
-            side_effect=lambda *_: events.append("rank") or "served",
-        ), self.assertLogs(
-            "rtp_llm.utils.startup_timing", "INFO"
-        ) as logs:
-            self.assertEqual(backend.start_backend_server(None, configs), "served")
-        self.assertEqual(events, ["bootstrap", "rank", "stop"])
-        self.assertIn("stage=backend.jit_cache_bootstrap event=begin", logs.output[0])
-        self.assertIn("stage=backend.jit_cache_bootstrap event=end", logs.output[1])
-        self.assertIn("elapsed_ms=", logs.output[1])
-
     def test_parent_signal_during_jit_setup_prevents_rank_start(self):
         handlers = {}
         configs = self.make_configs(remote="/r", world_size=2)

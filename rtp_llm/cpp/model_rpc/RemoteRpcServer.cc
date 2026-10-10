@@ -1,6 +1,5 @@
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
-#include "rtp_llm/cpp/utils/StartupTiming.h"
 
 using namespace std;
 
@@ -25,7 +24,6 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
 }
 
 void RemoteRpcServer::startDeferredServices() {
-    StartupTiming deferred_timing("backend.remote_deferred_services");
     if (defer_cache_store_ && !cache_store_) {
         // Resolve host/peer identity only after the controller releases the
         // template barrier. This keeps the source host's identity and
@@ -106,18 +104,12 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
                      params.listen_port,
                      params.rdma_listen_port,
                      params.rdma_mode);
-    {
-        StartupTiming timing("backend.cache_store_create");
-        cache_store_ = NormalCacheStore::createNormalCacheStore(params);
-        RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
-    }
+    cache_store_ = NormalCacheStore::createNormalCacheStore(params);
+    RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
     RTP_LLM_LOG_INFO("cache store init success");
 
     cache_manager->setCacheStore(cache_store_);
-    {
-        StartupTiming timing("backend.cache_store_register_memory");
-        cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
-    }
+    cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }
