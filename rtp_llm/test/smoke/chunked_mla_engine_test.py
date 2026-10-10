@@ -232,8 +232,8 @@ class ChunkedMlaEngineTest(unittest.TestCase):
             )
             time.sleep(0.02)
 
-    def _cancel_and_retry(self, manager, prompt, budget, expected):
-        # Cancel during decode: no model hooks or timing assumptions about prefill.
+    def _disconnect_and_retry(self, manager, prompt, budget, expected):
+        # A fast decode can finish before the server observes the closed response.
         # Cache reuse is disabled for this phase, so all request slots must return.
         with grpc.insecure_channel(f"127.0.0.1:{manager.port + 1}") as channel:
             stub = RpcServiceStub(channel)
@@ -256,9 +256,9 @@ class ChunkedMlaEngineTest(unittest.TestCase):
             )
             # This phase is serial, so the completion delta must be this request.
             self.assertEqual(len(after.finished_task_list), 1, after)
-            self.assertEqual(
+            self.assertIn(
                 after.finished_task_list[0].error_info.error_code,
-                ExceptionType.CANCELLED.value,
+                (0, ExceptionType.CANCELLED.value),
                 after.finished_task_list[0],
             )
         self.assertEqual(self._request(manager, prompt, budget), expected)
@@ -331,7 +331,7 @@ class ChunkedMlaEngineTest(unittest.TestCase):
                                 for name, future in pending.items():
                                     self.assertEqual(future.result(), reference[name])
                         if budget and not reuse:
-                            self._cancel_and_retry(
+                            self._disconnect_and_retry(
                                 manager, prompts["short"], budget, reference["short"]
                             )
                     finally:
