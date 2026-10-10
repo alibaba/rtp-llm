@@ -636,6 +636,25 @@ class ScopeTest(JitCacheTestBase):
         self.assertLessEqual({"aiter", "flydsl", "triton"}, names)
         self.assertFalse(names & {"flashinfer", "deep_gemm", "tvm_ffi", "cute_dsl"})
 
+    def test_rocm_scope_recognizes_amd_aiter_distribution(self):
+        def version(name):
+            if name == "aiter":
+                raise jit.importlib.metadata.PackageNotFoundError(name)
+            return "0.1.23" if name == "amd-aiter" else "1_0"
+
+        with _fake_probes(hip="6.2.41133", arch="gfx942", pkg=version):
+            scope = jit.resolve_scope(self.root)
+        self.assertIn("aiter", {item.name for item in scope.components})
+
+        def no_aiter(name):
+            if name in ("aiter", "amd-aiter"):
+                raise jit.importlib.metadata.PackageNotFoundError(name)
+            return "1_0"
+
+        with _fake_probes(hip="6.2.41133", arch="gfx942", pkg=no_aiter):
+            scope = jit.resolve_scope(self.root)
+        self.assertNotIn("aiter", {item.name for item in scope.components})
+
     def test_setup_env_redirects_and_respects_presets(self):
         os.environ["TRITON_CACHE_DIR"] = str(self.root / "preset")
         with _fake_probes():
