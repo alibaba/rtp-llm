@@ -29,9 +29,9 @@ public:
         for (const auto& group : topology.groups()) {
             ShardLayout::GroupLayout g;
             g.policy                = group.policy;
-            g.kv_block_stride_bytes = group.kv_block_stride_bytes;
-            g.kv_scale_stride_bytes = group.kv_scale_stride_bytes;
-            g.seq_size_per_block    = group.seq_size_per_block;
+            g.kv_block_stride_bytes = group.kvBlockStrideBytes();
+            g.kv_scale_stride_bytes = group.kvScaleStrideBytes();
+            g.seq_size_per_block    = group.seqSizePerBlock();
             if (group.spec) {
                 g.spec_type             = group.spec->type;
                 g.k_block_payload_bytes = group.spec->k_block_payload_bytes();

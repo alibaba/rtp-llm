@@ -1,22 +1,9 @@
 package org.flexlb.consistency;
 
-/**
- * @author zjw
- * description:
- * date: 2025/3/20
- */
+/** Read-only leadership view used to decide local scheduling versus forwarding. */
 public interface MasterElectService {
-
-    void start();
-
-    void offline();
-
-    void destroy();
 
     boolean isNeedConsistency();
 
     boolean isMaster();
-
-    void refreshMasterHost(boolean forceSync);
-
 }

@@ -21,19 +21,34 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
+py_test(
+    name = "rpc_error_code_proto_test",
+    size = "small",
+    srcs = ["rpc_error_code_proto_test.py"],
+    deps = [
+        "//rtp_llm:protobuf",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+    ],
+)
+
 py_test (
     name = "model_rpc_client_test",
     srcs = ["model_rpc_client_test.py"],
     deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:pydantic",
+        "//rtp_llm:testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
-        "//rtp_llm:testlib",
-        "//rtp_llm/test/model_test/test_util:test_util",
+        "//rtp_llm/test/model_test/test_util",
     ] + telemetry_test_deps(),
     data = [
-        "//:th_transformer"
+        "//:th_transformer",
     ],
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 test_deps = [
@@ -72,7 +87,24 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "generate_context_lifecycle_test",
+    srcs = [
+        "GenerateContextLifecycleTest.cc",
+        "RpcHandlerLifecycleTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+        "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+    ],
+    env = {},
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
 )
 
 cc_test(
@@ -87,7 +119,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -97,12 +130,14 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/model_rpc:model_rpc_pool",
+    deps = [
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
         "@havenask//aios/autil:net",
     ],
     env = {},
-    exec_properties = {'gpu':'A10'},
 )
 
 cc_test(
@@ -115,7 +150,7 @@ cc_test(
         "//rtp_llm/cpp/cache:recent_cache_key_window",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + cuda13_torch_link_deps,
+    ],
 )
 
 cc_test(
@@ -130,7 +165,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -143,7 +179,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'A10'},
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(

@@ -7,10 +7,12 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/KVCacheGroup.h"
+#include "rtp_llm/cpp/cache/SingleTypeCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -24,11 +26,13 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm {
 namespace {
 
-constexpr size_t kPoolAlignment = 4096;
+constexpr size_t kCopyAlignment = 16;
+constexpr size_t kDirectIOAlignment = 4096;
 
 std::optional<EvictionPolicy> parseEvictionPolicy(const std::string& value) {
     std::string normalized = value;
@@ -74,19 +78,19 @@ size_t checkedQueueSize(int64_t value, const char* name) {
     return static_cast<size_t>(value);
 }
 
-int slidingWindowSize(const GroupBase& group, size_t group_id) {
-    RTP_LLM_CHECK_WITH_INFO(
-        group.policy.group_type == CacheGroupType::SWA, "sliding window requested for non-SWA group_id=%zu", group_id);
-    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "SWA group_id=%zu has null cache spec", group_id);
+int slidingWindowSize(const GroupBase& group) {
+    RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::SWA,
+                            "sliding window requested for non-SWA tag=%s",
+                            group.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "SWA tag=%s has null cache spec", group.tag.c_str());
     RTP_LLM_CHECK_WITH_INFO(group.policy.sliding_window_size >= 0,
-                            "SWA group_id=%zu has invalid sliding window=%d",
-                            group_id,
+                            "SWA tag=%s has invalid sliding window=%d",
+                            group.tag.c_str(),
                             group.policy.sliding_window_size);
     return group.policy.sliding_window_size;
 }
 
 GroupSetPtr createGroupSet(const GroupBase&                group,
-                           size_t                          group_id,
                            std::vector<DeviceBlockPoolPtr> device_pools,
                            std::shared_ptr<HostBlockPool>  host_pool,
                            BlockTreeDiskBlockPoolPtr       disk_pool) {
@@ -103,10 +107,10 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
         case CacheGroupType::SWA: {
             const auto seq_size = group.cacheKeyTokenStride();
             RTP_LLM_CHECK_WITH_INFO(seq_size > 0 && seq_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                                    "SWA group_id=%zu has invalid seq_size_per_block=%zu",
-                                    group_id,
+                                    "SWA tag=%s has invalid seq_size_per_block=%zu",
+                                    group.tag.c_str(),
                                     seq_size);
-            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group, group_id),
+            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group),
                                                    static_cast<int>(seq_size),
                                                    std::move(device_pools),
                                                    std::move(host_pool),
@@ -114,39 +118,44 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
             break;
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "unsupported cache group type for group_id=%zu", group_id);
+    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "unsupported cache group type for tag=%s", group.tag.c_str());
     return result;
 }
 
-std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cache_config,
-                                                  const KVCacheAllocatorPtr& allocator) {
-    if (!allocator) {
-        RTP_LLM_LOG_ERROR("allocator is null");
+std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&                cache_config,
+                                                              const CoordinatorCacheManagerPtr& coordinator_manager) {
+    if (!coordinator_manager) {
+        RTP_LLM_LOG_ERROR("coordinator manager is null");
         return {};
     }
-    const auto allocator_groups = allocator->cacheGroups();
-    const auto group_count      = static_cast<size_t>(cache_config.groupNums());
-    if (allocator_groups.size() != group_count) {
-        RTP_LLM_LOG_ERROR("allocator/topology group count mismatch, allocator=%zu topology=%zu",
-                          allocator_groups.size(),
+    const auto coordinator_groups = coordinator_manager->cacheGroups();
+    const auto group_count        = static_cast<size_t>(cache_config.groupNums());
+    if (coordinator_groups.size() != group_count) {
+        RTP_LLM_LOG_ERROR("coordinator/topology group count mismatch, coordinator=%zu topology=%zu",
+                          coordinator_groups.size(),
                           group_count);
         return {};
     }
 
-    std::vector<KVCacheGroupPtr> aligned(group_count);
-    for (const auto& group : allocator_groups) {
+    std::vector<SingleTypeCacheManagerPtr> aligned(group_count);
+    const auto&                            topology_groups = cache_config.topology().groups();
+    for (const auto& group : coordinator_groups) {
         if (!group || !group->blockPool()) {
-            RTP_LLM_LOG_ERROR("allocator group/direct pool must be non-null");
+            RTP_LLM_LOG_ERROR("coordinator group/direct pool must be non-null");
             return {};
         }
-        const int group_id = group->group_id();
-        if (group_id < 0 || static_cast<size_t>(group_id) >= group_count) {
-            RTP_LLM_LOG_ERROR("allocator group_id=%d out of range [0, %zu)", group_id, group_count);
+        const auto& tag   = group->tag();
+        const auto  found = std::find_if(topology_groups.begin(),
+                                        topology_groups.end(),
+                                        [&tag](const GroupBase& declared) { return declared.tag == tag; });
+        if (found == topology_groups.end()) {
+            RTP_LLM_LOG_ERROR("coordinator has unknown group tag=%s", tag.c_str());
             return {};
         }
-        auto& aligned_group = aligned[static_cast<size_t>(group_id)];
+        const size_t group_id      = static_cast<size_t>(std::distance(topology_groups.begin(), found));
+        auto&        aligned_group = aligned[group_id];
         if (aligned_group != nullptr) {
-            RTP_LLM_LOG_ERROR("duplicate allocator group_id=%d", group_id);
+            RTP_LLM_LOG_ERROR("duplicate coordinator group tag=%s", tag.c_str());
             return {};
         }
         aligned_group = group;
@@ -155,36 +164,32 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
     for (size_t group_id = 0; group_id < group_count; ++group_id) {
         const auto& group = aligned[group_id];
         if (group == nullptr) {
-            RTP_LLM_LOG_ERROR("allocator is missing group_id=%zu", group_id);
+            RTP_LLM_LOG_ERROR("coordinator is missing tag=%s", topology_groups[group_id].tag.c_str());
             return {};
         }
         const auto& actual   = group->config();
-        const auto& declared = cache_config.topology().groupById(group_id);
+        const auto& declared = topology_groups[group_id];
         if (actual.spec != declared.spec || !CacheConfig::samePolicy(actual.policy, declared.policy)
-            || actual.layer_ids != declared.layer_ids || actual.block_num != declared.block_num
-            || actual.local_kv_head_num != declared.local_kv_head_num
-            || actual.seq_size_per_block != declared.seq_size_per_block
-            || actual.kernel_seq_size_per_block != declared.kernel_seq_size_per_block
-            || actual.kv_block_stride_bytes != declared.kv_block_stride_bytes
-            || actual.kv_scale_stride_bytes != declared.kv_scale_stride_bytes) {
-            RTP_LLM_LOG_ERROR("allocator group_id=%zu does not exactly match topology", group_id);
+            || actual.block_num != declared.block_num) {
+            RTP_LLM_LOG_ERROR("coordinator tag=%s does not exactly match topology", declared.tag.c_str());
             return {};
         }
     }
     return aligned;
 }
 
-std::shared_ptr<HostBlockPool> createHostPool(const std::string& name, size_t payload_bytes, size_t usable_blocks) {
-    if (payload_bytes == 0 || usable_blocks == 0) {
+std::shared_ptr<HostBlockPool>
+createHostPool(const std::string& name, const BackingLayout& layout, size_t usable_blocks, size_t alignment) {
+    if (layout.payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = name;
     config->physical_block_count = usable_blocks + 1;
-    config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
-    config->alignment            = kPoolAlignment;
+    config->payload_bytes        = layout.payload_bytes;
+    config->stride_bytes         = layout.pool_stride;
+    config->alignment            = alignment;
     auto pool                    = std::make_shared<HostBlockPool>(config);
     return pool->init() ? pool : nullptr;
 }
@@ -203,11 +208,11 @@ createDiskMountGuard(const KVCacheConfig& config, int64_t local_world_size, int6
 BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                            kv_config,
                                          const std::shared_ptr<BlockTreeDiskMountGuard>& guard,
                                          const std::string&                              name,
-                                         size_t                                          payload_bytes,
+                                         const BackingLayout&                            layout,
                                          size_t                                          usable_blocks,
                                          int64_t                                         world_rank,
                                          int64_t                                         local_rank) {
-    if (!guard || payload_bytes == 0 || usable_blocks == 0) {
+    if (!guard || layout.payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
     auto config                  = std::make_shared<BlockTreeDiskBlockPoolConfig>();
@@ -216,8 +221,8 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
     config->work_dir             = guard->workDir();
     config->local_rank           = local_rank;
     config->world_rank           = world_rank;
-    config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = alignUp(payload_bytes, kPoolAlignment);
+    config->payload_bytes        = layout.payload_bytes;
+    config->stride_bytes         = layout.pool_stride;
     config->physical_block_count = usable_blocks + 1;
     config->disk_size_bytes      = config->physical_block_count * config->stride_bytes;
     config->buffered_io          = kv_config.disk_cache_buffered_io;
@@ -226,16 +231,15 @@ BlockTreeDiskBlockPoolPtr createDiskPool(const KVCacheConfig&                   
     return pool->init() ? pool : nullptr;
 }
 
-bool groupSetSemanticsCompatible(const CacheConfig& cache_config, int lhs_group_id, int rhs_group_id) {
-    const GroupBase& lhs = cache_config.topology().groupById(static_cast<size_t>(lhs_group_id));
-    const GroupBase& rhs = cache_config.topology().groupById(static_cast<size_t>(rhs_group_id));
-    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seq_size_per_block != rhs.seq_size_per_block
+bool groupSetSemanticsCompatible(const CacheConfig& cache_config, std::string_view lhs_tag, std::string_view rhs_tag) {
+    const GroupBase& lhs = cache_config.topology().group(lhs_tag);
+    const GroupBase& rhs = cache_config.topology().group(rhs_tag);
+    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seqSizePerBlock() != rhs.seqSizePerBlock()
         || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
         return false;
     }
     if (lhs.policy.group_type == CacheGroupType::SWA) {
-        if (slidingWindowSize(lhs, static_cast<size_t>(lhs_group_id))
-            != slidingWindowSize(rhs, static_cast<size_t>(rhs_group_id))) {
+        if (slidingWindowSize(lhs) != slidingWindowSize(rhs)) {
             return false;
         }
     }
@@ -247,10 +251,9 @@ bool groupSetSemanticsCompatible(const CacheConfig& cache_config, int lhs_group_
     return true;
 }
 
-bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<int>>& group_members) {
+bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<std::string>>& group_members) {
     group_members.clear();
-    for (int group_id = 0; group_id < cache_config.groupNums(); ++group_id) {
-        const GroupBase& group = cache_config.topology().groupById(static_cast<size_t>(group_id));
+    for (const GroupBase& group : cache_config.topology().groups()) {
         if (!group.policy.enable_prefix_reuse) {
             continue;
         }
@@ -258,72 +261,93 @@ bool buildGroupMembers(const CacheConfig& cache_config, std::vector<std::vector<
         const CacheGroupType group_type = group.policy.group_type;
         if (group_type != CacheGroupType::FULL && group_type != CacheGroupType::SWA
             && group_type != CacheGroupType::LINEAR) {
-            RTP_LLM_LOG_ERROR("unsupported reusable cache group type for group_id=%d", group_id);
+            RTP_LLM_LOG_ERROR("unsupported reusable cache group type for tag=%s", group.tag.c_str());
             return false;
         }
 
-        auto it = std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<int>& members) {
-            const GroupBase& first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
-            return first.policy.group_type == group.policy.group_type;
-        });
+        auto it =
+            std::find_if(group_members.begin(), group_members.end(), [&](const std::vector<std::string>& members) {
+                const GroupBase& first = cache_config.topology().group(members.front());
+                return first.policy.group_type == group.policy.group_type;
+            });
         if (it == group_members.end()) {
-            group_members.push_back({group_id});
+            group_members.push_back({group.tag});
         } else {
-            if (!groupSetSemanticsCompatible(cache_config, it->front(), group_id)) {
-                RTP_LLM_LOG_ERROR(
-                    "incompatible BlockTree reuse coordinates for group_id=%d and group_id=%d", it->front(), group_id);
+            if (!groupSetSemanticsCompatible(cache_config, it->front(), group.tag)) {
+                RTP_LLM_LOG_ERROR("incompatible BlockTree reuse coordinates for tags=%s and %s",
+                                  it->front().c_str(),
+                                  group.tag.c_str());
                 return false;
             }
-            it->push_back(group_id);
+            it->push_back(group.tag);
         }
     }
     return true;
 }
 
-size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::vector<int>& members) {
-    size_t payload_bytes = 0;
-    for (int group_id : members) {
-        RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid group_id=%d", group_id);
-        const size_t group_bytes = cache_config.blockSizeBytesForGroup(static_cast<size_t>(group_id));
-        RTP_LLM_CHECK_WITH_INFO(group_bytes > 0, "group_id=%d has zero payload", group_id);
-        RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - payload_bytes,
-                                "group set payload overflow at group_id=%d",
-                                group_id);
-        payload_bytes += group_bytes;
+BackingLayout computeBackingLayout(const CacheConfig&              cache_config,
+                                   const std::vector<std::string>& members,
+                                   bool                            enable_crc,
+                                   size_t                          pool_alignment) {
+    BackingLayout layout;
+    for (const auto& tag : members) {
+        const size_t group_bytes = cache_config.blockSizeBytesForGroup(tag);
+        RTP_LLM_CHECK_WITH_INFO(group_bytes > 0, "tag=%s has zero payload", tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - layout.payload_bytes,
+                                "group set payload overflow at tag=%s",
+                                tag.c_str());
+        layout.payload_bytes += group_bytes;
+        // The instance owns one GPU; only explicitly host-resident members
+        // need the ordinary backing format.
+        enable_crc =
+            enable_crc && cache_config.topology().group(tag).policy.memory_placement == CacheMemoryPlacement::DEVICE;
     }
-    return payload_bytes;
+    layout.crc_enabled   = enable_crc;
+    layout.storage_bytes = enable_crc ? CrcBlockCopyBatch::encodedBytes(layout.payload_bytes) : layout.payload_bytes;
+    layout.pool_stride   = alignUp(layout.storage_bytes, pool_alignment);
+    return layout;
 }
 
-std::vector<BlockInfo> resolveStorageBuffers(const CacheTopology&                   topology,
-                                             const std::vector<DeviceBlockPoolPtr>& group_pools,
-                                             int                                    layer_id,
-                                             int                                    group_id,
-                                             int                                    block_id) {
+// group_pools is a complete dense table bound to this topology's immutable tag order.
+const DeviceBlockPoolPtr&
+poolForTag(const CacheTopology& topology, const std::vector<DeviceBlockPoolPtr>& group_pools, const std::string& tag) {
+    const auto& tags  = topology.groupTags();
+    const auto  found = std::find(tags.begin(), tags.end(), tag);
+    RTP_LLM_CHECK_WITH_INFO(found != tags.end() && group_pools.size() == tags.size(),
+                            "invalid storage pool binding for tag=%s",
+                            tag.c_str());
+    return group_pools[static_cast<size_t>(std::distance(tags.begin(), found))];
+}
+
+std::vector<BlockInfo> resolveStorageBuffers(const CacheConfig&                cache_config,
+                                             const StorageBackend::PoolsByTag& pools_by_tag,
+                                             int                               layer_id,
+                                             const std::string&                tag,
+                                             int                               block_id) {
+    const auto& topology  = cache_config.topology();
+    const auto& pool      = pools_by_tag.at(tag);
+    const auto  layer_ids = topology.layerIdsForGroup(tag);
+    const auto  layer     = std::find(layer_ids.begin(), layer_ids.end(), layer_id);
     RTP_LLM_CHECK_WITH_INFO(
-        group_id >= 0 && static_cast<size_t>(group_id) < group_pools.size(), "invalid storage group_id=%d", group_id);
-    const auto& group = topology.groupById(static_cast<size_t>(group_id));
-    const auto  layer = std::find(group.layer_ids.begin(), group.layer_ids.end(), layer_id);
-    RTP_LLM_CHECK_WITH_INFO(
-        layer != group.layer_ids.end(), "layer_id=%d does not belong to storage group_id=%d", layer_id, group_id);
-    // Pools are laid out in group-local layer order, including shared hybrid
-    // pools. This is the same model-global -> pool-layer mapping used by
-    // KVCacheGroup::convertIndexToBuffer; model layer IDs cannot be passed
+        layer != layer_ids.end(), "layer_id=%d does not belong to storage tag=%s", layer_id, tag.c_str());
+    // Pools are laid out in group-local layer order. This is the same model-global -> pool-layer mapping used by
+    // SingleTypeCacheManager::convertIndexToBuffer; model layer IDs cannot be passed
     // directly to these physical pools.
-    auto buffers = group_pools[static_cast<size_t>(group_id)]->convertIndexToBuffer(
-        static_cast<int>(std::distance(group.layer_ids.begin(), layer)), block_id);
-    RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage group_id=%d returned no block buffers", group_id);
-    RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= group.kv_block_stride_bytes,
-                            "storage group_id=%d physical kv block is smaller than logical block",
-                            group_id);
-    buffers[0].size_bytes = group.kv_block_stride_bytes;
-    if (group.kv_scale_stride_bytes == 0) {
+    auto buffers = pool->convertIndexToBuffer(static_cast<int>(std::distance(layer_ids.begin(), layer)), block_id);
+    const auto& physical_group = cache_config.physicalGroupForLayer(layer_id, tag);
+    RTP_LLM_CHECK_WITH_INFO(!buffers.empty(), "storage tag=%s returned no block buffers", tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(buffers[0].size_bytes >= physical_group.kvBlockStrideBytes(),
+                            "storage tag=%s physical kv block is smaller than logical block",
+                            tag.c_str());
+    buffers[0].size_bytes = physical_group.kvBlockStrideBytes();
+    if (physical_group.kvScaleStrideBytes() == 0) {
         buffers.resize(1);
         return buffers;
     }
-    RTP_LLM_CHECK_WITH_INFO(buffers.size() >= 2 && buffers[1].size_bytes >= group.kv_scale_stride_bytes,
-                            "storage group_id=%d has an invalid scale block buffer",
-                            group_id);
-    buffers[1].size_bytes = group.kv_scale_stride_bytes;
+    RTP_LLM_CHECK_WITH_INFO(buffers.size() >= 2 && buffers[1].size_bytes >= physical_group.kvScaleStrideBytes(),
+                            "storage tag=%s has an invalid scale block buffer",
+                            tag.c_str());
+    buffers[1].size_bytes = physical_group.kvScaleStrideBytes();
     buffers.resize(2);
     return buffers;
 }
@@ -353,7 +377,7 @@ std::string resolveDiskMountPath(const std::string& paths_csv, int64_t local_wor
 
 BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                         cache_config,
                                        const KVCacheConfig&                       kv_cache_config,
-                                       const KVCacheAllocatorPtr&                 allocator,
+                                       const CoordinatorCacheManagerPtr&          coordinator_manager,
                                        const ParallelismConfig&                   parallelism_config,
                                        std::shared_ptr<StorageBackend>            storage_backend,
                                        std::shared_ptr<BroadcastManager>          broadcast_manager,
@@ -373,22 +397,29 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_LOG_ERROR("topology must contain at least one group");
         return nullptr;
     }
-    const auto groups = alignAllocatorGroups(cache_config, allocator);
+    const auto groups = alignCoordinatorGroups(cache_config, coordinator_manager);
     if (groups.size() != static_cast<size_t>(group_count)) {
         return nullptr;
     }
     std::vector<DeviceBlockPoolPtr> group_pools(static_cast<size_t>(group_count));
-    const auto&                     independent_pools = allocator->groupBlockPools();
-    if (!independent_pools.empty() && independent_pools.size() != static_cast<size_t>(group_count)) {
+    const auto&                     independent_pools = coordinator_manager->groupBlockPools();
+    if (independent_pools.size() != static_cast<size_t>(group_count)) {
         RTP_LLM_LOG_ERROR(
             "independent pool/topology count mismatch, pools=%zu topology=%d", independent_pools.size(), group_count);
         return nullptr;
     }
+    std::unordered_set<const DeviceBlockPool*> unique_pools;
+    for (const auto& pool : independent_pools) {
+        if (!pool || !unique_pools.insert(pool.get()).second) {
+            RTP_LLM_LOG_ERROR("each cache group must own a distinct non-null device pool");
+            return nullptr;
+        }
+    }
     for (int group_id = 0; group_id < group_count; ++group_id) {
-        auto pool = independent_pools.empty() ? allocator->getDeviceBlockPool() :
-                                                independent_pools[static_cast<size_t>(group_id)];
-        if (!pool || groups[static_cast<size_t>(group_id)]->blockPool() != pool) {
-            RTP_LLM_LOG_ERROR("allocator/group direct pool mismatch for group_id %d", group_id);
+        auto        pool = groups[static_cast<size_t>(group_id)]->blockPool();
+        const auto& tag  = cache_config.topology().groupTags()[static_cast<size_t>(group_id)];
+        if (!pool || pool->poolName() != tag || unique_pools.erase(pool.get()) != 1) {
+            RTP_LLM_LOG_ERROR("coordinator/group direct pool mismatch for tag=%s", tag.c_str());
             return nullptr;
         }
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
@@ -396,6 +427,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     const bool       host_enabled = kv_cache_config.enable_memory_cache;
     const bool       disk_enabled = kv_cache_config.enable_disk_cache;
+    const bool       crc_backend_available = CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
+    // HOST buffers are also used directly for disk I/O, so both pools share the disk alignment when needed.
+    const size_t pool_alignment =
+        disk_enabled && !kv_cache_config.disk_cache_buffered_io ? kDirectIOAlignment : kCopyAlignment;
     constexpr size_t bytes_per_mb = 1024UL * 1024UL;
     const auto       valid_budget = [](int64_t mb) {
         return mb > 0 && static_cast<uint64_t>(mb) <= std::numeric_limits<size_t>::max() / bytes_per_mb;
@@ -409,32 +444,31 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         return nullptr;
     }
 
-    std::vector<GroupSetPtr>      group_sets;
-    std::vector<std::vector<int>> group_members;
+    std::vector<GroupSetPtr>              group_sets;
+    std::vector<std::vector<std::string>> group_members;
     if (!buildGroupMembers(cache_config, group_members)) {
         return nullptr;
     }
     if (disk_enabled) {
-        for (const std::vector<int>& members : group_members) {
+        for (const std::vector<std::string>& members : group_members) {
             RTP_LLM_CHECK_WITH_INFO(!members.empty(), "BlockTreeCache aggregation plan contains an empty group set");
-            const size_t group_id = static_cast<size_t>(members.front());
-            if (cache_config.topology().groupById(group_id).policy.group_type == CacheGroupType::LINEAR) {
-                RTP_LLM_LOG_ERROR("disk cache does not support reusable LINEAR group sets, group_id=%zu", group_id);
+            if (cache_config.topology().group(members.front()).policy.group_type == CacheGroupType::LINEAR) {
+                RTP_LLM_LOG_ERROR("disk cache does not support reusable LINEAR group sets, tag=%s",
+                                  members.front().c_str());
                 return nullptr;
             }
         }
     }
 
-    std::vector<size_t> group_set_payload_bytes;
-    group_set_payload_bytes.reserve(group_members.size());
+    std::vector<BackingLayout> backing_layouts;
+    backing_layouts.reserve(group_members.size());
     size_t combined_stride = 0;
-    for (const std::vector<int>& members : group_members) {
-        const size_t payload_bytes = computeGroupSetPayloadBytes(cache_config, members);
-        group_set_payload_bytes.push_back(payload_bytes);
-        const size_t stride = alignUp(payload_bytes, kPoolAlignment);
-        RTP_LLM_CHECK_WITH_INFO(stride <= std::numeric_limits<size_t>::max() - combined_stride,
+    for (const std::vector<std::string>& members : group_members) {
+        const auto layout = computeBackingLayout(cache_config, members, crc_backend_available, pool_alignment);
+        RTP_LLM_CHECK_WITH_INFO(layout.pool_stride <= std::numeric_limits<size_t>::max() - combined_stride,
                                 "BlockTreeCache combined lower-tier stride overflow");
-        combined_stride += stride;
+        combined_stride += layout.pool_stride;
+        backing_layouts.push_back(layout);
     }
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());
@@ -446,11 +480,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
-            const std::vector<int>& members = group_members[group_set_id];
-            const GroupBase&        first   = cache_config.topology().groupById(static_cast<size_t>(members.front()));
-            const std::string       pool_name =
+            const std::vector<std::string>& members = group_members[group_set_id];
+            const GroupBase&                first   = cache_config.topology().group(members.front());
+            const std::string               pool_name =
                 "block_tree_host_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
-            host_pools[group_set_id] = createHostPool(pool_name, group_set_payload_bytes[group_set_id], usable);
+            host_pools[group_set_id] = createHostPool(pool_name, backing_layouts[group_set_id], usable, pool_alignment);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
@@ -471,14 +505,14 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
-            const std::vector<int>& members = group_members[group_set_id];
-            const GroupBase&        first   = cache_config.topology().groupById(static_cast<size_t>(members.front()));
-            const std::string       pool_name =
+            const std::vector<std::string>& members = group_members[group_set_id];
+            const GroupBase&                first   = cache_config.topology().group(members.front());
+            const std::string               pool_name =
                 "block_tree_disk_" + std::string(metricCacheGroupTypeName(first.policy.group_type));
             disk_pools[group_set_id] = createDiskPool(kv_cache_config,
                                                       guard,
                                                       pool_name,
-                                                      group_set_payload_bytes[group_set_id],
+                                                      backing_layouts[group_set_id],
                                                       usable,
                                                       parallelism_config.world_rank,
                                                       parallelism_config.local_rank);
@@ -491,34 +525,30 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     // Canonical CP keys cover a virtual token block. Keep the physical layout
     // unchanged and publish the key stride only to cache matching/remote storage.
     auto cache_topology = cache_config.topologyPtr();
-    if (const auto mapper = allocator->cpSlotMapper(); mapper && mapper->isSharded()) {
+    if (const auto mapper = coordinator_manager->cpSlotMapper(); mapper && mapper->isSharded()) {
         auto         groups  = cache_topology->groups();
         const size_t cp_size = static_cast<size_t>(mapper->cpSize());
         RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block <= std::numeric_limits<size_t>::max() / cp_size,
                                 "canonical CP cache key stride overflow");
         for (auto& group : groups) {
-            group.cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+            auto spec                    = group.spec->clone();
+            spec->cache_key_token_stride = cache_config.seq_size_per_block * cp_size;
+            group.spec                   = std::move(spec);
         }
         cache_topology = CacheTopology::create(std::move(groups), cache_topology->layers());
     }
     group_sets.reserve(group_members.size());
     for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
-        const std::vector<int>&         members = group_members[group_set_id];
+        const std::vector<std::string>& members = group_members[group_set_id];
         std::vector<DeviceBlockPoolPtr> device_pools;
-        std::vector<size_t>             group_ids;
         device_pools.reserve(members.size());
-        group_ids.reserve(members.size());
-        for (int group_id : members) {
-            device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
-            group_ids.push_back(static_cast<size_t>(group_id));
+        for (const auto& tag : members) {
+            device_pools.push_back(poolForTag(cache_config.topology(), group_pools, tag));
         }
-        const auto& first     = cache_topology->groupById(group_ids.front());
-        auto        group_set = createGroupSet(first,
-                                        group_ids.front(),
-                                        std::move(device_pools),
-                                        std::move(host_pools[group_set_id]),
-                                        std::move(disk_pools[group_set_id]));
-        group_set->initialize(group_set_id, cache_topology, std::move(group_ids));
+        const auto& first     = cache_topology->group(members.front());
+        auto        group_set = createGroupSet(
+            first, std::move(device_pools), std::move(host_pools[group_set_id]), std::move(disk_pools[group_set_id]));
+        group_set->initialize(group_set_id, cache_topology, members, backing_layouts[group_set_id]);
         RTP_LLM_LOG_INFO(
             "group_set[%zu] membership sealed: payload_bytes=%zu", group_set_id, group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));
@@ -615,7 +645,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                                         config.max_descriptors_per_transfer_batch,
                                                                         config.transfer_worker_count,
                                                                         config.transfer_queue_max_size,
-                                                                        cache_metrics_reporter);
+                                                                        cache_metrics_reporter,
+                                                                        parallelism_config.world_rank);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
@@ -638,15 +669,23 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                                                    std::move(cache_metrics_reporter));
     if (result->isRemoteCacheEnabled()) {
         const std::shared_ptr<const CacheTopology> storage_topology = cache_topology;
-        const std::vector<DeviceBlockPoolPtr>      resolver_pools   = group_pools;
-        RTP_LLM_CHECK_WITH_INFO(result->storageBackend()->init(
-                                    storage_topology,
-                                    group_pools,
-                                    [storage_topology, resolver_pools](int layer_id, int group_id, int block_id) {
-                                        return resolveStorageBuffers(
-                                            *storage_topology, resolver_pools, layer_id, group_id, block_id);
-                                    }),
-                                "StorageBackend init failed");
+        const CacheConfig                          storage_config   = cache_config;
+        StorageBackend::PoolsByTag                 resolver_pools;
+        const auto&                                tags = storage_topology->groupTags();
+        RTP_LLM_CHECK(tags.size() == group_pools.size());
+        for (size_t i = 0; i < tags.size(); ++i) {
+            RTP_LLM_CHECK_WITH_INFO(resolver_pools.emplace(tags[i], group_pools[i]).second,
+                                    "duplicate storage pool tag=%s",
+                                    tags[i].c_str());
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            result->storageBackend()->init(
+                storage_topology,
+                resolver_pools,
+                [storage_config, resolver_pools](int layer_id, const std::string& tag, int block_id) {
+                    return resolveStorageBuffers(storage_config, resolver_pools, layer_id, tag, block_id);
+                }),
+            "StorageBackend init failed");
     }
     if (!result->init()) {
         RTP_LLM_LOG_ERROR("BlockTreeCache init failed");

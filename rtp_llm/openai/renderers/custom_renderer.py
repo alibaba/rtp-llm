@@ -108,9 +108,12 @@ class StreamStatus:
     tokenizer = None
     responded_string = ""
     delta_output_string = ""
+    has_real_aux_info: bool = True
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.has_real_aux_info = True
+        self._fallback_aux_info: Optional[AuxInfo] = None
 
     def update_output(
         self,
@@ -122,6 +125,18 @@ class StreamStatus:
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
+        if output.aux_info is None:
+            self.has_real_aux_info = False
+            if self._fallback_aux_info is None:
+                self._fallback_aux_info = AuxInfo()
+            # ModelRpcClient attaches the request token IDs even when the backend
+            # omits aux_info. Keep token accounting and length limits independent
+            # of whether timing/cache statistics were requested.
+            if output.input_ids is not None:
+                self._fallback_aux_info.input_len = output.input_ids.shape[-1]
+            self._fallback_aux_info.output_len = len(self.output_ids_list)
+            self._fallback_aux_info.step_output_len = len(delta_output_ids)
+            output.aux_info = self._fallback_aux_info
         self.finish_reason = check_finish_func(
             self.output_ids_list, self.input_token_length
         )
@@ -285,7 +300,9 @@ class RenderedInputs:
         input_urls: List[str] = [],
         input_urls_type: List[MMUrlType] = [],
         preprocess_configs: List[MMPreprocessConfig] = [],
+        v41_inputs=None,
     ):
+        self.v41_inputs = v41_inputs
         self.input_ids = input_ids
         self.rendered_prompt = rendered_prompt
         self.multimodal_inputs = []
@@ -460,6 +477,7 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        v41_inputs=None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -470,6 +488,7 @@ class CustomChatRenderer:
                     request_id=request_id,
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
+                    v41_inputs=v41_inputs,
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
@@ -682,6 +701,9 @@ class CustomChatRenderer:
             result().output_ids = output.output_ids.tolist()
         if generate_config.return_input_ids and output.input_ids is not None:
             result().input_ids = output.input_ids.tolist()
+        # deployment-level gate (post-layers CustomHandler), no per-request flag
+        if output.custom_output is not None:
+            result().custom_output = output.custom_output.tolist()
 
         return final_result
 
@@ -1076,7 +1098,11 @@ class CustomChatRenderer:
                 input_token_length = buffer.output.aux_info.input_len
                 reuse_length = buffer.output.aux_info.reuse_len
                 multimodal_lengths = buffer.output.aux_info.multimodal_lengths
-                aux_info = buffer.output.aux_info if request.aux_info else None
+                aux_info = (
+                    buffer.output.aux_info
+                    if request.aux_info and buffer.has_real_aux_info
+                    else None
+                )
             output_token_length += buffer.output.aux_info.output_len
         return StreamResponseObject(
             choices=[
@@ -1431,6 +1457,7 @@ class CustomChatRenderer:
         input_len_list,
         output_len_list,
         reuse_len_list,
+        custom_output=None,
     ):
         input_token_length = 0
         output_token_length = 0
@@ -1467,6 +1494,11 @@ class CustomChatRenderer:
                 ),
             ),
             aux_info=aux_info,
+            extra_outputs=(
+                ChatCompletionExtraOutputs(custom_output=custom_output.tolist())
+                if custom_output is not None
+                else None
+            ),
         )
 
     def _create_status_list_sync(self, n: int, body: str) -> List[StreamStatusSync]:
@@ -1558,15 +1590,21 @@ class CustomChatRenderer:
         return chat_response.model_dump_json(exclude_none=True)
 
     def render_stream_response_final(
-        self, status_list, input_len_list, output_len_list, reuse_len_list
+        self,
+        status_list,
+        input_len_list,
+        output_len_list,
+        reuse_len_list,
+        custom_output=None,
     ):
         stream_response = self._generate_final_sync(
-            status_list, input_len_list, output_len_list, reuse_len_list
+            status_list, input_len_list, output_len_list, reuse_len_list, custom_output
         )
         chat_response = ChatCompletionStreamResponse(
             choices=stream_response.choices,
             usage=stream_response.usage,
             aux_info=stream_response.aux_info,
+            extra_outputs=stream_response.extra_outputs,
         )
         return chat_response.model_dump_json(exclude_none=True)
 
@@ -1639,10 +1677,15 @@ class CustomChatRenderer:
         return stream_response
 
     def render_stream_response_final_blocking(
-        self, status_list, input_len_list, output_len_list, reuse_len_list
+        self,
+        status_list,
+        input_len_list,
+        output_len_list,
+        reuse_len_list,
+        custom_output=None,
     ):
         stream_response = self._generate_final_sync(
-            status_list, input_len_list, output_len_list, reuse_len_list
+            status_list, input_len_list, output_len_list, reuse_len_list, custom_output
         )
         return stream_response
 
@@ -1650,6 +1693,7 @@ class CustomChatRenderer:
         all_choices = []
         usage = None
         aux_info = None
+        extra_outputs = None
 
         def split_think_tag(text: Optional[str]):
             if text is None:
@@ -1720,6 +1764,7 @@ class CustomChatRenderer:
                         all_choices[i].logprobs = response.choices[i].logprobs
             usage = response.usage or usage
             aux_info = response.aux_info or aux_info
+            extra_outputs = response.extra_outputs or extra_outputs
 
         if usage == None:
             logging.warning(f"No usage returned from stream response. use empty value.")
@@ -1728,6 +1773,7 @@ class CustomChatRenderer:
             choices=all_choices,
             usage=usage,
             aux_info=aux_info,
+            extra_outputs=extra_outputs,
             model="AsyncModel",
         )
         return chat_response.model_dump_json(exclude_none=True)

@@ -126,7 +126,7 @@ protected:
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds("group" + std::to_string(layer_id)).add({i});
             }
         }
 
@@ -211,7 +211,7 @@ protected:
 
 TEST_F(P2PConnectorTest, AsyncWriteByLayer_ReturnsNullWhenWorkerRejectsDispatch) {
     auto resource = createValidKVCacheResource();
-    resource->mutableBlockIds(0).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    resource->mutableBlockIds(resource->groupTags().at(0)).assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
     auto layer_context = std::make_shared<MockLayerContext>(std::move(resource));
 
     EXPECT_EQ(connector_->asyncWriteByLayer(0, layer_context), nullptr);
@@ -662,9 +662,6 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestHasInvalidB
     spec->tag                       = "full";
     group.tag                       = "full";
     group.spec                      = std::move(spec);
-    group.layer_ids                 = {0};
-    group.seq_size_per_block        = 1;
-    group.kernel_seq_size_per_block = 1;
     auto topology   = CacheTopology::create({std::move(group)}, {{0, {"full"}}});
     config.worker_config.topology = topology;
     auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);
@@ -697,9 +694,6 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     spec->tag                       = "full";
     group.tag                       = "full";
     group.spec                      = std::move(spec);
-    group.layer_ids                 = {0};
-    group.seq_size_per_block        = 1;
-    group.kernel_seq_size_per_block = 1;
     auto topology                   = CacheTopology::create({std::move(group)}, {{0, {"full"}}});
     config.worker_config.topology   = topology;
     auto connector = std::make_unique<P2PConnector>(config, mock_layer_block_converter_, nullptr);

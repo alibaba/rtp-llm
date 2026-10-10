@@ -3,6 +3,22 @@
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
 
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordPreservesFullAndAllowsRecomputeAfterReclaim) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::SWA));
+}
+
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptFullRecordDeletesSubtreeAndAllowsRecompute) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::FULL));
+}
+
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptSwaRecordPreservesPendingChildSources) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::SWA, /*pending_child=*/true));
+}
+
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4CorruptFullRecordRejectsPendingChildAtCommit) {
+    ASSERT_NO_FATAL_FAILURE(runCorruptLowerTierLoadScenario(CacheGroupType::FULL, /*pending_child=*/true));
+}
+
 TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierLoadFailureReleasesRefsAndCanRetry) {
     const auto source = GetParam() == TierLayout::HOST_ONLY ? LoadFailureSource::HOST : LoadFailureSource::DISK;
     ASSERT_NO_FATAL_FAILURE(runLowerTierLoadFailureScenario(source));
@@ -124,9 +140,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitPermanentCapacityRejectsBefo
     EXPECT_EQ(failed_result.reuse_len, 0);
 
     for (int batch_id = 0; batch_id < batch_size; ++batch_id) {
-        for (int group_id = 0; group_id < cache_config_.groupNums(); ++group_id) {
-            EXPECT_EQ(failed_resource->blocksNum(batch_id, group_id), 0u)
-                << "batch=" << batch_id << " group=" << group_id;
+        for (const auto& tag : cache_config_.groupTags()) {
+            EXPECT_EQ(failed_resource->blocksNum(batch_id, tag), 0u) << "batch=" << batch_id << " group=" << tag;
         }
     }
 

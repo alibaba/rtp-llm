@@ -19,34 +19,43 @@ inline TransferTask makeTransferTask(std::vector<TransferDescriptor> descriptors
     return TransferTask(std::move(descriptors), timeout);
 }
 
-GroupBase makeTestGroupBase(CacheGroupPolicy policy                = defaultCacheGroupPolicy(CacheGroupType::FULL),
-                            std::vector<int> layer_ids             = {0},
-                            size_t           kv_block_stride_bytes = 16,
-                            size_t           kv_scale_stride_bytes = 0,
-                            uint32_t         block_num             = 128,
-                            size_t           seq_size_per_block    = 1);
+struct TestGroupConfig {
+    GroupBase        group;
+    std::vector<int> layer_ids;
+};
 
-std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> groups);
+TestGroupConfig makeTestGroupBase(CacheGroupPolicy policy    = defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  std::vector<int> layer_ids = {0},
+                                  size_t           kv_block_stride_bytes = 16,
+                                  size_t           kv_scale_stride_bytes = 0,
+                                  uint32_t         block_num             = 128,
+                                  size_t           seq_size_per_block    = 1);
+
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfig> groups);
+
+BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry = false);
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
-                             std::vector<size_t>                  group_ids,
+                             std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
                              std::shared_ptr<HostBlockPool>       host_pool = nullptr,
-                             BlockTreeDiskBlockPoolPtr            disk_pool = nullptr);
+                             BlockTreeDiskBlockPoolPtr            disk_pool              = nullptr,
+                             bool                                 enable_crc             = false,
+                             size_t                               physical_payload_bytes = 0);
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
                                       size_t                                        usable_count,
                                       const std::string&                            pool_name);
 
-std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count);
+std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_crc = false);
 
 class TempDirGuard {
 public:
     explicit TempDirGuard(const char* name);
     ~TempDirGuard();
 
-    TempDirGuard(const TempDirGuard&)            = delete;
+    TempDirGuard(const TempDirGuard&) = delete;
     TempDirGuard& operator=(const TempDirGuard&) = delete;
 
     std::string path;
@@ -57,7 +66,8 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io = nullptr,
                                                      const std::string& pool_name    = "per_rank_transfer_engine_disk",
-                                                     bool               buffered_io  = true);
+                                                     bool               buffered_io  = true,
+                                                     bool               enable_crc   = false);
 
 class StatusDiskBlockIO: public DiskBlockIO {
 public:

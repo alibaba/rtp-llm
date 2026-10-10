@@ -404,26 +404,26 @@ class TestContextParallelProcessor(unittest.TestCase):
                     torch.tensor(expected_positions, dtype=torch.int32),
                 )
 
-    def test_mixed_decode_prefill_batch_is_rejected(self):
+    def test_mixed_decode_prefill_keeps_decode_rows_in_source_map(self):
         decode_tokens = torch.tensor([100, 101], dtype=torch.int32)
         prefill_tokens = torch.arange(14, dtype=torch.int32)
         combo_tokens = torch.cat([decode_tokens, prefill_tokens])
         feature = torch.arange(4, dtype=torch.float32).reshape(2, 2)
 
-        with self.assertRaisesRegex(
-            RuntimeError, "Context parallel supports pure-prefill batches only"
-        ):
-            cp_test.remap_multimodal_inputs(
-                combo_tokens,
-                torch.empty(0, dtype=torch.int32),
-                [feature],
-                [],
-                torch.tensor([4], dtype=torch.int32),
-                0,
-                2,
-                torch.tensor([1, 1, 14], dtype=torch.int32),
-                torch.tensor([0, 0], dtype=torch.int32),
-            )
+        features, _, locs, _, _ = cp_test.remap_multimodal_inputs(
+            combo_tokens,
+            torch.empty(0, dtype=torch.int32),
+            [feature],
+            [],
+            torch.tensor([4], dtype=torch.int32),
+            0,
+            2,
+            torch.tensor([1, 1, 14], dtype=torch.int32),
+            torch.tensor([0, 0], dtype=torch.int32),
+        )
+        self.assertEqual(locs.tolist(), [4])
+        self.assertEqual(len(features), 1)
+        torch.testing.assert_close(features[0], feature)
 
     def test_multimodal_linear_scan_rejects_unordered_ranges(self):
         combo_tokens = torch.arange(14, dtype=torch.int32)
@@ -624,9 +624,7 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         caller_view, published = cp_test.handle_inputs_caller_lengths(
             total_tokens, input_lengths, 0, 2
         )
-        self.assertTrue(
-            torch.equal(caller_view, torch.tensor([6], dtype=torch.int32))
-        )
+        self.assertTrue(torch.equal(caller_view, torch.tensor([6], dtype=torch.int32)))
         self.assertTrue(torch.equal(published, torch.tensor([4], dtype=torch.int32)))
         self.assertTrue(
             torch.equal(input_lengths, torch.tensor([6], dtype=torch.int32))

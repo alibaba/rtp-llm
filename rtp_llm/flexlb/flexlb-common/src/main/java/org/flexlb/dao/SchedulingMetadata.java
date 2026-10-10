@@ -32,8 +32,8 @@ public final class SchedulingMetadata {
                                         int defaultPriority) {
         int priority = PriorityNormalizer.normalize(
                 rawProtoPriority, qosHeader, defaultPriority);
-        boolean explicit = rawProtoPriority != 0
-                || (qosHeader != null && !qosHeader.isBlank());
+        boolean explicit = PriorityNormalizer.isValid(rawProtoPriority)
+                || PriorityNormalizer.isValid(PriorityNormalizer.parseHeader(qosHeader));
         PrioritySource source = explicit
                 ? PrioritySource.EXPLICIT
                 : PrioritySource.DEFAULT;

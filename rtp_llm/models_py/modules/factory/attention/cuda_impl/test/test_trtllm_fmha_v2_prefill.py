@@ -6,9 +6,11 @@ This mode is used for dynamic batch processing.
 """
 
 import unittest
+from unittest import mock
 
 import torch
 
+from rtp_llm.models_py.modules.factory.attention.cuda_impl import trt
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.trt_tests.test_trt_base import (
     TRTLLMFMHAv2TestBase,
 )
@@ -23,6 +25,20 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
 from rtp_llm.models_py.utils.arch import is_sm12x, is_sm90
 from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import get_typemeta
+
+
+class TestTRTLLMWorkspaceReuse(unittest.TestCase):
+    def test_workspace_reuse_after_inference_mode(self):
+        with mock.patch.object(trt, "_g_trtllm_fmha_v2_workspace_pool", []):
+            with torch.inference_mode():
+                workspace = trt._get_trtllm_fmha_v2_workspace("cpu", 128)
+                workspace.fill_(1)
+                trt._release_trtllm_fmha_v2_workspace(workspace)
+            reused = trt._get_trtllm_fmha_v2_workspace("cpu", 128)
+            self.assertEqual(reused.data_ptr(), workspace.data_ptr())
+            self.assertEqual(reused.count_nonzero().item(), 0)
+            reused.fill_(2)
+            self.assertTrue(torch.all(reused == 2).item())
 
 
 class TestTRTLLMFMHAv2PrefillOpBF16(TRTLLMFMHAv2TestBase):

@@ -2,12 +2,15 @@ package org.flexlb.mockengine;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
+import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -22,14 +25,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Task35 场景 C：11 种故障注入逐一验证 —— 明确错误传播到调度器终态，
- * post-send 不确定性进入安全 fence，调度器不崩溃且同集群其余引擎不受影响。
+ * post-send 不确定性在请求 TTL 内等待确认，到期回收，且同集群其余引擎不受影响。
  *
  * <p>覆盖 {@link FaultInjectionConfig} 全部字段：failOnEnqueue、enqueueErrorCode、
  * enqueueErrorMessage、enqueueDelayMs、generateDelayMs、generateError、fetchError、
  * noRespond、kvPressureTokens、queueDepthLimit、crashAfterNRequests。
  *
  * <p>控制面（enqueueBatch）故障走真实调度器栈：明确拒绝断言 8510 终态，
- * missing ACK 则断言保守保留记账；数据面（generate_stream/fetch_response）
+ * missing ACK 则断言 TTL 前保留记账、到期回收；数据面（generate_stream/fetch_response）
  * 故障不经过 LB 控制面，用直连 RPC 断言 mock 行为，同时验证调度器路径不受影响。
  *
  * <p>已知缺陷（只报不修，见任务报告）：{@code enqueueErrorCode} 字段从未被
@@ -68,7 +71,7 @@ class FaultInjectionE2ETest {
 
             Response failed = submitTo(h, 0, 9101);
             assertFalse(failed.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), failed.getCode(),
+            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), failed.getCode(),
                     "engine-side enqueue rejection must propagate as 8510: " + failed.getErrorMessage());
             assertTrue(failed.getErrorMessage().contains("injected-boom"),
                     "custom enqueueErrorMessage must reach the caller: " + failed.getErrorMessage());
@@ -270,7 +273,7 @@ class FaultInjectionE2ETest {
                     .build());
             Response rejected = submitTo(h, 0, 9802);
             assertFalse(rejected.isSuccess());
-            assertEquals(StrategyErrorType.BATCH_DISPATCH_FAILED.getErrorCode(), rejected.getCode());
+            assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), rejected.getCode());
             assertTrue(rejected.getErrorMessage().contains("queue depth limit exceeded"),
                     rejected.getErrorMessage());
 
@@ -281,11 +284,14 @@ class FaultInjectionE2ETest {
 
     // ==================== C9 crashAfterNRequests ====================
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @Timeout(30)
-    void c09_crash_after_n_requests_fences_missing_ack_and_isolates_healthy_engine() throws Exception {
+    void c09_crash_after_n_requests_expires_missing_ack_and_isolates_healthy_engine(
+            boolean clientCancellation) throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
-                BASE_PORT + 80, 2, 1, "5", 1.0, false, DecisionPolicyConfig.single())) {
+                BASE_PORT + 80, 2, 1, "5", 1.0, true, DecisionPolicyConfig.single())) {
+            h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);
@@ -294,7 +300,7 @@ class FaultInjectionE2ETest {
                     .build());
 
             // 首个 EnqueueBatch 触发 crash 并返回空 ACK。请求可能已经越过发送边界，
-            // 因此 Master 必须保留 Future 与端点记账，直到 Engine 给出权威终态。
+            // Master 在请求 TTL 内等待匹配状态；持续无确认时必须本地回收。
             h.prefillSelector = ctx -> 0;
             CompletableFuture<Response> crashed = h.scheduler.submit(h.context(9902, 50));
             CountDownLatch crashedTerminal = new CountDownLatch(1);
@@ -310,16 +316,44 @@ class FaultInjectionE2ETest {
             assertEquals(0, prefillEndpoint.getIndividuallyTrackedRequestCount(),
                     "batch delivery must not consume the route-request ledger");
             assertFalse(crashedTerminal.await(250, TimeUnit.MILLISECONDS),
-                    "missing ACK without an authoritative Engine terminal must stay fenced");
-            assertFalse(crashed.isDone(), "the fenced request must remain incomplete");
+                    "missing ACK stays pending before the request inactivity deadline");
+            assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
+            if (clientCancellation) {
+                h.scheduler.cancelRequest(9902L, 0L, CancelReason.CLIENT_CANCELLED);
+            }
+            assertEquals(0L, engineCancelCalls(prefill),
+                    "uncertain delivery and ordinary cancellation must not send Engine Cancel");
 
-            // 一个请求处于不确定性 fence 时，不得阻塞同集群的健康 Prefill。
+            // 一个请求等待 Engine 确认时，不得阻塞同集群的健康 Prefill。
             Response healthy = submitTo(h, 1, 9904);
             assertTrue(healthy.isSuccess(), "the crash never spreads to the healthy engine");
-            assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated fence");
+            assertFalse(crashed.isDone(), "healthy delivery must not settle the unrelated unconfirmed request");
             assertEquals(1, prefillEndpoint.getInflightBatchCount());
             assertEquals(1, prefillEndpoint.getLocallyOwnedRequestCount());
+
+            Response expired = crashed.get(5, TimeUnit.SECONDS);
+            assertFalse(expired.isSuccess());
+            StrategyErrorType expectedError = clientCancellation
+                    ? StrategyErrorType.REQUEST_CANCELLED : StrategyErrorType.RESOURCE_EXHAUSTED;
+            assertEquals(expectedError.getErrorCode(), expired.getCode());
+            // Cleanup may wait for inactivity, but it cannot replace an earlier client cancellation.
+            assertTrue(expired.getErrorMessage().contains(clientCancellation
+                    ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
+            assertEquals(0, prefillEndpoint.getInflightBatchCount());
+            assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
+            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 0
+                            && h.decodeEndpoint(0).getInflightCount() == 0,
+                    2_000, "TTL must release the crashed request's scheduler and Decode accounting");
+            assertTrue(prefill.isStopped(), "cleanup cannot depend on the crashed Engine returning");
+            for (var engine : h.services.values()) {
+                assertEquals(0L, engineCancelCalls(engine), "TTL only releases Master accounting");
+            }
         }
+    }
+
+    private static long engineCancelCalls(JavaMockEngineCluster.FastRpcService engine) {
+        var counts = (java.util.Map<?, ?>) engine.getSnapshot().get("rpc_counts");
+        return ((Number) counts.get("cancel")).longValue();
     }
 
     // ==================== 数据面直连 helpers ====================

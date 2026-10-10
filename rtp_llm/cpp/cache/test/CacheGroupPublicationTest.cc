@@ -21,15 +21,20 @@ TEST(CacheGroupPublicationTest, PublishesOnlyDenseReusableGroups) {
 }
 
 TEST(CacheGroupPublicationTest, SelectsEveryEligibleGroupInOrder) {
-    const auto ids = reuseParticipatingGroupIdsFromPolicies({
+    const std::vector<CacheGroupPolicy> policies({
         policyOf(CacheGroupType::FULL),
         policyOf(CacheGroupType::SWA),
         policyOf(CacheGroupType::FULL, false),
         policyOf(CacheGroupType::FULL),
         policyOf(CacheGroupType::LINEAR),
     });
-    EXPECT_EQ((std::vector<int>{0, 3}), ids);
-    EXPECT_TRUE(reuseParticipatingGroupIdsFromPolicies({}).empty());
+    std::vector<size_t>                 selected;
+    for (size_t gid = 0; gid < policies.size(); ++gid) {
+        if (cacheGroupPublishesPrefixChain(policies[gid])) {
+            selected.push_back(gid);
+        }
+    }
+    EXPECT_EQ((std::vector<size_t>{0, 3}), selected);
 }
 
 }  // namespace rtp_llm::test

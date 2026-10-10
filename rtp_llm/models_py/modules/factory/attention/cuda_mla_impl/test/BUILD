@@ -5,8 +5,11 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual"],
-    exec_properties = {'gpu': 'H20'},
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test(
@@ -15,8 +18,11 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual"],
-    exec_properties = {'gpu': 'H20'},
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )
 
 py_test(
@@ -25,6 +31,9 @@ py_test(
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
-    tags = ["manual"],
-    exec_properties = {'gpu': 'H20'},
+    tags = [
+        "H20_CU13",
+        "manual",
+    ],
+    exec_properties = {"gpu": "H20_CU13"},
 )

@@ -91,6 +91,27 @@ TEST_F(BlockRefCounterTest, testMultipleBlocksRefCount) {
     EXPECT_EQ(counter.busyBlockNum(), 0);
 }
 
+TEST_F(BlockRefCounterTest, testDecrementWithFreeInfo) {
+    BlockRefCounter counter(block_nums_);
+
+    std::vector<int> blocks          = {1, 2, 3, 4};
+    std::vector<int> retained_blocks = {1, 3};
+    counter.incrementRefCounter(blocks);
+    counter.incrementRefCounter(retained_blocks);
+
+    auto free_blocks = counter.decrementRefCounterWithFreeInfo(blocks);
+    EXPECT_EQ(free_blocks, (std::vector<int>{2, 4}));
+    EXPECT_EQ(counter.getRefCounter(1), 1);
+    EXPECT_EQ(counter.getRefCounter(2), 0);
+    EXPECT_EQ(counter.getRefCounter(3), 1);
+    EXPECT_EQ(counter.getRefCounter(4), 0);
+    EXPECT_EQ(counter.busyBlockNum(), 2);
+
+    free_blocks = counter.decrementRefCounterWithFreeInfo(retained_blocks);
+    EXPECT_EQ(free_blocks, (std::vector<int>{1, 3}));
+    EXPECT_EQ(counter.busyBlockNum(), 0);
+}
+
 // 测试重复块索引
 TEST_F(BlockRefCounterTest, testDuplicateBlockIndices) {
     BlockRefCounter counter(block_nums_);
@@ -129,6 +150,9 @@ TEST_F(BlockRefCounterTest, testEmptyVectorOperations) {
 
     counter.decrementRefCounter(empty_blocks);
     EXPECT_EQ(counter.busyBlockNum(), 0);
+
+    EXPECT_TRUE(counter.decrementRefCounterWithFreeInfo(empty_blocks).empty());
+    EXPECT_EQ(counter.busyBlockNum(), 0);
 }
 
 // ==================== 错误处理测试 ====================
@@ -150,6 +174,17 @@ TEST_F(BlockRefCounterTest, testDecrementZeroRefCount) {
 
     // 验证状态：块1的引用计数应该已经被减少了
     EXPECT_EQ(counter.getRefCounter(1), 0);
+    EXPECT_EQ(counter.busyBlockNum(), 0);
+}
+
+TEST_F(BlockRefCounterTest, testDecrementWithFreeInfoZeroRefCount) {
+    BlockRefCounter counter(block_nums_);
+
+    counter.incrementRefCounter({1});
+    EXPECT_THROW(counter.decrementRefCounterWithFreeInfo({1, 2}), rtp_llm::RTPException);
+
+    EXPECT_EQ(counter.getRefCounter(1), 0);
+    EXPECT_EQ(counter.getRefCounter(2), 0);
     EXPECT_EQ(counter.busyBlockNum(), 0);
 }
 

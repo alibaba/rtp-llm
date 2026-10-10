@@ -37,6 +37,11 @@ getArgs(const GenerateOutputs& outputs) {
     return std::make_tuple(input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list);
 }
 
+std::optional<th::Tensor> getCustomOutput(const GenerateOutputs& outputs) {
+    // Match the Python renderer's request-level extra_outputs (last choice).
+    return outputs.generate_outputs.empty() ? std::nullopt : outputs.generate_outputs.back().custom_output;
+}
+
 void RenderContext::render_stream_response_first_blocking(int n) {
     py::gil_scoped_acquire acquire;
     auto                   response = render_->attr("render_stream_response_first_blocking")(n);
@@ -80,7 +85,7 @@ void RenderContext::render_stream_response_final_blocking(const GenerateOutputs&
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
     auto response = render_->attr("render_stream_response_final_blocking")(
-        *status_list_, input_len_list, output_len_list, reuse_len_list);
+        *status_list_, input_len_list, output_len_list, reuse_len_list, getCustomOutput(outputs));
     complete_responses_->append(response);
 }
 
@@ -143,8 +148,8 @@ std::string RenderContext::render_stream_response_flush(const GenerateOutputs&  
 std::string RenderContext::render_stream_response_final(const GenerateOutputs& outputs) {
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
-    auto json_response =
-        render_->attr("render_stream_response_final")(*status_list_, input_len_list, output_len_list, reuse_len_list);
+    auto json_response = render_->attr("render_stream_response_final")(
+        *status_list_, input_len_list, output_len_list, reuse_len_list, getCustomOutput(outputs));
     auto res = py::cast<std::string>(json_response);
     return res;
 }

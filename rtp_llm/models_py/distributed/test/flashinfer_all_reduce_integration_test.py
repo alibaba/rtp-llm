@@ -27,9 +27,8 @@ def _worker(rank: int, port: int) -> None:
             base = torch.arange(
                 tokens * 5120, device="cuda", dtype=torch.float32
             ).reshape(tokens, 5120)
-            input_tensor = (
-                ((base.remainder(251) - 125) / 64).to(torch.bfloat16)
-                * (rank + 1)
+            input_tensor = ((base.remainder(251) - 125) / 64).to(torch.bfloat16) * (
+                rank + 1
             )
             reference = input_tensor.clone()
             dist.all_reduce(reference)
@@ -61,6 +60,7 @@ def _worker(rank: int, port: int) -> None:
             torch.cuda.synchronize()
             expected = torch.full_like(graph_output, value * 3)
             torch.testing.assert_close(graph_output, expected, rtol=0, atol=0)
+        dist.barrier()
     finally:
         communicator.destroy()
         dist.destroy_process_group()

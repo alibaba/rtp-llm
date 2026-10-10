@@ -1,32 +1,8 @@
-"""Balance-category cases: scheduling result properties.
+"""Routing tests for admission, queue completion and token-sensitive Prefill placement.
 
-Theme: RESULT-PROPERTY cases (task #61 rework, superseding
-scheduling_smoke.py S1-S12) — they assert observable outcome properties
-(P-series), not mechanism narratives; every measured property is graded
-against the central band table (grade.GRADE_BANDS) — strict=优异 /
-normal=良好 / loose 地板（超出即不可用）— and each case returns its
-achieved grade for the run-level verdict (all strict=优异 / all
-≥normal=良好 / any beyond loose=不可用).  Hard invariants (P2
-no-starvation, P6 completeness) carry no band: violation is unusable at
-every grade.
-
-Case map (task #61/#62 disposition):
-
-  balance_uniform_serial        <- S1+S6+S8 merged (P1+P2, two variants:
-                                    plain / speed-heterogeneous injection)
-  balance_concurrent_mix        <- S7 strengthened (P1 relaxed + P2 + P6)
-  balance_overload_avoid_prefill<- S4 + new P7 short-request protection
-                                    (P5 graded + P6 + P7 dual-caliber)
-  balance_overload_avoid_decode <- S11 strengthened (P5 delta-caliber graded
-                                    + P6 + takeover assertions)
-  balance_decode_spread         <- S3+S10 merged (P2+P1, n=10/50 two tiers)
-  balance_len_mixed             <- L1 bimodal length mix (P3 token-share
-                                    graded — first P3 calibration + P2 short
-                                    request spread + P6)
-
-Result properties are asserted profile-agnostically: all balance cases
-run under every profile.
-"""
+BEST_ONLY does not promise uniform request counts across equal-cost Prefill
+workers. Distribution assertions are used only with a constructed cost or
+admission difference."""
 
 from __future__ import annotations
 
@@ -37,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ..context import CaseContext, CaseDef, rid_base
 from ..grade import GradeReport
-from ..harness import TTL_DRAIN_TIMEOUT_S, AssertUtils
+from ..harness import REQUEST_CLEANUP_TIMEOUT_S, AssertUtils
 
 BALANCE_CASES: list[CaseDef] = []
 
@@ -160,128 +136,14 @@ def _drain_fired(ops, fired: list, fired_handles: dict, wait_s: float = 30.0) ->
 
 
 @case(
-    "balance_uniform_serial",
-    source="scheduling_smoke.py S1+S6+S8 (merged, task #61)",
-)
-def balance_uniform_serial(ctx: CaseContext):
-    """Homogeneous serial traffic spreads evenly across equivalent engines.
-
-    Result properties (graded): P1 request-uniformity max-share + P2
-    no-starvation, measured over n=20 serial requests per variant, counted
-    from CLIENT landing addresses.
-
-    Two parameterized variants:
-      * plain — no injection;
-      * speed_hetero — one prefill slowed via set_perf (200ms fixed).  The
-        injection is a regression guard, not a routing signal: the prefill
-        score is ledgerWaitMs + FORMULA estimate (a pure function of the
-        request's token shape) + batcherWaitMs, so engine *speed* never
-        enters the score and serial requests leave no backlog — both
-        engines stay tied and the tie window is sampled uniformly per
-        request.  A skewed split under this variant would mean the score
-        model started leaking speed or leaving residue — a real defect the
-        P1 property catches at any grade.
-    """
-    ops = ctx.ops()
-    report = GradeReport(run_grade=ctx.grade)
-    n = 20
-    perf_engine = None
-    try:
-        for variant, slow in (("plain", False), ("speed_hetero", True)):
-            if slow:
-                prefill_names = _prefill_names(ops)
-                if len(prefill_names) >= 2:
-                    ops.set_perf(prefill_names[1], prefill_fixed_ms=200.0)
-                    perf_engine = prefill_names[1]
-                    time.sleep(1.5)  # master perf sync
-
-            addrs = []
-            failure = None
-            for _ in range(n):
-                rid = ops.next_request_id(rid_base(ctx, "balance"))
-                keys = [rid * 100 + j for j in range(3)]
-                addr, err = ops.run_one_request(
-                    rid,
-                    output_len=2,
-                    block_keys=keys,
-                    stream_timeout_s=STREAM_TIMEOUT_S,
-                )
-                if err:
-                    failure = f"{variant}: rid={rid} failed: {err}"
-                    break
-                addrs.append(addr)
-            if failure:
-                report.invariant("P6", False, context=variant, detail=failure)
-                break
-
-            addr_map = ops.addr_to_name()
-            dist = Counter(addr_map.get(a, a) for a in addrs)
-            used = len(dist)
-            max_share = max(dist.values()) / n
-            dist_json = json.dumps(dict(dist), sort_keys=True)
-            report.check(
-                "P1",
-                max_share,
-                context=variant,
-                detail=f"n={n}, dist={dist_json}",
-            )
-            report.invariant("P2", used >= 2, context=variant, detail=f"workers={used}")
-
-        slow_note = (
-            f", speed_injection={perf_engine} (observational: engine speed "
-            f"is not a prefill-score input)"
-            if perf_engine
-            else ""
-        )
-        return report.finish(
-            f"variants=plain+speed_hetero, n={n}, grades: {report.summary()}"
-            f"{slow_note}"
-        )
-    except Exception as exc:
-        return False, f"exception: {exc!r}"
-    finally:
-        if perf_engine:
-            try:
-                ops.set_perf(perf_engine, prefill_fixed_ms=100.0)
-            except Exception:
-                pass
-
-
-@case(
     "balance_concurrent_mix",
     source="scheduling_smoke.py S7 (strengthened, task #61)",
 )
 def balance_concurrent_mix(ctx: CaseContext):
-    """A concurrent mixed burst must not collapse onto a single engine.
+    """All requests in a bounded concurrent burst must complete.
 
-    Result properties: P1 (relaxed band inheritance) + P2 no-starvation +
-    P6 completeness over a 20-request / 20-way-concurrent burst, counted
-    from client landing addresses.
-
-    P1 band note (relax=1): under a concurrent burst the master may process
-    the burst in several groups; within a group every request is evaluated
-    against the same live ledger snapshot, so the split is a fresh uniform
-    draw per group — group-splitting is CORRECT balancing behaviour, not a
-    defect.  The effective bands are therefore shifted one tier right
-    (strict→0.75, normal/loose→0.85): the calibrated loose floor (0.85,
-    false-failure < 1% at 2 engines / 20 samples) is never widened past
-    itself.
-
-    P6 note (intake2 scheduler contract, task #65 intake2-sync): the
-    RequestScheduler/GroupPolicy architecture fails fast with retryable
-    NO_PREFILL_WORKER (8402) once the per-engine inflight-batch admission
-    ledger is saturated — dispatcher.maxInflightBatchesPerPrefillWorker
-    (harness default 4) x 2 prefill workers = 8 concurrent batch
-    reservations; each burst request is its own batch, so a 20-way burst
-    exceeds the floor and the excess is rejected at select time via
-    projection PROJECTION_BLOCKED_DELIVERY_CAPACITY_BATCH_ADMISSION
-    (flexlb-sync BatchPrefillAdmission.reserveBatch +
-    WorkerBatcher.admissionBlockUnderLock).  The old "master queues the
-    entire burst" assumption no longer holds: completeness now means
-    (a) no failure other than batch-admission backpressure, and (b) at
-    least the 8-reservation floor admitted — the first 8 arrivals always
-    find a permit (releases only raise the floor).
-    """
+    Batch credits defer QUEUE delivery rather than rejecting publication. The
+    landing distribution is diagnostic; equal-cost Prefill ties need not be random."""
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
     base = rid_base(ctx, "balance")
@@ -308,29 +170,12 @@ def balance_concurrent_mix(ctx: CaseContext):
         dist = Counter(addr_map.get(a, a) for a in addrs)
         used = len(dist)
         n_ok = len(addrs)
-        max_share = max(dist.values()) / n_ok if n_ok else 1.0
         dist_json = json.dumps(dict(dist), sort_keys=True)
 
-        admission_denied = [f for f in failures if "NO_PREFILL_WORKER" in f]
-        hard_failures = [f for f in failures if "NO_PREFILL_WORKER" not in f]
         report.invariant(
-            "P6",
-            not hard_failures and n_ok >= 8,
-            detail=(
-                f"completed={n_ok}/20, batch-admission-denied="
-                f"{len(admission_denied)} (retryable 8402, intake2 "
-                f"contract), failures={hard_failures[:2]}"
-            ),
+            "P6", not failures and n_ok == len(rids),
+            detail=f"completed={n_ok}/{len(rids)}, failures={failures[:2]}, dist={dist_json}",
         )
-        report.check(
-            "P1",
-            max_share,
-            context="burst20",
-            relax=1,
-            detail=f"ok={n_ok}, dist={dist_json} (concurrent group-split "
-            f"is correct behaviour — bands shifted one tier)",
-        )
-        report.invariant("P2", used >= 2, detail=f"workers={used}")
 
         return report.finish(
             f"burst=20x20-way, workers={used}, " f"grades: {report.summary()}"
@@ -367,8 +212,8 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
       6. wave: 5 requests fired back-to-back (0.12s spacing) so ALL five
          routing decisions happen while the seed's ~2.06s ledger is still
          live; timings are collected after the last decision — a serial
-         consume-and-fire wave would outlive the ledger and re-open the
-         tie window mid-wave.
+         consume-and-fire wave could outlive the ledger and erase the
+         cost difference mid-wave.
 
     P7 dual caliber (profile-dependent measurement, one band table):
       * NON_BATCH dispatch — client TTFT: schedule-return → first stream
@@ -526,7 +371,7 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
 
         # -- cool engine fast again; baseline anchors the P7 denominator
         #    (hot still carries most of the ~2.06s seed ledger → baseline
-        #    deterministically lands cool, well outside the tie window).
+        #    selects the lower-TTFT cool worker).
         ops.set_perf(cool, prefill_fixed_ms=100.0)
         time.sleep(0.3)
         base_rid = ops.next_request_id(base)
@@ -626,7 +471,7 @@ def balance_overload_avoid_prefill(ctx: CaseContext):
             # stopped short of it and the residue poisoned later cases on
             # this shared env.  Still not asserted (this finally is
             # hygiene, the case's own contract lives in its verdict).
-            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+            AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
         except Exception:
             pass
 
@@ -735,90 +580,36 @@ def balance_overload_avoid_decode(ctx: CaseContext):
                 pass
 
 
-@case(
-    "balance_decode_spread",
-    source="scheduling_smoke.py S3+S10 (merged, task #61)",
-)
-def balance_decode_spread(ctx: CaseContext):
-    """Decode traffic spreads across the decode fleet at both small and
-    large sample sizes.
-
-    Result properties: P2 no-starvation (min engines used) + P1 distribution
-    bound (case-calibrated 4-engine bands) + P6 completeness, parameterized
-    over n=10 and n=50 tiers.  Landing points are engine-completed counts
-    (decode deltas via mock snapshots).
-
-    P1 band note (case override, 4-engine caliber): the decode selector is
-    KV_USAGE_WEIGHTED_RANDOM, not a uniform draw — weights track per-worker
-    KV residue left by earlier cases, so the 2-engine bands do not apply.
-    Calibration (task #61, batch-window, engine-completed deltas): n=10
-    observed max_share 0.40 (dist 1/4/3/2), n=50 observed 0.40 (dist
-    20/10/13/7 — the KV-weighted draw routinely puts ~40% on the residue-
-    heaviest engine).  Bands kept at n=10: 0.60/0.70/0.80, n=50:
-    0.40/0.50/0.60 — the n=50 strict tier sits ON the observed mode (a
-    quality bar for weight convergence, not a statistical guarantee);
-    widen from full-suite regression data in task #63 if the
-    residue-inheritance across predecessor cases pushes it over.
-    """
+@case("balance_decode_rotation", source="Decode rotation over settled admissible workers")
+def balance_decode_rotation(ctx: CaseContext):
+    """Settled, healthy Decode workers all participate in repeated routing."""
     ops = ctx.ops()
-    report = GradeReport(run_grade=ctx.grade)
+    names = _decode_names(ops)
+    if len(names) < 2:
+        return False, "need at least two Decode workers"
     try:
-        tiers = (
-            # (n, min_used, P1 case bands)
-            (10, 2, {"strict": 0.60, "normal": 0.70, "loose": 0.80}),
-            (50, 3, {"strict": 0.40, "normal": 0.50, "loose": 0.60}),
+        clean, detail = AssertUtils.inflight_clean(_master_http(ops), 15.0)
+        if not clean:
+            return False, f"fixture has outstanding work: {detail}"
+        before = ops.snapshot_by_name()
+        baseline = {name: before[name].get("completed", 0) for name in names}
+        count = 2 * len(names)
+        for _ in range(count):
+            rid = ops.next_request_id(rid_base(ctx, "balance"))
+            _, error = ops.run_one_request(
+                rid, output_len=2, block_keys=[rid * 100],
+                stream_timeout_s=STREAM_TIMEOUT_S,
+            )
+            if error:
+                return False, f"rid={rid}: {error}"
+            clean, detail = AssertUtils.inflight_clean(_master_http(ops), 15.0)
+            if not clean:
+                return False, f"rid={rid} did not settle: {detail}"
+        after = ops.snapshot_by_name()
+        deltas = {name: after[name].get("completed", 0) - baseline[name] for name in names}
+        return all(value > 0 for value in deltas.values()) and sum(deltas.values()) == count, (
+            f"Decode completions={deltas}, expected {count} total and every healthy worker used"
         )
-        for n, min_used, bands in tiers:
-            decode_names = _decode_names(ops)
-            if len(decode_names) < 2:
-                return False, "need >=2 decode workers"
-            snap0 = ops.snapshot_by_name()
-            baseline = {name: snap0[name].get("completed", 0) for name in decode_names}
-
-            failures = []
-            for _ in range(n):
-                rid = ops.next_request_id(rid_base(ctx, "balance"))
-                keys = [rid * 100 + j for j in range(3)]
-                _, err = ops.run_one_request(
-                    rid,
-                    output_len=2,
-                    block_keys=keys,
-                    stream_timeout_s=STREAM_TIMEOUT_S,
-                )
-                if err:
-                    failures.append(f"rid={rid}: {err}")
-
-            snap1 = ops.snapshot_by_name()
-            deltas = {
-                name: snap1[name].get("completed", 0) - baseline.get(name, 0)
-                for name in decode_names
-            }
-            total = sum(deltas.values())
-            used = sum(1 for v in deltas.values() if v > 0)
-            max_share = max(deltas.values()) / n if n else 1.0
-            deltas_json = json.dumps(deltas, sort_keys=True)
-
-            report.invariant(
-                "P6",
-                not failures and total >= n,
-                context=f"n{n}",
-                detail=f"failures={failures[:2]}, total_delta={total}/{n}",
-            )
-            report.invariant(
-                "P2",
-                used >= min_used,
-                context=f"n{n}",
-                detail=f"used={used}/{len(decode_names)} (need >= {min_used})",
-            )
-            report.check(
-                "P1",
-                max_share,
-                context=f"n{n}",
-                bands=bands,
-                detail=f"dist={deltas_json} (4-engine KV-weighted caliber)",
-            )
-
-        return report.finish(f"tiers=n10+n50, grades: {report.summary()}")
     except Exception as exc:
         return False, f"exception: {exc!r}"
 
@@ -828,48 +619,13 @@ def balance_decode_spread(ctx: CaseContext):
     source="length-heterogeneity dimension L1 (task #62)",
 )
 def balance_len_mixed(ctx: CaseContext):
-    """Bimodal length mix balances TOKEN footprint, not request count.
+    """Two long requests per wave must select different Prefill workers.
 
-    Result properties (graded): P3 token-weighted max-share (first
-    calibrated measurement of the P3 band), P2 short-request spread (both
-    engines take short work), P6 completeness.
-
-    Construction (5 waves, each 2 long + 6 short fire-and-forget):
-      * ONE formula for both sides (task #67): mock execution time and the
-        master's ledger prediction share the production DSv4 fit, so a
-        long request's ledger entry decays on exactly the clock the mock
-        sleeps — the diversion window equals the fitted prefill time;
-      * long ladder 131072..147456: the fit predicts ~1.72-2.06 s all-miss,
-        wide enough to choreograph a wave well inside the window (the old
-        32k ladder predicted ~342 ms — too narrow to orchestrate against,
-        which the retired set_perf(3000ms) crutch used to paper over);
-      * wave choreography (S4 ledger technique, symmetric — no single hot
-        engine is manufactured):
-        1. L_a fired on an empty ledger pair -> uniform tie-window pick (X);
-        2. poll X pending (engine-side proof the ledger entry exists);
-        3. L_b fired immediately after that proof: X carries the FULL
-           fitted ledger (~1.72-2.06 s) while Y is still empty — a gap
-           ~20x the 10%/20ms tie window, so L_b deterministically lands
-           on Y with no timing assumption about when shorter requests
-           register their own ledger entries (the t+200ms variant of this
-           step raced the shorts' registration and split the longs 7/3);
-        4. poll Y pending (both longs now provably in flight);
-        5. 6 shorts fired while BOTH longs execute: X has decayed only by
-           the polls' overhead (tens of ms — inside the ~190ms tie window
-           of the ~1.9s ledgers), so the shorts spread across both
-           engines; the exact split does not matter for P3 because the
-           shorts carry ~1% of the wave's tokens;
-        6. drain the wave to terminal state + master inflight clean,
-           so the next wave starts from a settled (double-zero) ledger.
-      * per wave: X = L_a + ~3 shorts, Y = L_b + ~3 shorts in tokens; the
-        ladder is cyclic (L_a series == L_b series), so the aggregate
-        token share is pinned at ~0.50 for ANY short split (see the P3
-        calibration note in grade.GRADE_BANDS).
-
-    Why not request-count uniformity (P1): the wave deliberately lands
-    BOTH long requests' complements asymmetrically in flight order —
-    token balance and request-count balance genuinely conflict in this
-    scene, and P3 is the property that matters.
+    Wait until the first long request is visible before submitting the second;
+    the empty worker then has lower predicted TTFT. Submit six short requests
+    while both long requests execute and require every request to complete.
+    Token share is measured across five waves; short-request counts need not
+    be uniform between equal-cost workers.
     """
     ops = ctx.ops()
     report = GradeReport(run_grade=ctx.grade)
@@ -906,14 +662,16 @@ def balance_len_mixed(ctx: CaseContext):
                 break
             # 3. L_b immediately after the L_a dispatch proof: X carries the
             #    full fitted ledger (~1.72-2.06 s) while Y is still empty —
-            #    ~20x the tie window, so L_b deterministically lands on Y
-            #    (no dependency on the shorts' ledger registration timing).
+            #    the lower-TTFT empty worker must receive L_b.
             rid = ops.next_request_id(base)
             name_b, err = _fire_request(
                 ops, rid, fired, fired_handles, input_len=lb, output_len=2
             )
             if err:
                 failure = f"wave{wave} L_b: {err}"
+                break
+            if name_b == name_a:
+                failure = f"wave{wave}: second long request ignored empty worker"
                 break
             landed.append((rid, name_b, lb))
             if not _poll_engine_pending(ops, name_b, 1):
@@ -922,7 +680,7 @@ def balance_len_mixed(ctx: CaseContext):
             # 4. 6 shorts while BOTH longs are in flight: X has decayed only
             #    by the polls' overhead (tens of ms, inside the ~190ms tie
             #    window of the ~1.9s ledgers), so the shorts spread evenly —
-            #    both engines take short work (P2) and the wave stays
+            #    the wave stays
             #    token-symmetric for any exact split.
             for short_idx in range(6):
                 rid = ops.next_request_id(base)
@@ -969,7 +727,6 @@ def balance_len_mixed(ctx: CaseContext):
             max_share = (
                 max(token_by_engine.values()) / total_tokens if total_tokens else 1.0
             )
-            short_engines = len(short_by_engine)
             tokens_json = json.dumps(
                 {k: token_by_engine[k] for k in sorted(token_by_engine)},
                 sort_keys=True,
@@ -980,12 +737,7 @@ def balance_len_mixed(ctx: CaseContext):
                 context="bimodal_5waves",
                 detail=f"tokens={tokens_json}, shorts={dict(short_by_engine)}",
             )
-            report.invariant(
-                "P2",
-                short_engines >= 2,
-                context="short_spread",
-                detail=f"engines taking shorts={short_engines}",
-            )
+
 
         return report.finish(
             f"waves=5, landed={len(landed)}/40, " f"grades: {report.summary()}"
@@ -1000,6 +752,6 @@ def balance_len_mixed(ctx: CaseContext):
             # #87 — same rationale as balance_overload_avoid_prefill: a
             # drain-fallback cancel that fails settles on the stale-TTL +
             # ExpirationTimer path, worst ~90s).
-            AssertUtils.inflight_clean(_master_http(ops), TTL_DRAIN_TIMEOUT_S)
+            AssertUtils.inflight_clean(_master_http(ops), REQUEST_CLEANUP_TIMEOUT_S)
         except Exception:
             pass

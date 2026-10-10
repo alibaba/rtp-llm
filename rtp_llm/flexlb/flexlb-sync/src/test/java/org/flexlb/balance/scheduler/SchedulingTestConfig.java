@@ -2,10 +2,8 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
-import org.flexlb.config.EngineCancellationConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.PreemptionConfig;
-import org.flexlb.config.QueueCapacityConfig;
 import org.flexlb.config.QueueOrderingConfig;
 import org.flexlb.config.SchedulerConfig;
 import org.flexlb.config.VictimStage;
@@ -19,7 +17,7 @@ public final class SchedulingTestConfig {
     }
 
     public static FlexlbConfig batchConfig() {
-        FlexlbConfig config = new FlexlbConfig();
+        FlexlbConfig config = newConfig();
         useBatchDispatcher(config);
         return config;
     }
@@ -59,30 +57,25 @@ public final class SchedulingTestConfig {
         return fixedWindow;
     }
 
-    public static QueueCapacityConfig useQueueCapacity(FlexlbConfig config) {
-        SchedulerConfig queue = activeQueueOrNew(config);
-        if (queue.getCapacity() == null) {
-            queue.setCapacity(new QueueCapacityConfig());
-        }
-        config.setScheduler(queue);
-        return queue.getCapacity();
-    }
-
     public static DispatcherConfig useBatchDispatcher(FlexlbConfig config) {
+        configureRequiredValues(config);
         if (config.getDispatcher().getType() == DispatcherConfig.Type.BATCH) {
             return config.getDispatcher();
         }
         DispatcherConfig batch = new DispatcherConfig();
+        batch.setMaxInflightPerPrefillWorker(2);
         config.setDispatcher(batch);
         return batch;
     }
 
     public static DispatcherConfig useNonBatchDispatcher(FlexlbConfig config) {
+        configureRequiredValues(config);
         if (config.getDispatcher().getType()
                 == DispatcherConfig.Type.NON_BATCH) {
             return config.getDispatcher();
         }
         DispatcherConfig nonBatch = DispatcherConfig.nonBatch();
+        nonBatch.setMaxInflightPerPrefillWorker(64);
         config.setDispatcher(nonBatch);
         return nonBatch;
     }
@@ -103,10 +96,6 @@ public final class SchedulingTestConfig {
                 : EnumSet.copyOf(preemption.getAllowedVictimStages());
         stages.add(stage);
         preemption.setAllowedVictimStages(stages);
-        if (stage == VictimStage.DECODE_ENGINE_OWNED
-                && preemption.getEngineCancellation() == null) {
-            preemption.setEngineCancellation(new EngineCancellationConfig());
-        }
     }
 
     public static void disallowVictim(FlexlbConfig config, VictimStage stage) {
@@ -116,20 +105,26 @@ public final class SchedulingTestConfig {
                 : EnumSet.copyOf(preemption.getAllowedVictimStages());
         stages.remove(stage);
         preemption.setAllowedVictimStages(stages);
-        if (stage == VictimStage.DECODE_ENGINE_OWNED) {
-            preemption.setEngineCancellation(null);
-        }
     }
 
-    public static EngineCancellationConfig engineCancellation(FlexlbConfig config) {
-        PreemptionConfig preemption = preemption(config);
-        if (preemption.getEngineCancellation() == null) {
-            preemption.setEngineCancellation(new EngineCancellationConfig());
+    public static FlexlbConfig newConfig() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.getDispatcher().setMaxInflightPerPrefillWorker(2);
+        configureRequiredValues(config);
+        return config;
+    }
+
+    public static void configureRequiredValues(FlexlbConfig config) {
+        if (config.getRequestLifecycle().getRequest().getTimeoutMs() == null) {
+            config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
         }
-        return preemption.getEngineCancellation();
+        if (config.getRequestLifecycle().getDecision().getLifetime() == null) {
+            config.getRequestLifecycle().getDecision().setLifetime(2.0);
+        }
     }
 
     private static SchedulerConfig activeQueueOrNew(FlexlbConfig config) {
+        configureRequiredValues(config);
         return config.isQueue() ? config.getScheduler() : new SchedulerConfig();
     }
 }

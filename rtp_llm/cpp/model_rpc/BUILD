@@ -66,16 +66,22 @@ cc_library(
         exclude = [
             "TensorPbConvert.cc",
             "MultimodalPbConverter.cc",
+            "ResponseBuffer.cc",
         ],
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = [
+            "RPCPool.h",
+            # Owned by :response_buffer so its public header has a single cc_library.
+            "ResponseBuffer.h",
+        ],
     ),
     visibility = ["//visibility:public"],
     deps = [
         ":embedding_arpc_deps",
         ":model_rpc_pool",
+        ":response_buffer",
         ":rpc_error_code",
         ":tensor_pb_convert",
         "//rtp_llm/cpp/cache:cache_types",
@@ -89,6 +95,8 @@ cc_library(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:deferred_completion_queue_drainer",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/utils:torch_cuda_oom",
@@ -98,6 +106,7 @@ cc_library(
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/utils:atomic_util",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "@havenask//aios/autil:scope",
     ],
 )
 
@@ -124,5 +133,21 @@ cc_library(
         ":rpc_error_code",
         ":model_rpc_pool",
         "//rtp_llm/cpp/utils:rpc_completion_queue",
+    ],
+)
+
+cc_library(
+    name = "response_buffer",
+    srcs = ["ResponseBuffer.cc"],
+    hdrs = ["ResponseBuffer.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        # ResponseBuffer.h includes <grpcpp/...> and exposes grpc:: types in
+        # its public interface; declare grpc explicitly instead of relying on
+        # the proto target's transitive dependency.
+        "@grpc//:grpc++",
+        "@havenask//aios/autil:time",
     ],
 )

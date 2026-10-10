@@ -38,7 +38,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.routers import (
 )
 from rtp_llm.models_py.modules.hybrid import dense_mlp as dense_mlp_module
 from rtp_llm.ops import ActivationType, MoeConfig, NcclCommConfig, ParallelismConfig
-from rtp_llm.test.utils.cuda_graph_util import graph_capture
+from rtp_llm.test.utils.cuda_graph_util import record_graph_capture
 from rtp_llm.test.utils.port_util import PortManager
 from rtp_llm.utils.model_weight import W
 
@@ -284,7 +284,7 @@ def _run_batched_eager_and_graph(rank):
 
     with patch.object(
         rocm_rccl, "_is_hipgraph_capture_active", return_value=True
-    ), graph_capture(stream=stream) as graph:
+    ), record_graph_capture(stream=stream) as graph:
         graph_output = forward()
     stream.synchronize()
     rocm_rccl.finish_hipgraph_capture_session()

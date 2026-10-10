@@ -102,7 +102,9 @@ class FlexlbTraceTest {
     @Test
     void scheduleFailureClassificationDoesNotGuessFromUnknownCodes() {
         assertEquals("FLEXLB_INTERNAL_ERROR", FlexlbTrace.scheduleFailureType(500));
-        for (int code : new int[] {8406, 8502, 8514, 8430, 8431, 8432}) {
+        // QUEUE_FULL (8502) was removed with the synthetic queue-capacity limit.
+        assertEquals("FLEXLB_SCHEDULE_FAILED", FlexlbTrace.scheduleFailureType(8502));
+        for (int code : new int[] {8406, 8514, 8430, 8431, 8432}) {
             assertEquals("FLEXLB_BUSINESS_REJECTED", FlexlbTrace.scheduleFailureType(code));
         }
         for (int code : new int[] {8402, 8511, 8513, 8202, -1}) {

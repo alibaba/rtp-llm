@@ -24,7 +24,7 @@ protected:
         }
         topology_ = test::makeTestCacheTopology(group_num, layer_num, layer_group_ids, 1, group_types);
         resource.initGroups(topology_);
-        auto& blocks = resource.mutableBlockIds(0);
+        auto& blocks = resource.mutableBlockIds(resource.groupTags().at(0));
         blocks.assign(block_ids_g0);
         resource.cacheKeys() = cache_keys_input;
         return resource;
@@ -40,8 +40,8 @@ protected:
         std::vector<CacheGroupType> group_types    = {CacheGroupType::FULL, CacheGroupType::LINEAR};
         topology_                                  = test::makeTestCacheTopology(2, 2, {{0}, {1}}, 1, group_types);
         resource.initGroups(topology_);
-        resource.mutableBlockIds(0).assign(full_block_ids);
-        resource.mutableBlockIds(1).assign(linear_block_ids);
+        resource.mutableBlockIds(resource.groupTags().at(0)).assign(full_block_ids);
+        resource.mutableBlockIds(resource.groupTags().at(1)).assign(linear_block_ids);
         resource.cacheKeys() = cache_keys_input;
         return resource;
     }

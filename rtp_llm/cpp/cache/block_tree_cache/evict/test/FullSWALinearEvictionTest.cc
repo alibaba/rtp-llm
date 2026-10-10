@@ -26,9 +26,9 @@ protected:
         auto linear = std::make_shared<LinearGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups = {full, swa, linear};
-        BlockTreeCacheConfig config{};
+        BlockTreeCacheConfig     config{};
         config.task_pool_size = 2;
-        cache_ = makeBlockTreeCacheForTest(std::move(groups), config);
+        cache_                = makeBlockTreeCacheForTest(std::move(groups), config);
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -97,7 +97,7 @@ TEST_F(FullSWALinearEvictionTest, OrdinarySuffixCanBeEvictedWithoutReadmittingRe
     EXPECT_EQ(cache_->getStats().device_heap_total_size, 0u);
     BlockTreeMatchResult match = cache_->match({100, 200, 300});
     EXPECT_EQ(match.matched_device_blocks, 2u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{10, 11}));
+    EXPECT_EQ(cache_->matchedBlocksForGroup("group0", match.matched_device_resources), (BlockIndicesType{10, 11}));
     block_tree_cache_test::releaseRequestRefsForTest(*cache_, match.matched_device_resources);
 }
 
@@ -265,9 +265,9 @@ TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
         128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     auto linear = std::make_shared<LinearGroupSet>(
         std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    std::vector<GroupSetPtr>        groups = {swa, linear};
-    BlockTreeCacheConfig config{};
-    config.task_pool_size = 2;
+    std::vector<GroupSetPtr> groups = {swa, linear};
+    BlockTreeCacheConfig     config{};
+    config.task_pool_size                         = 2;
     std::unique_ptr<BlockTreeCache> swa_lin_cache = makeBlockTreeCacheForTest(std::move(groups), config);
 
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));

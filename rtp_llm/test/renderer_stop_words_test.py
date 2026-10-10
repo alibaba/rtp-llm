@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, Mock
 
 import torch
 
+from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.config.py_config_modules import GenerateEnvConfig
 from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
@@ -18,8 +20,7 @@ from rtp_llm.openai.renderers.custom_renderer import (
 from rtp_llm.openai.renderers.reasoning_tool_base_renderer import (
     ReasoningToolBaseRenderer,
 )
-from rtp_llm.config.py_config_modules import GenerateEnvConfig
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput
+from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 from rtp_llm.utils.word_util import get_stop_word_slices
 
 
@@ -345,6 +346,44 @@ class _RendererTestBase(IsolatedAsyncioTestCase):
         )
         status_list = await renderer._create_status_list(1, request)
         return status_list[0]
+
+
+class TestFinalExtraOutputs(_RendererTestBase):
+    async def test_eos_preserves_cached_logits_without_text(self):
+        renderer = self._make_renderer(self._make_tokenizer({100: "Hello", 101: "!"}))
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="test")]
+        )
+        config = GenerateConfig(
+            max_new_tokens=10, is_streaming=True, return_logits=True, logits_index=1
+        )
+        cached_logits = [[1.0, 2.0]]
+
+        async def outputs():
+            for step, (token, logits) in enumerate(
+                ((100, cached_logits), (101, [[9.0, 10.0]]), (0, cached_logits)), 1
+            ):
+                output = self._create_output([token])
+                output.aux_info.output_len = step
+                output.finished = token == 0
+                output.logits = torch.tensor(logits)
+                yield GenerateOutputs(generate_outputs=[output])
+
+        responses = [
+            response
+            async for response in renderer.render_response_stream(
+                outputs(), request, config
+            )
+        ]
+        content = "".join(
+            choice.delta.content or "" for r in responses for choice in r.choices
+        )
+        self.assertEqual(content, "Hello!")
+        extra_outputs = [
+            r.extra_outputs for r in responses if r.extra_outputs is not None
+        ]
+        self.assertEqual(extra_outputs[-1].logits, cached_logits)
+        self.assertEqual(responses[-1].choices[0].finish_reason, FinisheReason.stop)
 
 
 class TestStopWordTruncation(_RendererTestBase):

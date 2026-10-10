@@ -31,7 +31,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
 from rtp_llm.models_py.utils.arch import get_sm
-from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
 
 
 class DeepepNormalRouterBase(FusedMoeDataRouter):
@@ -284,6 +283,8 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 scale_ue8m0=True,
             )
         else:
+            from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
+
             return trt_fp8_quantize_128(a1, False)
 
 

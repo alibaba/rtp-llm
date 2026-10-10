@@ -102,7 +102,7 @@ protected:
     KVCacheResourcePtr resource() {
         auto result = std::make_shared<KVCacheResource>();
         result->initGroups(config_.topology);
-        result->mutableBlockIds(0).assign({1, 2});
+        result->mutableBlockIds(result->groupTags().at(0)).assign({1, 2});
         result->cacheKeys() = {101, 102};
         return result;
     }

@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryMetrics;
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
@@ -10,6 +9,8 @@ import org.flexlb.balance.planner.GroupPlanner;
 import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
+import org.flexlb.balance.projection.WorkSnapshot;
+import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -72,14 +73,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         try {
             for (ScheduledRequest item : candidates) {
                 CapacityBoundary.Attempt<ScheduledRequest> attempt =
-                        requests.prepareIfOwned(
-                                item,
-                                () -> transaction.append(
-                                        item,
-                                        predict(evaluator, item)))
-                        .orElseGet(
-                                RouteDeliveryStrategy::<ScheduledRequest>
-                                        ownershipLost);
+                        requests.prepareRouteMember(item, transaction, evaluator);
                 if (!attempt.accepted()) {
                     blockedItem = item;
                     blockedResult = attempt.boundary();
@@ -107,21 +101,23 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     private void deliver(
-            List<ScheduledRequest> items,
+            RouteTransaction transaction,
             PrefillAdmissionResources.CommittedAdmissionOwner admission,
-            int remainingQueueDepth) {
+            int remainingQueueDepth,
+            WorkSnapshot precedingWork) {
+        List<ScheduledRequest> items = transaction.items();
         Throwable deliveryFailure = null;
         List<ScheduledRequest> delivered = new ArrayList<>(items.size());
+        List<ClaimedRoute> claimed = new ArrayList<>(items.size());
         try {
             for (ScheduledRequest item : items) {
-                RequestRegistry.DeliveryClaim claim;
+                DeliveryClaim claim;
                 try {
-                    claim = requests.tryClaimRouteDelivery(
-                            item,
-                            () -> admission.transferToEndpoint(item));
+                    claim = requests.claimRouteDelivery(
+                            item, admission);
                 } catch (Throwable claimFailure) {
                     try {
-                        requests.failPrepared(item, claimFailure);
+                        requests.failDeliveryPreparation(item, claimFailure);
                     } catch (Throwable terminalFailure) {
                         claimFailure.addSuppressed(terminalFailure);
                         deliveryFailure = append(
@@ -132,8 +128,16 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 if (claim == null) {
                     continue;
                 }
+                claimed.add(new ClaimedRoute(item, claim));
+            }
+            long unstartedWorkMs = 0L;
+            for (ClaimedRoute route : claimed) {
+                ScheduledRequest item = route.item();
                 try {
-                    requests.complete(claim, DeliveryResult.delivered());
+                    long itemWorkMs = transaction.predictions.get(item);
+                    unstartedWorkMs = unstartedWorkMs > Long.MAX_VALUE - itemWorkMs
+                            ? Long.MAX_VALUE : unstartedWorkMs + itemWorkMs;
+                    requests.publishRoute(route.claim(), precedingWork, unstartedWorkMs);
                     delivered.add(item);
                 } catch (Throwable completionFailure) {
                     deliveryFailure = append(
@@ -151,6 +155,8 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             throw propagate(deliveryFailure);
         }
     }
+
+    private record ClaimedRoute(ScheduledRequest item, DeliveryClaim claim) { }
 
     @Override
     public double projectGroupDurationMs(
@@ -174,11 +180,6 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             ScheduledRequest item) {
         return PrefillPredictionBoundary.predictSingleRequestMs(
                 evaluator, item.seqLen(), item.hitCache());
-    }
-
-    private static <T> CapacityBoundary.Attempt<T> ownershipLost() {
-        return CapacityBoundary.Attempt.rejected(
-                CapacityBoundary.OWNERSHIP_LOST);
     }
 
     private static Throwable close(AutoCloseable capability) {
@@ -214,7 +215,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
     }
 
     /** Ordered route callback payload and sole owner of its exact members. */
-    private static final class RouteTransaction implements Transaction {
+    static final class RouteTransaction implements Transaction {
         private final RouteDeliveryStrategy owner;
         private final PrefillEndpoint prefill;
         private List<ScheduledRequest> items = List.of();
@@ -222,6 +223,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         private CapacityBoundary blockedResult;
         private ArrayList<PrefillState.RouteReservation> reservations;
         private ArrayList<Boolean> itemOwnedReservations;
+        private final java.util.IdentityHashMap<ScheduledRequest, Long> predictions = new java.util.IdentityHashMap<>();
         private ArrayList<PrefillAdmissionResources.Member> members;
         private PrefillAdmissionResources.CommittedAdmissionOwner committed;
 
@@ -252,10 +254,11 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             return new RouteTransaction(owner, blockedItem, blockedResult);
         }
 
-        private synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
+        synchronized CapacityBoundary.Attempt<ScheduledRequest> append(
                 ScheduledRequest exact,
-                long predictedMs) {
+                PrefillTimePredictor.Evaluator evaluator) {
             requirePrepared("append");
+            long predictedMs = predict(evaluator, exact);
             final CapacityBoundary.Attempt<ScheduledRequest> acceptedItem;
             try {
                 acceptedItem = accepted(exact);
@@ -271,18 +274,19 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
             try {
                 if (published == null) {
                     return failed(new IllegalStateException(
-                            "ACTIVE NON_BATCH request lost its publish-time route credit: request_id="
+                            "ACTIVE NON_BATCH request lost its publish-time route reservation: request_id="
                                     + exact.requestId()));
                 }
                 published.updatePrediction(exact, predictedMs);
             } catch (Throwable failure) {
                 return failed(failure);
             }
+            predictions.put(exact, predictedMs);
             PrefillState.RouteReservation reservation = published;
             final CapacityBoundary.Attempt<PrefillAdmissionResources.Member>
                     memberAttempt;
             try {
-                memberAttempt = prepareMember(exact, owner.requests);
+                memberAttempt = prepareMember(exact);
             } catch (Throwable failure) {
                 return failed(failure);
             }
@@ -321,7 +325,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
         }
 
         @Override
-        public synchronized void commitUnderLock() {
+        public synchronized WorkSnapshot commitUnderLock() {
             requirePrepared("commit");
             if (!sameIdentitySequence(members, items)) {
                 throw new IllegalArgumentException(
@@ -342,7 +346,7 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         && items.get(index).publishedRouteReservation()
                         != reservations.get(index)) {
                     throw new IllegalStateException(
-                            "ACTIVE NON_BATCH request lost its exact route credit: request_id="
+                            "ACTIVE NON_BATCH request lost its exact route reservation: request_id="
                                     + items.get(index).requestId());
                 }
             }
@@ -353,17 +357,17 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                         "Prefill", items.get(0));
             }
             try (routeCommit) {
-                // Allocate the committed owner before taking any credit away
+                // Allocate the committed owner before transferring any reservation
                 // from its ACTIVE item. After the first successful CAS below,
                 // the remainder of this transaction must be allocation-free.
                 PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
-                        createCommittedOwner(members, 1);
+                        createCommittedOwner(members);
                 for (int index = 0; index < reservations.size(); index++) {
                     if (itemOwnedReservations.get(index)
                             && !items.get(index).takePublishedRouteReservation(
                                     reservations.get(index))) {
                         throw new IllegalStateException(
-                                "ACTIVE NON_BATCH request lost its exact route credit: request_id="
+                                "ACTIVE NON_BATCH request lost its exact route reservation: request_id="
                                         + items.get(index).requestId());
                     }
                     if (itemOwnedReservations.get(index)) {
@@ -379,15 +383,18 @@ public final class RouteDeliveryStrategy implements DeliveryStrategy {
                 reservations = null;
                 itemOwnedReservations = null;
                 members = null;
+                return handoff.precedingWork();
             }
         }
 
         @Override
         public void handoff(
-                String decisionReason, int remainingQueueDepth) {
+                String decisionReason, int remainingQueueDepth,
+                WorkSnapshot precedingWork) {
             PrefillAdmissionResources.CommittedAdmissionOwner exactCommitted =
                     takeCommitted();
-            owner.deliver(items, exactCommitted, remainingQueueDepth);
+            owner.deliver(this, exactCommitted, remainingQueueDepth,
+                    Objects.requireNonNull(precedingWork, "precedingWork"));
         }
 
         @Override

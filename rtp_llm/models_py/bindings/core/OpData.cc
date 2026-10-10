@@ -59,6 +59,7 @@ std::string GptModelInputs::debugString(bool force) const {
     if (kv_cache_block_id.defined()) {
         debug_string << ", kv_cache_block_id: " << tb(kv_cache_block_id);
     }
+    debug_string << ", kv_cache_group_tags: " << combineStrings(kv_cache_group_tags);
     if (attention_mask.defined()) {
         debug_string << ", attention_mask: " << tb(attention_mask);
     }
@@ -73,6 +74,8 @@ std::string GptModelInputs::debugString(bool force) const {
     }
     debug_string << ", kv_block_stride_bytes: " << kv_block_stride_bytes;
     debug_string << ", pd_separation: " << pd_separation;
+    debug_string << ", skip_lm_head: " << skip_lm_head;
+    debug_string << ", capture_hidden_states: " << capture_hidden_states;
     debug_string << "}";
     return debug_string.str();
 }

@@ -19,6 +19,13 @@ class MMProfiler:
     and ``top_operations.json`` are generated from the last request's data.
     """
 
+    # Per-process (class-level) profiler-stack warmup state, shared by every
+    # MMProfiler instance in the process (a worker holds the engine's, and
+    # the VIT proxy creates one that is never armed). See
+    # _warmup_profiler_stack().
+    _STACK_WARMED = False
+    _STACK_WARMUP_LOCK = threading.Lock()
+
     def __init__(self):
         self._lock = threading.Lock()
         self._armed = False
@@ -32,6 +39,68 @@ class MMProfiler:
         self._finished = False
 
     # ------------------------------------------------------------------ #
+    #  One-time per-process profiler stack warmup
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _warmup_profiler_stack(cls) -> None:
+        """Run one throwaway profiler session on the calling (arming) thread
+        so libkineto/CUPTI finish their lazy init BEFORE any real session
+        starts on a scheduler executor thread.
+
+        Why: the first ``torch.profiler`` session with CUDA activity makes
+        libkineto register itself as a CUPTI client on the thread that
+        started it, and CUPTI's external-init callback must then run on that
+        SAME thread. Profiling is armed from the HTTP/event-loop thread but
+        the sessions run on the "mm-scheduler" executor thread, so when the
+        executor thread starts the process's FIRST session, the affinity
+        check in the libkineto vendored in torch 2.11 kills the thread (log
+        line: "External init callback must run in same thread as
+        registerClient"). The executor then dies silently and every request
+        lands on its timeout; this only surfaced under co-located CI runs,
+        where CUPTI's lazy init lands on a different thread than the
+        subscriber. Warming up at ARM time makes registration and CUPTI init
+        happen on the arming thread by construction; later sessions only
+        toggle activity collection and never re-enter the init path.
+        """
+        if cls._STACK_WARMED:
+            return
+        with cls._STACK_WARMUP_LOCK:
+            if cls._STACK_WARMED:
+                return
+            # Best-effort: a same-thread warmup cannot hit the affinity
+            # death, so a failure here means CUPTI itself is broken and the
+            # real session would fail anyway. Keep arm semantics unchanged,
+            # and remember the ATTEMPT (finally below) so a broken
+            # environment does not re-pay the warmup on every arm.
+            try:
+                # Mirror profile_forward's activity selection exactly.
+                activities = [torch.profiler.ProfilerActivity.CPU]
+                cuda_available = torch.cuda.is_available()
+                if cuda_available:
+                    activities.append(torch.profiler.ProfilerActivity.CUDA)
+                # Cheap flags: this session exists to initialize CUPTI, not
+                # to collect data (nothing is exported or aggregated). The
+                # REAL sessions keep full CPU + CUDA tracing with
+                # shapes/stack/memory.
+                with torch.profiler.profile(
+                    activities=activities,
+                    record_shapes=False,
+                    profile_memory=False,
+                    with_stack=False,
+                ):
+                    if cuda_available:
+                        # A real CUDA op INSIDE the warmup session: creates
+                        # the CUDA context (if none exists yet) while the
+                        # client registration is on this same thread, so the
+                        # context-created init callback also runs here.
+                        torch.zeros(1, device="cuda").add_(1)
+            except Exception as e:
+                logging.warning(f"MMProfiler: profiler stack warmup failed: {e}")
+            finally:
+                cls._STACK_WARMED = True
+
+    # ------------------------------------------------------------------ #
     #  HTTP API
     # ------------------------------------------------------------------ #
 
@@ -43,6 +112,15 @@ class MMProfiler:
         with_stack: bool = True,
         profile_memory: bool = True,
     ) -> Dict[str, Any]:
+        # Force the one-time CUPTI/profiler stack init on THIS (arming)
+        # thread before taking any instance lock: the warmup is process
+        # init, not session state, and it must not hold ``_lock`` —
+        # profile_forward's hot-path arming check blocks on it — for the
+        # ~0.1-1s a first CUPTI init can take. After it returns, every later
+        # session (including the real ones on the scheduler executor thread)
+        # finds CUPTI already initialized.
+        self._warmup_profiler_stack()
+
         with self._lock:
             # Reject any new start while a prior session is still resolvable:
             # either still armed (in progress) OR finished but its end_profile

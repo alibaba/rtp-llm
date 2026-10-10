@@ -192,7 +192,7 @@ class QwenGdnGraphReplayTest(unittest.TestCase):
             return inputs
 
         runner = extension.CudaGraphRunner()
-        runner.init_decode(Model(), 4, 8, 8, 8, [2], ["linear", "full"])
+        runner.init_decode(Model(), 4, 8, 1, [2], ["linear", "full"])
         valid = make_live(1)
         self.assertTrue(runner.canRun(valid))
         result = runner.forward(valid)

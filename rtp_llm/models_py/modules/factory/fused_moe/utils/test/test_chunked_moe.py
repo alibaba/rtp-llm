@@ -18,7 +18,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
     resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_plan,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
+from rtp_llm.models_py.utils.profiler import (
     disable_record_function_ranges,
     record_function_ranges_enabled,
 )

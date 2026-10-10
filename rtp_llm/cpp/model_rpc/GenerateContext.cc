@@ -1,8 +1,19 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 
+#include <limits>
+
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
+    if (!rpc_handling_completed_) {
+        RTP_LLM_LOG_ERROR("request [%s] GenerateContext destroyed before RPC handling completed, grpc code [%d], "
+                          "grpc message [%s], finished [%d], has stream [%d]",
+                          request_key.c_str(),
+                          static_cast<int>(error_status.error_code()),
+                          error_status.error_message().c_str(),
+                          finished,
+                          static_cast<bool>(stream_));
+    }
     stopStream();
     reportTime();
 }
@@ -10,6 +21,7 @@ GenerateContext::~GenerateContext() {
 void GenerateContext::reset() {
     error_info   = ErrorInfo::OkStatus();
     error_status = grpc::Status::OK;
+    retryable_   = true;
 }
 
 bool GenerateContext::ok() const {
@@ -20,6 +32,14 @@ bool GenerateContext::hasError() const {
     return !ok();
 }
 
+bool GenerateContext::shouldRetry() const {
+    return retryable_;
+}
+
+void GenerateContext::setRetryable(bool retryable) {
+    retryable_ = retryable;
+}
+
 void GenerateContext::setRequestTimeoutMs(int64_t timeout_ms) {
     request_timeout_ms = timeout_ms;
     if (timeout_ms > 0) {
@@ -27,6 +47,56 @@ void GenerateContext::setRequestTimeoutMs(int64_t timeout_ms) {
     } else {
         request_deadline.reset();
     }
+}
+
+void GenerateContext::setRetryTimeoutMs(int64_t timeout_ms) {
+    if (timeout_ms > 0) {
+        retry_deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms);
+    } else {
+        retry_deadline.reset();
+    }
+}
+
+GenerateContext::RequestDeadline GenerateContext::streamRpcDeadline(int64_t relative_timeout_ms) const {
+    auto deadline = request_deadline;
+    if (relative_timeout_ms > 0) {
+        const auto relative_deadline =
+            std::chrono::system_clock::now() + std::chrono::milliseconds(relative_timeout_ms);
+        if (!deadline.has_value() || relative_deadline < *deadline) {
+            deadline = relative_deadline;
+        }
+    }
+    return deadline;
+}
+
+GenerateContext::RequestDeadline GenerateContext::effectiveDeadline(int64_t relative_timeout_ms) const {
+    auto deadline = streamRpcDeadline(relative_timeout_ms);
+    if (retry_deadline.has_value() && (!deadline.has_value() || *retry_deadline < *deadline)) {
+        deadline = retry_deadline;
+    }
+    return deadline;
+}
+
+bool GenerateContext::retryDeadlineExceeded() const {
+    return retry_deadline.has_value() && std::chrono::system_clock::now() >= *retry_deadline;
+}
+
+int64_t GenerateContext::cappedRetrySleepUs(int64_t retry_interval_ms) const {
+    if (retry_interval_ms <= 0) {
+        return 0;
+    }
+    constexpr int64_t kMicrosecondsPerMillisecond = 1000;
+    int64_t           sleep_us                    = std::numeric_limits<int64_t>::max();
+    if (retry_interval_ms <= std::numeric_limits<int64_t>::max() / kMicrosecondsPerMillisecond) {
+        sleep_us = retry_interval_ms * kMicrosecondsPerMillisecond;
+    }
+    const auto deadline = effectiveDeadline();
+    if (deadline.has_value()) {
+        const auto remaining_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(*deadline - std::chrono::system_clock::now()).count();
+        sleep_us = std::min(sleep_us, std::max<int64_t>(remaining_us, 0));
+    }
+    return sleep_us;
 }
 
 bool GenerateContext::cancelled() const {
@@ -77,48 +147,53 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 }
 
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
+    if (stream_ && stream_ != stream) {
+        stopStreamForRetry();
+    }
     stream_ = stream;
     if (stream) {
         meta->enqueue(request_id, stream_);
     }
 }
 
-void GenerateContext::stopStream() {
-    if (stream_) {
-        constexpr const char* kContextCleanupReason = "context cleanup before stream finished";
-        const bool            context_has_error     = error_info.hasError();
-        const bool            request_cancelled     = cancelled() || isRequestCancelled();
-        if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
-            if (context_has_error) {
-                RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=context_error, code=%d, err=%s",
-                                    request_key.c_str(),
-                                    static_cast<int>(error_info.code()),
-                                    error_info.ToString().c_str());
-                stream_->reportError(error_info.code(), error_info.ToString());
-            } else if (request_cancelled) {
-                RTP_LLM_LOG_WARNING("request [%s] stopping stream with terminal source=client_cancel",
-                                    request_key.c_str());
-                stream_->reportError(ErrorCode::CANCELLED, "request cancelled by client");
-            }
-        }
-        const char* cancel_reason = !context_has_error && !request_cancelled ? kContextCleanupReason : "cancel stream";
-        if (!stream_->finishOrCancel(kStopStreamWaitTimeoutMs, cancel_reason)) {
-            RTP_LLM_LOG_WARNING("stopStream timeout (%ld ms) waiting for Engine Loop for request [%d]",
-                                kStopStreamWaitTimeoutMs,
-                                stream_->generateInput()->request_id);
-        }
-        if (!context_has_error && !request_cancelled) {
-            const auto stream_error = stream_->statusInfo();
-            if (stream_error.code() == ErrorCode::CANCELLED
-                && stream_error.ToString().rfind(kContextCleanupReason, 0) == 0) {
-                RTP_LLM_LOG_WARNING("request [%s] stopped unfinished stream with terminal source=context_cleanup",
-                                    request_key.c_str());
-            }
-        }
-        // RuntimeMeta snapshots the stream's terminal status during dequeue.
-        // Capture only after reportError/finishOrCancel have committed it so
-        // FlexLB observes the real cancellation or context error code.
+void GenerateContext::markRpcHandlingCompleted() {
+    rpc_handling_completed_ = true;
+}
+
+void GenerateContext::cancelStreamOnTeardown() noexcept {
+    if (!stream_ || stream_->getStatus() == StreamState::FINISHED || stream_->hasError()) {
+        return;
+    }
+    if (rpc_handling_completed_ && !hasError() && !error_info.hasError() && !isRequestCancelled()) {
+        return;
+    }
+    // Preserve the terminal cause before RuntimeMeta snapshots the stream.
+    if (error_info.hasError()) {
+        stream_->reportError(error_info.code(), error_info.ToString());
+    } else {
+        stream_->reportError(ErrorCode::CANCELLED, "RPC handling failed, was cancelled, or exited unexpectedly");
+    }
+}
+
+void GenerateContext::stopStreamForRetry() {
+    if (!stream_) {
+        return;
+    }
+    if (stream_->getStatus() != StreamState::FINISHED && !stream_->hasError()) {
+        stream_->reportError(ErrorCode::CANCELLED, "cancel abandoned retry attempt");
+    }
+    if (meta) {
         meta->dequeue(request_id, stream_);
+    }
+    stream_.reset();
+}
+
+void GenerateContext::stopStream() {
+    cancelStreamOnTeardown();
+    if (stream_) {
+        if (meta) {
+            meta->dequeue(request_id, stream_);
+        }
         stream_.reset();
     }
 }

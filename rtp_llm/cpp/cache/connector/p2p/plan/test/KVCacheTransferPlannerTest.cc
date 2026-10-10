@@ -915,11 +915,7 @@ TEST(PlannerGroupD, FactoryMirrorsCpStatePayloadFromRealSpecs) {
                     group.spec                      = spec;
                     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
                     group.policy.cp_slice           = mode;
-                    group.layer_ids                 = {0};
                     group.block_num                 = 8;
-                    group.seq_size_per_block        = spec->seq_size_per_block;
-                    group.kernel_seq_size_per_block = spec->seq_size_per_block;
-                    group.kv_block_stride_bytes     = spec->block_size_bytes();
                     auto topology = CacheTopology::create({group}, {{0, {kFixedTag}}});
                     return ShardLayoutFactory::fromTopology(*topology, pc, pc.role_type);
                 };

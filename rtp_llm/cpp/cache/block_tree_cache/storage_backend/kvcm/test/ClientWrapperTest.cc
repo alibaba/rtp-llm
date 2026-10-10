@@ -90,10 +90,17 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
             .WillOnce(Invoke([&meta_client](const std::string&, const kv_cache_manager::InitParams&) {
                 return std::move(meta_client);
             }))
-            .WillRepeatedly(Invoke([reinit_attempts](const std::string&, const kv_cache_manager::InitParams&) {
-                reinit_attempts->fetch_add(1, std::memory_order_release);
-                return std::unique_ptr<kv_cache_manager::MetaClient>{};
-            }));
+            .WillRepeatedly(
+                Invoke([reinit_attempts, &observation](const std::string&, const kv_cache_manager::InitParams& params) {
+                    EXPECT_EQ(params.regist_span, observation.registration_descriptor);
+                    EXPECT_NE(params.regist_span, nullptr);
+                    if (params.regist_span) {
+                        EXPECT_EQ(params.regist_span->base, observation.registration_base);
+                        EXPECT_EQ(params.regist_span->size, observation.registration_size);
+                    }
+                    reinit_attempts->fetch_add(1, std::memory_order_release);
+                    return std::unique_ptr<kv_cache_manager::MetaClient>{};
+                }));
     } else {
         EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
             .WillOnce(Invoke([&meta_client](const std::string&, const kv_cache_manager::InitParams&) {
@@ -117,10 +124,93 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
     auto                         wrapper = std::make_shared<ClientWrapper>(std::move(factory));
     ClientWrapper::ConfigMap     config_map{{"", makeConfig(enable_vipserver, endpoint)}};
     kv_cache_manager::InitParams params{kv_cache_manager::RoleType::HYBRID, &registration_span, "tp0_Fgroup"};
-    if (!wrapper->init(config_map, params)) {
+    if (!wrapper->init(config_map, params, "default")) {
         return nullptr;
     }
     return wrapper;
+}
+
+TEST(ClientWrapperTest, RejectsInvalidTagsBeforeCreatingClients) {
+    auto factory = std::make_unique<MockClientFactory>();
+    EXPECT_CALL(*factory, createSubscriber(_)).Times(0);
+    EXPECT_CALL(*factory, createTransferClient(_, _)).Times(0);
+    ClientWrapper                                      wrapper(std::move(factory));
+    std::array<char, 32>                               data{};
+    const std::vector<ClientWrapper::PoolRegistration> registrations{{{data.data(), 16}, "tp0_Fzeta"},
+                                                                     {{data.data() + 16, 16}, "tp0_Falpha"}};
+    const ClientWrapper::ConfigMap                     configs{{"", makeConfig(false, "direct")}};
+    for (const auto& tags : std::vector<std::vector<std::string>>{{}, {"zeta"}, {"zeta", ""}, {"zeta", "zeta"}}) {
+        EXPECT_FALSE(wrapper.initForPools(configs, kv_cache_manager::RoleType::HYBRID, registrations, tags));
+    }
+    kv_cache_manager::BlockBuffers buffers;
+    EXPECT_FALSE(wrapper.loadKvCachesForTag("zeta", {}, buffers));
+    EXPECT_FALSE(wrapper.saveKvCachesForTag("alpha", {}, buffers).first);
+}
+
+TEST(ClientWrapperTest, TagRoutingUsesRegistrationOrderAndFailedInitPublishesNoRoutes) {
+    for (bool fail_second : {false, true}) {
+        auto                     factory        = std::make_unique<MockClientFactory>();
+        auto                     subscriber     = std::make_unique<MockSubscriber>();
+        auto                     meta           = std::make_unique<kv_cache_manager::MockMetaClient>();
+        static const std::string storage_config = "{}";
+        EXPECT_CALL(*meta, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
+        EXPECT_CALL(*subscriber, init(std::vector<std::string>{"direct"})).WillOnce(Return(true));
+        EXPECT_CALL(*factory, createSubscriber(false)).WillOnce(Invoke([&](bool) { return std::move(subscriber); }));
+        EXPECT_CALL(*factory, createMetaClient(_, _)).WillOnce(Invoke([&](const auto&, const auto&) {
+            return std::move(meta);
+        }));
+        auto                                               destroyed = std::make_shared<int>(0);
+        std::vector<const kv_cache_manager::RegistSpan*>   retained;
+        std::vector<kv_cache_manager::MockTransferClient*> clients;
+        EXPECT_CALL(*factory, createTransferClient(_, _))
+            .Times(2)
+            .WillRepeatedly(Invoke([&](const auto&, const kv_cache_manager::InitParams& params)
+                                       -> std::unique_ptr<kv_cache_manager::TransferClient> {
+                EXPECT_EQ(params.self_location_spec_name, retained.empty() ? "tp0_Fzeta" : "tp0_Falpha");
+                EXPECT_EQ(params.role_type,
+                          retained.empty() ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER);
+                retained.push_back(params.regist_span);
+                if (fail_second && retained.size() == 2) {
+                    return nullptr;
+                }
+                auto client = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+                clients.push_back(client.get());
+                return client;
+            }));
+        ClientWrapper                                wrapper(std::move(factory));
+        std::array<char, 32>                         data{};
+        std::vector<ClientWrapper::PoolRegistration> registrations{{{data.data(), 16}, "tp0_Fzeta"},
+                                                                   {{data.data() + 16, 16}, "tp0_Falpha"}};
+        EXPECT_EQ(wrapper.initForPools({{"", makeConfig(false, "direct")}},
+                                       kv_cache_manager::RoleType::HYBRID,
+                                       registrations,
+                                       {"zeta", "alpha"}),
+                  !fail_second);
+        kv_cache_manager::BlockBuffers buffers;
+        if (fail_second) {
+            EXPECT_EQ(*destroyed, 1);
+            EXPECT_FALSE(wrapper.loadKvCachesForTag("zeta", {}, buffers));
+            EXPECT_FALSE(wrapper.saveKvCachesForTag("alpha", {}, buffers).first);
+        } else {
+            registrations.clear();
+            ASSERT_EQ(retained.size(), 2u);
+            EXPECT_EQ(retained[0]->base, data.data());
+            EXPECT_EQ(retained[1]->base, data.data() + 16);
+            EXPECT_EQ(retained[0]->size, 16u);
+            EXPECT_CALL(*clients[1], LoadKvCaches(kv_cache_manager::UriStrVec{"alpha_uri"}, _, _))
+                .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
+            EXPECT_CALL(*clients[0], SaveKvCaches(kv_cache_manager::UriStrVec{"zeta_uri"}, _, _))
+                .WillOnce(Return(
+                    std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::UriStrVec{"actual"})));
+            EXPECT_TRUE(wrapper.loadKvCachesForTag("alpha", {"alpha_uri"}, buffers));
+            EXPECT_EQ(wrapper.saveKvCachesForTag("zeta", {"zeta_uri"}, buffers).second,
+                      (kv_cache_manager::UriStrVec{"actual"}));
+            EXPECT_FALSE(wrapper.loadKvCachesForTag("missing", {}, buffers));
+        }
+        wrapper.shutdown();
+        EXPECT_EQ(*destroyed, fail_second ? 1 : 2);
+        EXPECT_FALSE(wrapper.loadKvCachesForTag("zeta", {}, buffers));
+    }
 }
 
 TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
@@ -146,7 +236,7 @@ TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
         EXPECT_CALL(*factory, createMetaClient(_, _)).Times(0);
         EXPECT_CALL(*factory, createTransferClient(_, _)).Times(0);
         ClientWrapper wrapper(std::move(factory));
-        EXPECT_FALSE(wrapper.init(configs, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}));
+        EXPECT_FALSE(wrapper.init(configs, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}, "default"));
         wrapper.shutdown();
     }
 }
@@ -160,7 +250,8 @@ TEST(ClientWrapperTest, RejectsMultipleDirectEndpointsAndVipDomainsBeforeSideEff
             EXPECT_CALL(*factory, createTransferClient(_, _)).Times(0);
             ClientWrapper wrapper(std::move(factory));
             EXPECT_FALSE(wrapper.init({{"a", makeConfig(vip, "first")}, {"b", makeConfig(vip, "second")}},
-                                      {role, nullptr, "tp0_Ffull"}));
+                                      {role, nullptr, "tp0_Ffull"},
+                                      "default"));
             wrapper.shutdown();
         }
     }
@@ -256,8 +347,9 @@ TEST(ClientWrapperTest, ShutdownInterruptsFailedReRegistrationBeforeCreatingNewS
     kv_cache_manager::BlockBuffers buffers;
     std::promise<bool>             transfer_result_promise;
     auto                           transfer_result = transfer_result_promise.get_future();
-    std::thread transfer_thread([&] { transfer_result_promise.set_value(old_client->loadKvCaches(uris, buffers)); });
-    const auto  transfer_status = transfer_result.wait_for(std::chrono::seconds(1));
+    std::thread                    transfer_thread(
+        [&] { transfer_result_promise.set_value(old_client->loadKvCachesForTag("default", uris, buffers)); });
+    const auto transfer_status = transfer_result.wait_for(std::chrono::seconds(1));
     if (transfer_status != std::future_status::ready) {
         // Keep a regressed implementation from hanging the test indefinitely.
         old_client->shutdown();
@@ -301,7 +393,8 @@ TEST(ClientWrapperTest, RejectsEmptyDirectAddressBeforeCreatingClients) {
     ClientWrapper                wrapper(std::move(factory));
     std::array<char, 16>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    EXPECT_FALSE(wrapper.init({{"", makeConfig(false, "")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    EXPECT_FALSE(wrapper.init(
+        {{"", makeConfig(false, "")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
 }
 
 TEST(ClientWrapperTest, RetriesMetadataClientCreationAccordingToKVCMConfig) {
@@ -331,7 +424,8 @@ TEST(ClientWrapperTest, RetriesMetadataClientCreationAccordingToKVCMConfig) {
     std::array<char, 16>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
     EXPECT_TRUE(wrapper.init({{"", makeConfig(false, "direct", /*retry_time=*/2)}},
-                             {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+                             {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"},
+                             "default"));
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
@@ -367,8 +461,8 @@ TEST(ClientWrapperTest, ReusesMetadataClientWhenVipAddressSnapshotIsUnchanged) {
     ClientWrapper                wrapper(std::move(factory));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    ASSERT_TRUE(wrapper.init(
+        {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
     EXPECT_TRUE(wrapper
                     .match("",
                            "match",
@@ -414,8 +508,8 @@ TEST(ClientWrapperTest, RecreatesMetadataClientWhenVipAddressChanges) {
     ClientWrapper                wrapper(std::move(factory));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    ASSERT_TRUE(wrapper.init(
+        {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
     EXPECT_TRUE(wrapper
                     .match("",
                            "match",
@@ -491,8 +585,8 @@ TEST_P(MetadataClientLifetimeTest, VipRefreshRetainsInFlightClient) {
         return std::make_unique<kv_cache_manager::MockTransferClient>(std::make_shared<int>(0));
     }));
     auto wrapper = std::make_shared<ClientWrapper>(std::move(factory));
-    ASSERT_TRUE(
-        wrapper->init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}));
+    ASSERT_TRUE(wrapper->init(
+        {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, nullptr, "tp0_Ffull"}, "default"));
     BoundedThread<bool> call([wrapper, operation = GetParam()] {
         if (operation == "match") {
             return wrapper
@@ -564,8 +658,8 @@ TEST(ClientWrapperTest, VipRefreshFailureDoesNotCallStaleMetadataClient) {
     ClientWrapper                wrapper(std::move(factory));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    ASSERT_TRUE(wrapper.init(
+        {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
     EXPECT_FALSE(wrapper.finishWrite("", "finish", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
@@ -607,8 +701,8 @@ TEST(ClientWrapperTest, RetriesVipAddressChangeAfterClientCreationFailure) {
     ClientWrapper                wrapper(std::move(factory));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    ASSERT_TRUE(wrapper.init(
+        {{"", makeConfig(true, "vip")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
     EXPECT_FALSE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
     EXPECT_TRUE(wrapper.finishWrite("", "finish_2", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
     wrapper.shutdown();
@@ -655,8 +749,8 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     ClientWrapper                wrapper(std::move(factory));
     std::array<char, 32>         registration{};
     kv_cache_manager::RegistSpan span{registration.data(), registration.size()};
-    ASSERT_TRUE(
-        wrapper.init({{"", makeConfig(false, "direct")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}));
+    ASSERT_TRUE(wrapper.init(
+        {{"", makeConfig(false, "direct")}}, {kv_cache_manager::RoleType::HYBRID, &span, "tp0_Ffull"}, "default"));
     EXPECT_FALSE(wrapper.finishWrite("", "finish_1", "session", kv_cache_manager::BlockMaskOffset{0}, {}));
     ASSERT_EQ(reinit_ready.wait_for(std::chrono::seconds(3)), std::future_status::ready);
 

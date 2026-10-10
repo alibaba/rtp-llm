@@ -57,13 +57,17 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777441829,
+                "created": 1790741145,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
+                            "content": "",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
                             "tool_calls": [
                                 {
                                     "index": 0,
@@ -74,9 +78,12 @@
                                         "arguments": "{\"location\": \"San Francisco\", \"unit\": \"celsius\"}"
                                     }
                                 }
-                            ]
+                            ],
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "tool_calls"
+                        "finish_reason": "tool_calls",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
@@ -88,14 +95,42 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 1324.313,
+                    "cost_time": 1462.324,
                     "iter_count": 27,
+                    "prefix_len": 0,
                     "input_len": 203,
                     "output_len": 27,
                     "step_output_len": 27,
-                    "first_token_cost_time": 136.156
+                    "first_token_cost_time": 210.533,
+                    "wait_time": 0.469,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "disk_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "prefill_disk_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "decode_disk_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "speculative_draft_rounds": 0,
+                    "speculative_accepted_tokens_per_pos": [],
+                    "generation_prefill_cuda_graph_status": "not_requested",
+                    "role_addrs": [],
+                    "aux_string": ""
                 },
-                "extra_outputs": null
+                "extra_outputs": null,
+                "prompt_logprobs": null
             }
         },
         {
@@ -261,16 +296,23 @@
             "result": {
                 "id": "chat-",
                 "object": "chat.completion",
-                "created": 1777441831,
+                "created": 1790741147,
                 "model": "",
                 "choices": [
                     {
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "The current weather in San Francisco is 17°C (62.6°F), with 72% humidity and partly cloudy skies."
+                            "content": "The current weather in San Francisco is 17°C (62.6°F) with 72% humidity and partly cloudy skies.",
+                            "name": null,
+                            "reasoning_content": null,
+                            "function_call": null,
+                            "tool_calls": null,
+                            "partial": false,
+                            "tool_call_id": null
                         },
-                        "finish_reason": "stop"
+                        "finish_reason": "stop",
+                        "logprobs": null
                     }
                 ],
                 "usage": {
@@ -282,14 +324,42 @@
                 },
                 "debug_info": null,
                 "aux_info": {
-                    "cost_time": 1222.809,
+                    "cost_time": 1282.071,
                     "iter_count": 27,
+                    "prefix_len": 0,
                     "input_len": 225,
                     "output_len": 27,
                     "step_output_len": 27,
-                    "first_token_cost_time": 82.586
+                    "first_token_cost_time": 92.846,
+                    "wait_time": 0.135,
+                    "pd_sep": false,
+                    "cum_log_probs": [],
+                    "beam_responses": [],
+                    "softmax_probs": [],
+                    "reuse_len": 0,
+                    "local_reuse_len": 0,
+                    "remote_reuse_len": 0,
+                    "memory_reuse_len": 0,
+                    "disk_reuse_len": 0,
+                    "prefill_total_reuse_len": 0,
+                    "prefill_local_reuse_len": 0,
+                    "prefill_remote_reuse_len": 0,
+                    "prefill_memory_reuse_len": 0,
+                    "prefill_disk_reuse_len": 0,
+                    "decode_total_reuse_len": 0,
+                    "decode_local_reuse_len": 0,
+                    "decode_remote_reuse_len": 0,
+                    "decode_memory_reuse_len": 0,
+                    "decode_disk_reuse_len": 0,
+                    "multimodal_lengths": {},
+                    "speculative_draft_rounds": 0,
+                    "speculative_accepted_tokens_per_pos": [],
+                    "generation_prefill_cuda_graph_status": "not_requested",
+                    "role_addrs": [],
+                    "aux_string": ""
                 },
-                "extra_outputs": null
+                "extra_outputs": null,
+                "prompt_logprobs": null
             }
         }
     ]

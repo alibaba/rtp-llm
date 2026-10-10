@@ -9,6 +9,9 @@
 #include <torch/extension.h>
 
 #include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace rtp_llm {
@@ -17,10 +20,8 @@ namespace {
 class TestKVCacheSpec: public KVCacheSpec {
 public:
     TestKVCacheSpec(std::string tag, KVCacheSpecType type, size_t seq_size, size_t k_elems, size_t v_elems):
-        k_elems_(k_elems), v_elems_(v_elems) {
-        this->tag                = std::move(tag);
-        this->type               = type;
-        this->seq_size_per_block = static_cast<uint32_t>(seq_size);
+        KVCacheSpec(std::move(tag), static_cast<uint32_t>(seq_size), 1, 1), k_elems_(k_elems), v_elems_(v_elems) {
+        this->type = type;
     }
 
     size_t block_size() const override {
@@ -64,15 +65,14 @@ GroupBase makeGroup(const std::string& tag,
                     size_t             k_elems,
                     size_t             v_elems,
                     uint32_t           local_kv_heads = 1) {
+    auto spec = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, k_elems, v_elems);
+    spec->kernel_seq_size_per_block = kernel_seq_size;
+    spec->local_kv_head_num         = local_kv_heads;
     GroupBase group;
-    group.tag                = tag;
-    group.spec               = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, k_elems, v_elems);
-    group.policy.group_type  = group_type;
-    group.layer_ids          = {0};
-    group.block_num          = 4;
-    group.local_kv_head_num  = local_kv_heads;
-    group.seq_size_per_block = physical_seq_size;
-    group.kernel_seq_size_per_block = kernel_seq_size;
+    group.tag               = tag;
+    group.spec              = std::move(spec);
+    group.policy.group_type = group_type;
+    group.block_num         = 4;
     return group;
 }
 
@@ -83,7 +83,7 @@ GroupedCacheLayerLayout makeLayout(std::vector<GroupBase>          groups,
     auto topology = CacheTopology::create(std::move(groups), {{0, std::move(layer_tags)}});
     GroupedCacheLayerLayout::GroupLayouts layouts;
     for (size_t group_id = 0; group_id < topology->groups().size(); ++group_id) {
-        layouts.emplace(topology->groupById(group_id).tag,
+        layouts.emplace(topology->groupTags()[group_id],
                         CacheLayerLayout(std::vector<BlockBufferPtrInfo>{std::move(buffers[group_id])}));
     }
     return GroupedCacheLayerLayout(std::move(topology), std::move(layouts));
@@ -109,12 +109,12 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
-    EXPECT_EQ(by_tag.group_id, 0);
     EXPECT_EQ(by_tag.tag, "full");
     EXPECT_EQ(cache.groupTags(), std::vector<std::string>{"full"});
     EXPECT_EQ(cache.layerCount(), 1u);
     EXPECT_EQ(cache.getSeqSizePerBlock("full"), 8);
     EXPECT_EQ(cache.getKernelSeqSizePerBlock("full"), 2);
+    EXPECT_EQ(cache.getEntriesPerBlock("full"), 0u);
 }
 
 TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
@@ -157,6 +157,136 @@ TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
         EXPECT_EQ(layer.seq_size_per_block, 8) << tag;
         EXPECT_EQ(layer.kv_cache_base.sizes().vec(), physical.sizes().vec()) << tag;
         EXPECT_EQ(layer.kv_cache_base.data_ptr(), physical.data_ptr()) << tag;
+    }
+}
+
+TEST(KVCacheLayoutViewTest, CompressedSpecPreservesPaddingBetweenKernelPages) {
+    KVCacheSpecDesc desc;
+    desc.tag                          = "compressed";
+    desc.cache_type                   = KVCacheSpecType::OpaqueKV;
+    desc.entry_dtype                  = DataType::TYPE_UINT8;
+    desc.entry_elems                  = 3;
+    desc.entry_count_mode             = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
+    desc.compression_ratio            = 4;
+    desc.block_stride_bytes_alignment = 8;
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block      = 32;
+    ctx.kernel_tokens_per_block = 8;
+    GroupBase group;
+    group.tag               = desc.tag;
+    group.spec              = CompressedKVCacheSpec::build(desc, ctx);
+    group.policy.group_type = CacheGroupType::FULL;
+    group.block_num         = 3;
+    ASSERT_EQ(group.kvBlockStrideBytes(), 32u);
+    auto               base = torch::arange(96, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 32});
+    torch_ext::KVCache cache(makeLayout({group}, {desc.tag}, {{base, {}}}));
+    const auto         view = cache.getLayerCache(0).kv_cache_base;
+    ASSERT_EQ(view.sizes().vec(), (std::vector<int64_t>{12, 8}));
+    EXPECT_EQ(cache.getEntriesPerBlock(desc.tag), 2u);
+    EXPECT_EQ(view.data_ptr(), base.data_ptr());
+    for (int page = 0; page < 12; ++page) {
+        EXPECT_EQ(view[page][0].item<int>(), page * 8);
+        EXPECT_EQ(view[page][7].item<int>(), page * 8 + 7);
+    }
+}
+
+TEST(KVCacheLayoutViewTest, Cp5ByteSlicedRingEntryCountExcludesAlignmentPadding) {
+    KVCacheSpecDesc desc;
+    desc.tag                          = "decoder_swa_kv";
+    desc.cache_type                   = KVCacheSpecType::OpaqueState;
+    desc.entry_dtype                  = DataType::TYPE_UINT8;
+    desc.entry_elems                  = 528;
+    desc.explicit_entry_count         = 128;
+    desc.block_stride_bytes_alignment = 512;
+    desc.cp                           = CacheCpPolicyDesc{};
+    desc.cp->prefill_slice_layout     = CpPrefillSliceLayout::BLOCK_STRIDE;
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::PREFILL;
+    parallelism.tp_size                            = 5;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block      = 640;
+    ctx.kernel_tokens_per_block = 128;
+    ctx.parallelism_config      = &parallelism;
+    GroupBase group;
+    group.tag               = desc.tag;
+    group.spec              = FixedStateCacheSpec::build(desc, ctx);
+    group.policy.group_type = CacheGroupType::LINEAR;
+    group.block_num         = 2;
+    const auto stride       = group.kvBlockStrideBytes();
+    // LCM(512, 5) alignment adds at least one 528-byte entry's worth of padding.
+    EXPECT_GT(stride * 5 / desc.entry_elems, desc.explicit_entry_count);
+    auto base = torch::zeros({2, static_cast<int64_t>(stride)}, torch::TensorOptions().dtype(torch::kUInt8));
+    torch_ext::KVCache cache(makeLayout({group}, {desc.tag}, {{base, {}}}));
+    EXPECT_EQ(cache.getEntriesPerBlock(desc.tag), 128u);
+    EXPECT_EQ(cache.getLayerCache(0).kv_cache_base.size(1), stride);
+}
+
+TEST(KVCacheLayoutViewTest, AlignedSwaRingSharesFullStrideAcrossPrefillAndDecode) {
+    for (const uint32_t cp_size : {3u, 5u, 7u}) {
+        KVCacheSpecDesc desc;
+        desc.tag                          = "swa_kv";
+        desc.cache_type                   = KVCacheSpecType::OpaqueState;
+        desc.entry_dtype                  = DataType::TYPE_UINT8;
+        desc.entry_elems                  = 528;
+        desc.explicit_entry_count         = 136;
+        desc.block_stride_bytes_alignment = 16896;  // LCM(512, 528)
+        desc.cp                           = CacheCpPolicyDesc{};
+        desc.cp->align_payload            = true;
+        desc.cp->prefill_slice_layout     = CpPrefillSliceLayout::BLOCK_STRIDE;
+        ParallelismConfig prefill;
+        prefill.role_type                          = RoleType::PREFILL;
+        prefill.tp_size                            = cp_size;
+        prefill.prefill_cp_config.kv_cache_sharded = true;
+        ParallelismConfig decode;
+        decode.role_type                          = RoleType::DECODE;
+        decode.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+        decode.prefill_cp_config.kv_cache_sharded = true;
+        decode.prefill_cp_config.prefill_cp_size  = cp_size;
+        SpecBuildContext ctx;
+        ctx.seq_size_per_block      = 128 * cp_size;
+        ctx.kernel_tokens_per_block = 128;
+        ctx.parallelism_config      = &prefill;
+        auto prefill_spec           = FixedStateCacheSpec::build(desc, ctx);
+        ctx.parallelism_config      = &decode;
+        auto       decode_spec      = FixedStateCacheSpec::build(desc, ctx);
+        const auto full_stride      = decode_spec->block_size_bytes();
+        EXPECT_EQ(full_stride % 528, 0u) << cp_size;
+        EXPECT_EQ(full_stride % cp_size, 0u) << cp_size;
+        EXPECT_EQ(prefill_spec->block_size_bytes() * cp_size, full_stride) << cp_size;
+        EXPECT_EQ(prefill_spec->block_payload_bytes(), decode_spec->block_payload_bytes());
+        const size_t logical_entries = ((136 + cp_size - 1) / cp_size) * cp_size;
+        EXPECT_EQ(decode_spec->block_payload_bytes(), logical_entries * 528);
+        GroupBase group;
+        group.tag               = desc.tag;
+        group.policy.group_type = CacheGroupType::LINEAR;
+        group.block_num         = 2;
+        for (const auto& spec : {prefill_spec, decode_spec}) {
+            group.spec              = spec;
+            auto               base = torch::zeros({2, static_cast<int64_t>(spec->block_size_bytes())},
+                                     torch::TensorOptions().dtype(torch::kUInt8));
+            torch_ext::KVCache cache(makeLayout({group}, {desc.tag}, {{base, {}}}));
+            EXPECT_EQ(cache.getEntriesPerBlock(desc.tag), logical_entries) << cp_size;
+        }
+        // EQUAL_BYTES transport must tile the complete destination exactly,
+        // with every sender publishing its local physical stride.
+        group.spec            = decode_spec;
+        group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+        CacheConfig config;
+        config.seq_size_per_block = 128;
+        config.layer_num          = 1;
+        config.setTopology({group}, {{0, {desc.tag}}});
+        CPSlotMapper      mapper(0, cp_size, 128);
+        std::vector<char> destination(full_stride);
+        BlockInfo         block;
+        block.addr       = destination.data();
+        block.size_bytes = full_stride;
+        for (uint32_t rank = 0; rank < cp_size; ++rank) {
+            const auto slices = mapper.sliceBlockForPeer(config, desc.tag, {block}, rank);
+            ASSERT_EQ(slices.size(), 1u);
+            EXPECT_EQ(slices[0].size_bytes, prefill_spec->block_size_bytes());
+            EXPECT_EQ(slices[0].addr, destination.data() + rank * prefill_spec->block_size_bytes());
+        }
     }
 }
 

@@ -226,9 +226,5 @@ class RouteDeliveryProjectionTest {
             return 100L * items.size(); // discriminating: prefix-size dependent
         }
 
-        @Override
-        public long committedGroupDurationMs(double plannedDurationMs) {
-            return (long) plannedDurationMs;
-        }
     }
 }

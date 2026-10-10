@@ -30,6 +30,10 @@ cc_library(
 
 cc_binary(
     name = "online_repetition_tracker",
+    # Same rationale as th_transformer_config: the pybind lib pulls the full
+    # torch_deps() link line but references only torch CPU ABI symbols, so
+    # --as-needed keeps the dead CUDA DT_NEEDED entries out of the .so.
+    linkopts = ["-Wl,--as-needed"],
     deps = [":online_repetition_tracker_pybind_lib"],
     linkshared = 1,
 )

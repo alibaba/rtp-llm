@@ -45,6 +45,7 @@ public:
         py_model_inputs_.attention_inputs.prefix_lengths_device    = inputs.attention_inputs.prefix_lengths_device;
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
+        py_model_inputs_.engram_token_windows                      = inputs.engram_token_windows;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
 
         // for spec

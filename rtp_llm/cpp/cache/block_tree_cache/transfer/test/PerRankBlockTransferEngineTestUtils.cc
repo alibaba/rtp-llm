@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 
 namespace rtp_llm::block_transfer_engine_test {
 namespace {
@@ -48,46 +49,56 @@ void removeTempDir(const std::string& path) {
 
 }  // namespace
 
-GroupBase makeTestGroupBase(CacheGroupPolicy policy,
-                            std::vector<int> layer_ids,
-                            size_t           kv_block_stride_bytes,
-                            size_t           kv_scale_stride_bytes,
-                            uint32_t         block_num,
-                            size_t           seq_size_per_block) {
+TestGroupConfig makeTestGroupBase(CacheGroupPolicy policy,
+                                  std::vector<int> layer_ids,
+                                  size_t           kv_block_stride_bytes,
+                                  size_t           kv_scale_stride_bytes,
+                                  uint32_t         block_num,
+                                  size_t           seq_size_per_block) {
     GroupBase group;
-    group.spec                      = std::make_shared<MHAKVCacheSpec>();
-    group.policy                    = policy;
-    group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = block_num;
-    group.local_kv_head_num         = 1;
-    group.seq_size_per_block        = seq_size_per_block;
-    group.kernel_seq_size_per_block = seq_size_per_block;
-    group.kv_block_stride_bytes     = kv_block_stride_bytes;
-    group.kv_scale_stride_bytes     = kv_scale_stride_bytes;
-    return group;
+    auto      spec  = test::makeResolvedMhaSpec(DataType::TYPE_UINT8, 1, 1, seq_size_per_block, "test");
+    group.spec      = std::make_shared<test::TestLayoutSpec>(*spec, kv_block_stride_bytes, kv_scale_stride_bytes);
+    group.policy    = policy;
+    group.block_num = block_num;
+    return {std::move(group), std::move(layer_ids)};
 }
 
-std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> groups) {
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupConfig> group_configs) {
+    std::vector<GroupBase>        groups;
+    std::vector<std::vector<int>> layers_by_group;
+    groups.reserve(group_configs.size());
+    layers_by_group.reserve(group_configs.size());
+    for (auto& config : group_configs) {
+        groups.push_back(std::move(config.group));
+        layers_by_group.push_back(std::move(config.layer_ids));
+    }
     RTP_LLM_CHECK(!groups.empty());
-    for (const auto& group : groups) {
-        RTP_LLM_CHECK(group.spec != nullptr);
-        RTP_LLM_CHECK(!group.layer_ids.empty());
-        for (int layer_id : group.layer_ids) {
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        RTP_LLM_CHECK(groups[group_id].spec != nullptr);
+        RTP_LLM_CHECK(!layers_by_group[group_id].empty());
+        for (int layer_id : layers_by_group[group_id]) {
             RTP_LLM_CHECK(layer_id >= 0);
         }
     }
-    return test::makeIndexedTestTopology(std::move(groups));
+    return test::makeIndexedTestTopology(std::move(groups), layers_by_group);
+}
+
+BackingLayout makeTestBackingLayout(size_t payload_bytes, bool enable_crc, bool physical_geometry) {
+    const size_t storage_bytes = enable_crc ? CrcBlockCopyBatch::encodedBytes(payload_bytes) : payload_bytes;
+    return {physical_geometry ? payload_bytes : 0, storage_bytes, ((storage_bytes + 4095) / 4096) * 4096, enable_crc};
 }
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
-                             std::vector<size_t>                  group_ids,
+                             std::vector<std::string>             group_tags,
                              std::vector<DeviceBlockPoolPtr>      device_pools,
                              std::shared_ptr<HostBlockPool>       host_pool,
-                             BlockTreeDiskBlockPoolPtr            disk_pool) {
+                             BlockTreeDiskBlockPoolPtr            disk_pool,
+                             bool                                 enable_crc,
+                             size_t                               physical_payload_bytes) {
     RTP_LLM_CHECK(topology != nullptr);
-    RTP_LLM_CHECK(!group_ids.empty());
-    const auto& first = topology->groupById(group_ids.front());
+    RTP_LLM_CHECK(!group_tags.empty());
+    const auto& first = topology->group(group_tags.front());
 
     GroupSetPtr group_set;
     switch (first.policy.group_type) {
@@ -96,7 +107,7 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
             break;
         case CacheGroupType::SWA:
             group_set = std::make_shared<SWAGroupSet>(static_cast<size_t>(first.policy.sliding_window_size),
-                                                      first.seq_size_per_block,
+                                                      first.seqSizePerBlock(),
                                                       device_pools,
                                                       host_pool,
                                                       disk_pool);
@@ -106,7 +117,16 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
             break;
     }
     RTP_LLM_CHECK(group_set != nullptr);
-    group_set->initialize(group_set_id, std::move(topology), std::move(group_ids));
+    size_t payload_bytes = physical_payload_bytes;
+    if (payload_bytes == 0) {
+        for (const auto& tag : group_tags) {
+            payload_bytes += topology->blockSizeBytesForGroup(tag);
+        }
+    }
+    group_set->initialize(group_set_id,
+                          std::move(topology),
+                          std::move(group_tags),
+                          makeTestBackingLayout(payload_bytes, enable_crc, physical_payload_bytes > 0));
     return group_set;
 }
 
@@ -153,13 +173,14 @@ DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t
     return pool;
 }
 
-std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count) {
+std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_crc) {
     auto config                  = std::make_shared<HostBlockPoolConfig>();
     config->pool_type            = BlockPoolType::HOST;
     config->pool_name            = "per_rank_transfer_engine_host";
     config->physical_block_count = usable_count + 1;
     config->payload_bytes        = payload_bytes;
-    config->stride_bytes         = ((payload_bytes + 4095) / 4096) * 4096;
+    const size_t storage_bytes   = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
+    config->stride_bytes         = ((storage_bytes + 4095) / 4096) * 4096;
     config->alignment            = 4096;
 
     auto pool = std::make_shared<HostBlockPool>(config);
@@ -178,8 +199,10 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io,
                                                      const std::string&           pool_name,
-                                                     bool                         buffered_io) {
-    const size_t stride_bytes = ((payload_bytes + 4095) / 4096) * 4096;
+                                                     bool                         buffered_io,
+                                                     bool                         enable_crc) {
+    const size_t storage_bytes = enable_crc ? ((payload_bytes + 4 + 15) / 16) * 16 : payload_bytes;
+    const size_t stride_bytes  = ((storage_bytes + 4095) / 4096) * 4096;
 
     auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
     config->pool_type       = BlockPoolType::DISK;

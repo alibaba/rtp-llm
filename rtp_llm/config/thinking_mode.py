@@ -1,5 +1,7 @@
 from typing import Any
 
+INT32_MAX = 2_147_483_647
+
 THINK_MODE_DISABLED = "disabled"
 THINK_MODE_ADAPTIVE = "adaptive"
 THINK_MODE_ENABLED = "enabled"

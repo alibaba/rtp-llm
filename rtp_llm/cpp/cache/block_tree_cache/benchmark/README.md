@@ -34,7 +34,7 @@
 cd github-opensource
 
 # 同一份普通构建同时用于指标和 CPU perf；DWARF unwind 不改变 C++ action key
-bazelisk build -c opt --config=cuda13 --config=sm8x \
+bazelisk build -c opt --config=cuda13 \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:block_tree_cache_gpu_benchmark \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:block_tree_cache_benchmark_driver
 ```
@@ -69,13 +69,13 @@ find ~/.cache/bazel -name "libpython3.10.so" -path "*/block_tree_cache*" 2>/dev/
 
 ```bash
 # Driver/registry/文档与 C++ workload 看护（统一使用 GPU 锁）
-bazelisk test -c opt --config=cuda13 --config=sm8x \
+bazelisk test -c opt --config=cuda13 \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:benchmark_driver_profile_test \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:transfer_benchmark_workload_test \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:tree_workload_generator_test
 
 # 真实 binary + driver 端到端看护（需 GPU）
-bazelisk test -c opt --config=cuda13 --config=sm8x \
+bazelisk test -c opt --config=cuda13 \
   //rtp_llm/cpp/cache/block_tree_cache/benchmark:block_tree_cache_benchmark_smoke_test
 ```
 

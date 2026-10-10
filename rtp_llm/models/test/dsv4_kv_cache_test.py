@@ -378,14 +378,11 @@ class Dsv4PostBuildModelConfigTest(TestCase):
         config.attn_config.kernel_tokens_per_block = tokens_per_block
         return config
 
-    def test_post_build_enables_independent_pools(self):
+    def test_post_build_declares_tagged_cache_descriptors(self):
         config = self._model_config()
 
         DeepSeekV4._post_build_model_config(config)
 
-        self.assertTrue(
-            config.hybrid_attention_config.enable_independent_kv_cache_pools
-        )
         self.assertEqual(
             list(config.hybrid_attention_config.hybrid_attention_types),
             [HybridAttentionType.NONE] * config.num_layers,

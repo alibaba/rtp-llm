@@ -14,7 +14,7 @@
 #include <grpc++/grpc++.h>
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
@@ -44,19 +44,19 @@ void writeBytes(const BlockInfo& block, uint8_t value) {
 // transport execution is controlled: a write always precedes its completion.
 class LeaseMemoryConverter: public LayerBlockConverter {
 public:
-    explicit LeaseMemoryConverter(std::shared_ptr<SingleTypeKVCacheAllocator> allocator):
+    explicit LeaseMemoryConverter(std::shared_ptr<CoordinatorCacheManager> allocator):
         allocator_(std::move(allocator)) {}
 
     std::vector<BlockInfo>
     convertIndexToBuffer(int layer, const std::string& tag, int block, int partitions, int partition) const override {
-        return allocator_->convertIndexToBufferByTag(layer, tag, block, partitions, partition);
+        return allocator_->convertIndexToBuffer(layer, tag, block, partitions, partition);
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }
 
 private:
-    std::shared_ptr<SingleTypeKVCacheAllocator> allocator_;
+    std::shared_ptr<CoordinatorCacheManager> allocator_;
 };
 
 class LeaseMemoryReceiver: public transfer::IKVCacheReceiver {
@@ -178,9 +178,9 @@ protected:
 
     void SetUp() override {
         config_    = test::makeSimpleMhaCacheConfig(2, 4, 4, DataType::TYPE_FP16, 2, 8);
-        allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(config_, AllocationType::DEVICE);
+        allocator_ = std::make_shared<CoordinatorCacheManager>(config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
-        pool_ = allocator_->getDeviceBlockPool();
+        pool_ = allocator_->groupBlockPools().front();
         ASSERT_NE(pool_, nullptr);
         initial_free_ = pool_->freeBlocksNum();
         ASSERT_GT(initial_free_, 1u);
@@ -244,7 +244,7 @@ protected:
         pool_->incRef(*blocks);
         KVCacheResource source;
         source.initGroups(config_.topologyPtr());
-        source.mutableBlockIds(0).assign(*blocks);
+        source.mutableBlockIds(source.groupTags().at(0)).assign(*blocks);
         for (const auto block : *blocks) {
             source.cacheKeys().push_back(1000 + block);
         }
@@ -258,7 +258,7 @@ protected:
     }
 
     void fill(const KVCacheResource& resource, uint8_t value) {
-        for (const auto block : resource.blocks(0)) {
+        for (const auto block : resource.blocks(resource.groupTags().at(0))) {
             for (int layer = 0; layer < 2; ++layer) {
                 for (const auto& buffer : buffers(block, layer)) {
                     writeBytes(buffer, value);
@@ -282,7 +282,7 @@ protected:
     }
 
     CacheConfig                                          config_;
-    std::shared_ptr<SingleTypeKVCacheAllocator>          allocator_;
+    std::shared_ptr<CoordinatorCacheManager>          allocator_;
     DeviceBlockPoolPtr                                   pool_;
     size_t                                               initial_free_ = 0;
     const std::string                                    key_          = "cancel_memory_reuse";
@@ -298,7 +298,7 @@ protected:
 TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedBytes) {
     auto request_a = allocate(1);
     ASSERT_NE(request_a, nullptr);
-    const auto block_a = request_a->blocks(0).at(0);
+    const auto block_a = request_a->blocks(request_a->groupTags().at(0)).at(0);
     EXPECT_EQ(blockRefs(block_a), 1u);
     fill(*request_a, 0x11);
     auto connector_ref = allocator_->incrKVCacheRef(*request_a, request_a->cacheKeys(), true);
@@ -355,7 +355,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
         EXPECT_EQ(pool_->freeBlocksNum(), initial_free_ - 1);
         request_b = allocate(initial_free_ - 1);
         ASSERT_NE(request_b, nullptr);
-        EXPECT_EQ(std::count(request_b->blocks(0).begin(), request_b->blocks(0).end(), block_a), 0);
+        EXPECT_EQ(std::count(request_b->blocks(request_b->groupTags().at(0)).begin(), request_b->blocks(request_b->groupTags().at(0)).end(), block_a), 0);
         fill(*request_b, 0xB2);
         EXPECT_FALSE(pool_->malloc(1).has_value());
 
@@ -367,7 +367,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
             std::thread writer([&, i] { LeaseMemoryReceiver::finishWrite(tasks[i], 0xA0 + i); });
             writer.join();
             expectBytes(block_a, i, 0xA0 + i);
-            for (const auto block : request_b->blocks(0)) {
+            for (const auto block : request_b->blocks(request_b->groupTags().at(0))) {
                 EXPECT_EQ(blockRefs(block), 1u);
                 expectBytes(block, 0, 0xB2);
                 expectBytes(block, 1, 0xB2);
@@ -395,7 +395,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     // Occupy every free block, guaranteeing the old physical block is reused.
     auto request_c = allocate(pool_->freeBlocksNum());
     ASSERT_NE(request_c, nullptr);
-    ASSERT_EQ(std::count(request_c->blocks(0).begin(), request_c->blocks(0).end(), block_a), 1);
+    ASSERT_EQ(std::count(request_c->blocks(request_c->groupTags().at(0)).begin(), request_c->blocks(request_c->groupTags().at(0)).end(), block_a), 1);
     fill(*request_c, 0xC3);
     EXPECT_EQ(blockRefs(block_a), 1u);
     EXPECT_TRUE(worker_->cancelRead(key_));
@@ -407,19 +407,19 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
         task->cancel();
         task->notifyDone(true);  // A duplicate completion must not release C's ref.
     }
-    for (const auto block : request_c->blocks(0)) {
+    for (const auto block : request_c->blocks(request_c->groupTags().at(0))) {
         EXPECT_EQ(blockRefs(block), 1u);
         expectBytes(block, 0, 0xC3);
         expectBytes(block, 1, 0xC3);
     }
     EXPECT_EQ(pool_->freeBlocksNum(), 0u);
-    const auto reused_blocks = request_c->blocks(0);
+    const auto reused_blocks = request_c->blocks(request_c->groupTags().at(0));
     request_c.reset();
     for (const auto block : reused_blocks) {
         EXPECT_EQ(blockRefs(block), 0u);
     }
     if (request_b) {
-        const auto other_blocks = request_b->blocks(0);
+        const auto other_blocks = request_b->blocks(request_b->groupTags().at(0));
         for (const auto block : other_blocks) {
             EXPECT_EQ(blockRefs(block), 1u);
             expectBytes(block, 0, 0xB2);

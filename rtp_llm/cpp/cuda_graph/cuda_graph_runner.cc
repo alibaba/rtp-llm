@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cuda_graph/generation_prefill_cuda_graph_replay_metadata.h"
@@ -22,6 +23,47 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
+int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
+    const size_t expansion =
+        group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
+    const size_t limit = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+    RTP_LLM_CHECK_WITH_INFO(physical > 0 && physical <= limit / expansion, "CUDA graph block table capacity overflow");
+    return static_cast<int64_t>(physical * expansion);
+}
+}  // namespace
+
+int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology,
+                                                      size_t               max_seq_len,
+                                                      size_t               max_reserved_step) {
+    RTP_LLM_CHECK_WITH_INFO(!topology.groups().empty(), "CUDA graph requires a non-empty cache topology");
+    const size_t limit = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+    RTP_LLM_CHECK_WITH_INFO(max_seq_len > 0 && max_seq_len <= limit && max_reserved_step <= limit - max_seq_len,
+                            "CUDA graph sequence/reserve size overflow");
+    int64_t width = 0;
+    for (const auto& group : topology.groups()) {
+        const size_t span = group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(span > 0, "CUDA graph requires a positive group block span");
+        const size_t tokens =
+            group.policy.group_type == CacheGroupType::LINEAR ? max_seq_len : max_seq_len + max_reserved_step;
+        size_t physical = tokens / span + (tokens % span != 0);
+        if (group.policy.group_type == CacheGroupType::LINEAR && max_reserved_step > 0) {
+            physical += max_reserved_step - 1;
+        }
+        width = std::max(width, expandedCaptureBlockTableWidth(group, physical));
+    }
+    return width;
+}
+
+int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topology, size_t fake_physical_block_count) {
+    RTP_LLM_CHECK_WITH_INFO(!topology.groups().empty(), "CUDA graph requires a non-empty cache topology");
+    int64_t width = 0;
+    for (const auto& group : topology.groups()) {
+        width = std::max(width, expandedCaptureBlockTableWidth(group, std::max<size_t>(1, fake_physical_block_count)));
+    }
+    return width;
+}
+
+namespace {
 
 struct FallbackTick {
     uint64_t count;
@@ -36,24 +78,39 @@ FallbackTick tickFallback(std::atomic<uint64_t>& counter) {
 class ScopedEnvFlag {
 public:
     ScopedEnvFlag(const char* name, const char* value): name_(name) {
-        const char* old_value = std::getenv(name_);
-        if (old_value != nullptr) {
+        // Python's os.environ is a cached mapping: changing the process
+        // environment with setenv() does not update the mapping that
+        // os.environ.get() reads.  The warmup signal is consumed by Python,
+        // so update os.environ itself (which also calls putenv()) while the
+        // GIL is held.  Otherwise the compiled SM120 MoE path is skipped
+        // during warmup and torch.compile first runs inside graph capture.
+        py::gil_scoped_acquire gil;
+        auto                   environ = py::module_::import("os").attr("environ");
+        auto                   py_name = py::str(name_);
+        if (environ.contains(py_name)) {
             had_old_value_ = true;
-            old_value_     = old_value;
+            old_value_     = py::cast<std::string>(environ[py_name]);
         }
-        setenv(name_, value, 1);
+        environ[py_name] = py::str(value);
     }
 
-    ~ScopedEnvFlag() {
-        if (had_old_value_) {
-            setenv(name_, old_value_.c_str(), 1);
-        } else {
-            unsetenv(name_);
+    ~ScopedEnvFlag() noexcept {
+        py::gil_scoped_acquire gil;
+        try {
+            auto environ = py::module_::import("os").attr("environ");
+            auto py_name = py::str(name_);
+            if (had_old_value_) {
+                environ[py_name] = py::str(old_value_);
+            } else {
+                environ.attr("pop")(py_name, py::none());
+            }
+        } catch (py::error_already_set& error) {
+            error.discard_as_unraisable("ScopedEnvFlag::~ScopedEnvFlag");
         }
     }
 
 private:
-    const char* name_;
+    std::string name_;
     bool        had_old_value_ = false;
     std::string old_value_;
 };
@@ -187,9 +244,9 @@ struct BlockTableCopyGeometry {
 };
 
 // Hybrid cache groups may expose a common staging row width even though a
-// selected graph stores a narrower model-local table.  The graph buffers are
-// cleared before every replay, so copying the intersection is both sufficient
-// and prevents a wider live staging table from overwriting adjacent storage.
+// selected graph stores a narrower model-local table. Copying the bounded
+// intersection keeps a wider live staging table from overwriting the capture
+// buffer; consumers read only lengths they are explicitly given.
 BlockTableCopyGeometry blockTableCopyGeometry(const torch::Tensor& src, const torch::Tensor& dst) {
     RTP_LLM_CHECK_WITH_INFO(src.defined() && dst.defined(), "CUDA graph block-table copy requires defined tensors");
     RTP_LLM_CHECK_WITH_INFO(src.scalar_type() == dst.scalar_type(),
@@ -288,6 +345,16 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                             token_num,
                             py_model_inputs.input_ids.numel());
     optimizedCopyAsync(inputs.input_ids, py_model_inputs.input_ids, token_num * sizeof(int));
+    if (engram_window_size_ > 0) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.engram_token_windows.defined() && inputs.engram_token_windows.dim() == 2
+                                    && inputs.engram_token_windows.size(0) == token_num
+                                    && inputs.engram_token_windows.size(1) == engram_window_size_,
+                                "invalid Engram graph history");
+        py_model_inputs.engram_token_windows.fill_(-1);
+        optimizedCopyAsync(inputs.engram_token_windows,
+                           py_model_inputs.engram_token_windows,
+                           token_num * engram_window_size_ * sizeof(int32_t));
+    }
     if (isGenerationPrefillCudaGraph() && token_num < state.graph_token_capacity) {
         py_model_inputs.input_ids.slice(0, token_num, state.graph_token_capacity)
             .fill_(generation_prefill_cuda_graph_pad_token_id_);
@@ -1594,9 +1661,6 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     inputs.attention_inputs.sequence_lengths.fill_(max_seq_len_ - num_tokens_per_bs - 1);
     inputs.attention_inputs.sequence_lengths = inputs.attention_inputs.sequence_lengths.pin_memory();
 
-    const int64_t max_kv_blocks =
-        static_cast<int64_t>(((max_seq_len_ + seq_size_per_block_ - 1) / seq_size_per_block_) + sp_steps_);
-
     // Allocate combo_position_ids capture buffer only when the model actually uses
     // combo position ids (Mrope etc.). The factor is sourced from the C++ rope_config
     // by PyWrappedModel — 0 means "no combo_position_ids" and the buffer stays unset
@@ -1609,7 +1673,7 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
         inputs.attention_inputs.combo_position_ids = inputs.combo_position_ids;
     }
 
-    const int64_t max_blocks = max_kv_blocks * seq_size_per_block_ / kernel_seq_size_per_block_;
+    const int64_t max_blocks = max_kernel_block_table_width_;
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
@@ -1778,6 +1842,9 @@ void CudaGraphRunner::initCapture() {
         // owns only attention metadata and must not replace this tensor because
         // the captured graph retains its address.
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        if (engram_window_size_ > 0) {
+            inputs.engram_token_windows = torch::full({max_num_token_, engram_window_size_}, -1, options_cuda_int32_);
+        }
         // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
         // to hidden_size * hc_mult for regular (MTP) graphs and to
         // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
@@ -1932,6 +1999,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d start.", key_type, key);
     auto attn_pyobj = graph_instances_[key].mem_hold_.attn_pyobj_;
     try {
+        // Run the same backend that will be captured for this exact key.  In
+        // particular, static torch.compile/Triton specializations must be
+        // materialized before graphCaptureBegin rather than during capture.
+        ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         py_forward_method_(inputs, attn_pyobj);
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
@@ -2023,6 +2094,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const bool fixed_capacity_draft_prefill = usesFixedCapacityMtpDraftPrefillCudaGraph();
     const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    if (engram_window_size_ > 0) {
+        inputs.engram_token_windows =
+            capture_mem_hold_.py_model_inputs_.engram_token_windows.slice(0, 0, token_slice_len);
+    }
     if (isGenerationPrefillCudaGraph()) {
         // Generation prefill builds embeddings from input_ids. Keep this
         // transport-only tensor empty, matching initCapture(), instead of

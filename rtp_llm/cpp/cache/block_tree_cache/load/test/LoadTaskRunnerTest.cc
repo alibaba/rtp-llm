@@ -23,22 +23,25 @@
 namespace rtp_llm {
 namespace {
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false) {
     using namespace block_transfer_engine_test;
 
-    auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    policy.enable_prefix_reuse                          = true;
-    const GroupBase                            group    = makeTestGroupBase(policy);
-    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
-    DeviceBlockPoolPtr pool      = makeTestDevicePool({{group.kv_block_stride_bytes, group.kv_scale_stride_bytes}},
+    auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse                              = true;
+    const auto                                 group_config = makeTestGroupBase(policy);
+    const auto                                 kv_bytes     = group_config.group.kvBlockStrideBytes();
+    const auto                                 scale_bytes  = group_config.group.kvScaleStrideBytes();
+    const std::shared_ptr<const CacheTopology> topology     = makeTestTopology({group_config});
+    DeviceBlockPoolPtr                         pool         = makeTestDevicePool({{kv_bytes, scale_bytes}},
                                                  /*usable_count=*/1,
                                                  "load_task_runner_" + std::to_string(group_set_id));
-    auto               host_pool = makeHostPool(group.kv_block_stride_bytes, /*usable_count=*/2);
-    auto               disk_pool = makeDiskPool(group.kv_block_stride_bytes,
+    auto                                       host_pool    = makeHostPool(kv_bytes, /*usable_count=*/2);
+    auto                                       disk_pool    = makeDiskPool(kv_bytes,
                                   /*usable_count=*/2,
                                   "/tmp",
                                   std::make_unique<StatusDiskBlockIO>(DiskBlockIOStatus::OK));
-    return makeTestGroupSet(group_set_id, topology, {0}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool));
+    return makeTestGroupSet(
+        group_set_id, topology, {"group0"}, {std::move(pool)}, std::move(host_pool), std::move(disk_pool), enable_crc);
 }
 
 LoadTaskRunner::TaskPtr makeLoadTask(std::vector<TransferDescriptor> descriptors) {
@@ -62,7 +65,7 @@ public:
     explicit RecordingPerRankEngine(std::deque<bool> results):
         PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}), results_(std::move(results)) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         batches_.push_back(descriptors);
         const TransferDescriptor& first     = descriptors.front();
@@ -72,9 +75,10 @@ public:
         const bool result = results_.front();
         results_.pop_front();
         if (result) {
-            return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
+            return std::make_shared<CompletedTransferAsyncContext>(ErrorInfo::OkStatus());
         }
-        return std::make_shared<CompletedAsyncContext>(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
+        return std::make_shared<CompletedTransferAsyncContext>(
+            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "submission failed"));
     }
 
     std::vector<std::vector<TransferDescriptor>> batches_;
@@ -86,7 +90,7 @@ class PendingPerRankEngine final: public PerRankBlockTransferEngine {
 public:
     PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
 
-    std::shared_ptr<AsyncContext> execute(TransferTask task) override {
+    std::shared_ptr<TransferAsyncContext> execute(TransferTask task) override {
         auto context  = std::make_shared<TransferBatchAsyncContext>();
         bool released = false;
         {
@@ -169,7 +173,6 @@ TEST(LoadTaskRunnerTest, CreateTaskSkipsDeviceDescriptors) {
     LoadTaskRunner::TaskPtr                 task    = runner.createTask(context);
     EXPECT_EQ(task, nullptr);
 }
-
 
 TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
     GroupSetPtr                                   group = makeTaskRunnerTestGroupSet();
@@ -301,11 +304,11 @@ TEST(LoadTaskRunnerTest, SplitsEachDirectionByGroupSetId) {
     BlockTransferDispatcher dispatcher(engine, nullptr, 8);
     BlockTreeCacheMetricsReporter metrics_reporter{nullptr};
     auto                          task = makeLoadTask({TransferDescriptor::hostToDevice(0, 1, {1}),
-                                                       TransferDescriptor::hostToDevice(0, 2, {2}),
-                                                       TransferDescriptor::hostToDevice(1, 3, {3}),
-                                                       TransferDescriptor::diskToDevice(0, 4, {4}),
-                                                       TransferDescriptor::diskToDevice(1, 5, {5}),
-                                                       TransferDescriptor::diskToDevice(1, 6, {6})});
+                              TransferDescriptor::hostToDevice(0, 2, {2}),
+                              TransferDescriptor::hostToDevice(1, 3, {3}),
+                              TransferDescriptor::diskToDevice(0, 4, {4}),
+                              TransferDescriptor::diskToDevice(1, 5, {5}),
+                              TransferDescriptor::diskToDevice(1, 6, {6})});
     std::optional<ErrorInfo>      result;
 
     runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result.emplace(std::move(error)); });

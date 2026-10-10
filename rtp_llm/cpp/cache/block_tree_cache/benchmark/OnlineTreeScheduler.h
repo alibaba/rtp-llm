@@ -50,6 +50,7 @@ public:
         size_t                            actual_matched_depth{0};
         std::vector<MultiNodeResource>    matched_device_resources;
         std::vector<BlockIndicesType>     request_blocks;
+        std::vector<std::string>          request_group_tags;
         size_t                            joined_target_block_count{0};
         std::shared_ptr<LoadAsyncContext> load_ticket;  // nullable
     };
@@ -81,13 +82,16 @@ public:
     virtual void publishInsert(const PathKeys&                path,
                                size_t                         actual_matched_depth,
                                PreparedRequestResources&      out,
-                               std::vector<BlockIndicesType>& request_blocks) = 0;
+                               std::vector<BlockIndicesType>& request_blocks,
+                               std::vector<std::string>&      request_group_tags) = 0;
 
-    virtual void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks) = 0;
+    virtual void releaseRequestBlocks(std::vector<BlockIndicesType>& blocks, std::vector<std::string>& group_tags) = 0;
 
     // Release prepared and request blocks. Used by rollback and cleanup;
     // must be idempotent.
-    virtual void rollback(PreparedRequestResources& out, std::vector<BlockIndicesType>& request_blocks) = 0;
+    virtual void rollback(PreparedRequestResources&      out,
+                          std::vector<BlockIndicesType>& request_blocks,
+                          std::vector<std::string>&      request_group_tags) = 0;
 };
 
 // Benchmark-local bounded polling helper used by the real adapter.
@@ -114,6 +118,7 @@ struct OnlineRequestContext {
     size_t                                matched_device_blocks{0};
     size_t                                host_matched_blocks{0};
     std::vector<BlockIndicesType>         request_blocks;
+    std::vector<std::string>              request_group_tags;
     size_t                                joined_target_block_count{0};
     std::shared_ptr<LoadAsyncContext>     load_ticket;
     PreparedRequestResources              prepared;

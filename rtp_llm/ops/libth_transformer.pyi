@@ -46,3 +46,6 @@ class TypedOutput:
     @t.setter
     def t(self, arg1: torch.Tensor) -> None:
         ...
+
+def get_multimodal_feature_hash(arg0: torch.Tensor) -> torch.Tensor:
+    ...

@@ -639,7 +639,7 @@ def prepare_indexer_params(
 
     seqlens_32 = seq_lens.to(torch.int32).to("cuda")
     schedule_metadata = deep_gemm.get_paged_mqa_logits_metadata(
-        seqlens_32, blocksize, deep_gemm.get_num_sms()
+        seqlens_32.view(-1, 1), blocksize, deep_gemm.get_num_sms()
     )
 
     return SimpleNamespace(
@@ -839,7 +839,7 @@ class IndexerRef(torch.nn.Module):
                 q_fp8.unsqueeze(1),
                 kv_cache_fp8.view(dtype=torch.uint8),
                 weights,
-                self.params.seq_lens.to(torch.int32).to("cuda"),
+                self.params.seq_lens.to(torch.int32).to("cuda").view(-1, 1),
                 self.params.block_table,
                 self.params.schedule_metadata,
                 max_seq_len,

@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class GrpcCacheStatusCheckRunnerTest {
@@ -37,6 +38,31 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final DynamicCacheIntervalService cacheIntervalService =
             Mockito.mock(DynamicCacheIntervalService.class);
+
+    @Test
+    void decodeCacheResponseUpdatesCapacityWithoutBuildingDetailedIndex() {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
+        EngineRpcService.CacheStatusPB response = EngineRpcService.CacheStatusPB.newBuilder()
+                .setVersion(1)
+                .setAvailableKvCache(1000)
+                .setTotalKvCache(2000)
+                .setBlockSize(128)
+                .build();
+        when(engineGrpcService.getCacheStatusAsync(
+                anyString(), anyInt(), eq(status), anyLong(), anyLong(), eq(RoleType.DECODE)))
+                .thenReturn(CompletableFuture.completedFuture(response));
+
+        new GrpcCacheStatusCheckRunner(
+                "test-model", status.getIpPort(), "test-site", RoleType.DECODE,
+                status, status.tryBeginCachePoll(), directory(status),
+                engineHealthReporter, engineGrpcService, localKvCacheAwareManager, cacheIntervalService,
+                20, new LongAdder(), 50L, true, Runnable::run).run();
+
+        assertEquals(1000, status.getCacheStatus().getAvailableKvCache());
+        assertEquals(2000, status.getCacheStatus().getTotalKvCache());
+        verifyNoInteractions(localKvCacheAwareManager);
+    }
 
     @Test
     void testGrpcCacheStatusCheckRunner() {

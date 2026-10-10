@@ -10,7 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/test/mock/MockKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/MockAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -96,13 +96,13 @@ protected:
             generate_input, model_config, runtime_config, resource_context, nullptr);
     }
 
-    std::shared_ptr<testing::NiceMock<MockKVCacheAllocator>> installRetryableInitMalloc() {
-        auto allocator = std::make_shared<testing::NiceMock<MockKVCacheAllocator>>(cache_manager_->config_);
+    std::shared_ptr<testing::NiceMock<MockCoordinatorCacheManager>> installRetryableInitMalloc() {
+        auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
         ON_CALL(*allocator, totalBlocksNum()).WillByDefault(testing::Return(64));
         ON_CALL(*allocator, getNeedBlocks(testing::_)).WillByDefault(testing::Return(1));
         ON_CALL(*allocator, initMallocForCommonLen(testing::_))
             .WillByDefault(testing::Return(MallocResult{false, 0, 0, MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED}));
-        cache_manager_->allocator_ = allocator;
+        cache_manager_->coordinator_manager_ = allocator;
         return allocator;
     }
 
@@ -453,17 +453,18 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
     ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
     ASSERT_EQ(stream->curBlocksNum(), 1u);
 
-    const auto real_allocator = cache_manager_->allocator_;
-    const auto device_pool    = real_allocator->getDeviceBlockPool();
+    const auto real_allocator = cache_manager_->coordinator_manager_;
+    ASSERT_EQ(real_allocator->groupBlockPools().size(), 1u);
+    const auto device_pool = real_allocator->groupBlockPools().front();
     ASSERT_NE(device_pool, nullptr);
-    const auto& request_blocks = stream->streamCacheResource().kvCache().blocks(/*batch_id=*/0, /*group_id=*/0);
+    const auto& request_blocks = stream->streamCacheResource().kvCache().blocks(/*batch_id=*/0, "default");
     ASSERT_EQ(request_blocks.size(), 1u);
     const BlockIdxType request_block = request_blocks.front();
     ASSERT_EQ(device_pool->refCount(request_block), 1u);
     const size_t free_after_request_alloc = device_pool->freeBlocksNum();
 
     auto   async_context  = std::make_shared<MockAsyncContext>();
-    auto   mock_allocator = std::make_shared<MockKVCacheAllocator>(init_config());
+    auto   mock_allocator = std::make_shared<MockCoordinatorCacheManager>(init_config());
     size_t free_count     = 0;
     EXPECT_CALL(*mock_allocator, incrMalloc(_))
         .WillOnce(Return(MallocResult{/*success=*/true,
@@ -474,7 +475,7 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
         ++free_count;
         real_allocator->free(free_info);
     });
-    cache_manager_->allocator_ = mock_allocator;
+    cache_manager_->coordinator_manager_ = mock_allocator;
 
     stream->setIsContextStream(false);
     stream->setSeqLength(3);

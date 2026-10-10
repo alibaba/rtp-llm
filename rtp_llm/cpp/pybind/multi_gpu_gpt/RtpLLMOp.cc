@@ -203,6 +203,19 @@ void RtpLLMOp::init(py::object model,
             RTP_LLM_LOG_WARNING("telemetry disabled: role=backend field=config reason=conversion_failed");
         }
     }
+
+    // engine_creator routes embedding tasks through RtpEmbeddingOp, not this generation op.
+    if (py::hasattr(model, "custom_module") && !model.attr("custom_module").is_none()) {
+        TORCH_CHECK(!params.py_model.is_none(), "custom output requires a Python model");
+        RTP_LLM_CHECK_WITH_INFO(params.pd_sep_config.role_type == RoleType::PDFUSION && !propose_params
+                                    && params.sp_config.type == SP_TYPE_NONE,
+                                "custom output requires PDFUSION without speculative decoding");
+        // Hidden states are replicated; only rank 0 owns response streams.
+        if (params.parallelism_config.tp_rank == 0) {
+            params.py_model.attr("custom_output_handler") = model.attr("custom_module").attr("handler");
+        }
+    }
+
     pybind11::gil_scoped_release release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,

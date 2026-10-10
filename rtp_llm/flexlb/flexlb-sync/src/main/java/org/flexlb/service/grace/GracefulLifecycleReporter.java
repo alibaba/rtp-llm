@@ -1,6 +1,5 @@
 package org.flexlb.service.grace;
 
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -9,7 +8,6 @@ import org.springframework.stereotype.Component;
 
 import static org.flexlb.constant.MetricConstant.GRACEFUL_LIFECYCLE_EVENT;
 
-@Slf4j
 @Component
 public class GracefulLifecycleReporter {
 
@@ -29,10 +27,6 @@ public class GracefulLifecycleReporter {
 
     public void reportZkNodeOffline(long durationMs) {
         monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "zk_node_offline", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
-    }
-
-    public void reportShutdownTimeout(long durationMs) {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of(TYPE_TAG, "shutdown_timeout", DURATION_MS_TAG, String.valueOf(durationMs)), 1);
     }
 
     public void reportShutdownComplete(long durationMs) {

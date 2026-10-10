@@ -15,7 +15,10 @@ try:
     if torch.version.cuda:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
         if (major, minor) >= (12, 9):
-            from flash_mla import flash_mla_with_kvcache, get_mla_metadata
+            from rtp_llm.models_py.utils.flash_mla_legacy import (
+                flash_mla_with_kvcache,
+                get_mla_metadata,
+            )
 
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:

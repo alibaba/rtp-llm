@@ -31,4 +31,5 @@ rpm_library(
     hdrs = [
         "hf3fs_usrbio.h",
     ],
+    origin_rpath = True,
 )

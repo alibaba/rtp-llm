@@ -72,86 +72,107 @@ def recompute_w_u_fwd_kda_kernel(
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-    p_b = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-    b_b = tl.load(p_b, boundary_check=(0,))
+    p_b_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_b_m0 = (p_b_i0 >= 0) & (p_b_i0 < (T))
+    p_b = (beta + bos * H + i_h) + p_b_i0 * (H)
+    b_b = tl.load(p_b, mask=p_b_m0, other=0)
 
-    p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+    p_A_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+    p_A_m0 = (p_A_i0 >= 0) & (p_A_i0 < (T))
+    p_A_i1 = tl.arange(0, BT).to(tl.int64) + (0)
+    p_A_m1 = (p_A_i1 >= 0) & (p_A_i1 < (BT))
+    p_A = (
+        (A + (bos * H + i_h) * BT) + p_A_i0[:, None] * (H * BT) + p_A_i1[None, :] * (1)
     )
-    b_A = tl.load(p_A, boundary_check=(0, 1))
+    b_A = tl.load(p_A, mask=p_A_m0[:, None] & p_A_m1[None, :], other=0)
 
     for i_v in range(tl.cdiv(V, BV)):
-        p_v = tl.make_block_ptr(
-            v + (bos * H + i_h) * V,
-            (T, V),
-            (H * V, 1),
-            (i_t * BT, i_v * BV),
-            (BT, BV),
-            (1, 0),
+        p_v_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_v_m0 = (p_v_i0 >= 0) & (p_v_i0 < (T))
+        p_v_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+        p_v_m1 = (p_v_i1 >= 0) & (p_v_i1 < (V))
+        p_v = (
+            (v + (bos * H + i_h) * V)
+            + p_v_i0[:, None] * (H * V)
+            + p_v_i1[None, :] * (1)
         )
-        p_u = tl.make_block_ptr(
-            u + (bos * H + i_h) * V,
-            (T, V),
-            (H * V, 1),
-            (i_t * BT, i_v * BV),
-            (BT, BV),
-            (1, 0),
+        p_u_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_u_m0 = (p_u_i0 >= 0) & (p_u_i0 < (T))
+        p_u_i1 = tl.arange(0, BV).to(tl.int64) + (i_v * BV)
+        p_u_m1 = (p_u_i1 >= 0) & (p_u_i1 < (V))
+        p_u = (
+            (u + (bos * H + i_h) * V)
+            + p_u_i0[:, None] * (H * V)
+            + p_u_i1[None, :] * (1)
         )
-        b_v = tl.load(p_v, boundary_check=(0, 1))
+        b_v = tl.load(p_v, mask=p_v_m0[:, None] & p_v_m1[None, :], other=0)
         b_vb = (b_v * b_b[:, None]).to(b_v.dtype)
         b_u = tl.dot(b_A, b_vb)
-        tl.store(p_u, b_u.to(p_u.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(
+            p_u, b_u.to(p_u.dtype.element_ty), mask=p_u_m0[:, None] & p_u_m1[None, :]
+        )
 
     for i_k in range(tl.cdiv(K, BK)):
-        p_w = tl.make_block_ptr(
-            w + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_w_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_w_m0 = (p_w_i0 >= 0) & (p_w_i0 < (T))
+        p_w_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_w_m1 = (p_w_i1 >= 0) & (p_w_i1 < (K))
+        p_w = (
+            (w + (bos * H + i_h) * K)
+            + p_w_i0[:, None] * (H * K)
+            + p_w_i1[None, :] * (1)
         )
-        p_k = tl.make_block_ptr(
-            k + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_k_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_k_m0 = (p_k_i0 >= 0) & (p_k_i0 < (T))
+        p_k_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_k_m1 = (p_k_i1 >= 0) & (p_k_i1 < (K))
+        p_k = (
+            (k + (bos * H + i_h) * K)
+            + p_k_i0[:, None] * (H * K)
+            + p_k_i1[None, :] * (1)
         )
-        b_k = tl.load(p_k, boundary_check=(0, 1))
+        b_k = tl.load(p_k, mask=p_k_m0[:, None] & p_k_m1[None, :], other=0)
         b_kb = b_k * b_b[:, None]
 
-        p_gk = tl.make_block_ptr(
-            gk + (bos * H + i_h) * K,
-            (T, K),
-            (H * K, 1),
-            (i_t * BT, i_k * BK),
-            (BT, BK),
-            (1, 0),
+        p_gk_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_gk_m0 = (p_gk_i0 >= 0) & (p_gk_i0 < (T))
+        p_gk_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+        p_gk_m1 = (p_gk_i1 >= 0) & (p_gk_i1 < (K))
+        p_gk = (
+            (gk + (bos * H + i_h) * K)
+            + p_gk_i0[:, None] * (H * K)
+            + p_gk_i1[None, :] * (1)
         )
-        b_gk = tl.load(p_gk, boundary_check=(0, 1)).to(tl.float32)
+        b_gk = tl.load(p_gk, mask=p_gk_m0[:, None] & p_gk_m1[None, :], other=0).to(
+            tl.float32
+        )
         b_kb *= exp2(b_gk)
         if STORE_QG:
-            p_q = tl.make_block_ptr(
-                q + (bos * H + i_h) * K,
-                (T, K),
-                (H * K, 1),
-                (i_t * BT, i_k * BK),
-                (BT, BK),
-                (1, 0),
+            p_q_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+            p_q_m0 = (p_q_i0 >= 0) & (p_q_i0 < (T))
+            p_q_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+            p_q_m1 = (p_q_i1 >= 0) & (p_q_i1 < (K))
+            p_q = (
+                (q + (bos * H + i_h) * K)
+                + p_q_i0[:, None] * (H * K)
+                + p_q_i1[None, :] * (1)
             )
-            p_qg = tl.make_block_ptr(
-                qg + (bos * H + i_h) * K,
-                (T, K),
-                (H * K, 1),
-                (i_t * BT, i_k * BK),
-                (BT, BK),
-                (1, 0),
+            p_qg_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+            p_qg_m0 = (p_qg_i0 >= 0) & (p_qg_i0 < (T))
+            p_qg_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+            p_qg_m1 = (p_qg_i1 >= 0) & (p_qg_i1 < (K))
+            p_qg = (
+                (qg + (bos * H + i_h) * K)
+                + p_qg_i0[:, None] * (H * K)
+                + p_qg_i1[None, :] * (1)
             )
-            b_q = tl.load(p_q, boundary_check=(0, 1))
+            b_q = tl.load(p_q, mask=p_q_m0[:, None] & p_q_m1[None, :], other=0)
             b_qg = b_q * exp2(b_gk)
-            tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(
+                p_qg,
+                b_qg.to(p_qg.dtype.element_ty),
+                mask=p_qg_m0[:, None] & p_qg_m1[None, :],
+            )
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
             o_k = i_k * BK + tl.arange(0, BK)
@@ -164,18 +185,25 @@ def recompute_w_u_fwd_kda_kernel(
                 exp2(b_gn[None, :] - b_gk),
                 0,
             )
-            p_kg = tl.make_block_ptr(
-                kg + (bos * H + i_h) * K,
-                (T, K),
-                (H * K, 1),
-                (i_t * BT, i_k * BK),
-                (BT, BK),
-                (1, 0),
+            p_kg_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+            p_kg_m0 = (p_kg_i0 >= 0) & (p_kg_i0 < (T))
+            p_kg_i1 = tl.arange(0, BK).to(tl.int64) + (i_k * BK)
+            p_kg_m1 = (p_kg_i1 >= 0) & (p_kg_i1 < (K))
+            p_kg = (
+                (kg + (bos * H + i_h) * K)
+                + p_kg_i0[:, None] * (H * K)
+                + p_kg_i1[None, :] * (1)
             )
-            tl.store(p_kg, b_kg.to(p_kg.dtype.element_ty), boundary_check=(0, 1))
+            tl.store(
+                p_kg,
+                b_kg.to(p_kg.dtype.element_ty),
+                mask=p_kg_m0[:, None] & p_kg_m1[None, :],
+            )
 
         b_w = tl.dot(b_A, b_kb.to(b_k.dtype))
-        tl.store(p_w, b_w.to(p_w.dtype.element_ty), boundary_check=(0, 1))
+        tl.store(
+            p_w, b_w.to(p_w.dtype.element_ty), mask=p_w_m0[:, None] & p_w_m1[None, :]
+        )
 
 
 def recompute_w_u_fwd(

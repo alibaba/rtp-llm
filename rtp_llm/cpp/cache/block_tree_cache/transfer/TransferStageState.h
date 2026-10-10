@@ -5,15 +5,16 @@
 #include <mutex>
 #include <utility>
 
-#include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
 class TransferStageState {
 public:
-    using DoneCallback = std::function<void(ErrorInfo)>;
+    using DoneCallback = std::function<void(TransferResult)>;
 
-    explicit TransferStageState(DoneCallback callback): callback_(std::move(callback)) {}
+    explicit TransferStageState(DoneCallback callback, size_t block_count = 0):
+        callback_(std::move(callback)), result_(block_count) {}
 
     void addBatch() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -23,17 +24,18 @@ public:
         ++remaining_;
     }
 
-    void completeBatch(ErrorInfo error) {
-        DoneCallback callback;
-        ErrorInfo    result = ErrorInfo::OkStatus();
+    void completeBatch(TransferResult batch_result, const std::vector<size_t>& block_indices = {}) {
+        DoneCallback   callback;
+        TransferResult result;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (completed_ || remaining_ <= (submitting_finished_ ? 0u : 1u)) {
                 return;
             }
-            if (first_error_.ok() && !error.ok()) {
-                first_error_ = std::move(error);
+            for (size_t i = 0; i < block_indices.size(); ++i) {
+                result_.block_errors[block_indices[i]] = batch_result.blockError(i);
             }
+            result_.merge(std::move(batch_result));
             --remaining_;
             finishIfReadyLocked(callback, result);
         }
@@ -43,8 +45,8 @@ public:
     }
 
     void finishSubmitting() {
-        DoneCallback callback;
-        ErrorInfo    result = ErrorInfo::OkStatus();
+        DoneCallback   callback;
+        TransferResult result;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (submitting_finished_ || completed_) {
@@ -60,21 +62,21 @@ public:
     }
 
 private:
-    void finishIfReadyLocked(DoneCallback& callback, ErrorInfo& result) {
+    void finishIfReadyLocked(DoneCallback& callback, TransferResult& result) {
         if (remaining_ != 0 || completed_) {
             return;
         }
         completed_ = true;
-        result     = first_error_;
+        result     = result_;
         callback   = std::move(callback_);
     }
 
-    std::mutex   mutex_;
-    DoneCallback callback_;
-    ErrorInfo    first_error_{ErrorInfo::OkStatus()};
-    size_t       remaining_{1};
-    bool         submitting_finished_{false};
-    bool         completed_{false};
+    std::mutex     mutex_;
+    DoneCallback   callback_;
+    TransferResult result_;
+    size_t         remaining_{1};
+    bool           submitting_finished_{false};
+    bool           completed_{false};
 };
 
 }  // namespace rtp_llm

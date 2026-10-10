@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
@@ -20,6 +22,7 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -76,6 +79,7 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     profile_step_start_(std::move(profile_step_start)),
     profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    has_engram_         = !params.model_config_.attn_config.v41_kv_source_layer_ids.empty();
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
@@ -117,12 +121,6 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         static_cast<size_t>(std::max<int64_t>(1, params.runtime_config.max_generate_batch_size));
     sampler_.reset(new Sampler(SamplerInitParams{initial_sampler_batch_size, false}));
 
-    const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
-                                                                   params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
-
     GptModelInitParams model_init_params(
         {params.gpt_weights,
          genModelDescription(params.model_config_, params.parallelism_config, params.eplb_config, params.moe_config),
@@ -141,12 +139,47 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          mla_ops_type,
          params.model_config_.max_seq_len,
          params.model_config_.hidden_size,
-         runtime_tokens_per_block,
-         runtime_kernel_tokens_per_block,
          cache_manager,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
+        is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
+        role_type_,
+        warm_up_,
+        params.model_config_.hidden_state_capture_layer_ids);
+    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+#if USING_CUDA || USING_ROCM
+    if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
+        const auto& model_cache_config =
+            is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
+        const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
+        const size_t max_reserved_step        = params.sp_config.speculativeReserveStep();
+        const auto&  topology                 = model_init_params.kv_cache_layer_layout->topology();
+        RTP_LLM_CHECK_WITH_INFO(params.model_config_.max_seq_len > 0,
+                                "CUDA graph max sequence length must be positive");
+        const size_t max_seq_len = static_cast<size_t>(params.model_config_.max_seq_len);
+        const size_t real_width =
+            CudaGraphRunner::captureKernelBlockTableWidth(topology, max_seq_len, max_reserved_step);
+
+        // Fake callers use one uniform physical count for every group: decode
+        // warmup reserves seq+reserve with model pages, generation-prefill
+        // warmup reserves the same fake input length with cache pages, and idle batches use one.
+        const size_t warmup_span = params.model_config_.attn_config.tokens_per_block;
+        RTP_LLM_CHECK_WITH_INFO(warmup_span > 0 && runtime_tokens_per_block > 0,
+                                "CUDA graph fake block spans must be positive");
+        const size_t warmup_len           = warmUpInputLength(max_seq_len, max_reserved_step);
+        const size_t decode_tokens        = warmup_len + max_reserved_step;
+        const size_t decode_warmup_blocks = decode_tokens / warmup_span + (decode_tokens % warmup_span != 0);
+        const size_t prefill_warmup_blocks =
+            warmup_len / runtime_tokens_per_block + (warmup_len % runtime_tokens_per_block != 0);
+        const size_t fake_count = std::max<size_t>({1, decode_warmup_blocks, prefill_warmup_blocks});
+        const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
+        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width) <= std::numeric_limits<int64_t>::max(),
+                                "CUDA graph kernel block table width exceeds int64 range");
+        model_init_params.kernel_block_table_width = std::max(real_width, fake_width);
+    }
+#endif
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -168,8 +201,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                                   cache_manager->cacheConfig()) :
                                    CacheConfig();
 
-    batch_stream_processor_.reset(new NormalBatchStreamProcessor(
-        params.model_config_, params.pd_sep_config, params.profiling_debug_logging_config, cache_config, warm_up_));
+    const int async_worker_count =
+        tp_rank_ > 0 || warm_up_ || is_propose_ ? 0 : params.runtime_config.output_dispatcher_worker_count;
+    batch_stream_processor_.reset(new NormalBatchStreamProcessor(params.model_config_,
+                                                                 params.pd_sep_config,
+                                                                 params.profiling_debug_logging_config,
+                                                                 cache_config,
+                                                                 warm_up_,
+                                                                 async_worker_count));
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
                                  params.sp_config.tree_decode_config,
@@ -258,9 +297,11 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         // update kv cache
-        if (model_input.kv_cache_update_mapping.defined()) {
+        if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
-            cache_manager_->blockBatchCopy(model_input.kv_cache_update_mapping);
+            RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
+            cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
+                                                     model_input.kv_cache_group_tags);
         }
     }
     {
@@ -289,6 +330,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
+        cudaSyncAndCheck();
+        model_->releaseBuffers();
+        for (const auto& stream : streams) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
+        }
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
+        return absl::OkStatus();
+    }
+
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         if (cache_manager_ && cache_manager_->hasP2PConnector()) {
             // P2P synchronizes KV readiness and transfer completion separately.
@@ -305,7 +358,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
-    {
+    // Gather selects the execution mode from non-errored streams in model order.
+    // Use that same decision: streams.front() may already have failed or be reordered.
+    const bool zero_token_batch = model_input.skip_lm_head;
+    if (!zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -337,7 +393,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
-    if (useStreamAsync() && is_decode_only) {
+    if (useStreamAsync() && is_decode_only && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -365,11 +421,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
-        if (useDeviceInput()) {
-            publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+        absl::Status result;
+        if (zero_token_batch) {
+            cudaSyncAndCheck();
+            result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
+                                                                  model_output.generation_prefill_cuda_graph_status);
+        } else {
+            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
+            if (useDeviceInput()) {
+                publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+            }
+            result = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         }
-        auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {
@@ -486,6 +549,7 @@ void NormalExecutor::ensureModelInputsOnCuda(GptModelInputs& model_input, const 
     to_cuda(model_input.prefix_lengths, "prefix_lengths");
     to_cuda(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     to_cuda(model_input.lm_output_indexes, "lm_output_indexes");
+    to_cuda(model_input.custom_output_indexes, "custom_output_indexes");
     checkModelInputsOnCuda(model_input, tag);
 }
 
@@ -510,6 +574,7 @@ void NormalExecutor::checkModelInputsOnCuda(const GptModelInputs& model_input, c
     check(model_input.prefix_lengths, "prefix_lengths");
     check(model_input.sequence_lengths_plus_1, "sequence_lengths_plus_1");
     check(model_input.lm_output_indexes, "lm_output_indexes");
+    check(model_input.custom_output_indexes, "custom_output_indexes");
 }
 
 bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) const {
@@ -677,8 +742,23 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
         state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
-        state.last_real_seq_len     = cur_real_seq_len;
-        state.next_real_seq_len     = cur_real_seq_len + 1;
+        if (has_engram_) {
+            torch::Tensor previous = prev_state.engram_token_window_gpu;
+            if (!previous.defined()) {
+                // The first publication (including PD admission) owns stable
+                // host history. Later rounds use the immutable GPU tail.
+                auto                 history = stream->completeTokenIdsVec(0);
+                std::vector<int32_t> tail(3, -1);
+                for (int lag = 0; lag < 3 && lag < static_cast<int>(history.size()); ++lag) {
+                    tail[lag] = history[history.size() - 1 - lag];
+                }
+                previous = torch::tensor(tail, cuda_i32).reshape({1, 3});
+            }
+            state.engram_token_window_gpu =
+                torch::cat({state.last_sample_token_gpu.reshape({1, 1}), previous.narrow(1, 0, 3)}, 1);
+        }
+        state.last_real_seq_len = cur_real_seq_len;
+        state.next_real_seq_len = cur_real_seq_len + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }

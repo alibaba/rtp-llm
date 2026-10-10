@@ -15,6 +15,8 @@ public:
 
     static RequestInfo transRequestInfo(const RequestInfoPB& request_info_pb);
 
+    static int resolveMaxNewTokens(const GenerateConfigPB& config_proto);
+
     static void transResponse(GenerateOutputsPB*     outputs,
                               const GenerateOutputs* response,
                               bool                   dump_aux_info,

@@ -27,7 +27,7 @@ inline constexpr const char* kReasonReleaseClientStop  = "release_client_stoppin
 inline constexpr size_t      kMaxPendingReleaseHandles = 1024;
 
 std::vector<std::string> uniqueReleaseHandles(const std::vector<std::string>& handles) {
-    std::vector<std::string>       unique;
+    std::vector<std::string>        unique;
     std::unordered_set<std::string> seen;
     unique.reserve(handles.size());
     for (const auto& handle : handles) {
@@ -82,12 +82,28 @@ public:
         auto& connection = connection_status.value();
         auto  stub       = connection.stub;
 
-        grpc::ClientContext context;
-        context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(budget.remainingMs()));
+        auto                     server_context = budget.serverContext();
+        grpc::PropagationOptions options;
+        options.enable_deadline_propagation().enable_cancellation_propagation();
+        auto context = server_context ? grpc::ClientContext::FromServerContext(*server_context, options) :
+                                        std::make_unique<grpc::ClientContext>();
+        if (server_context) {
+            for (const auto* key : {"x-dashscope-uid", "x-dashscope-service"}) {
+                auto it = server_context->client_metadata().find(key);
+                if (it != server_context->client_metadata().end()) {
+                    context->AddMetadata(key, std::string(it->second.data(), it->second.size()));
+                }
+            }
+        }
+        auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(budget.remainingMs());
+        if (server_context) {
+            deadline = std::min(deadline, server_context->deadline());
+        }
+        context->set_deadline(deadline);
         MultimodalOutputPB receipt;
         const int64_t      request_bytes = request_pb.ByteSizeLong();
         const auto         start         = std::chrono::steady_clock::now();
-        auto               status        = stub->RemoteMultimodalEmbedding(&context, request_pb, &receipt);
+        auto               status        = stub->RemoteMultimodalEmbedding(context.get(), request_pb, &receipt);
         const int64_t      cost_us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
         metrics_->reportRpcMetrics(endpoint, cost_us, request_bytes, receipt.ByteSizeLong());
@@ -97,6 +113,12 @@ public:
                 endpoint, kReasonGrpcError, std::to_string(static_cast<int>(status.error_code())));
             if (auto error_info = parseMultimodalErrorMessage(status.error_message())) {
                 return *error_info;
+            }
+            if (status.error_code() == grpc::StatusCode::CANCELLED) {
+                return ErrorInfo(ErrorCode::CANCELLED, status.error_message());
+            }
+            if (status.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED) {
+                return ErrorInfo(ErrorCode::CONCURRENCY_LIMIT_ERROR, status.error_message());
             }
             if (status.error_code() == grpc::StatusCode::UNAVAILABLE
                 || status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
@@ -110,11 +132,10 @@ public:
         return receipt;
     }
 
-    void release(const std::string&              endpoint,
-                 const std::vector<std::string>& handles,
-                 DeadlineBudget&                 budget) override {
-        const int64_t remaining = budget.remainingMs();
-        const auto unique_handles = uniqueReleaseHandles(handles);
+    void
+    release(const std::string& endpoint, const std::vector<std::string>& handles, DeadlineBudget& budget) override {
+        const int64_t remaining      = budget.remainingMs();
+        const auto    unique_handles = uniqueReleaseHandles(handles);
         if (unique_handles.empty() || remaining <= 0) {
             return;
         }
@@ -187,9 +208,8 @@ private:
         EmptyPB empty;
         auto    rel_status = stub->ReleaseRdmaLease(&rel_ctx, rel, &empty);
         if (!rel_status.ok()) {
-            RTP_LLM_LOG_WARNING("ReleaseRdmaLease(%zu leases) failed: %s",
-                                handles.size(),
-                                rel_status.error_message().c_str());
+            RTP_LLM_LOG_WARNING(
+                "ReleaseRdmaLease(%zu leases) failed: %s", handles.size(), rel_status.error_message().c_str());
         }
     }
 
@@ -227,15 +247,15 @@ private:
         }
     }
 
-    MultimodalRpcPool       pool_;
-    MMTransportMetricsPtr   metrics_;
-    int64_t                 release_timeout_ms_;
-    std::mutex              release_mutex_;
-    std::condition_variable release_cv_;
-    std::deque<ReleaseTask>  release_queue_;
+    MultimodalRpcPool               pool_;
+    MMTransportMetricsPtr           metrics_;
+    int64_t                         release_timeout_ms_;
+    std::mutex                      release_mutex_;
+    std::condition_variable         release_cv_;
+    std::deque<ReleaseTask>         release_queue_;
     std::unordered_set<std::string> pending_release_keys_;
-    bool                     stopping_ = false;
-    std::thread              release_thread_;
+    bool                            stopping_ = false;
+    std::thread                     release_thread_;
 };
 
 class GrpcInlineReceiptReader: public MMTerminalReceiptReader {
@@ -252,8 +272,7 @@ public:
 
 }  // namespace
 
-std::unique_ptr<MMControlClient> createGrpcMMControlClient(MMTransportMetricsPtr metrics,
-                                                           int64_t release_timeout_ms) {
+std::unique_ptr<MMControlClient> createGrpcMMControlClient(MMTransportMetricsPtr metrics, int64_t release_timeout_ms) {
     return std::make_unique<GrpcMMControlClient>(std::move(metrics), release_timeout_ms);
 }
 

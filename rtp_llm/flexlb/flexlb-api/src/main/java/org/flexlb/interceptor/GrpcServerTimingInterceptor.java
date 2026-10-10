@@ -7,6 +7,9 @@ import io.grpc.ServerCall;
 import io.grpc.ServerCallHandler;
 import io.grpc.ServerInterceptor;
 import org.springframework.stereotype.Component;
+import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * gRPC server interceptor that records the timestamp when a request enters
@@ -21,6 +24,12 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class GrpcServerTimingInterceptor implements ServerInterceptor {
+
+    private final AtomicLong lastScheduleArrivalNanos = new AtomicLong(System.nanoTime());
+
+    public long getLastScheduleArrivalNanos() {
+        return lastScheduleArrivalNanos.get();
+    }
 
     /**
      * Context key carrying the gRPC server entry timestamp (epoch millis).
@@ -46,6 +55,10 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
             ServerCall<ReqT, RespT> call, Metadata headers,
             ServerCallHandler<ReqT, RespT> next) {
+        if (call.getMethodDescriptor().getFullMethodName()
+                .equals(FlexlbServiceGrpc.getScheduleMethod().getFullMethodName())) {
+            lastScheduleArrivalNanos.updateAndGet(previous -> System.nanoTime());
+        }
         long grpcEntryTime = System.currentTimeMillis();
         long grpcEntryNanos = System.nanoTime();
         Context ctx = Context.current()

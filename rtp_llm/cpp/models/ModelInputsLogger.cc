@@ -34,7 +34,7 @@ constexpr size_t      kQueueMaxBytes   = 256ULL * 1024ULL * 1024ULL;
 std::atomic<uint64_t> g_file_sequence{0};
 // clang-format off
 #define MODEL_INPUT_TENSORS(X)                                                                                       \
-    X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
+    X(combo_tokens) X(input_lengths) X(sequence_lengths) X(lm_output_indexes) X(custom_output_indexes) X(lm_output_lengths) X(prefix_lengths) \
     X(sequence_lengths_plus_1)                                                                                      \
     X(combo_tokens_type_ids) X(combo_position_ids) X(last_hidden_states) X(attention_mask)                           \
     X(kv_cache_block_id) X(kv_cache_kernel_block_id) X(kv_cache_group_types) X(kv_cache_update_mapping)             \
@@ -78,6 +78,9 @@ size_t estimateBytes(const GptModelInputs& inputs) {
     size_t bytes = 16 * 1024;
     for (const auto& trace_id : inputs.trace_ids) {
         addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + trace_id.size());
+    }
+    for (const auto& tag : inputs.kv_cache_group_tags) {
+        addBytes(bytes, sizeof(std::string) + sizeof(uint64_t) + tag.size());
     }
 #define ADD_TENSOR_BYTES(field) addTensorBytes(bytes, inputs.field);
     MODEL_INPUT_TENSORS(ADD_TENSOR_BYTES)
@@ -147,6 +150,7 @@ c10::impl::GenericDict snapshotPayload(const GptModelInputs&     inputs,
     payload.insert("execution_stage", executionStage(inputs));
     payload.insert("model_id", model_id);
     payload.insert("trace_ids", inputs.trace_ids);
+    payload.insert("kv_cache_group_tags", inputs.kv_cache_group_tags);
     c10::impl::GenericDict float8_dtypes(c10::StringType::get(), c10::StringType::get());
 #define ADD_TENSOR(field) addTensor(payload, #field, inputs.field, devices, float8_dtypes);
     MODEL_INPUT_TENSORS(ADD_TENSOR)

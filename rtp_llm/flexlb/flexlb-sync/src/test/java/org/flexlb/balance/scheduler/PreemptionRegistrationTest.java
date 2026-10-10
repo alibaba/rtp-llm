@@ -25,14 +25,14 @@ class PreemptionRegistrationTest {
         assertTrue(registration.advanceTo(
                 PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isUnknown());
-        assertTrue(registration.canSettleTombstone());
-        assertTrue(registration.settle());
-        assertFalse(registration.settle());
-        assertTrue(registration.isSettled());
+        assertTrue(registration.canCompletePreemption());
+        assertTrue(registration.tryFinish());
+        assertFalse(registration.tryFinish());
+        assertTrue(registration.isFinished());
     }
 
     @Test
-    void notFoundCanTransferToAnEngineFenceOrSettle() {
+    void notFoundRetainsTheAttemptUntilEvidenceOrRequestExpiryFinishesIt() {
         PreemptionRegistration registration = registration();
 
         assertTrue(registration.advanceTo(
@@ -42,8 +42,11 @@ class PreemptionRegistrationTest {
         assertFalse(registration.advanceTo(
                 PreemptionCancelPhase.CANCEL_UNKNOWN));
         assertTrue(registration.isNotFound());
-        assertTrue(registration.isFenceTransferable());
-        assertTrue(registration.canSettleTombstone());
+        assertFalse(registration.isReleasable());
+        assertTrue(registration.canCompletePreemption());
+        assertTrue(registration.tryFinish());
+        assertFalse(registration.canCompletePreemption());
+        assertFalse(registration.advanceTo(PreemptionCancelPhase.CANCEL_IN_FLIGHT));
     }
 
     @Test
@@ -61,6 +64,6 @@ class PreemptionRegistrationTest {
     }
 
     private static PreemptionRegistration registration() {
-        return new PreemptionRegistration(7L, 11L, "test preemption");
+        return new PreemptionRegistration(null, 7L, 11L, "test preemption");
     }
 }

@@ -11,6 +11,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -179,6 +182,77 @@ class WhitelistMetricsFilterConfigTest {
         assertFalse(set.contains("grpc.server.executor.queue.size"));
         assertFalse(set.contains("app.cachex.near.miss"));
         assertFalse(set.contains(42));
+        assertFalse(set.contains(null));
         assertEquals(4, set.size());
+    }
+
+    @Test
+    void counterSuffixMatchingKeepsPrefixBoundaries() {
+        String name = "app.requests";
+        for (String prefix : List.of("flexlb_app_requests", "flexlb_app_requests_",
+                "flexlb_app_requests_tot", "flexlb_app_requests_total")) {
+            var allowed = new WhitelistMetricsFilterConfig.PrefixAllowSet(List.of(prefix));
+            assertTrue(allowed.contains(name), prefix);
+            assertTrue(allowed.contains(new String(name)), prefix);
+            assertFalse(allowed.contains("app.request"), prefix);
+        }
+        var denied = new WhitelistMetricsFilterConfig.PrefixAllowSet(
+                List.of("flexlb_app_requests_total_extra"));
+        assertFalse(denied.contains(name));
+        assertFalse(denied.contains(new String(name)));
+    }
+
+    @Test
+    void replacingAllowlistDoesNotReusePreviousDecisions() {
+        var cacheOnly = new WhitelistMetricsFilterConfig("flexlb_app_cache_");
+        var queueOnly = new WhitelistMetricsFilterConfig("flexlb_app_queue_");
+        MeterFilter cacheFilter = cacheOnly.whitelistMetricsFilter();
+        MeterFilter queueFilter = queueOnly.whitelistMetricsFilter();
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        try {
+            MicrometerFlexMonitor monitor = new MicrometerFlexMonitor(registry);
+            Meter.Id cache = registry.counter("flexlb.app.cache.counter").getId();
+            Meter.Id queue = registry.counter("flexlb.app.queue.counter").getId();
+            cacheOnly.init();
+            monitor.report("app.cache.gauge", 1.0);
+            monitor.report("app.queue.gauge", 2.0);
+            assertNotNull(registry.find("flexlb.app.cache.gauge").gauge());
+            assertNull(registry.find("flexlb.app.queue.gauge").gauge());
+            assertEquals(MeterFilterReply.NEUTRAL, cacheFilter.accept(cache));
+            assertEquals(MeterFilterReply.DENY, cacheFilter.accept(queue));
+
+            queueOnly.init();
+            monitor.report("app.cache.gauge", 3.0);
+            monitor.report("app.queue.gauge", 4.0);
+            assertEquals(1.0, registry.find("flexlb.app.cache.gauge").gauge().value());
+            assertEquals(4.0, registry.find("flexlb.app.queue.gauge").gauge().value());
+            assertEquals(MeterFilterReply.DENY, queueFilter.accept(cache));
+            assertEquals(MeterFilterReply.NEUTRAL, queueFilter.accept(queue));
+            assertEquals(MeterFilterReply.NEUTRAL, cacheFilter.accept(cache));
+            assertEquals(MeterFilterReply.DENY, cacheFilter.accept(queue));
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void concurrentLookupsKeepAllowedAndDeniedNamesDistinct() throws Exception {
+        var allowed = new WhitelistMetricsFilterConfig.PrefixAllowSet(
+                WhitelistMetricsFilterConfig.parseWhitelist(G3_SHAPED_WHITELIST));
+        try (var executor = Executors.newFixedThreadPool(8)) {
+            List<Callable<Void>> tasks = IntStream.range(0, 8)
+                    .mapToObj(thread -> (Callable<Void>) () -> {
+                        for (int i = 0; i < 1_000; i++) {
+                            assertTrue(allowed.contains("app.cache.hit.ratio"));
+                            assertTrue(allowed.contains("app.engine.balancing.master.dispatch.reason"));
+                            assertFalse(allowed.contains("grpc.server.executor.queue.size"));
+                            assertFalse(allowed.contains("app.cachex.near.miss"));
+                        }
+                        return null;
+                    }).toList();
+            for (var result : executor.invokeAll(tasks)) {
+                result.get();
+            }
+        }
     }
 }

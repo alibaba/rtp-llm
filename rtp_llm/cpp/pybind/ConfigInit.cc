@@ -1,5 +1,6 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -20,7 +21,12 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
-void registerMultimodal(const py::module& m) {
+void registerMultimodal(py::module& m) {
+    m.def("get_multimodal_token_spans",
+          &getMultimodalTokenSpans,
+          py::arg("token_ids"),
+          py::arg("separators"),
+          py::arg("include_separators"));
     pybind11::class_<MultimodalInput>(m, "MultimodalInput")
         .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig>(),
              py::arg("url"),
@@ -44,17 +50,26 @@ void registerMultimodal(const py::module& m) {
                                        t[3].cast<MMPreprocessConfig>());
             }));
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
-        .def(pybind11::
-                 init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
-             py::arg("width")          = -1,
-             py::arg("height")         = -1,
-             py::arg("min_pixels")     = -1,
-             py::arg("max_pixels")     = -1,
-             py::arg("fps")            = -1,
-             py::arg("min_frames")     = -1,
-             py::arg("max_frames")     = -1,
-             py::arg("crop_positions") = std::vector<float>{},
-             py::arg("mm_timeout_ms")  = -1)
+        .def(pybind11::init<int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            std::vector<float>,
+                            int32_t,
+                            int32_t>(),
+             py::arg("width")               = -1,
+             py::arg("height")              = -1,
+             py::arg("min_pixels")          = -1,
+             py::arg("max_pixels")          = -1,
+             py::arg("fps")                 = -1,
+             py::arg("min_frames")          = -1,
+             py::arg("max_frames")          = -1,
+             py::arg("crop_positions")      = std::vector<float>{},
+             py::arg("mm_timeout_ms")       = -1,
+             py::arg("max_long_side_pixel") = -1)
         .def_readwrite("width", &MMPreprocessConfig::width)
         .def_readwrite("height", &MMPreprocessConfig::height)
         .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
@@ -64,6 +79,7 @@ void registerMultimodal(const py::module& m) {
         .def_readwrite("max_frames", &MMPreprocessConfig::max_frames)
         .def_readwrite("crop_positions", &MMPreprocessConfig::crop_positions)
         .def_readwrite("mm_timeout_ms", &MMPreprocessConfig::mm_timeout_ms)
+        .def_readwrite("max_long_side_pixel", &MMPreprocessConfig::max_long_side_pixel)
         .def("to_string", &MMPreprocessConfig::to_string)
         .def(pybind11::pickle(
             [](const MMPreprocessConfig& m) {  // __getstate__
@@ -75,7 +91,8 @@ void registerMultimodal(const py::module& m) {
                                       m.min_frames,
                                       m.max_frames,
                                       m.crop_positions,
-                                      m.mm_timeout_ms);
+                                      m.mm_timeout_ms,
+                                      m.max_long_side_pixel);
             },
             [](py::tuple t) {  // __setstate__
                 return MMPreprocessConfig(t[0].cast<int32_t>(),
@@ -86,7 +103,8 @@ void registerMultimodal(const py::module& m) {
                                           t[5].cast<int32_t>(),
                                           t[6].cast<int32_t>(),
                                           t[7].cast<std::vector<float>>(),
-                                          t[8].cast<int32_t>());
+                                          t[8].cast<int32_t>(),
+                                          t.size() > 9 ? t[9].cast<int32_t>() : -1);
             }));
 }
 
@@ -96,6 +114,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerMultimodal(m);
 
     // Register enums
+    py::enum_<HiddenStateCaptureDtype>(m, "HiddenStateCaptureDtype")
+        .value("BF16", HiddenStateCaptureDtype::BF16)
+        .value("FP8_E4M3", HiddenStateCaptureDtype::FP8_E4M3);
+
     py::enum_<RoleType>(m, "RoleType")
         .value("PDFUSION", RoleType::PDFUSION)
         .value("PREFILL", RoleType::PREFILL)
@@ -957,10 +979,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.masked_max_token_num,
                                       self.use_all_gather,
                                       self.ll_num_max_token,
-                                      self.moe_strategy);
+                                      self.moe_strategy,
+                                      self.fp4_moe_op);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -976,6 +999,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_all_gather             = t[9].cast<bool>();
                     c.ll_num_max_token           = t[10].cast<int>();
                     c.moe_strategy               = t[11].cast<std::string>();
+                    if (t.size() == 13)
+                        c.fp4_moe_op = t[12].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
@@ -1000,13 +1025,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     pybind11::class_<HybridAttentionConfig>(m, "HybridAttentionConfig")
         .def(pybind11::init<>())
-        .def(pybind11::init<bool, bool, std::vector<HybridAttentionType>>(),
+        .def(pybind11::init<bool, std::vector<HybridAttentionType>>(),
              pybind11::arg("enable_hybrid_attention"),
-             pybind11::arg("enable_independent_kv_cache_pools"),
              pybind11::arg("hybrid_attention_types"))
         .def("to_string", &HybridAttentionConfig::to_string)
         .def_readwrite("enable_hybrid_attention", &HybridAttentionConfig::enable_hybrid_attention)
-        .def_readwrite("enable_independent_kv_cache_pools", &HybridAttentionConfig::enable_independent_kv_cache_pools)
         .def_readwrite("hybrid_attention_types", &HybridAttentionConfig::hybrid_attention_types);
 
     // Register SpeculativeType enum
@@ -1574,6 +1597,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("warm_up", &RuntimeConfig::warm_up)
         .def_readwrite("warm_up_with_loss", &RuntimeConfig::warm_up_with_loss)
         .def_readwrite("model_warm_up", &RuntimeConfig::model_warm_up)
+        .def_readwrite("output_dispatcher_worker_count", &RuntimeConfig::output_dispatcher_worker_count)
         .def_readwrite("use_batch_decode_scheduler", &RuntimeConfig::use_batch_decode_scheduler)
         .def_readwrite("model_name", &RuntimeConfig::model_name)
         .def_readwrite("worker_grpc_addrs", &RuntimeConfig::worker_grpc_addrs)
@@ -1604,10 +1628,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.worker_grpc_addrs,
                                       self.worker_addrs,
                                       self.specify_gpu_arch,
-                                      self.model_warm_up);
+                                      self.model_warm_up,
+                                      self.output_dispatcher_worker_count);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 RuntimeConfig c;
                 try {
@@ -1625,6 +1650,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.specify_gpu_arch              = t[11].cast<std::string>();
                     if (t.size() >= 13) {
                         c.model_warm_up = t[12].cast<bool>();
+                    }
+                    if (t.size() >= 14) {
+                        c.output_dispatcher_worker_count = t[13].cast<int>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("RuntimeConfig unpickle error: ") + e.what());
@@ -1796,6 +1824,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("max_seq_len", &AttentionConfigs::max_seq_len)
         .def_readwrite("gen_num_per_cycle", &AttentionConfigs::gen_num_per_cycle)
         // DeepSeek-V4 fields
+        .def_readwrite("v41_kv_source_layer_ids", &AttentionConfigs::v41_kv_source_layer_ids)
         .def_readwrite("layer_compress_ratios", &AttentionConfigs::layer_compress_ratios)
         .def_readwrite("o_groups", &AttentionConfigs::o_groups)
         .def_readwrite("o_lora_rank", &AttentionConfigs::o_lora_rank)
@@ -1865,6 +1894,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register MMModelConfig
     py::class_<MMModelConfig>(m, "MMModelConfig")
         .def(py::init<>())
+        .def_readwrite("mm_padding_size", &MMModelConfig::mm_padding_size)
         .def_readwrite("is_multimodal", &MMModelConfig::is_multimodal)
         .def_readwrite("mm_sep_tokens", &MMModelConfig::mm_sep_tokens)
         .def_readwrite("include_sep_tokens", &MMModelConfig::include_sep_tokens)
@@ -2036,12 +2066,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
         .def_readwrite("output_vocab_padded_size", &ModelConfig::output_vocab_padded_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
+        .def_readwrite("hidden_state_capture_layer_ids", &ModelConfig::hidden_state_capture_layer_ids)
+        .def_readwrite("hidden_state_capture_dtype", &ModelConfig::hidden_state_capture_dtype)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
         .def_readwrite("linear_attention_config", &ModelConfig::linear_attention_config)
         .def_readwrite("hybrid_attention_config", &ModelConfig::hybrid_attention_config)
         .def_readwrite("special_tokens", &ModelConfig::special_tokens)
         .def_readwrite("quant_algo", &ModelConfig::quant_algo)
         .def_readwrite("eplb_config", &ModelConfig::eplb_config)
+        .def_readwrite("cache_min_replay_tokens", &ModelConfig::cache_min_replay_tokens)
+        .def_readwrite("cache_key_hash_seed", &ModelConfig::cache_key_hash_seed)
         .def_readwrite("kv_cache_spec_descs", &ModelConfig::kv_cache_spec_descs)
         // task_type is defined as property below
         .def_readwrite("ckpt_path", &ModelConfig::ckpt_path)

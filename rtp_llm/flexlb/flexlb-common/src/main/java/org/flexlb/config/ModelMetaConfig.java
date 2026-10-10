@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import lombok.Getter;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.route.Endpoint;
@@ -22,12 +23,16 @@ public class ModelMetaConfig {
             RoleType.PREFILL,
             RoleType.VIT);
 
+    @Getter
     private final ServiceRoute serviceRoute;
     private final String modelName;
     private final List<RoleType> requiredRoles;
 
     public ModelMetaConfig() {
-        String document = System.getenv("MODEL_SERVICE_CONFIG");
+        this(System.getenv("MODEL_SERVICE_CONFIG"));
+    }
+
+    public ModelMetaConfig(String document) {
         if (document == null || document.isBlank()) {
             throw new IllegalStateException(
                     "master load balancer env MODEL_SERVICE_CONFIG is empty");

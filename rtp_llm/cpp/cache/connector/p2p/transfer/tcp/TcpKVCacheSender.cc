@@ -107,6 +107,7 @@ TcpKVCacheSender::TcpKVCacheSender(const kmonitor::MetricsReporterPtr& metrics_r
     metrics_reporter_(metrics_reporter), cuda_copy_util_(std::make_unique<CudaCopyUtil>()) {}
 
 TcpKVCacheSender::~TcpKVCacheSender() {
+    std::lock_guard<std::mutex> lock(staged_scratch_mutex_);
     releaseStagedMemoryCopyScratch(staged_scratch_);
 }
 

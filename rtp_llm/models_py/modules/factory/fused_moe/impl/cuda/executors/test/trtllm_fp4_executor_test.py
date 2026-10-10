@@ -1,5 +1,6 @@
 import unittest
 from dataclasses import dataclass
+from unittest.mock import patch
 
 import torch
 from flashinfer import (
@@ -325,6 +326,10 @@ class FP4Moe:
 
 
 class FP4MoeExecutor(FP4Moe):
+    def __init__(self, heterogeneous_input_scales=False):
+        super().__init__()
+        self.heterogeneous_input_scales = heterogeneous_input_scales
+
     def prepare_static_weights_for_kernel(self, args):
         _cache_permute_indices = dict()
         args.gemm1_weights_fp4_shuffled, args.gemm1_scales_fp4_shuffled = (
@@ -369,13 +374,22 @@ class FP4MoeExecutor(FP4Moe):
             expert_topk_ids=args.topk_ids,
             expert_topk_weights=args.topk_weights,
         )
+        w13_input_scale = 1.0 / args.hidden_states_scale_global
+        if self.heterogeneous_input_scales:
+            w13_input_scale = w13_input_scale * torch.linspace(
+                0.25,
+                1.0,
+                args.num_experts,
+                device=w13_input_scale.device,
+                dtype=w13_input_scale.dtype,
+            )
         weights = {
             W.moe_w1: args.gemm1_weights_fp4_shuffled,
             W.moe_w2: args.gemm2_weights_fp4_shuffled,
             W.moe_s1: args.gemm1_scales_fp4_shuffled,
             W.moe_s2: args.gemm2_scales_fp4_shuffled,
             W.moe_w1_s2: 1.0 / args.gemm1_scales_global,
-            W.moe_w1_i_s: 1.0 / args.hidden_states_scale_global,
+            W.moe_w1_i_s: w13_input_scale,
             W.moe_w2_s2: 1.0 / args.gemm2_scales_global,
             W.moe_w2_i_s: 1.0 / args.c_global_sf,
         }
@@ -920,12 +934,282 @@ def _test_moe(
 class TrtllmFp4ExecutorTest(unittest.TestCase):
     MAX_GENERATE_BATCH_SIZE = 128
 
+    def test_per_expert_input_scales_use_scalar_activation_scale(self):
+        model_config = ModelConfig()
+        model_config.expert_num = 3
+        model_config.hidden_size = 4
+        model_config.moe_inter_size = 2
+        model_config.moe_k = 1
+        parallelism_config = ParallelismConfig()
+        parallelism_config.dp_size = 1
+        parallelism_config.tp_size = 1
+        parallelism_config.ep_size = 1
+        config = MoEConfigAdapter(
+            model_config=model_config,
+            parallelism_config=parallelism_config,
+            moe_config=MoeConfig(),
+        )
+        w13_input_scale = torch.tensor([0.25, 0.5, 2.0])
+        w13_weight_scale = torch.tensor([2.0, 3.0, 4.0])
+        w2_input_scale = torch.tensor([0.5, 1.0, 2.0])
+        w2_weight_scale = torch.tensor([5.0, 6.0, 7.0])
+        weights = {
+            W.moe_w1: torch.empty(3, 4, 4, dtype=torch.uint8),
+            W.moe_w2: torch.empty(3, 4, 2, dtype=torch.uint8),
+            W.moe_s1: torch.empty(3, 4, 1, dtype=torch.uint8),
+            W.moe_s2: torch.empty(3, 4, 1, dtype=torch.uint8),
+            W.moe_w1_i_s: w13_input_scale,
+            W.moe_w1_s2: w13_weight_scale,
+            W.moe_w2_i_s: w2_input_scale,
+            W.moe_w2_s2: w2_weight_scale,
+        }
+        with patch(
+            "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.trtllm_fp4_executor.device_support_pdl",
+            return_value=False,
+        ):
+            executor = TrtllmFp4Executor(config, FusedMoEQuantConfig(), weights)
+
+        shared_input_scale = w13_input_scale.max()
+        self.assertEqual(tuple(executor.expert_x_scale.shape), (1,))
+        self.assertEqual(executor.expert_x_scale.dtype, torch.float32)
+        torch.testing.assert_close(
+            executor.expert_x_scale, shared_input_scale.reciprocal().reshape(1)
+        )
+        torch.testing.assert_close(
+            executor.g1_alphas, shared_input_scale * w13_weight_scale
+        )
+        torch.testing.assert_close(executor.g2_alphas, w2_input_scale * w2_weight_scale)
+        torch.testing.assert_close(
+            executor.g1_scale_c,
+            (shared_input_scale * w13_weight_scale) / w2_input_scale,
+        )
+
+    @staticmethod
+    def _prepare_static_weights_list_stack(weight, scale, shape, findices, cache):
+        # Reference the legacy list/stack path independently of production allocation.
+        from flashinfer import nvfp4_block_scale_interleave
+
+        weight_fp4 = weight.view(torch.float8_e4m3fn).reshape(
+            *shape[:-1], shape[-1] // 2
+        )
+        scale_linear_fp4 = scale.view(torch.float8_e4m3fn).reshape(
+            *shape[:-1], shape[-1] // 16
+        )
+        weights, scales = [], []
+        for i in range(shape[0]):
+            indices = findices(cache, weight_fp4[i].view(torch.uint8), 128)
+            weights.append(
+                weight_fp4[i]
+                .view(torch.uint8)[indices.to(weight_fp4.device)]
+                .contiguous()
+            )
+            sf_indices = findices(
+                cache, scale_linear_fp4[i].view(torch.uint8), 128, num_elts_per_sf=16
+            )
+            scale_bytes = (
+                scale_linear_fp4[i]
+                .view(torch.uint8)[sf_indices.to(scale_linear_fp4.device)]
+                .contiguous()
+            )
+            if scale_bytes.device.type == "cpu":
+                scale_bytes = scale_bytes.to(
+                    torch.device("cuda", torch.cuda.current_device())
+                )
+                scales.append(nvfp4_block_scale_interleave(scale_bytes).cpu())
+            else:
+                scales.append(nvfp4_block_scale_interleave(scale_bytes))
+        return torch.stack(weights), (
+            torch.stack(scales)
+            .view(torch.float8_e4m3fn)
+            .reshape(*shape[:-1], shape[-1] // 16)
+        )
+
+    def test_prepare_static_weights_matches_list_stack(self):
+        generator = torch.Generator().manual_seed(0)
+        for name, rows, cols, findices in (
+            ("w1", 256, 256, _maybe_get_cached_w3_w1_permute_indices),
+            ("w2", 256, 128, get_w2_permute_indices_with_cache),
+        ):
+            for experts in (1, 3):
+                shape = (experts, rows, cols)
+                for device in (
+                    torch.device("cpu"),
+                    torch.device("cuda", torch.cuda.current_device()),
+                ):
+                    for noncontiguous in (False, True):
+                        with self.subTest(
+                            weight=name,
+                            experts=experts,
+                            device=device,
+                            noncontiguous=noncontiguous,
+                        ):
+                            inputs = []
+                            for divisor in (2, 16):
+                                stride = 2 if noncontiguous else 1
+                                tensor = torch.randint(
+                                    0,
+                                    256,
+                                    (*shape[:-1], cols // divisor * stride),
+                                    dtype=torch.uint8,
+                                    generator=generator,
+                                ).to(device)[..., ::stride]
+                                self.assertEqual(
+                                    tensor.is_contiguous(), not noncontiguous
+                                )
+                                inputs.append(tensor)
+                            weight, scale_bytes = inputs
+                            scale = scale_bytes.view(torch.float8_e4m3fn)
+                            originals = [tensor.clone() for tensor in inputs]
+                            expected = self._prepare_static_weights_list_stack(
+                                weight, scale, shape, findices, {}
+                            )
+                            cache = {}
+                            for repeat in range(2):
+                                actual = (
+                                    CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+                                        weight, scale, shape, findices, cache
+                                    )
+                                )
+                                for result, reference, divisor, dtype in zip(
+                                    actual,
+                                    expected,
+                                    (2, 16),
+                                    (torch.uint8, torch.float8_e4m3fn),
+                                ):
+                                    self.assertEqual(
+                                        tuple(result.shape),
+                                        (*shape[:-1], cols // divisor),
+                                    )
+                                    self.assertEqual(result.dtype, dtype)
+                                    self.assertEqual(result.device, device)
+                                    self.assertTrue(result.is_contiguous())
+                                    self.assertTrue(
+                                        torch.equal(
+                                            result.view(torch.uint8),
+                                            reference.view(torch.uint8),
+                                        )
+                                    )
+                                for tensor, original in zip(inputs, originals):
+                                    self.assertTrue(torch.equal(tensor, original))
+                                if repeat == 0:
+                                    self.assertTrue(cache)
+                                    cached_indices = dict(cache)
+                                else:
+                                    self.assertEqual(
+                                        cache.keys(), cached_indices.keys()
+                                    )
+                                    for key in cache:
+                                        self.assertIs(cache[key], cached_indices[key])
+
+    def test_prepare_static_weights_zero_experts(self):
+        for name, cols, findices in (
+            ("w1", 256, _maybe_get_cached_w3_w1_permute_indices),
+            ("w2", 128, get_w2_permute_indices_with_cache),
+        ):
+            for device in ("cpu", "cuda"):
+                with self.subTest(weight=name, device=device):
+                    cache = {}
+                    with self.assertRaisesRegex(RuntimeError, "at least one expert"):
+                        CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+                            torch.empty(
+                                0, 256, cols // 2, dtype=torch.uint8, device=device
+                            ),
+                            torch.empty(
+                                0, 256, cols // 16, dtype=torch.float8_e4m3fn, device=device
+                            ),
+                            (0, 256, cols),
+                            findices,
+                            cache,
+                        )
+                    self.assertEqual(cache, {})
+
+    def test_prepare_static_weights_cpu_staged(self):
+        cuda_device = torch.device("cuda", torch.cuda.current_device())
+        generator = torch.Generator().manual_seed(0)
+        for name, shape, findices in (
+            ("w1", (2, 256, 256), _maybe_get_cached_w3_w1_permute_indices),
+            ("w2", (2, 256, 128), get_w2_permute_indices_with_cache),
+        ):
+            with self.subTest(weight=name):
+                weight = torch.randint(
+                    0,
+                    256,
+                    (*shape[:-1], shape[-1] // 2),
+                    dtype=torch.uint8,
+                    generator=generator,
+                )
+                scale = torch.randint(
+                    1,
+                    120,
+                    (*shape[:-1], shape[-1] // 16),
+                    dtype=torch.uint8,
+                    generator=generator,
+                ).view(torch.float8_e4m3fn)
+                cuda_weight = weight.to(cuda_device)
+                cuda_scale = scale.to(cuda_device)
+                with patch(
+                    "torch.cuda.current_device",
+                    side_effect=AssertionError(
+                        "CUDA inputs must retain their device without staging"
+                    ),
+                ):
+                    expected_weight, expected_scale = (
+                        CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+                            cuda_weight, cuda_scale, shape, findices, {}
+                        )
+                    )
+                actual_weight, actual_scale = (
+                    CudaImpl.prepare_static_weights_for_trtllm_fp4_moe(
+                        weight, scale, shape, findices, {}
+                    )
+                )
+
+                for tensor in (weight, scale, actual_weight, actual_scale):
+                    self.assertEqual(tensor.device, torch.device("cpu"))
+                for tensor in (
+                    cuda_weight,
+                    cuda_scale,
+                    expected_weight,
+                    expected_scale,
+                ):
+                    self.assertEqual(tensor.device, cuda_device)
+                for actual, expected in (
+                    (actual_weight, expected_weight),
+                    (actual_scale, expected_scale),
+                ):
+                    self.assertEqual(actual.dtype, expected.dtype)
+                    self.assertTrue(
+                        torch.equal(
+                            actual.view(torch.uint8),
+                            expected.cpu().view(torch.uint8),
+                        )
+                    )
+
     def test_executor(self):
         _test_moe(
             num_tokens=3072,
             hidden_size=1024,
             intermediate_size=768,
             moe_impl=FP4MoeExecutor(),
+            routing_config={
+                "num_experts": 128,
+                "top_k": 8,
+                "padding": 8,
+                "routing_method_type": RoutingMethodType.Renormalize,
+            },
+            weight_processing={
+                "layout": WeightLayout.MajorK,
+            },
+            gated_act_type=ActivationType.Swiglu,
+            ll_num_max_token=self.MAX_GENERATE_BATCH_SIZE,
+        )
+
+    def test_executor_with_heterogeneous_input_scales(self):
+        _test_moe(
+            num_tokens=3072,
+            hidden_size=1024,
+            intermediate_size=768,
+            moe_impl=FP4MoeExecutor(heterogeneous_input_scales=True),
             routing_config={
                 "num_experts": 128,
                 "top_k": 8,

@@ -118,6 +118,16 @@ protected:
         }
     }
 
+    // Helpers for derived-pool transactions; the caller holds mutex_.
+    std::optional<BlockIdList> mallocNoLock(size_t n);
+    size_t                     availableFreeBlocksNoLock() const;
+    void                       reserveReleasedBlocksNoLock(size_t additional) {
+        released_blocks_.reserve(released_blocks_.size() + additional);
+    }
+    std::function<void()> capacityChangeCallbackNoLock() const {
+        return capacity_change_callback_;
+    }
+
     void     checkInitializedNoLock() const;
     void     checkAllocatedNoLock(BlockIdxType block) const;
     uint32_t treeRefCountNoLock(BlockIdxType block) const;
@@ -142,7 +152,6 @@ private:
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
 
     size_t       totalBlocksNumNoLock() const;
-    size_t       availableFreeBlocksNoLock() const;
     void         refillAscendingFreeBlocksNoLock();
     BlockIdxType popFreeBlockNoLock();
     void         pushFreeBlockNoLock(BlockIdxType block);

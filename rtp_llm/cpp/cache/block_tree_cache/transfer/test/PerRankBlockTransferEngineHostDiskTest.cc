@@ -58,8 +58,12 @@ GroupSetPtr makeHostDiskGroup(size_t                                  group_set_
     policy.enable_prefix_reuse = true;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, payload_bytes)});
     auto device_pool = makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
-    auto group       = makeTestGroupSet(
-        group_set_id, std::move(topology), {0}, {std::move(device_pool)}, std::move(host_pool), std::move(disk_pool));
+    auto group       = makeTestGroupSet(group_set_id,
+                                  std::move(topology),
+                                  {"group0"},
+                                  {std::move(device_pool)},
+                                  std::move(host_pool),
+                                  std::move(disk_pool));
     return group;
 }
 
@@ -236,6 +240,8 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskExecutorReportsTaskPoolSu
     context->waitDone();
 
     EXPECT_FALSE(context->success());
+    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_EQ(context->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_NE(context->errorInfo().ToString().find("RESOURCE_EXHAUSTED"), std::string::npos);
     releasePoolBlock(*host_pool_, host_block);
@@ -352,20 +358,22 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
 
     const auto disk_block = poolMalloc(*direct_disk);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
-    ASSERT_EQ(executor.executeBatch({HostBufferView{host_data, host_block_size_, stride}},
-                                    {TransferDescriptor::deviceToDisk(0, {0}, disk_block)},
-                                    {group.get()}),
-              TransferStatus::OK);
+    ASSERT_TRUE(executor
+                    .executeBatch({HostBufferView{host_data, host_block_size_, stride}},
+                                  {TransferDescriptor::deviceToDisk(0, {0}, disk_block)},
+                                  {group.get()})
+                    .ok());
     EXPECT_EQ(direct_io->lastWriteBytes(), stride);
 
     const BlockIdxType dst_block = poolMalloc(*host_pool_);
     ASSERT_NE(dst_block, NULL_BLOCK_IDX);
     uint8_t* dst_data = static_cast<uint8_t*>(host_pool_->blockBuffer(dst_block).addr);
     std::memset(dst_data, 0xAB, stride);
-    ASSERT_EQ(executor.executeBatch({HostBufferView{dst_data, host_block_size_, stride}},
-                                    {TransferDescriptor::diskToDevice(0, disk_block, {0})},
-                                    {group.get()}),
-              TransferStatus::OK);
+    ASSERT_TRUE(executor
+                    .executeBatch({HostBufferView{dst_data, host_block_size_, stride}},
+                                  {TransferDescriptor::diskToDevice(0, disk_block, {0})},
+                                  {group.get()})
+                    .ok());
     EXPECT_EQ(direct_io->lastReadBytes(), stride);
 
     for (size_t i = 0; i < host_block_size_; ++i) {
@@ -447,7 +455,7 @@ TEST(GroupSetPayloadTest, PayloadBytesUsesLogicalStridesAcrossLayers) {
     policy.enable_prefix_reuse = true;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0, 1, 2}, 160, 40)});
     auto pool                  = makeTestDevicePool({{200, 40}, {220, 40}, {240, 40}}, 2, "group_set_payload_test");
-    auto group                 = makeTestGroupSet(0, std::move(topology), {0}, {std::move(pool)});
+    auto group                 = makeTestGroupSet(0, std::move(topology), {"group0"}, {std::move(pool)});
     EXPECT_EQ(group->payloadBytes(), 600u);
 }
 

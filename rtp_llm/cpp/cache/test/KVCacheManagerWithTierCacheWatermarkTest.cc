@@ -189,13 +189,13 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
                 EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 2u);
                 load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, path_index);
                 ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
-                for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-                    const int          group_id = static_cast<int>(group_set->groupIds()[member_index]);
+                for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+                    const auto&        tag      = group_set->groupTags()[member_index];
                     const BlockIdxType block    = load_targets[group_set_id][member_index];
                     ASSERT_FALSE(isNullBlockIdx(block));
                     EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
                     ASSERT_TRUE(
-                        fillGroupBlockPayload(manager_, cache_config_, group_id, block, path_index, /*poison=*/true));
+                        fillGroupBlockPayload(manager_, cache_config_, tag, block, path_index, /*poison=*/true));
                 }
             } else {
                 EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
@@ -468,13 +468,12 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 2u);
         load_targets[group_set_id] = groupSetRequestBlocksAt(group_set, load_resource, 0, /*path_index=*/0);
         ASSERT_EQ(group_set->devicePools().size(), load_targets[group_set_id].size());
-        for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-            const int          group_id = static_cast<int>(group_set->groupIds()[member_index]);
+        for (size_t member_index = 0; member_index < group_set->groupTags().size(); ++member_index) {
+            const auto&        tag      = group_set->groupTags()[member_index];
             const BlockIdxType block    = load_targets[group_set_id][member_index];
             ASSERT_FALSE(isNullBlockIdx(block));
             EXPECT_EQ(group_set->devicePools()[member_index]->refCount(block), 2u);
-            ASSERT_TRUE(
-                fillGroupBlockPayload(manager_, cache_config_, group_id, block, /*path_index=*/0, /*poison=*/true));
+            ASSERT_TRUE(fillGroupBlockPayload(manager_, cache_config_, tag, block, /*path_index=*/0, /*poison=*/true));
         }
     }
 
@@ -540,7 +539,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostSourceMatchableAndCanRetry) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesOwnershipAndRecovers) {
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "HOST-to-DISK failure serviceability requires HostDisk layout";
     }
@@ -588,6 +587,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         const auto& group_set = cache->groupSets()[group_set_id];
         const auto& resource  = (*after_device_failure)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+        EXPECT_TRUE(resource.isMatchUsable());
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_FALSE(resource.hasTier(Tier::HOST));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
@@ -682,6 +682,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             const auto& group_set = cache->groupSets()[group_set_id];
             const auto& resource  = (*after_host_failure)[0][group_set_id];
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+            EXPECT_TRUE(resource.isMatchUsable());
             ASSERT_TRUE(resource.hasTier(Tier::HOST));
             EXPECT_FALSE(resource.hasTier(Tier::DISK));
             EXPECT_EQ(resource.getTopTier(), Tier::HOST);
@@ -694,10 +695,10 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
         }
         expectPoolSnapshotsEq(lower_before_host_failure, snapshotLowerPools(*cache, GetParam()));
 
-        // Prove the preserved HOST copy remains manager-serviceable before the
-        // demotion retry. A successful load consumes that HOST copy, so the
-        // same cached path is demoted back to HOST below before retrying H2Dk.
         recording_engine->clearScriptedResults();
+        // A transport failure preserves the valid HOST copy for subsequent requests
+        // before the demotion retry. A successful load consumes that HOST copy,
+        // so demote the same cached path back to HOST before retrying H2Dk.
         const size_t submits_before_host_hit = recording_engine->submittedDescriptorCount();
         auto         host_hit_resource       = makeResource(cache_config_);
         auto         host_hit_tokens         = makeTokenIds(
