@@ -1,5 +1,7 @@
 """Submitted requests reach a business terminal without stream errors."""
 
+from dataclasses import replace
+
 from cases.config import output
 from cases.inputs import fields
 from traffic.contracts import driver
@@ -16,9 +18,7 @@ NUMERIC_PARAMETERS = {
     **number_fields(NONNEGATIVE,
         'procedure.setup_timeout_s',
     ),
-    **number_fields(POSITIVE_COUNT,
-        'traffic.count',
-    ),
+    'traffic.count': replace(POSITIVE_COUNT, maximum=10000),
     **number_fields(JAVA_LENGTH,
         'traffic.input_len',
         'traffic.output_len',

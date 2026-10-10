@@ -2,7 +2,7 @@
 
 import copy
 import math
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,10 +47,9 @@ def test_ratio_unit_is_not_a_fraction_type():
 
 
 @pytest.mark.parametrize('name', CASES)
-def test_authored_schemas_only_contain_the_case_budget(name):
+def test_shipped_scenarios_need_no_numeric_schema(name):
     data = config(name)
-    assert data.get('parameter_schema', {}) == (
-        {'traffic.count': {'maximum': 10000}} if name == 'request_completion' else {})
+    assert 'parameter_schema' not in data
     document = configure_program(data, name)
     rules = document.implementation['numeric_parameters']['default']
     assert rules
@@ -70,12 +69,21 @@ def test_shared_field_cannot_drift_between_programs():
             configure_program(config('cache_scale_in'), 'case.yaml')
 
 
+def test_program_budget_can_only_narrow_a_shared_field():
+    bounded = replace(POSITIVE_COUNT, maximum=10000)
+    assert parameter_rules({'traffic.count': bounded})['traffic.count'] == bounded
+    for rule in (replace(PRIORITY, minimum=0), replace(PRIORITY, maximum=101),
+                 replace(PRIORITY, maximum=None), replace(PRIORITY, integer=False)):
+        with pytest.raises(ScenarioError, match='conflicting shared numeric field'):
+            parameter_rules({'traffic.source.parameters.priority': rule})
+
+
 @pytest.mark.parametrize('spec', [dict(minimum=0), dict(maximum=1 << 31),
                                  dict(integer=False), dict(maximum=math.inf),
                                  dict(minimum=True), dict(minimum=10, maximum=5)])
 def test_yaml_cannot_weaken_protocol_type_or_range(spec):
     data = config('request_completion')
-    data['parameter_schema']['traffic.input_len'] = spec
+    data['parameter_schema'] = {'traffic.input_len': spec}
     with pytest.raises(ScenarioError):
         configure_program(data, 'case.yaml')
 

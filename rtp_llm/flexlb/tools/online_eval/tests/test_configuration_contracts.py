@@ -81,7 +81,7 @@ def test_driver_is_required_and_cannot_select_another_field_contract(name):
 def test_numeric_schema_does_not_hide_unused_program_fields():
     data = config('request_completion')
     data['parameters']['traffic']['unused'] = 1
-    data['parameter_schema']['traffic.unused'] = dict(minimum=0, integer=True)
+    data['parameter_schema'] = {'traffic.unused': dict(minimum=0, integer=True)}
     with pytest.raises(ScenarioError, match='unknown configuration fields'):
         configure_program(data, 'case.yaml')
     data = config('master_performance')

@@ -268,15 +268,21 @@ class CaseConfigTest(unittest.TestCase):
         with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
             self.compile(config)
 
-    def test_numeric_constraints_and_profiles_are_yaml_owned(self):
+    def test_program_numeric_budget_and_yaml_profiles(self):
         config = self.config()
         config["variants"] = [{"id": "custom"}]
         config["profiles"] = ["single-nonbatch"]
         config["parameters"]["traffic"]["count"] = 10001
-        config["parameter_schema"]["traffic.count"]["maximum"] = 10001
+        with self.assertRaisesRegex(ScenarioError, "traffic.count"):
+            self.compile(config)
+        config["parameter_schema"] = {"traffic.count": {"maximum": 10001}}
+        with self.assertRaisesRegex(ScenarioError, "cannot weaken"):
+            self.compile(config)
+        config["parameters"]["traffic"]["count"] = 10000
+        del config["parameter_schema"]
         plans = self.compile(config)
         self.assertEqual([p["variant_id"] for p in plans], ["default", "custom"])
-        self.assertTrue(all(p["stages"][1]["params"]["count"] == 10001 for p in plans))
+        self.assertTrue(all(p["stages"][1]["params"]["count"] == 10000 for p in plans))
         del config["profiles"]
         with self.assertRaisesRegex(ScenarioError, "profiles must"):
             self.compile(config)

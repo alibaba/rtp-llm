@@ -43,6 +43,3 @@ parameters:
       window: terminal
       output: error_count
       unit: errors
-parameter_schema:
-  traffic.count:
-    maximum: 10000

@@ -30,8 +30,8 @@ JAVA_FLOW_NUMBERS = {
 CAPTURE_NUMBERS = number_fields(POSITIVE_COUNT,
     'observation.capture.max_samples', 'observation.capture.max_bytes')
 
-# Shared paths have one meaning across programs. A binding cannot silently change
-# a shared field's type/range; scenario-specific budgets belong in YAML narrowing.
+# Shared paths have one type and intrinsic range. Programs may declare a smaller
+# budget; YAML may further narrow it. Neither can weaken the shared rule.
 COMMON_NUMBERS = {
     **SOURCE_NUMBERS, **OUTPUT_DISTRIBUTION_NUMBERS, **JAVA_FLOW_NUMBERS,
     **CAPTURE_NUMBERS, 'procedure.setup_timeout_s': NONNEGATIVE,
@@ -50,8 +50,15 @@ def parameter_rules(defaults):
         if (type(path) is not str or not path or any(not part for part in path.split('.'))
                 or not isinstance(rule, NumberRule)):
             raise ScenarioError("invalid program numeric parameter contract")
-        if path in COMMON_NUMBERS and rule != COMMON_NUMBERS[path]:
-            raise ScenarioError("conflicting shared numeric field: " + path)
+        if path in COMMON_NUMBERS:
+            bounds = {key: getattr(rule, key) for key in ('minimum', 'maximum')
+                      if getattr(rule, key) is not None}
+            try:
+                compatible = COMMON_NUMBERS[path].narrow(bounds, path) == rule
+            except ValueError:
+                compatible = False
+            if not compatible:
+                raise ScenarioError("conflicting shared numeric field: " + path)
     return dict(defaults)
 
 

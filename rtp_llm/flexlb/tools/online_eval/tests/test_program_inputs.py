@@ -36,9 +36,13 @@ def test_numeric_constraints_apply_to_nested_traffic_paths():
     data["parameters"]["traffic"]["count"] = 10001
     with pytest.raises(ScenarioError, match="traffic.count"):
         configure_program(data, "case.yaml")
-    data["parameter_schema"]["traffic.count"]["maximum"] = 10001
+    data["parameter_schema"] = {"traffic.count": {"maximum": 10001}}
+    with pytest.raises(ScenarioError, match="cannot weaken"):
+        configure_program(data, "case.yaml")
+    data["parameters"]["traffic"]["count"] = 10000
+    del data["parameter_schema"]
     plan = configure_program(data, "case.yaml")
-    assert plan["variants"][0]["stages"][1]["params"]["count"] == 10001
+    assert plan["variants"][0]["stages"][1]["params"]["count"] == 10000
 
 
 @pytest.mark.parametrize("name,stage", [
