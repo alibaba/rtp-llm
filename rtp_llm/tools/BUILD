@@ -52,6 +52,13 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_engram_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_engram_boundary_replay.py"],
+    deps = [":dsv41_attention_replay", ":dsv41_mhc_boundary_replay", "//rtp_llm:torch", "//rtp_llm:transformers"],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
