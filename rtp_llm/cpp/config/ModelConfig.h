@@ -15,6 +15,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <optional>
 
 namespace rtp_llm {
 
@@ -144,6 +145,10 @@ public:
     // Declarative per-model KV cache layout. C++ cache config consumes this
     // and performs runtime finalization such as block/ring sizing.
     LayerKVCacheSpecDescs kv_cache_spec_descs;
+    // Local FULL/BLOCK_ROUND_ROBIN allocation and table layout, independent of
+    // Query CP and the upstream Prefill TP size. Unset preserves legacy rules;
+    // true selects owned pages in compact order, false selects the full table.
+    std::optional<bool> local_kv_cache_sharded = std::nullopt;
     // Model policy for prefix recomputation; live P/D transfers are unaffected.
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;
