@@ -35,6 +35,18 @@ py_library(
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 
+py_test(
+    name = "test_v41_decode_tilelang_reference_sm120",
+    srcs = ["test_v41_decode_tilelang_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_decode_tilelang_reference_testlib",
+        ":v41_deep_history_testlib",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
 py_library(
     name = "v41_mhc_collapse_reference_testlib",
     testonly = True,

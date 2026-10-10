@@ -3,8 +3,10 @@
 Keeps only what dsv4/attention.py uses:
 - ``sparse_attn_kernel`` — top-k sparse attention + per-head learned sink.
 
-The math is bit-for-bit from the upstream V4 release at
-``/mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py``.  No modifications.
+The attention equations come from the upstream V4 release at
+``/mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py``. The optional maximum
+initializer also supports V4.1's finite initial value without changing V4's
+default.
 Wrapped in a lazy-import guard so dsv4 stays importable on hosts without
 tilelang installed (fallbacks to the PyTorch reference at call site).
 
@@ -73,6 +75,7 @@ def _ensure_libz3_loadable() -> None:
 
     try:
         import z3
+
         lib_dir = os.path.join(os.path.dirname(z3.__file__), "lib")
     except Exception:
         return
@@ -133,7 +136,7 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
     INT32 = "int32"
 
     @tilelang.jit(pass_configs=_PASS_CONFIGS)
-    def _sparse_attn_kernel(h: int, d: int, scale=None):
+    def _sparse_attn_kernel(h: int, d: int, scale=None, initial_max=-float("inf")):
         """Verbatim port of V4 inference/kernel.py:sparse_attn_kernel.
 
         Top-k sparse MQA attention with per-head learned attn_sink,
@@ -177,12 +180,9 @@ try:  # noqa: broad except — ImportError / OSError (CDLL symbol miss) / Runtim
 
                 T.clear(acc_o)
                 T.clear(sum_exp)
-                # Identity element of max — standard online-softmax init.
-                # NaN would arise only if block 0 is entirely masked
-                # (exp(−∞ − (−∞)) = exp(NaN)), which requires topk = 0.
-                # V4's Indexer always returns index_topk ≥ 1 valid keys,
-                # so block 0 always has ≥ 1 valid entry and this is safe.
-                T.fill(scores_max, -T.infinity(FP32))
+                # V4 defaults to -infinity and requires a valid first tile.
+                # V4.1 uses -1e30 to support leading/all-masked tiles.
+                T.fill(scores_max, initial_max)
                 T.copy(q[by, bx, :, :], q_shared)
 
                 for t in T.Pipelined(num_blocks, num_stages=num_stages):
@@ -289,18 +289,24 @@ def sparse_attn(
     attn_sink: torch.Tensor,  # [H] fp32
     topk_idxs: torch.Tensor,  # [B, S, K] int — any integer dtype; cast to int32
     softmax_scale: float,
+    *,
+    initial_max: float = -float("inf"),
 ) -> torch.Tensor:
     """V4's native top-k sparse MQA attention with per-head learned sink.
 
     Exact port of ``inference/kernel.py:sparse_attn``. Pads the Q-head
     dimension up to 16 when ``H < 16`` for kernel throughput (trims after).
-    Caches the compiled kernel per ``(h_padded, d, softmax_scale)`` triple.
+    Caches kernels by head padding, dimension, scale and maximum initializer.
+    V4.1 callers can request ``initial_max=-1e30`` for leading masked tiles.
     """
     if not _TILELANG_AVAILABLE:
         raise RuntimeError(
             "tilelang is not available; cannot run V4 TileLang sparse_attn. "
             "Install tilelang>=0.1.7 (pip install --no-build-isolation tilelang).",
         )
+
+    if initial_max not in (-float("inf"), -1e30):
+        raise ValueError("Sparse attention requires the V4 or V4.1 maximum initializer")
 
     b, s, h, d = q.size()
     h_padded = max(h, 16)
@@ -311,13 +317,13 @@ def sparse_attn(
     if topk_idxs.dtype != torch.int32:
         topk_idxs = topk_idxs.to(torch.int32)
 
-    key = (h_padded, d, float(softmax_scale))
+    key = (h_padded, d, float(softmax_scale), float(initial_max))
     kernel = _SPARSE_ATTN_KERNEL_CACHE.get(key)
     if kernel is None:
         _log.warning(
             "[dsv4] JIT-compiling V4 TileLang sparse_attn h=%d d=%d", h_padded, d
         )
-        kernel = _sparse_attn_kernel(h_padded, d, softmax_scale)
+        kernel = _sparse_attn_kernel(h_padded, d, softmax_scale, initial_max)
         _SPARSE_ATTN_KERNEL_CACHE[key] = kernel
 
     o = torch.empty_like(q)
