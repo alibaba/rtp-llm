@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Callable, Protocol
 
 from rtp_llm.utils.scr_restore_context import RestoreContext
+from rtp_llm.utils.startup_timing import startup_stage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -143,7 +144,8 @@ class TemplateLifecycle:
             )
         for name, hook in self._snapshot():
             LOGGER.info("template hook fixup name=%s generation=%s", name, generation)
-            hook.restore_fixup(context)
+            with startup_stage("restore.fixup_hook", hook=name):
+                hook.restore_fixup(context)
         with self._lock:
             self._fixup_complete = True
 
@@ -161,7 +163,8 @@ class TemplateLifecycle:
             )
         for name, hook in self._snapshot():
             LOGGER.info("template hook release name=%s generation=%s", name, generation)
-            hook.release_template(generation)
+            with startup_stage("restore.release_hook", hook=name):
+                hook.release_template(generation)
         # Keep the state on release failure so the barrier can still abort.
         with self._lock:
             self._state = None

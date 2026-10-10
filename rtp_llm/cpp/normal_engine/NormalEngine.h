@@ -21,9 +21,9 @@ namespace rtp_llm {
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params,
+    NormalEngine(const EngineInitParams&                       params,
                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                 bool defer_loop_start = false);
+                 bool                                          defer_loop_start = false);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;
@@ -56,6 +56,7 @@ public:
 
 private:
     void                            initScheduler();
+    void                            warmUpScrPrefill();
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
@@ -63,13 +64,12 @@ private:
     void                            initLoadBalance();
     absl::Status                    trySaveStepError() const;
     void                            loop();
-    void                            initCacheManager(std::optional<WarmUpResult> warm_up_result,
-                                                     bool defer_connector_start);
-    absl::Status                    initSystemPrompt();
-    std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
-    size_t                          getWarmUpInputLength() const;
-    void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
-    void                            maybeRefreshCacheStatusSnapshot(const std::list<GenerateStreamPtr>& streams);
+    void         initCacheManager(std::optional<WarmUpResult> warm_up_result, bool defer_connector_start);
+    absl::Status initSystemPrompt();
+    std::shared_ptr<GenerateInput> makeFakeInput(size_t seq_len);
+    size_t                         getWarmUpInputLength() const;
+    void                           mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
+    void                           maybeRefreshCacheStatusSnapshot(const std::list<GenerateStreamPtr>& streams);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 

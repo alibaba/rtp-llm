@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/NumaMemoryPolicy.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/StartupTiming.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -246,12 +247,13 @@ private:
     std::vector<std::thread> workers_;
 };
 
-torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
-                                          bool interleave_numa_nodes,
-                                          size_t prefault_threads,
+torch::Tensor allocateRegisteredCpuTensor(size_t                size_bytes,
+                                          bool                  interleave_numa_nodes,
+                                          size_t                prefault_threads,
                                           std::shared_ptr<bool> registered = nullptr) {
 #if USING_CUDA
-    void* ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    StartupTiming allocation_timing("backend.host_pool_allocate");
+    void*         ptr = mmap(nullptr, size_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (ptr == MAP_FAILED) {
         throw std::runtime_error(std::string("anonymous mmap failed: ") + std::strerror(errno));
     }
@@ -287,7 +289,9 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
     {
         // Prefaulting runs concurrently with the registration below; the scope
         // guarantees the threads are joined before any munmap of the arena.
+        StartupTiming       prefault_timing("backend.host_pool_prefault_and_register");
         HostArenaPrefaulter prefaulter(ptr, size_bytes, prefault_threads);
+        StartupTiming       register_timing("backend.host_pool_cuda_host_register");
         err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
     }
     if (err != cudaSuccess) {
@@ -386,6 +390,11 @@ void BlockPool::validateConfig() const {
 }
 
 void BlockPool::initializeCacheBuffer() {
+    StartupTiming timing("backend.block_pool_initialize");
+    RTP_LLM_LOG_INFO("[RTPLLM_STARTUP] block pool begin pool_name=%s bytes=%zu allocation_type=%s",
+                     config_.pool_name.c_str(),
+                     config_.total_size_bytes,
+                     allocationTypeName(allocation_type_));
     gpu_cache_tensors_.clear();
     cache_buffer_registered_host_ = false;
     if (allocation_type_ == AllocationType::HOST) {
@@ -397,7 +406,7 @@ void BlockPool::initializeCacheBuffer() {
                                     "pinned MLA backing requires a sparse MLA-only pool");
         }
         use_pinned_cpu_backing_ = true;
-        block_generations_ = torch::zeros(
+        block_generations_      = torch::zeros(
             {config_.block_num}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU).pinned_memory(true));
         layout_indexer_buffers_.resize(config_.memory_layouts.size());
         layout_hbm_buffers_.resize(config_.memory_layouts.size());
@@ -441,11 +450,12 @@ void BlockPool::initializeCacheBuffer() {
     } else if (config_.mla_tiered_cache) {
         // The caching pinned allocator rounds large arenas up to a power of two.
         // Register the exact budget instead, using the existing NUMA policy.
-        mla_host_registered_ = std::make_shared<bool>(false);
-        mla_host_discarded_  = false;
-        cache_aligned_buffer_ = allocateRegisteredCpuTensor(
-            config_.total_size_bytes, shouldInterleaveRegisteredHostBlockPool(), hostBlockPoolPrefaultThreads(),
-            mla_host_registered_);
+        mla_host_registered_          = std::make_shared<bool>(false);
+        mla_host_discarded_           = false;
+        cache_aligned_buffer_         = allocateRegisteredCpuTensor(config_.total_size_bytes,
+                                                            shouldInterleaveRegisteredHostBlockPool(),
+                                                            hostBlockPoolPrefaultThreads(),
+                                                            mla_host_registered_);
         cache_buffer_registered_host_ = true;
         markHostBlockPoolDontDump(cache_aligned_buffer_.data_ptr(), config_.total_size_bytes);
     } else if (use_pinned_cpu_backing_) {
@@ -594,14 +604,14 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
         if (config_.mla_tiered_cache) {
             // RDMA requires the same legacy CUDA allocation for the separate
             // Indexer buffer as for an ordinary HBM block pool.
-            kv_scale_tensor = allocateGpuCacheBuffer(layout_cfg.kv_scale_pool_size_bytes);
+            kv_scale_tensor                     = allocateGpuCacheBuffer(layout_cfg.kv_scale_pool_size_bytes);
             layout_indexer_buffers_[layout_idx] = kv_scale_tensor;
         } else {
             kv_scale_tensor = createTensor(full_tensor,
-                                       static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
-                                       static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
-                                       layout_idx,
-                                       "kv_scale");
+                                           static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
+                                           static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
+                                           layout_idx,
+                                           "kv_scale");
         }
     }
 
@@ -650,11 +660,14 @@ void BlockPool::initializeLayoutStrategy(size_t                    layout_idx,
                             "Failed to create memory layout strategy for layout[%zu]",
                             layout_idx);
 
-    RTP_LLM_CHECK_WITH_INFO(
-        layout_strategies_[layout_idx]->init(layout_cfg, kv_cache_tensor, kv_scale_tensor, layout_cache_base_ptr,
-            config_.mla_tiered_cache ? layout_hbm_buffers_[layout_idx] : torch::Tensor()),
-        "Failed to initialize memory layout strategy for layout[%zu]",
-        layout_idx);
+    RTP_LLM_CHECK_WITH_INFO(layout_strategies_[layout_idx]->init(
+                                layout_cfg,
+                                kv_cache_tensor,
+                                kv_scale_tensor,
+                                layout_cache_base_ptr,
+                                config_.mla_tiered_cache ? layout_hbm_buffers_[layout_idx] : torch::Tensor()),
+                            "Failed to initialize memory layout strategy for layout[%zu]",
+                            layout_idx);
 }
 
 void BlockPool::processLayerTensors(size_t                    layout_idx,
@@ -720,28 +733,29 @@ void BlockPool::releaseMlaHostCacheForCheckpoint() {
     }
     std::scoped_lock lock(ref_mu_, free_mu_);
     RTP_LLM_CHECK_WITH_INFO(free_block_ids_.size() + 1 == config_.block_num && !kvcache_reg_mr_,
-                           "MLA host KV release requires an empty pool before cache registration");
+                            "MLA host KV release requires an empty pool before cache registration");
     // The template engine loop is not started; include the MLA transfer stream.
     RTP_LLM_CHECK_WITH_INFO(cudaDeviceSynchronize() == cudaSuccess, "synchronize MLA host KV before checkpoint");
     void* device_ptr = nullptr;
     RTP_LLM_CHECK_WITH_INFO(cudaHostGetDevicePointer(&device_ptr, cache_base_ptr_, 0) == cudaSuccess
-                               && device_ptr == cache_base_ptr_,
-                           "MLA host KV must use the captured CPU/GPU VA");
+                                && device_ptr == cache_base_ptr_,
+                            "MLA host KV must use the captured CPU/GPU VA");
     RTP_LLM_CHECK_WITH_INFO(cudaHostUnregister(cache_base_ptr_) == cudaSuccess, "unregister MLA host KV");
     *mla_host_registered_ = false;
     try {
         RTP_LLM_CHECK_WITH_INFO(madvise(cache_base_ptr_, config_.total_size_bytes, MADV_DONTNEED) == 0,
-                               "discard MLA host KV pages: %s",
-                               std::strerror(errno));
+                                "discard MLA host KV pages: %s",
+                                std::strerror(errno));
         mla_host_discarded_ = true;
         RTP_LLM_CHECK_WITH_INFO(mprotect(cache_base_ptr_, config_.total_size_bytes, PROT_NONE) == 0,
-                               "protect discarded MLA host KV: %s",
-                               std::strerror(errno));
+                                "protect discarded MLA host KV: %s",
+                                std::strerror(errno));
     } catch (...) {
         restoreMlaHostCacheAfterCheckpoint();
         throw;
     }
-    RTP_LLM_LOG_INFO("SCR MLA host KV released, VA retained: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
+    RTP_LLM_LOG_INFO(
+        "SCR MLA host KV released, VA retained: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
 #endif
 }
 
@@ -750,24 +764,30 @@ void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
     if (!mla_host_registered_ || *mla_host_registered_) {
         return;
     }
+    StartupTiming restore_timing("restore.mla_host_kv");
+    RTP_LLM_LOG_INFO("[RTPLLM_STARTUP] MLA host KV restore bytes=%zu prefault_threads=%zu",
+                     config_.total_size_bytes,
+                     hostBlockPoolPrefaultThreads());
     RTP_LLM_CHECK_WITH_INFO(mprotect(cache_base_ptr_, config_.total_size_bytes, PROT_READ | PROT_WRITE) == 0,
-                           "unprotect MLA host KV: %s",
-                           std::strerror(errno));
+                            "unprotect MLA host KV: %s",
+                            std::strerror(errno));
     if (shouldInterleaveRegisteredHostBlockPool()) {
         const auto policy = applyAllowedNumaInterleavePolicy(cache_base_ptr_, config_.total_size_bytes);
         RTP_LLM_CHECK_WITH_INFO(policy.success, "restore MLA host KV NUMA policy: %s", policy.error_message.c_str());
     }
     {
+        StartupTiming       prefault_timing("restore.mla_host_kv.prefault_and_register");
         HostArenaPrefaulter prefaulter(cache_base_ptr_, config_.total_size_bytes, hostBlockPoolPrefaultThreads());
+        StartupTiming       register_timing("restore.mla_host_kv.cuda_host_register");
         RTP_LLM_CHECK_WITH_INFO(cudaHostRegister(cache_base_ptr_, config_.total_size_bytes, cudaHostRegisterDefault)
-                                   == cudaSuccess,
-                               "restore MLA host KV registration");
+                                    == cudaSuccess,
+                                "restore MLA host KV registration");
     }
     *mla_host_registered_ = true;
-    void* device_ptr = nullptr;
+    void* device_ptr      = nullptr;
     RTP_LLM_CHECK_WITH_INFO(cudaHostGetDevicePointer(&device_ptr, cache_base_ptr_, 0) == cudaSuccess
-                               && device_ptr == cache_base_ptr_,
-                           "restored MLA host KV GPU VA changed");
+                                && device_ptr == cache_base_ptr_,
+                            "restored MLA host KV GPU VA changed");
     if (mla_host_discarded_) {
         // Invalidate captured working-set entries in place; snapshot mode also
         // copies these generations on every replay. Tensor/view VAs stay fixed.
@@ -777,25 +797,26 @@ void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
         }
         mla_host_discarded_ = false;
     }
-    RTP_LLM_LOG_INFO("SCR MLA host KV restored at captured VA: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
+    RTP_LLM_LOG_INFO(
+        "SCR MLA host KV restored at captured VA: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
 #endif
 }
 
 void BlockPool::initFreeBlocks() {
     if (config_.mla_tiered_cache) {
-        const char* value = std::getenv("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR");
+        const char*       value       = std::getenv("RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR");
         const std::string denominator = value ? value : "3";
-        RTP_LLM_CHECK_WITH_INFO(!denominator.empty()
-                                   && std::all_of(denominator.begin(), denominator.end(),
-                                                  [](char c) { return c >= '0' && c <= '9'; }),
-                               "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or an integer >= 2");
+        RTP_LLM_CHECK_WITH_INFO(
+            !denominator.empty()
+                && std::all_of(denominator.begin(), denominator.end(), [](char c) { return c >= '0' && c <= '9'; }),
+            "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or an integer >= 2");
         mla_hbm_share_denominator_ = std::stoull(denominator);
         RTP_LLM_CHECK_WITH_INFO(mla_hbm_share_denominator_ != 1,
-                               "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
+                                "RTP_LLM_DSA_MLA_HBM_SHARE_DENOMINATOR must be 0 or >= 2");
         mla_hbm_blocks_ = config_.memory_layouts.front().mla_hbm_blocks;
         for (const auto& layout : config_.memory_layouts) {
             RTP_LLM_CHECK_WITH_INFO(layout.mla_hbm_blocks == static_cast<uint32_t>(mla_hbm_blocks_),
-                                   "MLA layouts must share the HBM block boundary");
+                                    "MLA layouts must share the HBM block boundary");
         }
         free_hbm_blocks_ = mla_hbm_blocks_ > 0 ? mla_hbm_blocks_ - 1 : 0;
     }
@@ -836,12 +857,12 @@ BlockIndicesType BlockPool::malloc(int num_blocks, int seq_len, BlockIdxType las
         }
         auto first = free_block_ids_.begin();
         if (mla_hbm_share_denominator_ > 0 && seq_len > 0) {
-            const size_t block_size = config_.memory_layouts.front().seq_size_per_block;
+            const size_t block_size   = config_.memory_layouts.front().seq_size_per_block;
             const size_t query_blocks = (static_cast<size_t>(seq_len) + block_size - 1) / block_size;
             // Decide from the complete sequence at admission. Growth follows the
             // last allocated tier so a host query cannot grab HBM one block at a time.
             const bool prefer_host = last_block > 0 ? last_block >= mla_hbm_blocks_ :
-                                     query_blocks > free_hbm_blocks_ / mla_hbm_share_denominator_;
+                                                      query_blocks > free_hbm_blocks_ / mla_hbm_share_denominator_;
             if (prefer_host) {
                 first = free_block_ids_.lower_bound(mla_hbm_blocks_);
             }
@@ -991,8 +1012,13 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     "kv");
 
             if (config_.mla_tiered_cache) {
-                registerUserMrForBuffer(memory_util, layout_idx, 0, layout_cfg.mla_hbm_size_bytes,
-                                        layout_cfg.kv_block_stride_bytes, true, "hbm_kv");
+                registerUserMrForBuffer(memory_util,
+                                        layout_idx,
+                                        0,
+                                        layout_cfg.mla_hbm_size_bytes,
+                                        layout_cfg.kv_block_stride_bytes,
+                                        true,
+                                        "hbm_kv");
             }
             // Register scale buffer if present
             if (layout_cfg.hasScale()) {
@@ -1046,12 +1072,12 @@ void BlockPool::registerUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> mem
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     if (config_.mla_tiered_cache && buffer_type == "scale") {
         base_ptr = layout_indexer_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     } else if (config_.mla_tiered_cache && buffer_type == "hbm_kv") {
         base_ptr = layout_hbm_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     }
-    auto  start_us = currentTimeUs();
+    auto start_us = currentTimeUs();
 
     if (!memory_util->regUserMr(base_ptr, bytes, gpu, stride_bytes)) {
         RTP_LLM_FAIL("register user mr for block pool layout[%zu] %s buffer failed", layout_idx, buffer_type.c_str());
@@ -1077,10 +1103,10 @@ void BlockPool::deregisterUserMrForBuffer(std::shared_ptr<rtp_llm::MemoryUtil> m
     void* base_ptr = static_cast<void*>(static_cast<char*>(cache_base_ptr_) + static_cast<ptrdiff_t>(offset_bytes));
     if (config_.mla_tiered_cache && buffer_type == "scale") {
         base_ptr = layout_indexer_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     } else if (config_.mla_tiered_cache && buffer_type == "hbm_kv") {
         base_ptr = layout_hbm_buffers_[layout_idx].data_ptr();
-        gpu = true;
+        gpu      = true;
     }
 
     if (!memory_util->deregUserMr(base_ptr, gpu)) {
@@ -1093,15 +1119,15 @@ std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const 
         return {};
     }
     std::vector<KVCachePoolMetricsSnapshot> snapshots(2);
-    snapshots[0].storage = "hbm";
-    snapshots[1].storage = "pinned";
-    const size_t hbm_blocks = config_.memory_layouts.front().mla_hbm_blocks;
-    size_t block_bytes = 0;
+    snapshots[0].storage     = "hbm";
+    snapshots[1].storage     = "pinned";
+    const size_t hbm_blocks  = config_.memory_layouts.front().mla_hbm_blocks;
+    size_t       block_bytes = 0;
     for (const auto& layout : config_.memory_layouts) {
         block_bytes += layout.layer_num * layout.kv_block_stride_bytes;
         snapshots[0].indexer_bytes += layout.kv_scale_pool_size_bytes;
-        snapshots[0].working_set_bytes += layout.layer_num * layout.kv_block_stride_bytes
-            * (layout.mla_resident_tokens / layout.seq_size_per_block);
+        snapshots[0].working_set_bytes +=
+            layout.layer_num * layout.kv_block_stride_bytes * (layout.mla_resident_tokens / layout.seq_size_per_block);
     }
     // Take a single consistent snapshot across request, connector and cache refs.
     std::scoped_lock lock(ref_mu_, free_mu_);
@@ -1117,8 +1143,8 @@ std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const 
         entry.capacity_bytes = entry.total_blocks * block_bytes;
         // Occupied includes reusable prefix-cache blocks; available excludes only in-flight refs.
         entry.occupied_bytes = (entry.total_blocks - entry.free_blocks) * block_bytes;
-        entry.used_ratio = entry.total_blocks ?
-            100.0 * (entry.total_blocks - entry.available_blocks) / entry.total_blocks : 0.0;
+        entry.used_ratio =
+            entry.total_blocks ? 100.0 * (entry.total_blocks - entry.available_blocks) / entry.total_blocks : 0.0;
     }
     return snapshots;
 }

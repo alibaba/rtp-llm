@@ -52,6 +52,7 @@ from rtp_llm.utils.scr_template_utils import (
     register_for_scr,
     resolve_scr_worker_mapping,
 )
+from rtp_llm.utils.startup_timing import startup_stage
 
 setup_logging()
 
@@ -83,9 +84,7 @@ def _register_scr_resources(backend_manager, py_env_configs):
 
     try:
         engine = getattr(backend_manager, "engine", None)
-        local_rank = int(
-            getattr(py_env_configs.parallelism_config, "local_rank", 0)
-        )
+        local_rank = int(getattr(py_env_configs.parallelism_config, "local_rank", 0))
         registered = register_for_scr(
             engine,
             local_rank=local_rank,
@@ -118,7 +117,9 @@ def _scr_worker_num(py_env_configs: PyEnvConfigs) -> int:
         try:
             value = int(raw)
         except ValueError:
-            logging.error("invalid %s=%r; refusing custom SCR quorum", SCR_WORKER_NUM_ENV, raw)
+            logging.error(
+                "invalid %s=%r; refusing custom SCR quorum", SCR_WORKER_NUM_ENV, raw
+            )
             raise ValueError(f"{SCR_WORKER_NUM_ENV} must be an integer, got {raw!r}")
         if value <= 0:
             raise ValueError(f"{SCR_WORKER_NUM_ENV} must be positive, got {value}")
@@ -137,7 +138,9 @@ def _scr_worker_num(py_env_configs: PyEnvConfigs) -> int:
     return value if value > 0 else 1
 
 
-def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, world_rank=None):
+def _start_scr_rank_arrival(
+    backend_manager, py_env_configs, scr_manifest=None, world_rank=None
+):
     """Synchronously announce this CUDA rank's pre-service safe point."""
 
     if not is_scr_template_phase_active() or backend_manager is None:
@@ -145,7 +148,9 @@ def _start_scr_rank_arrival(backend_manager, py_env_configs, scr_manifest=None, 
     try:
         pc = py_env_configs.parallelism_config
         if scr_manifest is not None:
-            rank_key = str(getattr(pc, "world_rank", world_rank if world_rank is not None else 0))
+            rank_key = str(
+                getattr(pc, "world_rank", world_rank if world_rank is not None else 0)
+            )
             # A one-rank-per-container scheduler scope uses local rank 0 even
             # when the distributed world rank is non-zero.  Multi-rank local
             # scopes use the launcher world-rank keys frozen by the parent.
@@ -847,7 +852,8 @@ def start_backend_server(
         try:
             from rtp_llm.utils.jit_cache_manager import start_from_config
 
-            manager = start_from_config(py_env_configs.jit_config)
+            with startup_stage("backend.jit_cache_bootstrap"):
+                manager = start_from_config(py_env_configs.jit_config)
         except Exception:
             logging.exception("JIT_CACHE_FAIL_OPEN: setup failed; cold start")
 

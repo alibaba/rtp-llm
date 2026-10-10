@@ -37,6 +37,7 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.server.misc import format_exception
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from rtp_llm.utils.startup_timing import startup_event, startup_stage
 from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -272,6 +273,14 @@ class FrontendApp(object):
         )
 
     async def _wait_backend_health_ready_impl(self) -> None:
+        with startup_stage(
+            "frontend.wait_backend_health",
+            rank=self.server_config.rank_id,
+            frontend_id=self.server_config.frontend_server_id,
+        ):
+            await self._poll_backend_health_ready()
+
+    async def _poll_backend_health_ready(self) -> None:
         """Loop until backend gRPC health_check returns ok (used when PD 不分离)."""
         if self.frontend_server.is_embedding:
             return
@@ -395,6 +404,9 @@ class FrontendApp(object):
                 )
             )
             kmonitor.start_serving_when_ready()
+            on_ready = getattr(self, "_on_ready", None)
+            if on_ready is not None:
+                on_ready()
 
         def draining_response():
             reason = (
@@ -453,11 +465,26 @@ class FrontendApp(object):
                     detail="inference service is not ready",
                 )
 
+        startup_gate_wait_logged = False
+        startup_health_ready_logged = False
+
+        def log_startup_health_ready(request: Request):
+            nonlocal startup_health_ready_logged
+            if not startup_health_ready_logged:
+                startup_event("frontend.health", "ready", path=request.url.path)
+                startup_health_ready_logged = True
+
         def check_startup_warmup_ready(request: Request):
+            nonlocal startup_gate_wait_logged
             if request.url.path == "/liveness":
                 return
             gate_file = os.environ.get(STARTUP_WARMUP_HEALTH_GATE_FILE_ENV, "").strip()
             if gate_file and not os.path.exists(gate_file):
+                if not startup_gate_wait_logged:
+                    startup_event(
+                        "frontend.health_gate", "waiting", path=request.url.path
+                    )
+                    startup_gate_wait_logged = True
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="startup warmup is not ready",
@@ -490,6 +517,7 @@ class FrontendApp(object):
                 return draining_response()
             if self.separated_frontend:
                 await check_all_health()
+                log_startup_health_ready(request)
                 return "ok"
             if self.frontend_server.is_embedding:
                 return await async_request_server(
@@ -501,6 +529,7 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
+            log_startup_health_ready(request)
             return "ok"
 
         @app.get("/")

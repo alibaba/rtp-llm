@@ -13,6 +13,7 @@ from rtp_llm.models.propose_model.propose_model import ProposeModel
 from rtp_llm.ops import TaskType
 from rtp_llm.ops.rtp_llm.rtp_llm_op import RtpLLMOp
 from rtp_llm.utils.mm_process_engine import MMProcessEngine
+from rtp_llm.utils.startup_timing import startup_stage
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -99,14 +100,19 @@ class LanguageCppEngine(BaseEngine):
         """Release the deferred backend RPC/HTTP listeners after SCR arrival."""
         if not self.defer_service_start or self._service_started:
             return
-        self.rtp_llm_op_.start_service()
-        if self.config.task_type == TaskType.LANGUAGE_MODEL and self.world_info is not None:
-            self.rtp_llm_op_.ft_op.start_http_server(
-                self.model.model_weights_loader,
-                self.world_info,
-                self.tokenizer,
-                None,
-            )
+        with startup_stage("backend.rpc_service_start"):
+            self.rtp_llm_op_.start_service()
+        if (
+            self.config.task_type == TaskType.LANGUAGE_MODEL
+            and self.world_info is not None
+        ):
+            with startup_stage("backend.http_service_start"):
+                self.rtp_llm_op_.ft_op.start_http_server(
+                    self.model.model_weights_loader,
+                    self.world_info,
+                    self.tokenizer,
+                    None,
+                )
         self._service_started = True
 
     def update_runtime_endpoints(self, runtime_config, world_info) -> None:
