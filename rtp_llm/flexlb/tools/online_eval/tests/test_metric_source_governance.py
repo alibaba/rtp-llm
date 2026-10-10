@@ -74,6 +74,8 @@ def test_sampled_curve_values_and_provenance_do_not_change_the_exact_verdict(tmp
     data = evidence()
     frozen = analyze(data)
     archive_client(tmp_path)
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     produce(tmp_path, data, frozen)
     curves, _ = prepare_curves(tmp_path, data, view('master_performance.yaml'))
     for identity, value in CLIENT_CURVES.items():
@@ -90,6 +92,8 @@ def test_sampled_curve_values_and_provenance_do_not_change_the_exact_verdict(tmp
 
 def test_missing_prometheus_keeps_qps_empty_even_with_a_complete_journal(tmp_path):
     data = evidence()
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     produce(tmp_path, data, analyze(data))
     presentation = view('master_performance.yaml')
     curves, _ = prepare_curves(tmp_path, data, presentation)
@@ -107,6 +111,8 @@ def test_complete_prometheus_does_not_rescue_an_incomplete_request_ledger(tmp_pa
     data['flow']['complete'] = False
     invalid = analyze(data)
     assert invalid['verdict'] == 'INVALID'
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     produce(tmp_path, data, invalid)
     store = MetricStore.read(tmp_path)
     assert store.select('client/actual_send_qps')[0]['points']
@@ -117,6 +123,8 @@ def test_missing_required_gate_result_is_a_contract_error(tmp_path):
     data = evidence()
     frozen = copy.deepcopy(analyze(data))
     del frozen['metrics']['goodput_rps']
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     with pytest.raises(MetricContractError, match='missing declared performance result'):
         produce(tmp_path, data, frozen)
 

@@ -28,6 +28,8 @@ def archive_bytes(directory):
 def test_html_reinterpretation_is_self_contained_and_source_is_read_only(tmp_path):
     source = tmp_path / 'archive'
     e = evidence()
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(source, "master_performance")
     publish_performance(source, e, analyze(e))
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(source)

@@ -26,7 +26,7 @@ def performance_main():
         write_evidence(args.output / "performance-gate-evidence.json", e)
         write_evidence(args.output / "analysis.json", r)
     else:
-        import_metrics(args.output, args.evidence.parent, "master_performance.yaml")
+        import_metrics(args.output, args.evidence.parent)
         publish_performance(args.output, e, r)
     print(json.dumps(r, allow_nan=False))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[r["verdict"]]

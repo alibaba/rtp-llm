@@ -41,7 +41,7 @@ def cache_main():
     )
     args.output.mkdir(parents=True, exist_ok=True)
     result = analyze(evidence)
-    import_metrics(args.output, args.evidence.parent, "cache_scale_in.yaml")
+    import_metrics(args.output, args.evidence.parent)
     publish_cache(args.output, evidence, result,
                  prepared=prepare_report(args.output, evidence))
     print(result["verdict"])

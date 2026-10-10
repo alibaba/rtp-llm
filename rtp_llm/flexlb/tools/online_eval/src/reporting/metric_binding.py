@@ -35,6 +35,9 @@ def monitoring_audit(store, presentation):
         if "promql" in definition and identity.split('/')[-1] == 'up':
             continue
         classification = metric_classification(identity, definition, presentation)
+        if classification is None and any(identity in plan["definition"].get("demand", {}).get("gate", [])
+                for plan in store.document.get("plans", {}).values()):
+            classification = "GATE_INPUT"
         if classification is None:
             raise ValueError("unclassified monitoring metric " + identity)
         audit.append(dict(metric_id=identity, classification=classification,

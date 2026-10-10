@@ -107,6 +107,8 @@ def test_performance_publication_uses_frozen_environment_epoch(tmp_path):
     from cases.master_performance.analysis import analyze
     e = evidence()
     e['provenance']['env_epoch'] = 4
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     produce_performance(tmp_path, e, analyze(e))
     rows = MetricStore.read(tmp_path).document['metrics']['request/ttft_p99_ms']
     assert {row['epoch'] for row in rows} == {'4'}
@@ -146,6 +148,8 @@ def test_cache_publication_retains_prometheus_origin_and_environment_epoch(tmp_p
     from cases.cache_scale_in.metrics import produce
     e = CacheGateTest().evidence()
     e['provenance']['env_epoch'] = 5
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, 'cache_scale_in')
     produce(tmp_path, e, analyze(e))
     row = MetricStore.read(tmp_path).document['metrics']['derived/survivor_hit_ratio'][0]
     assert row['epoch'] == '5'

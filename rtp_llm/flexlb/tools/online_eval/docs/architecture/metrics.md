@@ -118,12 +118,18 @@ calculation:
 
 ## 按需采集与数据源扩展
 
-公共层不按 case 名分支。每次 run 选择的 query plan 是指标清单；查询声明物理依赖，注册 producer 为必要的额外采集声明 `collection.source` 和 `collection.field`。这两个字段由 Python 输出契约生成，不能在 YAML 手写覆盖。编译产物的 `implementation.monitoring_query_plan.collection` 冻结 Prometheus 物理白名单、证据字段及适配器实现 SHA；运行期的 `session.json` 和 `queries.json` 保留实际 target 与计划。
+公共层不按 case 名分支。query plan 是能力目录，不意味着采集目录中所有指标。编译器按每个变体展开 `case.metric()` 的门禁与算法输入、view 曲线的 `metric_id`、view 的显式 `diagnostic_only`，冻结三者并集及各自的消费者。默认 view 只展示已选中的归档，不扩大采集集合。未知依赖在启动前拒绝；门禁 producer 的输入也必须通过 program 显式声明，不能等运行时再加载整份目录。
 
-`monitoring.collection_plan` 从选中查询生成按来源的白名单。没有查询的来源不启动 scrape job；动态客户端同样遵守选择，未选中的客户端不开 exporter。每个 job 使用 Prometheus `metric_relabel_configs` 的 keep 规则，只入库声明的物理指标，保留原有身份标签和自动生成的 `up`。查询使用 histogram 时显式列出所需 bucket、sum、count，不能用同名 gauge 替换。过滤不解析或重写 PromQL，复杂表达式的依赖由定义维护者负责核对。没有 Prometheus 查询的纯证据计划不启动 TSDB。
+查询声明物理依赖，注册 producer 为必要的额外采集声明 `collection.source` 和 `collection.field`。这两个字段由 Python 输出契约生成，不能在 YAML 手写覆盖。编译产物的 `implementation.monitoring_query_plan.collection` 冻结 Prometheus 物理白名单、证据字段及适配器实现 SHA；运行期的 `session.json` 和 `queries.json` 保留实际 target 与计划。`implementation.monitoring_query_plan.definition.demand` 保存门禁、曲线和诊断需求；运行时校验计划摘要，使用冻结定义。producer 发布及离线重判沿用冻结清单，不按当前目录补回未选中的指标。报告对已采集指标保持严格分类；仅作算法输入的项归为 `GATE_INPUT`。
+
+`monitoring.collection_plan` 从选中查询生成按来源的白名单。没有查询的来源不启动 scrape job；动态客户端同样遵守选择，未选中的客户端不开 exporter。每个 job 使用 Prometheus `metric_relabel_configs` 的 keep 规则，只入库声明的物理指标，保留原有身份标签和自动生成的 `up`。查询使用 histogram 时显式列出所需 bucket、sum、count，不能用同名 gauge 替换。过滤不解析或重写 PromQL，复杂表达式的依赖由定义维护者负责核对。没有原生查询也没有 probe 的纯事件证据计划不启动 TSDB。
 
 入库过滤减少序列和存储量，不减少 exporter HTTP 响应生成或网络传输；只减少查询或图表也不会减少 scrape。Master 不增加生产指标、接口或日志。现有 Java 暴露白名单仍受编译校验；client、engine 的源端导出能力可按其自身合同扩展，不把服务端成本下降当成入库过滤的既有效果。
 
-`monitoring.sources.SOURCES` 注册额外证据能力，选中的指标决定启动哪些能力和字段。普通时序优先复用现有 exporter 或标准 exporter；只有确需未暴露字段的观测才走有界证据采集。`monitoring.collectors.EvidenceCollector` 管理时钟、采样、样本/字节预算、失败传播与 stop/join。适配器只执行一次有超时的读取和严格字段投影，不能创建线程、写文件或回退到日志。HTTP 读取失败与成功响应的坏 JSON、缺字段分开处理；坏数据报错。若接口不可达本身是测试观测，可由协议适配器显式产出可达性状态，但不能为其余字段补零。
+`monitoring.sources.SOURCES` 注册额外数据源能力，选中的指标决定启动哪些能力和字段。源协议可声明必需的完整性字段，例如 Master 状态需要同时保留 HTTP 可回读状态。普通时序复用 exporter；现有只读 HTTP 接口通过 `monitoring.probe.PrometheusEvidence` 接入官方 `prometheus_client` custom collector。SDK 只负责本地 exposition 服务，Prometheus 触发 scrape 时才调用有超时和响应字节上限的适配器，没有 Python 定时采集线程，也不新建第二套 TSDB。每个 probe 与原生 exporter 使用同一个 run 所有的 Prometheus；没有原生查询但选中 probe 时仍启动 Prometheus，只有请求流水等无需 scrape 的计划才不启动它。
 
-接口协议与字段语义独立于测试目的时放公共源模块；专属协议解释放 `cases/<case>/`，通过相同注册入口接入公共生命周期。只有接口已有稳定 exporter 时才改用 Prometheus 调度；不能为统一传输而丢失物理来源或改变观测语义。请求 journal 是事件证据，由已注册 producer 按冻结窗口计算；它不需要再转成逐请求 Prometheus 标签。
+适配器只执行一次严格字段投影，不创建线程、写文件或回退到日志。接口不可达本身是观测时，可以显式产出可达性 0，其余字段缺失；成功响应的坏 JSON、缺字段、非有限数报错。probe 启动必须完成一次成功 scrape 才开始发流。SDK 的 `up` 表示适配器 exporter 是否成功，Master 的 HTTP 可回读是另一条源端观测，不能混淆；坏响应和样本/字节预算超限会在启动或收尾显式失败。
+
+收尾先结束适配器读取，再从 TSDB 按实际 scrape 时间导出选中字段。`*.prometheus.json` 保留原始查询、时间边界、源地址与错误，协议证据 JSONL 从这些样本生成；producer 再按冻结定义落入统一 `metrics.json`。不使用 PromQL lookback 补断档。物理来源仍是 `debug_api`，传输记录为 `prometheus`，不会因为用了 SDK 就改成生产 Master 原生指标。exporter、采集错误与收尾由共同资源所有者管理，结束 probe 后再关闭 TSDB；失败时仍尝试保存其他采集证据并回收所有进程。
+
+接口协议与字段语义独立于测试目的时放公共源模块；专属协议解释放 `cases/<case>/`，通过相同注册入口接入公共生命周期。采样新增源遵循 [新增 case](../development/adding-cases.md) 的必要性与字段完整性规则。请求 journal 是事件证据，由注册 producer 按冻结窗口计算，不需要转成逐请求 Prometheus 标签。

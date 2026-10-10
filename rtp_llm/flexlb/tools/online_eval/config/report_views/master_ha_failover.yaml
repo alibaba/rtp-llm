@@ -8,35 +8,9 @@ metrics:
   query_plan: master_ha_failover.yaml
   diagnostic_only:
   - mock/running_sum
-  - mock/running_avg
-  - mock/running_max
   - mock/waiting_sum
-  - mock/waiting_avg
-  - mock/waiting_max
   - mock/engine_count
-  - mock/context_wall_tps
-  - mock/context_completed_qps
   - mock/cache_hit_ratio
-  - mock/prefill_batch_size_mean
-  - mock/prefill_batch_size_p50
-  - mock/prefill_batch_size_p90
-  - mock/prefill_batch_size_p99
-  - mock/rtp_llm_context_tps_per_engine
-  - mock/rtp_llm_context_tps_engine_mean
-  - mock/rtp_llm_context_tps_with_cache_per_engine
-  - mock/rtp_llm_context_tps_with_cache_engine_mean
-  - mock/mock_decode_wall_tps_engine_mean
-  - mock/context_execution_tps_avg
-  - mock/context_execution_tps_with_cache_avg
-  - mock/simulated_prefill_ms_avg
-  - mock/simulated_decode_ms_avg
-  - mock/rtp_llm_kv_cache_pool_total_blocks
-  - mock/rtp_llm_kv_cache_pool_available_blocks
-  - mock/mock_engine_held_blocks
-  - mock/mock_engine_referenced_blocks
-  - mock/completed_qps
-  - mock/accepted_qps
-  - mock/output_wall_tps
 charts:
   events:
     kill_a:

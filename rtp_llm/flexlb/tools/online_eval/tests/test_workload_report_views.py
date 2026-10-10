@@ -39,14 +39,15 @@ class WorkloadReportViewsTest(unittest.TestCase):
             with self.assertRaisesRegex(ScenarioError, "axis is not declared"):
                 view("cache_scale_in.yaml")
 
-    def test_new_monitor_query_needs_explicit_presentation_classification(self):
+    def test_unused_catalog_query_does_not_force_collection_or_presentation(self):
         from monitoring.query_plan import load_plan
 
         plan = load_plan("cache_scale_in.yaml")
         plan["sources"]["master"]["new_metric"] = {"promql": "new_metric${selector}"}
         with mock.patch("monitoring.query_plan.load_plan", return_value=plan):
-            with self.assertRaisesRegex(ScenarioError, "lack presentation"):
-                view("cache_scale_in.yaml")
+            from monitoring.collection_plan import select_plan
+            selected = select_plan(plan, {}, [view("cache_scale_in.yaml")])
+            self.assertNotIn("new_metric", selected["sources"]["master"])
 
     def test_ha_core_view_aligns_events_requests_and_master_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -75,7 +76,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             from monitoring.metric_store import export_metrics
             from monitoring.query_plan import load_plan
             from monitoring.producers import produce
-            export_metrics(root, load_plan("master_ha_failover.yaml"))
+            from metric_fixtures import freeze_metrics
+            freeze_metrics(root, "master_ha_failover")
             produce(root, analysis)
             requests.unlink()
             state.unlink()

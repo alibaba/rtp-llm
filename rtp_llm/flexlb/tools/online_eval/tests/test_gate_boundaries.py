@@ -62,6 +62,8 @@ def test_report_uses_frozen_verdict_without_republishing_metrics(kind):
     result = analyze(evidence)
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        from metric_fixtures import freeze_metrics
+        freeze_metrics(root, "cache_scale_in" if kind == "cache" else "master_performance")
         publish(root, evidence, result)
         before = {name: (root/name).read_bytes() for name in
                   ('metrics.json', kind+'-gate-evidence.json')}

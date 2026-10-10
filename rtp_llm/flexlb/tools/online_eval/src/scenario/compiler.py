@@ -139,6 +139,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "findings",
                     "metadata",
                     "reports",
+                    "monitoring_query_plan",
                 },
                 {"id"},
             )
@@ -332,7 +333,9 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "source": "yaml",
                         "source_path": source,
                         **(
-                            {"implementation": copy.deepcopy(doc.implementation)}
+                            {"implementation": dict(copy.deepcopy(doc.implementation),
+                                **({"monitoring_query_plan": copy.deepcopy(variant["monitoring_query_plan"])}
+                                   if "monitoring_query_plan" in variant else {}))}
                             if hasattr(doc, "implementation")
                             else {}
                         ),

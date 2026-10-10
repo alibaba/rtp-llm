@@ -36,7 +36,7 @@ class MasterActionsTest(unittest.TestCase):
         ):
             runner = HaReplayClient(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
-            ], source=replay_source(), query_plan=load_plan("master_ha_failover.yaml"), sampler_limits=dict(max_samples=10, max_bytes=10000))
+            ], source=replay_source(), monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
         path = Path(runner._overrides["MASTER_DISCOVERY_FILE"])
         self.assertEqual({"hosts": [
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
@@ -93,7 +93,7 @@ class MasterActionsTest(unittest.TestCase):
             HaReplayClient(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
             ], duration_s=10, replay_speed=2, source={"kind": "trace"},
-              query_plan=load_plan("master_ha_failover.yaml"), sampler_limits=dict(max_samples=10, max_bytes=10000))
+              monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
 
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
         root = Path(self.tmp.name)
@@ -102,7 +102,7 @@ class MasterActionsTest(unittest.TestCase):
             "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=102),
         })
         sampler = evidence_collector(load_plan("master_ha_failover.yaml"), "master_inflight", env,
-                                       root / "master_states.jsonl", interval_s=0.01,
+                                       root / "master_states.jsonl", session=self.ctx.monitor,
                                        limits=dict(max_samples=10, max_bytes=10000))
 
         from io import BytesIO
@@ -111,12 +111,13 @@ class MasterActionsTest(unittest.TestCase):
                 return BytesIO(json.dumps(dict(scheduler_inflight=4,
                     prefill_endpoints=[{"inflight_requests": 2}, {"inflight_requests": 3}],
                     decode_endpoints=[{"master_queued": 1, "confirmed_running": 6}])).encode())
-            sampler._stop.set()
             raise OSError("Master offline")
 
         with patch("monitoring.collectors.urllib.request.urlopen", side_effect=fetch):
-            sampler._run()
-        rows = [json.loads(line) for line in sampler.path.read_text().splitlines()]
+            families = list(sampler.collect())
+        rows = [{"master": name, **{field: next(sample.value for sample in family.samples
+                  if sample.labels["master"] == name) for field, family in zip(sampler.fields, families)
+                  if any(sample.labels["master"] == name for sample in family.samples)}} for name in ("A", "B")]
         self.assertEqual(["A", "B"], [row["master"] for row in rows])
         self.assertEqual(5, rows[0]["prefill_inflight_requests"])
         self.assertEqual(6, rows[0]["decode_confirmed_running"])

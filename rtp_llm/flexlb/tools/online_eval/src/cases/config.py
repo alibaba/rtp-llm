@@ -273,16 +273,24 @@ def _variant_contract(config, builder, source):
     execution = normalize_execution(config.get("execution"), kind=metadata["kind"])
     if (builder.metric_dependencies or "metric_whitelist" in builder.environment
             or any("metric_whitelist" in patch for patch in builder.environment.get("profile_overrides", {}).values())):
-        _bind_metric_dependencies(builder.metric_dependencies, execution, builder.environment)
+        _bind_metric_dependencies(builder.metric_dependencies, execution)
     variant = dict(metadata=metadata, execution=execution)
     _bind_reports(config, variant, source, builder.steps)
+    if metadata["kind"] == "workload":
+        from monitoring.query_plan import load_plan, DEFAULT_PLAN, validate_export_filter
+        from monitoring.collection_plan import select_plan, frozen_plan
+        from reporting.view_config import view
+        name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
+        selected = select_plan(load_plan(name), builder.metric_dependencies,
+                               [view(report) for report in variant.get("reports", [])])
+        validate_export_filter(selected, builder.environment)
+        variant["monitoring_query_plan"] = frozen_plan(name, selected)
     return variant
 
 
-def _bind_metric_dependencies(requirements, execution, environment):
-    from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions, validate_export_filter
+def _bind_metric_dependencies(requirements, execution):
+    from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions
     plan = load_plan(execution["monitoring"].get("query_plan", DEFAULT_PLAN))
-    validate_export_filter(plan, environment)
     declared = definitions(plan)
     missing = set(requirements) - set(declared)
     if missing:
@@ -331,16 +339,4 @@ def _implementation(config, module, name):
             ).encode()
         ).hexdigest(),
     }
-    query_plan = config.get("execution", {}).get("monitoring", {}).get("query_plan")
-    if query_plan is not None:
-        from monitoring.query_plan import load_plan, plan_hash
-
-        metric_plan = load_plan(query_plan)
-        from monitoring.collection_plan import collection_plan
-        implementation["monitoring_query_plan"] = {
-            "name": query_plan,
-            "sha256": plan_hash(metric_plan),
-            "definition": metric_plan,
-            "collection": collection_plan(metric_plan),
-        }
     return implementation

@@ -100,7 +100,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 | `inputs.py`、`analysis.py` | 业务指标绑定、输入合同与根据显式证据计算的门禁 |
 | `metrics.py` | 将业务证据投影成声明的指标；采集、归档与通用统计仍复用公共组件 |
 | `report.py`、`panels.py`、`view.py` | 业务结果展示、面板装配与专属视图校验；HTML 交互和 bundle 协议复用 `reporting/` |
-| `client.py`、`observation.py` 等现场模块 | 专属客户端会话或数据源协议解释；采样生命周期、预算和收尾复用公共组件 |
+| `client.py`、`observation.py` 等现场模块 | 专属客户端会话或数据源协议解释；HTTP 观测注册适配器，由公共标准 exporter 与 Prometheus 管理调度、预算和收尾 |
 | `comparison.py` | 业务声明的对齐策略校验，不重算跨 run 门禁 |
 | `publication.py`、`replay.py` | 产物发布与显式离线重判 |
 
@@ -108,7 +108,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 `cases.registry.PROGRAMS` 将稳定 case 名映射到 program 模块；YAML 只能选择注册入口，不能导入代码。通用构建接口是 `cases.config.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
-program 的 `ACTION_HANDLERS` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明依赖，编译检查 ID、单位与身份标签。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
+program 的 `ACTION_HANDLERS` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
 若需最终归档后刷新报告，program 声明可调用的 `REPORT_FINALIZER(directory)`；只读取已发布的结果与指标，不重判或重复生产指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
 

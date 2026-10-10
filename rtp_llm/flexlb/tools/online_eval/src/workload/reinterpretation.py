@@ -24,10 +24,9 @@ def load_reinterpretation(parser, args, analyzer_path):
     return evidence
 
 
-def import_metrics(destination, source, plan_name):
+def import_metrics(destination, source):
     """Copy frozen metrics and convert raw archives, always writing at destination."""
     from monitoring.metric_store import MetricStore, export_metrics
-    from monitoring.query_plan import load_plan
 
     destination, source = Path(destination), Path(source)
     destination.mkdir(parents=True, exist_ok=True)
@@ -40,4 +39,4 @@ def import_metrics(destination, source, plan_name):
         target = destination / path.relative_to(source)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
-    return export_metrics(destination, load_plan(plan_name))
+    return export_metrics(destination)

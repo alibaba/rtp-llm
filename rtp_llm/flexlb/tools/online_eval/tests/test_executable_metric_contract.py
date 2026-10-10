@@ -138,6 +138,8 @@ def test_new_request_projection_needs_no_case_code():
 def test_publication_rejects_forged_measurement_and_preserves_frozen_calculation(tmp_path):
     from test_performance_gate import evidence
     data = evidence()
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     produce(tmp_path, data, analyze(data))
     store = MetricStore.read(tmp_path)
     metric = 'request/ttft_p99_ms'
@@ -176,6 +178,8 @@ def test_invalid_journal_publishes_missing_samples_without_zero_fallback(tmp_pat
     data['flow']['complete'] = False
     result = analyze(data)
     assert result['verdict'] == 'INVALID'
+    from metric_fixtures import freeze_metrics
+    freeze_metrics(tmp_path, "master_performance")
     produce(tmp_path, data, result)
     row = MetricStore.read(tmp_path).document['metrics']['request/ttft_p99_ms'][0]
     assert row['status'] == 'ABSENT'

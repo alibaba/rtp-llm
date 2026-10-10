@@ -113,7 +113,7 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
 
 
 @pytest.mark.parametrize('name', ['cache_scale_in', 'master_performance', 'master_ha_failover'])
-def test_all_selected_views_require_complete_monitoring_classification(name):
+def test_catalog_additions_do_not_force_unused_collection(name):
     from monitoring.query_plan import load_plan
     from reporting.view_config import view
     from scenario.loader import ScenarioError
@@ -122,8 +122,9 @@ def test_all_selected_views_require_complete_monitoring_classification(name):
     plan = load_plan(name + '.yaml')
     plan['sources']['master']['new_query'] = {'promql': 'new_query'}
     with mock.patch('monitoring.query_plan.load_plan', return_value=plan):
-        with pytest.raises(ScenarioError, match='lack presentation'):
-            view(name + '.yaml')
+        from monitoring.collection_plan import select_plan
+        selected = select_plan(plan, {}, [view(name + ".yaml")])
+        assert "new_query" not in selected["sources"]["master"]
     data['metrics'].pop('diagnostic_only')
     with mock.patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='diagnostic_only'):
@@ -138,7 +139,8 @@ def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_p
     from reporting.view_config import view
 
     config = view(name + '.yaml')
-    store = export_metrics(tmp_path, load_plan(name + '.yaml'))
+    from metric_fixtures import freeze_metrics
+    store = freeze_metrics(tmp_path, name)
     audit = monitoring_audit(store, config)
     assert {row['metric_id'] for row in audit if row['classification'] == 'DIAGNOSTIC_ONLY'} == \
         set(config['metrics']['diagnostic_only'])
@@ -183,7 +185,7 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
 
 
 @pytest.mark.parametrize('name', ['cache_scale_in', 'master_performance', 'master_ha_failover'])
-def test_unbound_produced_series_is_rejected_just_like_a_query(name):
+def test_unused_produced_capability_is_omitted_and_frozen_unclassified_output_rejected(name, tmp_path):
     from monitoring.query_plan import load_plan
     from reporting.view_config import view
     from scenario.loader import ScenarioError
@@ -192,5 +194,12 @@ def test_unbound_produced_series_is_rejected_just_like_a_query(name):
     definition = next(d for d in plan['produced'].values() if d['value_kind'] == 'gauge')
     plan['produced']['unbound/series'] = copy.deepcopy(definition)
     with mock.patch('monitoring.query_plan.load_plan', return_value=plan):
-        with pytest.raises(ScenarioError, match='lack presentation'):
-            view(name + '.yaml')
+        from monitoring.collection_plan import select_plan
+        selected = select_plan(plan, {}, [view(name + ".yaml")])
+        assert "unbound/series" not in selected["produced"]
+    from metric_fixtures import freeze_metrics
+    from reporting.metric_binding import monitoring_audit
+    store = freeze_metrics(tmp_path, name)
+    store.document["definitions"]["unbound/series"] = definition
+    with pytest.raises(ValueError, match="unclassified monitoring metric unbound/series"):
+        monitoring_audit(store, view(name + ".yaml"))

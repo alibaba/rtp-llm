@@ -103,8 +103,7 @@ def _ha_start(ctx, params, deadline):
         targets,
         duration_s=params["duration_s"],
         sampler_limits=params["capture"],
-        query_plan=ctx.monitor.query_plan, interval_s=ctx.monitor.interval,
-        clock=ctx.clock, wall_clock=ctx.wall_clock,
+        monitor=ctx.monitor,
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],
         live_events=params["live_events"],
@@ -146,7 +145,7 @@ def _ha_finish(ctx, params, deadline):
     sampler = getattr(client, "state_sampler", None)
     return StageOutput(
         {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
-        artifacts=[str(path)] + ([str(sampler.path)] if sampler is not None else []),
+        artifacts=[str(path)] + ([str(sampler.path), str(sampler.path.with_suffix(".prometheus.json"))] if sampler is not None else []),
     )
 
 

@@ -9,7 +9,12 @@ from traffic.traffic_source import materialize
 from traffic.workload_profile import profile
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
-from cases.cache_scale_in.publication import publish_cache as write_report
+from cases.cache_scale_in.publication import publish_cache
+from metric_fixtures import freeze_metrics
+
+def write_report(directory, evidence, result, prepared=None):
+    freeze_metrics(directory, "cache_scale_in")
+    return publish_cache(directory, evidence, result, prepared)
 from reporting.view_config import view
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
@@ -27,6 +32,7 @@ def prepare_report(directory, evidence):
 def metric_spec(directory, evidence, result, prepared):
     from cases.cache_scale_in.metrics import produce
     from cases.cache_scale_in.report import build_spec
+    freeze_metrics(directory, "cache_scale_in")
     produce(directory, evidence, result)
     from monitoring.metric_store import MetricStore
     from reporting.metric_binding import monitoring_audit

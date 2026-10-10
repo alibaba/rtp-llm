@@ -224,7 +224,6 @@ def validate_monitoring_policy(path, data, query_plan, fail):
         fail(path, "classified monitoring styles require unit, color and hidden")
     diagnostic = policy.get("diagnostic_only", [])
     from monitoring.query_plan import definitions
-    from reporting.metric_binding import metric_classification
 
     known = {identity: definition for identity, definition in definitions(query_plan).items()
              if not ("promql" in definition and identity.split('/')[-1] == 'up')}
@@ -232,9 +231,7 @@ def validate_monitoring_policy(path, data, query_plan, fail):
         type(identity) is not str or identity not in known for identity in diagnostic
     ) or len(diagnostic) != len(set(diagnostic)):
         fail(path, "invalid diagnostic_only metrics")
-    if any(metric_classification(identity, definition, data) is None
-           for identity, definition in known.items()):
-        fail(path, "monitoring metrics lack presentation or diagnostic classification")
+
 
 
 def validate_text(path, data, fail):

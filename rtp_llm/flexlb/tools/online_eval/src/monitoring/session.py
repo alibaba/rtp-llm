@@ -50,12 +50,12 @@ class PrometheusSource:
 
 class PrometheusSession:
     def __init__(self, directory, targets, interval_s=1, max_gap_s=5, binary=None,
-                 query_plan=DEFAULT_PLAN, target_kinds=None):
+                 query_plan=DEFAULT_PLAN, target_kinds=None, metric_plan=None):
         from monitoring.query_plan import load_plan
 
         self.directory = Path(directory).resolve()
         self.query_plan_name = query_plan
-        self.query_plan = load_plan(query_plan)
+        self.query_plan = metric_plan if metric_plan is not None else load_plan(query_plan)
         kinds = dict(target_kinds) if target_kinds is not None else {name: source_kind(name) for name in targets}
         if set(kinds) != set(targets) or set(kinds.values()) - set(self.query_plan["sources"]):
             raise ValueError("target kinds must identify every Prometheus target")
@@ -80,6 +80,7 @@ class PrometheusSession:
         self.log = None
         self.target_bounds = {}
         self.closed = False
+        self.probes = {}
 
     def collects(self, kind):
         return bool(self.query_plan["sources"][kind])
@@ -168,13 +169,39 @@ class PrometheusSession:
         for name in targets:
             self.target_bounds[name] = [time.time(), None]
 
+    def add_probe(self, probe, url):
+        """A registered on-demand adapter shares this run's scheduler and TSDB."""
+        if not self.url or self.closed or probe.job in self.probes:
+            raise ValueError("probe requires a live Prometheus and a unique source")
+        self.probes[probe.job] = probe
+        path = self.directory / "prometheus.json"
+        config = json.loads(path.read_text())
+        config["scrape_configs"].append(dict(job_name=probe.job, sample_limit=100000,
+            body_size_limit="32MB", static_configs=[dict(targets=[url.removeprefix("http://").split("/", 1)[0]])],
+            metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",
+                regex="(" + "|".join(probe.names.values()) + ")")]))
+        path.write_text(json.dumps(config))
+        with urllib.request.urlopen(urllib.request.Request(self.url + "/-/reload", data=b"", method="POST"), timeout=5):
+            pass
+        self._write_session()
+        deadline = time.monotonic() + 15
+        while True:
+            if probe.error is not None:
+                raise RuntimeError("probe startup failed: " + str(probe.error)) from probe.error
+            health = self.query('up{job=' + json.dumps(probe.job) + '}')
+            if len(health) == 1 and float(health[0]["value"][1]) == 1:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("probe scrape not ready")
+            time.sleep(.05)
+
     def end_target(self, name, ended=None):
         self.target_bounds[name][1] = ended or time.time()
 
     def start(self):
         if self.started is not None:
             raise ValueError("monitor session already started")
-        if not any(self.query_plan["sources"].values()):
+        if not any(self.query_plan["sources"].values()) and not self.collection_plan["evidence"]:
             self.directory.mkdir(parents=True, exist_ok=True)
             self.started, self.monotonic = time.time(), time.monotonic()
             self._write_session()
@@ -258,7 +285,9 @@ class PrometheusSession:
     def _write_session(self):
         (self.directory / "session.json").write_text(json.dumps(dict(
             backend="prometheus", url=self.url, targets=self.targets,
-            collection_plan=self.collection_plan, started_epoch_s=self.started,
+            collection_plan=self.collection_plan,
+            evidence_targets={name: dict(source=probe.source, fields=probe.fields, url=probe.url, path=str(probe.path))
+                              for name, probe in self.probes.items()}, started_epoch_s=self.started,
             interval_s=self.interval, retention_time="24h", retention_size="1GB"), indent=2))
 
     def metric_definition(self, metric_id):
@@ -377,9 +406,13 @@ class PrometheusSession:
 
     def stop(self, timeout=10, export=True):
         try:
+            from runtime.cleanup import cleanup_all
+            operations = [(name, lambda probe=probe: probe.stop(timeout=timeout))
+                          for name, probe in self.probes.items()]
             if not self.closed and export and (self.process is not None and self.process.poll() is None
                     or self.started is not None and not any(self.query_plan["sources"].values())):
-                self.archive()
+                operations.append(("Prometheus archive", self.archive))
+            cleanup_all(operations)
         finally:
             self.closed = True
             if self.process is not None and self.process.poll() is None:

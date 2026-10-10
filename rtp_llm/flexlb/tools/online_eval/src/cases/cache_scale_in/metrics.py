@@ -3,7 +3,6 @@
 from cases.cache_scale_in.analysis import analyze
 from runtime.observation import evidence_origin
 from monitoring.metric_store import MetricStore, export_metrics, publish, series_row
-from monitoring.query_plan import load_plan
 
 
 def metric_contract(producer, identity, calculation):
@@ -24,20 +23,23 @@ def metric_contract(producer, identity, calculation):
 
 
 def produce(directory, evidence, result):
-    export_metrics(directory, load_plan("cache_scale_in.yaml"))
+    export_metrics(directory)
     store = MetricStore.read(directory)
     epoch = evidence["provenance"]["env_epoch"]
     anchor = evidence_origin(evidence)
     identity = "derived/survivor_hit_ratio"
-    publish(store, identity, store.document["definitions"][identity],
-            [series_row([[anchor+w["end"], w["hit"] if not w["errors"] else None]
-                         for w in result["windows"]], epoch=epoch, source="cache_gate", labels={})], producer="cache_windows",
-            evidence=dict(path=str(directory) + "/cache-gate-evidence.json",
-                          calculation="survivor hit/context counter delta; timestamp is window end",
-                          survivors=evidence.get("survivors", [])))
+    if identity in store.document["definitions"]:
+        publish(store, identity, store.document["definitions"][identity],
+                [series_row([[anchor+w["end"], w["hit"] if not w["errors"] else None]
+                             for w in result["windows"]], epoch=epoch, source="cache_gate", labels={})], producer="cache_windows",
+                evidence=dict(path=str(directory) + "/cache-gate-evidence.json",
+                              calculation="survivor hit/context counter delta; timestamp is window end",
+                              survivors=evidence.get("survivors", [])))
 
     for metric, value in result["gate_metrics"].items():
         identity = "cache_gate/" + metric
+        if identity not in store.document["definitions"]:
+            continue
         publish(store, identity, store.document["definitions"][identity],
                 [series_row([[anchor+evidence["post_end"], value]],
                             epoch=epoch, source="cache_gate", labels={})], producer="cache_windows",

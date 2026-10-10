@@ -7,7 +7,7 @@
 ## 前置条件
 
 - JDK 21；`java -version` 与 Maven 实际使用的 JVM 都必须是 21。
-- Python 3，且安装 `PyYAML`、`grpcio`、`grpcio-tools`、`protobuf`。
+- Python 3；用 `python3 -m pip install -r tools/online_eval/requirements.txt` 安装编排、gRPC 与标准 exporter SDK 依赖。
 - Prometheus 可执行文件。workload 通过 `PROMETHEUS_BIN` 指向它；命令名为 `prometheus` 时可省略。
 - 至少一个连续的空闲端口区间。runner 规划 Mock、Master HTTP、management 和 gRPC 端口。
 - 按 YAML 的 P/D 拓扑和 JVM heap 预留内存；改变规模时需同步检查性能门槛。

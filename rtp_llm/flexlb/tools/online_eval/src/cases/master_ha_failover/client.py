@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import json
 import uuid
-import time
 from pathlib import Path
 
 from cases.master_ha_failover.analysis import row_ts_ms
-from monitoring.sources import evidence_collector
+from monitoring.sources import evidence_collector, selected_sources
 from runtime.java_client import ClientOps
 from traffic.contracts import source_priority
 
 
 class HaReplayClient:
-    """Own the HA producer and sampler across start, finish and cleanup actions."""
+    """Own HA replay and observation resources across start, finish and cleanup."""
 
     def __init__(
         self,
@@ -35,15 +34,16 @@ class HaReplayClient:
         max_requests: int | None = None,
         loop: bool = False,
         collection_profile="request",
-        sampler_limits, query_plan, interval_s=1, clock=time.monotonic, wall_clock=time.time,
+        sampler_limits, monitor,
     ):
         self.name = name
         self.targets = list(targets)
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
-        self.state_sampler = evidence_collector(query_plan, "master_inflight", env,
-            case_dir / "master_states.jsonl", limits=sampler_limits, interval_s=interval_s,
-            clock=clock, wall_clock=wall_clock)
+        self.state_sampler = None
+        if "master_inflight" in selected_sources(monitor.query_plan):
+            self.state_sampler = evidence_collector(monitor.query_plan, "master_inflight", env,
+                case_dir / "master_states.jsonl", limits=sampler_limits, session=monitor)
         specs_by_target = {
             manager.master_instance_target(env, master_name): spec
             for master_name, spec in env.master_specs.items()
@@ -119,14 +119,16 @@ class HaReplayClient:
                        terminal_count=len(rows), command_id=self.stop_command)
 
     def start(self) -> None:
-        self.state_sampler.start()
+        if self.state_sampler is not None:
+            self.state_sampler.start()
         try:
             self.proc, self.out_dir = self._client.run_async(
                 self._overrides, self.out_dir, self.log_file, label=self.name
             )
         except Exception as start_error:
             try:
-                self.state_sampler.stop()
+                if self.state_sampler is not None:
+                    self.state_sampler.stop()
             except Exception as cleanup_error:
                 raise start_error from cleanup_error
             raise

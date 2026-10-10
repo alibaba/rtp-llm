@@ -9,10 +9,10 @@ from unittest import mock
 
 from reporting import load_analysis, read_bundle, run_meta, write_bundle
 from reporting.comparison import compare, main
-from cases.master_performance.publication import publish_performance as report
+from test_performance_gate import report
 from cases.master_performance.analysis import analyze as analyze_performance
 from cases.cache_scale_in.analysis import analyze as analyze_cache
-from cases.cache_scale_in.publication import publish_cache as write_report
+from test_cache_scale_gate import write_report
 from test_performance_gate import evidence
 import test_cache_scale_gate as cache_fixtures
 

@@ -166,14 +166,15 @@ def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
     from monitoring.query_plan import load_plan
     env = NS(master_specs=dict(A=NS(bind_ip="127.0.0.1", http_port=1)))
     sampler = evidence_collector(load_plan("master_ha_failover.yaml"), "master_inflight", env,
-                                  tmp_path/"states.jsonl", interval_s=.001,
+                                  tmp_path/"states.jsonl", session=NS(interval=.1),
                                   limits=dict(max_samples=1, max_bytes=10000))
     with patch("monitoring.collectors.urllib.request.urlopen", side_effect=OSError("offline")):
-        sampler.start()
-        assert sampler._stop.wait(2)
+        list(sampler.collect())
+        with pytest.raises(ValueError, match="budget exceeded"):
+            list(sampler.collect())
         with pytest.raises(RuntimeError, match="budget exceeded"):
             sampler.stop()
-    assert len(sampler.path.read_text().splitlines()) == 1
+    assert sampler.budget.count == 1
 
 
 @pytest.mark.parametrize('name,check', [('cache_scale_in', 'baseline_hit'),

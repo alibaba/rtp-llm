@@ -9,7 +9,12 @@ from unittest import mock
 
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate
-from cases.master_performance.publication import publish_performance as report
+from cases.master_performance.publication import publish_performance
+from metric_fixtures import freeze_metrics
+
+def report(directory, evidence, result):
+    freeze_metrics(directory, "master_performance")
+    return publish_performance(directory, evidence, result)
 from workload.gate_evidence import trace_workload_sha
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
@@ -21,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def metric_curves(directory, evidence, result, presentation=None):
     from cases.master_performance.metrics import produce
     from cases.master_performance.panels import prepare_curves
+    freeze_metrics(directory, "master_performance")
     produce(directory, evidence, result)
     from reporting.view_config import view
     return prepare_curves(directory, evidence, presentation or view("master_performance.yaml"))

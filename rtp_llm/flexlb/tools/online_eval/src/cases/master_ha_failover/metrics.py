@@ -14,15 +14,15 @@ STATE_FIELDS = ("http_up", "scheduler_inflight", "prefill_inflight_requests",
                 "decode_master_queued", "decode_confirmed_running")
 
 
-def _artifacts(payload):
+def _artifacts(payload, *, require_states=True):
     candidates = []
     for stage in payload["stages"]:
         resource = stage.get("output", {}).get("rows", {})
         if resource.get("kind") != "ha_rows" or not stage.get("artifacts"):
             continue
         paths = {Path(path).name: Path(path) for path in stage["artifacts"]}
-        if {"client_events.jsonl", "master_states.jsonl"} <= set(paths):
-            candidates.append((paths["client_events.jsonl"], paths["master_states.jsonl"],
+        if "client_events.jsonl" in paths and (not require_states or "master_states.jsonl" in paths):
+            candidates.append((paths["client_events.jsonl"], paths.get("master_states.jsonl"),
                                resource["env_epoch"]))
     if len(candidates) != 1:
         raise MetricUnavailable("HA metrics require one completed request/state journal resource")
@@ -51,7 +51,7 @@ def _request_series(rows, anchor):
     }
 
 
-def _state_series(rows, anchor):
+def _state_series(rows, anchor, fields=STATE_FIELDS):
     samples = defaultdict(list)
     for row in rows:
         timestamp = row.get("epoch_s")
@@ -59,9 +59,9 @@ def _state_series(rows, anchor):
         if type(timestamp) not in (int, float) or not math.isfinite(timestamp) or name not in {"A", "B"}:
             raise ValueError("HA Master state row lacks timestamp or identity")
         if row.get("http_up") not in (0, 1) or (row["http_up"] == 1 and (
-                row.get("state_error") or any(row.get(field) is None for field in STATE_FIELDS))):
+                row.get("state_error") or any(row.get(field) is None for field in fields))):
             raise ValueError("healthy HA Master state violates ledger contract")
-        for field in STATE_FIELDS:
+        for field in fields:
             value = row.get(field)
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value) or value < 0):
                 raise ValueError("invalid HA Master state value")
@@ -118,8 +118,9 @@ def produce(directory, payload):
     from monitoring.metric_store import MetricStore, publish
     store = MetricStore.read(directory)
     anchor = payload["clock_anchor"]["epoch_s"]
-    request_path, state_path, epoch = _artifacts(payload)
-    requests, states = _read_rows(request_path), _read_rows(state_path)
+    fields = [field for field in STATE_FIELDS if "ha/" + field in store.document["definitions"]]
+    request_path, state_path, epoch = _artifacts(payload, require_states=bool(fields))
+    requests, states = _read_rows(request_path), _read_rows(state_path) if fields else []
     configured = (payload.get("configuration") or {}).get("environment", {}).get("n_prefill")
     observed = len({r.get("prefill") for r in requests if r.get("prefill")})
     fleet_size = configured if type(configured) is int and configured > 0 else observed
@@ -127,19 +128,23 @@ def produce(directory, payload):
     if fleet_size:
         values.update({key: [(None, points)] for key, points in
                        _prefill_balance_series(requests, anchor, fleet_size).items()})
-    states_by_key = _state_series(states, anchor)
-    for field in STATE_FIELDS:
+    states_by_key = _state_series(states, anchor, fields)
+    for field in fields:
         values[field] = [(master, states_by_key.get((master, field), [])) for master in ("A", "B")]
     for field in ("prefill_peak_qps", "prefill_mean_qps", "prefill_skew"):
         values.setdefault(field, [(None, [])])
     for field, members in values.items():
         identity = "ha/" + field
+        if identity not in store.document["definitions"]:
+            continue
         definition = store.document["definitions"][identity]
         publish(store, identity, definition, [series_row([[p["x"] + anchor, p["y"]] for p in points],
                 epoch=epoch, source="ha", labels={"master": master} if master else {})
                 for master, points in members], producer="ha_evidence",
                 evidence=dict(request_events=str(request_path) if request_path else None,
                               master_states=str(state_path) if state_path else None,
+                              transport="prometheus" if identity.removeprefix("ha/") in STATE_FIELDS else "client_journal",
+                              probe_archive=str(state_path.with_suffix(".prometheus.json")) if state_path and identity.removeprefix("ha/") in STATE_FIELDS else None,
                               fleet_size=fleet_size or None))
     store.save(directory)
     return dict(request_events=str(request_path) if request_path else None,

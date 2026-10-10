@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 
-from monitoring.collectors import EvidenceCollector, HttpJsonAdapter
+from monitoring.collectors import HttpJsonAdapter
+from monitoring.probe import PrometheusEvidence
 from monitoring.collection_plan import collection_plan, physical_metrics, scrape_job
 from monitoring.query_plan import load_plan
 from monitoring.session import PrometheusSession
@@ -64,6 +65,7 @@ def test_unused_targets_are_not_scraped_or_waited_on(tmp_path):
 def test_only_evidence_plan_needs_no_prometheus_binary(tmp_path):
     plan = load_plan('master_ha_failover.yaml')
     plan['sources'] = dict(mock={}, client={}, master={})
+    plan['produced'] = {key: spec for key, spec in plan['produced'].items() if 'collection' not in spec}
     with patch('monitoring.query_plan.load_plan', return_value=plan), patch('shutil.which', return_value=None):
         session = PrometheusSession(tmp_path, {}, binary='', query_plan='master_ha_failover.yaml')
     session.start()
@@ -71,7 +73,7 @@ def test_only_evidence_plan_needs_no_prometheus_binary(tmp_path):
     assert session.process is None
     assert not (tmp_path/'prometheus.json').exists()
     assert json.loads((tmp_path/'queries.json').read_text())['queries'] == {}
-    assert json.loads((tmp_path/'metrics.json').read_text())['definitions']['ha/http_up']['collection']['source'] == 'master_inflight'
+    assert 'ha/http_up' not in json.loads((tmp_path/'metrics.json').read_text())['definitions']
 
 
 @pytest.mark.parametrize('dependency', [None, [], ['another_metric']])
@@ -112,12 +114,12 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
     plan['produced'] = {'ha/http_up': plan['produced']['ha/http_up']}
     env = NS(master_specs=dict(A=NS(bind_ip='localhost', http_port=123)))
     collector = evidence_collector(plan, 'master_inflight', env, tmp_path/'states.jsonl',
-                                  limits=dict(max_samples=10, max_bytes=10000))
+                                  session=NS(interval=1), limits=dict(max_samples=10, max_bytes=10000))
     with patch('urllib.request.urlopen', return_value=BytesIO(b'{}')):
         assert collector.adapters['A'](timeout=.1) == {'master': 'A', 'http_up': 1}
     plan['produced']['ha/scheduler_inflight'] = load_plan('master_ha_failover.yaml')['produced']['ha/scheduler_inflight']
     collector = evidence_collector(plan, 'master_inflight', env, tmp_path/'states.jsonl',
-                                  limits=dict(max_samples=10, max_bytes=10000))
+                                  session=NS(interval=1), limits=dict(max_samples=10, max_bytes=10000))
     with patch('urllib.request.urlopen', return_value=BytesIO(b'{}')):
         with pytest.raises(ValueError, match='required ledger'):
             collector.adapters['A'](timeout=.1)
@@ -126,37 +128,32 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
 def test_unselected_adapter_cannot_start(tmp_path):
     with pytest.raises(ValueError, match='not selected'):
         evidence_collector(load_plan('master_performance.yaml'), 'master_inflight', object(),
-                           tmp_path/'states.jsonl', limits=dict(max_samples=10, max_bytes=10000))
+                           tmp_path/'states.jsonl', session=NS(interval=1), limits=dict(max_samples=10, max_bytes=10000))
     assert not list(tmp_path.iterdir())
 
 
-def test_arbitrary_adapter_reuses_clock_budget_error_and_join(tmp_path):
-    collector = None
-    def read(*, timeout):
-        assert timeout == .2
-        collector._stop.set()
-        return {'queue': 0}
-    collector = EvidenceCollector(tmp_path/'samples.jsonl', {'queue': read},
-        limits=dict(max_samples=1, max_bytes=1000), timeout_s=.2,
-        clock=lambda: 10, wall_clock=lambda: 100)
-    collector.start()
-    assert collector._stop.wait(2)
-    collector.stop()
-    row = json.loads(collector.path.read_text())
-    assert row == dict(queue=0, epoch_s=100, elapsed_s=0, monotonic_s=10)
-    with pytest.raises(ValueError, match='fresh'):
-        collector.start()
+def test_probe_registration_does_not_read_and_only_scrapes_collect():
+    calls = []
+    probe = PrometheusEvidence('unused.jsonl', {'one': lambda **kw: calls.append(kw) or {'target': 'one', 'queue': 0}},
+        fields={'queue'}, label='target', source='example', session=NS(interval=1),
+        limits=dict(max_samples=1, max_bytes=1000))
+    assert probe.describe() == [] and calls == []
+    assert list(probe.collect())[0].samples[0].value == 0
+    assert len(calls) == 1
+    with pytest.raises(ValueError, match='budget exceeded'):
+        list(probe.collect())
+    with pytest.raises(RuntimeError, match='collection failed'):
+        probe.stop()
 
 
-def test_adapter_contract_error_surfaces_at_stop(tmp_path):
-    for row in ({'epoch_s': 1}, {'depth': float('nan')}):
-        path = tmp_path/('reserved.jsonl' if 'epoch_s' in row else 'nan.jsonl')
-        collector = EvidenceCollector(path, {'invalid': lambda *, timeout: row},
-                                      limits=dict(max_samples=1, max_bytes=1000))
-        collector.start()
-        assert collector._stop.wait(2)
-        with pytest.raises(RuntimeError):
-            collector.stop()
+@pytest.mark.parametrize('row', [{'target': 'wrong', 'queue': 1}, {'target': 'one', 'queue': float('nan')}])
+def test_bad_probe_data_is_not_published_as_partial_or_zero(row):
+    probe = PrometheusEvidence('unused.jsonl', {'one': lambda **kw: row},
+        fields={'queue'}, label='target', source='example', session=NS(interval=1),
+        limits=dict(max_samples=1, max_bytes=1000))
+    with pytest.raises(ValueError):
+        list(probe.collect())
+    assert probe.error is not None
 
 
 def test_http_response_budget_does_not_truncate_or_fallback():
