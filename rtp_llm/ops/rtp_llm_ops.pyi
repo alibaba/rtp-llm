@@ -159,3 +159,6 @@ def silu_and_mul(
     """
     SiLU and Multiply kernel
     """
+
+
+def fused_multimodal_copy_(dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]) -> None: ...

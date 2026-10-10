@@ -419,3 +419,6 @@ class TrtllmArFusionHandle:
         """
         AllReduce kernel
         """
+
+
+def fused_multimodal_copy_(dst: torch.Tensor, srcs: list[torch.Tensor], row_offsets: list[int]) -> None: ...

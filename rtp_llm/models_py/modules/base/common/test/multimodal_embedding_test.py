@@ -119,20 +119,44 @@ class MultimodalEmbeddingTest(TestCase):
             ):
                 self._run_deepstack_embedding_test(*params)
 
-    def test_rejects_negative_multimodal_locations(self):
+    def test_crops_multimodal_features_from_reused_prefix(self):
+        for device in ("cpu", "cuda"):
+            with self.subTest(device=device):
+                embeddings = torch.zeros(4, 2, device=device, dtype=torch.half)
+                feature = torch.tensor(
+                    [[1.0, 2.0], [3.0, 4.0]], device=device, dtype=torch.half
+                )
+                output = MultimodalEmbeddingInjector()(
+                    embeddings,
+                    [feature],
+                    torch.tensor([-1], device=device, dtype=torch.int32),
+                )
+                expected = torch.zeros_like(embeddings)
+                expected[0] = feature[1]
+                torch.testing.assert_close(output, expected)
+
+    def test_skips_multimodal_features_fully_in_reused_prefix(self):
+        for device in ("cpu", "cuda"):
+            for loc in (-2, -4):
+                with self.subTest(device=device, loc=loc):
+                    embeddings = torch.ones(4, 2, device=device, dtype=torch.half)
+                    feature = torch.full((2, 2), 7.0, device=device, dtype=torch.half)
+                    expected = embeddings.clone()
+                    output = MultimodalEmbeddingInjector()(
+                        embeddings,
+                        [feature],
+                        torch.tensor([loc], device=device, dtype=torch.int32),
+                    )
+                    torch.testing.assert_close(output, expected)
+
+    def test_deepstack_rejects_negative_multimodal_locations(self):
         embeddings = torch.zeros(4, 2, dtype=torch.half)
-        feature = torch.ones(2, 2, dtype=torch.half)
-        locations = torch.tensor([-1], dtype=torch.int32)
-
-        with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
-            MultimodalEmbeddingInjector()(embeddings, [feature], locations)
-
         deepstack = torch.ones(1, 2, 2, dtype=torch.half)
         with self.assertRaisesRegex(ValueError, "loc must be non-negative"):
             MultimodalDeepstackInjector()(
                 embeddings,
                 [deepstack],
-                locations,
+                torch.tensor([-1], dtype=torch.int32),
                 layer_id=0,
             )
 

@@ -1,3 +1,4 @@
+#include "rtp_llm/models_py/bindings/common/FusedCopyOp.h"
 #include "rtp_llm/models_py/bindings/rocm/Norm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
@@ -12,6 +13,8 @@ namespace py = pybind11;
 namespace rtp_llm {
 
 void registerBasicRocmOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("fused_multimodal_copy_", &fusedMultimodalCopy,
+                  py::arg("dst"), py::arg("srcs"), py::arg("row_offsets"));
     rtp_ops_m.def("fused_add_layernorm",
                   &fused_add_layernorm,
                   "Fused Add LayerNorm kernel",
