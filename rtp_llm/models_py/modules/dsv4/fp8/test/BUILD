@@ -380,6 +380,8 @@ py_test(
     ],
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
     deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_decode_tilelang_reference_testlib",
+        ":v41_mhc_collapse_reference_testlib",
         ":v41_sparse_prefill_reference_testlib",
         "//rtp_llm/tools:dsv41_trace",
     ],

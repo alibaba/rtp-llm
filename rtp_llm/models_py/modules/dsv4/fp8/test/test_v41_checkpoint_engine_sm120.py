@@ -25,6 +25,7 @@ import torch.multiprocessing as mp
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as native_ops
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import (
     load_configuration,
     make_loader,
@@ -34,6 +35,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import f
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
     compressor_bf16,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_decode_tilelang_reference import (
+    decode_tilelang_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
     engram_gate_reference,
     engram_projection_reference,
@@ -41,6 +45,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
     expert_down_reference,
     load_reference_kernel,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_collapse_reference import (
+    mhc_collapse_reference,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
     mhc_fp32,
@@ -118,6 +125,16 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_sparse_prefill = (
         os.environ.get("DSV41_TEST_COMPARE_SPARSE_PREFILL_REFERENCE") == "1"
     )
+    compare_collapse = os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
+    compare_tilelang = os.environ.get("DSV41_TEST_COMPARE_DECODE_TILELANG") == "1"
+    if compare_collapse and not compare_sparse_prefill:
+        raise ValueError(
+            "mHC collapse diagnostic requires the scoped prefill composition"
+        )
+    if compare_tilelang and not compare_collapse:
+        raise ValueError(
+            "TileLang decode diagnostic requires the mHC collapse composition"
+        )
     if compare_sparse_prefill and not compare_output:
         raise ValueError(
             "Sparse prefill diagnostic requires the qualified output composition"
@@ -148,6 +165,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_query
         or compare_output
         or compare_sparse_prefill
+        or compare_collapse
+        or compare_tilelang
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -212,6 +231,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         profiles.append(f"{profiles[-1]}_output_reference")
     if compare_sparse_prefill:
         profiles.append(f"{profiles[-1]}_sparse_prefill_reference")
+    if compare_collapse:
+        profiles.append(f"{profiles[-1]}_mhc_collapse_reference")
+    if compare_tilelang:
+        profiles.append(f"{profiles[-1]}_decode_tilelang_reference")
+    tilelang_source_hash = (
+        hashlib.sha256(Path(tilelang_kernels.__file__).read_bytes()).hexdigest()
+        if compare_tilelang
+        else None
+    )
     trace_steps = dict.fromkeys(profiles, 0)
     post_trace_steps = {}
     post_trace_requests = {}
@@ -332,8 +360,12 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                sparse_prefill = profile.endswith("_sparse_prefill_reference")
-                prefill_base = profile.removesuffix("_sparse_prefill_reference")
+                tilelang_decode = profile.endswith("_decode_tilelang_reference")
+                tilelang_base = profile.removesuffix("_decode_tilelang_reference")
+                collapse = tilelang_base.endswith("_mhc_collapse_reference")
+                collapse_base = tilelang_base.removesuffix("_mhc_collapse_reference")
+                sparse_prefill = collapse_base.endswith("_sparse_prefill_reference")
+                prefill_base = collapse_base.removesuffix("_sparse_prefill_reference")
                 output_reference = prefill_base.endswith("_output_reference")
                 output_base = prefill_base.removesuffix("_output_reference")
                 query_reference = output_base.endswith("_query_reference")
@@ -425,6 +457,16 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 if sparse_prefill
                                 else {}
                             ),
+                            **({"mhc_collapse_reference": True} if collapse else {}),
+                            **(
+                                {
+                                    "decode_tilelang_reference": True,
+                                    "decode_tilelang_reference_scope": "single-token-planar",
+                                    "decode_tilelang_provider_sha256": tilelang_source_hash,
+                                }
+                                if tilelang_decode
+                                else {}
+                            ),
                         }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
@@ -458,6 +500,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     kernel=reference_kernel,
                 ), sparse_prefill_reference(
                     sparse_prefill,
+                ), mhc_collapse_reference(
+                    collapse,
+                ), decode_tilelang_reference(
+                    tilelang_decode,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -621,7 +667,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_sparse_prefill_reference")
+                                or profile.removesuffix("_decode_tilelang_reference")
+                                .removesuffix("_mhc_collapse_reference")
+                                .removesuffix("_sparse_prefill_reference")
                                 .removesuffix("_output_reference")
                                 .removesuffix("_query_reference")
                                 .endswith("_engram_reference")
@@ -631,7 +679,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_sparse_prefill_reference")
+                        or profile.removesuffix("_decode_tilelang_reference")
+                        .removesuffix("_mhc_collapse_reference")
+                        .removesuffix("_sparse_prefill_reference")
                         .removesuffix("_output_reference")
                         .removesuffix("_query_reference")
                         .removesuffix("_engram_reference")
