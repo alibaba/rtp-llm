@@ -27,6 +27,7 @@ from typing import (
     Iterable,
     Optional,
     Protocol,
+    Sequence,
 )
 from urllib.parse import urlsplit
 
@@ -522,16 +523,23 @@ def _uses_dash_sc_empty_think_phase2(model_type: Optional[str]) -> bool:
 
 
 def _matched_echo_prefix_ids(
-    input_ids_list: list[int], echo_prefix_ids: Optional[list[int]]
+    input_ids_list: Sequence[int], echo_prefix_ids: Optional[Sequence[int]]
 ) -> list[int]:
     """Return the exact think-BOS ids already present at the input tail."""
     prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
     if not prefix_ids:
         return []
-    if input_ids_list[-len(prefix_ids) :] == prefix_ids:
+    if len(input_ids_list) >= len(prefix_ids) and all(
+        input_ids_list[len(input_ids_list) - len(prefix_ids) + index] == token_id
+        for index, token_id in enumerate(prefix_ids)
+    ):
         return prefix_ids
     # Some tokenizers collapse the think-BOS prefix to its first token.
-    if len(prefix_ids) > 1 and input_ids_list[-1:] == prefix_ids[:1]:
+    if (
+        len(prefix_ids) > 1
+        and len(input_ids_list) > 0
+        and input_ids_list[-1] == prefix_ids[0]
+    ):
         return prefix_ids[:1]
     return []
 
@@ -897,6 +905,7 @@ def _apply_dash_sc_controls_to_generate_config(
     default_thinking_mode: ThinkingMode,
 ) -> None:
     """Apply DashSC request controls over the deployment THINK_MODE default."""
+    generate_config.force_sp_accept = bool(request_controls.force_sp_accept)
     request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
         request_max_think = request_controls.max_new_think_tokens
@@ -1987,7 +1996,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     )
                     yield resp
                     return
-                input_ids_list = parsed_input_ids.values
+                input_ids_list = parsed_input_ids.sequence
                 record.log_input_output = request_controls.log_input_output
                 if first_request:
                     # Hand the record the payload we just parsed so it does not

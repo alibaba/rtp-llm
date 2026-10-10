@@ -80,3 +80,8 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# Generated cache-grid AOne package and collected results
+/cache_grid_ci_inputs/
+/cache_grid_ci_generated/
+/cache_grid_ci_results/
