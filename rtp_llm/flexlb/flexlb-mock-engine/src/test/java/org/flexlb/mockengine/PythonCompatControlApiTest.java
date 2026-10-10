@@ -525,6 +525,8 @@ class PythonCompatControlApiTest {
                 "mock_engine_prefill_ms_avg", "mock_engine_decode_ms_avg"}) {
             assertTrue(body.contains(metric), "/metrics should contain " + metric);
         }
+        assertTrue(body.contains("mock_context_requests_total{role=\"prefill\"} 2"), body);
+        assertTrue(body.contains("mock_hit_tokens_total{role=\"prefill\"}"), body);
         // Aggregated mode uses role-only labels.
         assertTrue(body.contains("mock_engine_accepted_total{role=\"prefill\"} 2"),
                 "aggregated prefill accepted should be 2:\n" + body);

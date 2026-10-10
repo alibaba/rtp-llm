@@ -30,7 +30,7 @@
   "source": {
     "capture": {
       "layer": "frontend",
-      "deployment": "6aa3b6979ffe080d001c3dbb"
+      "deployment": null
     },
     "attribution": {
       "identity": "deepseek-v4-flash-model traffic replication into the test deployment",

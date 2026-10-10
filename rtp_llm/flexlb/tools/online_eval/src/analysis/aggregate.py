@@ -213,17 +213,9 @@ def classify_error(status, err):
 
 
 def percentile_nr(values, p, nd=1):
-    """Nearest-rank 分位：int(n*p) 取秩（全仓库统一实现，Phase A）。
-
-    与旧 pct 逐字等价（v[min(n-1, int(n*p))]）；空表返回 0。nd=1 与
-    aggregate 旧 pct 精度对齐；pacing 分布用 nd=3（sh 合并段 distribution
-    的 round 3——p99 与 limit 比较需保留亚毫秒精度，round 1 会在边界值
-    上翻转判定）。
-    """
-    if not values:
-        return 0
-    v = sorted(values)
-    return round(v[min(len(v) - 1, int(len(v) * p))], nd)
+    """Use the same pooled nearest-rank definition as workload reports."""
+    from reporting.statistics import percentile_nr as pooled_percentile
+    return pooled_percentile(values, p, nd)
 
 
 def rank_rate(epoch_ms_values):
@@ -2643,8 +2635,7 @@ dispatch_reason_ts = [{"t": t, **vals} for t, vals in rel_axis(reason_rate_rows)
 #   * 结构化日志行只承担分布样本与不变量检查，log_coverage_ratio 标注
 #     覆盖率；
 #   * 分位口径沿用原脚本 ceil-rank（math.ceil(nq)−1），与主链
-#     percentile_nr（int(np)）刻意不同——保持与历史 slo_batch_analysis
-#     数字可比。
+#     percentile_nr 统一使用 pooled nearest rank。
 
 
 def _bd_percentile(sorted_values, quantile):

@@ -39,6 +39,23 @@ class CaptureContractTest(unittest.TestCase):
             '--source', str(root), '--out', str(root/'fit'), '--expected-shards', '1',
             '--output-tokens', '10'], capture_output=True, text=True)
 
+    def test_upstream_identity_fallback_keeps_distinct_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            path = logs / 'dash_sc_grpc_access_r0_s0.log'
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            for i, row in enumerate(rows):
+                row.pop('request_id')
+                row['upstream_request_id'] = f'upstream-{i}'
+            path.write_text('\n'.join(map(json.dumps, rows + [rows[0]])) + '\n')
+            summary = self.run_capture(root, logs)
+            self.assertEqual(1, summary['stats']['duplicate'])
+            with gzip.open(root / 'pod-0.jsonl.gz', 'rt') as stream:
+                captured = [json.loads(line) for line in stream]
+            self.assertEqual(2, len(captured))
+            self.assertNotEqual(captured[0]['rid'], captured[1]['rid'])
+
     def test_fit_rejects_bad_rows_with_line_and_reason(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

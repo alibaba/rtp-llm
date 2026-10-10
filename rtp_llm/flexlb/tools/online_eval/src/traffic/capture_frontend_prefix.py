@@ -106,7 +106,7 @@ def capture(a, *, clock=time.monotonic):
                         continue
                     rid = str(r.get("upstream_request_id") or r.get("request_id") or "")
                     # Log rotation overlap is deduplicated by local request identity + arrival.
-                    ident = (str(r.get("request_id")), ts)
+                    ident = (str(r.get("request_id") or r.get("upstream_request_id") or ""), ts)
                     if ident in seen:
                         stats["duplicate"] += 1
                         continue

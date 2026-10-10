@@ -75,6 +75,7 @@ import gzip
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import urllib.request
@@ -94,7 +95,6 @@ PROMETHEUS_SAMPLE_RE = re.compile(
     r"(?P<value>[-+\deE.]+)(\s+\d+)?\s*$"
 )
 # flexlb_env.txt lines look like:   "MODEL_SERVICE_CONFIG='{}'" \
-ENV_FILE_LINE_RE = re.compile(r"^\s*'?([^=']+=[^']*)'?\s*\\?\s*$")
 # Separator comment the per-second pollers prefix each sample with.
 PROM_GROUP_TS_RE = re.compile(r"^#\s*ts=(\d+)\s*$")
 # process_usage_timeseries.txt lines look like:
@@ -230,12 +230,20 @@ def parse_env_file(path: Path) -> dict[str, str]:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            match = ENV_FILE_LINE_RE.match(line)
-            if not match:
+            if stripped.endswith("\\"):
+                stripped = stripped[:-1].rstrip()
+            try:
+                parts = shlex.split(stripped)
+            except ValueError:
+                warn("invalid quoted environment assignment")
                 continue
-            pair = match.group(1)
-            key, sep, value = pair.partition("=")
-            if sep:
+            for pair in parts:
+                key, sep, value = pair.partition("=")
+                if not sep or not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key):
+                    continue
+                # A quoted whole assignment may retain quotes around its value.
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                    value = value[1:-1]
                 env[key] = value
     return env
 

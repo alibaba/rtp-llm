@@ -6027,6 +6027,8 @@ public final class JavaMockEngineCluster {
             var metrics = new HashMap<String, Number>(Map.ofEntries(
                     Map.entry("mock_context_compute_tokens_total", lifetimeContextComputeTokens.sum()),
                     Map.entry("mock_context_tokens_total", lifetimeContextTokens.sum()),
+                    Map.entry("mock_hit_tokens_total", hitTokensTotal.get()),
+                    Map.entry("mock_context_requests_total", lifetimeContextRequests.sum()),
                     Map.entry("mock_generate_tokens_total", lifetimeGenerateTokens.sum()),
                     Map.entry("mock_decode_step_tokens_total", lifetimeDecodeStepTokens.sum()),
                     Map.entry("mock_kv_total_tokens", getTotalKvTokens()),

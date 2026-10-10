@@ -1082,7 +1082,8 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %s%n", labels, snap.get("cache_evictions")));
             if ("prefill".equalsIgnoreCase(service.getRoleName())) {
                 sb.append(String.format("mock_engine_prefill_ms_avg{%s} %.1f%n", labels, asDouble(snap.get("prefill_ms_avg"))));
-                for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
+                for (String name : List.of("context_compute_tokens_total", "context_tokens_total",
+                        "hit_tokens_total", "context_requests_total")) {
                     sb.append(String.format("mock_%s{%s} %s%n", name, labels, snap.get(name)));
                 }
                 for (String name : List.of("hit_tokens_total", "context_requests_total")) {
@@ -1141,7 +1142,8 @@ final class MockControlServer {
             sb.append(String.format("mock_engine_completed_total{%s} %d%n", label, sumLong(group, "completed")));
             sb.append(String.format("mock_engine_cache_evictions_total{%s} %d%n", label, sumLong(group, "cache_evictions")));
             if ("prefill".equals(bucket.getKey())) {
-                for (String name : List.of("context_compute_tokens_total", "context_tokens_total")) {
+                for (String name : List.of("context_compute_tokens_total", "context_tokens_total",
+                        "hit_tokens_total", "context_requests_total")) {
                     sb.append(String.format("mock_%s{%s} %d%n", name, label, sumLong(group, name)));
                 }
                 appendPrefillBatchHistogram(sb, label, group);

@@ -593,8 +593,8 @@ def main():
     success_n = sm.get("success_count")
     error_n = sm.get("error_count")
     error_rate = sm.get("error_rate")
-    if error_rate is None and total_req:
-        error_rate = (error_n or 0) / float(total_req)
+    if error_rate is None and total_req and error_n is not None:
+        error_rate = error_n / float(total_req)
     # 发送 QPS 口径（20260829 修正）：主值取 master arrival_qps（server 侧
     # 全量计数，docs 手册指定口径）；client 自估 actual_send_qps 降为参考值
     # 双值透出——过载 run 下 client 自估值被压低（实测 475 vs 2002），
@@ -898,7 +898,7 @@ def main():
         if len(pts) > 48:
             pts = [pts[i] for i in downsample_idx(len(pts), 40)]
         cats = str_arr([str(t) for t, _ in pts])
-        reg_time(cats_name, [t for t, _ in pts])
+        reg_time(cats, [t for t, _ in pts])
         data = num_arr([v for _, v in pts])
         return cats, data, pts
 
@@ -1099,7 +1099,7 @@ def main():
             warnings.append("integrity: " + _note)
     kpis.append(kpi_spec(fmt_int_trunc(send_qps), send_qps_label))
     kpis.append(kpi_spec(fmt_int_trunc(ok_qps), "成功调度 QPS", "success"))
-    kpis.append(kpi_spec(fmt_pct(error_rate), "错误率", "danger"))
+    kpis.append(kpi_spec(fmt_pct(error_rate) if error_rate is not None else "—", "错误率", "danger"))
     kpis.append(kpi_spec(gini_stat, gini_label, gini_tone))
     kpis.append(kpi_spec(pacing_label, "pacing 质量", pacing_tone))
 

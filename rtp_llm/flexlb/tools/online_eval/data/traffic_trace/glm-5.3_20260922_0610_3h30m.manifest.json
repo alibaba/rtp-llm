@@ -38,7 +38,7 @@
   "source": {
     "capture": {
       "layer": "frontend",
-      "deployment": "na130_L20C_4TP",
+      "deployment": null,
       "evidence": "prior_capture_manifest"
     },
     "spectrum": {

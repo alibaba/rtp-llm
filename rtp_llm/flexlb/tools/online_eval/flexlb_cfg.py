@@ -43,6 +43,7 @@ dies in Python instead of aborting master startup.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, fields
 from typing import Mapping, Optional, Union
 
@@ -151,6 +152,12 @@ class ConfigOverride:
     strip_preemption: bool = False
 
     def __post_init__(self):
+        if self.decision_lifetime is not None and (
+            type(self.decision_lifetime) not in (int, float)
+            or not math.isfinite(self.decision_lifetime)
+            or self.decision_lifetime < 1
+        ):
+            raise ValueError("decision_lifetime must be finite and >= 1")
         _validate_affinity(self.cache_affinity_max_extra_ttft_ms,
                            self.cache_affinity_min_prefix_hit_percent)
 
@@ -490,7 +497,11 @@ def _retype_ordering(doc: dict, overrides: ConfigOverride) -> None:
                 "default_priority/preemption apply only to ordering='priority' "
                 "(the strict FLEXLB_CONFIG parser rejects them under FIFO)"
             )
-        policy = FifoOrdering() if new_type == "fifo" else PriorityOrdering()
+        policy = FifoOrdering() if new_type == "fifo" else PriorityOrdering(
+            current.get("defaultPriority") if current_type == "priority" else None,
+            PreemptionPolicy.from_json(current["preemption"])
+            if current_type == "priority" and "preemption" in current else None,
+        )
     elif current_type == "priority":
         policy = PriorityOrdering(
             current.get("defaultPriority"),

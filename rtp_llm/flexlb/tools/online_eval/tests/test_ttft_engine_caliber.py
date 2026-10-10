@@ -266,11 +266,11 @@ class EngineTtftMissGuardTest(unittest.TestCase):
 
     def test_ttft_count_and_miss_markers(self):
         # rid0=30 / rid3=60 进样本；rid1（无 prefill 行）与 rid2（cancelled）
-        # 计 miss 不编造。分位按仓库统一 int-rank 约定（v[int(n*p)]）：
-        # [30,60] 的 p50 = v[1] = 60
+        # 计 miss 不编造。统一 pooled nearest-rank（ceil(n*p)-1）：
+        # [30,60] 的 p50 = v[0] = 30
         ttft = self.agg["summary"]["ttft_latency_ms"]
         self.assertEqual(ttft["count"], 2)
-        self.assertEqual(ttft["p50"], 60)
+        self.assertEqual(ttft["p50"], 30)
         self.assertEqual(ttft["p99"], 60)
         self.assertEqual(ttft["mean"], 45.0)
         integ = self.agg["integrity"]
