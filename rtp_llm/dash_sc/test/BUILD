@@ -48,6 +48,17 @@ py_test(
 )
 
 py_test(
+    name = "logging_consent_test",
+    srcs = ["inference/logging_consent_test.py"],
+    main = "inference/logging_consent_test.py",
+    data = ["//rtp_llm/cpp/repetition:online_repetition_tracker"],
+    deps = ["//rtp_llm:testlib"],
+    imports = [],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+py_test(
     name = "mrcr_smoke_test",
     srcs = ["inference/mrcr_smoke_test.py"],
     data = ["data/mrcr_deepseek_v4_think_leak_cases.json"],
