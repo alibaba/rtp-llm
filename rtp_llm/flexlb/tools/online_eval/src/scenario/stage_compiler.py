@@ -7,6 +7,7 @@ from typing import Callable
 
 from scenario.contracts import PlanContext
 from scenario.validation import fail, mapping, identifier, number
+from analysis.checks import validate_comparison
 
 
 def reference(value, path, outputs, expected=None):
@@ -113,9 +114,9 @@ def _check_params(params, loc, outputs):
             loc,
             "checks compare scalar values with matching types, not live handles",
         )
-    if params["op"] not in ("eq", "le", "ge") or (
-        kind in ("boolean", "string") and params["op"] != "eq"
-    ):
+    try:
+        validate_comparison(params["op"], params["expected"])
+    except ValueError:
         fail(loc, "invalid comparison for output type")
 
 

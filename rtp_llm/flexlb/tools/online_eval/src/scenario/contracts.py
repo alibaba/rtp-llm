@@ -7,6 +7,7 @@ modules do not mutate a registry at import time.
 
 from dataclasses import dataclass, field
 from typing import Callable
+from analysis.checks import CheckResult
 
 
 @dataclass(frozen=True)
@@ -30,16 +31,6 @@ class StageHandler:
     max_environment_workers: object = 0
     next_environment: object = None  # normalized params -> next raw environment
     owners: frozenset[str] = frozenset()  # empty means foundational
-
-
-@dataclass(frozen=True)
-class CheckResult:
-    id: str
-    status: str  # PASS | FAIL | ERROR | SKIP | WARNING; only ordinary FAIL can match a finding
-    detail: str = ""
-    actual: object = None
-    expected: object = None
-    evidence: dict = field(default_factory=dict)
 
 
 @dataclass

@@ -54,7 +54,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 | `scenario/` | 配置编译、基础 action、资源句柄、阶段执行与清理 |
 | `runtime/` | 端口/进程/Java/HTTP/gRPC 等协议与资源底座 |
 | `workload/` | 连续负载的通用采集生命周期、证据核对、来源与全量视图 |
-| `analysis/` | 可复用统计及输入保真度分析，不定义某个 case 的门槛 |
+| `analysis/` | 可复用统计、只读检查及输入保真度分析，不定义某个 case 的门槛 |
 | `monitoring/`、`reporting/` | 指标查询/归档与图表/spec/bundle 的公共能力 |
 | `traffic/`、`artifacts/` | 流量构造、播放与制品管理 |
 
@@ -64,7 +64,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 ## 执行与资源契约
 
-每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、输出引用或任意表达式；配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
+每个 case 有 `default` program，变体只追加测试点。YAML 保存数据，不能写 action、通用 `$ref` 或任意表达式；具名观测窗口只能选择 program 声明的时间输出，不能编排步骤。配置层次和 action 边界见[新增 case](../development/adding-cases.md)。
 
 资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。
 

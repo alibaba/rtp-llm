@@ -3,6 +3,7 @@
 from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
+from cases.master_ha_failover.inputs import read_cycle
 from scenario.loader import ScenarioError
 
 
@@ -18,81 +19,61 @@ def non_rolling(case):
 
 
 def _cycle(case, restart_mode):
-    root = "dual_master_cycle"
-    if "restart_mode" in case.value(root):
-        raise ScenarioError("restart_mode is owned by flow identity, not parameters")
-    case.step("setup", "setup", timeout_s=case.value(f"{root}.setup_timeout_s"))
-    case.step("flow", "master_client_start", params=case.value(f"{root}.flow"))
+    data, windows = read_cycle(case)
+    case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
+    case.step("flow", "master_client_start", params=data.traffic)
 
     # The producer keeps running while A and B are killed and restarted in order.
-    case.step("baseline_end", "master_mark", params=case.value(f"{root}.baseline_wait"))
-    case.step("kill_a", "master_fault", params=case.value(f"{root}.kill_a"))
-    case.step("b_ready", "master_ready", params=case.value(f"{root}.b_ready"))
-    case.step("b_start", "master_mark", params=case.value(f"{root}.settle"))
-    case.step("b_end", "master_mark", params=case.value(f"{root}.survivor_wait"))
+    case.step("baseline_end", "master_mark", params=data.observation["baseline_wait"])
+    case.step("kill_a", "master_fault", params=data.procedure["kill_a"])
+    case.step("b_ready", "master_ready", params=data.procedure["b_ready"])
+    case.step("b_start", "master_mark", params=data.observation["settle"])
+    case.step("b_end", "master_mark", params=data.observation["survivor_wait"])
     if restart_mode == "non_rolling":
-        case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
-        case.step("outage_start", "master_mark", params=case.value(f"{root}.settle"))
-        case.step("outage_end", "master_mark", params=case.value(f"{root}.outage_wait"))
-    case.step("restart_a", "master_restore", timeout_s=case.value(f"{root}.restart_timeout_s"),
+        case.step("kill_b", "master_fault", params=data.procedure["kill_b"])
+        case.step("outage_start", "master_mark", params=data.observation["settle"])
+        case.step("outage_end", "master_mark", params=data.observation["outage_wait"])
+    case.step("restart_a", "master_restore", timeout_s=data.procedure["restart_timeout_s"],
               params={"fault": output("kill_a", "fault")})
-    case.step("a_ready", "master_ready", params=case.value(f"{root}.a_ready"))
+    case.step("a_ready", "master_ready", params=data.procedure["a_ready"])
     if restart_mode == "rolling":
-        case.step("kill_b", "master_fault", params=case.value(f"{root}.kill_b"))
-    case.step("a_start", "master_mark", params=case.value(f"{root}.settle"))
-    case.step("a_end", "master_mark", params=case.value(f"{root}.survivor_wait"))
-    case.step("restart_b", "master_restore", timeout_s=case.value(f"{root}.restart_timeout_s"),
+        case.step("kill_b", "master_fault", params=data.procedure["kill_b"])
+    case.step("a_start", "master_mark", params=data.observation["settle"])
+    case.step("a_end", "master_mark", params=data.observation["survivor_wait"])
+    case.step("restart_b", "master_restore", timeout_s=data.procedure["restart_timeout_s"],
               params={"fault": output("kill_b", "fault")})
-    case.step("a_ready_final", "master_ready", params=case.value(f"{root}.a_ready"))
-    case.step("b_ready_final", "master_ready", params=case.value(f"{root}.b_ready"))
-    case.step("both_start", "master_mark", params=case.value(f"{root}.settle"))
-    case.step("both_end", "master_mark", params=case.value(f"{root}.both_wait"))
-    case.step("finish", "master_client_finish", timeout_s=case.value(f"{root}.finish_timeout_s"),
+    case.step("a_ready_final", "master_ready", params=data.procedure["a_ready"])
+    case.step("b_ready_final", "master_ready", params=data.procedure["b_ready"])
+    case.step("both_start", "master_mark", params=data.observation["settle"])
+    case.step("both_end", "master_mark", params=data.observation["both_wait"])
+    case.step("finish", "master_client_finish", timeout_s=data.procedure["finish_timeout_s"],
               params={"client": output("flow", "client"), "stop_sending": True})
 
-    windows = {
-        "baseline": {"until": output("baseline_end", "epoch_s"), "until_offset_s": -2},
-        "b_only": {"from": output("b_start", "epoch_s"), "until": output("b_end", "epoch_s")},
-        "a_only": {"from": output("a_start", "epoch_s"), "until": output("a_end", "epoch_s")},
-        "both": {"from": output("both_start", "epoch_s"), "until": output("both_end", "epoch_s")},
-    }
+    selected_windows = ["baseline", "b_only", "a_only", "both"]
     if restart_mode == "non_rolling":
-        windows["outage"] = {"from": output("outage_start", "epoch_s"),
-                              "until": output("outage_end", "epoch_s")}
+        selected_windows.append("outage")
     else:
-        # The existing steady windows intentionally skip restart seams and
-        # stop after 30 seconds of the final long-running traffic period.
-        windows["a_handover"] = {"from": output("b_end", "epoch_s"),
-                                  "until": output("a_start", "epoch_s")}
-        windows["post_recovery"] = {"from": output("both_start", "epoch_s")}
-        windows["all_requests"] = {}
-    for name, boundaries in windows.items():
-        case.step(name, "master_client_window", params={"rows": output("finish", "rows"), **boundaries})
+        selected_windows.extend(["a_handover", "post_recovery", "all_requests"])
+    rows = {"full_run": output("finish", "rows")}
+    for name in selected_windows:
+        case.step(name, "master_client_window", params={"rows": output("finish", "rows"), **windows[name].boundaries})
+        rows[name] = output(name, "rows")
 
-    checks = {
-        "baseline_success": "baseline",
-        "b_success": "b_only",
-        "b_route": "b_only",
-        "b_balance": "b_only",
-        "a_success": "a_only",
-        "a_route": "a_only",
-        "a_balance": "a_only",
-        "both_success": "both",
-        "both_balance": "both",
-    }
+    checks = ["baseline_success", "b_success", "b_route", "b_balance", "a_success",
+              "a_route", "a_balance", "both_success", "both_balance"]
     if restart_mode == "non_rolling":
-        checks.update(outage_failures="outage", outage_no_master="outage",
-                      outage_terminal="outage")
+        checks.extend(["outage_failures", "outage_no_master", "outage_terminal"])
     else:
-        checks.update(handover_errors="a_handover", late_errors="post_recovery",
-                      rolling_errors="all_requests")
-    for name, window in checks.items():
-        params = case.params(f"{root}.checks.{name}", {"rows": output(window, "rows")})
+        checks.extend(["handover_errors", "late_errors", "rolling_errors"])
+    checks.append("unique_requests")
+    for name in checks:
+        params = dict(data.checks[name])
+        window = params.pop("window")
+        if window not in rows:
+            raise ScenarioError(f"parameters.checks.{name}: window unavailable in {restart_mode}")
+        params["rows"] = rows[window]
         case.metric(params["metric"])
         case.observe(name, "master_client_check", params=params)
-    params = case.params(f"{root}.checks.unique_requests", {"rows": output("finish", "rows")})
-    case.metric(params["metric"])
-    case.observe("unique_requests", "master_client_check", params=params)
     case.step("clean_a", "master_inflight_clean", params={"target": "A"})
     case.step("clean_b", "master_inflight_clean", params={"target": "B"})
     case.step("cleanup", "teardown")

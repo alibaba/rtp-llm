@@ -195,24 +195,12 @@ def _core_action(action, ctx, params, deadline):
             {"issued": ctx.backend.cancel_requests(ctx, requests, deadline)}
         )
     if action == "check":
+        from analysis.checks import evaluate
+
         actual = ctx.resolve(params["actual"])
-        expected = params["expected"]
-        op = params["op"]
-        passed = (
-            actual == expected
-            if op == "eq"
-            else actual <= expected if op == "le" else actual >= expected
-        )
+        result = evaluate("comparison", actual, params["op"], params["expected"])
         return StageOutput(
-            {"passed": passed},
-            [
-                CheckResult(
-                    "comparison",
-                    "PASS" if passed else "FAIL",
-                    actual=actual,
-                    expected=expected,
-                )
-            ],
+            {"passed": result.status == "PASS"}, [result],
         )
     if action == "teardown":
         results = ctx.cleanup(deadline.remaining())

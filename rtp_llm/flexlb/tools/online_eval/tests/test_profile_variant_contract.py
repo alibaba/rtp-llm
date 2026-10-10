@@ -55,8 +55,8 @@ def test_every_case_requires_root_default_even_with_variants(program):
         del data['program']
     else:
         data['program'] = program
-    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.count']}
-    data['variants'] = [{'id': 'two', 'parameters': {'count': 2}}]
+    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.traffic.count']}
+    data['variants'] = [{'id': 'two', 'parameters': {'traffic': {'count': 2}}}]
     with pytest.raises(ScenarioError, match='every case must declare program: default'):
         configure_program(data, 'case.yaml')
 
@@ -71,8 +71,8 @@ def test_variants_cannot_replace_a_missing_python_default(monkeypatch):
 
 def test_default_id_is_reserved_for_the_root_program():
     data = config()
-    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.count']}
-    data['variants'] = [{'id': 'default', 'parameters': {'count': 2}}]
+    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.traffic.count']}
+    data['variants'] = [{'id': 'default', 'parameters': {'traffic': {'count': 2}}}]
     with pytest.raises(ScenarioError, match="duplicate configuration id 'default'"):
         configure_program(data, 'case.yaml')
 
@@ -124,10 +124,10 @@ def test_invalid_or_retyped_unselected_profiles_fail_during_load(patch):
 
 def test_second_data_point_is_isolated_and_identity_and_keys_cannot_collide(tmp_path):
     data = config()
-    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.count']}
+    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.traffic.count']}
     data['variants'] = [
-        {'id': 'one', 'parameters': {'count': 1}},
-        {'id': 'two', 'parameters': {'count': 2}},
+        {'id': 'one', 'parameters': {'traffic': {'count': 1}}},
+        {'id': 'two', 'parameters': {'traffic': {'count': 2}}},
     ]
     original = copy.deepcopy(data)
     plans = compile_config(data)
@@ -146,11 +146,11 @@ def test_second_data_point_is_isolated_and_identity_and_keys_cannot_collide(tmp_
 @pytest.mark.parametrize('patch', [
     {'program': 'default'}, {'profiles': ['single-nonbatch']},
     {'environment': {'config_overrides': {'queue_timeout_ms': 10}}},
-    {'parameters': {'output_len': 10}},
+    {'parameters': {'traffic': {'output_len': 10}}},
 ])
 def test_variant_cannot_change_undeclared_dimensions(patch):
     data = config()
-    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.count']}
+    data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.traffic.count']}
     data['variants'] = [{'id': 'sample', **patch}]
     with pytest.raises(ScenarioError, match='outside declared dimension'):
         compile_config(data)
@@ -169,7 +169,7 @@ def test_flow_identity_cannot_disagree_with_program_or_switch():
         configure_program(wrong, 'ha.yaml')
     for mode in ('rolling', 'non_rolling'):
         wrong = copy.deepcopy(data)
-        wrong['parameters']['dual_master_cycle']['restart_mode'] = mode
+        wrong['parameters']['procedure']['restart_mode'] = mode
         with pytest.raises(ScenarioError, match='owned by flow identity'):
             configure_program(wrong, 'ha.yaml')
 
@@ -200,9 +200,9 @@ def test_unused_variant_parameter_and_overlapping_paths_fail():
     data = config()
     data['variant_axis'] = {'kind': 'data', 'fields': ['parameters.coutn']}
     data['variants'] = [{'id': 'two', 'parameters': {'coutn': 2}}]
-    with pytest.raises(ScenarioError, match='unused variant parameter'):
+    with pytest.raises(ScenarioError, match='unknown configuration fields'):
         compile_config(data)
-    data['variant_axis']['fields'] = ['parameters.completion', 'parameters.completion.expected']
+    data['variant_axis']['fields'] = ['parameters.checks', 'parameters.checks.completed']
     with pytest.raises(ScenarioError, match='overlapping'):
         compile_config(data)
 

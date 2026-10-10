@@ -166,7 +166,7 @@ class PerformanceGateTest(unittest.TestCase):
     def engine_evidence(self):
         import yaml
         gate_input = yaml.safe_load((ROOT / "config/scenarios/master_performance.yaml").read_text())[
-            "parameters"]["gate_inputs"]["engine_tps"]
+            "parameters"]["observation"]["inputs"]["engine_tps"]
         roles = gate_input["metric_roles"]
         e = evidence()
         e["gate_input"] = gate_input

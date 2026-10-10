@@ -5,6 +5,12 @@ import re
 
 METRIC = re.compile(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*\Z")
 
+PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s"})
+OBSERVATION_FIELDS = frozenset({"warmup_timeout_s", "baseline_s", "observe_s", "sample_s",
+                               "window_s", "step_s", "max_gap_s"})
+CHECK_FIELDS = frozenset({"qps_tolerance", "baseline_min_hit", "baseline_max_spread",
+                         "absolute_min_hit", "max_drop", "min_completed", "sustain_s"})
+
 
 ENGINE_COUNTER_UNITS = {"running": "requests", "waiting": "requests", "cache_evictions": "events",
         "prefill_ms_avg": "ms", "prefill_batches": "batches", "prefill_batch_requests": "requests",

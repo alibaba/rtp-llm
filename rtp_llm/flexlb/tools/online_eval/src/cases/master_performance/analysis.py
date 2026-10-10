@@ -4,30 +4,12 @@ import bisect
 import math
 
 from schema_contract import matches_schema
+from analysis.checks import compare
+from analysis.statistics import percentile_nr
+from cases.master_performance.inputs import OBSERVATION_FIELDS, CHECK_FIELDS
 
 
-NUMERIC = {
-    "warmup_s",
-    "measure_s",
-    "sample_s",
-    "max_gap_s",
-    "qps",
-    "qps_tolerance",
-    "min_requests",
-    "max_pacing_lag_ms",
-    "min_input_tps",
-    "min_output_tps",
-    "min_goodput_rps",
-    "min_slo_fraction",
-    "max_error_rate",
-    "max_ttft_p99_ms",
-    "max_e2e_p99_ms",
-    "max_tpot_p99_ms",
-    "slo_ttft_ms",
-    "slo_e2e_ms",
-    "slo_tpot_ms",
-    "max_inflight_growth_rps",
-}
+NUMERIC = (OBSERVATION_FIELDS - {"benchmark_id"}) | CHECK_FIELDS | {"qps"}
 
 
 REQUIRED_PROVENANCE = (
@@ -168,12 +150,12 @@ def engine_tps_checks(evidence):
         metrics[name] = value
         metrics[name + "_engine_count"] = expected
         checks.append(dict(metric=name, actual=value, bound=bounds[name], direction="min",
-                           status="PASS" if value >= bounds[name] else "FAIL"))
+                           status="PASS" if compare(value, "ge", bounds[name]) else "FAIL"))
     return metrics, checks
 
 
 def percentile(values, q=0.99):
-    return sorted(values)[max(0, math.ceil(len(values) * q) - 1)] if values else None
+    return percentile_nr(values, q, nd=None) if values else None
 
 
 def analyze(evidence):
@@ -369,7 +351,7 @@ def analyze(evidence):
             and all(r["observed_output_tokens"] == 1 for r in ok)
         )
         passed = na or (
-            v is not None and (v >= c[key] if direction == "min" else v <= c[key])
+            v is not None and compare(v, "ge" if direction == "min" else "le", c[key])
         )
         checks.append(
             dict(

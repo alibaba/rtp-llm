@@ -30,7 +30,7 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 90
 parameters:
-  flow:
+  traffic:
     group_id: performance
     phase_id: continuous
     source:
@@ -68,20 +68,20 @@ parameters:
     poll_s: 0.1
     jvm_xms: 8g
     jvm_xmx: 8g
-  gate_inputs:
-    engine_tps:
-      source: metric_store
-      metric_roles:
-        mock/rtp_llm_context_tps: prefill
-        mock/rtp_llm_context_tps_with_cache: prefill
-        mock/rtp_llm_generate_tps: decode
-  criteria:
+  observation:
     benchmark_id: flash-whale-mock-20260923-capture0920-output294-v3-ramp10
     warmup_s: 180
     measure_s: 180
     sample_s: 1
     max_gap_s: 3
-    qps: 1536
+    inputs:
+      engine_tps:
+        source: metric_store
+        metric_roles:
+          mock/rtp_llm_context_tps: prefill
+          mock/rtp_llm_context_tps_with_cache: prefill
+          mock/rtp_llm_generate_tps: decode
+  checks:
     qps_tolerance: 0.05
     min_requests: 260000
     max_pacing_lag_ms: 250

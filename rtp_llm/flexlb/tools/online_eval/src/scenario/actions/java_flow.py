@@ -6,7 +6,7 @@ import re
 import time
 from pathlib import Path
 
-from runtime.java_flow import JavaFlowGroup
+from runtime.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
 from traffic.traffic_source import materialize
 from traffic.playback_config import normalize
@@ -16,18 +16,8 @@ from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from runtime.mock_control import engine_snapshot
 
-
 def _start_validate(params, plan):
-    fields = {
-        "group_id",
-        "phase_id",
-        "poll_s",
-        "source",
-        "trace",
-        "client",
-        "jvm_xms",
-        "jvm_xmx",
-    }
+    fields = JAVA_FLOW_INPUT_FIELDS | {"trace"}
     p = validate_fields(params, plan, fields, fields - {"source", "trace"})
     if ("source" in p) == ("trace" in p):
         raise ValueError("specify exactly one traffic source")

@@ -24,62 +24,83 @@ execution:
   stage_timeout_s: 180
   cleanup_timeout_s: 300
 parameters:
-  dual_master_cycle:
+  traffic:
+    source:
+      kind: trace
+      model: prefix_lineage
+      version: '2'
+      parameters:
+        path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
+        sha256: 241ac71c5bde834afd9dc656fefae6462c6f99767a203b54bba21059e9948f04
+        count: 587711
+        output_tokens: 8192
+        output_distribution:
+          kind: geometric
+          mean_tokens: 420
+          seed: 20260913
+        priority: 50
+    targets:
+    - A
+    - B
+    duration_s: 240
+    timeout_ms: 120000
+    replay_speed: 5
+    loop: false
+    max_concurrency: 4096
+    max_requests: 20000
+    fallback: false
+  procedure:
     setup_timeout_s: 600
-    flow:
-      source:
-        kind: trace
-        model: prefix_lineage
-        version: '2'
-        parameters:
-          path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
-          sha256: 241ac71c5bde834afd9dc656fefae6462c6f99767a203b54bba21059e9948f04
-          count: 587711
-          output_tokens: 8192
-          output_distribution:
-            kind: geometric
-            mean_tokens: 420
-            seed: 20260913
-          priority: 50
-      targets: [A, B]
-      duration_s: 240
-      timeout_ms: 120000
-      # The long trace is played once. The first 20 minutes at 5x average
-      # about 68 QPS; looping a 15-minute trace either breaks cross-lap cache
-      # reuse when relabeled or invents repeated users when labels are kept.
-      replay_speed: 5
-      loop: false
-      max_concurrency: 4096
-      max_requests: 20000
-      fallback: false
-    baseline_wait: {wait_s: 20}
-    settle: {wait_s: 5}
-    survivor_wait: {wait_s: 20}
-    outage_wait: {wait_s: 30}
-    both_wait: {wait_s: 20}
     kill_a: {mode: kill, target: A}
     kill_b: {mode: kill, target: B}
     b_ready: {target: B, inflight_zero: false}
     a_ready: {target: A, inflight_zero: false}
     restart_timeout_s: 300
     finish_timeout_s: 150
-    checks:
-      baseline_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-      b_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-      b_route: {metric: ha_gate/target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
-      b_balance: {metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-      outage_failures: {metric: ha_gate/failed_count, op: ge, expected: 1, min_samples: 50}
-      outage_no_master: {metric: ha_gate/route_count, route: master, op: eq, expected: 0, min_samples: 50}
-      outage_terminal: {metric: ha_gate/visible_terminal_share, op: eq, expected: 1, min_samples: 50}
-      a_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-      a_route: {metric: ha_gate/target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
-      a_balance: {metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-      both_success: {metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
-      both_balance: {metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
-      handover_errors: {metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
-      late_errors: {metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100}
-      rolling_errors: {metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
-      unique_requests: {metric: ha_gate/duplicate_ids, op: eq, expected: 0, min_samples: 1}
+  observation:
+    baseline_wait: {wait_s: 20}
+    settle: {wait_s: 5}
+    survivor_wait: {wait_s: 20}
+    outage_wait: {wait_s: 30}
+    both_wait: {wait_s: 20}
+    windows:
+      baseline:
+        until: {stage: baseline_end, field: epoch_s, offset_s: -2}
+      b_only:
+        from: {stage: b_start, field: epoch_s}
+        until: {stage: b_end, field: epoch_s}
+      a_only:
+        from: {stage: a_start, field: epoch_s}
+        until: {stage: a_end, field: epoch_s}
+      both:
+        from: {stage: both_start, field: epoch_s}
+        until: {stage: both_end, field: epoch_s}
+      outage:
+        from: {stage: outage_start, field: epoch_s}
+        until: {stage: outage_end, field: epoch_s}
+      a_handover:
+        from: {stage: b_end, field: epoch_s}
+        until: {stage: a_start, field: epoch_s}
+      post_recovery:
+        from: {stage: both_start, field: epoch_s}
+      all_requests: {}
+  checks:
+    baseline_success: {window: baseline, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+    b_success: {window: b_only, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+    b_route: {window: b_only, metric: ha_gate/target_share, target: B, op: ge, expected: 0.95, min_samples: 100}
+    b_balance: {window: b_only, metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+    outage_failures: {window: outage, metric: ha_gate/failed_count, op: ge, expected: 1, min_samples: 50}
+    outage_no_master: {window: outage, metric: ha_gate/route_count, route: master, op: eq, expected: 0, min_samples: 50}
+    outage_terminal: {window: outage, metric: ha_gate/visible_terminal_share, op: eq, expected: 1, min_samples: 50}
+    a_success: {window: a_only, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+    a_route: {window: a_only, metric: ha_gate/target_share, target: A, op: ge, expected: 0.95, min_samples: 100}
+    a_balance: {window: a_only, metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+    both_success: {window: both, metric: ha_gate/success_rate, op: ge, expected: 0.95, min_samples: 100}
+    both_balance: {window: both, metric: ha_gate/prefill_max_share, op: le, expected: 0.25, min_samples: 100}
+    handover_errors: {window: a_handover, metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
+    late_errors: {window: post_recovery, metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100}
+    rolling_errors: {window: all_requests, metric: ha_gate/non_ok_count, op: eq, expected: 0, min_samples: 100, warning_profiles: [batch-window]}
+    unique_requests: {window: full_run, metric: ha_gate/duplicate_ids, op: eq, expected: 0, min_samples: 1}
 variant_axis:
   kind: flow
   fields: [program]

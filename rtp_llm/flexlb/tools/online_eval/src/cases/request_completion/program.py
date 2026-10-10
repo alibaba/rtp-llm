@@ -1,16 +1,17 @@
 """Submitted requests reach a business terminal without stream errors."""
 
 from cases.config import output
+from cases.inputs import fields
 
 
 def default(case):
     """Submitted requests must reach a business terminal without stream errors."""
-    request = {
-        "input_len": case.number("input_len"),
-        "output_len": case.number("output_len"),
-        "count": case.number("count"),
-    }
-    case.step("setup", "setup", timeout_s=case.value("completion.setup_timeout_s"))
+    data = case.inputs(traffic={"input_len", "output_len", "count"},
+                       procedure={"setup_timeout_s"}, checks={"completed", "no_errors"})
+    request = {name: case.number("traffic." + name) for name in data.traffic}
+    for name, criterion in data.checks.items():
+        fields(criterion, {"op", "expected"}, f"parameters.checks.{name}")
+    case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
     case.step("submit", "request", params=request)
     case.step("terminal", "wait", params={"requests": output("submit", "requests")})
     for name, field in (
@@ -20,12 +21,6 @@ def default(case):
         case.step(
             name,
             "check",
-            params=case.params(
-                "completion.step_5",
-                {
-                    "actual": output("terminal", field),
-                    "expected": case.value(f"completion.expected.{name}"),
-                },
-            ),
+            params=dict(data.checks[name], actual=output("terminal", field)),
         )
     case.step("cleanup", "teardown")

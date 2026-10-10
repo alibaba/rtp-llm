@@ -9,6 +9,8 @@ from runtime.client_journal import LiveClientEvents
 from traffic.traffic_source import sha256_file
 from traffic.playback_config import normalize
 
+JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
+
 
 class JavaFlowGroup:
     def __init__(

@@ -45,6 +45,11 @@ class CaseBuilder:
             value = value[part]
         return copy.deepcopy(value)
 
+    def inputs(self, **contract):
+        from cases.inputs import ProgramInputs
+
+        return ProgramInputs.read(self, **contract)
+
     def metric(self, identity, *, unit=None, labels=(), mode=None):
         """Declare a numeric dependency; compilation binds it to the selected plan."""
         if type(identity) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*", identity):
@@ -244,9 +249,9 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
         config.get("parameter_schema", {}),
     )
     build(builder)
-    for field in leaf_paths(variant_parameters):
+    for field in leaf_paths(builder.parameters):
         if not path_in_scope(field, builder.read_parameters):
-            raise ScenarioError(f"{source}: unused variant parameter {field!r}")
+            raise ScenarioError(f"{source}: unused YAML parameter {field!r}")
     variant = {"test": _variant_test(config, builder, source)}
     variant.update(
         id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()

@@ -31,4 +31,4 @@ def percentile_nr(values, p, nd=1):
         return 0.0
     ordered = sorted(values)
     k = max(0, min(len(ordered) - 1, math.ceil(p * len(ordered)) - 1))
-    return round(float(ordered[k]), nd)
+    return ordered[k] if nd is None else round(float(ordered[k]), nd)

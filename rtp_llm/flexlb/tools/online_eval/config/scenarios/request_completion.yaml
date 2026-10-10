@@ -25,26 +25,29 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 120
 parameters:
-  completion:
+  traffic:
+    input_len: 2048
+    output_len: 2
+    count: 1
+  procedure:
     setup_timeout_s: 180
-    step_5:
+  checks:
+    completed:
       op: eq
-    expected:
-      completed: true
-      no_errors: 0
-  input_len: 2048
-  output_len: 2
-  count: 1
+      expected: true
+    no_errors:
+      op: eq
+      expected: 0
 parameter_schema:
-  input_len:
+  traffic.input_len:
     minimum: 1
     maximum: 2147483647
     integer: true
-  output_len:
+  traffic.output_len:
     minimum: 1
     maximum: 2147483647
     integer: true
-  count:
+  traffic.count:
     minimum: 1
     maximum: 10000
     integer: true

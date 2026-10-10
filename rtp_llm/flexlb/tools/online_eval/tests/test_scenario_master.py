@@ -496,7 +496,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertLess(ids.index("outage_end"), ids.index("restart_a"))
         self.assertIn("outage_failures", ids)
         self.assertNotIn("rolling_errors", ids)
-        config["parameters"]["dual_master_cycle"]["restart_mode"] = "typo"
+        config["parameters"]["procedure"]["restart_mode"] = "typo"
         with self.assertRaisesRegex(ScenarioError, "restart_mode"):
             configure_program(config, str(path))
 

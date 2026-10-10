@@ -112,21 +112,28 @@ def produce(directory, payload):
                 master_states=str(state_path) if state_path else None, state_samples=len(states))
 
 
+def gate_labels(params):
+    """The cohort and predicate identify the frozen scalar, not its publish timestamp."""
+    return dict(window=json.dumps(params["rows"], sort_keys=True),
+                selection=json.dumps({k: params[k] for k in ("target", "route", "error_kind", "code")
+                                      if k in params}, sort_keys=True))
+
+
 def publish_gate(ctx, params, actual, rows):
+    """Freeze the computed cohort metric and return the published store for checks."""
     from monitoring.metric_store import export_metrics, publish
     store = export_metrics(ctx.artifact_dir, ctx.monitor.query_plan)
     identity = params["metric"]
-    window = json.dumps(params["rows"], sort_keys=True)
-    selection = json.dumps({k: params[k] for k in ("target", "route", "error_kind", "code") if k in params}, sort_keys=True)
+    labels = gate_labels(params)
     observations = [row for row in store.document["metrics"].get(identity, [])
-                    if row["labels"] != dict(window=window, selection=selection)]
+                    if row["labels"] != labels]
     current = dict(epoch=str(ctx.env_epoch), source="ha_gate",
-        labels=dict(window=window, selection=selection), points=[[time.time(), actual]])
+        labels=labels, points=[[time.time(), actual]])
     stamps = [row["send_start_epoch_ms"] / 1000 for row in rows if "send_start_epoch_ms" in row]
     publish(store, identity, store.document["definitions"][identity], [current],
             producer="ha_gates", evidence=dict(input_resource=params["rows"], sample_count=len(rows),
-                observed_request_bounds=[min(stamps), max(stamps)] if stamps else None, selection=json.loads(selection),
+                observed_request_bounds=[min(stamps), max(stamps)] if stamps else None, selection=json.loads(labels["selection"]),
                 calculation=identity))
     store.document["metrics"][identity] = observations + store.document["metrics"][identity]
     store.save(ctx.artifact_dir)
-    return store.select(identity, labels=dict(window=window, selection=selection))[0]["points"][0][1]
+    return store

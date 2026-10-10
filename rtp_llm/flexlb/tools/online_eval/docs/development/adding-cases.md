@@ -15,7 +15,7 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 | 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
 | 6 | `analysis`、`reports` | 分析策略及交付视图 |
 
-`parameters` 内先放 `flow`，再放 `gate_inputs` 与 `gate`/`criteria`。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
+`parameters` 按 `traffic` → `procedure` → `observation` → `checks` 排列，只声明 program 使用的组。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
 
 从 `rtp_llm/flexlb` 检查或整理配置：
 
@@ -36,10 +36,16 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 | `test` | functional/workload、采集档位及监控设置，决定执行和取证策略 | suite 选择、执行器、客户端与采集器 |
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
 | `execution` | 实例、阶段和清理的时间预算 | runner、阶段执行器 |
-| `parameters` | Python program 实际读取的数据，如请求数量、长度、流程预算和门槛 | `CaseBuilder.value/number`、业务输入校验 |
+| `parameters` | 按流量、流程、观测与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
 | `parameter_schema` | 数值参数的整数类型、最小值和最大值约束 | `CaseBuilder.number(path)` |
 
-`environment.n_prefill` 是启动多少个 Prefill worker；`parameters.count` 是 program 发出多少个请求；`parameter_schema.count.maximum` 是请求数量允许的上界。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
+`environment.n_prefill` 是启动多少个 Prefill worker；`parameters.traffic.count` 是 program 发出多少个请求；`parameter_schema["traffic.count"].maximum` 是该数量允许的上界。实际取值与允许范围分别维护，调整约束不自动改变请求数量。
+
+`traffic` 保存请求、来源与发流条件；`procedure` 保存操作及流程预算；`observation` 保存观测时窗、指标输入绑定与采样要求；`checks` 保存检查条件和门槛。发流 QPS 只在 `traffic` 定义，program 将同一个值冻结到门禁证据，不维护另一份目标 QPS。环境启动配置和实例执行预算仍分别属于 `environment`、`execution`。
+
+program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `ProgramInputs`。基础参数和 variant 合并后都执行严格校验；未知字段、未读取参数和缺失必需值报错。嵌套业务对象复用其拥有者的输入校验，不能用“已读取父级 dict”代替子字段校验。复杂流程仍在 Python，不为每个 YAML 字段创建类或表达式语言。
+
+需要具名窗口时，`observation.windows` 保存边界的 `stage`、`field: epoch_s` 和可选 `offset_s`；program 通过 `ObservationWindow` 将它们编译成有类型的输出引用，并选择当前流程可用的窗口。`checks.<id>.window` 指向声明窗口；不存在或当前流程不可用的窗口报错。YAML 不能借此定义步骤顺序或分支。
 
 `parameter_schema` 只约束 `case.number(path)` 读取的数值参数，不会自动扫描所有 `parameters`；复杂对象由 program 或 action 的输入合同校验。它不提供缺省参数值，也不承担环境配置校验。
 
@@ -78,6 +84,10 @@ program 的 `ACTION_HANDLERS` 声明所属能力；分析策略用 `ANALYSIS_POL
 - 多操作的流程与编译时分支放在 program；单操作的现场判断与有界重试放在 handler。跨阶段动态跳转没有现成契约，不能通过 YAML 表达式或隐式跳步实现。
 
 handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
+
+基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查结果保留定义、来源、实际窗口和样本信息；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
+
+请求集合采用哪个时间字段、如何归属节点、如何判定终态，以及持续异常等业务计算留在 case。请求集合的半开时窗与指标采样点的闭区间选择分别声明，不互相推断；报告展示既定结果，不重新计算门禁。
 
 ## 配置覆盖与变体
 

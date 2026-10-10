@@ -24,14 +24,14 @@ from scenario.loader import load_document
 class CaseConfigTest(unittest.TestCase):
     def test_cache_analysis_budget_is_explicit_and_independent_of_gate_thresholds(self):
         config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
-        original = copy.deepcopy(config["parameters"]["gate"])
-        config["parameters"]["analysis_timeout_s"] = 400
+        original = copy.deepcopy(config["parameters"]["checks"])
+        config["parameters"]["procedure"]["analysis_timeout_s"] = 400
         plan = configure_program(config, "cache_scale_in.yaml")
         stages = plan["variants"][0]["stages"]
         gate = next(stage for stage in stages if stage["id"] == "gate")
         self.assertEqual(gate["timeout_s"], 400)
-        self.assertEqual(config["parameters"]["gate"], original)
-        del config["parameters"]["analysis_timeout_s"]
+        self.assertEqual(config["parameters"]["checks"], original)
+        del config["parameters"]["procedure"]["analysis_timeout_s"]
         with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
             configure_program(config, "cache_scale_in.yaml")
 
@@ -41,18 +41,18 @@ class CaseConfigTest(unittest.TestCase):
             ("master_performance", "performance_observe", "engine_tps"),
         ):
             config = load_document(ROOT / f"config/scenarios/{name}.yaml")
-            expected = config["parameters"]["gate_inputs"][input_name]
+            expected = config["parameters"]["observation"]["inputs"][input_name]
             plan = configure_program(config, name + ".yaml")
             action = next(s for s in plan["variants"][0]["stages"] if s["action"] == stage)
             self.assertEqual(action["params"]["gate_input"], expected)
 
         config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
-        del config["parameters"]["gate_inputs"]["engine_counters"]["fields"]["hit_tokens_total"]
+        del config["parameters"]["observation"]["inputs"]["engine_counters"]["fields"]["hit_tokens_total"]
         with self.assertRaisesRegex(ValueError, "missing or invalid metric bindings"):
             configure_program(config, "cache_scale_in.yaml")
 
         config = load_document(ROOT / "config/scenarios/master_performance.yaml")
-        del config["parameters"]["gate_inputs"]["engine_tps"]["metric_roles"]["mock/rtp_llm_generate_tps"]
+        del config["parameters"]["observation"]["inputs"]["engine_tps"]["metric_roles"]["mock/rtp_llm_generate_tps"]
         with self.assertRaisesRegex(ValueError, "match YAML metric_roles"):
             configure_program(config, "master_performance.yaml")
 
@@ -78,7 +78,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def config(self):
         config = load_document(ROOT / "config/scenarios/request_completion.yaml")
-        config["variant_axis"] = {"kind": "data", "fields": ["parameters.count", "parameters.input_len", "parameters.output_len", "parameters.completion"]}
+        config["variant_axis"] = {"kind": "data", "fields": ["parameters.traffic", "parameters.procedure", "parameters.checks"]}
         config["variants"] = [{"id": "immediate"}]
         return config
 
@@ -101,7 +101,7 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["variant_axis"] = {"kind": "scale", "fields": ["environment.n_prefill", "environment.n_decode"]}
         config["profiles"] = ["single-nonbatch"]
-        config["parameters"].update(input_len=8192, output_len=16, count=3)
+        config["parameters"]["traffic"].update(input_len=8192, output_len=16, count=3)
         config["variants"] = [
             {
                 "id": "large_pd",
@@ -119,8 +119,8 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_parameters_are_scoped_to_their_configuration(self):
         config = self.config()
-        config["parameters"]["count"] = 2
-        config["variants"][0]["parameters"] = {"count": 4}
+        config["parameters"]["traffic"]["count"] = 2
+        config["variants"][0]["parameters"] = {"traffic": {"count": 4}}
         config["variants"].append(
             {
                 "id": "default_count",
@@ -191,7 +191,7 @@ class CaseConfigTest(unittest.TestCase):
         ):
             with self.subTest(parameters=parameters):
                 config = self.config()
-                config["parameters"] = parameters
+                config["parameters"]["traffic"].update(parameters)
                 with self.assertRaises(ScenarioError):
                     self.compile(config)
 
@@ -229,8 +229,8 @@ class CaseConfigTest(unittest.TestCase):
     def test_yaml_controls_timeouts_expectations_and_metadata(self):
         config = self.config()
         config["metadata"]["description"] = "Configured in YAML"
-        config["parameters"]["completion"]["setup_timeout_s"] = 211
-        config["parameters"]["completion"]["expected"]["no_errors"] = 7
+        config["parameters"]["procedure"]["setup_timeout_s"] = 211
+        config["parameters"]["checks"]["no_errors"]["expected"] = 7
         for plan in self.compile(config):
             self.assertEqual(plan["description"], "Configured in YAML")
             self.assertEqual(plan["stages"][0]["timeout_s"], 211)
@@ -238,7 +238,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_missing_yaml_data_has_no_python_fallback(self):
         config = self.config()
-        del config["parameters"]["completion"]["setup_timeout_s"]
+        del config["parameters"]["procedure"]["setup_timeout_s"]
         with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
             self.compile(config)
 
@@ -246,8 +246,8 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["variants"] = [{"id": "custom"}]
         config["profiles"] = ["single-nonbatch"]
-        config["parameters"]["count"] = 10001
-        config["parameter_schema"]["count"]["maximum"] = 10001
+        config["parameters"]["traffic"]["count"] = 10001
+        config["parameter_schema"]["traffic.count"]["maximum"] = 10001
         plans = self.compile(config)
         self.assertEqual([p["variant_id"] for p in plans], ["default", "custom"])
         self.assertTrue(all(p["stages"][1]["params"]["count"] == 10001 for p in plans))
@@ -258,7 +258,7 @@ class CaseConfigTest(unittest.TestCase):
     def test_nested_variant_data_is_isolated(self):
         config = self.config()
         config["variants"][0]["parameters"] = {
-            "completion": {"expected": {"no_errors": 3}}
+            "checks": {"no_errors": {"expected": 3}}
         }
         for plan in self.compile(config):
             expected = 3 if plan["variant_id"] == "immediate" else 0

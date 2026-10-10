@@ -6,7 +6,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
+from cases.master_ha_failover.analysis import measure_client_metric
+from cases.master_ha_failover.inputs import validate_client_criterion, validate_wait
 from runtime.master_control import require_process
 from scenario.parameters import validate_fields
 from scenario.contracts import CheckResult, StageHandler, StageOutput
@@ -256,15 +257,7 @@ def _ha_finish(ctx, params, deadline):
 
 
 def _mark_validate(params, plan):
-    p = validate_fields(params, plan, {"wait_s"})
-    p.setdefault("wait_s", 0)
-    if (
-        type(p["wait_s"]) not in (int, float)
-        or not math.isfinite(p["wait_s"])
-        or not 0 <= p["wait_s"] <= 180
-    ):
-        raise ValueError("wait_s must be finite in [0,180]")
-    return p
+    return validate_wait(params, path=plan.path)
 
 
 def _mark(ctx, params, deadline):
@@ -365,41 +358,8 @@ def _client_check_validate(params, plan):
         {"rows", "metric", "op", "expected"},
     )
     plan.reference(p["rows"], "ha_rows")
-    if p["metric"] not in {"ha_gate/" + name for name in HA_METRICS} or p["op"] not in {"eq", "ge", "le"}:
-        raise ValueError("unknown client metric/comparison")
-    if type(p["expected"]) not in (int, float) or not math.isfinite(p["expected"]):
-        raise ValueError("client comparison needs finite numeric expected value")
-    from flexlb_profile_data import PROFILES
-    warnings = p.get("warning_profiles", [])
-    if not isinstance(warnings, list) or any(profile not in PROFILES for profile in warnings):
-        raise ValueError("warning_profiles must contain registered profiles")
-    p.setdefault("min_samples", 1)
-    if type(p["min_samples"]) is not int or p["min_samples"] < 1:
-        raise ValueError("client check must require actual samples")
-    required = {
-        "target_share": "target",
-        "target_count": "target",
-        "route_share": "route",
-        "route_count": "route",
-        "error_kind_count": "error_kind",
-        "wrong_error_code": "code",
-    }.get(p["metric"].split("/", 1)[1])
-    if required and required not in p:
-        raise ValueError(f"{p['metric']} requires {required}")
-    if "target" in p and p["target"] not in ("A", "B"):
-        raise ValueError("client target must be A or B")
-    if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
-        raise ValueError("invalid expected route")
-    if "error_kind" in p and p["error_kind"] not in {
-        "none",
-        "transport",
-        "business",
-        "deadline",
-    }:
-        raise ValueError("invalid expected error kind")
-    if "code" in p and (type(p["code"]) is not int or p["code"] <= 0):
-        raise ValueError("error code must be positive integer")
-    return p
+    criterion = validate_client_criterion({key: value for key, value in p.items() if key != "rows"})
+    return dict(criterion, rows=p["rows"])
 
 
 def _client_check(ctx, params, deadline):
@@ -421,38 +381,25 @@ def _client_check(ctx, params, deadline):
 
         prefill_pool = topology_pools(ctx, deadline)["prefill"]
     actual = measure_client_metric(params, rows, target=target, prefill_pool=prefill_pool)
-    from cases.master_ha_failover.metrics import publish_gate
-    actual = publish_gate(ctx, params, actual, rows)
-    expected = params["expected"]
-    comparison = (
-        actual == expected
-        if params["op"] == "eq"
-        else actual >= expected if params["op"] == "ge" else actual <= expected
-    )
-    passed = n >= params["min_samples"] and comparison
-    warning = (not comparison and bool(params.get("warning_profiles"))
-               and ctx.instance["profile"] in params["warning_profiles"])
-    if warning:
+    from cases.master_ha_failover.metrics import publish_gate, gate_labels
+    from analysis.checks import check_metric
+
+    store = publish_gate(ctx, params, actual, rows)
+    result = check_metric(store, "criterion", params["metric"],
+        labels=gate_labels(params), source="ha_gate", epoch=ctx.env_epoch, reduction="last",
+        op=params["op"], expected=params["expected"],
+        advisory=bool(params.get("warning_profiles")) and ctx.instance["profile"] in params["warning_profiles"],
+        evidence=dict(sample_count=n, min_samples=params["min_samples"]))
+    if result.status == "WARNING":
         import logging
         logging.getLogger(__name__).warning(
             "HA advisory criterion: profile=%s metric=%s actual=%s expected=%s samples=%s",
-            ctx.instance["profile"], metric, actual, expected, n)
+            ctx.instance["profile"], metric, actual, params["expected"], n)
+        from dataclasses import replace
+        result = replace(result, detail="Known issue: advisory criterion")
     return StageOutput(
         {"actual": actual},
-        [
-            CheckResult(
-                "criterion",
-                "PASS" if passed else "WARNING" if warning else "FAIL",
-                detail="Known issue: advisory criterion" if warning else "",
-                actual=actual,
-                expected=expected,
-                evidence={
-                    "metric": params["metric"],
-                    "sample_count": n,
-                    "min_samples": params["min_samples"],
-                },
-            )
-        ],
+        [result],
     )
 
 

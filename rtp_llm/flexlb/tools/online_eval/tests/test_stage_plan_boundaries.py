@@ -59,8 +59,8 @@ def test_malformed_variant_dimension_is_a_configuration_error(kind):
 
     root = Path(__file__).resolve().parents[1]
     config = load_document(root/'config/scenarios/request_completion.yaml')
-    config.update(variant_axis={'kind': kind, 'fields': ['parameters.count']},
-                  variants=[{'id': 'two', 'parameters': {'count': 2}}])
+    config.update(variant_axis={'kind': kind, 'fields': ['parameters.traffic.count']},
+                  variants=[{'id': 'two', 'parameters': {'traffic': {'count': 2}}}])
     with pytest.raises(ScenarioError, match='variant_axis.kind must be data, scale or flow'):
         configure_program(config, 'case.yaml')
 
@@ -71,8 +71,8 @@ def test_variant_dimension_guard_runs_before_the_variant_program():
 
     root = Path(__file__).resolve().parents[1]
     config = load_document(root/'config/scenarios/request_completion.yaml')
-    config.update(variant_axis={'kind': 'data', 'fields': ['parameters.count']},
-                  variants=[{'id': 'two', 'parameters': {'count': 2, 'input_len': 10}}])
+    config.update(variant_axis={'kind': 'data', 'fields': ['parameters.traffic.count']},
+                  variants=[{'id': 'two', 'parameters': {'traffic': {'count': 2, 'input_len': 10}}}])
     with patch.object(program, 'default', wraps=program.default) as build:
         build.__module__ = program.__name__
         with pytest.raises(ScenarioError, match='outside declared dimension'):

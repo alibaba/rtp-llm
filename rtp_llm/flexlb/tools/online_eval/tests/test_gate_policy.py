@@ -25,12 +25,21 @@ class GatePolicyTest(unittest.TestCase):
 
     def test_advisory_errors_do_not_waive_sample_coverage_or_single(self):
         rows = [{'status': 'ok'}, {'status': 'error'}]
-        ctx = SimpleNamespace(metric_store=None, instance={'profile': 'batch-window'},
+        ctx = SimpleNamespace(env_epoch=1, instance={'profile': 'batch-window'},
                               resource=lambda *args: rows)
         deadline = SimpleNamespace(check=lambda: None)
         params = dict(rows='rows', metric='ha_gate/non_ok_count', op='eq', expected=0,
                       min_samples=2, warning_profiles=['batch-window'])
-        publisher = mock.patch("cases.master_ha_failover.metrics.publish_gate", side_effect=lambda c, p, v, r: v)
+        def publish(c, p, value, rows):
+            from monitoring.metric_store import MetricStore
+            from cases.master_ha_failover.metrics import gate_labels
+
+            return MetricStore(dict(metrics_schema_version=1,
+                definitions={p['metric']: dict(unit='requests')},
+                metrics={p['metric']: [dict(epoch='1', source='ha_gate', labels=gate_labels(p),
+                    points=[[1, value]], status='OK', provenance={})]}))
+
+        publisher = mock.patch("cases.master_ha_failover.metrics.publish_gate", side_effect=publish)
         publisher.start()
         self.addCleanup(publisher.stop)
         check = _client_check(ctx, params, deadline).checks[0]

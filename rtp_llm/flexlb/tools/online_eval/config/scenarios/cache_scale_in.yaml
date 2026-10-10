@@ -30,7 +30,7 @@ execution:
   stage_timeout_s: 60
   cleanup_timeout_s: 660
 parameters:
-  flow:
+  traffic:
     group_id: scale_in
     phase_id: continuous
     source:
@@ -62,45 +62,46 @@ parameters:
     poll_s: 0.1
     jvm_xms: 1g
     jvm_xmx: 48g
-  gate_inputs:
-    engine_counters:
-      source: metric_store
-      fields:
-        running: mock/running
-        waiting: mock/waiting
-        hit_tokens_total: mock/hit_tokens_total
-        context_tokens_total: mock/context_tokens_total
-        context_requests_total: mock/context_requests_total
-        cache_evictions: mock/cache_evictions
-        prefill_ms_avg: mock/prefill_ms_avg
-        prefill_batches: mock/prefill_batches
-        prefill_batch_requests: mock/prefill_batch_requests
-        cache_key_hits: mock/cache_key_hits
-        cache_keys_requested: mock/cache_keys_requested
-        admission_open: mock/admission_open
-        admitted_rpcs_total: mock/admitted_rpcs_total
-        rejected_rpcs_total: mock/rejected_rpcs_total
-  gate:
+  procedure:
     target_p: 64
+    removal_mode: graceful
+    drain_timeout_ms: 30000
+    topology_timeout_s: 37  # discovery convergence budget, independent of drain
+    analysis_timeout_s: 300
+  observation:
     warmup_timeout_s: 450
     baseline_s: 60
     observe_s: 60  # Diagnostic window; full 240s acceptance needs a longer traffic plan.
     sample_s: 1
     window_s: 10
     step_s: 1
-    sustain_s: 30
     max_gap_s: 5
-    qps: 240
+    inputs:
+      engine_counters:
+        source: metric_store
+        fields:
+          running: mock/running
+          waiting: mock/waiting
+          hit_tokens_total: mock/hit_tokens_total
+          context_tokens_total: mock/context_tokens_total
+          context_requests_total: mock/context_requests_total
+          cache_evictions: mock/cache_evictions
+          prefill_ms_avg: mock/prefill_ms_avg
+          prefill_batches: mock/prefill_batches
+          prefill_batch_requests: mock/prefill_batch_requests
+          cache_key_hits: mock/cache_key_hits
+          cache_keys_requested: mock/cache_keys_requested
+          admission_open: mock/admission_open
+          admitted_rpcs_total: mock/admitted_rpcs_total
+          rejected_rpcs_total: mock/rejected_rpcs_total
+  checks:
     qps_tolerance: 0.1
     baseline_min_hit: 0.85
     baseline_max_spread: 0.05
     absolute_min_hit: 0.45
     max_drop: 0.25
     min_completed: 20
-    removal_mode: graceful
-    drain_timeout_ms: 30000
-    topology_timeout_s: 37  # discovery convergence budget, independent of drain
-  analysis_timeout_s: 300
+    sustain_s: 30
 analysis:
   alignment_event: withdraw_start
 reports:

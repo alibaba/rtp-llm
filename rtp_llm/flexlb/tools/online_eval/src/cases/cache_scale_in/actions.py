@@ -19,28 +19,9 @@ from cases.cache_scale_in.analysis import (
     window,
 )
 from cases.cache_scale_in.publication import publish_cache
+from cases.cache_scale_in.inputs import PROCEDURE_FIELDS, OBSERVATION_FIELDS, CHECK_FIELDS
 
-FIELDS = {
-    "flow",
-    "target_p",
-    "warmup_timeout_s",
-    "baseline_s",
-    "observe_s",
-    "sample_s",
-    "window_s",
-    "step_s",
-    "sustain_s",
-    "max_gap_s",
-    "qps",
-    "qps_tolerance",
-    "baseline_min_hit",
-    "baseline_max_spread",
-    "absolute_min_hit",
-    "max_drop",
-    "min_completed",
-    "drain_timeout_ms",
-    "topology_timeout_s",
-}
+FIELDS = (PROCEDURE_FIELDS - {"removal_mode"}) | OBSERVATION_FIELDS | CHECK_FIELDS | {"flow", "qps"}
 INTERMEDIATE_FIELDS = {"intermediate_p", "intermediate_hold_s"}
 OPTIONAL_FIELDS = INTERMEDIATE_FIELDS | {"removal_mode"}
 

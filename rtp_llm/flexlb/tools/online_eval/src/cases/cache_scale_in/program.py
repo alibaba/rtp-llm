@@ -5,15 +5,25 @@ from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 from cases.config import output
 from traffic.playback_config import normalize
 from cases.cache_scale_in.comparison import validate_policy
-from cases.cache_scale_in.inputs import engine_counters, ENGINE_COUNTER_UNITS
+from cases.cache_scale_in.inputs import (
+    engine_counters, ENGINE_COUNTER_UNITS, PROCEDURE_FIELDS, OBSERVATION_FIELDS, CHECK_FIELDS,
+)
+from runtime.java_flow import JAVA_FLOW_INPUT_FIELDS
 
 ANALYSIS_POLICY_VALIDATOR = validate_policy
 
 
 def default(case):
-    flow = case.value("flow")
-    gate = case.value("gate")
-    inputs = case.value("gate_inputs")
+    data = case.inputs(
+        traffic=JAVA_FLOW_INPUT_FIELDS,
+        procedure=PROCEDURE_FIELDS | {"analysis_timeout_s"},
+        observation=OBSERVATION_FIELDS | {"inputs"},
+        checks=CHECK_FIELDS,
+    )
+    flow = data.traffic
+    inputs = data.observation["inputs"]
+    gate = dict({k: v for k, v in data.procedure.items() if k != "analysis_timeout_s"},
+                **{k: v for k, v in data.observation.items() if k != "inputs"}, **data.checks)
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])
@@ -22,18 +32,17 @@ def default(case):
             raise ValueError("unknown engine gate field: " + field)
         case.metric(identity, unit=ENGINE_COUNTER_UNITS[field],
                     labels=("role", "engine_name", "engine_incarnation"), mode="scrape")
-    client, playback = normalize(flow["client"])
+    client, _ = normalize(flow["client"])
+    gate["qps"] = float(client["SEND_MODE_QPS"])
     if (
         client.get("LOOP") != "false"
         or client.get("SEND_MODE") != "uniform"
     ):
         raise ValueError("scale-in requires a nonlooping uniform Java workload")
-    if float(client["SEND_MODE_QPS"]) != gate["qps"]:
-        raise ValueError("client and gate QPS must agree")
     budget = (
         gate["warmup_timeout_s"] + gate["topology_timeout_s"] + gate["observe_s"] + 10
     )
-    if {"intermediate_p", "intermediate_hold_s"} & gate.keys() or gate.get("removal_mode") != "graceful":
+    if gate["removal_mode"] != "graceful":
         raise ValueError("step requires one graceful scale-in; different fault sequences require a separate case")
     if (
         int(client["DURATION_S"]) < budget
@@ -58,7 +67,7 @@ def default(case):
     case.observe(
         "gate",
         "cache_scale_in_check",
-        timeout_s=case.value("analysis_timeout_s"),
+        timeout_s=data.procedure["analysis_timeout_s"],
         params={
             "flow": output("traffic", "flow"),
             "evidence": output("scale_in", "evidence"),

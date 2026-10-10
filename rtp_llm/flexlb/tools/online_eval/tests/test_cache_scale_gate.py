@@ -338,11 +338,11 @@ class CacheGateTest(unittest.TestCase):
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
         for mode in ("graceful",):
             changed = copy.deepcopy(case)
-            changed["parameters"]["gate"].update(topology_timeout_s=31, removal_mode=mode)
+            changed["parameters"]["procedure"].update(topology_timeout_s=31, removal_mode=mode)
             with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
             self.assertEqual(len(plans), 2)
-        changed["parameters"]["gate"]["removal_mode"] = "silent"
+        changed["parameters"]["procedure"]["removal_mode"] = "silent"
         with self.assertRaisesRegex(Exception, "separate case"):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
 
@@ -425,9 +425,9 @@ class CacheGateTest(unittest.TestCase):
         case = yaml.safe_load(
             (ROOT / "config/scenarios/cache_scale_in.yaml").read_text()
         )
-        gate = case["parameters"]["gate"]
+        gate = case["parameters"]["procedure"]
         gate.update(intermediate_p=72, intermediate_hold_s=60)
-        flow = case["parameters"]["flow"]
+        flow = case["parameters"]["traffic"]
         flow["source"]["parameters"]["count"] = 170000
         flow["client"]["DURATION_S"] = "700"
         with tempfile.TemporaryDirectory() as directory:
@@ -440,7 +440,7 @@ class CacheGateTest(unittest.TestCase):
                         load_scenarios(path), handlers=handlers()
                     )
 
-            with self.assertRaisesRegex(ValueError, "separate case"):
+            with self.assertRaisesRegex(ValueError, "unknown configuration fields"):
                 compile_case(case)
 
 
