@@ -41,10 +41,6 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B924
 # Official DeepEP main@a56d6156 with legacy Buffer and V2 APIs.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl
 
-# FP32-checkpoint KDA prefill uses the pinned cuLA wheel and its patched FLA runtime.
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash_linear_attention/flash_linear_attention-0.5.0+rtp.3a9ce1c.6-py3-none-any.whl
-http://artlab.alibaba-inc.com/1/pypi/rtp_llm/cuda_linear_attention/cuda_linear_attention-0.1.dev88+dcce4719.cu132-cp310-cp310-linux_x86_64.whl
-
 # Unified rtp_kernel built from cuda_extension main@34e3b72a against
 # torch 2.11+cu130; includes the current fused RoPE position_ids API.
 http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B34e3b72a.cu132-cp310-cp310-linux_x86_64.whl
