@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cstdint>
 #include <limits>
 #include <unordered_map>
 #include <cstdlib>
@@ -377,15 +376,6 @@ void DeviceBlockPool::initializeDeviceMallocBuffer() {
                             cfg.total_size_bytes,
                             allocation_size,
                             cudaGetErrorString(err));
-    if (reinterpret_cast<uintptr_t>(ptr) % static_cast<size_t>(page_size) != 0) {
-        (void)cudaFree(ptr);
-        RTP_LLM_FAIL("cudaMalloc block pool backing is not page aligned for GDR registration, "
-                     "pool_name=%s ptr=%p page_size=%ld",
-                     cfg.pool_name.c_str(),
-                     ptr,
-                     page_size);
-    }
-
     auto deleter = [device_id](void* p) {
         if (p == nullptr) {
             return;

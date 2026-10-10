@@ -2,6 +2,7 @@
 
 #include <unordered_map>
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -152,7 +153,9 @@ private:
     void                                 taskFinished();
     void                                 quarantineTask(
         const std::shared_ptr<storage_backend_detail::StorageTaskState>& state);
-    bool                                    quarantineActive();
+    bool                                    quarantineActive() const;
+    bool                                    tryBeginTransfer();
+    void                                    endTransfer();
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;
@@ -166,7 +169,9 @@ private:
     size_t                  in_flight_{0};
 
     std::mutex                                                             quarantine_mutex_;
+    std::atomic<bool>                                                      quarantine_active_{false};
     std::vector<std::shared_ptr<storage_backend_detail::StorageTaskState>> quarantined_tasks_;
+    size_t                                                                 active_transfer_count_{0};
     size_t                                                                 quarantined_block_count_{0};
     uint64_t                                                               quarantine_generation_{0};
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
@@ -10,6 +11,7 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <unistd.h>
 
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
@@ -481,6 +483,18 @@ private:
                         "RemoteCache GDR requires a dedicated cudaMalloc backing for group %d", group_id);
                     return {};
                 }
+                const long page_size = sysconf(_SC_PAGESIZE);
+                if (page_size <= 0
+                    || reinterpret_cast<uintptr_t>(pool->getBaseAddress()) % static_cast<size_t>(page_size) != 0
+                    || pool->getAllocationSizeBytes() % static_cast<size_t>(page_size) != 0) {
+                    RTP_LLM_LOG_ERROR("RemoteCache GDR registration span must be page aligned for group %d: "
+                                      "base=%p size=%zu page_size=%ld",
+                                      group_id,
+                                      pool->getBaseAddress(),
+                                      pool->getAllocationSizeBytes(),
+                                      page_size);
+                    return {};
+                }
                 kv_cache_manager::ClientMemoryRegistrations memory_registrations;
                 memory_registrations.gpu.push_back(
                     {pool->getBaseAddress(), pool->getAllocationSizeBytes(), pool->deviceIndex()});
@@ -656,6 +670,9 @@ private:
             try {
                 result->waitDone();
             } catch (const std::exception& exception) {
+                if (result->deadlineExceeded()) {
+                    throw StorageOperationTimeout(std::string("KVCM broadcast timed out: ") + exception.what());
+                }
                 throw StorageOperationCompletionUnknown(
                     std::string("KVCM broadcast completion is unknown: ") + exception.what());
             } catch (...) {
