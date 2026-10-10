@@ -103,14 +103,17 @@ cc_library(
         "torch.libs/libgomp*.so*",
         "torch.libs/libopenblasp*.so",
     ]),
+    # No -lnccl/-lcudnn: the engine references zero nccl/cudnn symbols, so
+    # those flags only baked dead DT_NEEDED entries in and forced every build
+    # host to carry nccl/cudnn libs on the link path.  The pip wheel deps in
+    # the build graph (and the runtime images' wheel envs) carry what is
+    # actually needed.
     linkopts = select({
         "@//:cuda_pre_12_9": [
             "-L/usr/local/cuda/lib64",
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
             "-lnvToolsExt",
         ],
         "@//:using_cuda12_9_x86": [
@@ -118,8 +121,6 @@ cc_library(
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
             "-lnvtx3interop",
         ],
         "@//:using_cuda13_x86": [
@@ -127,8 +128,6 @@ cc_library(
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
         ],
         "//conditions:default": [],
     }),

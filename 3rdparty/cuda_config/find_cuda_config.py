@@ -618,15 +618,30 @@ def find_cuda_config():
     result.update(
         _find_cusparse_config(cusparse_paths, cusparse_version, cuda_version))
 
+  # cuDNN and NCCL are optional: nothing in the build graph consumes the
+  # @local_config_cuda//cuda:cudnn / :nccl targets (the engine references zero
+  # cudnn/nccl symbols), and dev images that take their NVIDIA libraries from
+  # pip wheels inside bazel instead of from the toolkit do not ship them on
+  # the standard search paths.  Skip instead of failing the whole configure.
+  #
+  # The skip is reported on stdout as an extra "key: value" config entry: the
+  # caller (common.bzl execute()) treats any stderr output as a command
+  # failure, and stdout is parsed as simple "key: value" lines.
   if "cudnn" in libraries:
     cudnn_paths = _get_legacy_path("CUDNN_INSTALL_PATH", base_paths)
     cudnn_version = os.environ.get("TF_CUDNN_VERSION", "")
-    result.update(_find_cudnn_config(cudnn_paths, cudnn_version))
+    try:
+      result.update(_find_cudnn_config(cudnn_paths, cudnn_version))
+    except ConfigError:
+      result["cudnn_skipped"] = "not found"
 
   if "nccl" in libraries:
     nccl_paths = _get_legacy_path("NCCL_INSTALL_PATH", base_paths)
     nccl_version = os.environ.get("TF_NCCL_VERSION", "")
-    result.update(_find_nccl_config(nccl_paths, nccl_version))
+    try:
+      result.update(_find_nccl_config(nccl_paths, nccl_version))
+    except ConfigError:
+      result["nccl_skipped"] = "not found"
 
   if "tensorrt" in libraries:
     tensorrt_paths = _get_legacy_path("TENSORRT_INSTALL_PATH", base_paths)
