@@ -373,8 +373,8 @@ public final class FlexlbConfigValidator {
                 "cacheMatching.maxQueryRetryCount");
         positive(kvcm.getRecoverySuccessThreshold(),
                 "cacheMatching.recoverySuccessThreshold");
-        nonNegative(kvcm.getGlobalKvsHostCount(),
-                "cacheMatching.globalKvsHostCount");
+        nonNegative(kvcm.getTopKHostCount(),
+                "cacheMatching.topKHostCount");
         require(kvcm.getLocalStandby() != null,
                 "cacheMatching.localStandby", "is required for KVCM");
         validateLocalStandby(kvcm.getLocalStandby());

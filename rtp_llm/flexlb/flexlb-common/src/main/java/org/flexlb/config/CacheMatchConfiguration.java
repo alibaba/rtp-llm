@@ -76,14 +76,14 @@ public class CacheMatchConfiguration {
         kvcmRuntimeConfig = config.kvcmCacheMatching();
         log.info("Applied KVCM cache matching configuration update: requestTimeoutMs={}, "
                         + "heartbeatFailureThreshold={}, queryFailureThreshold={}, maxQueryRetryCount={}, "
-                        + "recoverySuccessThreshold={}, globalKvsHostCount={}, enableP2p={}, medium={}",
+                        + "recoverySuccessThreshold={}, topKHostCount={}, backendTypes={}, medium={}",
                 kvcmRuntimeConfig.getRequestTimeoutMs(),
                 kvcmRuntimeConfig.getHeartbeatFailureThreshold(),
                 kvcmRuntimeConfig.getQueryFailureThreshold(),
                 kvcmRuntimeConfig.getMaxQueryRetryCount(),
                 kvcmRuntimeConfig.getRecoverySuccessThreshold(),
-                kvcmRuntimeConfig.getGlobalKvsHostCount(),
-                kvcmRuntimeConfig.isEnableP2p(),
+                kvcmRuntimeConfig.getTopKHostCount(),
+                kvcmRuntimeConfig.getBackendTypes(),
                 kvcmRuntimeConfig.getMedium());
     }
 
@@ -108,7 +108,7 @@ public class CacheMatchConfiguration {
             log.info("KVCM cache matching configuration: serviceId={}, address={}, namespace={}, "
                             + "requestTimeoutMs={}, leaderRefreshIntervalMs={}, "
                             + "heartbeatFailureThreshold={}, queryFailureThreshold={}, maxQueryRetryCount={}, "
-                            + "recoverySuccessThreshold={}, globalKvsHostCount={}, enableP2p={}, medium={}",
+                            + "recoverySuccessThreshold={}, topKHostCount={}, backendTypes={}, medium={}",
                     kvcmServiceRoute.getServiceId(),
                     kvcmConfig.getAddress(),
                     kvcmConfig.getNamespace(),
@@ -118,8 +118,8 @@ public class CacheMatchConfiguration {
                     kvcmRuntimeConfig.getQueryFailureThreshold(),
                     kvcmRuntimeConfig.getMaxQueryRetryCount(),
                     kvcmRuntimeConfig.getRecoverySuccessThreshold(),
-                    kvcmRuntimeConfig.getGlobalKvsHostCount(),
-                    kvcmRuntimeConfig.isEnableP2p(),
+                    kvcmRuntimeConfig.getTopKHostCount(),
+                    kvcmRuntimeConfig.getBackendTypes(),
                     kvcmRuntimeConfig.getMedium());
         }
         if (localStandbyEnabled) {

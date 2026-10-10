@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
@@ -19,6 +20,54 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
+
+    @Test
+    void defaultsKvcmTopKToThreeAndBackendTypesToEmpty() {
+        KvcmCacheMatchingConfig config = ConfigTestFixtures.parse("""
+                {"cacheMatching":{"type":"KVCM"}}
+                """).kvcmCacheMatching();
+
+        assertEquals(3, config.getTopKHostCount());
+        assertTrue(config.getBackendTypes().isEmpty());
+        assertEquals(0, ConfigTestFixtures.parse("""
+                {"cacheMatching":{"type":"KVCM","topKHostCount":0}}
+                """).kvcmCacheMatching().getTopKHostCount());
+    }
+
+    @Test
+    void rejectsInvalidKvcmQueryParameters() {
+        for (String queryField : new String[]{
+                "\"topKHostCount\":-1", "\"topKHostCount\":1.5", "\"topKHostCount\":\"3\"",
+                "\"backendTypes\":[\"ST_EVENT_REPORT_L1P5\"]", "\"backendTypes\":[\"ST_NFS\"]",
+                "\"backendTypes\":[\"UNKNOWN\"]", "\"backendTypes\":[3]",
+                "\"backendTypes\":null", "\"backendTypes\":[null]",
+                "\"backendTypes\":\"ST_EVENT_REPORT_L2\""}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
+                    "{\"cacheMatching\":{\"type\":\"KVCM\"," + queryField + "}}"), queryField);
+        }
+    }
+
+    @Test
+    void rejectsRemovedKvcmQueryFieldNames() {
+        for (String queryField : new String[]{
+                "\"globalKvsHostCount\":3", "\"enableP2p\":true"}) {
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
+                    "{\"cacheMatching\":{\"type\":\"KVCM\"," + queryField + "}}"), queryField);
+        }
+    }
+
+    @Test
+    void acceptsKvcmTopKAndBackendTypes() {
+        FlexlbConfig config = ConfigTestFixtures.parse("""
+                {"cacheMatching":{"type":"KVCM","topKHostCount":5,
+                  "backendTypes":["ST_TAIRMEMPOOL","ST_EVENT_REPORT_L2"]}}
+                """);
+
+        var queryConfig = JsonUtils.strictValueToTree(config).path("cacheMatching");
+        assertEquals(5, queryConfig.path("topKHostCount").intValue());
+        assertEquals("ST_TAIRMEMPOOL", queryConfig.path("backendTypes").get(0).textValue());
+        assertEquals("ST_EVENT_REPORT_L2", queryConfig.path("backendTypes").get(1).textValue());
+    }
 
     @Test
     void localStandbyTtlReductionRatioAllowsEndpoints() {

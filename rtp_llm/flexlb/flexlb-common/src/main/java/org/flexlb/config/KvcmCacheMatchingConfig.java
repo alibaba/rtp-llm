@@ -15,7 +15,15 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
     public static final int DEFAULT_QUERY_FAILURE_THRESHOLD = 10;
     public static final int DEFAULT_MAX_QUERY_RETRY_COUNT = 1;
     public static final int DEFAULT_RECOVERY_SUCCESS_THRESHOLD = 3;
-    public static final int DEFAULT_GLOBAL_KVS_HOST_COUNT = 3;
+    public static final int DEFAULT_TOP_K_HOST_COUNT = 3;
+
+    /**
+     * Additional cache sources supported by the KVCM host-match query.
+     */
+    public enum BackendType {
+        ST_TAIRMEMPOOL,
+        ST_EVENT_REPORT_L2
+    }
 
     /**
      * Total cache-query budget, including retries; also bounds each cluster-info RPC.
@@ -37,14 +45,18 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
      * Logical engines with the longest local match to compute remote hits for.
      * Zero requests local matches only.
      */
-    private int globalKvsHostCount = DEFAULT_GLOBAL_KVS_HOST_COUNT;
+    private int topKHostCount = DEFAULT_TOP_K_HOST_COUNT;
     /**
-     * Enables P2P matches in the combined global prefix hit count.
+     * Additional sources to combine with local caches; an empty list is sent unchanged.
      */
-    private boolean enableP2p;
+    private List<BackendType> backendTypes = List.of();
     private LocalStandbyConfig localStandby = new LocalStandbyConfig();
 
     public void setMedium(List<String> medium) {
         this.medium = medium == null ? List.of() : List.copyOf(medium);
+    }
+
+    public void setBackendTypes(List<BackendType> backendTypes) {
+        this.backendTypes = backendTypes == null ? List.of() : List.copyOf(backendTypes);
     }
 }

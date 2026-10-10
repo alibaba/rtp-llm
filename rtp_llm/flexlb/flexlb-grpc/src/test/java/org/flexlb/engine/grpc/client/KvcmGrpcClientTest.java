@@ -1,9 +1,9 @@
 package org.flexlb.engine.grpc.client;
 
-import com.google.protobuf.UnknownFieldSet;
 import io.grpc.Deadline;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.KvcmCacheMatchingConfig.BackendType;
 import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
@@ -18,6 +18,7 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.kvcm.grpc.Status;
+import org.flexlb.kvcm.grpc.StorageType;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.junit.jupiter.api.AfterEach;
@@ -34,7 +35,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -217,8 +217,8 @@ class KvcmGrpcClientTest {
         runtimeConfig.setLeaderRefreshIntervalMs(60_000);
         runtimeConfig.setMaxQueryRetryCount(0);
         runtimeConfig.setMedium(List.of("hbm", "kvs"));
-        runtimeConfig.setGlobalKvsHostCount(5);
-        runtimeConfig.setEnableP2p(true);
+        runtimeConfig.setTopKHostCount(5);
+        runtimeConfig.setBackendTypes(List.of(BackendType.ST_TAIRMEMPOOL, BackendType.ST_EVENT_REPORT_L2));
         when(configuration.isKvcmEnabled()).thenReturn(true);
         when(configuration.getKvcmConfig()).thenReturn(config);
         when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
@@ -268,19 +268,16 @@ class KvcmGrpcClientTest {
                 ArgumentCaptor.forClass(GetHostCacheStateRequest.class);
         verify(metaServiceClient).getHostCacheState(any(), sentRequest.capture(), any(Deadline.class));
         assertEquals(List.of("hbm", "kvs"), sentRequest.getValue().getMediumList());
-        assertEquals(5, sentRequest.getValue().getGlobalKvsHostCount());
-        assertTrue(sentRequest.getValue().getEnableP2P());
-        UnknownFieldSet wireFields = UnknownFieldSet.parseFrom(sentRequest.getValue().toByteArray());
-        assertEquals(List.of(5L), wireFields.getField(7).getVarintList());
-        assertEquals(List.of(1L), wireFields.getField(8).getVarintList());
-        assertTrue(wireFields.getField(8).getLengthDelimitedList().isEmpty());
+        assertEquals(5, sentRequest.getValue().getTopKHostCount());
+        assertEquals(List.of(StorageType.ST_TAIRMEMPOOL, StorageType.ST_EVENT_REPORT_L2),
+                sentRequest.getValue().getBackendTypesList());
 
         assertEquals(2, result.get("10.0.0.1:8601@1").localMatchBlocks());
         assertEquals(10, result.get("10.0.0.1:8601@1").globalMatchBlocks());
     }
 
     @Test
-    void queriesThreeGlobalHostsWithoutP2pByDefault() {
+    void queriesTopThreeHostsWithNoBackendsByDefault() {
         CacheMatchConfiguration configuration = mock(CacheMatchConfiguration.class);
         KvcmCacheMatchingConfig runtimeConfig = new KvcmCacheMatchingConfig();
         runtimeConfig.setLeaderRefreshIntervalMs(60_000);
@@ -315,8 +312,8 @@ class KvcmGrpcClientTest {
         ArgumentCaptor<GetHostCacheStateRequest> sentRequest =
                 ArgumentCaptor.forClass(GetHostCacheStateRequest.class);
         verify(metaServiceClient).getHostCacheState(any(), sentRequest.capture(), any(Deadline.class));
-        assertEquals(3, sentRequest.getValue().getGlobalKvsHostCount());
-        assertFalse(sentRequest.getValue().getEnableP2P());
+        assertEquals(3, sentRequest.getValue().getTopKHostCount());
+        assertTrue(sentRequest.getValue().getBackendTypesList().isEmpty());
         assertTrue(sentRequest.getValue().getMediumList().isEmpty());
     }
 
@@ -424,8 +421,8 @@ class KvcmGrpcClientTest {
         KvcmCacheMatchingConfig updatedConfig = new KvcmCacheMatchingConfig();
         updatedConfig.setLeaderRefreshIntervalMs(60_000);
         updatedConfig.setMaxQueryRetryCount(0);
-        updatedConfig.setGlobalKvsHostCount(9);
-        updatedConfig.setEnableP2p(true);
+        updatedConfig.setTopKHostCount(0);
+        updatedConfig.setBackendTypes(List.of(BackendType.ST_EVENT_REPORT_L2));
         updatedConfig.setMedium(List.of("kvs"));
         updatedConfig.setRequestTimeoutMs(900L);
         runtimeConfig.set(updatedConfig);
@@ -437,10 +434,11 @@ class KvcmGrpcClientTest {
         ArgumentCaptor<Deadline> deadline = ArgumentCaptor.forClass(Deadline.class);
         verify(metaServiceClient, times(2))
                 .getHostCacheState(any(), sentRequest.capture(), deadline.capture());
-        assertEquals(3, sentRequest.getAllValues().get(0).getGlobalKvsHostCount());
-        assertEquals(9, sentRequest.getAllValues().get(1).getGlobalKvsHostCount());
-        assertFalse(sentRequest.getAllValues().get(0).getEnableP2P());
-        assertTrue(sentRequest.getAllValues().get(1).getEnableP2P());
+        assertEquals(3, sentRequest.getAllValues().get(0).getTopKHostCount());
+        assertEquals(0, sentRequest.getAllValues().get(1).getTopKHostCount());
+        assertTrue(sentRequest.getAllValues().get(0).getBackendTypesList().isEmpty());
+        assertEquals(List.of(StorageType.ST_EVENT_REPORT_L2),
+                sentRequest.getAllValues().get(1).getBackendTypesList());
         assertEquals(List.of("kvs"), sentRequest.getAllValues().get(1).getMediumList());
         assertTrue(deadline.getAllValues().get(1).timeRemaining(TimeUnit.MILLISECONDS) <= 900L);
         assertTrue(deadline.getAllValues().get(1).timeRemaining(TimeUnit.MILLISECONDS) > 0L);
@@ -452,8 +450,8 @@ class KvcmGrpcClientTest {
         KvcmCacheMatchingConfig initialConfig = new KvcmCacheMatchingConfig();
         initialConfig.setLeaderRefreshIntervalMs(60_000);
         initialConfig.setMaxQueryRetryCount(1);
-        initialConfig.setGlobalKvsHostCount(4);
-        initialConfig.setEnableP2p(true);
+        initialConfig.setTopKHostCount(4);
+        initialConfig.setBackendTypes(List.of(BackendType.ST_TAIRMEMPOOL, BackendType.ST_EVENT_REPORT_L2));
         initialConfig.setMedium(List.of("hbm"));
         initialConfig.setRequestTimeoutMs(700L);
         AtomicReference<KvcmCacheMatchingConfig> runtimeConfig =
@@ -478,8 +476,8 @@ class KvcmGrpcClientTest {
                         KvcmCacheMatchingConfig updatedConfig = new KvcmCacheMatchingConfig();
                         updatedConfig.setLeaderRefreshIntervalMs(60_000);
                         updatedConfig.setMaxQueryRetryCount(0);
-                        updatedConfig.setGlobalKvsHostCount(9);
-                        updatedConfig.setEnableP2p(false);
+                        updatedConfig.setTopKHostCount(9);
+                        updatedConfig.setBackendTypes(List.of());
                         updatedConfig.setMedium(List.of("kvs"));
                         updatedConfig.setRequestTimeoutMs(900L);
                         runtimeConfig.set(updatedConfig);
@@ -505,8 +503,9 @@ class KvcmGrpcClientTest {
         verify(metaServiceClient, times(2))
                 .getHostCacheState(any(), sentRequest.capture(), deadline.capture());
         for (GetHostCacheStateRequest request : sentRequest.getAllValues()) {
-            assertEquals(4, request.getGlobalKvsHostCount());
-            assertTrue(request.getEnableP2P());
+            assertEquals(4, request.getTopKHostCount());
+            assertEquals(List.of(StorageType.ST_TAIRMEMPOOL, StorageType.ST_EVENT_REPORT_L2),
+                    request.getBackendTypesList());
             assertEquals(List.of("hbm"), request.getMediumList());
         }
         assertSame(deadline.getAllValues().get(0), deadline.getAllValues().get(1),

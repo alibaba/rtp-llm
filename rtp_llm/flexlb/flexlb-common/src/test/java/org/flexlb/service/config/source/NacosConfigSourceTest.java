@@ -1,9 +1,14 @@
 package org.flexlb.service.config.source;
 
 import com.alibaba.nacos.api.config.listener.Listener;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DeploymentIdentity;
+import org.flexlb.config.KvcmCacheMatchingConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.nacos.NacosConfig;
+import org.flexlb.dao.route.KvcmConfig;
+import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.config.parser.ConfigDocumentParserResolver;
 import org.flexlb.service.config.parser.StandardConfigDocumentParser;
@@ -253,6 +258,65 @@ class NacosConfigSourceTest {
                 "FLEXLB_GROUP",
                 listenerCaptor.getValue());
         verify(client).shutDown();
+    }
+
+    @Test
+    void hotUpdatesKvcmQueryParametersAndKeepsLastValidConfig() throws Exception {
+        com.alibaba.nacos.api.config.ConfigService client =
+                mock(com.alibaba.nacos.api.config.ConfigService.class);
+        when(client.getConfig("flexlb-test", "FLEXLB_GROUP", 3000L)).thenReturn("""
+                {"schemaVersion":3,"requestLifecycle":{"request":{"timeoutMs":60000}},
+                 "cacheMatching":{"type":"KVCM"}}
+                """);
+        NacosConfigSource source = createSource(client, "test-namespace");
+        source.initialize();
+        ConfigService configService = new ConfigService(List.of(
+                new StandardConfigDocumentParser(), new V0ConfigDocumentParser()));
+        try {
+            ServiceRoute route = new ServiceRoute();
+            route.setServiceId("test-service");
+            route.setKvcm(new KvcmConfig());
+            ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
+            modelMetaConfig.putServiceRoute(route.getServiceId(), route);
+            CacheMatchConfiguration configuration = new CacheMatchConfiguration(modelMetaConfig, configService);
+            KvcmCacheMatchingConfig initial = configuration.getKvcmRuntimeConfig();
+            assertThat(initial.getTopKHostCount()).isEqualTo(3);
+            assertThat(initial.getBackendTypes()).isEmpty();
+
+            ArgumentCaptor<Listener> listener = ArgumentCaptor.forClass(Listener.class);
+            verify(client).addListener(
+                    org.mockito.ArgumentMatchers.eq("flexlb-test"),
+                    org.mockito.ArgumentMatchers.eq("FLEXLB_GROUP"), listener.capture());
+            listener.getValue().receiveConfigInfo("""
+                    {"schemaVersion":3,"cacheMatching":{"topKHostCount":7,
+                     "backendTypes":["ST_EVENT_REPORT_L2","ST_TAIRMEMPOOL"]}}
+                    """);
+            KvcmCacheMatchingConfig updated = configuration.getKvcmRuntimeConfig();
+            assertThat(updated.getTopKHostCount()).isEqualTo(7);
+            assertThat(updated.getBackendTypes()).containsExactly(
+                    KvcmCacheMatchingConfig.BackendType.ST_EVENT_REPORT_L2,
+                    KvcmCacheMatchingConfig.BackendType.ST_TAIRMEMPOOL);
+            assertThat(initial.getTopKHostCount()).isEqualTo(3);
+            assertThat(initial.getBackendTypes()).isEmpty();
+
+            for (String invalidField : List.of("\"topKHostCount\":-1",
+                    "\"backendTypes\":[\"ST_EVENT_REPORT_L1P5\"]", "\"backendTypes\":[3]",
+                    "\"backendTypes\":null")) {
+                listener.getValue().receiveConfigInfo(
+                        "{\"schemaVersion\":3,\"cacheMatching\":{" + invalidField + "}}");
+                assertThat(configuration.getKvcmRuntimeConfig()).isSameAs(updated);
+                assertThat(configService.loadBalanceConfig().kvcmCacheMatching()).isSameAs(updated);
+            }
+
+            listener.getValue().receiveConfigInfo("""
+                    {"schemaVersion":3,"cacheMatching":{"backendTypes":[]}}
+                    """);
+            assertThat(configuration.getKvcmRuntimeConfig().getBackendTypes()).isEmpty();
+            assertThat(configuration.getKvcmRuntimeConfig().getTopKHostCount()).isEqualTo(7);
+            assertThat(updated.getBackendTypes()).hasSize(2);
+        } finally {
+            configService.close();
+        }
     }
 
     @Test

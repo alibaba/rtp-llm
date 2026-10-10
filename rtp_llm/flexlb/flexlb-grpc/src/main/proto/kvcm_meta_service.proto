@@ -16,17 +16,16 @@ enum ErrorCode {
   INTERNAL_ERROR = 3;
   SERVICE_NOT_READY = 4;
   INVALID_ARGUMENT = 5;
-  DUPLICATE_ENTITY = 6;
+  DUPLICATE_ENTITY = 6; // 注册时如果发现模型信息不同，返回这个
   REACH_MAX_ENTITY_CAPACITY = 7;
   INSTANCE_NOT_EXIST = 8;
-  SERVER_NOT_LEADER = 9;
+  SERVER_NOT_LEADER = 9; // 高可用部署模式下，请求的接口只能在leader执行但请求的节点不是leader
   NODE_NOT_REGISTERED = 10;
   SNAPSHOT_IN_PROGRESS = 11;
-  reserved 12;
+  reserved 12; // DELTA_IN_PROGRESS was removed: admitted deltas wait behind the snapshot gate.
   SNAPSHOT_RATE_LIMITED = 13;
   SNAPSHOT_REQUIRED = 14;
-  // The upstream schema also leaves 15-19 and 21-99 unassigned.
-  // Future values must follow upstream numbering.
+
   IO_ERROR = 20;
   UNKNOWN_ERROR = 100;
   ERROR_MAX = 65535;
@@ -71,30 +70,38 @@ enum QueryType {
   QT_PREFIX_MATCH_WITH_MAMBA = 4;
 }
 
+enum StorageType {
+  ST_UNSPECIFIED = 0;
+  ST_3FS = 1;
+  ST_MOONCAKE = 2;
+  ST_TAIRMEMPOOL = 3;
+  ST_NFS = 4;
+  ST_VCNS_3FS = 5;
+  ST_DUMMY = 6;
+  ST_EVENT_REPORT_L1P5 = 7;
+  ST_EVENT_REPORT_L2 = 8;
+  ST_TAIRMEMPOOL_SSD = 9;
+}
+
 message GetHostCacheStateRequest {
   string trace_id = 1;
   string instance_id = 2;
   QueryType query_type = 3;
-  repeated int64 block_cache_keys = 4;  // Ordered prompt block cache keys.
-  repeated string medium = 5;           // Empty means all storage media.
-  reserved 6;
-  reserved "p2p_host_count";
-  // Number of logical engines with the longest local match to compute remote hits for.
-  // Zero computes local matches only.
-  int32 global_kvs_host_count = 7;
-  bool enable_p2p = 8;
+  repeated int64 block_cache_keys = 4;   // 请求 prompt 的有序 block cache keys
+  repeated string medium = 5;            // 要匹配的介质列表；为空时考虑所有介质
+  int32 top_k_host_count = 7; // 按 local 降序选前 N 个逻辑引擎计算其他cache来源(p2p、tairmempool)；0 表示所有host仅计算local
+  // 对按 local 降序选出的 top_k_host_count 个 host，在本地缓存基础上，
+  // 合并以下类型的缓存，计算联合前缀命中块数 global（包含 local）：
+  // - ST_TAIRMEMPOOL：TairMempool 中的缓存。
+  // - ST_EVENT_REPORT_L2：其他节点可通过 P2P 获取的 Vineyard 缓存。
+  // 仅支持上述类型，可同时选择，顺序无关；本字段不影响 local 的计算。
+  repeated StorageType backend_types = 8;
 }
 
 message HostCacheMatch {
-  // Logical worker identity emitted by the KVCM subscriber: ip:port@engineIndex.
-  // A legacy physical ip:port key is accepted only for an unambiguous N=1 worker.
-  string host_ip_port = 1;
-  int64 local = 2;                    // Local continuous prefix matches.
-  reserved 3, 4;
-  reserved "p2p_1_fetch", "p2p_1_total_match";
-  // Continuous prefix matches from local, P2P and remote pool sources combined,
-  // including local.
-  int64 global = 5;
+  string host_ip_port = 1;   // 必须与 Master 中 workerStatus.getIpPort() 的格式完全一致
+  int64 local = 2;           // 本地前缀匹配的 block 数
+  int64 global = 5; // 本地+p2p + tairmempool来源联合后的前缀命中块数，包含 local
 }
 
 message GetHostCacheStateResponse {
