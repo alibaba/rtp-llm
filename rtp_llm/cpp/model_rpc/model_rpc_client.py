@@ -1367,7 +1367,7 @@ class ModelRpcClient(object):
         last_response = None
 
         try:
-            if input_pb.multimodal_inputs:
+            if input_pb is not None and input_pb.multimodal_inputs:
                 # GreenNet content-safety gate: block before prefill until the VIT
                 # encoder's inspection verdict lands. A violation raises
                 # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
