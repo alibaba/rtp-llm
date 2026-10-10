@@ -12,6 +12,7 @@ import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
@@ -28,8 +29,10 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongConsumer;
+import java.util.stream.LongStream;
 
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.await;
 import static org.flexlb.balance.scheduler.RequestLifecycleTestSupport.awaitCondition;
@@ -46,6 +49,67 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class GlobalQueueProgressTest {
+    @Test
+    void concurrentArrivalsNeverExceedGlobalQueueCapacity() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.config.getScheduler().setMaxQueuedRequests(2);
+            LongStream.rangeClosed(1, 20).parallel().forEach(id -> f.submit(id, "a"));
+
+            assertEquals(2, f.scheduler.getQueuedRequestCount());
+            assertEquals(18, f.requests.values().stream()
+                    .filter(CompletableFuture::isDone)
+                    .map(CompletableFuture::join)
+                    .filter(response -> response.getCode() == StrategyErrorType.QUEUE_FULL.getErrorCode())
+                    .count());
+        }
+    }
+
+    @Test
+    void globalQueueRejectsAtCapacityAndAcceptsAfterSpaceIsFreed() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.config.getScheduler().setMaxQueuedRequests(1);
+            f.submit(1, "a");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+            assertEquals(1, f.scheduler.getQueuedRequestCount());
+
+            f.submit(2, "a");
+            Response rejected = f.requests.get(2L).join();
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), rejected.getCode());
+            assertEquals(1, f.scheduler.getQueuedRequestCount());
+            assertFalse(f.selected.contains(2L));
+
+            f.requests.get(1L).complete(new Response());
+            awaitCondition(() -> f.scheduler.getQueuedRequestCount() == 0);
+            f.submit(3, "a");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 1);
+            assertFalse(f.requests.get(3L).isDone());
+        }
+    }
+
+    @Test
+    void globalQueueUsesUpdatedCapacityForNewArrivals() throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+            f.config.getScheduler().setMaxQueuedRequests(2);
+            f.submit(1, "a");
+            f.submit(2, "a");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 2);
+
+            FlexlbConfig reduced = SchedulingTestConfig.batchConfig();
+            reduced.getScheduler().setMaxQueuedRequests(1);
+            f.currentConfig.set(reduced);
+            f.submit(3, "a");
+            assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), f.requests.get(3L).join().getCode());
+            assertEquals(2, f.scheduler.getQueuedRequestCount());
+
+            FlexlbConfig increased = SchedulingTestConfig.batchConfig();
+            increased.getScheduler().setMaxQueuedRequests(3);
+            f.currentConfig.set(increased);
+            f.submit(4, "a");
+            awaitCondition(() -> f.scheduler.getBlockedRequestCount() == 3);
+            assertFalse(f.requests.get(4L).isDone());
+        }
+    }
+
     @Test
     void completedBacklogDoesNotDelayRefillingAReleasedSlot() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
@@ -282,6 +346,7 @@ class GlobalQueueProgressTest {
 
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
+        private final AtomicReference<FlexlbConfig> currentConfig = new AtomicReference<>(config);
         private final PlacementAvailability availability = new PlacementAvailability();
         private final AtomicInteger aSlots = new AtomicInteger();
         private final Map<Long, RouteAdmission> routes = new ConcurrentHashMap<>();
@@ -319,7 +384,7 @@ class GlobalQueueProgressTest {
             }
             SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
-            when(service.loadBalanceConfig()).thenReturn(config);
+            when(service.loadBalanceConfig()).thenAnswer(ignored -> currentConfig.get());
             DefaultRouter router = mock(DefaultRouter.class);
             when(router.resolvePolicyGroup(any())).thenAnswer(i -> groups.get(((BalanceContext) i.getArgument(0)).getRequestId()));
             EndpointRegistry endpoints = mock(EndpointRegistry.class);

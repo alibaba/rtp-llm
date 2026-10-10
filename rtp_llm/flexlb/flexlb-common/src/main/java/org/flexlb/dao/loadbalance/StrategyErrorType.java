@@ -19,6 +19,7 @@ public enum StrategyErrorType {
     INVALID_REQUEST(8406, false),
 
     // queue error
+    QUEUE_FULL(8502, false),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 

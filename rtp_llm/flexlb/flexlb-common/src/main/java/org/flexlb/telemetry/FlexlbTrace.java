@@ -98,7 +98,8 @@ public final class FlexlbTrace {
         if (code == StatusEnum.INTERNAL_ERROR.getCode()) {
             return "FLEXLB_INTERNAL_ERROR";
         }
-        if (code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
+        if (code == StrategyErrorType.QUEUE_FULL.getErrorCode()
+                || code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
                 || code == StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode()
                 || code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()
                 || code == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
