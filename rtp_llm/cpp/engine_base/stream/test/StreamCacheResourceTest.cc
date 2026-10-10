@@ -1353,6 +1353,23 @@ TEST_F(StreamCacheResourceTest, testAllocatorLoadFailureIsTerminal) {
     EXPECT_EQ(stream_->deviceReuseLength(), 0);
 }
 
+TEST_F(StreamCacheResourceTest, AllocatorLoadTimeoutPreservesDeadlineStatus) {
+    prepareResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    resource.allocator_load_context_ = std::make_shared<CompletedAsyncContext>(
+        ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "remote cache transfer timed out"));
+
+    const auto status = resource.waitForAllocatorLoad();
+
+    EXPECT_TRUE(absl::IsDeadlineExceeded(status));
+    EXPECT_EQ(resource.allocator_load_context_, nullptr);
+
+    resource.allocator_load_context_ = std::make_shared<CompletedAsyncContext>(
+        ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "remote cache transfer timed out"));
+    EXPECT_TRUE(resource.loadCacheDone());
+    EXPECT_EQ(stream_->statusInfo().code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+}
+
 TEST_F(StreamCacheResourceTest, testReleaseResetsAllocatorContextBeforeFreeingRequestBlocks) {
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();

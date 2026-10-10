@@ -378,6 +378,7 @@ cc_library(
     ] + torch_deps() + select({
         "//:using_remote_kv_cache": [
             "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend",
+            "//rtp_llm/cpp/utils:core_utils",
         ],
         "//conditions:default": [],
     }),

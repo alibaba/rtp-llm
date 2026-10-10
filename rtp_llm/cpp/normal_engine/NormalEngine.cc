@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
@@ -54,16 +55,20 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
-    // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
-    // raw device allocation backing out of direct KVCacheManager users and non-RDMA
-    // paths so PyTorch allocator behavior is unchanged elsewhere.
+bool shouldUseDeviceMallocKVCacheBacking(const PDSepConfig&      pd_sep_config,
+                                         const CacheStoreConfig& cache_store_config,
+                                         const KVCacheConfig&    kv_cache_config) {
+    const bool remote_cache_gdr = kv_cache_config.enable_remote_cache && remoteCacheGdrEnabled();
+    // Raw device allocation is required by PD cache-store RDMA and by the
+    // KVCM RemoteCache GDR backend. Keep the PyTorch allocator for deployments
+    // where neither registered-memory path is active.
     const bool pd_role = pd_sep_config.role_type == RoleType::PREFILL || pd_sep_config.role_type == RoleType::DECODE;
     const bool has_cache_store_server = pd_sep_config.cache_store_listen_port > 0
                                         || pd_sep_config.cache_store_rdma_listen_port > 0
                                         || pd_sep_config.remote_rpc_server_port > 0;
-    return pd_role && pd_sep_config.cache_store_rdma_mode
-           && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    const bool cache_store_rdma = pd_role && pd_sep_config.cache_store_rdma_mode
+                                  && (cache_store_config.cache_store_rdma_mode || has_cache_store_server);
+    return cache_store_rdma || remote_cache_gdr;
 }
 
 bool cacheStatusSnapshotEnabled() {
@@ -623,7 +628,8 @@ void NormalEngine::initializeAndPublishCacheManager(ResourceContext&            
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
     normalizeSystemPromptCacheConfig();
-    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_device_malloc_block_pool =
+        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
     const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
                                                   &propose_params_->getEngineInitParams().model_config_ :
                                                   nullptr;

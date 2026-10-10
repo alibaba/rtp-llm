@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #endif
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
@@ -288,7 +289,7 @@ bool KVCacheManager::init() {
                                                                      pd_sep_config_.role_type);
 
     if (use_device_malloc_block_pool_) {
-        RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use raw device malloc KV cache block-pool backing");
+        RTP_LLM_LOG_INFO("use raw device malloc KV cache block-pool backing");
         coordinator_manager_->setUseDeviceMallocBlockPool(true);
     }
 
@@ -313,7 +314,14 @@ bool KVCacheManager::init() {
     if (kv_cache_config_.enable_remote_cache) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
         storage_backend = std::make_shared<KVCMStorageBackend>(
-            config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, broadcast_manager);
+            config_,
+            kv_cache_config_,
+            runtime_config_,
+            parallelism_config_,
+            sp_config_,
+            broadcast_manager,
+            kv_cache_config_.enable_remote_cache && remoteCacheGdrEnabled(),
+            metrics_reporter_);
 #else
         RTP_LLM_LOG_ERROR("remote cache was requested, but this build does not include the KVCM client");
         return false;
@@ -715,7 +723,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
             return false;
         }
-        return backend->execute(request.remote_request(), *response.mutable_remote_response());
+        // A handled transfer failure is carried in remote_response so the
+        // coordinator can distinguish failure from timeout. Keep the RPC
+        // successful long enough to deliver that payload to rank 0.
+        (void)backend->execute(request.remote_request(), *response.mutable_remote_response());
+        return true;
 #else
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
         return false;

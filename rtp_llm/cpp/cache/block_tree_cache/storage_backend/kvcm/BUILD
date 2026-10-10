@@ -20,6 +20,7 @@ cc_library(
         ":client",
         ":group_policy",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",

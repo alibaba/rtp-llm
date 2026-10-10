@@ -47,12 +47,14 @@ kvcm_backend_test_deps = [
     "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend",
     "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/metrics:metrics",
     "//rtp_llm/cpp/model_rpc:model_rpc_pool",
     "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:env_util",
     "@havenask//aios/autil:json",
+    "@havenask//aios/kmonitor:kmonitor_client_cpp",
 ]
 
 cc_test_wrapper(

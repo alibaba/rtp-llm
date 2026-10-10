@@ -96,6 +96,12 @@ public:
                 createTransferClient,
                 (const std::string&, const kv_cache_manager::InitParams&),
                 (const, override));
+    MOCK_METHOD(std::unique_ptr<kv_cache_manager::TransferClient>,
+                createTransferClientWithMemory,
+                (const std::string&,
+                 const kv_cache_manager::InitParams&,
+                 const kv_cache_manager::ClientMemoryRegistrations&),
+                (const, override));
     MOCK_METHOD(std::unique_ptr<Subscriber>, createSubscriber, (bool), (const, override));
 };
 

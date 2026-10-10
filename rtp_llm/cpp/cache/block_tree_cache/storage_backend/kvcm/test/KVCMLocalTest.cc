@@ -1,9 +1,36 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <array>
+#include <cstdint>
+#include <unistd.h>
+
+#include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsData.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
 namespace {
+
+double snapshotGauge(kmonitor::MutableMetric* metric) {
+    if (metric == nullptr) {
+        ADD_FAILURE() << "metric is null";
+        return -1;
+    }
+    kmonitor::MetricsTags tags;
+    kmonitor::Metric*     gauge = metric->DeclareMetric(&tags);
+    if (gauge == nullptr) {
+        ADD_FAILURE() << "metric series is missing";
+        return -1;
+    }
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    gauge->Snapshot(&record, 1000);
+    EXPECT_TRUE(metric->UndeclareMetric(gauge));
+    if (record.Values().size() != 1) {
+        ADD_FAILURE() << "unexpected metric value count=" << record.Values().size();
+        return -1;
+    }
+    return std::stod(record.Values().front()->Value());
+}
 
 kvcm::KVCMConfigPtr makeLocalConfig() {
     auto location_infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
@@ -88,6 +115,15 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
     EXPECT_TRUE(save_ok);
     EXPECT_EQ(actual_uris, (kv_cache_manager::UriStrVec{"actual_uri"}));
 
+    const kv_cache_manager::UriStrVec failed_uris{"failed_uri"};
+    EXPECT_CALL(*transfer_ptr, SaveKvCaches(failed_uris, _, _))
+        .WillOnce(Return(std::make_pair(kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT,
+                                        kv_cache_manager::UriStrVec{"partial_uri"})));
+    const auto [failed_save_ok, failed_actual_uris] =
+        wrapper.saveKvCachesForTag("default", failed_uris, buffers);
+    EXPECT_FALSE(failed_save_ok);
+    EXPECT_TRUE(failed_actual_uris.empty());
+
     EXPECT_CALL(*meta_ptr,
                 FinishWrite("finish",
                             "session",
@@ -112,6 +148,63 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     EXPECT_ANY_THROW(backend->init(nullptr, {}, resolver));
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {}, resolver));
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
+}
+
+TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
+    auto             environment    = makeBackendEnvironment("kvcm_storage_backend_gdr_span");
+    auto             client_wrapper = std::make_shared<MockClientWrapper>();
+
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _))
+        .WillOnce(Invoke([&](const kvcm::ClientWrapper::ConfigMap&,
+                             kv_cache_manager::RoleType,
+                             const std::vector<kvcm::ClientWrapper::PoolRegistration>& registrations,
+                             const std::vector<std::string>&) {
+            if (registrations.size() != 1u) {
+                ADD_FAILURE() << "expected one GDR pool registration";
+                return false;
+            }
+            const auto& registration = registrations.front();
+            EXPECT_EQ(registration.span.base, environment.device_pool->getBaseAddress());
+            EXPECT_EQ(registration.span.size, environment.device_pool->getAllocationSizeBytes());
+            const long page_size = sysconf(_SC_PAGESIZE);
+            EXPECT_GT(page_size, 0);
+            if (page_size <= 0) {
+                return false;
+            }
+            EXPECT_EQ(reinterpret_cast<uintptr_t>(registration.span.base) % static_cast<size_t>(page_size), 0u);
+            EXPECT_EQ(registration.span.size % static_cast<size_t>(page_size), 0u);
+            EXPECT_TRUE(registration.memory_registrations.has_value());
+            if (!registration.memory_registrations.has_value()) {
+                return false;
+            }
+            EXPECT_EQ(registration.memory_registrations->gpu.size(), 1u);
+            if (registration.memory_registrations->gpu.size() != 1u) {
+                return false;
+            }
+            EXPECT_EQ(registration.memory_registrations->gpu.front().size,
+                      environment.device_pool->getAllocationSizeBytes());
+            return true;
+        }));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment,
+                               singleRankConfig(),
+                               client_wrapper,
+                               /*broadcast_manager=*/nullptr,
+                               /*metrics_reporter=*/nullptr,
+                               /*gdr_enabled=*/true);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+}
+
+TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {
+    FunctionResponsePB response;
+    response.mutable_remote_response();
+    std::string serialized;
+    ASSERT_TRUE(response.SerializeToString(&serialized));
+
+    FunctionResponsePB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(serialized));
+    ASSERT_TRUE(parsed.has_remote_response());
+    EXPECT_EQ(parsed.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_UNSPECIFIED);
 }
 
 TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
@@ -289,9 +382,58 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     ASSERT_TRUE(observation.success);
     ASSERT_NE(observation.match_meta, nullptr);
 
+    const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
         .WillOnce(Return(false));
     EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
+}
+
+TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesDestinationBlock) {
+    auto environment    = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
+    auto metrics_reporter =
+        std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper, nullptr, metrics_reporter);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
+    ASSERT_NE(quarantine_metrics, nullptr);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
+
+    kv_cache_manager::Locations locations{
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
+    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+    auto observation = match(*backend.backend, makeStorageRequest(environment));
+    ASSERT_TRUE(observation.success);
+    ASSERT_NE(observation.match_meta, nullptr);
+
+    const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
+    client_wrapper->load_status = kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag(_, _, _, _)).Times(0);
+    const auto error =
+        readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
+    EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+
+    EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
+    const auto blocked_read = readResult(*backend.backend, makeStorageRequest(environment), nullptr);
+    EXPECT_EQ(blocked_read.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).Times(0);
+    const auto blocked_match = match(*backend.backend, makeStorageRequest(environment));
+    EXPECT_FALSE(blocked_match.success);
+    EXPECT_EQ(blocked_match.matched_blocks_num, 0u);
+
+    backend.backend->shutdown();
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 0);
 }
 
 }  // namespace

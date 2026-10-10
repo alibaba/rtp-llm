@@ -174,18 +174,18 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         return;
     }
     if (storage_request_.empty()) {
-        onBackendRead(/*success=*/true);
+        onBackendRead(ErrorInfo::OkStatus());
         return;
     }
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
-    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak](bool success) {
+    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak](ErrorInfo error) {
         if (auto context = weak.lock()) {
-            context->onBackendRead(success);
+            context->onBackendRead(std::move(error));
         }
     });
 }
 
-void LoadAsyncContext::onBackendRead(bool success) {
+void LoadAsyncContext::onBackendRead(ErrorInfo error) {
     bool                    notify = false;
     SettlementReadyCallback settlement_ready_callback;
     {
@@ -193,10 +193,11 @@ void LoadAsyncContext::onBackendRead(bool success) {
         if (state_.load() != State::PENDING || !backend_pending_) {
             return;
         }
-        if (success) {
+        if (error.ok()) {
             matched_blocks_ = backend_matched_blocks_;
         } else {
             has_failure_ = true;
+            error_info_  = std::move(error);
         }
         backend_pending_ = false;
         finishIfReadyLocked(notify, settlement_ready_callback);
@@ -246,6 +247,9 @@ void LoadAsyncContext::markAborted() {
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
+        if (error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load context aborted");
+        }
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -292,6 +296,9 @@ bool LoadAsyncContext::completeTransfers(size_t count, bool success) {
             return false;
         }
         has_failure_ = has_failure_ || !success;
+        if (!success && error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load transfer failed");
+        }
         remaining_transfer_count_ -= count;
         finishIfReadyLocked(notify, settlement_ready_callback);
     }
@@ -310,7 +317,11 @@ bool LoadAsyncContext::settle(bool success) {
         if (state_.load() != State::PENDING || !settlement_ready_) {
             return false;
         }
-        state_.store(success && !has_failure_ ? State::SUCCEEDED : State::FAILED);
+        const bool completed_successfully = success && !has_failure_;
+        if (!completed_successfully && error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
+        }
+        state_.store(completed_successfully ? State::SUCCEEDED : State::FAILED);
     }
     notifyCompletion();
     return true;
@@ -325,6 +336,9 @@ bool LoadAsyncContext::onTaskFail() {
         }
         remaining_transfer_count_ = 0;
         backend_pending_          = false;
+        if (error_info_.ok()) {
+            error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load task failed");
+        }
         state_.store(State::FAILED);
     }
     notifyCompletion();
@@ -372,9 +386,7 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done()) {
             run_now = true;
-            if (!success()) {
-                error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
-            }
+            error   = completionErrorLocked();
         } else {
             callbacks_.push_back(std::move(callback));
         }
@@ -384,14 +396,19 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
     }
 }
 
+ErrorInfo LoadAsyncContext::completionErrorLocked() const {
+    if (state_.load() == State::FAILED && error_info_.ok()) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+    }
+    return error_info_;
+}
+
 void LoadAsyncContext::notifyCompletion() {
     std::vector<DoneCallback> callbacks;
     ErrorInfo                 error = ErrorInfo::OkStatus();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!success()) {
-            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
-        }
+        error = completionErrorLocked();
         callbacks.swap(callbacks_);
     }
     cv_.notify_all();
@@ -407,6 +424,11 @@ bool LoadAsyncContext::done() const {
 
 bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
+}
+
+ErrorInfo LoadAsyncContext::errorInfo() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return completionErrorLocked();
 }
 
 MallocStatus LoadAsyncContext::mallocStatus() const {
