@@ -405,10 +405,9 @@ class MasterActionsTest(unittest.TestCase):
             self.ctx,
             {
                 "rows": empty,
-                "metric": "ha_gate/wrong_error_code",
+                "metric": "ha_gate/non_ok_count",
                 "op": "eq",
                 "expected": 0,
-                "code": 8431,
                 "min_samples": 5,
             },
             self.deadline,
@@ -416,7 +415,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual("ERROR", verdict.checks[0].status)
 
 
-    def test_one_switched_request_is_not_replaced_by_one_percent_threshold(self):
+    def test_target_share_keeps_one_switched_request_visible(self):
         self.manager.master_instance_target.return_value = "B"
         rows = [{"master_target": "A"}] * 999 + [{"master_target": "B"}]
         handle = self.ctx.register_resource("ha_rows", rows)
@@ -424,10 +423,10 @@ class MasterActionsTest(unittest.TestCase):
             self.ctx,
             {
                 "rows": handle,
-                "metric": "ha_gate/target_count",
+                "metric": "ha_gate/target_share",
                 "target": "B",
                 "op": "ge",
-                "expected": 1,
+                "expected": 0.001,
                 "min_samples": 1,
             },
             self.deadline,
@@ -532,40 +531,6 @@ class MasterActionsTest(unittest.TestCase):
                    return_value={"prefill": ["P1", "P2"]}), self.assertRaisesRegex(
                        ValueError, "known Prefill"):
             ha._client_check(self.ctx, params, self.deadline)
-
-    def test_ha_handover_peak_balance_counts_failed_assigned_requests(self):
-        rows = self.ctx.register_resource("ha_rows", [
-            {"send_start_epoch_ms": 11_000 + (i % 5) * 1000,
-             "status": "exception" if i < 5 else "ok",
-             "prefill": "P0" if i < 6 else "P1"}
-            for i in range(8)
-        ] + [{"send_start_epoch_ms": 11_020, "status": "schedule_error", "prefill": None}])
-        params = dict(rows=rows, metric="ha_gate/prefill_peak_skew", op="le",
-                      expected=2.0, min_samples=5)
-        with patch("runtime.mock_control.topology_pools",
-                   return_value={"prefill": ["P0", "P1", "P2", "P3"]}):
-            result = ha._client_check(self.ctx, params, self.deadline)
-            self.assertEqual("FAIL", result.checks[0].status)
-            self.assertEqual(3.0, result.output["actual"])
-            missing = ha._client_check(self.ctx, {**params, "min_samples": 10}, self.deadline)
-            self.assertEqual("ERROR", missing.checks[0].status)
-            self.assertEqual("INVALID", missing.checks[0].evidence["validity"])
-
-    def test_ha_handover_balance_uses_five_seconds_at_lower_qps(self):
-        pool = [f"P{i}" for i in range(125)]
-        rows = self.ctx.register_resource("ha_rows", [
-            {"send_start_epoch_ms": 11_000 + (i // 60) * 1000,
-             "status": "ok", "prefill": pool[i % len(pool)]}
-            for i in range(300)
-        ])
-        params = dict(rows=rows, metric="ha_gate/prefill_peak_skew", op="le",
-                      expected=4.0, min_samples=200)
-        with patch("runtime.mock_control.topology_pools",
-                   return_value={"prefill": pool}):
-            result = ha._client_check(self.ctx, params, self.deadline)
-        self.assertEqual("PASS", result.checks[0].status)
-        self.assertEqual(1.25, result.output["actual"])
-
 
     def test_strict_parameters_and_typed_prior_fault(self):
         plan = PlanContext("fault", {})

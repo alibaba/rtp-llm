@@ -246,8 +246,6 @@ def _client_check_validate(params, plan):
             "expected",
             "target",
             "route",
-            "error_kind",
-            "code",
             "min_samples",
             "warning_profiles",
         },
@@ -271,9 +269,9 @@ def _client_check(ctx, params, deadline):
 
     target = None
     prefill_pool = ()
-    if metric in {"target_share", "target_count"}:
+    if metric == "target_share":
         target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
-    elif metric in {"prefill_max_share", "prefill_peak_skew"}:
+    elif metric == "prefill_max_share":
         from runtime.mock_control import topology_pools
 
         prefill_pool = topology_pools(ctx, deadline)["prefill"]

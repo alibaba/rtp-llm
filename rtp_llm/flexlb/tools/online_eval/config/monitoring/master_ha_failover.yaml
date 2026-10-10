@@ -89,14 +89,6 @@ produced:
     value_kind: gauge
     labels:
     - master
-  ha_gate/business_rate_above_one:
-    producer: ha_gates
-    source_type: client_journal
-    unit: ratio
-    value_kind: scalar
-    labels:
-    - window
-    - selection
   ha_gate/duplicate_ids:
     producer: ha_gates
     source_type: client_journal
@@ -105,31 +97,7 @@ produced:
     labels:
     - window
     - selection
-  ha_gate/error_kind_count:
-    producer: ha_gates
-    source_type: client_journal
-    unit: requests
-    value_kind: scalar
-    labels:
-    - window
-    - selection
   ha_gate/failed_count:
-    producer: ha_gates
-    source_type: client_journal
-    unit: requests
-    value_kind: scalar
-    labels:
-    - window
-    - selection
-  ha_gate/failed_rate_above_one:
-    producer: ha_gates
-    source_type: client_journal
-    unit: ratio
-    value_kind: scalar
-    labels:
-    - window
-    - selection
-  ha_gate/failover_count:
     producer: ha_gates
     source_type: client_journal
     unit: requests
@@ -153,31 +121,7 @@ produced:
     labels:
     - window
     - selection
-  ha_gate/prefill_peak_skew:
-    producer: ha_gates
-    source_type: client_journal
-    unit: ratio
-    value_kind: scalar
-    labels:
-    - window
-    - selection
   ha_gate/route_count:
-    producer: ha_gates
-    source_type: client_journal
-    unit: requests
-    value_kind: scalar
-    labels:
-    - window
-    - selection
-  ha_gate/route_share:
-    producer: ha_gates
-    source_type: client_journal
-    unit: ratio
-    value_kind: scalar
-    labels:
-    - window
-    - selection
-  ha_gate/sample_count:
     producer: ha_gates
     source_type: client_journal
     unit: requests
@@ -193,14 +137,6 @@ produced:
     labels:
     - window
     - selection
-  ha_gate/target_count:
-    producer: ha_gates
-    source_type: client_journal
-    unit: requests
-    value_kind: scalar
-    labels:
-    - window
-    - selection
   ha_gate/target_share:
     producer: ha_gates
     source_type: client_journal
@@ -209,26 +145,10 @@ produced:
     labels:
     - window
     - selection
-  ha_gate/visible_terminal_count:
-    producer: ha_gates
-    source_type: client_journal
-    unit: requests
-    value_kind: scalar
-    labels:
-    - window
-    - selection
   ha_gate/visible_terminal_share:
     producer: ha_gates
     source_type: client_journal
     unit: ratio
-    value_kind: scalar
-    labels:
-    - window
-    - selection
-  ha_gate/wrong_error_code:
-    producer: ha_gates
-    source_type: client_journal
-    unit: requests
     value_kind: scalar
     labels:
     - window

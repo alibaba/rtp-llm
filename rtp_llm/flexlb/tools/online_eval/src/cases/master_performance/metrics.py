@@ -7,13 +7,12 @@ from monitoring.metric_store import series_row
 
 
 GATE_POPULATIONS = {
-    'arrival_cohort': frozenset({'sent_qps', 'cohort_requests', 'success_requests',
-        'cohort_error_rate', 'slo_fraction', 'goodput_rps', 'input_goodput', 'output_goodput',
+    'arrival_cohort': frozenset({'cohort_requests', 'slo_fraction', 'goodput_rps',
         'offered_qps_deviation', 'pacing_lag_max_ms'}),
     'whole_run_terminals': frozenset({'error_rate'}),
     'completion_window_successes': frozenset({'input_tps', 'output_tps'}),
     'arrival_cohort_successes': frozenset({'ttft_p99_ms', 'e2e_p99_ms', 'tpot_p99_ms'}),
-    'full_request_lifetimes': frozenset({'inflight_start', 'inflight_end', 'inflight_growth_rps'}),
+    'full_request_lifetimes': frozenset({'inflight_growth_rps'}),
 }
 ENGINE_METRICS = frozenset({'rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'rtp_llm_generate_tps'})
 
@@ -55,7 +54,7 @@ def values(evidence, definitions=None):
 
 
 def produce(directory, evidence, result):
-    from monitoring.metric_store import MetricStore, export_metrics, publish
+    from monitoring.metric_store import MetricContractError, MetricStore, export_metrics, publish
     from monitoring.query_plan import load_plan
     export_metrics(directory, load_plan("master_performance.yaml"))
     store = MetricStore.read(directory)
@@ -71,16 +70,32 @@ def produce(directory, evidence, result):
                     path=str(directory) + "/performance-gate-evidence.json",
                     window=evidence.get("window"), calculation=store.document["definitions"][identity]["calculation"]))
 
-    for name, value in result["metrics"].items():
-        key = name.split("/")[-1]
-        identity = "performance_gate/" + key
-        if name.startswith("mock/") and not key.endswith("_engine_count"):
-            identity += "_scrape_engine_mean"
-        publish(store, identity, store.document["definitions"][identity],
-                [series_row([[evidence["window"]["end_epoch_ms"]/1000, value]],
-                            epoch=epoch, source="performance_gate", labels={})],
-                producer="performance_requests", evidence=dict(
-                    path=str(directory) + "/performance-gate-evidence.json",
-                    window=evidence["window"], measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
-                    algorithm="absolute_performance_gate"))
+    # Analysis retains its explanatory intermediates; publish only declared
+    # scalar measurements. Missing declared results are contract errors.
+    if result["metrics"]:
+        for identity, definition in store.document["definitions"].items():
+            if definition.get("producer") != "performance_requests" or definition["value_kind"] != "scalar":
+                continue
+            key = identity.removeprefix("performance_gate/")
+            if key.endswith("_scrape_engine_mean"):
+                name = "mock/" + key.removesuffix("_scrape_engine_mean")
+            elif key.endswith("_engine_count"):
+                name = "mock/" + key
+            else:
+                name = key
+            if name in result["metrics"]:
+                value = result["metrics"][name]
+            elif name.startswith("mock/") and not evidence["criteria"].get("engine_tps"):
+                continue
+            elif name.startswith("mock/") and result["verdict"] == "INVALID":
+                value = None
+            else:
+                raise MetricContractError("missing declared performance result: " + identity)
+            publish(store, identity, definition,
+                    [series_row([[evidence["window"]["end_epoch_ms"]/1000, value]],
+                                epoch=epoch, source="performance_gate", labels={})],
+                    producer="performance_requests", evidence=dict(
+                        path=str(directory) + "/performance-gate-evidence.json",
+                        window=evidence["window"], measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID",
+                        algorithm="absolute_performance_gate"))
     store.save(directory)

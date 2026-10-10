@@ -80,7 +80,7 @@ NUMERIC_PARAMETERS = {
 def validate_client_criterion(params, *, path="client criterion"):
     """Validate selected and inactive YAML criteria without accessing live resources."""
     p = copy.deepcopy(fields(params, {"metric", "op", "expected"}, path,
-        optional={"target", "route", "error_kind", "code", "min_samples", "warning_profiles"}))
+        optional={"target", "route", "min_samples", "warning_profiles"}))
     if type(p["metric"]) is not str or p["metric"] not in {"ha_gate/" + name for name in HA_METRICS}:
         raise ValueError("unknown client metric/comparison")
     if type(p["expected"]) not in (int, float) or not math.isfinite(p["expected"]):
@@ -96,11 +96,7 @@ def validate_client_criterion(params, *, path="client criterion"):
         raise ValueError("client check must require actual samples")
     required = {
         "target_share": "target",
-        "target_count": "target",
-        "route_share": "route",
         "route_count": "route",
-        "error_kind_count": "error_kind",
-        "wrong_error_code": "code",
     }.get(p["metric"].split("/", 1)[1])
     if required and required not in p:
         raise ValueError(f"{p['metric']} requires {required}")
@@ -108,15 +104,9 @@ def validate_client_criterion(params, *, path="client criterion"):
         raise ValueError("client target must be A or B")
     if "route" in p and p["route"] not in {"master", "fallback", "failed"}:
         raise ValueError("invalid expected route")
-    if "error_kind" in p and p["error_kind"] not in {
-        "none",
-        "transport",
-        "business",
-        "deadline",
-    }:
-        raise ValueError("invalid expected error kind")
-    if "code" in p and (type(p["code"]) is not int or p["code"] <= 0):
-        raise ValueError("error code must be positive integer")
+    unused = ({"target", "route"} & set(p)) - ({required} if required else set())
+    if unused:
+        raise ValueError(f"{p['metric']} does not consume {sorted(unused)}")
     return p
 
 
@@ -152,7 +142,7 @@ def read_cycle(case):
     for name, criterion in data.checks.items():
         fields(criterion, {"windows", "metric", "unit", "op", "expected", "min_samples"},
                "parameters.checks." + name,
-               optional={"target", "route", "error_kind", "code", "warning_profiles"})
+               optional={"target", "route", "warning_profiles"})
         check_windows(criterion["windows"], available=window_names | {"full_run"},
                       path=f"parameters.checks.{name}.windows", single=True)
         validate_client_criterion({k: v for k, v in criterion.items() if k not in {"windows", "unit"}},

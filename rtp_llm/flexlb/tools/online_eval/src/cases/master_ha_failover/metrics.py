@@ -148,7 +148,7 @@ def produce(directory, payload):
 def gate_labels(params):
     """The cohort and predicate identify the frozen scalar, not its publish timestamp."""
     return dict(window=json.dumps(params["rows"], sort_keys=True),
-                selection=json.dumps({k: params[k] for k in ("target", "route", "error_kind", "code")
+                selection=json.dumps({k: params[k] for k in ("target", "route")
                                       if k in params}, sort_keys=True))
 
 

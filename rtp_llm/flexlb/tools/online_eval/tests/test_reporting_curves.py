@@ -155,7 +155,7 @@ def test_ha_removes_queries_without_consumers_but_keeps_produced_measurements():
                'flexlb_app_flexlb_batcher_queue_size'}
     assert not removed & plan['sources']['master'].keys()
     assert 'schedule_p99_seconds' not in plan['sources']['client']
-    assert len(plan['produced']) == 29
+    assert len(plan['produced']) == 19
 
 
 def test_unused_curve_declaration_cannot_masquerade_as_presentation():

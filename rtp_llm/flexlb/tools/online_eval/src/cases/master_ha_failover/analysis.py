@@ -53,14 +53,8 @@ class _ClientMetricInput:
     def count(self, field, value):
         return sum(row[field] == value for row in self.rows)
 
-    def count_param(self, field, parameter):
-        return sum(row[field] == self.params[parameter] for row in self.rows)
-
     def share(self, count):
         return count / len(self.rows) if self.rows else 0
-
-    def rate_above_one(self, count):
-        return self.share(count) if count > 1 else 0
 
 
 def _prefill_max_share(source):
@@ -71,49 +65,20 @@ def _prefill_max_share(source):
     return max(Counter(addresses).values()) / len(addresses)
 
 
-def _prefill_peak_skew(source):
-    pool = set(source.prefill_pool)
-    windows = prefill_assignment_windows(source.rows)
-    assigned = {row.get("prefill") for row in source.rows if row.get("prefill")}
-    if not pool or not assigned <= pool:
-        raise ValueError("HA requests reference unknown Prefill endpoints")
-    eligible = [counts for counts in windows.values()
-                if sum(counts.values()) >= source.params["min_samples"]]
-    if not eligible:
-        raise ValueError("no HA rolling 5-second window has enough assigned Prefill samples")
-    return max(max(counts.values()) * len(pool) / sum(counts.values())
-               for counts in eligible)
-
-
 def _visible_terminal_count(source):
     return sum(row["status"] == "ok" or row["error_kind"] in {"deadline", "transport", "business"}
                for row in source.rows)
 
 
-def _wrong_error_code(source):
-    # This is a literal substring predicate; exact matching requires a structured code field.
-    return sum(str(source.params["code"]) not in str(row.get("error", "")) for row in source.rows)
-
-
 _CLIENT_METRICS = {
-    "sample_count": lambda s: len(s.rows),
     "success_rate": lambda s: s.share(s.count("status", "ok")),
     "non_ok_count": lambda s: sum(r["status"] != "ok" for r in s.rows),
-    "target_count": lambda s: s.count("master_target", s.target),
     "target_share": lambda s: s.share(s.count("master_target", s.target)),
-    "route_count": lambda s: s.count_param("route_path", "route"),
-    "route_share": lambda s: s.share(s.count_param("route_path", "route")),
-    "failover_count": lambda s: sum(r["failover"] is True for r in s.rows),
+    "route_count": lambda s: s.count("route_path", s.params["route"]),
     "duplicate_ids": lambda s: sum(count > 1 for count in Counter(r["rid"] for r in s.rows).values()),
-    "error_kind_count": lambda s: s.count_param("error_kind", "error_kind"),
-    "wrong_error_code": _wrong_error_code,
     "failed_count": lambda s: s.count("route_path", "failed"),
-    "failed_rate_above_one": lambda s: s.rate_above_one(s.count("route_path", "failed")),
-    "business_rate_above_one": lambda s: s.rate_above_one(s.count("error_kind", "business")),
-    "visible_terminal_count": _visible_terminal_count,
     "visible_terminal_share": lambda s: s.share(_visible_terminal_count(s)),
     "prefill_max_share": _prefill_max_share,
-    "prefill_peak_skew": _prefill_peak_skew,
 }
 HA_METRICS = frozenset(_CLIENT_METRICS)
 

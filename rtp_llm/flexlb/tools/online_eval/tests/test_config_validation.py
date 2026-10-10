@@ -94,20 +94,15 @@ def test_produced_definition_errors_are_configuration_errors(tmp_path, change, m
             load_plan('test.yaml')
 
 
-@pytest.mark.parametrize('name', sorted(HA_METRICS - {'prefill_max_share', 'prefill_peak_skew'}))
+@pytest.mark.parametrize('name', sorted(HA_METRICS - {'prefill_max_share'}))
 def test_empty_ha_windows_retain_zero_result(name):
-    assert measure_client_metric({'metric': 'ha_gate/'+name}, []) == 0
+    assert measure_client_metric({'metric': 'ha_gate/'+name, 'route': 'master'}, []) == 0
 
 
 def test_ha_count_and_rate_boundaries():
     rows = [dict(rid='same', failover=1, route_path='failed', error_kind='business',
                  error='1503') for _ in range(3)]
     assert measure_client_metric({'metric': 'ha_gate/duplicate_ids'}, rows) == 1
-    assert measure_client_metric({'metric': 'ha_gate/failover_count'}, rows) == 0
-    assert measure_client_metric({'metric': 'ha_gate/failed_rate_above_one'}, rows[:1]) == 0
-    assert measure_client_metric({'metric': 'ha_gate/failed_rate_above_one'}, rows) == 1
-    assert measure_client_metric({'metric': 'ha_gate/business_rate_above_one'}, rows) == 1
-    assert measure_client_metric({'metric': 'ha_gate/wrong_error_code', 'code': 503}, rows) == 0
     with pytest.raises(ValueError, match='unknown HA metric'):
         measure_client_metric({'metric': 'ha_gate/unknown'}, rows)
 

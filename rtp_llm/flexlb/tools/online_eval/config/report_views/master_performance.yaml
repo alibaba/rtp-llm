@@ -35,15 +35,6 @@ metrics:
   - mock/running_sum
   - mock/simulated_decode_ms_avg
   - mock/waiting_sum
-  - request/completed_qps
-  - request/arrival_success_ratio
-  - request/e2e_p99_ms
-  - request/tpot_p99_ms
-  - request/input_tokens_mean
-  - request/output_tokens_mean
-  - request/input_tps
-  - request/output_tps
-  - request/inflight
 charts:
   events:
     measure_start:
@@ -203,8 +194,8 @@ charts:
       color: '#eb2f96'
       hidden: false
       source_unit: s
-    request/sent_qps:
-      metric_id: request/sent_qps
+    client/actual_send_qps:
+      metric_id: client/actual_send_qps
       labels: {}
       name: 发送 QPS
       group: 流量
@@ -212,8 +203,8 @@ charts:
       axis: qps
       color: '#faad14'
       hidden: false
-    request/success_qps:
-      metric_id: request/success_qps
+    client/success_qps:
+      metric_id: client/success_qps
       labels: {}
       name: 成功 QPS
       group: 流量
@@ -221,8 +212,8 @@ charts:
       axis: qps
       color: '#2f54eb'
       hidden: false
-    request/error_qps:
-      metric_id: request/error_qps
+    client/error_qps:
+      metric_id: client/error_qps
       labels: {}
       name: 错误 QPS
       group: 流量
@@ -255,15 +246,15 @@ charts:
   - id: client-qps
     title: 发送 / 成功 / 失败 QPS
     curve_ids:
-    - request/sent_qps
-    - request/success_qps
-    - request/error_qps
+    - client/actual_send_qps
+    - client/success_qps
+    - client/error_qps
     axes:
       qps:
         title: 请求 / 秒
         position: left
-    caption: 发送按请求发出时间分桶，成功和失败按终态时间分桶，均为每秒请求数。
-    empty_caption: 缺少逐请求终态证据，无法绘制 QPS。
+    caption: 发送、成功和失败均来自客户端 Prometheus counter 的 rate 采样窗口（实际窗口见曲线来源）；展示采样趋势，不代表逐秒精确计数，也不用于整窗门禁。
+    empty_caption: 缺少客户端 Prometheus 采样，无法绘制 QPS；不以请求流水补曲线，也不补零。
   - id: latency
     title: TTFT / 调度等待 / Model forward
     curve_ids:

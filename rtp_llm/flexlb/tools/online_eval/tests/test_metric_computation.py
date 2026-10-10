@@ -45,10 +45,7 @@ def test_arrival_cohort_is_not_the_completion_window():
     evidence = dict(window=dict(start_epoch_ms=10250, end_epoch_ms=12250), criteria=dict(measure_s=2),
                     flow=dict(issued=[issued], records=[terminal]))
     perf = values(evidence)
-    assert perf['request/sent_qps'] == [[10.25, 1], [11.25, 0]]
-    assert perf['request/success_qps'] == [[10.25, 0], [11.25, 1]]
     assert perf['request/ttft_p99_ms'] == [[10.25, 123.456], [11.25, None]]
-    assert perf['request/arrival_success_ratio'] == [[10.25, 1], [11.25, None]]
     ha = _request_series([terminal], 10.25)
     assert ha['success'] == [dict(x=-.25, y=1)]
     assert ha['success'][0]['x'] + 10.25 == 10
@@ -76,8 +73,8 @@ def test_request_ledgers_exclude_sampled_twins_from_actual_query_plan(name):
     plan = load_plan(name + '.yaml')
     queries, _ = queries_for_targets(plan, {'client-flow': '', 'master-A': ''},
                                      lambda name: '{job="' + name + '"}', 1)
-    for metric in ('actual_send_qps', 'success_qps', 'error_qps', 'completed_qps',
-                   'ttft_p99_seconds', 'total_p99_seconds'):
+    for metric in (('actual_send_qps', 'success_qps', 'error_qps') if name == 'master_ha_failover' else ()) + (
+                   'completed_qps', 'ttft_p99_seconds', 'total_p99_seconds'):
         assert 'client-flow/' + metric not in queries
     if name == 'master_ha_failover':
         for metric in ('flexlb_app_flexlb_scheduler_inflight_size',
@@ -111,7 +108,7 @@ def test_performance_publication_uses_frozen_environment_epoch(tmp_path):
     e = evidence()
     e['provenance']['env_epoch'] = 4
     produce_performance(tmp_path, e, analyze(e))
-    rows = MetricStore.read(tmp_path).document['metrics']['request/sent_qps']
+    rows = MetricStore.read(tmp_path).document['metrics']['request/ttft_p99_ms']
     assert {row['epoch'] for row in rows} == {'4'}
 
 

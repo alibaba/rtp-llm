@@ -44,7 +44,7 @@ with patch('builtins.__import__', side_effect=guarded_import), \\
      patch.object(socket, 'create_connection', side_effect=AssertionError('network IO')):
     assert performance(performance_input)['verdict'] == 'PASS'
     assert cache(cache_input)['verdict'] == 'PASS'
-    assert measure_client_metric({'metric':'ha_gate/sample_count'}, [{}]) == 1
+    assert measure_client_metric({'metric':'ha_gate/non_ok_count'}, [{'status':'error'}]) == 1
 assert not any(name.split('.')[0] in {'reporting', 'runtime'} or name.startswith('cases.') and name.rsplit('.', 1)[-1] in {'program', 'actions', 'publication', 'report', 'metrics', 'panels', 'runtime'} for name in sys.modules)
 '''
     process = subprocess.run([sys.executable, '-c', script], input=json.dumps(documents),
@@ -94,19 +94,16 @@ def test_ha_metrics_use_explicit_targets_and_topology():
                  master_target='B' if i < 5 else 'A',
                  prefill='p0' if i < 4 else 'p1', send_start_epoch_ms=(100+i)*1000)
             for i in range(6)]
-    expected = dict(sample_count=6, success_rate=5/6, non_ok_count=1,
-                    target_share=5/6, target_count=5, route_share=5/6, route_count=5,
-                    failover_count=1, duplicate_ids=0, error_kind_count=1,
-                    wrong_error_code=5, failed_count=1, failed_rate_above_one=0,
-                    business_rate_above_one=0, visible_terminal_count=6,
-                    visible_terminal_share=1, prefill_max_share=4/5, prefill_peak_skew=8/5)
+    expected = dict(success_rate=5/6, non_ok_count=1, target_share=5/6, route_count=5,
+                    duplicate_ids=0, failed_count=1, visible_terminal_share=1,
+                    prefill_max_share=4/5)
     assert set(expected) == HA_METRICS
     for name, value in expected.items():
         params = dict(metric='ha_gate/'+name, route='master', error_kind='business',
                       code=503, min_samples=1)
         assert measure_client_metric(params, rows, target='B', prefill_pool=['p0','p1']) == value
-    with pytest.raises(ValueError, match='unknown Prefill'):
-        measure_client_metric(dict(metric='ha_gate/prefill_peak_skew', min_samples=1),
+    with pytest.raises(ValueError, match='known Prefill'):
+        measure_client_metric(dict(metric='ha_gate/prefill_max_share'),
                               rows, prefill_pool=['p0'])
     with pytest.raises(ValueError, match='unknown HA metric'):
         measure_client_metric(dict(metric='ha_gate/misspelled'), rows)

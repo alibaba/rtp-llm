@@ -212,13 +212,13 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(next(curve for curve in curves
                                   if curve["name"] == "D generate TPS")["points"],
                              [dict(x=0, y=120), dict(x=10, y=130)])
-            self.assertIn("成功 QPS", [c["name"] for p in panels for c in p["series"]])
+            self.assertNotIn("成功 QPS", [c["name"] for p in panels for c in p["series"]])
             archive.unlink()
             # A new artifact with neither query evidence nor frozen metrics.
             (Path(d) / "metrics.json").unlink()
             curves, _ = prepare(d, evidence(), analyze(evidence()))
             panels = report_panels(curves, evidence()["criteria"], view("master_performance.yaml"))
-            self.assertIn("发送 QPS", [c["name"] for p in panels for c in p["series"]])
+            self.assertNotIn("发送 QPS", [c["name"] for p in panels for c in p["series"]])
             self.assertTrue(any(p['caption'] for p in panels if not p['series']))
             # HTML must still exist for INVALID runs, with embedded plotting code.
             bundle = report(d, e, analyze(e))
@@ -330,16 +330,21 @@ class PerformanceGateTest(unittest.TestCase):
         prepare = metric_curves
 
         presentation = copy.deepcopy(view("master_performance.yaml"))
-        presentation["charts"]["curves"]["request/sent_qps"]["name"] = "YAML sent rate"
-        style = presentation["charts"]["curves"].pop("request/sent_qps")
+        presentation["charts"]["curves"]["client/actual_send_qps"]["name"] = "YAML sent rate"
+        style = presentation["charts"]["curves"].pop("client/actual_send_qps")
         presentation["charts"]["curves"]["sent_curve"] = style
         presentation["charts"]["panels"][1]["curve_ids"][0] = "sent_curve"
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(json.dumps(dict(start=100, end=110, step=1, targets={}, queries={
+                "client-flow/actual_send_qps": dict(promql="sum(rate(flexlb_client_actual_send_total[10s]))",
+                    result=[dict(metric={}, values=[[100, 7.5], [101, 8.5]])])})))
             curves, _ = prepare(d, e, analyze(e), presentation)
         selected = report_panels(curves, e["criteria"], presentation)
         self.assertEqual(selected[1]["series"][0]["name"], "YAML sent rate")
-        self.assertEqual(selected[1]["series"][0]["metric_id"], "request/sent_qps")
+        self.assertEqual(selected[1]["series"][0]["metric_id"], "client/actual_send_qps")
         self.assertEqual(selected[1]["series"][0]["curve_id"], "sent_curve")
         self.assertTrue(selected[1]["series"][0]["points"])
 
@@ -419,10 +424,9 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(store.select("mock/engine_count", labels={"role": "decode"})[0]["points"][0], [100, 4])
             self.assertEqual(store.select("mock/rtp_llm_context_tps_per_engine", labels={"role": "prefill"})[0]["points"][0], [100, 60000])
             self.assertEqual(by_name["TTFT p99"]["points"][0]["y"], 50)
-            self.assertEqual(store.select("request/arrival_success_ratio")[0]["points"][0][1], 1)
-            self.assertEqual(
-                sum(point[1] for point in store.select("request/output_tps")[0]["points"]), 792
-            )
+            self.assertNotIn("request/arrival_success_ratio", store.document["definitions"])
+            self.assertEqual(set(k for k in store.document["metrics"] if k.startswith("request/")),
+                             {"request/ttft_p99_ms"})
 
     def test_tail_cohort_and_actual_tokens_not_requested_budget(self):
         e = evidence()

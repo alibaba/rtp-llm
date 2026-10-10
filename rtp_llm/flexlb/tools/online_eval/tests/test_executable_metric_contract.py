@@ -25,6 +25,11 @@ def config(**changes):
     return result
 
 
+def calculation_spec():
+    return dict(producer='performance_requests', calculation=config(),
+                **describe_calculation(config(), windows={'measurement'}))
+
+
 def ledger():
     return RequestLedger([
         dict(rid='before', send_start_epoch_ms=9500, total_ms=1000, status='ok',
@@ -73,7 +78,7 @@ def test_calculator_choice_and_percentile_execute():
     dict(selection=dict(time_basis='completion')), dict(selection=[]),
 ])
 def test_invalid_calculation_is_rejected_at_load(tmp_path, change):
-    spec = copy.deepcopy(load_plan('master_performance.yaml')['produced']['request/input_tps'])
+    spec = calculation_spec()
     del spec['measurement']
     spec['calculation'].update(change)
     path = tmp_path/'case.yaml'
@@ -85,7 +90,7 @@ def test_invalid_calculation_is_rejected_at_load(tmp_path, change):
 @pytest.mark.parametrize('field,value', [('unit', 'ms'), ('source_type', 'prometheus'),
                                         ('value_kind', 'scalar'), ('labels', ['role'])])
 def test_declared_metadata_must_match_the_calculator(tmp_path, field, value):
-    spec = copy.deepcopy(load_plan('master_performance.yaml')['produced']['request/input_tps'])
+    spec = calculation_spec()
     del spec['measurement']
     spec[field] = value
     (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'request/input_tps': spec})))
@@ -102,7 +107,7 @@ def test_produced_metadata_is_generated_and_cannot_be_authored(tmp_path):
     descriptor = describe_calculation(config(), windows={'measurement'})
     assert descriptor['measurement'] == dict(method='token_throughput', population='measurement:completion:ok',
                                              accuracy='request_ledger', requires_request_identity=True)
-    spec = load_plan('master_performance.yaml')['produced']['request/input_tps']
+    spec = calculation_spec()
     (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'request/input_tps': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path), pytest.raises(ScenarioError, match='invalid produced metric'):
         load_plan('case.yaml')
@@ -124,7 +129,7 @@ def test_case_calculation_contract_rejects_wrong_source_and_unknown_output(tmp_p
 def test_new_request_projection_needs_no_case_code():
     from test_performance_gate import evidence
     data = evidence()
-    definition = copy.deepcopy(definitions(load_plan('master_performance.yaml'))['request/input_tps'])
+    definition = calculation_spec()
     actual = values(data, {'request/custom_input_rate': definition})
     assert list(actual) == ['request/custom_input_rate']
     assert actual['request/custom_input_rate']
@@ -135,7 +140,7 @@ def test_publication_rejects_forged_measurement_and_preserves_frozen_calculation
     data = evidence()
     produce(tmp_path, data, analyze(data))
     store = MetricStore.read(tmp_path)
-    metric = 'request/input_tps'
+    metric = 'request/ttft_p99_ms'
     row = store.document['metrics'][metric][0]
     assert row['provenance']['calculation_module'] == 'analysis.request_metrics'
     assert len(row['provenance']['calculation_sha256']) == 64
@@ -172,6 +177,6 @@ def test_invalid_journal_publishes_missing_samples_without_zero_fallback(tmp_pat
     result = analyze(data)
     assert result['verdict'] == 'INVALID'
     produce(tmp_path, data, result)
-    row = MetricStore.read(tmp_path).document['metrics']['request/input_tps'][0]
+    row = MetricStore.read(tmp_path).document['metrics']['request/ttft_p99_ms'][0]
     assert row['status'] == 'ABSENT'
     assert row['points'] == []

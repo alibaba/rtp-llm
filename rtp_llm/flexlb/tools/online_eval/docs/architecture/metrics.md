@@ -93,6 +93,8 @@ calculation:
 | counter 命中率 | 明确全 fleet 或 survivor 群体、差分边界及 counter reset 检查；来源均可为 Prometheus，但统计对象不同 |
 | HTTP 可回读与 debug ledger | 可回读不是 scrape `up`；用 debug 证据必须声明具体字段和 `debug_api` 来源，不能把 engine 负载当请求分配归属 |
 
+指标定义按实际消费准入：检查使用的测量、报告曲线，以及有明确排障用途的诊断指标。注册计算能力不要求把所有可计算值加入每个 case 的 plan；只在所属场景声明需要的输出。分子、分母等算法中间值保存在冻结分析证据中，除非需要独立消费，否则不另注册指标。请求账本可同时支持精确门禁和少量专属曲线，普通趋势优先读取 Prometheus；展示采样缺失不能以账本重算补图。
+
 每条指标的权威口径在冻结的 `measurement` 中，包括 `method`、`population`、`accuracy` 和 `requires_request_identity`；门禁绑定的 ID 指定判定权威，view 绑定的 ID 指定展示口径。`exclude` 是集合选择，不是指标失效后的替代链。若明确需要两种口径作诊断，应分别保留 ID、声明用途，不计算“数值应相同”的漂移告警。
 
 请求身份需求不适合通过给 Prometheus 增加逐请求标签解决。若 exporter 预先维护固定 cohort 或路由维度的统计，PromQL 可以查询这些结果，但终态配对与归因仍由 exporter 完成，且需要单独验证其 cohort 和完整性契约。
