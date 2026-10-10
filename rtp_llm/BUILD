@@ -306,10 +306,9 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        # cuda13 test graphs link flashinfer-python only; the precompiled
-        # cubin/jit-cache wheels ride the rtp_llm wheel's Requires-Dist
-        # (pip lock) into runtime images and are not bazel test deps.
-        "@//:using_cuda13_x86": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
+        # cuda13 tests use the matching cubins from the pip lock.
+        # The jit-cache wheel is installed through Requires-Dist in runtime images.
+        "@//:using_cuda13_x86": flashinfer + ["flashinfer-cubin", "nvidia-cutlass-dsl", "flash-mla", "fast-hadamard-transform", "tilelang"],
         "@//:using_cuda13_arm": flashinfer + ["nvidia-cutlass-dsl", "flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
@@ -852,6 +851,29 @@ py_library(
     ],
     deps = [
         ":rtp_llm_lib",
+        "//rtp_llm/test/utils:test_util",
+        "@rtp_deps//:extension_lib",
+        ":aiohttp",
+    ]
+)
+
+# CPU-clean variant of :testlib for tests that never load CUDA artifacts at
+# runtime. It keeps the pure-py rtp_llm subset and the minimal runtime config
+# .so (libth_transformer_config), and does not carry :th_transformer /
+# :rtp_compute_ops / :rtp_llm_lib, so its runfiles stay free of the CUDA
+# toolchain closure.
+py_library(
+    name = "testlib_lite",
+    data = [
+        "//rtp_llm/test/model_test/fake_test/testdata:testdata",
+        "//rtp_llm/libs:libth_transformer_config_so",
+    ],
+    deps = [
+        ":config",
+        ":utils",
+        ":ops",
+        ":openai_api",
+        ":pydantic",
         "//rtp_llm/test/utils:test_util",
         "@rtp_deps//:extension_lib",
         ":aiohttp",

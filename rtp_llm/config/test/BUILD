@@ -18,8 +18,8 @@ py_test(
     deps = [
         "//rtp_llm:testlib",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 py_library(
@@ -63,4 +63,10 @@ py_test(
     deps = [
         "//rtp_llm:config",
     ],
+)
+
+py_test(
+    name = "model_size_test",
+    srcs = ["model_size_test.py"],
+    deps = ["//rtp_llm:testlib"],
 )

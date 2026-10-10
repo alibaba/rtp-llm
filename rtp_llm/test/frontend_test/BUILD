@@ -7,9 +7,10 @@ py_test(
         "//rtp_llm:ops",
         "//rtp_llm:testlib",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
+    env = {"GPU_COUNT": "0"},
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "frontend",
     ],
 )

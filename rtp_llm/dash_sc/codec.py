@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 import torch
 
 from rtp_llm.config.response_format import parse_response_format
+from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
     DashScStructuralTagError,
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
     from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 _INT32_MIN = -2_147_483_648
-_INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
 
 _LOGGING_CONSENT_HEADERS = {
@@ -784,12 +784,6 @@ class SamplingParams:
         request_max_think = self.max_new_think_tokens
         if request_max_think is None and request_controls is not None:
             request_max_think = request_controls.max_new_think_tokens
-        if request_max_think is None:
-            max_thinking_tokens = 32000
-        elif request_max_think < 0:
-            max_thinking_tokens = _INT32_MAX
-        else:
-            max_thinking_tokens = request_max_think
         backend_max_new_tokens = self.max_new_tokens
         if (
             request_controls is not None
@@ -800,6 +794,12 @@ class SamplingParams:
                 backend_max_new_tokens = min(
                     backend_max_new_tokens, int(self.max_total_tokens)
                 )
+        if request_max_think is None:
+            max_thinking_tokens = backend_max_new_tokens
+        elif request_max_think < 0:
+            max_thinking_tokens = INT32_MAX
+        else:
+            max_thinking_tokens = request_max_think
         return GenerateConfig(
             max_new_tokens=backend_max_new_tokens,
             num_return_sequences=self.num_return_sequences,
@@ -857,7 +857,7 @@ def _parse_input_ids_for_inference(request) -> ParsedInputIds | None:
         tensor = torch.frombuffer(bytearray(raw), dtype=torch.int64)
         if tensor.numel():
             min_value, max_value = torch.aminmax(tensor)
-            if min_value.item() < _INT32_MIN or max_value.item() > _INT32_MAX:
+            if min_value.item() < _INT32_MIN or max_value.item() > INT32_MAX:
                 raise DashScInputIdsError("input_ids value is outside the INT32 range")
         tensor = tensor.to(torch.int32)
     else:
@@ -1050,6 +1050,8 @@ def parse_request_controls(
     request_headers: dict[str, str] = {}
     for header_name in (
         "user_id",
+        "x-dashscope-uid",
+        "x-dashscope-service",
         "x-dashscope-apikeyid",
         "x-dashscope-inner-qos-level",
     ):
@@ -1123,6 +1125,7 @@ _MULTIMODAL_PARAMETER_KEYS: tuple[str, ...] = ("payload", "__messages__")
 _PER_PART_CONFIG_INT_KEYS: tuple[str, ...] = (
     "min_pixels",
     "max_pixels",
+    "max_long_side_pixel",
     "fps",
     "max_frames",
     "min_frames",
@@ -1137,6 +1140,7 @@ class MultimodalPart:
     mm_type: MMUrlType
     min_pixels: int = -1
     max_pixels: int = -1
+    max_long_side_pixel: int = -1
     fps: int = -1
     max_frames: int = -1
     min_frames: int = -1

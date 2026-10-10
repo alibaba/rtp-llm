@@ -8,6 +8,35 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+# CPU-only subset of the DSv4 decode package: pure-torch modules plus the
+# package __init__ chain, without the CUDA/testlib closure. The lazily
+# imported paged/pool helpers (pool_slot_mapping, _pool_triton) are part of
+# the closure: without them, enabling the paged or is_cuda branches under
+# sandboxed runfiles raises ModuleNotFoundError instead of running the
+# (pure-torch / triton-optional) helper.
+py_library(
+    name = "dsv4_decode_cpu",
+    srcs = [
+        "modules/__init__.py",
+        "modules/dsv4/__init__.py",
+        "modules/dsv4/_pool_triton.py",
+        "modules/dsv4/decode/__init__.py",
+        "modules/dsv4/decode/decode_attn_metadata.py",
+        "modules/dsv4/decode/kv_write_decode_op.py",
+        "modules/dsv4/fp8/__init__.py",
+        "modules/dsv4/fp8/decode/__init__.py",
+        "modules/dsv4/fp8/decode/pool_slot_mapping.py",
+        "modules/dsv4/kv_cache_utils.py",
+    ],
+    data = [
+        "//rtp_llm:__init__.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//rtp_llm:torch",
+    ],
+)
+
 # flashinfer-python ships in the cuda12 and cuda13 locks
 flashinfer = ["flashinfer-python"]
 deep = ["deep_gemm", "deep_ep"]

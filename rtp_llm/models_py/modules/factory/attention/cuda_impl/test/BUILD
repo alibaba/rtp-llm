@@ -12,6 +12,7 @@ py_test_deps = [
 flashinfer_deps = [
     "//rtp_llm:apache-tvm-ffi",
     "//rtp_llm:flashinfer-python",
+    "//rtp_llm:flashinfer-cubin",
 ]
 
 CUDA13_X86_ONLY = select({
@@ -305,8 +306,8 @@ py_test(
         "test_flashinfer_prefill/test_mha_rotary_emb.py",
     ],
     deps = flashinfer_test_deps,
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
     target_compatible_with = CUDA13_X86_ONLY,
 )
 

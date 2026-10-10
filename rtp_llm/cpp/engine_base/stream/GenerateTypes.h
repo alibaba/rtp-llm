@@ -3,6 +3,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 #include <torch/python.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateConfig.h"
@@ -23,6 +24,10 @@ struct RequestInfo {
     bool empty() const {
         return frontend_ip.empty() && dash_ip.empty() && trace_id.empty() && request_id.empty() && source_role.empty();
     }
+};
+
+struct MultimodalTokenLayout {
+    std::vector<std::pair<int32_t, int32_t>> spans;
 };
 
 class GenerateInput {
@@ -89,6 +94,7 @@ public:
     std::optional<torch::Tensor>                mm_locs;           // multimodal input locations
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
+    std::optional<MultimodalTokenLayout>        multimodal_token_layout;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;
@@ -209,6 +215,7 @@ public:
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
         NeedRemoteGenerate = 1 << 4,  // 需要远程生成
+        CachePrepared      = 1 << 5,  // KV allocation/cache load completed by the enqueue-time worker
     };
 
     void append(EventType event) {
@@ -224,8 +231,8 @@ public:
     }
 
     void clearLoadInitiated() {
-        flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
-                                        & ~static_cast<uint32_t>(EventType::LoadInitiated));
+        flags_ =
+            static_cast<EventType>(static_cast<uint32_t>(flags_) & ~static_cast<uint32_t>(EventType::LoadInitiated));
     }
 
 private:

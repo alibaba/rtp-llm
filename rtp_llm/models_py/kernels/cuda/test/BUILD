@@ -44,26 +44,27 @@ py_test (
     name = "per_tensor_scaled_fp8_quant_test",
     srcs = ["per_tensor_scaled_fp8_quant_test.py"],
     deps = py_test_deps,
-    # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
-    # reference across 18 shapes, 0 skips. Our AOT cubins cover sm86.
+    # Verified on L20_CU13 (sm89): bit-exact (torch.equal) vs the torch
+    # float8_e4m3fn reference across 18 shapes, 0 skips. The CUDA13 AOT arch
+    # list covers 8.9.
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (
     name = "per_token_scaled_fp8_quant_test",
     srcs = ["per_token_scaled_fp8_quant_test.py"],
     deps = py_test_deps,
-    # Verified on sm86: bit-exact (torch.equal) vs the torch float8_e4m3fn
-    # reference across 18 shapes, 0 skips.
+    # Verified on L20_CU13 (sm89): bit-exact (torch.equal) vs the torch
+    # float8_e4m3fn reference across 18 shapes, 0 skips.
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "open_skip",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
 )
 
 py_test (
