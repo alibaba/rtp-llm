@@ -255,12 +255,23 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     onQuarantineChanged(generation, task_count, block_count);
 }
 
+bool StorageBackend::quarantineActive() {
+    std::lock_guard<std::mutex> lock(quarantine_mutex_);
+    return !quarantined_tasks_.empty();
+}
+
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
     validateRequest(request, /*allow_null_blocks=*/false);
     auto state     = std::make_shared<storage_backend_detail::StorageTaskState>();
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
 
+    // Once completion is unknown, new work must not pin more blocks until
+    // shutdown drains the transport and releases the quarantined request.
+    std::lock_guard<std::mutex> quarantine_lock(quarantine_mutex_);
+    if (!quarantined_tasks_.empty()) {
+        return nullptr;
+    }
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
@@ -324,7 +335,7 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
     validateRequest(request, /*allow_null_blocks=*/true);
     dispatch([this, request = std::move(request), done = std::move(done)](Lifecycle outcome) mutable {
         StorageMatchResult result;
-        bool               success = outcome == Lifecycle::ACCEPTING;
+        bool               success = outcome == Lifecycle::ACCEPTING && !quarantineActive();
         if (success) {
             try {
                 result = matchImpl(request);
@@ -338,12 +349,25 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
 
 void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) {
     auto state = prepare(std::move(request));
+    if (!state) {
+        dispatch([done = std::move(done)](Lifecycle) mutable {
+            if (done) {
+                done(ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                               "storage backend is quarantined after unknown transfer completion"));
+            }
+        });
+        return;
+    }
     dispatch([this, state = std::move(state), match_meta = std::move(match_meta), done = std::move(done)](
                  Lifecycle outcome) mutable {
         ErrorInfo error = outcome == Lifecycle::ACCEPTING ?
                               ErrorInfo::OkStatus() :
                               ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
         bool quarantine = false;
+        if (error.ok() && quarantineActive()) {
+            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                              "storage backend is quarantined after unknown transfer completion");
+        }
         if (error.ok()) {
             try {
                 readImpl(state->request, match_meta);
@@ -382,7 +406,7 @@ bool StorageBackend::write(StorageWriteTask task) {
     auto state = std::move(task.state_);
     return dispatch([this, state](Lifecycle outcome) {
         bool quarantine = false;
-        if (outcome == Lifecycle::ACCEPTING) {
+        if (outcome == Lifecycle::ACCEPTING && !quarantineActive()) {
             try {
                 writeImpl(state->request);
             } catch (const StorageOperationCompletionUnknown&) {

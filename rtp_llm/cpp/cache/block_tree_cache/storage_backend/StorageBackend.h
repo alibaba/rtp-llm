@@ -152,6 +152,7 @@ private:
     void                                 taskFinished();
     void                                 quarantineTask(
         const std::shared_ptr<storage_backend_detail::StorageTaskState>& state);
+    bool                                    quarantineActive();
     std::shared_ptr<const CacheTopology> topology_;
     PoolsByTag                           pools_by_tag_;
     BufferResolver                       buffer_resolver_;

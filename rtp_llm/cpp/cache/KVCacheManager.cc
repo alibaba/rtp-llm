@@ -723,7 +723,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM storage backend is not initialized");
             return false;
         }
-        return backend->execute(request.remote_request(), *response.mutable_remote_response());
+        // A handled transfer failure is carried in remote_response so the
+        // coordinator can distinguish failure from timeout. Keep the RPC
+        // successful long enough to deliver that payload to rank 0.
+        (void)backend->execute(request.remote_request(), *response.mutable_remote_response());
+        return true;
 #else
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: KVCM support is not compiled in");
         return false;
