@@ -1,8 +1,11 @@
+import json
 import logging
 import os
+from pathlib import Path
 from typing import Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -31,6 +34,7 @@ _PLE_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_PLE"
 _PLE_CPU_OFFLOAD_ENV = "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD"
 _QSA_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_QSA"
 _GRAPH_EXPERIMENTAL_ENV = "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL"
+_MOE_FP8_ENV = "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL"
 
 
 class Qwen4Exp(Qwen35Moe):
@@ -90,6 +94,25 @@ class Qwen4Exp(Qwen35Moe):
         # changing the process environment after config construction must not
         # change which model implementation is loaded.
         config = getattr(self, "model_config", None)
+        moe_only_fp8 = getattr(config, "_qwen4_moe_only_fp8", False) is True
+        if moe_only_fp8:
+            quant = getattr(config, "quant_config", None)
+            parallelism = getattr(self, "parallelism_config", None)
+            if (
+                not isinstance(quant, Fp8BlockWiseQuantConfig)
+                or not quant.is_quanted()
+                or quant.group_size() != 128
+                or parallelism is None
+                or parallelism.get_ffn_tp_size() != 1
+            ):
+                raise RuntimeError(
+                    "qwen4_exp expert FP8 requires prequantized 128x128 weights "
+                    "and FFN TP=1 (expert parallelism); got "
+                    f"quant={type(quant).__name__}, "
+                    f"prequantized={quant.is_quanted() if isinstance(quant, Fp8BlockWiseQuantConfig) else None}, "
+                    f"block={quant.group_size() if isinstance(quant, Fp8BlockWiseQuantConfig) else None}, "
+                    f"ffn_tp={parallelism.get_ffn_tp_size() if parallelism is not None else None}"
+                )
         if getattr(config, "enable_qwen4_qsa", False):
             gamma = int(getattr(config, "gen_num_per_cycle", 0))
             ratio = int(getattr(config, "_qwen4_indexer_compress_ratio", 0))
@@ -105,8 +128,10 @@ class Qwen4Exp(Qwen35Moe):
                 )
             quant_config = getattr(config, "quant_config", None)
             is_quanted = getattr(quant_config, "is_quanted", None)
-            if quant_config is not None and (
-                not callable(is_quanted) or bool(is_quanted())
+            if (
+                not moe_only_fp8
+                and quant_config is not None
+                and (not callable(is_quanted) or bool(is_quanted()))
             ):
                 raise RuntimeError(
                     "qwen4_exp QSA does not support quantized indexer weights"
@@ -194,6 +219,16 @@ class Qwen4Exp(Qwen35Moe):
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)
+        config._qwen4_moe_only_fp8 = False
+        if str_to_bool(os.environ.get(_MOE_FP8_ENV, "false")):
+            from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
+
+            root = Path(ckpt_path)
+            config_json = json.loads((root / "config.json").read_text())
+            if config_json.get("quantization_config"):
+                index = json.loads((root / "model.safetensors.index.json").read_text())
+                validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
+                config._qwen4_moe_only_fp8 = True
         logging.warning(_SKELETON_WARNING)
         return config
 

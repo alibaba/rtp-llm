@@ -6,6 +6,12 @@ py_test(
 )
 
 py_test(
+    name = "moe_fp8_test",
+    srcs = ["moe_fp8_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "qwen4_exp_mtp_component_test",
     srcs = ["qwen4_exp_mtp_component_test.py"],
     deps = ["//rtp_llm:testlib"],
