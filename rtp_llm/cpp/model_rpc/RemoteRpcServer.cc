@@ -1,4 +1,5 @@
 #include "autil/NetUtil.h"
+#include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 
 using namespace std;
@@ -104,12 +105,17 @@ void RemoteRpcServer::initCacheStore(const EngineInitParams&                init
                      params.listen_port,
                      params.rdma_listen_port,
                      params.rdma_mode);
+    const auto create_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     cache_store_ = NormalCacheStore::createNormalCacheStore(params);
     RTP_LLM_CHECK_WITH_INFO(cache_store_ != nullptr, "cache store init failed");
-    RTP_LLM_LOG_INFO("cache store init success");
+    RTP_LLM_LOG_INFO("cache store init success: cost_ms=%.3f",
+                     (autil::TimeUtility::currentTimeInMicroSeconds() - create_begin_us) / 1000.0);
 
     cache_manager->setCacheStore(cache_store_);
+    const auto register_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     cache_manager->regUserMr(maga_init_params_.model_id, cache_store_);
+    RTP_LLM_LOG_INFO("cache store register memory done: cost_ms=%.3f",
+                     (autil::TimeUtility::currentTimeInMicroSeconds() - register_begin_us) / 1000.0);
 
     resource_.cache_store = std::dynamic_pointer_cast<NormalCacheStore>(cache_store_);
 }

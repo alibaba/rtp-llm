@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/CoordinatedStopUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "autil/EnvUtil.h"
+#include "autil/StringUtil.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -218,6 +219,67 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
+#if USING_CUDA
+    if (defer_loop_start && pd_sep_config.role_type == RoleType::PREFILL && !model_config_.mm_model_config.is_multimodal
+        && !ffn_disaggregate_config.enable_ffn_disaggregate) {
+        // Run the real prefill path (including MTP) before the SCR barrier.
+        const auto begin_us   = autil::TimeUtility::currentTimeInMicroSeconds();
+        const auto configured = autil::EnvUtil::getEnv("RTP_LLM_STARTUP_REAL_WARMUP_TOKEN_LENS", std::string());
+        std::vector<int64_t> lengths;
+        if (configured.empty()) {
+            for (int64_t length = 2; length < model_config_.max_seq_len; length *= 2) {
+                lengths.push_back(length);
+            }
+            lengths.push_back(model_config_.max_seq_len);
+        } else {
+            for (const auto& value : autil::StringUtil::split(configured, ",")) {
+                int64_t length = 0;
+                RTP_LLM_CHECK_WITH_INFO(autil::StringUtil::fromString(value, length) && length >= 2
+                                            && length <= model_config_.max_seq_len,
+                                        "invalid startup warmup length: %s",
+                                        value.c_str());
+                lengths.push_back(length);
+            }
+        }
+        c10::cuda::CUDAGuard         device_guard(getDeviceId());
+        ScopedKmonMetricsSuppression suppress_metrics;
+        resource_context_.initCacheConfig(
+            kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
+        const auto free_blocks = resource_context_.cache_manager->freeBlocksNum();
+        for (auto length : lengths) {
+            length = std::min<int64_t>(length, model_config_.max_seq_len - std::max<int64_t>(1, reserve_step_));
+            RTP_LLM_CHECK_WITH_INFO(length > 0, "no input space for startup warmup");
+            const auto request_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
+            RTP_LLM_LOG_INFO("SCR prefill warmup begin: tokens=%ld rank=%ld", length, parallelism_config.tp_rank);
+            auto       input       = makeFakeInput(length);
+            const auto token_count = model_config_.embedding_size ?
+                                         std::min(model_config_.embedding_size, model_config_.vocab_size) :
+                                         model_config_.vocab_size;
+            input->input_ids.fill_(std::min<int64_t>(100, token_count - 1));
+            input->generate_config->max_new_tokens        = 1;
+            input->generate_config->temperature           = 0.0;
+            input->generate_config->do_sample             = false;
+            input->generate_config->reuse_cache           = false;
+            input->generate_config->can_use_pd_separation = false;
+            input->generate_config->enable_device_cache   = false;
+            input->generate_config->enable_memory_cache   = false;
+            input->generate_config->enable_remote_cache   = false;
+            auto result                                   = preRun(input, preRunMode::build_system_prompt);
+            THROW_IF_STATUS_ERROR(result.status());
+            RTP_LLM_CHECK_WITH_INFO(cudaDeviceSynchronize() == cudaSuccess, "SCR prefill warmup sync failed");
+            result.value()->releaseResource();  // Return request blocks, retain the KV backing allocation.
+            RTP_LLM_CHECK_WITH_INFO(resource_context_.cache_manager->freeBlocksNum() == free_blocks,
+                                    "SCR prefill warmup retained KV blocks");
+            RTP_LLM_LOG_INFO("SCR prefill warmup done: tokens=%ld rank=%ld cost_ms=%.3f",
+                             length,
+                             parallelism_config.tp_rank,
+                             (autil::TimeUtility::currentTimeInMicroSeconds() - request_begin_us) / 1000.0);
+        }
+        RTP_LLM_LOG_INFO("SCR prefill warmup finished before barrier: rank=%ld cost_ms=%.3f",
+                         parallelism_config.tp_rank,
+                         (autil::TimeUtility::currentTimeInMicroSeconds() - begin_us) / 1000.0);
+    }
+#endif
     if (defer_loop_start) {
         // DP dummy streams also launch kernels without incoming requests.
         // Keep the loop absent until the template has been released.
@@ -571,7 +633,10 @@ absl::Status NormalEngine::startLoop() {
     // External cache connectors can allocate large host-memory pools and open
     // remote/P2P resources. Keep them out of the checkpoint template and only
     // create them when the controller releases the SCR barrier.
+    const auto connectors_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     resource_context_.cache_manager->startDeferredServices();
+    RTP_LLM_LOG_INFO("cache connectors started: cost_ms=%.3f",
+                     (autil::TimeUtility::currentTimeInMicroSeconds() - connectors_begin_us) / 1000.0);
     if (parallelism_config.tp_rank == 0) {
         RTP_LLM_LOG_INFO("start init system prompt");
         THROW_IF_STATUS_ERROR(initSystemPrompt());
@@ -581,7 +646,10 @@ absl::Status NormalEngine::startLoop() {
     // Run after KV cache, executor, scheduler and system-prompt initialization,
     // but before the engine loop can accept work. The temporary torch::Tensor is
     // released into the same CUDACachingAllocator used by Prefill model forwards.
+    const auto pool_begin_us = autil::TimeUtility::currentTimeInMicroSeconds();
     preallocateTorchCudaPoolForPrefill(pd_sep_config.role_type, getDeviceId());
+    RTP_LLM_LOG_INFO("prefill CUDA pool ready: cost_ms=%.3f",
+                     (autil::TimeUtility::currentTimeInMicroSeconds() - pool_begin_us) / 1000.0);
 #endif
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;

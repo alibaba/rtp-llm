@@ -288,7 +288,12 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
         // Prefaulting runs concurrently with the registration below; the scope
         // guarantees the threads are joined before any munmap of the arena.
         HostArenaPrefaulter prefaulter(ptr, size_bytes, prefault_threads);
+        const auto          register_begin_us = currentTimeUs();
         err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+        RTP_LLM_LOG_INFO("host pool cudaHostRegister: bytes=%zu cost_ms=%.3f status=%d",
+                         size_bytes,
+                         (currentTimeUs() - register_begin_us) / 1000.0,
+                         static_cast<int>(err));
     }
     if (err != cudaSuccess) {
         (void)munmap(ptr, size_bytes);
@@ -750,6 +755,8 @@ void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
     if (!mla_host_registered_ || *mla_host_registered_) {
         return;
     }
+    const auto restore_begin_us = currentTimeUs();
+    RTP_LLM_LOG_INFO("SCR MLA host KV restore begin: bytes=%zu", config_.total_size_bytes);
     RTP_LLM_CHECK_WITH_INFO(mprotect(cache_base_ptr_, config_.total_size_bytes, PROT_READ | PROT_WRITE) == 0,
                            "unprotect MLA host KV: %s",
                            std::strerror(errno));
@@ -777,7 +784,10 @@ void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
         }
         mla_host_discarded_ = false;
     }
-    RTP_LLM_LOG_INFO("SCR MLA host KV restored at captured VA: ptr=%p bytes=%zu", cache_base_ptr_, config_.total_size_bytes);
+    RTP_LLM_LOG_INFO("SCR MLA host KV restored at captured VA: ptr=%p bytes=%zu cost_ms=%.3f",
+                     cache_base_ptr_,
+                     config_.total_size_bytes,
+                     (currentTimeUs() - restore_begin_us) / 1000.0);
 #endif
 }
 
