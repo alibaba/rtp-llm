@@ -1,3 +1,4 @@
+#include <c10/util/ScopeExit.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -334,9 +335,13 @@ void DecodeRpcServer::initThreadPool() {
 
 DecodeRpcServer::~DecodeRpcServer() {
     if (thread_pool_) {
-        thread_pool_->stop();
+        runRpcBlockingCleanupWithoutGil([this] { thread_pool_->stop(); });
         thread_pool_.reset();
     }
+}
+
+size_t DecodeRpcServer::activeCacheTransferCount() {
+    return RemoteRpcServer::activeCacheTransferCount() + onflight_load_cache_requests_.load(std::memory_order_relaxed);
 }
 
 void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_context) {
@@ -837,10 +842,10 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
-    auto*                              generate_stream = decode_context.getStream().get();
-    auto&                              cache_keys      = generate_stream->cacheKeys(0);
-    const auto&                        cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
-    auto                               group_block_ids = cache_resource.groupBlockIds();
+    auto*       generate_stream = decode_context.getStream().get();
+    auto&       cache_keys      = generate_stream->cacheKeys(0);
+    const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
+    auto        group_block_ids = cache_resource.groupBlockIds();
 
     const auto topology_error = validateRemoteLoadTopology(resource_.workers.size(), decode_context.peer_addrs.size());
     if (!topology_error.ok()) {
@@ -1497,10 +1502,20 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
+    auto admission = acquireCacheTransferAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto admission_done = c10::make_scope_exit([&]() {
+        if (admission.complete) {
+            admission.complete();
+        }
+    });
+
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config     = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology         = cache_config.topology();
-    auto                      group_block_ids  = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config    = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology        = cache_config.topology();
+    auto                      group_block_ids = decodeGroupBlockIds(*request, topology);
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1593,6 +1608,15 @@ void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_contex
 
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
+    auto admission = acquireAdmission();
+    if (!admission.detail.admitted) {
+        return AdmissionGate::toGrpcStatus(admission.detail);
+    }
+    auto               admission_done = c10::make_scope_exit([&]() {
+        if (admission.complete) {
+            admission.complete();
+        }
+    });
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
     DecodeRpcContext   rpc_context{grpc_stream};
@@ -1672,7 +1696,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

@@ -59,6 +59,7 @@ py_test(
         "//rtp_llm:jit_cache_manager_lib",
         "//rtp_llm:sdk",
         "//rtp_llm:torch",
+        "//rtp_llm/model_loader:loader",
         "//rtp_llm/model_loader/tipc",
         "//rtp_llm/test/utils:jit_sys_path_setup",
     ],
@@ -151,6 +152,18 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "database_fastsafetensors_region_test",
+    srcs = [
+        "database_fastsafetensors_region_test.py",
+    ],
+    deps = [
+        "//rtp_llm:lora",
+        "//rtp_llm:utils",
+    ],
+)
+
 
 py_test(
     name = "util_test",
@@ -253,4 +266,34 @@ py_test(
     deps = [
         "//rtp_llm:utils",
     ],
+)
+
+py_test(
+    name = "ckpt_database_fastsafetensors_multirank_arm_test",
+    size = "medium",
+    timeout = "moderate",
+    srcs = ["ckpt_database_fastsafetensors_multirank_test.py"],
+    main = "ckpt_database_fastsafetensors_multirank_test.py",
+    data = ["//:th_transformer_config"],
+    deps = [
+        "//rtp_llm:_ft_pickler",
+        "//rtp_llm:config",
+        "//rtp_llm:fast-safetensors",
+        "//rtp_llm:fastsafetensors",
+        "//rtp_llm:lora",
+        "//rtp_llm:ops",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:utils",
+    ],
+    env = {
+        "GPU_COUNT": "2",
+        "WORLD_SIZE": "2",
+    },
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+    tags = ["multi_device", "SM100_ARM"],
+    target_compatible_with = select({
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )

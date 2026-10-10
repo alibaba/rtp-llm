@@ -99,6 +99,7 @@ def whl_deps():
             "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.9",
             "apache-tvm-ffi==0.1.10",
+            "torch_memory_saver==0.0.9.post1",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "torch@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl",
@@ -114,8 +115,9 @@ def whl_deps():
             "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
             "tilelang@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
             "apache-tvm-ffi==0.1.10",
+            "torch_memory_saver==0.0.9.post1",
         ],
-        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126"],
+        "@rtp_llm//:using_cuda12": ["torch==2.6.0+cu126", "torch_memory_saver==0.0.9.post1"],
         "@rtp_llm//:using_rocm": [
             "pyrsmi==0.2.0",
             "amdsmi@https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis%2FAMD%2Famd_smi%2Fali%2Famd_smi.tar",

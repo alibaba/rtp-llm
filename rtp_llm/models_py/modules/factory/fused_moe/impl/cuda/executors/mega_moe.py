@@ -29,6 +29,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.buffer import (
     _get_or_create_mega_buf,
     _get_or_create_mega_output,
     _mega_moe_available,
+    register_mega_executor,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer import (
     get_mega_moe_input_packer,
@@ -185,7 +186,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         checker.check(config.world_rank == config.ep_rank)
         checker.check(_mega_moe_available())
 
-    def setup_weights(self, layer_weights: Dict) -> None:
+    def _setup_kernel_weights(self, layer_weights: Dict) -> None:
         """Stack EP-local routed-expert SFs into the int32 UTCCP-transposed
         layout ``fp8_fp4_mega_moe`` expects, then register the symm-mem
         dispatch buffer.
@@ -208,7 +209,6 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         to at most one input stack.
         """
         import deep_gemm
-        import torch.distributed as dist
 
         from rtp_llm.utils.model_weight import W
 
@@ -225,7 +225,6 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             inter,
             cfg.moe_w1_layout,
         )
-        device = w13.device
         s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
         del s13_raw
         torch.cuda.empty_cache()
@@ -253,6 +252,18 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         self._mega_l2_w = l2_w
         self._mega_l2_sf = l2_sf
 
+    def sleep_weight_tensors(self):
+        return {
+            name: getattr(self, name)
+            for name in ("_mega_l1_w", "_mega_l1_sf", "_mega_l2_w", "_mega_l2_sf")
+        }
+
+    def _setup_runtime(self) -> None:
+        import torch.distributed as dist
+
+        cfg = self.cfg
+        D, inter = cfg.dim, cfg.moe_inter_dim
+        device = self._mega_l1_w.device
         # (4) Allocate the symmetric-memory buffer.  Uses
         # ``torch.distributed.group.WORLD`` because our DP+EP layout has
         # ``ep_size == world_size`` — every rank holds a distinct 64/256
@@ -282,8 +293,34 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
             torch.bfloat16,
             device,
         )
+        register_mega_executor(self)
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
+
+    def _ensure_mega_buffers(self) -> None:
+        if self._mega_buf is not None and self._mega_y is not None:
+            return
+        if self.includes_shared_expert:
+            raise RuntimeError("Mega-SE peer-import buffers must remain resident")
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("Cannot recreate Mega buffers inside graph capture")
+        cfg = self.cfg
+        self._mega_buf = _get_or_create_mega_buf(
+            group=self._mega_group,
+            num_experts=cfg.n_routed_experts,
+            num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
+            num_topk=cfg.n_activated_experts,
+            hidden=cfg.dim,
+            intermediate_hidden=cfg.moe_inter_dim,
+            use_fp8_dispatch=True,
+            activation="swiglu",
+        )
+        self._mega_y = _get_or_create_mega_output(
+            _mega_output_capacity(self._mega_buf, cfg.max_tokens_per_rank),
+            cfg.dim,
+            torch.bfloat16,
+            self._mega_l1_w.device,
+        )
 
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
         cfg = self.cfg
@@ -488,6 +525,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         Returns the combined routed-expert output in BF16.  The MoE epilogue
         owns the final routed+shared cast.
         """
+        self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         self._validate_capacity(T)
@@ -527,6 +565,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
 
         if not self.supports_gate_pack:
             raise RuntimeError("MegaMoE fused gate packing requires the fused packer")
+        self._ensure_mega_buffers()
         tokens = x.size(0)
         self._validate_capacity(tokens)
         from rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack import (

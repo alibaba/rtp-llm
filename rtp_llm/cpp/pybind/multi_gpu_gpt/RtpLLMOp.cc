@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/engine_base/CpuQuiesceCoordinator.h"
 #include <cstddef>
 #include <memory>
 #include <tuple>
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/telemetry/TelemetryRuntime.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 
 using namespace std;
 namespace th = torch;
@@ -75,28 +77,28 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         // it keeps the full checkpoint config instead of an MTP module plan.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                          model_config,
-                                                                          base_params.parallelism_config,
-                                                                          base_params.runtime_config,
-                                                                          base_params.pd_sep_config,
-                                                                          base_params.concurrency_config,
-                                                                          base_params.fmha_config,
-                                                                          base_params.kv_cache_config,
-                                                                          base_params.profiling_debug_logging_config,
-                                                                          base_params.hw_kernel_config,
-                                                                          base_params.device_resource_config,
-                                                                          base_params.moe_config,
-                                                                          base_params.model_specific_config,
-                                                                          base_params.sp_config,
-                                                                          base_params.cache_store_config,
-                                                                          base_params.misc_config,
-                                                                          base_params.arpc_config,
-                                                                          base_params.grpc_config,
-                                                                          base_params.ffn_disaggregate_config,
-                                                                          base_params.vit_config,
-                                                                          std::move(*gpt_weight),
-                                                                          py::none(),
-                                                                          py_eplb)));
+                                                                           model_config,
+                                                                           base_params.parallelism_config,
+                                                                           base_params.runtime_config,
+                                                                           base_params.pd_sep_config,
+                                                                           base_params.concurrency_config,
+                                                                           base_params.fmha_config,
+                                                                           base_params.kv_cache_config,
+                                                                           base_params.profiling_debug_logging_config,
+                                                                           base_params.hw_kernel_config,
+                                                                           base_params.device_resource_config,
+                                                                           base_params.moe_config,
+                                                                           base_params.model_specific_config,
+                                                                           base_params.sp_config,
+                                                                           base_params.cache_store_config,
+                                                                           base_params.misc_config,
+                                                                           base_params.arpc_config,
+                                                                           base_params.grpc_config,
+                                                                           base_params.ffn_disaggregate_config,
+                                                                           base_params.vit_config,
+                                                                           std::move(*gpt_weight),
+                                                                           py::none(),
+                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -159,10 +161,19 @@ void RtpLLMOp::init(py::object model,
                     py::object propose_model,
                     py::object token_processor,
                     py::object mm_process_engine,
-                    py::object trace_config) {
+                    py::object trace_config,
+                    py::object cpu_lifecycle_group) {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
+    if (!cpu_lifecycle_group.is_none()) {
+        auto group = cpu_lifecycle_group.cast<c10::intrusive_ptr<c10d::Backend>>();
+        if (group->getRank() != params.parallelism_config.world_rank
+            || group->getSize() != params.parallelism_config.world_size) {
+            throw std::invalid_argument("CPU lifecycle group does not cover this DP/TP world");
+        }
+        quiesce_coordinator_ = std::make_shared<CpuQuiesceCoordinator>(std::move(group));
+    }
 
     if (!propose_model.is_none()) {
         if (!propose_model.attr("model").is_none()) {
@@ -429,6 +440,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
+        model_rpc_service_->getEngine()->setQuiesceCoordinator(quiesce_coordinator_);
 
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
@@ -521,6 +533,10 @@ void RtpLLMOp::stop() {
             pybind11::gil_scoped_release release;
             telemetry::TelemetryRuntime::shutdown();
         }
+        // The grammar backend is process-global and owns a metrics reporter.
+        // Release it after all streams/executors, not during static destruction
+        // after KMonitorFactory has already deleted the reporter's monitor.
+        LogitsProcessorFactory::shutdown();
         stopKmonitorFactory();
     }
 }
@@ -539,6 +555,75 @@ void RtpLLMOp::restart() {
     engine->restart();
 }
 
+std::shared_ptr<EngineBase> RtpLLMOp::shutdownEngine() const {
+    if (!model_rpc_service_) {
+        throw std::runtime_error("backend lifecycle control is not initialized");
+    }
+    const auto engine = model_rpc_service_->getEngine();
+    if (!engine) {
+        throw std::runtime_error("backend lifecycle engine is not initialized");
+    }
+    return engine;
+}
+
+py::dict RtpLLMOp::shutdownStatus() const {
+    const auto engine = shutdownEngine();
+    const auto status = engine->sleepController().status();
+    py::dict   result;
+    result["supported"]          = engine->executionQuiesceSupported();
+    result["worker_incarnation"] = status.worker_incarnation;
+    result["state"]              = sleepStateToString(status.state);
+    return result;
+}
+
+void RtpLLMOp::beginShutdown() {
+    auto engine = shutdownEngine();
+    engine->getScheduler().admission()->beginTermination();
+    engine->requestTermination();
+    // Do not call PrefillBatchRpcServer::beginShutdown here: its final cleanup
+    // cancels deferred work. Counted continuations must first be allowed to drain.
+}
+
+void RtpLLMOp::drainShutdown(int64_t timeout_ms, bool seal_continuations) {
+    auto engine = shutdownEngine();
+    if (!engine->getScheduler().admission()->terminating()) {
+        throw std::runtime_error("shutdown drain requires terminal admission intent");
+    }
+    if (seal_continuations) {
+        engine->getScheduler().admission()->sealContinuations();
+    }
+    if (engine->sleepController().status().state == SleepState::RUNNING) {
+        engine->armCollectiveSleepQuiesce();
+    }
+    auto& drain = engine->getScheduler().drainManager();
+    if (!drain.waitDrained(timeout_ms)) {
+        throw std::runtime_error("shutdown drain deadline exceeded: " + drain.pendingCountersDebugString());
+    }
+}
+
+void RtpLLMOp::freezeShutdown() {
+    auto engine = shutdownEngine();
+    if (!engine->getScheduler().admission()->terminating() || !engine->getScheduler().admission()->continuationsSealed()
+        || !engine->getScheduler().drainManager().drained()) {
+        throw std::runtime_error("shutdown freeze requires sealed and drained terminal admission");
+    }
+    engine->freezeSleepRounds();
+}
+
+void RtpLLMOp::quiesceShutdown(const std::string& token, int64_t timeout_ms) {
+    const auto status = shutdownEngine()->coordinatedQuiesce(token, timeout_ms);
+    if (!status.ok()) {
+        throw std::runtime_error("shutdown quiesce failed: " + status.ToString());
+    }
+}
+
+void RtpLLMOp::terminateShutdown() {
+    const auto status = shutdownEngine()->terminate();
+    if (!status.ok()) {
+        throw std::runtime_error("shutdown terminate failed: " + status.ToString());
+    }
+}
+
 void registerRtpLLMOp(const py::module& m) {
     pybind11::class_<RtpLLMOp>(m, "RtpLLMOp")
         .def(pybind11::init<>())
@@ -550,14 +635,21 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("propose_model"),
              py::arg("token_processor"),
              py::arg("mm_process_engine"),
-             py::arg("trace_config") = py::none())
+             py::arg("trace_config")        = py::none(),
+             py::arg("cpu_lifecycle_group") = py::none())
         .def("start_http_server",
              &RtpLLMOp::startHttpServer,
              py::arg("model_weights_loader"),
              py::arg("world_info"),
              py::arg("tokenizer"),
              py::arg("render"))
-        .def("stop", &RtpLLMOp::stop);
+        .def("stop", &RtpLLMOp::stop)
+        .def("shutdown_status", &RtpLLMOp::shutdownStatus)
+        .def("begin_shutdown", &RtpLLMOp::beginShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("drain_shutdown", &RtpLLMOp::drainShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("freeze_shutdown", &RtpLLMOp::freezeShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("quiesce_shutdown", &RtpLLMOp::quiesceShutdown, py::call_guard<py::gil_scoped_release>())
+        .def("terminate_shutdown", &RtpLLMOp::terminateShutdown, py::call_guard<py::gil_scoped_release>());
 }
 
 }  // namespace rtp_llm

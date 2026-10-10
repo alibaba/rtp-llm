@@ -96,6 +96,12 @@ class GaugeMetrics(Enum):
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"
     CACHE_STATUS_QPS_LATENCY_METRIC = "py_rtp_cache_status_rt"
+    SLEEP_ACTIVE_REQUEST_COUNT_METRIC = "py_rtp_sleep_active_request_count"
+    SLEEP_ACTIVE_CACHE_TRANSFER_COUNT_METRIC = (
+        "py_rtp_sleep_active_cache_transfer_count"
+    )
+    SLEEP_ACTION_RT_METRIC = "py_rtp_sleep_action_rt"
+    WAKE_UP_ACTION_RT_METRIC = "py_rtp_wake_up_action_rt"
 
     # route:
     ROUTE_RT_METRIC = "py_rtp_route_rt"

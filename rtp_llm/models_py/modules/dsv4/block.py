@@ -25,6 +25,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
     adapt_split_moe_weights,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_reload import (
+    register_split_moe_reload,
+)
 from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
@@ -150,6 +153,7 @@ class Block(nn.Module):
 
         if layer_weights is None:
             raise ValueError("Block requires per-layer weights")
+        moe_reload_names = set(_MOE_WEIGHT_NAMES.values()) & layer_weights.keys()
         adapt_split_moe_weights(
             layer_weights, moe_inter_dim, n_shared_experts, _MOE_WEIGHT_NAMES
         )
@@ -179,6 +183,14 @@ class Block(nn.Module):
             moe_w1_layout="gate_up",
             observer_factory=self._moe_observer,
             record_function_scope=_profiler.moe_record_function_scope,
+        )
+        register_split_moe_reload(
+            self.ffn._moe,
+            layer_weights,
+            _MOE_WEIGHT_NAMES,
+            moe_reload_names,
+            moe_inter_dim,
+            n_shared_experts,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight

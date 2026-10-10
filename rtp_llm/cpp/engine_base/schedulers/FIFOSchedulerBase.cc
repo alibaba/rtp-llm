@@ -57,6 +57,21 @@ absl::Status FIFOSchedulerBase::stop() {
     return absl::OkStatus();
 }
 
+void FIFOSchedulerBase::wake() {
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        schedule_trigger_ = true;
+    }
+    cond_.notify_all();
+}
+
+void FIFOSchedulerBase::setForcePoll(bool enable) {
+    force_poll_.store(enable, std::memory_order_relaxed);
+    if (enable) {
+        wake();
+    }
+}
+
 int64_t FIFOSchedulerBase::lastScheduleTime() {
     return empty() ? autil::TimeUtility::currentTimeInMilliSeconds() : last_schedule_time_.load();
 }

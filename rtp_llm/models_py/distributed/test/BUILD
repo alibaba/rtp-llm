@@ -45,6 +45,23 @@ py_test (
 # GPUs per node, so gpu_count 4 is satisfiable. Verification records live
 # with the internal CI evidence, not here.
 py_test(
+    name = "lifecycle_group_test",
+    srcs = ["lifecycle_group_test.py"],
+    deps = ["//rtp_llm/models_py/distributed:collective_torch"],
+    timeout = "short",
+)
+
+py_test(
+    name = "sleep_quiesce_host_collective_test",
+    srcs = ["sleep_quiesce_host_collective_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
+    ],
+    timeout = "short",
+)
+
+py_test(
     name = "collective_torch_test",
     srcs = ["collective_torch_test.py"],
     deps = [
