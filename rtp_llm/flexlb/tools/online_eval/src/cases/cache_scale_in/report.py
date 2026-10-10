@@ -21,7 +21,7 @@ def prepare_report(directory, evidence):
     anchor = evidence_origin(evidence)
     series, sources, gaps, errors = archived_series(directory, anchor)
     archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
-    presentation = view("cache_scale_in_overview.yaml")
+    presentation = view("cache_scale_in.yaml")
     metric_defs = presentation["charts"]["curves"]
     diagnostic_only = set(presentation["metrics"].get("diagnostic_only", []))
     curves = []
@@ -132,7 +132,7 @@ def report_panels(curves, presentation):
 
 
 def build_spec(directory, evidence, result, prepared):
-    presentation = view("cache_scale_in_overview.yaml")
+    presentation = view("cache_scale_in.yaml")
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore

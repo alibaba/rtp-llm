@@ -9,8 +9,8 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 | 顺序 | 字段 | 阅读目的 |
 |---|---|---|
 | 1 | `case_schema_version`、`case`、`program` | 格式、身份与默认入口 |
-| 2 | `metadata`、`test`、`profiles` | 用途、测试性质、采集与运行形态 |
-| 3 | `environment`、`execution` | 模型/拓扑、配置与时间预算 |
+| 2 | `metadata`、`profiles` | 用途、测试性质与运行形态 |
+| 3 | `environment`、`execution` | 模型/拓扑、采集策略与时间预算 |
 | 4 | `parameters`、`parameter_schema` | 流量输入、指标绑定、门槛及约束 |
 | 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
 | 6 | `analysis`、`reports` | 分析策略及交付视图 |
@@ -26,16 +26,15 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 唯一的字段排序表在 `scripts/pipeline/config_order.py`。命令只移动已有字段块，不补默认值、改标量或重排列表，并在写入前检查解析值不变。新业务参数按其输入含义组织，不为了格式工具另建 YAML schema。
 
-每个 case 顶层必须声明 `program: default`，Python 必须提供 `default(case)`。`variants` 只追加额外测试点，不能占用 `id: default`。`test.kind` 为 functional 或 workload，`collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
+每个 case 顶层必须声明 `program: default`，Python 必须提供 `default(case)`。`variants` 只追加额外测试点，不能占用 `id: default`。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
 
 ## 数据、运行策略与参数约束
 
 | 段 | 负责什么 | 主要消费者 |
 |---|---|---|
-| `metadata` | 测试目标、分类与标签，供检索和结果展示 | 实例清单、报告 |
-| `test` | functional/workload、采集档位及监控设置，决定执行和取证策略 | suite 选择、执行器、客户端与采集器 |
+| `metadata` | 测试性质、目标、分类与标签；`kind` 参与 CI 筛选和执行器选择 | suite 选择、实例清单、执行器与报告 |
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
-| `execution` | 实例、阶段和清理的时间预算 | runner、阶段执行器 |
+| `execution` | 实例、阶段和清理预算，以及 `collection` 和 `monitoring` 取证策略 | runner、阶段执行器、客户端与采集器 |
 | `parameters` | 按流量、流程、观测与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
 | `parameter_schema` | 数值参数的整数类型、最小值和最大值约束 | program 构建前统一校验；`CaseBuilder.number(path)` 可显式读取 |
 
@@ -57,7 +56,9 @@ program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `Pr
 
 QPS 只取 `traffic.client.playback.qps`，编译时核对请求数量和 goodput 下界不超过允许的 offered-load 范围。修改负载不自动缩放绝对阈值，需要同时核对时窗和门槛。priority 由 `traffic.source.parameters.priority` 定义，客户端环境从该值生成；显式客户端 PRIORITY 与来源冲突时报错。
 
-`test` 保持独立：将执行与采集策略藏入 `metadata` 会使说明字段承担控制作用。`metadata.description` 描述业务目标，`test.description` 描述测试或取证策略；两者应避免重复。指标绑定和名称的规则见[指标契约](../architecture/metrics.md)。
+`metadata.description` 是唯一的业务目标说明；`metadata.kind` 必须显式声明为 functional 或 workload，不从目录、标签或参数推断。`execution.collection` 为 aggregate 时保留汇总计数，为 request 时保留逐请求证据，为 diagnostic 时额外启用诊断。`execution.monitoring` 管指标集合、采样周期、缺采预算与采集器收尾预算；业务窗口和输入绑定仍属于 `parameters.observation`。指标绑定和名称的规则见[指标契约](../architecture/metrics.md)。
+
+case 主报告文件使用 `<case>.yaml`，公共视图使用 `default.yaml`，额外视角使用 `<case>_<视角>.yaml`。目录区分场景、指标集合和报告职责，同一 case 的配置可使用相同文件名。报告生产能力与 bundle 身份独立声明，不由文件名推断。
 
 ## Python 的归属与注册
 

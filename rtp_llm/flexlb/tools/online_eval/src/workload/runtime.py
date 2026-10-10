@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class WorkloadPolicy:
     def attach(self, ctx):
         self.options = dict(ctx.instance["workload_runtime"])
-        self.reports = ctx.instance.get("test", {}).get("reports")
+        self.reports = ctx.instance.get("reports")
         self.profile = ctx.instance.get("collection_profile", "request")
         self.monitors = {}
         self.anchor = dict(monotonic_s=ctx.clock(), epoch_s=time.time())
@@ -159,7 +159,7 @@ class WorkloadPolicy:
             targets,
             self.options["sample_interval_s"],
             self.options.get("max_sample_gap_s", 5),
-            query_plan=ctx.instance.get("test", {}).get("monitoring", {}).get(
+            query_plan=ctx.instance["execution"]["monitoring"].get(
                 "query_plan", DEFAULT_PLAN
             ),
             target_kinds={name: "mock" if name == "mock" else "master"
@@ -298,7 +298,7 @@ class WorkloadPolicy:
         result["workload"]["monitor_backend"] = "prometheus"
         from monitoring.metric_store import export_metrics
         from monitoring.query_plan import load_plan
-        metric_plan = load_plan(ctx.instance.get("test", {}).get("monitoring", {}).get("query_plan", DEFAULT_PLAN))
+        metric_plan = load_plan(ctx.instance["execution"]["monitoring"].get("query_plan", DEFAULT_PLAN))
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
         metric_store.document["run"] = dict(id=result["id"],
             configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))

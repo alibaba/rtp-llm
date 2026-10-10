@@ -48,8 +48,8 @@ class ReportPresentationTest(unittest.TestCase):
                                   producer="cache-gate", role="gate")
             source = analysis()
             with mock.patch("workload.report.build_panels", return_value=[]):
-                paths = write_views(directory, source, ["default.yaml", "cache_scale_in_overview.yaml"])
-            self.assertEqual(["cache_scale_in_overview.yaml", "default.yaml"], list(paths))
+                paths = write_views(directory, source, ["default.yaml", "cache_scale_in.yaml"])
+            self.assertEqual(["cache_scale_in.yaml", "default.yaml"], list(paths))
             frozen = load_analysis(bundle)
             self.assertEqual(original, {key: frozen[key] for key in original})
             self.assertEqual(source, frozen["run"])

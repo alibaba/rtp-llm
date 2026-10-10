@@ -160,7 +160,7 @@ def configure_program(config, source):
     for index, row in enumerate([{"id": "default"}, *config.get("variants", [])]):
         mapping(row, {
             "id", "program", "profiles", "environment", "execution", "parameters",
-            "metadata", "parameter_schema", "test", "reports",
+            "metadata", "parameter_schema", "reports",
         }, source + ".variants")
         if index and axis is not None:
             axis.validate_patch(row, source)
@@ -193,11 +193,14 @@ def _validate_configuration(config, source):
             "metadata",
             "parameter_schema",
             "analysis",
-            "test",
             "reports",
         },
         source,
     )
+    from scenario.suites import normalize_metadata, normalize_execution
+
+    metadata = normalize_metadata(config.get("metadata"))
+    normalize_execution(config.get("execution"), kind=metadata["kind"])
     if type(config.get("case_schema_version")) is not int or config["case_schema_version"] != 2:
         raise ScenarioError(
             f"{source}: only data-only case_schema_version 2 is accepted; move orchestration into Python"
@@ -209,14 +212,21 @@ def _program_document(config, name, source):
     metadata = config.get("metadata", {})
     if not isinstance(metadata, dict):
         raise ScenarioError(f"{source}.metadata: expected mapping")
-    document = ProgramDocument(copy.deepcopy(metadata))
+    document = ProgramDocument({
+        key: copy.deepcopy(value) for key, value in metadata.items() if key != "kind"
+    })
     document.update(
         program_schema_version=1, environment=copy.deepcopy(environment), variants=[]
     )
     document["id"] = config.get("id", name)
-    for key in ("profiles", "execution"):
-        if key in config:
-            document[key] = copy.deepcopy(config[key])
+    from scenario.suites import EXECUTION_BUDGETS
+
+    if "profiles" in config:
+        document["profiles"] = copy.deepcopy(config["profiles"])
+    document["execution"] = {
+        key: copy.deepcopy(value) for key, value in config["execution"].items()
+        if key in EXECUTION_BUDGETS
+    }
     selected_profiles = document.get("profiles")
     from scenario.validation import identifier, names
     from scenario.environment_config import environment as validate_environment
@@ -274,7 +284,7 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
     for field in leaf_paths(builder.parameters):
         if not path_in_scope(field, builder.read_parameters):
             raise ScenarioError(f"{source}: unused YAML parameter {field!r}")
-    variant = {"test": _variant_test(config, builder, source)}
+    variant = _variant_contract(config, builder, source)
     variant.update(
         id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
     )
@@ -283,22 +293,22 @@ def _build_variant(config, row, identity, module, axis, selected_profiles, sourc
     return variant
 
 
-def _variant_test(config, builder, source):
-    from scenario.suites import normalize_test
+def _variant_contract(config, builder, source):
+    from scenario.suites import normalize_metadata, normalize_execution
 
-    if not isinstance(config.get("test", {}), dict):
-        raise ScenarioError(f"{source}.test: expected mapping")
-    test = normalize_test(copy.deepcopy(config.get("test", {})))
+    metadata = normalize_metadata(config.get("metadata"))
+    execution = normalize_execution(config.get("execution"), kind=metadata["kind"])
     if (builder.metric_dependencies or "metric_whitelist" in builder.environment
             or any("metric_whitelist" in patch for patch in builder.environment.get("profile_overrides", {}).values())):
-        _bind_metric_dependencies(builder.metric_dependencies, test, builder.environment)
-    _bind_reports(config, test, source, builder.steps)
-    return test
+        _bind_metric_dependencies(builder.metric_dependencies, execution, builder.environment)
+    variant = dict(metadata=metadata, execution=execution)
+    _bind_reports(config, variant, source, builder.steps)
+    return variant
 
 
-def _bind_metric_dependencies(requirements, test, environment):
+def _bind_metric_dependencies(requirements, execution, environment):
     from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions, validate_export_filter
-    plan = load_plan(test["monitoring"].get("query_plan", DEFAULT_PLAN))
+    plan = load_plan(execution["monitoring"].get("query_plan", DEFAULT_PLAN))
     validate_export_filter(plan, environment)
     declared = definitions(plan)
     missing = set(requirements) - set(declared)
@@ -312,13 +322,14 @@ def _bind_metric_dependencies(requirements, test, environment):
             raise ScenarioError("metric dependency unit, mode or identity labels mismatch: " + metric_id)
 
 
-def _bind_reports(config, test, source, stages):
+def _bind_reports(config, variant, source, stages):
     from reporting.view_config import declaration
 
-    reports = config.get("reports") if test["kind"] == "workload" else None
+    reports = config.get("reports")
+    kind = variant["metadata"]["kind"]
     if reports is not None:
-        test["reports"] = declaration(
-            reports, kind=test["kind"], path=source + ".reports"
+        variant["reports"] = declaration(
+            reports, kind=kind, path=source + ".reports"
         )
         from reporting.view_config import view
 
@@ -327,7 +338,7 @@ def _bind_reports(config, test, source, stages):
             from reporting.events import validate_stage_sources
             validate_stage_sources(presentation, {stage["id"] for stage in stages}, source + ".reports")
             required_plan = presentation.get("metrics", {}).get("query_plan")
-            if required_plan and required_plan != test["monitoring"].get("query_plan"):
+            if required_plan and required_plan != variant["execution"]["monitoring"].get("query_plan"):
                 raise ScenarioError(
                     f"{source}.reports: {report_name} requires monitoring query plan {required_plan}"
                 )
@@ -347,7 +358,7 @@ def _implementation(config, module, name):
             ).encode()
         ).hexdigest(),
     }
-    query_plan = config.get("test", {}).get("monitoring", {}).get("query_plan")
+    query_plan = config.get("execution", {}).get("monitoring", {}).get("query_plan")
     if query_plan is not None:
         from monitoring.query_plan import load_plan, plan_hash
 

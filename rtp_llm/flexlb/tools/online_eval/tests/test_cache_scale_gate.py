@@ -35,7 +35,7 @@ def metric_spec(directory, evidence, result, prepared):
 
 class CacheGateTest(unittest.TestCase):
     def test_derived_curve_label_comes_from_yaml_presentation(self):
-        template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
+        template = copy.deepcopy(view("cache_scale_in.yaml"))
         template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
         prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[],
                         monitoring_status="OK", monitor_warnings=[])
@@ -67,7 +67,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual(dispatch[0]["points"][0]["y"], 3)
 
     def test_report_layout_follows_yaml_view(self):
-        template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
+        template = copy.deepcopy(view("cache_scale_in.yaml"))
         template["charts"]["panels"][0]["title"] = "YAML panel"
         template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
         prepared = dict(
@@ -99,7 +99,7 @@ class CacheGateTest(unittest.TestCase):
         curves = [dict(curve_id=metric_id, metric_id=metric_id, name=name,
                        points=[dict(x=5, y=None), dict(x=6, y=2)])
                   for metric_id, name in zip(metric_ids, names)]
-        panels = report_panels(curves, view("cache_scale_in_overview.yaml"))
+        panels = report_panels(curves, view("cache_scale_in.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
         self.assertEqual([s["name"] for s in panels[2]["series"]],
@@ -110,7 +110,7 @@ class CacheGateTest(unittest.TestCase):
         for panel, axis in zip(panels, ("ratio", "qps")):
             self.assertEqual("left", panel["axes"][axis]["position"])
             self.assertEqual("right", panel["axes"]["count"]["position"])
-        sparse = report_panels(curves[:2], view("cache_scale_in_overview.yaml"))
+        sparse = report_panels(curves[:2], view("cache_scale_in.yaml"))
         self.assertIn("Client error QPS", sparse[1]["caption"])
 
     def evidence(self, hit=0.8):

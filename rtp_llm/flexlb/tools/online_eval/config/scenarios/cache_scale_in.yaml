@@ -2,15 +2,10 @@ case_schema_version: 2
 case: cache_scale_in
 program: default
 metadata:
+  kind: workload
   description: Empirical frontend prefix lineage; ordinary single-run absolute cache gate at the known
     125P to 64P control point.
   category: kv
-test:
-  kind: workload
-  description: Fixed Java traffic across one-step P withdrawal with cache collapse adjudication
-  collection: request
-  monitoring:
-    query_plan: cache_scale_in.yaml
 profiles:
 - single-nonbatch
 - batch-window
@@ -28,6 +23,9 @@ execution:
   timeout_s: 1800
   stage_timeout_s: 60
   cleanup_timeout_s: 660
+  collection: request
+  monitoring:
+    query_plan: cache_scale_in.yaml
 parameters:
   traffic:
     kind: java_flow
@@ -277,4 +275,4 @@ parameter_schema:
 analysis:
   alignment_event: withdraw_start
 reports:
-- cache_scale_in_overview.yaml
+- cache_scale_in.yaml

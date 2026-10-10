@@ -8,6 +8,7 @@ from runtime.resource_plan import VICTIM_OFFSETS
 from runtime.perf_presets import capture_defaults
 from scenario.validation import fail, mapping, identifier, number, names
 from scenario.stage_compiler import OUTPUTS, stages
+from scenario.suites import EXECUTION_FIELDS
 from scenario.environment_config import environment, variant_environment_fields, CAPABILITIES
 
 CATEGORIES = {
@@ -136,7 +137,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "execution",
                     "requires",
                     "findings",
-                    "test",
+                    "metadata",
+                    "reports",
                 },
                 {"id"},
             )
@@ -150,9 +152,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             if not selected:
                 fail(loc + ".profiles", "must not be empty")
             variant_budgets = dict(budgets)
-            for key, value in mapping(
-                variant.get("execution", {}), loc + ".execution", set(budgets)
-            ).items():
+            variant_execution = mapping(
+                variant.get("execution", {}), loc + ".execution", EXECUTION_FIELDS
+            )
+            for key, value in variant_execution.items():
+                if key not in budgets:
+                    continue
                 variant_budgets[key] = number(
                     value, loc + ".execution." + key, minimum=0.001
                 )
@@ -316,7 +321,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "variant": vid,
                         "variant_id": vid,
                         "profile": p,
-                        **({"test": copy.deepcopy(variant["test"])} if "test" in variant else {}),
+                        **({"metadata": copy.deepcopy(variant["metadata"])} if "metadata" in variant else {}),
+                        **({"reports": copy.deepcopy(variant["reports"])} if "reports" in variant else {}),
                         "effective_axes": resolved["effective_axes"],
                         "effective_capabilities": resolved["effective_capabilities"],
                         "grade": grade,
@@ -348,7 +354,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                             "reserved_tail_offset": VICTIM_OFFSETS[2],
                         },
                         "environment": resolved,
-                        "execution": dict(variant_budgets),
+                        "execution": {
+                            **variant_budgets,
+                            **{key: copy.deepcopy(value)
+                               for key, value in variant_execution.items()
+                               if key not in budgets},
+                        },
                         "stages": copy.deepcopy(compiled),
                         "findings": list(findings),
                     }

@@ -55,7 +55,7 @@ def test_invalid_recorded_time_fails_instead_of_becoming_zero(epoch):
 
 @pytest.mark.parametrize('mutation', ['unknown', 'duplicate', 'bad_boundary', 'timestamp', 'wrong_source'])
 def test_event_declarations_are_validated_in_shared_loader(mutation):
-    data = copy.deepcopy(view('master_ha_core.yaml'))
+    data = copy.deepcopy(view('master_ha_failover.yaml'))
     if mutation == 'unknown':
         data['charts']['panels'][0]['event_ids'] = ['missing']
     elif mutation == 'duplicate':
@@ -68,7 +68,7 @@ def test_event_declarations_are_validated_in_shared_loader(mutation):
         data['charts']['events']['kill_a']['source'] = 'logs'
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError):
-            view('master_ha_core.yaml')
+            view('master_ha_failover.yaml')
 
 
 def test_runtime_case_event_records_both_clocks_and_isolates_returned_record(tmp_path):
@@ -91,8 +91,8 @@ def test_canonical_reassembly_keeps_native_chart_origin_for_case_events(tmp_path
     analysis['events'] = evidence['events']
     # Workload and the case's observation window begin at different times.
     analysis['clock_anchor'] = dict(epoch_s=900)
-    paths = write_views(tmp_path, analysis, ['cache_scale_in_overview.yaml'])
-    spec = json.loads((paths['cache_scale_in_overview.yaml'].parent/'report-spec.json').read_text())
+    paths = write_views(tmp_path, analysis, ['cache_scale_in.yaml'])
+    spec = json.loads((paths['cache_scale_in.yaml'].parent/'report-spec.json').read_text())
     assert spec['events'][0]['t'] == 20
     assert spec['panels'][0]['events'][0]['t'] == 20
     assert spec['timeOriginEpochS'] == 1000
@@ -126,12 +126,12 @@ def test_frozen_inventory_includes_python_producer_metrics():
 
 @pytest.mark.parametrize('legacy', ['ha', 'produced', 'checks'])
 def test_view_kind_is_shared_instead_of_case_specific(legacy):
-    data = copy.deepcopy(view('master_ha_core.yaml'))
+    data = copy.deepcopy(view('master_ha_failover.yaml'))
     assert data['kind'] == 'selected'
     data['kind'] = legacy
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='default or selected'):
-            view('master_ha_core.yaml')
+            view('master_ha_failover.yaml')
 
 
 def test_compilation_rejects_event_stage_typo_before_execution():
@@ -139,7 +139,7 @@ def test_compilation_rejects_event_stage_typo_before_execution():
     from scenario.loader import load_document
     from reporting.view_config import VIEWS
     config = load_document(VIEWS.parent/'scenarios/master_ha_failover.yaml')
-    data = copy.deepcopy(view('master_ha_core.yaml'))
+    data = copy.deepcopy(view('master_ha_failover.yaml'))
     data['charts']['events']['kill_a']['stage'] = 'unknown_stage'
     with patch('reporting.view_config.view', return_value=data):
         with pytest.raises(ScenarioError, match='references unknown stage'):

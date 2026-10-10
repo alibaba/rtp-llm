@@ -12,7 +12,7 @@ from reporting.view_config import view
 from scenario.loader import ScenarioError
 
 
-@pytest.mark.parametrize('filename', ['cache_scale_in_overview.yaml', 'master_ha_core.yaml'])
+@pytest.mark.parametrize('filename', ['cache_scale_in.yaml', 'master_ha_failover.yaml'])
 def test_view_loads_its_metric_plan_once(filename):
     with patch('monitoring.query_plan.load_plan', wraps=load_plan) as loader:
         view(filename)
@@ -21,7 +21,7 @@ def test_view_loads_its_metric_plan_once(filename):
     assert len(names) == len(set(names))
 
 
-@pytest.mark.parametrize('filename', ['cache_scale_in_overview.yaml', 'master_ha_core.yaml'])
+@pytest.mark.parametrize('filename', ['cache_scale_in.yaml', 'master_ha_failover.yaml'])
 @pytest.mark.parametrize('metric_id', [None, [], {}, 'mock/does_not_exist'])
 def test_invalid_metric_binding_reports_configuration_error(filename, metric_id):
     data = copy.deepcopy(view(filename))
@@ -38,11 +38,11 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
 
 
 def test_curves_require_an_explicit_plan():
-    data = copy.deepcopy(view('cache_scale_in_overview.yaml'))
+    data = copy.deepcopy(view('cache_scale_in.yaml'))
     del data['metrics']['query_plan']
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='invalid metric selection fields'):
-            view('cache_scale_in_overview.yaml')
+            view('cache_scale_in.yaml')
 
 
 @pytest.mark.parametrize('change, message', [
@@ -53,11 +53,11 @@ def test_curves_require_an_explicit_plan():
     ({'unknown': True}, 'invalid metric presentation'),
 ])
 def test_curve_styles_keep_strict_types_and_whitelists(change, message):
-    data = copy.deepcopy(view('cache_scale_in_overview.yaml'))
+    data = copy.deepcopy(view('cache_scale_in.yaml'))
     next(iter(data['charts']['curves'].values())).update(change)
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match=message):
-            view('cache_scale_in_overview.yaml')
+            view('cache_scale_in.yaml')
 
 
 @pytest.mark.parametrize('change, message', [
@@ -112,7 +112,7 @@ def test_ha_count_and_rate_boundaries():
         measure_client_metric({'metric': 'ha_gate/unknown'}, rows)
 
 
-@pytest.mark.parametrize('filename', ['cache_scale_in_overview.yaml', 'master_ha_core.yaml'])
+@pytest.mark.parametrize('filename', ['cache_scale_in.yaml', 'master_ha_failover.yaml'])
 def test_bad_panel_identity_or_binding_has_configuration_error(filename):
     data = copy.deepcopy(view(filename))
     for field, value, message in [('id', [], 'invalid.*panel'),

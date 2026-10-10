@@ -37,7 +37,7 @@ def test_flat_or_private_top_level_fields_are_rejected(filename, key):
 @pytest.mark.parametrize('block,key', [('report', 'meta'), ('report', 'kpis'),
                                       ('metrics', 'fallback'), ('charts', 'audit_columns')])
 def test_nested_blocks_are_not_an_unvalidated_options_bag(block, key):
-    filename = 'cache_scale_in_overview.yaml'
+    filename = 'cache_scale_in.yaml'
     data = copy.deepcopy(view(filename))
     data[block][key] = 'unexpected'
     with patch('reporting.view_config.load_document', return_value=data):
@@ -58,8 +58,8 @@ def test_view_loader_rejects_other_version_one_formats(header):
 
 
 @pytest.mark.parametrize('filename, key', [
-    ('cache_scale_in_overview.yaml', 'audit'), ('master_performance.yaml', 'checks'),
-    ('master_ha_core.yaml', 'sources'),
+    ('cache_scale_in.yaml', 'audit'), ('master_performance.yaml', 'checks'),
+    ('master_ha_failover.yaml', 'sources'),
 ])
 @pytest.mark.parametrize('mutation', ['missing', 'unknown', 'wrong_opened', 'wrong_columns'])
 def test_case_sections_fail_at_load_instead_of_report_generation(filename, key, mutation):
@@ -79,7 +79,7 @@ def test_case_sections_fail_at_load_instead_of_report_generation(filename, key, 
 
 
 def test_all_section_labels_and_open_states_use_common_components():
-    data = copy.deepcopy(view('cache_scale_in_overview.yaml'))
+    data = copy.deepcopy(view('cache_scale_in.yaml'))
     data['sections']['audit'].update(title='YAML audit', columns=['a', 'b', 'c', 'd'], opened=False)
     data['sections']['measurement'].update(title='YAML evidence', opened=True)
     table = view_table(data, 'audit', (row for row in [[1, 2, 3, 4]]))
@@ -98,11 +98,11 @@ def test_all_section_labels_and_open_states_use_common_components():
 
 
 def test_missing_case_chart_label_fails_before_rendering():
-    data = copy.deepcopy(view('cache_scale_in_overview.yaml'))
+    data = copy.deepcopy(view('cache_scale_in.yaml'))
     del data['charts']['time_origin_label']
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='requires time_origin_label'):
-            view('cache_scale_in_overview.yaml')
+            view('cache_scale_in.yaml')
 
 
 @pytest.mark.parametrize('filename', VIEWS)

@@ -2,17 +2,11 @@ case_schema_version: 2
 case: master_performance
 program: default
 metadata:
+  kind: workload
   description: Frozen 48P/192D Whale Mock regression reference; post-switch Flash frontend capture from
     16/20 pods, output mean from real Decode monitoring. Absolute provisional contract, not production
     capacity.
   category: master
-test:
-  kind: workload
-  description: Frozen trace/model absolute regression gate; provisional floors, 100% full-Fetch success,
-    optional batch/single observation
-  collection: request
-  monitoring:
-    query_plan: master_performance.yaml
 profiles:
 - single-nonbatch
 - batch-window
@@ -29,6 +23,9 @@ execution:
   timeout_s: 1000
   stage_timeout_s: 60
   cleanup_timeout_s: 90
+  collection: request
+  monitoring:
+    query_plan: master_performance.yaml
 parameters:
   traffic:
     kind: java_flow

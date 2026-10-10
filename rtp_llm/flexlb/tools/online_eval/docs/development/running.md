@@ -14,7 +14,7 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
   --instances '<case>::<variant>::<profile>' --parallel 1 --dry-run
 ```
 
-`core` 根据 `config/suites.yaml` 选 CI 实例；`functional` 和 `workload` 按 `test.kind` 筛选；`all` 选择全部。默认 suite 也来自该配置，不在文档维护实例数量。`--case-dir` 可指向一份 YAML 或目录，`--instances` 使用清单中的完整 ID。
+`core` 根据 `config/suites.yaml` 选 CI 实例；`functional` 和 `workload` 按 `metadata.kind` 筛选；`all` 选择全部。默认 suite 也来自该配置，不在文档维护实例数量。`--case-dir` 可指向一份 YAML 或目录，`--instances` 使用清单中的完整 ID。
 
 `--dry-run` 显示执行、端口及报告视图计划，不启动服务。核对 profile、worker 端口容量、lane 和内存预算后再执行；编译与执行使用同一组端口容量参数。列表顺序和 dry-run 成功不代表测试通过。
 

@@ -37,6 +37,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 "collector_shutdown_s": 2,
             },
         )
+        plan["execution"]["monitoring"] = dict(plan["workload_runtime"])
         clock = Clock()
         backend = Backend(clock)
         backend.completed = False

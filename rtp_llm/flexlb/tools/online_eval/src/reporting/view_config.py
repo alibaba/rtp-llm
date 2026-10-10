@@ -51,7 +51,7 @@ def view(name):
 
 def declaration(value, *, kind, path="reports"):
     if kind != "workload":
-        fail(path, "report views require test.kind=workload")
+        fail(path, "report views require metadata.kind=workload")
     if not isinstance(value, list) or not value or any(type(name) is not str for name in value):
         fail(path, "expected a nonempty list of view filenames")
     if len(set(value)) != len(value):

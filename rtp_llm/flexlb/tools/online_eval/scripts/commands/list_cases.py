@@ -51,12 +51,12 @@ def inventory(plans):
     for plan in plans:
         row = {key: plan[key] for key in LIST_FIELDS}
         row["test_kind"] = plan.get("test_kind", "functional")
-        row["test"] = plan["test"]
+        row["metadata"] = plan["metadata"]
+        if "reports" in plan:
+            row["reports"] = plan["reports"]
         if "implementation" in plan:
             row["implementation"] = plan["implementation"]
-        row["execution"] = {
-            key: plan["execution"][key] for key in ("timeout_s", "cleanup_timeout_s")
-        }
+        row["execution"] = plan["execution"]
         rows.append(row)
     return dict(instance_catalog_schema_version=1, counts=plan_counts(plans), instances=rows)
 

@@ -28,7 +28,7 @@
 | `--archive` | 可选的实验归档 ZIP |
 | `--timing-json` | 按既有耗时计划 lane 分配，不改变 case 的预算或判定 |
 
-采集档位、采样周期和缺采预算由 YAML 的 `test` 声明；指标定义由 `test.monitoring.query_plan` 选择。`reports` 选择报告视图，完整指标仍落在 `metrics.json`，见[指标配置](../../config/monitoring/README.md)和[运行产物](results.md#收取产物)。
+采集档位、采样周期和缺采预算由 YAML 的 `execution` 声明；指标定义由 `execution.monitoring.query_plan` 选择。`reports` 选择报告视图，完整指标仍落在 `metrics.json`，见[指标配置](../../config/monitoring/README.md)和[运行产物](results.md#收取产物)。
 
 ## 性能模型与流量
 

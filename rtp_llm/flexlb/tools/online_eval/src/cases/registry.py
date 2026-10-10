@@ -21,13 +21,13 @@ def finalize_reports(program, directory):
 
 
 VIEW_RENDERERS = {
-    "master_ha_core.yaml": "cases.master_ha_failover.report.write_report",
+    "master_ha_failover.yaml": "cases.master_ha_failover.report.write_report",
 }
 
 
 VIEW_VALIDATORS = {
-    "master_ha_core.yaml": "cases.master_ha_failover.report.validate_view",
-    "cache_scale_in_overview.yaml": "cases.cache_scale_in.report.validate_view",
+    "master_ha_failover.yaml": "cases.master_ha_failover.report.validate_view",
+    "cache_scale_in.yaml": "cases.cache_scale_in.report.validate_view",
     "master_performance.yaml": "cases.master_performance.report.validate_view",
 }
 

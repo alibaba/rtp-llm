@@ -152,7 +152,7 @@ def test_registered_view_extension_needs_no_workload_case_branch():
         root = Path(directory)
         from reporting.view_config import view
         import yaml
-        definition = view('master_ha_core.yaml')
+        definition = view('master_ha_failover.yaml')
         (root/'another.yaml').write_text(yaml.safe_dump(definition))
         with mock.patch.dict(VIEW_RENDERERS, {'another.yaml': 'test_extension.render'}), \
              mock.patch.dict(VIEW_VALIDATORS, {'another.yaml': 'test_extension.validate'}), \

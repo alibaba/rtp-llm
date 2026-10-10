@@ -236,6 +236,32 @@ class CaseConfigTest(unittest.TestCase):
             self.assertEqual(plan["stages"][0]["timeout_s"], 211)
             self.assertEqual(plan["stages"][4]["params"]["expected"], 7)
 
+    def test_classification_and_collection_have_one_explicit_owner(self):
+        config = self.config()
+        for path in (("metadata", "kind"), ("metadata", "description"), ("execution", "collection")):
+            invalid = copy.deepcopy(config)
+            del invalid[path[0]][path[1]]
+            with self.subTest(path=path), self.assertRaises(ScenarioError):
+                self.compile(invalid)
+        for group, patch in (
+            ("metadata", {"monitoring": {}}),
+            ("execution", {"description": "duplicate"}),
+            ("execution", {"collection": "unknown"}),
+            ("execution", {"monitoring": {"query_plan": "master_ha_failover.yaml"}}),
+        ):
+            invalid = copy.deepcopy(config)
+            invalid[group].update(patch)
+            with self.subTest(group=group, patch=patch), self.assertRaises(ScenarioError):
+                self.compile(invalid)
+        invalid = copy.deepcopy(config)
+        invalid["test"] = dict(kind="functional", description="legacy", collection="diagnostic")
+        with self.assertRaisesRegex(ScenarioError, "unknown configuration fields"):
+            self.compile(invalid)
+        for plan in self.compile(config):
+            self.assertNotIn("test", plan)
+            self.assertEqual(plan["metadata"], config["metadata"])
+            self.assertEqual(plan["execution"]["collection"], "diagnostic")
+
     def test_missing_yaml_data_has_no_python_fallback(self):
         config = self.config()
         del config["parameters"]["procedure"]["setup_timeout_s"]

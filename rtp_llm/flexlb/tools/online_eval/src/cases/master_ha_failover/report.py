@@ -62,7 +62,7 @@ def write_report(directory, payload, presentation):
     spec = canonical_spec(build_spec(payload, presentation), payload)
     bundle = write_bundle(
         directory, "run", payload["id"] + "-" + presentation["report"]["id"],
-        dict(payload, report_view="master_ha_core.yaml"),
+        dict(payload, report_view="master_ha_failover.yaml"),
         spec, meta=provenance_from(payload), producer=presentation["report"]["producer"],
     )
     return bundle / "report.html"

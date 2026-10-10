@@ -452,8 +452,7 @@ def _aggregate(lanes, instances, args, elapsed):
 def _print_planned_reports(instances):
     for instance in instances:
         if instance.metadata.get("test_kind") == "workload":
-            test = instance.metadata.get("test")
-            names = test.get("reports") if isinstance(test, dict) else None
+            names = instance.metadata.get("reports")
             if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
                 names = [DEFAULT_VIEW]
             print(f"  planned reports {instance.id}: {', '.join(names)}")

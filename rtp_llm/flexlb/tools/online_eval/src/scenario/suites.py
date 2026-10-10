@@ -1,4 +1,4 @@
-"""Instance-owned test metadata and explicit CI selection, independent of paths."""
+"""Case classification, collection policy and explicit CI selection."""
 
 import copy
 import math
@@ -20,38 +20,48 @@ DEFAULT_MONITORING = {
 }
 
 
-def normalize_test(value):
-    if not isinstance(value, dict) or set(value) - {"kind", "description", "collection", "monitoring", "reports"}:
-        raise ScenarioError("test must declare kind, description and collection; optional monitoring")
-    if value.get("kind") not in KINDS:
-        raise ScenarioError("test.kind must be functional or workload")
-    if not isinstance(value.get("description"), str) or not value["description"].strip():
-        raise ScenarioError("test.description is required")
-    if value.get("collection") not in ("aggregate", "request", "diagnostic"):
-        raise ScenarioError("test.collection must be aggregate, request or diagnostic")
+def normalize_metadata(value):
+    from scenario.validation import mapping
+
+    mapping(value, "metadata", {
+        "kind", "description", "category", "tags", "requires", "findings",
+        "estimated_duration_s",
+    }, {"kind", "description"})
+    if value["kind"] not in KINDS:
+        raise ScenarioError("metadata.kind must be functional or workload")
+    if not isinstance(value["description"], str) or not value["description"].strip():
+        raise ScenarioError("metadata.description is required")
+    return copy.deepcopy(value)
+
+
+EXECUTION_BUDGETS = {"timeout_s", "stage_timeout_s", "cleanup_timeout_s"}
+EXECUTION_FIELDS = EXECUTION_BUDGETS | {"collection", "monitoring"}
+
+
+def normalize_execution(value, *, kind):
+    from scenario.validation import mapping
+
+    mapping(value, "execution", EXECUTION_FIELDS, {"collection"})
+    if value["collection"] not in ("aggregate", "request", "diagnostic"):
+        raise ScenarioError("execution.collection must be aggregate, request or diagnostic")
     patch = value.get("monitoring", {})
-    if not isinstance(patch, dict) or set(patch) - set(DEFAULT_MONITORING) - {"query_plan"}:
-        raise ScenarioError("invalid test.monitoring fields")
+    mapping(patch, "execution.monitoring", set(DEFAULT_MONITORING) | {"query_plan"})
     monitoring = {**DEFAULT_MONITORING, **patch}
     if type(monitoring["capture_metrics"]) is not bool:
-        raise ScenarioError("test.monitoring.capture_metrics must be boolean")
+        raise ScenarioError("execution.monitoring.capture_metrics must be boolean")
     for key in ("sample_interval_s", "collector_shutdown_s", "max_sample_gap_s"):
         v = monitoring[key]
         if type(v) not in (int, float) or not math.isfinite(v) or v <= 0:
-            raise ScenarioError("invalid test.monitoring budget: " + key)
+            raise ScenarioError("invalid execution.monitoring budget: " + key)
     if monitoring["max_sample_gap_s"] < monitoring["sample_interval_s"]:
         raise ScenarioError("maximum sample gap is shorter than sampling interval")
     if "query_plan" in monitoring:
-        if value["kind"] != "workload":
-            raise ScenarioError("test.monitoring.query_plan requires a workload case")
+        if kind != "workload":
+            raise ScenarioError("execution.monitoring.query_plan requires a workload case")
         from monitoring.query_plan import load_plan
 
         load_plan(monitoring["query_plan"])
-    if "reports" in value:
-        from reporting.view_config import declaration
-
-        declaration(value["reports"], kind=value["kind"], path="test.reports")
-    return {**value, "monitoring": monitoring}
+    return {**copy.deepcopy(value), "monitoring": monitoring}
 
 
 def _catalog(path=CATALOG):
@@ -96,8 +106,8 @@ def preselect_documents(documents, suite="all", catalog=CATALOG):
         variants = []
         for variant in document["variants"]:
             key = document["id"] + "::" + variant["id"]
-            test = normalize_test(variant.get("test"))
-            if _matches(key, test["kind"], suite, suites):
+            metadata = normalize_metadata(variant.get("metadata"))
+            if _matches(key, metadata["kind"], suite, suites):
                 variants.append(variant)
         if variants:
             doc = copy.deepcopy(document)
@@ -111,13 +121,14 @@ def classify(plans, suite="all", catalog=CATALOG):
     selected = []
     for plan in plans:
         key = plan["scenario_id"] + "::" + plan["variant_id"]
-        test = normalize_test(plan.get("test"))
-        kind = test["kind"]
+        metadata = normalize_metadata(plan.get("metadata"))
+        kind = metadata["kind"]
+        execution = normalize_execution(plan.get("execution"), kind=kind)
         if _matches(key, kind, suite, suites):
             selected.append(dict(
-                plan, test_kind=kind, test_description=test["description"],
-                collection_profile=test["collection"],
-                workload_runtime=test["monitoring"] if kind == "workload" else {},
+                plan, metadata=metadata, execution=execution, test_kind=kind,
+                collection_profile=execution["collection"],
+                workload_runtime=execution["monitoring"] if kind == "workload" else {},
             ))
     if suite in suites:
         actual = {p["scenario_id"] + "::" + p["variant_id"] for p in selected}

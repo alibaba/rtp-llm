@@ -2,15 +2,12 @@ case_schema_version: 2
 case: request_completion
 program: default
 metadata:
+  kind: functional
   description: Submitted requests reach a business terminal without stream errors.
   category: status
   tags:
   - smoke
   - lifecycle
-test:
-  kind: functional
-  description: Bounded protocol, state or admission contract
-  collection: diagnostic
 profiles:
 - batch-window
 - single-nonbatch
@@ -24,6 +21,7 @@ execution:
   timeout_s: 300
   stage_timeout_s: 60
   cleanup_timeout_s: 120
+  collection: diagnostic
 parameters:
   traffic:
     kind: request_batch

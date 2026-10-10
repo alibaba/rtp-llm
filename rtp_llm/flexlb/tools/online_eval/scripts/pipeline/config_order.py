@@ -7,7 +7,7 @@ from yaml.nodes import MappingNode, SequenceNode
 
 ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FIELDS = (
-    'case_schema_version', 'case', 'program', 'metadata', 'test', 'profiles',
+    'case_schema_version', 'case', 'program', 'metadata', 'profiles',
     'environment', 'execution', 'parameters', 'parameter_schema',
     'variant_axis', 'variants', 'profile_overrides', 'analysis', 'reports',
 )
@@ -19,12 +19,11 @@ VIEW_BLOCK_FIELDS = {
                   'detail_labels', 'summaries', 'default_visible', 'max_points_per_series', 'presets'),
 }
 BLOCK_FIELDS = {
-    'metadata': ('description', 'category', 'tags'),
-    'test': ('kind', 'description', 'collection', 'monitoring', 'reports'),
+    'metadata': ('kind', 'description', 'category', 'tags'),
     'environment': ('backend', 'perf_preset', 'model_override', 'master_layout',
                     'discovery', 'n_prefill', 'n_decode', 'prefill_cache_policy',
                     'config_overrides', 'metric_whitelist'),
-    'execution': ('timeout_s', 'stage_timeout_s', 'cleanup_timeout_s'),
+    'execution': ('timeout_s', 'stage_timeout_s', 'cleanup_timeout_s', 'collection', 'monitoring'),
     'parameters': ('traffic', 'procedure', 'observation', 'checks'),
     'traffic': ('kind', 'group_id', 'phase_id', 'source', 'client', 'targets', 'duration_s',
              'timeout_ms', 'replay_speed', 'loop', 'max_concurrency', 'max_requests',

@@ -2,15 +2,9 @@ case_schema_version: 2
 case: master_ha_failover
 program: default
 metadata:
+  kind: workload
   description: One real frontend prefix-lineage replay across a selectable dual-master restart cycle.
   category: master
-test:
-  kind: workload
-  description: Continuous request outcomes, owner state and Prefill distribution during a dual-master
-    restart cycle
-  collection: request
-  monitoring:
-    query_plan: master_ha_failover.yaml
 profiles:
 - batch-window
 - single-nonbatch
@@ -24,6 +18,9 @@ execution:
   timeout_s: 2400
   stage_timeout_s: 180
   cleanup_timeout_s: 300
+  collection: request
+  monitoring:
+    query_plan: master_ha_failover.yaml
 parameters:
   traffic:
     kind: ha_replay
@@ -425,4 +422,4 @@ variants:
 - id: non_rolling
   program: non_rolling
 reports:
-- master_ha_core.yaml
+- master_ha_failover.yaml

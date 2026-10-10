@@ -89,19 +89,25 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             )
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
-            execution = row.get("execution")
-            if not isinstance(execution, dict) or set(execution) != {
-                "timeout_s",
-                "cleanup_timeout_s",
-            }:
+            from scenario.suites import (
+                EXECUTION_BUDGETS, normalize_execution, normalize_metadata,
+            )
+            from scenario.loader import ScenarioError
+
+            try:
+                metadata = normalize_metadata(row.get("metadata"))
+                execution = normalize_execution(row.get("execution"), kind=metadata["kind"])
+            except ScenarioError as exc:
+                raise InstancePlanError(f"instance {identity}: {exc}") from exc
+            if not EXECUTION_BUDGETS <= set(execution):
                 raise InstancePlanError(
                     f"instance {identity} requires execution time budgets"
                 )
             if any(
-                type(value) not in (int, float)
-                or not math.isfinite(value)
-                or value <= 0
-                for value in execution.values()
+                type(execution[key]) not in (int, float)
+                or not math.isfinite(execution[key])
+                or execution[key] <= 0
+                for key in EXECUTION_BUDGETS
             ):
                 raise InstancePlanError(
                     f"instance {identity} has invalid execution time budgets"
@@ -133,7 +139,8 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                         "resource_budget",
                         "execution",
                         "test_kind",
-                        "test",
+                        "metadata",
+                        "reports",
                     )
                     if key in row
                 },

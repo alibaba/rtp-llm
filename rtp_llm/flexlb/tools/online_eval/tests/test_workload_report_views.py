@@ -28,7 +28,7 @@ def payload(series=None, gates=None):
 
 class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
-        presentation = view("cache_scale_in_overview.yaml")
+        presentation = view("cache_scale_in.yaml")
         self.assertEqual(
             presentation["charts"]["panels"][0]["curve_ids"][1], "mock/cache_hit_ratio"
         )
@@ -37,7 +37,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
         broken["charts"]["panels"][0]["axes"] = {"count": {"title": "数量", "position": "left"}}
         with mock.patch("reporting.view_config.load_document", return_value=broken):
             with self.assertRaisesRegex(ScenarioError, "axis is not declared"):
-                view("cache_scale_in_overview.yaml")
+                view("cache_scale_in.yaml")
 
     def test_new_monitor_query_needs_explicit_presentation_classification(self):
         from monitoring.query_plan import load_plan
@@ -46,7 +46,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
         plan["sources"]["master"]["new_metric"] = {"promql": "new_metric${selector}"}
         with mock.patch("monitoring.query_plan.load_plan", return_value=plan):
             with self.assertRaisesRegex(ScenarioError, "lack presentation"):
-                view("cache_scale_in_overview.yaml")
+                view("cache_scale_in.yaml")
 
     def test_ha_core_view_aligns_events_requests_and_master_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -78,8 +78,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             produce(root, analysis)
             requests.unlink()
             state.unlink()
-            paths = write_views(root, analysis, ["default.yaml", "master_ha_core.yaml"])
-            path = paths["master_ha_core.yaml"]
+            paths = write_views(root, analysis, ["default.yaml", "master_ha_failover.yaml"])
+            path = paths["master_ha_failover.yaml"]
             spec = json.loads((path.parent / "report-spec.json").read_text())
             panels = {panel["id"]: panel for panel in spec["panels"]}
             self.assertEqual({"request_qps", "inflight", "prefill_balance"}, set(panels))
@@ -99,7 +99,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertEqual(1, panels["request_qps"]["events"][0]["t"])
             self.assertEqual(5, spec["timeAxis"]["max"])
             self.assertEqual(spec["title"], "master_ha_failover : default : batch-window")
-            self.assertEqual(spec["subtitle"], view("master_ha_core.yaml")["report"]["subtitle"])
+            self.assertEqual(spec["subtitle"], view("master_ha_failover.yaml")["report"]["subtitle"])
             default = json.loads((paths["default.yaml"].parent / "report-spec.json").read_text())
             self.assertNotIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
 
@@ -142,20 +142,20 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_cases_declare_real_view_files(self):
         for path in (ROOT / "config/scenarios").glob("*.yaml"):
             doc = load_document(path)
-            if doc.get("test", {}).get("kind") != "workload":
+            if doc.get("metadata", {}).get("kind") != "workload":
                 continue
             configured = configure_program(doc, str(path))
             for variant in configured["variants"]:
-                if variant["test"]["kind"] != "workload":
-                    self.assertNotIn("reports", variant["test"])
+                if variant["metadata"]["kind"] != "workload":
+                    self.assertNotIn("reports", variant)
                     continue
-                names = variant["test"]["reports"]
+                names = variant["reports"]
                 self.assertEqual(len(names), 1)
                 self.assertNotIn(DEFAULT_VIEW, names)
                 self.assertTrue(all((ROOT / "config/report_views" / name).is_file()
                                     for name in names))
         cache = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
-        self.assertEqual(cache["reports"], ["cache_scale_in_overview.yaml"])
+        self.assertEqual(cache["reports"], ["cache_scale_in.yaml"])
         series = {
             f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]]
             for i in range(2)
@@ -195,9 +195,9 @@ class WorkloadReportViewsTest(unittest.TestCase):
                               )]), producer="cache-gate", role="gate")
             data = payload({'1/mock/running/{"engine_name":"p0"}': [[0, 1]]},
                            discover_reports(d, role="gate"))
-            links = write_views(d, data, ["default.yaml", "cache_scale_in_overview.yaml"])
+            links = write_views(d, data, ["default.yaml", "cache_scale_in.yaml"])
             default = links["default.yaml"].parent
-            self.assertEqual(links["cache_scale_in_overview.yaml"].resolve(),
+            self.assertEqual(links["cache_scale_in.yaml"].resolve(),
                              (gate / "report.html").resolve())
             read_bundle(default)
             sections = json.dumps(json.loads((default / "report-spec.json").read_text())["sections"], ensure_ascii=False)
@@ -207,13 +207,13 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_missing_view_source_and_invalid_declarations_fail_loud(self):
         with tempfile.TemporaryDirectory() as d, self.assertRaises(OSError):
-            write_views(d, payload(), ["default.yaml", "cache_scale_in_overview.yaml"])
+            write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])
         for names in ([], ["missing.yaml", "default.yaml"], ["../default.yaml"],
                       ["default.yaml", "default.yaml"],
                       ["default.yaml", {"action": "render"}]):
             with self.subTest(names=names), self.assertRaises(ScenarioError):
                 declaration(names, kind="workload")
-        with self.assertRaisesRegex(ScenarioError, "test.kind=workload"):
+        with self.assertRaisesRegex(ScenarioError, "metadata.kind=workload"):
             declaration([DEFAULT_VIEW], kind="functional")
 
     def test_timeout_keeps_monitoring_report_when_gate_was_not_produced(self):
@@ -221,7 +221,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             data = payload({'1/mock/running/{"engine_name":"p0"}': [[0, 1]]})
             data.update(status="TIMEOUT", checks=[])
             data["workload"]["runtime_validity"] = "INVALID"
-            paths = write_views(d, data, ["cache_scale_in_overview.yaml"])
+            paths = write_views(d, data, ["cache_scale_in.yaml"])
             self.assertEqual({DEFAULT_VIEW}, set(paths))
             frozen = load_analysis(paths[DEFAULT_VIEW].parent)
             self.assertEqual("TIMEOUT", frozen["status"])
@@ -240,7 +240,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             data = payload()
             data["status"] = "ERROR"
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
-                write_views(d, data, ["default.yaml", "cache_scale_in_overview.yaml"])
+                write_views(d, data, ["default.yaml", "cache_scale_in.yaml"])
 
     def test_performance_report_title_follows_frozen_run_identity(self):
         from cases.master_performance.report import write_report as report
