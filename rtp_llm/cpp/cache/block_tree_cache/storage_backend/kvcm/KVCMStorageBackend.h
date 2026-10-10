@@ -36,6 +36,8 @@ public:
                        std::shared_ptr<kvcm::ClientWrapper>          client_wrapper = nullptr);
     ~KVCMStorageBackend() override;
 
+    // Returns whether the request was handled and response is valid. Transfer
+    // success, failure, and timeout are carried by response.transfer_status().
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
 
 protected:

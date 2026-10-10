@@ -513,6 +513,16 @@ private:
         for (size_t index = 0; index < tags.size(); ++index) {
             indices_by_tag[tags[index]].push_back(index);
         }
+        // Reject an invalid route before issuing any SDK operation. Otherwise
+        // the registered subsets could complete before a later unknown tag
+        // turns the whole request into a failure.
+        for (const auto& [tag, indices] : indices_by_tag) {
+            (void)indices;
+            if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
+                RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
+                return TransferResult::FAILED;
+            }
+        }
         // Keep replacements local until every tag completes. A timeout or
         // failure is an all-or-nothing response and leaves response.actual_uris empty.
         auto actual_uris = uris;
@@ -556,10 +566,7 @@ private:
             }
             indices_by_tag.erase(found);
         }
-        if (!indices_by_tag.empty()) {
-            RTP_LLM_LOG_ERROR("KVCM transfer contains %zu unregistered tag(s)", indices_by_tag.size());
-            return TransferResult::FAILED;
-        }
+        RTP_LLM_CHECK(indices_by_tag.empty());
         if (operation == REMOTE_OPERATION_WRITE && actual_uris != uris) {
             for (auto& uri : actual_uris) {
                 *response.add_actual_uris() = std::move(uri);
@@ -588,6 +595,8 @@ private:
             quarantine_metrics_reported_        = true;
             last_quarantine_metrics_generation_ = generation;
         } catch (...) {
+            // Keep the same generation eligible for a later retry.
+            quarantine_metrics_reported_ = false;
             RTP_LLM_LOG_ERROR("failed to report KVCM quarantine metrics");
         }
     }
@@ -630,8 +639,7 @@ private:
             RTP_LLM_CHECK_WITH_INFO(
                 requests.size() == 1, "KVCM local transfer requires exactly one request, got %zu", requests.size());
             FunctionResponsePB response;
-            RTP_LLM_CHECK_WITH_INFO(execute(requests.front().remote_request(), *response.mutable_remote_response()),
-                                    "KVCM local transfer failed");
+            execute(requests.front().remote_request(), *response.mutable_remote_response());
             responses.push_back(std::move(response));
         } else {
             auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,

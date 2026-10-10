@@ -386,7 +386,7 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (done()) {
             run_now = true;
-            error = error_info_;
+            error   = completionErrorLocked();
         } else {
             callbacks_.push_back(std::move(callback));
         }
@@ -396,12 +396,19 @@ void LoadAsyncContext::onDone(DoneCallback callback) {
     }
 }
 
+ErrorInfo LoadAsyncContext::completionErrorLocked() const {
+    if (state_.load() == State::FAILED && error_info_.ok()) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load async context failed");
+    }
+    return error_info_;
+}
+
 void LoadAsyncContext::notifyCompletion() {
     std::vector<DoneCallback> callbacks;
     ErrorInfo                 error = ErrorInfo::OkStatus();
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        error = error_info_;
+        error = completionErrorLocked();
         callbacks.swap(callbacks_);
     }
     cv_.notify_all();
@@ -421,7 +428,7 @@ bool LoadAsyncContext::success() const {
 
 ErrorInfo LoadAsyncContext::errorInfo() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return error_info_;
+    return completionErrorLocked();
 }
 
 MallocStatus LoadAsyncContext::mallocStatus() const {

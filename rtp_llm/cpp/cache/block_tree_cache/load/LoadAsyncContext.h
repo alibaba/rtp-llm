@@ -95,6 +95,7 @@ private:
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
     void dispatchCompletion(bool notify, SettlementReadyCallback settlement_ready_callback);
+    ErrorInfo completionErrorLocked() const;
     void notifyCompletion();
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;
