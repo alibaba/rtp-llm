@@ -59,27 +59,31 @@ sources:
 
 
 def test_named_collections_keep_their_order():
-    source = '''kind: produced
-title: report
-curves:
-  second:
-    name: two
-    metric_id: mock/two
-    labels: {}
-  first:
-    name: one
-    metric_id: mock/one
-    labels: {}
-panels:
-- id: second
-  curve_ids: [second, first]
-'''
+    source = """charts:
+  curves:
+    second:
+      name: two
+      metric_id: mock/two
+      labels: {}
+    first:
+      name: one
+      metric_id: mock/one
+      labels: {}
+  panels:
+  - id: second
+    curve_ids: [second, first]
+kind: produced
+report_view_schema_version: 1
+report:
+  title: report
+  subtitle: selected
+"""
     result = ordered_yaml(source, 'report_views')
     parsed = yaml.safe_load(result)
     assert parsed == yaml.safe_load(source)
-    assert list(parsed['curves']) == ['second', 'first']
-    assert parsed['panels'][0]['curve_ids'] == ['second', 'first']
-    assert list(parsed['curves']['second']) == ['metric_id', 'labels', 'name']
+    assert list(parsed['charts']['curves']) == ['second', 'first']
+    assert parsed['charts']['panels'][0]['curve_ids'] == ['second', 'first']
+    assert list(parsed['charts']['curves']['second']) == ['metric_id', 'labels', 'name']
 
 
 def test_bundled_configs_follow_declared_order():

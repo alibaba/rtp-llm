@@ -4,7 +4,21 @@
 
 ## 输入与装配
 
-视图 YAML 在 `config/report_views/` 声明曲线、名称、分组、单位、轴、颜色和面板。曲线用 `metric_id` 与 `labels` 选择冻结指标，面板用稳定的 `curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
+视图 YAML 在 `config/report_views/` 使用 `report_view_schema_version: 1`。顶层顺序固定为版本、`kind`、`report`、`metrics`、`charts`、`sections`，只出现当前视图需要的块；不允许把文案、曲线策略、表头或 case 私有字段追加到顶层。
+
+| 块 | 职责 |
+|---|---|
+| `kind` | 由 Python 注册的视图能力；不能在 YAML 指定模块 |
+| `report` | `title`、`subtitle`；已生产报告另声明 `id`、`producer`，用于定位和校验 bundle |
+| `metrics` | `query_plan` 选择指标集合；`diagnostic_only` 明确哪些已采指标不绘图 |
+| `charts` | `curves`、`panels`、事件显示名和时间轴文案；全量视图在这里声明分组、采样和曲线可见性 |
+| `sections` | 按稳定 section ID 声明附录标题、表头和默认开合状态 |
+
+`sections.<id>` 只包含 `title`、`opened` 和表格的 `columns`。`checks` 表示专属门禁说明，`monitoring`、`validity`、`metrics`、`sources` 表示相应诊断；case 专属附录由注册的 Python 校验器声明。每个 case 校验附录 ID 集合及表格列数，不能依赖生产时的 KeyError。表格和详情使用相同开合组件，Python 决定内容和顺序，YAML 只控制展示。标准 KPI 的标签由公共组件统一提供，视图不另造一套 KPI 身份。
+
+曲线通过 `charts.curves.<curve_id>.metric_id` 与 `labels` 选择冻结指标，面板通过 `charts.panels[].curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
+
+视图不声明运行元信息，不用固定字符串宣称采样或来源；运行信息由归档的 `run_meta` 提供，曲线来源由冻结的 provenance 提供。新增展示项放入相应块并同时补充 Python 字段合同，不保留旧扁平字段或转换适配器。
 
 报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标契约](metrics.md)，主报告、全量 opt-in 和产物清单见[结果与指标](../development/results.md#收取产物)。
 

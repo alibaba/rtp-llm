@@ -6,7 +6,7 @@ from pathlib import Path
 
 from cases.registry import VIEW_KINDS, load_capability
 from reporting import bundle_path, details, load_analysis, read_bundle, write_bundle
-from reporting.run_context import canonical_spec, provenance_from
+from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from
 from reporting.view_config import DEFAULT_VIEW, CHECKS_VIEW, view
 from workload.report_panels import build_panels
 
@@ -15,10 +15,10 @@ def build_spec(payload, directory, *, name=CHECKS_VIEW):
     presentation = view(name)
     series = payload["series"]
     spec = dict(
-        subtitle=presentation["subtitle"],
+        subtitle=presentation["report"]["subtitle"],
         timeOriginLabel="秒；t=0 为 workload 运行开始",
-        kpis=[dict(label="Execution", value=payload["status"]),
-              dict(label="Validity", value=payload["workload"]["runtime_validity"])],
+        kpis=[dict(label=KPI_LABELS["execution"], value=payload["status"]),
+              dict(label=KPI_LABELS["validity"], value=payload["workload"]["runtime_validity"])],
         panels=build_panels(series, payload.get("statistic_sources", {}), presentation)
                if name == DEFAULT_VIEW else [],
         timeAxis=dict(min=0, max=max((point[0] for points in series.values()
@@ -52,16 +52,16 @@ def write_views(directory, analysis, names=None):
             renderer = load_capability(VIEW_KINDS[presentation["kind"]]["renderer"])
             paths[name] = renderer(directory, analysis, presentation)
             continue
-        expected = bundle_path(directory, "run", presentation["report"])
+        expected = bundle_path(directory, "run", presentation["report"]["id"])
         if not expected.exists() and analysis["status"] in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
             analysis.setdefault("unavailable_report_views", []).append(dict(
-                view=name, producer=presentation["producer"], status="NOT_PRODUCED",
+                view=name, producer=presentation["report"]["producer"], status="NOT_PRODUCED",
                 reason="专属报告生产阶段未完成；保留失败与证据，不补算结论。",
             ))
             continue
         bundle = read_bundle(expected)
         manifest = json.loads((bundle / "manifest.json").read_text())
-        if manifest.get("producer") != presentation["producer"]:
+        if manifest.get("producer") != presentation["report"]["producer"]:
             raise ValueError("report producer mismatch for " + name)
         spec = json.loads((bundle / "report-spec.json").read_text())
         frozen = load_analysis(bundle)

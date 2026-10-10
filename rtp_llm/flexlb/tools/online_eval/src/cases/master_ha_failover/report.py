@@ -1,7 +1,8 @@
 """Project HA request and Master-state evidence into the case-selected view."""
 
-from reporting import details, write_bundle
-from reporting.run_context import canonical_spec, provenance_from
+from reporting import write_bundle
+from reporting.view_sections import view_details
+from reporting.run_context import KPI_LABELS, canonical_spec, provenance_from
 
 
 def build_spec(payload, presentation):
@@ -10,14 +11,14 @@ def build_spec(payload, presentation):
     anchor = payload["clock_anchor"]["epoch_s"]
     observations = store.document["metrics"]
     metadata = payload["ha_metric_metadata"]
-    events = [dict(t=phase["epoch_s"] - anchor, name=presentation["events"][phase["stage"]])
+    events = [dict(t=phase["epoch_s"] - anchor, name=presentation["charts"]["events"][phase["stage"]])
               for phase in payload["phases"]
-              if phase["event"] == "end" and phase["stage"] in presentation["events"]]
+              if phase["event"] == "end" and phase["stage"] in presentation["charts"]["events"]]
     panels = []
-    for descriptor in presentation["panels"]:
+    for descriptor in presentation["charts"]["panels"]:
         curves = []
         for curve_id in descriptor["curve_ids"]:
-            style = presentation["curves"][curve_id]
+            style = presentation["charts"]["curves"][curve_id]
             identity = style["metric_id"]
             for row in observations.get(identity, []):
                 labels = row["labels"]
@@ -43,7 +44,7 @@ def build_spec(payload, presentation):
             }, series=curves, events=events,
         ))
     sections = [
-        details("数据来源与完整性", dict(metadata,
+        view_details(presentation, "sources", dict(metadata,
             metrics=payload["metric_directory"] + "/metrics.json",
             monitoring=payload["workload"].get("telemetry_completeness"),
             telemetry_errors=payload["workload"].get("telemetry_integrity_errors", []),
@@ -55,11 +56,11 @@ def build_spec(payload, presentation):
         + [1]
     )
     return dict(
-        run_id=payload["id"], title=presentation["title"], subtitle=presentation["subtitle"],
+        run_id=payload["id"], title=presentation["report"]["title"], subtitle=presentation["report"]["subtitle"],
         timeOriginLabel="秒；t=0 为 workload 运行开始", timeAxis=dict(min=0, max=maximum),
-        kpis=[dict(label="Execution", value=payload["status"]),
-              dict(label="Validity", value=payload["workload"]["runtime_validity"]),
-              dict(label="请求数", value=metadata["request_count"])],
+        kpis=[dict(label=KPI_LABELS["execution"], value=payload["status"]),
+              dict(label=KPI_LABELS["validity"], value=payload["workload"]["runtime_validity"]),
+              dict(label=KPI_LABELS["request_count"], value=metadata["request_count"])],
         panels=panels, sections=sections,
     )
 

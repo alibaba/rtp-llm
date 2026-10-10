@@ -25,8 +25,8 @@ def test_view_loads_its_metric_plan_once(filename):
 @pytest.mark.parametrize('metric_id', [None, [], {}, 'mock/does_not_exist'])
 def test_invalid_metric_binding_reports_configuration_error(filename, metric_id):
     data = copy.deepcopy(view(filename))
-    identity = next(iter(data['curves']))
-    style = data['curves'][identity]
+    identity = next(iter(data['charts']['curves']))
+    style = data['charts']['curves'][identity]
     if metric_id is None:
         del style['metric_id']
     else:
@@ -40,9 +40,9 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
 
 def test_curves_require_an_explicit_plan():
     data = copy.deepcopy(view('cache_scale_in_overview.yaml'))
-    del data['monitoring_query_plan']
+    del data['metrics']['query_plan']
     with patch('reporting.view_config.load_document', return_value=data):
-        with pytest.raises(ScenarioError, match='curves require monitoring_query_plan'):
+        with pytest.raises(ScenarioError, match='invalid metric selection fields'):
             view('cache_scale_in_overview.yaml')
 
 
@@ -55,7 +55,7 @@ def test_curves_require_an_explicit_plan():
 ])
 def test_curve_styles_keep_strict_types_and_whitelists(change, message):
     data = copy.deepcopy(view('cache_scale_in_overview.yaml'))
-    next(iter(data['curves'].values())).update(change)
+    next(iter(data['charts']['curves'].values())).update(change)
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match=message):
             view('cache_scale_in_overview.yaml')
@@ -119,7 +119,7 @@ def test_bad_panel_identity_or_binding_has_configuration_error(filename):
     for field, value, message in [('id', [], 'invalid.*panel'),
                                   ('curve_ids', ['missing'], 'invalid.*panel')]:
         broken = copy.deepcopy(data)
-        broken['panels'][0][field] = value
+        broken['charts']['panels'][0][field] = value
         with patch('reporting.view_config.load_document', return_value=broken):
             with pytest.raises(ScenarioError, match=message):
                 view(filename)

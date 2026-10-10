@@ -293,7 +293,7 @@ def _bind_reports(config, test, source):
         from reporting.view_config import view
 
         for report_name in reports:
-            required_plan = view(report_name).get("monitoring_query_plan")
+            required_plan = view(report_name).get("metrics", {}).get("query_plan")
             if required_plan and required_plan != test["monitoring"].get("query_plan"):
                 raise ScenarioError(
                     f"{source}.reports: {report_name} requires monitoring query plan {required_plan}"

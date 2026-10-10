@@ -1,124 +1,132 @@
+report_view_schema_version: 1
 kind: ha
-title: 双 Master HA · 核心观测
-subtitle: Master 事件、请求结果与两台 FlexLB 的 inflight 状态
-monitoring_query_plan: master_ha_failover.yaml
-events:
-  kill_a: A kill
-  kill_b: B kill
-  restart_a: A restart
-  restart_b: B restart
-curves:
-  ha/sent:
-    metric_id: ha/sent
-    labels: {}
-    name: 发出
-    group: 请求
-    axis: qps
-    color: '#2f54eb'
-  ha/success:
-    metric_id: ha/success
-    labels: {}
-    name: 成功
-    group: 请求
-    axis: qps
-    color: '#52c41a'
-  ha/failed:
-    metric_id: ha/failed
-    labels: {}
-    name: 失败
-    group: 请求
-    axis: qps
-    color: '#f5222d'
-  ha/prefill_peak_qps:
-    metric_id: ha/prefill_peak_qps
-    labels: {}
-    name: 最热 Prefill
-    group: Prefill 分配
-    axis: qps
-    color: '#f5222d'
-  ha/prefill_mean_qps:
-    metric_id: ha/prefill_mean_qps
-    labels: {}
-    name: 全体 Prefill 平均
-    group: Prefill 分配
-    axis: qps
-    color: '#52c41a'
-  ha/prefill_skew:
-    metric_id: ha/prefill_skew
-    labels: {}
-    name: 最热 / 平均
-    group: Prefill 分配
-    axis: skew
-    color: '#13c2c2'
-  ha/http_up:
-    metric_id: ha/http_up
-    labels: {}
-    name: '{master} · HTTP 可回读'
-    group: '{master}'
-    axis: up
-    color:
-      A: '#1677ff'
-      B: '#722ed1'
-  ha/scheduler_inflight:
-    metric_id: ha/scheduler_inflight
-    labels: {}
-    name: '{master} · 调度在飞'
-    group: '{master}'
-    axis: count
-    color:
-      A: '#1677ff'
-      B: '#722ed1'
-  ha/prefill_inflight_requests:
-    metric_id: ha/prefill_inflight_requests
-    labels: {}
-    name: '{master} · Prefill 在飞请求'
-    group: '{master}'
-    axis: count
-    color:
-      A: '#13c2c2'
-      B: '#eb2f96'
-  ha/decode_master_queued:
-    metric_id: ha/decode_master_queued
-    labels: {}
-    name: '{master} · Decode Master 排队'
-    group: '{master}'
-    axis: count
-    color:
-      A: '#fa8c16'
-      B: '#faad14'
-  ha/decode_confirmed_running:
-    metric_id: ha/decode_confirmed_running
-    labels: {}
-    name: '{master} · Decode 已确认运行'
-    group: '{master}'
-    axis: count
-    color:
-      A: '#52c41a'
-      B: '#a0d911'
-panels:
-- id: request_qps
-  title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
-  caption: 请求按发送时间分桶；HTTP 状态用右轴（1 为可回读，0 为采样失败）。竖线为故障与重启事件，不代表 gRPC 已恢复。
-  curve_ids:
-  - ha/sent
-  - ha/success
-  - ha/failed
-  - ha/http_up
-- id: inflight
-  title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
-  caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
-  curve_ids:
-  - ha/scheduler_inflight
-  - ha/prefill_inflight_requests
-  - ha/decode_master_queued
-  - ha/decode_confirmed_running
-  - ha/http_up
-- id: prefill_balance
-  title: Prefill 5 秒滚动分配均衡性
-  caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于
-    200 条时不显示倍数。此短窗指标仅作观测，不作强制门禁。A/B HTTP 可回读使用独立 0/1 轴，不代表 gRPC 已恢复；竖线标出 Master 事件。
-  curve_ids:
-  - ha/prefill_peak_qps
-  - ha/prefill_mean_qps
-  - ha/prefill_skew
-  - ha/http_up
+report:
+  title: 双 Master HA · 核心观测
+  subtitle: Master 事件、请求结果与两台 FlexLB 的 inflight 状态
+metrics:
+  query_plan: master_ha_failover.yaml
+charts:
+  events:
+    kill_a: A kill
+    kill_b: B kill
+    restart_a: A restart
+    restart_b: B restart
+  curves:
+    ha/sent:
+      metric_id: ha/sent
+      labels: {}
+      name: 发出
+      group: 请求
+      axis: qps
+      color: '#2f54eb'
+    ha/success:
+      metric_id: ha/success
+      labels: {}
+      name: 成功
+      group: 请求
+      axis: qps
+      color: '#52c41a'
+    ha/failed:
+      metric_id: ha/failed
+      labels: {}
+      name: 失败
+      group: 请求
+      axis: qps
+      color: '#f5222d'
+    ha/prefill_peak_qps:
+      metric_id: ha/prefill_peak_qps
+      labels: {}
+      name: 最热 Prefill
+      group: Prefill 分配
+      axis: qps
+      color: '#f5222d'
+    ha/prefill_mean_qps:
+      metric_id: ha/prefill_mean_qps
+      labels: {}
+      name: 全体 Prefill 平均
+      group: Prefill 分配
+      axis: qps
+      color: '#52c41a'
+    ha/prefill_skew:
+      metric_id: ha/prefill_skew
+      labels: {}
+      name: 最热 / 平均
+      group: Prefill 分配
+      axis: skew
+      color: '#13c2c2'
+    ha/http_up:
+      metric_id: ha/http_up
+      labels: {}
+      name: '{master} · HTTP 可回读'
+      group: '{master}'
+      axis: up
+      color:
+        A: '#1677ff'
+        B: '#722ed1'
+    ha/scheduler_inflight:
+      metric_id: ha/scheduler_inflight
+      labels: {}
+      name: '{master} · 调度在飞'
+      group: '{master}'
+      axis: count
+      color:
+        A: '#1677ff'
+        B: '#722ed1'
+    ha/prefill_inflight_requests:
+      metric_id: ha/prefill_inflight_requests
+      labels: {}
+      name: '{master} · Prefill 在飞请求'
+      group: '{master}'
+      axis: count
+      color:
+        A: '#13c2c2'
+        B: '#eb2f96'
+    ha/decode_master_queued:
+      metric_id: ha/decode_master_queued
+      labels: {}
+      name: '{master} · Decode Master 排队'
+      group: '{master}'
+      axis: count
+      color:
+        A: '#fa8c16'
+        B: '#faad14'
+    ha/decode_confirmed_running:
+      metric_id: ha/decode_confirmed_running
+      labels: {}
+      name: '{master} · Decode 已确认运行'
+      group: '{master}'
+      axis: count
+      color:
+        A: '#52c41a'
+        B: '#a0d911'
+  panels:
+  - id: request_qps
+    title: 请求发出 / 成功 / 失败 QPS · Master HTTP 状态
+    caption: 请求按发送时间分桶；HTTP 状态用右轴（1 为可回读，0 为采样失败）。竖线为故障与重启事件，不代表 gRPC 已恢复。
+    curve_ids:
+    - ha/sent
+    - ha/success
+    - ha/failed
+    - ha/http_up
+  - id: inflight
+    title: 两台 FlexLB 的 inflight 状态量 · Master HTTP 状态
+    caption: 每秒回读两台 Master；P/D 数量为对应端点求和。HTTP 状态用右轴；采集不到时断线，不补零。
+    curve_ids:
+    - ha/scheduler_inflight
+    - ha/prefill_inflight_requests
+    - ha/decode_master_queued
+    - ha/decode_confirmed_running
+    - ha/http_up
+  - id: prefill_balance
+    title: Prefill 5 秒滚动分配均衡性
+    caption: 每秒计算过去 5 秒已分配 Prefill 的请求，包含之后失败的请求；未选出 Prefill 的错误不计入。最热 P / 全体 P 平均值为右轴倍数，少于 200 条时不显示倍数。此短窗指标仅作观测，不作强制门禁。A/B
+      HTTP 可回读使用独立 0/1 轴，不代表 gRPC 已恢复；竖线标出 Master 事件。
+    curve_ids:
+    - ha/prefill_peak_qps
+    - ha/prefill_mean_qps
+    - ha/prefill_skew
+    - ha/http_up
+sections:
+  sources:
+    title: 数据来源与完整性
+    opened: false

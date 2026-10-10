@@ -3,38 +3,78 @@
 import re
 import string
 
+from schema_contract import matches_schema
+
 CURVES = frozenset({"mean", "max", "detail"})
 
 
+def validate_structure(path, data, fail):
+    required = {"report_view_schema_version", "kind", "report"}
+    if (not required <= data.keys() or data.keys() - required - {"metrics", "charts", "sections"}
+            or not matches_schema(data, "report_view_schema_version", 1)):
+        fail(path, "invalid report view fields or version")
+    report = data["report"]
+    if (not isinstance(report, dict) or not {"title", "subtitle"} <= report.keys()
+            or report.keys() - {"title", "subtitle", "id", "producer"}):
+        fail(str(path) + ".report", "invalid report fields")
+    if "metrics" in data:
+        metrics = data["metrics"]
+        if (not isinstance(metrics, dict) or "query_plan" not in metrics
+                or metrics.keys() - {"query_plan", "diagnostic_only"}):
+            fail(str(path) + ".metrics", "invalid metric selection fields")
+    if "charts" in data and not isinstance(data["charts"], dict):
+        fail(str(path) + ".charts", "expected mapping")
+    if "sections" in data:
+        sections = data["sections"]
+        if not isinstance(sections, dict) or not sections:
+            fail(str(path) + ".sections", "expected nonempty section mapping")
+        for key, section in sections.items():
+            location = str(path) + ".sections." + str(key)
+            if (type(key) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", key)
+                    or not isinstance(section, dict) or not {"title", "opened"} <= section.keys()
+                    or section.keys() - {"title", "opened", "columns"}
+                    or type(section["title"]) is not str or not section["title"].strip()
+                    or type(section["opened"]) is not bool):
+                fail(location, "invalid section fields")
+            if "columns" in section and (not isinstance(section["columns"], list)
+                    or not section["columns"] or any(type(column) is not str or not column.strip()
+                                                    for column in section["columns"])):
+                fail(location, "invalid section columns")
+
+
 def validate_checks(path, data, fail):
-    if set(data) != {"kind", "title", "subtitle"} or data["kind"] != "checks":
+    if (set(data) != {"report_view_schema_version", "kind", "report"}
+            or data["kind"] != "checks" or set(data["report"]) != {"title", "subtitle"}):
         fail(path, "invalid execution view")
 
 
 def validate_default(path, data, fail):
-    required = {"kind", "title", "subtitle", "group_by", "detail_labels",
-                "summaries", "default_visible", "max_points_per_series", "presets"}
-    if set(data) != required or data["kind"] != "default":
+    if (set(data) != {"report_view_schema_version", "kind", "report", "charts"}
+            or data["kind"] != "default" or set(data["report"]) != {"title", "subtitle"}):
         fail(path, "invalid default view")
-    if data["group_by"] != ["epoch", "source", "metric"]:
+    charts = data["charts"]
+    required = {"group_by", "detail_labels", "summaries", "default_visible", "max_points_per_series", "presets"}
+    if set(charts) != required:
+        fail(str(path) + ".charts", "invalid default chart fields")
+    if charts["group_by"] != ["epoch", "source", "metric"]:
         fail(path, "default view must retain metric identity")
-    labels = data["detail_labels"]
+    labels = charts["detail_labels"]
     if not isinstance(labels, list) or not labels or any(
         type(x) is not str or x not in {"engine_name", "pod", "engine"} for x in labels
     ) or len(set(labels)) != len(labels):
         fail(path, "invalid detail_labels")
     for field in ("summaries", "default_visible"):
-        values = data[field]
+        values = charts[field]
         if not isinstance(values, list) or not values or any(
             type(x) is not str or x not in CURVES for x in values
         ) or len(set(values)) != len(values):
             fail(path, "invalid " + field)
-    if set(data["summaries"]) - {"mean", "max"} or set(data["default_visible"]) - set(data["summaries"]):
+    if set(charts["summaries"]) - {"mean", "max"} or set(charts["default_visible"]) - set(charts["summaries"]):
         fail(path, "default_visible must select summary curves")
-    points = data["max_points_per_series"]
+    points = charts["max_points_per_series"]
     if type(points) is not int or not 32 <= points <= 2048:
         fail(path, "max_points_per_series must be 32..2048")
-    presets = data["presets"]
+    presets = charts["presets"]
     if not isinstance(presets, dict) or not presets or any(
         type(key) is not str or not key or not isinstance(values, list)
         or not values or any(type(item) is not str or item not in CURVES for item in values)
@@ -70,19 +110,16 @@ def validate_curves(path, data, fail):
 
 
 def validate_panels(path, data, metrics, fail):
-    if ("panel" in data) == ("panels" in data):
-        fail(path, "declare exactly one of panel or panels")
-    panels = data.get("panels", [data.get("panel")])
+    panels = data.get("panels")
     if not isinstance(panels, list) or not panels:
         fail(path, "invalid panels")
     ids = set()
     for panel in panels:
-        if "panels" in data:
-            if not isinstance(panel, dict) or not {"id", "curve_ids"} <= set(panel):
-                fail(path, "panels require id and metric_ids")
-            if type(panel["id"]) is not str or not panel["id"] or panel["id"] in ids:
-                fail(path, "invalid panel id")
-            ids.add(panel["id"])
+        if not isinstance(panel, dict) or not {"id", "curve_ids"} <= set(panel):
+            fail(path, "panels require id and curve_ids")
+        if type(panel["id"]) is not str or not panel["id"] or panel["id"] in ids:
+            fail(path, "invalid panel id")
+        ids.add(panel["id"])
         validate_panel(path, panel, metrics, fail)
 
 
@@ -128,41 +165,45 @@ def _valid_preset(selector):
 
 
 def validate_produced(path, data, fail):
-    required = {"kind", "report", "producer", "title", "subtitle", "sections"}
-    if (not required <= set(data) or set(data) - required - {
-        "panel", "panels", "time_origin", "kpis", "meta", "audit_columns",
-        "criteria_columns", "curves", "monitoring_query_plan", "diagnostic_only", "unlisted",
-    } or data["kind"] != "produced"):
+    required = {"report_view_schema_version", "kind", "report", "metrics", "charts", "sections"}
+    if set(data) != required or data["kind"] != "produced":
         fail(path, "invalid produced report view")
-    metrics = validate_curves(path, data, fail)
-    for field in ("report", "producer"):
-        if type(data[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", data[field]):
-            fail(path, "invalid " + field)
-    validate_panels(path, data, metrics, fail)
-    for field, require_entries, require_values in (
-        ("sections", True, True), ("kpis", False, True), ("meta", False, False),
-    ):
-        if field not in data:
-            continue
-        values = data[field]
-        if (not isinstance(values, dict) or (require_entries and not values) or any(
-            type(key) is not str or type(value) is not str or (require_values and not value)
-            for key, value in values.items()
-        )):
-            fail(path, "invalid " + field)
-    if "time_origin" in data and type(data["time_origin"]) is not str:
-        fail(path, "invalid time_origin")
-    for field in ("audit_columns", "criteria_columns"):
-        if field in data and (not isinstance(data[field], list)
-                or any(type(value) is not str for value in data[field])):
-            fail(path, "invalid " + field)
+    report = data["report"]
+    if set(report) != {"title", "subtitle", "id", "producer"}:
+        fail(str(path) + ".report", "produced reports require id and producer")
+    for field in ("id", "producer"):
+        if type(report[field]) is not str or not re.fullmatch(r"[a-z][a-z0-9-]*", report[field]):
+            fail(str(path) + ".report", "invalid " + field)
+    charts = data["charts"]
+    if (not {"curves", "panels"} <= charts.keys()
+            or charts.keys() - {"curves", "panels", "time_origin_label"}):
+        fail(str(path) + ".charts", "invalid produced chart fields")
+    metrics = validate_curves(path, charts, fail)
+    validate_panels(path, charts, metrics, fail)
+    if "time_origin_label" in charts and (type(charts["time_origin_label"]) is not str
+                                         or not charts["time_origin_label"].strip()):
+        fail(str(path) + ".charts", "invalid time_origin_label")
+
+
+def validate_section_contract(path, data, expected, fail):
+    """Python owns section contents; YAML only names, labels and opens them."""
+    sections = data["sections"]
+    if sections.keys() != expected.keys():
+        fail(str(path) + ".sections", "unexpected or missing sections")
+    for key, column_count in expected.items():
+        columns = sections[key].get("columns")
+        if column_count is None:
+            if columns is not None:
+                fail(str(path) + ".sections." + key, "detail section cannot declare columns")
+        elif columns is None or len(columns) != column_count:
+            fail(str(path) + ".sections." + key, f"table requires {column_count} columns")
 
 
 def validate_bindings(path, data, query_plan, fail):
     from monitoring.query_plan import definitions
 
     declared = definitions(query_plan)
-    for curve_id, style in data["curves"].items():
+    for curve_id, style in data["charts"]["curves"].items():
         if (type(style.get("metric_id")) is not str or style["metric_id"] not in declared
                 or not isinstance(style.get("labels"), dict)
                 or any(type(k) is not str or type(v) is not str for k, v in style["labels"].items())):
@@ -170,19 +211,14 @@ def validate_bindings(path, data, query_plan, fail):
 
 
 def validate_monitoring_policy(path, data, query_plan, fail):
-    if query_plan is None:
-        if "diagnostic_only" in data or "unlisted" in data:
-            fail(path, "monitoring policy requires monitoring_query_plan")
-        return
-    metrics = data.get("curves", {})
-    if "diagnostic_only" in data and any(
+    policy = data["metrics"]
+    metrics = data["charts"]["curves"]
+    if "diagnostic_only" in policy and any(
         not {"unit", "color", "hidden"} <= set(style)
         for style in metrics.values()
     ):
         fail(path, "classified monitoring styles require unit, color and hidden")
-    if data.get("unlisted", "error") != "error":
-        fail(path, "invalid unlisted monitoring policy")
-    diagnostic = data.get("diagnostic_only", [])
+    diagnostic = policy.get("diagnostic_only", [])
     known = {f"{kind}/{metric}" for kind, queries in query_plan["sources"].items()
              for metric in queries}
     if not isinstance(diagnostic, list) or any(
@@ -194,12 +230,12 @@ def validate_monitoring_policy(path, data, query_plan, fail):
 
 
 def validate_text(path, data, fail):
-    if any(type(data[key]) is not str or not data[key].strip() for key in ("title", "subtitle")):
+    if any(type(data["report"][key]) is not str or not data["report"][key].strip() for key in ("title", "subtitle")):
         fail(path, "title and subtitle are required")
     if data["kind"] != "produced":
         return
     try:
-        fields = [field for _, field, _, _ in string.Formatter().parse(data["subtitle"])
+        fields = [field for _, field, _, _ in string.Formatter().parse(data["report"]["subtitle"])
                   if field is not None]
     except ValueError as exc:
         fail(path, str(exc))

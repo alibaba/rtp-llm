@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -29,11 +30,11 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
         presentation = view("cache_scale_in_overview.yaml")
         self.assertEqual(
-            presentation["panels"][0]["curve_ids"][1], "mock/cache_hit_ratio"
+            presentation["charts"]["panels"][0]["curve_ids"][1], "mock/cache_hit_ratio"
         )
-        broken = dict(presentation)
-        broken["panels"] = [dict(panel) for panel in presentation["panels"]]
-        broken["panels"][0]["axes"] = {"count": {"title": "数量", "position": "left"}}
+        broken = copy.deepcopy(presentation)
+        broken["charts"]["panels"] = [dict(panel) for panel in presentation["charts"]["panels"]]
+        broken["charts"]["panels"][0]["axes"] = {"count": {"title": "数量", "position": "left"}}
         with mock.patch("reporting.view_config.load_document", return_value=broken):
             with self.assertRaisesRegex(ScenarioError, "axis is not declared"):
                 view("cache_scale_in_overview.yaml")
@@ -244,7 +245,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
         from cases.master_performance.report import write_report as report
 
         presentation = view("master_performance.yaml").copy()
-        presentation["title"] = "YAML performance title"
+        presentation["report"]["title"] = "YAML performance title"
         with tempfile.TemporaryDirectory() as d, mock.patch(
             "reporting.view_config.view", return_value=presentation
         ), mock.patch(
@@ -259,7 +260,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             spec = json.loads((bundle / "report-spec.json").read_text())
             self.assertEqual(spec["title"], "YAML performance title")
             self.assertEqual([panel["title"] for panel in spec["panels"]],
-                             [panel["title"] for panel in presentation["panels"]])
+                             [panel["title"] for panel in presentation["charts"]["panels"]])
             self.assertEqual([panel["id"] for panel in spec["panels"]],
                              ["engine-tps", "client-qps", "latency", "cache-hit",
                               "prefill-batch", "prefill-state"])

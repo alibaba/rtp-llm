@@ -1,3 +1,5 @@
+report_view_schema_version: 1
 kind: checks
-title: 运行结果
-subtitle: 门禁判定与证据有效性
+report:
+  title: 运行结果
+  subtitle: 门禁判定与证据有效性

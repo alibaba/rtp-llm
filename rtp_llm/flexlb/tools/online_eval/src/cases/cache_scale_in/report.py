@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 from reporting.view_config import view
-from reporting import details, table, run_meta, write_bundle
+from reporting import run_meta, write_bundle
+from reporting.run_context import KPI_LABELS
+from reporting.view_sections import view_details, view_table
 
 
 def prepare_report(directory, evidence):
@@ -18,8 +20,8 @@ def prepare_report(directory, evidence):
     series, sources, gaps, errors = archived_series(directory, anchor)
     archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
     presentation = view("cache_scale_in_overview.yaml")
-    metric_defs = presentation["curves"]
-    diagnostic_only = set(presentation["diagnostic_only"])
+    metric_defs = presentation["charts"]["curves"]
+    diagnostic_only = set(presentation["metrics"].get("diagnostic_only", []))
     curves = []
     audit = []
     found = set()
@@ -108,11 +110,11 @@ def prepare_report(directory, evidence):
 def report_panels(curves, presentation):
     """Project archived monitoring curves into independent presentation panels."""
     panels = []
-    for descriptor in presentation["panels"]:
+    for descriptor in presentation["charts"]["panels"]:
         selected = [dict(curve, hidden=False) for metric_id in descriptor["curve_ids"]
                     for curve in curves
                     if curve["curve_id"] == metric_id]
-        missing = [presentation["curves"][metric_id]["name"]
+        missing = [presentation["charts"]["curves"][metric_id]["name"]
                    for metric_id in descriptor["curve_ids"] if not any(
             curve["curve_id"] == metric_id
             for curve in selected)]
@@ -130,7 +132,7 @@ def build_spec(directory, evidence, result, prepared):
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
-    survivor_style = presentation["curves"]["derived/survivor_hit_ratio"]
+    survivor_style = presentation["charts"]["curves"]["derived/survivor_hit_ratio"]
     curves.append(dict(curve_id="derived/survivor_hit_ratio", metric_id="derived/survivor_hit_ratio",
                        **{field: survivor_style[field]
                           for field in ("name", "group", "axis", "unit", "color", "hidden")},
@@ -144,35 +146,26 @@ def build_spec(directory, evidence, result, prepared):
     monitor_warnings = prepared["monitor_warnings"]
     return dict(
         run_id="cache-scale-in",
-        title=presentation["title"],
-        subtitle=presentation["subtitle"].format(
+        title=presentation["report"]["title"],
+        subtitle=presentation["report"]["subtitle"].format(
             verdict=result["verdict"], monitoring_status=monitoring_status),
-        meta=dict(
-            params=evidence["criteria"],
-            sampling=presentation["meta"]["sampling"],
-            sources=dict(
-                aggregate=presentation["meta"]["aggregate"],
-                engineDist=presentation["meta"]["engine_dist"],
-                runDir=str(Path(directory).resolve()),
-            ),
-        ),
-        timeOriginLabel=presentation["time_origin"],
+        timeOriginLabel=presentation["charts"]["time_origin_label"],
         events=evidence.get("events", []),
         kpis=[
-            dict(label=presentation["kpis"]["verdict"], value=result["verdict"]),
-            dict(label=presentation["kpis"]["monitoring"], value=monitoring_status,
+            dict(label=KPI_LABELS["verdict"], value=result["verdict"]),
+            dict(label=KPI_LABELS["monitoring"], value=monitoring_status,
                  tone="danger" if monitor_warnings else "success"),
         ],
         panels=report_panels(curves, presentation),
         sections=[
-            table(presentation["sections"]["audit"], presentation["audit_columns"], audit),
-            details(presentation["sections"]["monitoring"], dict(status=monitoring_status, warnings=monitor_warnings)),
-            details(presentation["sections"]["verdict"], result),
-            details("测量口径与请求归属", dict(scope=result["measurement_scope"],
+            view_table(presentation, "audit", audit),
+            view_details(presentation, "monitoring", dict(status=monitoring_status, warnings=monitor_warnings)),
+            view_details(presentation, "checks", result),
+            view_details(presentation, "measurement", dict(scope=result["measurement_scope"],
                     client_attribution=evidence.get("client_attribution"),
                     removals=evidence.get("removals"),
                     reinterpretation=evidence.get("reinterpretation"))),
-            details(presentation["sections"]["sources"], dict(queries=sources, gaps=gaps, errors=errors)),
+            view_details(presentation, "sources", dict(queries=sources, gaps=gaps, errors=errors)),
         ],
         timeAxis=dict(min=0, max=max((r["t"] for r in rows), default=1)),
     )
@@ -215,3 +208,14 @@ def write_report(directory, evidence, result, prepared=None):
         role="gate",
     )
     return spec
+
+
+def validate_view(path, data, fail):
+    from reporting.view_schema import validate_section_contract
+
+    if "time_origin_label" not in data["charts"]:
+        fail(str(path) + ".charts", "cache view requires time_origin_label")
+    validate_section_contract(path, data, {
+        "audit": 4, "monitoring": None, "checks": None,
+        "measurement": None, "sources": None,
+    }, fail)

@@ -11,12 +11,13 @@ SCENARIO_FIELDS = (
     'environment', 'execution', 'parameters', 'parameter_schema',
     'variant_axis', 'variants', 'profile_overrides', 'analysis', 'reports',
 )
-VIEW_FIELDS = (
-    'kind', 'title', 'subtitle', 'monitoring_query_plan', 'report', 'producer',
-    'events', 'curves', 'panels', 'panel', 'sections', 'criteria_columns',
-    'diagnostic_only', 'group_by', 'detail_labels', 'summaries',
-    'default_visible', 'max_points_per_series', 'presets',
-)
+VIEW_FIELDS = ('report_view_schema_version', 'kind', 'report', 'metrics', 'charts', 'sections')
+VIEW_BLOCK_FIELDS = {
+    ('report',): ('title', 'subtitle', 'id', 'producer'),
+    ('metrics',): ('query_plan', 'diagnostic_only'),
+    ('charts',): ('time_origin_label', 'events', 'curves', 'panels', 'group_by',
+                  'detail_labels', 'summaries', 'default_visible', 'max_points_per_series', 'presets'),
+}
 BLOCK_FIELDS = {
     'metadata': ('description', 'category', 'tags'),
     'test': ('kind', 'description', 'collection', 'monitoring', 'reports'),
@@ -46,8 +47,13 @@ def fields(kind, path):
     if kind == 'monitoring' and (len(path) == 3 and path[0] == 'sources'
                                  or len(path) == 2 and path[0] == 'produced'):
         return QUERY_FIELDS
-    if kind == 'report_views' and len(path) == 2 and path[0] == 'curves':
-        return CURVE_FIELDS
+    if kind == 'report_views':
+        if path in VIEW_BLOCK_FIELDS:
+            return VIEW_BLOCK_FIELDS[path]
+        if len(path) == 3 and path[:2] == ('charts', 'curves'):
+            return CURVE_FIELDS
+        if len(path) == 2 and path[0] == 'sections':
+            return ('title', 'columns', 'opened')
     # Trace/source.parameters is a producer-specific contract, not case.parameters.
     if kind == 'scenarios' and path[-1] in BLOCK_FIELDS and (
         path[-1] != 'parameters' or len(path) == 1

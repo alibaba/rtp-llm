@@ -144,7 +144,7 @@ def test_registered_view_extension_needs_no_workload_case_branch():
     validator = mock.Mock()
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        (root/'another.yaml').write_text('kind: another\ntitle: new view\nsubtitle: explanation\n')
+        (root/'another.yaml').write_text('report_view_schema_version: 1\nkind: another\nreport:\n  title: new view\n  subtitle: explanation\n')
         extension = dict(validator='test_extension.validate', renderer='test_extension.render')
         with mock.patch.dict(VIEW_KINDS, {'another': extension}), \
              mock.patch('reporting.view_config.VIEWS', root), \

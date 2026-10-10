@@ -298,7 +298,7 @@ class PerformanceGateTest(unittest.TestCase):
         panel = metric_panel
 
         presentation = copy.deepcopy(view("master_performance.yaml"))
-        presentation["curves"]["request/sent_qps"]["name"] = "YAML sent rate"
+        presentation["charts"]["curves"]["request/sent_qps"]["name"] = "YAML sent rate"
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
             chart, _ = panel(d, e, analyze(e), presentation)

@@ -54,13 +54,13 @@ def _summarize(members, method):
 
 def build_panels(series, sources, presentation=None):
     presentation = presentation or view(DEFAULT_VIEW)
-    visible = presentation["default_visible"]
-    presets = presentation["presets"]
+    visible = presentation["charts"]["default_visible"]
+    presets = presentation["charts"]["presets"]
     grouped = {}
     for key, points in series.items():
         base, labels = _identity(key)
         residual = {name: value for name, value in labels.items()
-                    if name not in presentation["detail_labels"]}
+                    if name not in presentation["charts"]["detail_labels"]}
         group = (*base, json.dumps(residual, sort_keys=True))
         grouped.setdefault(group, []).append((key, points, labels))
     panels = []
@@ -76,8 +76,8 @@ def build_panels(series, sources, presentation=None):
         title, category, axis = metric, "原始序列", "y"
         curves = []
         high_cardinality = len(members) > 1
-        limit = presentation["max_points_per_series"]
-        methods = presentation["summaries"] if high_cardinality else []
+        limit = presentation["charts"]["max_points_per_series"]
+        methods = presentation["charts"]["summaries"] if high_cardinality else []
         for index, method in enumerate(methods):
             keys = [key for key, _, _ in members]
             raw = _summarize(members, method)

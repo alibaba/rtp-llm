@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from reporting import write_bundle, run_meta, details, table
+from reporting import write_bundle, run_meta
+from reporting.view_sections import view_details, view_table
 
 
 def write_report(directory, evidence, result, telemetry_directory=None):
@@ -18,14 +19,13 @@ def write_report(directory, evidence, result, telemetry_directory=None):
     chart, monitoring = panel(metric_directory, evidence, result, presentation)
     panels = report_panels(chart["series"], evidence.get("criteria", {}), presentation)
     spec = dict(
-        title=presentation["title"],
-        subtitle=presentation["subtitle"].format(verdict=result["verdict"]),
+        title=presentation["report"]["title"],
+        subtitle=presentation["report"]["subtitle"].format(verdict=result["verdict"]),
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
         panels=panels,
         sections=[
-            table(
-                presentation["sections"]["criteria"],
-                presentation["criteria_columns"],
+            view_table(
+                presentation, "checks",
                 [
                     [
                         x["metric"],
@@ -36,9 +36,9 @@ def write_report(directory, evidence, result, telemetry_directory=None):
                     for x in result["checks"]
                 ],
             ),
-            details(presentation["sections"]["monitoring"], monitoring),
-            details(presentation["sections"]["validity"], result["errors"]),
-            details(presentation["sections"]["metrics"], result["metrics"]),
+            view_details(presentation, "monitoring", monitoring),
+            view_details(presentation, "validity", result["errors"]),
+            view_details(presentation, "metrics", result["metrics"]),
         ],
     )
     return write_bundle(
@@ -70,3 +70,11 @@ def refresh_report(directory):
     if evidence.is_file() and bundle.exists():
         frozen = load_analysis(bundle)
         write_report(directory, json.loads(evidence.read_text()), frozen)
+
+
+def validate_view(path, data, fail):
+    from reporting.view_schema import validate_section_contract
+
+    validate_section_contract(path, data, {
+        "checks": 4, "monitoring": None, "validity": None, "metrics": None,
+    }, fail)

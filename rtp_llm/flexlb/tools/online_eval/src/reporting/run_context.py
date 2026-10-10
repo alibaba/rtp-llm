@@ -5,6 +5,10 @@ import copy
 from reporting.core import run_meta, table, details
 
 
+KPI_LABELS = {"execution": "Execution", "validity": "Validity", "request_count": "请求数",
+              "verdict": "Gate verdict", "monitoring": "监控与请求诊断"}
+
+
 def title(identity):
     return " : ".join(str(identity).split("::"))
 
@@ -51,8 +55,8 @@ def canonical_spec(spec, analysis):
     result.update(run_id=analysis["id"], title=title(analysis["id"]))
     kpis = result.setdefault("kpis", [])
     result["kpis"] = [dict(label=label, value=value)
-                      for label, value in (("Execution", analysis["status"]),
-                                           ("Validity", analysis["workload"]["runtime_validity"]))
+                      for label, value in ((KPI_LABELS["execution"], analysis["status"]),
+                                           (KPI_LABELS["validity"], analysis["workload"]["runtime_validity"]))
                       if not any(kpi["label"] == label for kpi in kpis)] + kpis
     sections = [checks_section(analysis), validity_section(analysis)]
     sections.extend(section for section in result.get("sections", [])

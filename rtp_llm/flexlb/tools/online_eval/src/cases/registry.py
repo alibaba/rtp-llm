@@ -28,6 +28,12 @@ VIEW_KINDS = {
 }
 
 
+VIEW_VALIDATORS = {
+    "cache_scale_in_overview.yaml": "cases.cache_scale_in.report.validate_view",
+    "master_performance.yaml": "cases.master_performance.report.validate_view",
+}
+
+
 def load_capability(path):
     """Resolve only a path supplied by the trusted capability registry."""
     from importlib import import_module

@@ -2,14 +2,20 @@
 
 
 def validate(path, data, _fail):
-    if set(data) != {"kind", "title", "subtitle", "events", "panels", "curves", "monitoring_query_plan"}:
+    if (set(data) != {"report_view_schema_version", "kind", "report", "metrics", "charts", "sections"}
+            or set(data["report"]) != {"title", "subtitle"}
+            or set(data["metrics"]) != {"query_plan"}
+            or set(data["charts"]) != {"events", "curves", "panels"}):
         _fail(path, "invalid HA view fields")
-    if not isinstance(data["events"], dict) or not data["events"] or any(
+    from reporting.view_schema import validate_section_contract
+    validate_section_contract(path, data, {"sources": None}, _fail)
+    charts = data["charts"]
+    if not isinstance(charts["events"], dict) or not charts["events"] or any(
         type(stage) is not str or type(label) is not str or not label
-        for stage, label in data["events"].items()
+        for stage, label in charts["events"].items()
     ):
         _fail(path, "invalid HA event labels")
-    styles = data["curves"]
+    styles = charts["curves"]
     if not isinstance(styles, dict) or not styles:
         _fail(path, "invalid HA metric presentation")
     for identity, style in styles.items():
@@ -21,7 +27,7 @@ def validate(path, data, _fail):
         if not (type(colors) is str and colors or isinstance(colors, dict)
                 and set(colors) == {"A", "B"} and all(type(c) is str and c for c in colors.values())):
             _fail(path, "invalid HA curve colors")
-    panels = data["panels"]
+    panels = charts["panels"]
     if not isinstance(panels, list) or not panels:
         _fail(path, "invalid HA panels")
     ids = set()

@@ -15,7 +15,7 @@ def panel(directory, evidence, result, presentation=None):
     duration = evidence.get("criteria", {}).get("measure_s", 1)
     curves, audit = [], []
     axes = {}
-    for descriptor in presentation["panels"]:
+    for descriptor in presentation["charts"]["panels"]:
         for axis, settings in descriptor["axes"].items():
             if axis in axes and axes[axis] != settings:
                 raise ValueError("conflicting view axis: " + axis)
@@ -23,7 +23,7 @@ def panel(directory, evidence, result, presentation=None):
 
     def add(metric_id, name, group, axis, points, description, hidden=True,
             unit=None, apply_style=True):
-        style = presentation["curves"][metric_id]
+        style = presentation["charts"]["curves"][metric_id]
         if apply_style:
             name, group, axis = (style[field] for field in ("name", "group", "axis"))
             scale = style.get("scale", 1)
@@ -41,7 +41,7 @@ def panel(directory, evidence, result, presentation=None):
                 points=[dict(x=t, y=v) for t, v in points],
                 hidden=hidden,
                 color=style.get("color") or PALETTE[
-                    list(presentation["curves"]).index(metric_id) % len(PALETTE)],
+                    list(presentation["charts"]["curves"]).index(metric_id) % len(PALETTE)],
                 description=description,
             )
         )
@@ -49,9 +49,9 @@ def panel(directory, evidence, result, presentation=None):
     from monitoring.metric_store import MetricStore
     store = MetricStore.read(directory)
     for identity, rows in store.document["metrics"].items():
-        if not identity.startswith("request/") or identity not in presentation["curves"]:
+        if not identity.startswith("request/") or identity not in presentation["charts"]["curves"]:
             continue
-        style = presentation["curves"][identity]
+        style = presentation["charts"]["curves"][identity]
         for row in rows:
             add(identity, style["name"], style["group"], style["axis"],
                 [(t-lo/1000, value) for t,value in row["points"]],
@@ -110,14 +110,14 @@ def report_panels(curves, criteria, presentation):
         "mock/rtp_llm_context_tps_with_cache_engine_mean/P": "mock/rtp_llm_context_tps_with_cache",
         "mock/rtp_llm_generate_tps_engine_mean/D": "mock/rtp_llm_generate_tps",
     }
-    for descriptor in presentation["panels"]:
+    for descriptor in presentation["charts"]["panels"]:
         selected = [dict(curve, hidden=False) for metric_id in descriptor["curve_ids"]
                     for curve in curves if curve["curve_id"] == metric_id]
         # A monitoring query may exist but contain only NaNs. Show an explicit
         # gap rather than a 0% line or an apparently valid empty panel.
         populated = [curve for curve in selected if any(
             point["y"] is not None for point in curve["points"])]
-        missing = [presentation["curves"][metric_id]["name"]
+        missing = [presentation["charts"]["curves"][metric_id]["name"]
                    for metric_id in descriptor["curve_ids"]
                    if not any(curve["curve_id"] == metric_id for curve in populated)]
         caption = descriptor["caption"] if populated else descriptor["empty_caption"]
@@ -129,11 +129,11 @@ def report_panels(curves, criteria, presentation):
                 metric = floor_metrics[metric_id]
                 if metric in floors:
                     source = next((curve for curve in selected if curve["curve_id"] == metric_id), None)
-                    name = presentation["curves"][metric_id]["name"]
+                    name = presentation["charts"]["curves"][metric_id]["name"]
                     selected.append(dict(
                         curve_id=metric_id + "/gate_floor", source_type="configuration",
                         name=name + " 门禁线", group="门禁", axis="forward",
-                        unit="执行 tok/s", color=source["color"] if source else presentation["curves"][metric_id].get("color") or PALETTE[len(selected) % len(PALETTE)],
+                        unit="执行 tok/s", color=source["color"] if source else presentation["charts"]["curves"][metric_id].get("color") or PALETTE[len(selected) % len(PALETTE)],
                         dash=[6, 4], hidden=False,
                         points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
                         description="场景配置中的绝对下界；不是实测值",

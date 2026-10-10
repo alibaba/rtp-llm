@@ -3,10 +3,10 @@
 import re
 from pathlib import Path
 
-from cases.registry import VIEW_KINDS, load_capability
+from cases.registry import VIEW_KINDS, VIEW_VALIDATORS, load_capability
 from reporting.view_schema import (
     validate_bindings, validate_checks, validate_default, validate_monitoring_policy,
-    validate_produced, validate_text,
+    validate_produced, validate_structure, validate_text,
 )
 from scenario.loader import load_document
 from scenario.validation import fail
@@ -22,6 +22,7 @@ def view(name):
         fail("reports", "view must be a filename under config/report_views")
     path = VIEWS / name
     data = load_document(path)
+    validate_structure(path, data, fail)
     validator = _BUILTIN_VALIDATORS.get(name)
     if validator is None:
         kind = data.get("kind")
@@ -29,13 +30,16 @@ def view(name):
         validator = load_capability(capability["validator"]) if capability else validate_produced
     validator(path, data, fail)
     query_plan = None
-    if "monitoring_query_plan" in data:
+    case_validator = VIEW_VALIDATORS.get(name)
+    if case_validator is not None:
+        load_capability(case_validator)(path, data, fail)
+    if "metrics" in data:
         from monitoring.query_plan import load_plan
 
-        query_plan = load_plan(data["monitoring_query_plan"])
-    if "curves" in data:
+        query_plan = load_plan(data["metrics"]["query_plan"])
+    if "curves" in data.get("charts", {}):
         if query_plan is None:
-            fail(path, "curves require monitoring_query_plan")
+            fail(path, "curves require metrics.query_plan")
         validate_bindings(path, data, query_plan, fail)
     if data["kind"] == "produced":
         validate_monitoring_policy(path, data, query_plan, fail)

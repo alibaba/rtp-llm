@@ -36,7 +36,7 @@ def metric_spec(directory, evidence, result, prepared):
 class CacheGateTest(unittest.TestCase):
     def test_derived_curve_label_comes_from_yaml_presentation(self):
         template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
-        template["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
+        template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
         prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[],
                         monitoring_status="OK", monitor_warnings=[])
         evidence = self.evidence()
@@ -68,9 +68,9 @@ class CacheGateTest(unittest.TestCase):
 
     def test_report_layout_follows_yaml_view(self):
         template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
-        template["title"] = "YAML title"
-        template["panels"][0]["title"] = "YAML panel"
-        template["panels"][0]["curve_ids"] = ["mock/engine_count"]
+        template["report"]["title"] = "YAML title"
+        template["charts"]["panels"][0]["title"] = "YAML panel"
+        template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
         prepared = dict(
             curves=[dict(curve_id="mock/engine_count", metric_id="mock/engine_count", name="Renamed engine count", group="规模", axis="count",
                          points=[dict(x=0, y=2)])],
