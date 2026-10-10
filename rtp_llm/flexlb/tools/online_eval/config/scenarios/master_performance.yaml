@@ -8,10 +8,12 @@ environment:
   perf_preset: deepseek_v4_flash_l20c
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
   config_overrides:
-    max_requests: 64
-    max_collection_wait_ms: 350
-    max_predicted_execution_ms: 350
     cache_affinity_max_extra_ttft_ms: 1000000000
+  profile_overrides:
+    batch-window:
+      max_requests: 64
+      max_collection_wait_ms: 350
+      max_predicted_execution_ms: 350
 execution:
   timeout_s: 1000
   stage_timeout_s: 60

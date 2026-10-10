@@ -289,3 +289,15 @@ def test_stress_scheduling_overrides_are_serialized_by_value_objects():
     assert doc['dispatcher'] == DispatcherPolicy('non_batch', 7).to_json()
     with pytest.raises(ValueError, match="max_requests applies only to decision='fixed_window'"):
         render_env('stress-na130', ConfigOverride(decision='single', max_requests=64))
+
+
+def test_bundled_performance_window_settings_are_profile_scoped():
+    document = load_document(ROOT / 'config/scenarios/master_performance.yaml')
+    single = environment(document['environment'], 'performance.environment', 'single-nonbatch')
+    batch = environment(document['environment'], 'performance.environment', 'batch-window')
+    assert single['resolved_config']['scheduler']['decision'] == {'type': 'SINGLE'}
+    decision = batch['resolved_config']['scheduler']['decision']
+    assert decision['type'] == 'FIXED_WINDOW'
+    assert decision['maxRequests'] == 64
+    assert decision['maxCollectionWaitMs'] == 350
+    assert decision['maxPredictedExecutionMs'] == 350
