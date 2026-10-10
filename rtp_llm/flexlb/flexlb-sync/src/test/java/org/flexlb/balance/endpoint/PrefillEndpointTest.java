@@ -1,5 +1,6 @@
 package org.flexlb.balance.endpoint;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
@@ -9,6 +10,7 @@ import org.flexlb.balance.scheduler.ScheduledRequest;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.RoutingConfig;
+import org.flexlb.config.SchedulerConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -20,6 +22,7 @@ import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
+import org.flexlb.metric.MicrometerFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -1126,6 +1129,193 @@ class PrefillEndpointTest {
     }
 
     // ---- batch metrics reporting ----
+
+    @ParameterizedTest
+    @EnumSource(SchedulerConfig.Type.class)
+    void nonBatchInflightGaugeKeepsConfirmedRequestsWithinTheFourRequestLimit(SchedulerConfig.Type schedulerType) {
+        FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        requestConfig.setDispatcher(DispatcherConfig.nonBatch());
+        requestConfig.getDispatcher().setMaxInflightPerPrefillWorker(4);
+        requestConfig.getScheduler().setType(schedulerType);
+        PrefillEndpoint metricsEndpoint = routeEndpoint(requestConfig, "127.0.0.4");
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        try {
+            BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            reporter.init();
+            Map<String, TaskInfo> running = new HashMap<>();
+            for (long requestId = 1; requestId <= 4; requestId++) {
+                ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, requestId, 500, 0);
+                try (var reservation = EndpointTestSupport.reserveUnqueued(metricsEndpoint, item, 100L);
+                     var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
+                     var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                    running.put(item.requestId(), taskInfo(requestId, 0L, TaskPhase.RUNNING, 0, 0));
+                }
+            }
+            metricsEndpoint.reportBatchMetrics(reporter);
+            assertEquals(4.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRunningTaskInfo(running);
+            EndpointTestSupport.applyStatus(metricsEndpoint, response);
+            metricsEndpoint.reportBatchMetrics(reporter);
+
+            assertEquals(4.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+            ScheduledRequest fifth = createScheduledRequest(metricsEndpoint, requestConfig, 5L, 500, 0);
+            try (var pin = metricsEndpoint.tryPinGeneration()) {
+                assertEquals(PrefillState.CapacityStatus.CAPACITY_FULL,
+                        metricsEndpoint.reserveUnqueuedRoute(pin, fifth, 100L).status());
+            }
+        } finally {
+            registry.close();
+            metricsEndpoint.close();
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = TaskPhase.class, names = {"RECEIVED", "RUNNING"})
+    void nonBatchUnconfirmedGaugeDropsOnConfirmationAndInflightDropsOnlyOnCompletion(TaskPhase phase) {
+        FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        requestConfig.setDispatcher(DispatcherConfig.nonBatch());
+        requestConfig.setScheduler(SchedulerConfig.direct());
+        PrefillEndpoint metricsEndpoint = routeEndpoint(requestConfig, "127.0.0.4");
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        try {
+            BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            reporter.init();
+            ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, 1L, 500, 0);
+            try (var reservation = EndpointTestSupport.reserveUnqueued(metricsEndpoint, item, 100L);
+                 var admission = metricsEndpoint.tryBeginRouteCommitAdmission();
+                 var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                metricsEndpoint.reportBatchMetrics(reporter);
+            }
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+
+            WorkerStatusResponse running = new WorkerStatusResponse();
+            running.setRunningTaskInfo(Map.of("1", taskInfo(1L, 0L, phase, 0, 0)));
+            EndpointTestSupport.applyStatus(metricsEndpoint, running);
+            metricsEndpoint.reportBatchMetrics(reporter);
+            assertEquals(0.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+
+            WorkerStatusResponse finished = new WorkerStatusResponse();
+            finished.setFinishedTaskInfo(Map.of("1", taskInfo(1L, 0L, TaskPhase.RUNNING, 0, 100L)));
+            EndpointTestSupport.applyStatus(metricsEndpoint, finished);
+            metricsEndpoint.reportBatchMetrics(reporter);
+            assertEquals(0.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+            assertEquals(0.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+        } finally {
+            registry.close();
+            metricsEndpoint.close();
+        }
+    }
+
+    @Test
+    void batchRequestGaugesRetainTheirOriginalMeaningWithoutTheNonBatchMetric() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        try {
+            BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            reporter.init();
+            registerBatch(endpoint, 1L, 100L, List.of(
+                    createScheduledRequest(101L, 500, 0),
+                    createScheduledRequest(102L, 500, 0)));
+            endpoint.reportBatchMetrics(reporter);
+            assertEquals(2.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.1:8080").gauge().value());
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRunningTaskInfo(Map.of("101", taskInfo(101L, 1L, TaskPhase.RECEIVED, 0, 0)));
+            EndpointTestSupport.applyStatus(endpoint, response);
+            endpoint.reportBatchMetrics(reporter);
+
+            assertEquals(0.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.1:8080").gauge().value());
+            assertNull(registry.find("flexlb.app.flexlb.worker.status.unconfirmed.request.count").gauge());
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.inflight.batch.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.1:8080").gauge().value());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
+    void nonBatchQueueGaugeCountsQueuedRequestsAndEngineOnlyWork() {
+        FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        requestConfig.setDispatcher(DispatcherConfig.nonBatch());
+        PrefillEndpoint metricsEndpoint = routeEndpoint(requestConfig, "127.0.0.4");
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        try {
+            BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            reporter.init();
+            ScheduledRequest item = createScheduledRequest(metricsEndpoint, requestConfig, 1L, 500, 0);
+            assertTrue(EndpointTestSupport.offer(metricsEndpoint, item));
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRunningTaskInfo(Map.of("900", taskInfo(900L, 0L, TaskPhase.RECEIVED, 0, 0)));
+            EndpointTestSupport.applyStatus(metricsEndpoint, response);
+            metricsEndpoint.reportBatchMetrics(reporter);
+
+            assertEquals(2.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+            assertEquals(0.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.4:8080").gauge().value());
+            assertFalse(metricsEndpoint.canAcceptRequest());
+        } finally {
+            registry.close();
+            metricsEndpoint.close();
+        }
+    }
+
+    @Test
+    void requestGaugesKeepSiblingPrefillEnginesAndWorkerRolesSeparate() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        WorkerStatus firstStatus = WorkerStatus.createDiscovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8090,
+                null, null, 0, 2);
+        WorkerStatus siblingStatus = WorkerStatus.createDiscovered(
+                RoleType.PDFUSION, null, "127.0.0.1", 8080, 8090,
+                null, null, 1, 2);
+        FlexlbConfig requestConfig = org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig();
+        requestConfig.setDispatcher(DispatcherConfig.nonBatch());
+        requestConfig.setScheduler(SchedulerConfig.direct());
+        PrefillEndpoint first = new PrefillEndpoint(firstStatus, requestConfig,
+                EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
+        PrefillEndpoint sibling = new PrefillEndpoint(siblingStatus, requestConfig,
+                EndpointTestSupport.routeStrategy(requestRuntime), requestRuntime.events(), endpointReporter);
+        try {
+            BatchSchedulerReporter reporter = new BatchSchedulerReporter(new MicrometerFlexMonitor(registry));
+            reporter.init();
+            for (PrefillEndpoint target : List.of(first, sibling)) {
+                ScheduledRequest item = createScheduledRequest(target, requestConfig, 1L, 500, 0);
+                try (var reservation = EndpointTestSupport.reserveUnqueued(target, item, 100L);
+                     var admission = target.tryBeginRouteCommitAdmission();
+                     var handoff = admission.commit(List.of(item), List.of(reservation))) {
+                    target.reportBatchMetrics(reporter);
+                }
+            }
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRunningTaskInfo(Map.of("1", taskInfo(1L, 0L, TaskPhase.RUNNING, 0, 0)));
+            EndpointTestSupport.applyStatus(first, response);
+            first.reportBatchMetrics(reporter);
+
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.1:8080@0").gauge().value());
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.inflight.request.count")
+                    .tags("role", "PDFUSION", "engineIp", "127.0.0.1:8080@1").gauge().value());
+            assertEquals(0.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
+                    .tags("role", "PREFILL", "engineIp", "127.0.0.1:8080@0").gauge().value());
+            assertEquals(1.0, registry.get("flexlb.app.flexlb.worker.status.unconfirmed.request.count")
+                    .tags("role", "PDFUSION", "engineIp", "127.0.0.1:8080@1").gauge().value());
+        } finally {
+            registry.close();
+            first.close();
+            sibling.close();
+        }
+    }
 
     @Test
     void reportBatchMetricsBucketsQueueLengthByPriority() {

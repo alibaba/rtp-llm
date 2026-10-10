@@ -552,7 +552,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
         PrefillState.Stats stats = prefillState.stats();
         reporter.reportInflightBatchCount(role, engineIp, stats.batchCount());
-        reporter.reportInflightRequestCount(role, engineIp, stats.inflightRequests());
+        if (inflightRequestLimit > 0L) {
+            reporter.reportInflightRequestCount(role, engineIp, stats.inflightRequests());
+            reporter.reportWorkerStatusUnconfirmedRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());
+        } else {
+            reporter.reportInflightRequestCount(role, engineIp, stats.workerStatusUnconfirmedRequests());
+        }
         reporter.reportInflightMaxAgeMs(
                 role,
                 engineIp,
