@@ -157,7 +157,7 @@ class RealPrometheusTest(unittest.TestCase):
                 self.send_header("Content-Type", "text/plain; version=0.0.4")
                 self.end_headers()
                 self.wfile.write(
-                    b'rtp_llm_running_stream_size{engine_name="P0",role="prefill"} 2\nrtp_llm_wait_stream_size{engine_name="P0",role="prefill"} 128\nrtp_llm_context_tps{engine_name="P0",role="prefill",engine_incarnation="one"} 9\n'
+                    b'rtp_llm_running_stream_size{engine_name="P0",role="prefill"} 2\nrtp_llm_wait_stream_size{engine_name="P0",role="prefill"} 128\nrtp_llm_context_tps{engine_name="P0",role="prefill",engine_incarnation="one"} 9\nflexlb_client_actual_send_total 12\nunused_large_metric{request_id="never_ingested"} 999\n'
                 )
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), Exporter)
@@ -173,9 +173,13 @@ class RealPrometheusTest(unittest.TestCase):
                     session.start()
                     time.sleep(0.5)
                     self.assertIn("rtp_llm_running_stream_size", http_text(url))
+                    self.assertEqual(session.query('unused_large_metric{job="mock"}'), [])
+                    self.assertNotIn("unused_large_metric", http_text(url))
+                    self.assertTrue(session.query('up{job="mock"}'))
                     session.query_plan["sources"]["mock"]["raw_context_tps"] = dict(
                         promql="rtp_llm_context_tps${selector}", mode="scrape", unit="tokens/s",
-                        value_kind="gauge", labels=["role", "engine_name", "engine_incarnation"])
+                        value_kind="gauge", labels=["role", "engine_name", "engine_incarnation"],
+                        exported_metrics=["rtp_llm_context_tps"])
                     from monitoring.query_plan import plan_hash
                     session.query_plan_sha256 = plan_hash(session.query_plan)
                     raw = session.metric_rows("mock/raw_context_tps", source="mock",
@@ -183,9 +187,9 @@ class RealPrometheusTest(unittest.TestCase):
                     self.assertTrue(raw)
                     self.assertTrue(all(float(value) == 9 for row in raw for _, value in row["values"]))
                     self.assertTrue(session.metric_snapshot(["mock/raw_context_tps"], source="mock"))
-                    self.assertEqual(
-                        len({x["sequence"] for x in samples}), len(samples)
-                    )
+                    for row in raw:
+                        stamps = [stamp for stamp, _ in row["values"]]
+                        self.assertEqual(stamps, sorted(set(stamps)))
                     session.add_targets({"client-0": url, "client-1": url})
                     self.assertEqual(
                         set(session.target_bounds), {"client-0", "client-1"}

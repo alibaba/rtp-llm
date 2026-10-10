@@ -336,9 +336,11 @@ def _implementation(config, module, name):
         from monitoring.query_plan import load_plan, plan_hash
 
         metric_plan = load_plan(query_plan)
+        from monitoring.collection_plan import collection_plan
         implementation["monitoring_query_plan"] = {
             "name": query_plan,
             "sha256": plan_hash(metric_plan),
             "definition": metric_plan,
+            "collection": collection_plan(metric_plan),
         }
     return implementation

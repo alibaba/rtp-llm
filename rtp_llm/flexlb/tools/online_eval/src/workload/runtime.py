@@ -166,7 +166,7 @@ class WorkloadPolicy:
                           for name in targets},
         )
         window = dict(started_epoch_s=time.time(), ended_epoch_s=None)
-        for name in targets:
+        for name in source.targets:
             self.telemetry_windows[f"{ctx.env_epoch}/{name}"] = window
             self.expected_telemetry.append(f"{ctx.env_epoch}/{name}")
 

@@ -13,7 +13,7 @@ PRODUCERS = {
 }
 
 
-def metric_contract(metric_id, spec):
+def output_contract(metric_id, spec):
     """Resolve executable capabilities, not user-provided measurement labels."""
     producer = spec['producer']
     if producer not in PRODUCERS:
@@ -24,9 +24,10 @@ def metric_contract(metric_id, spec):
         raise ValueError('metric producer lacks an output contract: ' + producer)
     contract = describe(producer, metric_id, spec.get('calculation'))
     for key, value in contract.items():
-        if key != 'measurement' and spec.get(key) != value:
+        if key not in {'measurement', 'collection'} and spec.get(key) != value:
             raise ValueError(metric_id + ': producer ' + key + ' mismatch')
-    return contract['measurement']
+    return contract
+
 
 
 def produce(directory, context):

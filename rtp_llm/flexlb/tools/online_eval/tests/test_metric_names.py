@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def meaning(definition):
     # Requiredness is a case-specific collection policy; it does not change the metric.
     return {key: definition.get(key) for key in (
-        'source_type', 'source_kind', 'promql', 'producer', 'unit', 'value_kind', 'labels', 'measurement', 'calculation', 'exported_metrics',
+        'source_type', 'source_kind', 'promql', 'producer', 'unit', 'value_kind', 'labels', 'measurement', 'calculation', 'exported_metrics', 'collection',
     )} | {'mode': definition.get('mode', 'evaluated')}
 
 

@@ -162,11 +162,13 @@ def test_performance_stop_and_drain_are_explicit_program_stages():
 
 
 def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
-    from cases.master_ha_failover.observation import HaMasterStateSampler
+    from monitoring.sources import evidence_collector
+    from monitoring.query_plan import load_plan
     env = NS(master_specs=dict(A=NS(bind_ip="127.0.0.1", http_port=1)))
-    sampler = HaMasterStateSampler(env, tmp_path/"states.jsonl", .001,
+    sampler = evidence_collector(load_plan("master_ha_failover.yaml"), "master_inflight", env,
+                                  tmp_path/"states.jsonl", interval_s=.001,
                                   limits=dict(max_samples=1, max_bytes=10000))
-    with patch("cases.master_ha_failover.observation.http_get_json", return_value=None):
+    with patch("monitoring.collectors.urllib.request.urlopen", side_effect=OSError("offline")):
         sampler.start()
         assert sampler._stop.wait(2)
         with pytest.raises(RuntimeError, match="budget exceeded"):

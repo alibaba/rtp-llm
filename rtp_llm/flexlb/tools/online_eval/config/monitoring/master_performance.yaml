@@ -1,4 +1,4 @@
-metric_plan_schema_version: 4
+metric_plan_schema_version: 5
 include:
 - default.yaml
 exclude:
@@ -21,6 +21,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_context_tps
     rtp_llm_context_tps_with_cache:
       promql: rtp_llm_context_tps_with_cache${selector}
       mode: scrape
@@ -35,6 +37,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_context_tps_with_cache
     rtp_llm_generate_tps:
       promql: rtp_llm_generate_tps${selector}
       mode: scrape
@@ -49,6 +53,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_generate_tps
 produced:
   request/ttft_p99_ms:
     producer: performance_requests

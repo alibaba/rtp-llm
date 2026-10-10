@@ -14,7 +14,8 @@ from scenario.actions import master
 from cases.master_ha_failover import actions as ha
 from scenario.contracts import PlanContext
 from scenario.runtime import Deadline, RuntimeContext
-from cases.master_ha_failover.observation import HaMasterStateSampler
+from monitoring.sources import evidence_collector
+from monitoring.query_plan import load_plan
 from cases.master_ha_failover.client import HaReplayClient
 from tests.ha_fixtures import client_resource, replay_source, replay_trace
 
@@ -35,7 +36,7 @@ class MasterActionsTest(unittest.TestCase):
         ):
             runner = HaReplayClient(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
-            ], source=replay_source(), sampler_limits=dict(max_samples=10, max_bytes=10000))
+            ], source=replay_source(), query_plan=load_plan("master_ha_failover.yaml"), sampler_limits=dict(max_samples=10, max_bytes=10000))
         path = Path(runner._overrides["MASTER_DISCOVERY_FILE"])
         self.assertEqual({"hosts": [
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
@@ -92,7 +93,7 @@ class MasterActionsTest(unittest.TestCase):
             HaReplayClient(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
             ], duration_s=10, replay_speed=2, source={"kind": "trace"},
-              sampler_limits=dict(max_samples=10, max_bytes=10000))
+              query_plan=load_plan("master_ha_failover.yaml"), sampler_limits=dict(max_samples=10, max_bytes=10000))
 
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
         root = Path(self.tmp.name)
@@ -100,18 +101,20 @@ class MasterActionsTest(unittest.TestCase):
             "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=101),
             "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=102),
         })
-        sampler = HaMasterStateSampler(env, root / "master_states.jsonl", 0.01,
+        sampler = evidence_collector(load_plan("master_ha_failover.yaml"), "master_inflight", env,
+                                       root / "master_states.jsonl", interval_s=0.01,
                                        limits=dict(max_samples=10, max_bytes=10000))
 
+        from io import BytesIO
         def fetch(url, timeout):
             if url.endswith(":101/rtp_llm/inflight_status"):
-                return dict(scheduler_inflight=4,
-                            prefill_endpoints=[{"inflight_requests": 2}, {"inflight_requests": 3}],
-                            decode_endpoints=[{"master_queued": 1, "confirmed_running": 6}])
+                return BytesIO(json.dumps(dict(scheduler_inflight=4,
+                    prefill_endpoints=[{"inflight_requests": 2}, {"inflight_requests": 3}],
+                    decode_endpoints=[{"master_queued": 1, "confirmed_running": 6}])).encode())
             sampler._stop.set()
-            return None
+            raise OSError("Master offline")
 
-        with patch("cases.master_ha_failover.observation.http_get_json", side_effect=fetch):
+        with patch("monitoring.collectors.urllib.request.urlopen", side_effect=fetch):
             sampler._run()
         rows = [json.loads(line) for line in sampler.path.read_text().splitlines()]
         self.assertEqual(["A", "B"], [row["master"] for row in rows])

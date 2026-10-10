@@ -1,4 +1,4 @@
-metric_plan_schema_version: 4
+metric_plan_schema_version: 5
 include:
 - default.yaml
 sources:
@@ -17,6 +17,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_running_stream_size
     waiting:
       promql: rtp_llm_wait_stream_size${selector}
       mode: scrape
@@ -31,6 +33,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_wait_stream_size
     hit_tokens_total:
       promql: mock_hit_tokens_total${selector}
       mode: scrape
@@ -45,6 +49,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_hit_tokens_total
     context_tokens_total:
       promql: mock_context_tokens_total${selector}
       mode: scrape
@@ -59,6 +65,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_context_tokens_total
     context_requests_total:
       promql: mock_context_requests_total${selector}
       mode: scrape
@@ -73,6 +81,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_context_requests_total
     cache_evictions:
       promql: mock_engine_cache_evictions_total${selector}
       mode: scrape
@@ -87,6 +97,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_evictions_total
     prefill_ms_avg:
       promql: mock_engine_prefill_ms_avg${selector}
       mode: scrape
@@ -101,6 +113,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_prefill_ms_avg
     prefill_batches:
       promql: mock_prefill_batch_size_count${selector}
       mode: scrape
@@ -115,6 +129,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_prefill_batch_size_count
     prefill_batch_requests:
       promql: mock_prefill_batch_size_sum${selector}
       mode: scrape
@@ -129,6 +145,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_prefill_batch_size_sum
     cache_key_hits:
       promql: mock_engine_cache_key_hits_total${selector}
       mode: scrape
@@ -143,6 +161,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_key_hits_total
     cache_keys_requested:
       promql: mock_engine_cache_keys_requested_total${selector}
       mode: scrape
@@ -157,6 +177,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_keys_requested_total
     admission_open:
       promql: mock_engine_admission_open${selector}
       mode: scrape
@@ -171,6 +193,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_admission_open
     admitted_rpcs_total:
       promql: mock_engine_admitted_rpcs_total${selector}
       mode: scrape
@@ -185,6 +209,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_admitted_rpcs_total
     rejected_rpcs_total:
       promql: mock_engine_rejected_rpcs_total${selector}
       mode: scrape
@@ -199,6 +225,8 @@ sources:
         population: mock_selector
         accuracy: sampled
         requires_request_identity: false
+      exported_metrics:
+      - mock_engine_rejected_rpcs_total
 produced:
   derived/survivor_hit_ratio:
     producer: cache_windows

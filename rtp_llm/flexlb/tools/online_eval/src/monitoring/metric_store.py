@@ -226,13 +226,14 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
     """A declared Python producer publishes numeric data with explicit provenance."""
     import hashlib
     from importlib.util import find_spec
-    from monitoring.producers import PRODUCERS, metric_contract
+    from monitoring.producers import PRODUCERS, output_contract
 
     declared = store.document["definitions"].get(metric_id)
     if declared is None or declared != definition or declared.get("producer") != producer or producer not in PRODUCERS:
         raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)
     try:
-        if metric_contract(metric_id, definition) != definition['measurement']:
+        contract = output_contract(metric_id, definition)
+        if any(contract.get(key) != definition.get(key) for key in ('measurement', 'collection')):
             raise MetricContractError('published measurement does not match its implementation: ' + metric_id)
     except ValueError as exc:
         raise MetricContractError(str(exc)) from exc

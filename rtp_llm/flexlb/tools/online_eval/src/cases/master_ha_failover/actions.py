@@ -103,6 +103,7 @@ def _ha_start(ctx, params, deadline):
         targets,
         duration_s=params["duration_s"],
         sampler_limits=params["capture"],
+        query_plan=ctx.monitor.query_plan, interval_s=ctx.monitor.interval,
         clock=ctx.clock, wall_clock=ctx.wall_clock,
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],

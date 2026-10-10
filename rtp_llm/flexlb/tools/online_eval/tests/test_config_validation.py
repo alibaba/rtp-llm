@@ -70,10 +70,10 @@ def test_curve_styles_keep_strict_types_and_whitelists(change, message):
     ({'mode': 'scrape', 'promql': 'sum(metric${selector})'}, 'raw metric selector'),
 ])
 def test_query_definition_errors_are_strict_and_path_aware(tmp_path, change, message):
-    spec = dict(promql='metric${selector}', unit='count', value_kind='gauge', labels=[])
+    spec = dict(promql='metric${selector}', unit='count', value_kind='gauge', labels=[], exported_metrics=['metric'])
     spec.update(change)
     filename = tmp_path/'test.yaml'
-    filename.write_text(json.dumps(dict(metric_plan_schema_version=4, sources={'mock': {'metric': spec}})))
+    filename.write_text(json.dumps(dict(metric_plan_schema_version=5, sources={'mock': {'metric': spec}})))
     with patch('monitoring.query_plan.CATALOG', tmp_path):
         with pytest.raises(ScenarioError, match=message) as error:
             load_plan('test.yaml')
@@ -88,7 +88,7 @@ def test_query_definition_errors_are_strict_and_path_aware(tmp_path, change, mes
 def test_produced_definition_errors_are_configuration_errors(tmp_path, change, message):
     spec = dict(producer='ha_evidence', source_type='client_journal', unit='count', value_kind='scalar', labels=[])
     spec.update(change)
-    (tmp_path/'test.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'derived/count': spec})))
+    (tmp_path/'test.yaml').write_text(json.dumps(dict(metric_plan_schema_version=5, produced={'derived/count': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path):
         with pytest.raises(ScenarioError, match=message):
             load_plan('test.yaml')

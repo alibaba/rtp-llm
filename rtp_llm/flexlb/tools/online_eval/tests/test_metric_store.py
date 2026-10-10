@@ -16,7 +16,7 @@ from scenario.loader import ScenarioError
 
 
 def definition(**kwargs):
-    return dict(promql="temperature${selector}", unit="K", value_kind="gauge", labels=[], **kwargs)
+    return dict(promql="temperature${selector}", unit="K", value_kind="gauge", labels=[], exported_metrics=["temperature"], **kwargs)
 
 
 def archive(root, queries, **kwargs):
@@ -53,9 +53,9 @@ class MetricPlanTest(unittest.TestCase):
     def test_sets_compose_exclude_and_pin_expanded_content(self):
         with tempfile.TemporaryDirectory() as d, patch("monitoring.query_plan.CATALOG", Path(d)):
             root = Path(d)
-            base = dict(metric_plan_schema_version=4, sources=dict(mock=dict(temperature=definition())))
+            base = dict(metric_plan_schema_version=5, sources=dict(mock=dict(temperature=definition())))
             (root / "base.yaml").write_text(json.dumps(base))
-            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4, include=["base.yaml"],
+            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=5, include=["base.yaml"],
                 sources=dict(mock=dict(second=definition())))))
             original = load_plan("case.yaml")
             self.assertEqual(set(original["sources"]["mock"]), {"temperature", "second"})
@@ -64,7 +64,7 @@ class MetricPlanTest(unittest.TestCase):
             (root / "base.yaml").write_text(json.dumps(base))
             self.assertNotEqual(plan_hash(load_plan("case.yaml")), pinned)
             self.assertEqual(original["sources"]["mock"]["temperature"]["unit"], "K")
-            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4, include=["base.yaml"],
+            (root / "case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=5, include=["base.yaml"],
                 exclude=["mock/temperature"], sources=dict(mock=dict(second=definition())))))
             self.assertEqual(set(load_plan("case.yaml")["sources"]["mock"]), {"second"})
 
@@ -77,9 +77,9 @@ class MetricPlanTest(unittest.TestCase):
                                              value_kind="scalar", labels=[])}), "unknown metric producer"),
         ]:
             with self.subTest(changes=changes), tempfile.TemporaryDirectory() as d, patch("monitoring.query_plan.CATALOG", Path(d)):
-                (Path(d)/"base.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4,
+                (Path(d)/"base.yaml").write_text(json.dumps(dict(metric_plan_schema_version=5,
                     sources=dict(mock=dict(temperature=definition())))))
-                (Path(d)/"case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=4, **changes)))
+                (Path(d)/"case.yaml").write_text(json.dumps(dict(metric_plan_schema_version=5, **changes)))
                 with self.assertRaisesRegex(ScenarioError, pattern):
                     load_plan("case.yaml")
 
@@ -117,7 +117,7 @@ class MetricArtifactTest(unittest.TestCase):
             self.assertTrue(all(len(row["provenance"]["producer_sha256"]) == 64 for row in rows))
 
     def plan(self):
-        return dict(metric_plan_schema_version=4, sources=dict(mock=dict(temperature=definition()),client={},master={}), produced={})
+        return dict(metric_plan_schema_version=5, sources=dict(mock=dict(temperature=definition()),client={},master={}), produced={})
 
     def test_query_id_survives_exported_name_and_chunk_boundaries(self):
         with tempfile.TemporaryDirectory() as d:

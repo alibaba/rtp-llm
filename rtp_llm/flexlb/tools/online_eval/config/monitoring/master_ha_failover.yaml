@@ -1,4 +1,4 @@
-metric_plan_schema_version: 4
+metric_plan_schema_version: 5
 include:
 - default.yaml
 exclude:

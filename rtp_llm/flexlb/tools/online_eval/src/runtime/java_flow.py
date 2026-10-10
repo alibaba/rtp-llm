@@ -40,7 +40,7 @@ class JavaFlowGroup:
         if collection_profile not in {"aggregate", "request", "diagnostic"}:
             raise ValueError("unknown collection profile")
         self.collection_profile = collection_profile
-        self.monitor = monitor
+        self.monitor = monitor if monitor is None or monitor.collects("client") else None
         self.monitor_target = "client-" + group_id
         self.client = client
         self.directory = Path(directory)

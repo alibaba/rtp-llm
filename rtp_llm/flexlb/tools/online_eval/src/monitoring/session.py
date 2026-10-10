@@ -1,7 +1,7 @@
 """Experiment-owned Prometheus. No Python scrape loop or private time-series DB.
 
-Prometheus is a required executable for monitored workloads (PROMETHEUS_BIN or
-PATH). Each environment has an isolated TSDB and a single owner of /metrics.
+Prometheus is required when a plan selects time-series queries (PROMETHEUS_BIN
+or PATH); evidence-only plans do not launch it. Each environment has an isolated TSDB and a single owner of /metrics.
 Live adapters read the TSDB, never the exporter. Query results carry their
 PromQL, evaluation bounds and source; absent/stale data is never replaced by 0.
 """
@@ -19,6 +19,7 @@ from pathlib import Path
 
 from monitoring import telemetry
 from monitoring.query_plan import DEFAULT_PLAN
+from monitoring.collection_plan import scrape_job, source_kind, collection_plan
 
 def _finite(value):
     number = float(value)
@@ -53,16 +54,19 @@ class PrometheusSession:
         from monitoring.query_plan import load_plan
 
         self.directory = Path(directory).resolve()
-        self.targets = dict(targets)
-        self.target_kinds = dict(target_kinds) if target_kinds is not None else None
         self.query_plan_name = query_plan
         self.query_plan = load_plan(query_plan)
+        kinds = dict(target_kinds) if target_kinds is not None else {name: source_kind(name) for name in targets}
+        if set(kinds) != set(targets) or set(kinds.values()) - set(self.query_plan["sources"]):
+            raise ValueError("target kinds must identify every Prometheus target")
+        self.targets = {name: url for name, url in targets.items() if self.collects(kinds[name])}
+        self.target_kinds = {name: kinds[name] for name in self.targets}
+        self.collection_plan = collection_plan(self.query_plan)
         from monitoring.query_plan import plan_hash
         self.query_plan_sha256 = plan_hash(self.query_plan)
         self.interval, self.max_gap = float(interval_s), float(max_gap_s)
         if (
-            not self.targets
-            or not math.isfinite(self.max_gap)
+            not math.isfinite(self.max_gap)
             or not 0.001 <= self.interval <= self.max_gap
         ):
             raise ValueError("invalid Prometheus targets or sampling budget")
@@ -75,6 +79,10 @@ class PrometheusSession:
         self.url = None
         self.log = None
         self.target_bounds = {}
+        self.closed = False
+
+    def collects(self, kind):
+        return bool(self.query_plan["sources"][kind])
 
     def api(self, endpoint, timeout=5, **params):
         url = self.url + "/api/v1/" + endpoint + "?" + urllib.parse.urlencode(params)
@@ -131,24 +139,16 @@ class PrometheusSession:
     def add_targets(self, targets):
         if set(targets) & set(self.targets):
             raise ValueError("duplicate monitor target")
+        selected = {name: url for name, url in targets.items() if self.collects("client")}
+        if not selected:
+            return
         path = self.directory / "prometheus.json"
         config = json.loads(path.read_text())
-        for name, url in targets.items():
-            parsed = urllib.parse.urlsplit(url)
-            if parsed.scheme != "http" or not parsed.hostname or parsed.username:
-                raise ValueError("invalid client exporter URL")
-            config["scrape_configs"].append(
-                dict(
-                    job_name=name,
-                    metrics_path=parsed.path,
-                    sample_limit=100000,
-                    body_size_limit="32MB",
-                    static_configs=[dict(targets=[parsed.netloc])],
-                )
-            )
+        jobs = [scrape_job(self.query_plan, name, url, "client") for name, url in selected.items()]
+        config["scrape_configs"].extend(jobs)
+        targets = selected
         self.targets.update(targets)
-        if self.target_kinds is not None:
-            self.target_kinds.update({name: "client" for name in targets})
+        self.target_kinds.update({name: "client" for name in targets})
         path.write_text(json.dumps(config))
         request = urllib.request.Request(
             self.url + "/-/reload", data=b"", method="POST"
@@ -172,6 +172,13 @@ class PrometheusSession:
         self.target_bounds[name][1] = ended or time.time()
 
     def start(self):
+        if self.started is not None:
+            raise ValueError("monitor session already started")
+        if not any(self.query_plan["sources"].values()):
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self.started, self.monotonic = time.time(), time.monotonic()
+            self._write_session()
+            return self
         if not self.binary:
             raise RuntimeError(
                 "Prometheus is required; install it or set PROMETHEUS_BIN (no collector fallback)"
@@ -179,21 +186,8 @@ class PrometheusSession:
         self.directory.mkdir(parents=True, exist_ok=True)
         if (self.directory / "data").exists():
             raise ValueError("Prometheus directory must be fresh")
-        jobs = []
-        for name, url in self.targets.items():
-            parsed = urllib.parse.urlsplit(url)
-            if parsed.scheme != "http" or not parsed.hostname or parsed.username:
-                raise ValueError("monitor target must be an explicit http endpoint")
-            jobs.append(
-                dict(
-                    job_name=name,
-                    sample_limit=100000,
-                    body_size_limit="32MB",
-                    metrics_path=parsed.path or "/metrics",
-                    params=urllib.parse.parse_qs(parsed.query),
-                    static_configs=[dict(targets=[parsed.netloc])],
-                )
-            )
+        jobs = [scrape_job(self.query_plan, name, url, self.target_kind(name))
+                for name, url in self.targets.items()]
         config = {
             "global": {
                 "scrape_interval": f"{round(self.interval * 1000)}ms",
@@ -255,24 +249,17 @@ class PrometheusSession:
                         raise TimeoutError("Prometheus targets not ready")
                     time.sleep(0.1)
             self.started, self.monotonic = time.time(), time.monotonic()
-            (self.directory / "session.json").write_text(
-                json.dumps(
-                    dict(
-                        backend="prometheus",
-                        url=self.url,
-                        targets=self.targets,
-                        started_epoch_s=self.started,
-                        interval_s=self.interval,
-                        retention_time="24h",
-                        retention_size="1GB",
-                    ),
-                    indent=2,
-                )
-            )
+            self._write_session()
         except BaseException:
             self.stop(export=False)
             raise
         return self
+
+    def _write_session(self):
+        (self.directory / "session.json").write_text(json.dumps(dict(
+            backend="prometheus", url=self.url, targets=self.targets,
+            collection_plan=self.collection_plan, started_epoch_s=self.started,
+            interval_s=self.interval, retention_time="24h", retention_size="1GB"), indent=2))
 
     def metric_definition(self, metric_id):
         from monitoring.query_plan import definitions
@@ -321,9 +308,7 @@ class PrometheusSession:
     def target_kind(self, source):
         if source not in self.targets:
             raise ValueError("unknown monitored source: " + source)
-        if self.target_kinds is not None:
-            return self.target_kinds[source]
-        return "mock" if source == "mock" else "client" if source.startswith("client-") else "master"
+        return self.target_kinds[source]
 
     def archive(self):
         end = time.time()
@@ -339,6 +324,7 @@ class PrometheusSession:
             query_plan_sha256=self.query_plan_sha256,
             backend="prometheus",
             metric_plan=self.query_plan,
+            collection_plan=self.collection_plan,
             target_kinds={source: self.target_kind(source) for source in self.targets},
             start=self.started,
             end=end,
@@ -391,9 +377,11 @@ class PrometheusSession:
 
     def stop(self, timeout=10, export=True):
         try:
-            if export and self.process is not None and self.process.poll() is None:
+            if not self.closed and export and (self.process is not None and self.process.poll() is None
+                    or self.started is not None and not any(self.query_plan["sources"].values())):
                 self.archive()
         finally:
+            self.closed = True
             if self.process is not None and self.process.poll() is None:
                 self.process.terminate()
                 try:

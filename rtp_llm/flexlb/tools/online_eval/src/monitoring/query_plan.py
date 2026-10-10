@@ -15,7 +15,7 @@ from monitoring.identity import NAME as _NAME, METRIC_ID
 SOURCE_KINDS = ("mock", "client", "master")
 _PLAN = re.compile(r"[a-z][a-z0-9_]*\.yaml\Z")
 _TOKENS = re.compile(r"\$\{([^}]+)\}")
-PLAN_VERSION = 4
+PLAN_VERSION = 5
 
 
 def load_plan(name, _stack=()):
@@ -45,6 +45,11 @@ def load_plan(name, _stack=()):
         raise ScenarioError(f"{path}: metric plan is empty")
     plan = dict(metric_plan_schema_version=PLAN_VERSION, sources=sources, produced=produced)
     definitions(plan)
+    from monitoring.sources import selected_sources
+    try:
+        selected_sources(plan)
+    except ValueError as exc:
+        raise ScenarioError(f"{path}: {exc}") from exc
     return plan
 
 
@@ -88,16 +93,17 @@ def _validate_query(spec, kind, metric, path):
     if "required" in spec and type(spec["required"]) is not bool:
         raise ScenarioError(f"{path}: required must be boolean for {kind}/{metric}")
     _metadata(spec, path)
-    if kind == "master" and "exported_metrics" not in spec:
-        raise ScenarioError(f"{path}: master query requires exported_metrics: {metric}")
-    if "exported_metrics" in spec:
-        names = _unique_strings(spec["exported_metrics"], path, "exported_metrics must be unique names")
-        if not names or any(not re.fullmatch(r"[a-zA-Z_:][a-zA-Z0-9_:]*", name) for name in names):
-            raise ScenarioError(f"{path}: invalid exported_metrics")
+    if "exported_metrics" not in spec:
+        raise ScenarioError(f"{path}: query requires exported_metrics: {kind}/{metric}")
+    names = _unique_strings(spec["exported_metrics"], path, "exported_metrics must be unique names")
+    if not names or any(not re.fullmatch(r"[a-zA-Z_:][a-zA-Z0-9_:]*", name) for name in names):
+        raise ScenarioError(f"{path}: invalid exported_metrics")
     if spec.get("mode", "evaluated") not in ("evaluated", "scrape"):
         raise ScenarioError(f"{path}: invalid timestamp mode")
     if spec.get("mode") == "scrape" and not re.fullmatch(r"[a-zA-Z_:][a-zA-Z0-9_:]*\$\{selector\}", expression):
         raise ScenarioError(f"{path}: scrape mode requires a raw metric selector")
+    if spec.get("mode") == "scrape" and spec["exported_metrics"] != [expression.removesuffix("${selector}")]:
+        raise ScenarioError(f"{path}: raw metric dependency mismatch: {kind}/{metric}")
 
 
 def _add_produced(produced, own, path):
@@ -118,13 +124,14 @@ def _validate_produced(spec, metric, path):
             or type(spec["producer"]) is not str or not _NAME.fullmatch(spec["producer"])):
         raise ScenarioError(f"{path}: invalid produced metric {metric}")
     _metadata(spec, path)
-    from monitoring.producers import metric_contract
+    from monitoring.producers import output_contract
     try:
-        measurement = metric_contract(metric, spec)
+        contract = output_contract(metric, spec)
     except ValueError as exc:
         raise ScenarioError(f"{path}: {exc}") from exc
-    validate_measurement(measurement, path)
-    return dict(spec, measurement=measurement)
+    validate_measurement(contract["measurement"], path)
+    return dict(spec, **{key: value for key, value in contract.items()
+                         if key in {"measurement", "collection"}})
 
 
 def _exclude(sources, produced, value, path):

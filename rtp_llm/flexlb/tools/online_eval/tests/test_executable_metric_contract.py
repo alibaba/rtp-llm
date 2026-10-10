@@ -82,7 +82,7 @@ def test_invalid_calculation_is_rejected_at_load(tmp_path, change):
     del spec['measurement']
     spec['calculation'].update(change)
     path = tmp_path/'case.yaml'
-    path.write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'request/input_tps': spec})))
+    path.write_text(json.dumps(dict(metric_plan_schema_version=5, produced={'request/input_tps': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path), pytest.raises(ScenarioError):
         load_plan('case.yaml')
 
@@ -93,7 +93,7 @@ def test_declared_metadata_must_match_the_calculator(tmp_path, field, value):
     spec = calculation_spec()
     del spec['measurement']
     spec[field] = value
-    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'request/input_tps': spec})))
+    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=5, produced={'request/input_tps': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path), pytest.raises(ScenarioError, match='mismatch'):
         load_plan('case.yaml')
 
@@ -108,7 +108,7 @@ def test_produced_metadata_is_generated_and_cannot_be_authored(tmp_path):
     assert descriptor['measurement'] == dict(method='token_throughput', population='measurement:completion:ok',
                                              accuracy='request_ledger', requires_request_identity=True)
     spec = calculation_spec()
-    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'request/input_tps': spec})))
+    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=5, produced={'request/input_tps': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path), pytest.raises(ScenarioError, match='invalid produced metric'):
         load_plan('case.yaml')
 
@@ -117,11 +117,11 @@ def test_case_calculation_contract_rejects_wrong_source_and_unknown_output(tmp_p
     spec = copy.deepcopy(load_plan('cache_scale_in.yaml')['produced']['derived/survivor_hit_ratio'])
     del spec['measurement']
     spec['source_type'] = 'client_journal'
-    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'derived/survivor_hit_ratio': spec})))
+    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=5, produced={'derived/survivor_hit_ratio': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path), pytest.raises(ScenarioError, match='source_type mismatch'):
         load_plan('case.yaml')
     spec['source_type'] = 'prometheus'
-    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=4, produced={'cache_gate/unknown': spec})))
+    (tmp_path/'case.yaml').write_text(json.dumps(dict(metric_plan_schema_version=5, produced={'cache_gate/unknown': spec})))
     with patch('monitoring.query_plan.CATALOG', tmp_path), pytest.raises(ScenarioError, match='unknown cache metric'):
         load_plan('case.yaml')
 

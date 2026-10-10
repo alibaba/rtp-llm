@@ -31,7 +31,7 @@ Prometheus 查询的完整 ID 由 `sources` 的来源种类和查询键组成；
 `config/monitoring` 定义指标身份、采集查询及单位、标签、测量口径元数据。`parameters.observation.inputs` 将这些指标按标签映射为 case 使用的本地字段；`observation.windows`、采样与 capture 设置限定取证范围和完整性要求。`parameters.analysis` 定义证据的解释规则，`parameters.checks` 绑定结果指标、窗口集合及门槛。指标采集、输入投影、测量计算与判定分别由其拥有者校验，输入绑定不创建新的采集后端。
 
 ```yaml
-metric_plan_schema_version: 4
+metric_plan_schema_version: 5
 include: [default.yaml]
 sources:
   mock:
@@ -40,6 +40,7 @@ sources:
       unit: requests
       value_kind: gauge
       labels: []
+      exported_metrics: [rtp_llm_wait_stream_size]
 ```
 
 上例的指标 ID 是 `mock/queue_depth`。`sources` 支持 `mock`、`client`、`master`；采集器仅注入 `${selector}` 和 `${window_ms}`，运算使用 PromQL 原文。默认 `mode: evaluated`；需要原始抓取时间的门禁声明 `mode: scrape`，此时 PromQL 只接受原始指标名加 `${selector}`。`labels` 声明每条结果必须携带的身份标签，`required: true` 表示缺失该查询会使监控归档失败。
@@ -109,8 +110,20 @@ calculation:
 
 只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
 
-Master 查询必须用 `exported_metrics` 列出依赖的物理指标名称。`environment.metric_whitelist` 是 Java exporter 的暴露过滤器，query plan 是查询选择，两者不合并。编译期检查显式过滤器及其 profile 覆盖不会排除所选查询的依赖；未声明过滤覆盖时保留 Java 策略，运行时仍需按查询的 `required` 和覆盖契约核验实际数据。
+所有 `sources` 查询必须用 `exported_metrics` 列出依赖的物理指标名称；`mode: scrape` 的依赖必须与原始 selector 一致。`environment.metric_whitelist` 是 Java exporter 的暴露过滤器，query plan 是查询选择，两者不合并。编译期检查显式过滤器及其 profile 覆盖不会排除所选查询的依赖；未声明过滤覆盖时保留 Java 策略，运行时仍需按查询的 `required` 和覆盖契约核验实际数据。
 
 视图 YAML 的 `curves` 用本地曲线 ID 声明 `metric_id` 和 `labels` 选择，并设置名称、颜色、轴和换算；面板用 `curve_ids` 选曲线。Python program 用 `case.metric(id)` 声明依赖，编译时拒绝未定义 ID。运行时 `MetricStore.select` 显式选择标签与时间窗、检查样本数及最大间隔，`reduce` 只对单条已选序列归约；缺失数据抛出 `MetricUnavailable`，定义冲突抛出 `MetricContractError`，均不能补零。
 
 门禁的共享运行身份、制品与流量 SHA、拓扑和容量结构由 `workload.run_provenance.validate_gate_provenance` 校验，采集端和消费端使用同一合同。Fetch、请求 cohort 等测量前提仍由所属分析器校验。字段集合可从已有测量定义推导时不重复列举；消费单位和身份维度属于算法约束，不能从生产配置直接复制。诊断使用结构化结果及错误代码，不按错误文案决定是否忽略采集失败。
+
+## 按需采集与数据源扩展
+
+公共层不按 case 名分支。每次 run 选择的 query plan 是指标清单；查询声明物理依赖，注册 producer 为必要的额外采集声明 `collection.source` 和 `collection.field`。这两个字段由 Python 输出契约生成，不能在 YAML 手写覆盖。编译产物的 `implementation.monitoring_query_plan.collection` 冻结 Prometheus 物理白名单、证据字段及适配器实现 SHA；运行期的 `session.json` 和 `queries.json` 保留实际 target 与计划。
+
+`monitoring.collection_plan` 从选中查询生成按来源的白名单。没有查询的来源不启动 scrape job；动态客户端同样遵守选择，未选中的客户端不开 exporter。每个 job 使用 Prometheus `metric_relabel_configs` 的 keep 规则，只入库声明的物理指标，保留原有身份标签和自动生成的 `up`。查询使用 histogram 时显式列出所需 bucket、sum、count，不能用同名 gauge 替换。过滤不解析或重写 PromQL，复杂表达式的依赖由定义维护者负责核对。没有 Prometheus 查询的纯证据计划不启动 TSDB。
+
+入库过滤减少序列和存储量，不减少 exporter HTTP 响应生成或网络传输；只减少查询或图表也不会减少 scrape。Master 不增加生产指标、接口或日志。现有 Java 暴露白名单仍受编译校验；client、engine 的源端导出能力可按其自身合同扩展，不把服务端成本下降当成入库过滤的既有效果。
+
+`monitoring.sources.SOURCES` 注册额外证据能力，选中的指标决定启动哪些能力和字段。普通时序优先复用现有 exporter 或标准 exporter；只有确需未暴露字段的观测才走有界证据采集。`monitoring.collectors.EvidenceCollector` 管理时钟、采样、样本/字节预算、失败传播与 stop/join。适配器只执行一次有超时的读取和严格字段投影，不能创建线程、写文件或回退到日志。HTTP 读取失败与成功响应的坏 JSON、缺字段分开处理；坏数据报错。若接口不可达本身是测试观测，可由协议适配器显式产出可达性状态，但不能为其余字段补零。
+
+接口协议与字段语义独立于测试目的时放公共源模块；专属协议解释放 `cases/<case>/`，通过相同注册入口接入公共生命周期。只有接口已有稳定 exporter 时才改用 Prometheus 调度；不能为统一传输而丢失物理来源或改变观测语义。请求 journal 是事件证据，由已注册 producer 按冻结窗口计算；它不需要再转成逐请求 Prometheus 标签。

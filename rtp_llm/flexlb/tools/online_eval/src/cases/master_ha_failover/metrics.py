@@ -106,9 +106,12 @@ def metric_contract(producer, identity, calculation):
             raise ValueError('unknown HA evidence metric: ' + identity)
     else:
         raise ValueError('unknown HA metric: ' + identity)
-    return dict(source_type=source, measurement=implementation_measurement(function,
+    contract = dict(source_type=source, measurement=implementation_measurement(function,
         population=population, accuracy='sampled' if source == 'debug_api' else 'request_ledger',
         request_identity=source == 'client_journal'))
+    if source == 'debug_api':
+        contract['collection'] = dict(source='master_inflight', field=key)
+    return contract
 
 
 def produce(directory, payload):

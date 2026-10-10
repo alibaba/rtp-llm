@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from cases.master_ha_failover.analysis import row_ts_ms
-from cases.master_ha_failover.observation import HaMasterStateSampler
+from monitoring.sources import evidence_collector
 from runtime.java_client import ClientOps
 from traffic.contracts import source_priority
 
@@ -35,14 +35,15 @@ class HaReplayClient:
         max_requests: int | None = None,
         loop: bool = False,
         collection_profile="request",
-        sampler_limits, clock=time.monotonic, wall_clock=time.time,
+        sampler_limits, query_plan, interval_s=1, clock=time.monotonic, wall_clock=time.time,
     ):
         self.name = name
         self.targets = list(targets)
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
-        self.state_sampler = HaMasterStateSampler(env, case_dir / "master_states.jsonl",
-            limits=sampler_limits, clock=clock, wall_clock=wall_clock)
+        self.state_sampler = evidence_collector(query_plan, "master_inflight", env,
+            case_dir / "master_states.jsonl", limits=sampler_limits, interval_s=interval_s,
+            clock=clock, wall_clock=wall_clock)
         specs_by_target = {
             manager.master_instance_target(env, master_name): spec
             for master_name, spec in env.master_specs.items()
