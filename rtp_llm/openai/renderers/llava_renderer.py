@@ -49,6 +49,7 @@ def get_preprocess_config(config):
         max_frames=config.max_frames or -1,
         crop_positions=crop_positions,
         mm_timeout_ms=config.mm_timeout_ms or -1,
+        max_long_side_pixel=getattr(config, "max_long_side_pixel", None) or -1,
     )
 
 
