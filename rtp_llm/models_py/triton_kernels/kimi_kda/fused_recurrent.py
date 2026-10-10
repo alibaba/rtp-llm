@@ -69,6 +69,7 @@ def fused_recurrent_kda_fwd_kernel(
     APPLY_BETA_SIGMOID: tl.constexpr,
     ALLOW_NEG_EIGVAL: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    STORE_STATES: tl.constexpr,
     num_stages: tl.constexpr,
 ):
     pid = tl.program_id(0)
@@ -198,7 +199,7 @@ def fused_recurrent_kda_fwd_kernel(
             eviction_policy="evict_first",
         )
 
-        if IS_CONTINUOUS_BATCHING:
+        if IS_CONTINUOUS_BATCHING and STORE_STATES:
             if INPLACE_FINAL_STATE:
                 write_block_offset = (
                     cal_block_idx(sequence_length, SEQ_SIZE_PER_BLOCK) + i_t
@@ -223,7 +224,7 @@ def fused_recurrent_kda_fwd_kernel(
         p_g += HV * K
         p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
-    if not IS_CONTINUOUS_BATCHING:
+    if not IS_CONTINUOUS_BATCHING and STORE_STATES:
         p_ht = ht + (i_n * HV + i_hv) * K * V
         if STATE_V_FIRST:
             p_ht = p_ht + o_v[:, None] * K + o_k[None, :]
@@ -254,7 +255,14 @@ def fused_recurrent_kda_fwd(
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
     decode_low_warps: bool = False,
+    store_states: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if not store_states and (
+        block_map is None or initial_state is None or not inplace_final_state
+    ):
+        raise ValueError(
+            "KDA no-store verification requires an existing paged state pool"
+        )
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
     N = B if cu_seqlens is None else len(cu_seqlens) - 1
@@ -336,6 +344,7 @@ def fused_recurrent_kda_fwd(
         APPLY_BETA_SIGMOID=use_beta_sigmoid_in_kernel,
         ALLOW_NEG_EIGVAL=allow_neg_eigval,
         STATE_V_FIRST=state_v_first,
+        STORE_STATES=store_states,
         num_warps=num_warps,
         num_stages=2,
     )
@@ -364,6 +373,7 @@ def fused_recurrent_kda(
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
     decode_low_warps: bool = False,
+    store_states: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -391,5 +401,6 @@ def fused_recurrent_kda(
         lower_bound=lower_bound,
         state_v_first=state_v_first,
         decode_low_warps=decode_low_warps,
+        store_states=store_states,
     )
     return o, final_state

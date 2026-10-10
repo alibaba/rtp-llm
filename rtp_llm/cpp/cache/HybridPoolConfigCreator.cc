@@ -222,7 +222,7 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         } else if (is_swa) {
             swa_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             swa_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
-        } else if (is_linear && config.enable_linear_attention_request_cache) {
+        } else if (is_linear && (config.enable_linear_attention_request_cache || config.linear_replay)) {
             linear_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             linear_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;
         } else {
@@ -338,9 +338,21 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
             1;
     config.linear_speculative_reserve_step = gen_num_per_cycle > 0 ? gen_num_per_cycle + 1 : 0;
     config.role_type                       = parallelism_config.role_type;
-    const char* linear_request_cache_env   = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
+    const char* replay_env                 = std::getenv("GLM53_KDA_REPLAY");
+    config.linear_replay = replay_env != nullptr && std::string(replay_env) == "1"
+                           && model_config.model_type == "glm5_3_flash" && !is_mtp && gen_num_per_cycle > 0
+                           && config.role_type != RoleType::PREFILL;
+    if (config.linear_replay) {
+        RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle < 8 && config.seq_size_per_block >= 8,
+                                "GLM53 KDA replay supports verify widths <=8 and cache pages >=8 tokens");
+    }
+    const char* linear_request_cache_env = std::getenv("ENABLE_LINEAR_ATTN_REQUEST_CACHE");
     config.enable_linear_attention_request_cache =
         linear_request_cache_env != nullptr && std::string(linear_request_cache_env) == "1";
+    if (config.linear_replay) {
+        RTP_LLM_CHECK_WITH_INFO(!kv_cache_config.reuse_cache || config.enable_linear_attention_request_cache,
+                                "KDA replay with Decode prefix reuse requires ENABLE_LINEAR_ATTN_REQUEST_CACHE=1");
+    }
     if (config.role_type != RoleType::DECODE && config.enable_linear_attention_request_cache
         && kv_cache_config.reuse_cache && kv_cache_config.enable_memory_cache
         && kv_cache_config.enable_memory_cache_disk) {

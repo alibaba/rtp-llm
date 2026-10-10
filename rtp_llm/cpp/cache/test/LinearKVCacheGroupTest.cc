@@ -27,6 +27,33 @@ static std::shared_ptr<LinearKVCacheSpec> makeLinearSpec(uint32_t seq_size_per_b
 
 class LinearKVCacheGroupTest: public ::testing::Test {};
 
+TEST_F(LinearKVCacheGroupTest, ReplayKeepsOnePhysicalReserveAndSparseLogicalSlots) {
+    auto pool = createBlockPool();
+    ASSERT_TRUE(pool->init());
+    LinearKVCacheGroup group({}, makeLinearSpec(128), pool, 0);
+    group.setRequestCacheMode(true);
+    group.setReplayMode(true);
+    ASSERT_TRUE(group.init());
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, 257, false, 4));
+    EXPECT_EQ(blocks.blocksNum(), 6u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    for (size_t pos : {1u, 2u, 3u}) {
+        EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[pos]));
+    }
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[4]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[5]));
+    EXPECT_EQ(pool->freeBlocksNum(), 6u);
+    // Rollover keeps the previous read page and one future write page.
+    ASSERT_TRUE(group.malloc(blocks, 385, false, 4));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[4]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[5]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[6]));
+    EXPECT_EQ(pool->freeBlocksNum(), 6u);
+}
+
 TEST_F(LinearKVCacheGroupTest, GetNeedBlocksReuseDisabledCountsLastTwoTailAndReserveStep) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());

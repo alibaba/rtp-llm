@@ -107,10 +107,11 @@ struct CacheConfig {
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int linear_fixed_cap =
         0;  // >0 = ring buffer of this many blocks per LINEAR group (per request); 0 = legacy unbounded
-    int group_layer_num  = 1;  // Number of layers per group for hybrid attention
-    int linear_group_num = 0;  // Number of linear attention groups
-    int swa_group_num    = 0;  // Number of sliding-window attention groups
-    int full_group_num   = 0;  // Number of full attention groups
+    bool linear_replay    = false;
+    int  group_layer_num  = 1;  // Number of layers per group for hybrid attention
+    int  linear_group_num = 0;  // Number of linear attention groups
+    int  swa_group_num    = 0;  // Number of sliding-window attention groups
+    int  full_group_num   = 0;  // Number of full attention groups
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -178,7 +179,7 @@ struct CacheConfig {
             const bool use_explicit_fixed_blocks = is_dsv4_fixed_region && dsv4_fixed_pool_blocks > 0;
             const bool use_explicit_dsv4_blocks  = use_explicit_hca_blocks || use_explicit_fixed_blocks;
             uint32_t   rule_blocks;
-            if (is_linear && enable_linear_attention_request_cache) {
+            if (is_linear && (enable_linear_attention_request_cache || linear_replay)) {
                 // A CP-aligned reusable tail can precede both working tail blocks.
                 const uint32_t resident_blocks_per_request = 2u + (linear_request_cache_alignment_blocks > 1 ? 1u : 0u);
                 const uint32_t concurrency =
@@ -186,7 +187,7 @@ struct CacheConfig {
                 const uint32_t speculative_blocks =
                     role_type == RoleType::PREFILL ?
                         0u :
-                        static_cast<uint32_t>(std::max(linear_speculative_reserve_step - 1, 0));
+                        static_cast<uint32_t>(linear_replay ? 1 : std::max(linear_speculative_reserve_step - 1, 0));
                 // The allocator retains one stale aligned read state until forward
                 // consumes it, including decode crossing a block boundary.
                 constexpr uint32_t read_state_blocks = 1u;
@@ -223,7 +224,7 @@ struct CacheConfig {
             // pool budget. The linear-step fallback is accounted by the
             // effective block-size formula instead, so no reserve is needed.
             const bool exclude_from_reserve = is_dsv4_fixed_region && fixed_pool_uses_pinned_cpu;
-            if (((is_linear && enable_linear_attention_request_cache) || use_explicit_dsv4_blocks)
+            if (((is_linear && (enable_linear_attention_request_cache || linear_replay)) || use_explicit_dsv4_blocks)
                 && gid < group_block_size_bytes.size() && !exclude_from_reserve) {
                 reserve += static_cast<size_t>(rule_blocks) * group_block_size_bytes[gid];
             }
@@ -276,6 +277,7 @@ struct CacheConfig {
         OUTPUT_FIELD(linear_step);
         OUTPUT_FIELD(linear_fixed_cap);
         OUTPUT_FIELD(linear_speculative_reserve_step);
+        OUTPUT_FIELD(linear_replay);
         OUTPUT_FIELD(enable_linear_attention_request_cache);
         OUTPUT_FIELD(linear_request_cache_avg_query_length);
         OUTPUT_FIELD(linear_request_cache_alignment_blocks);

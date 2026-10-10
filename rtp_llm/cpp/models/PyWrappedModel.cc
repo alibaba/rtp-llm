@@ -134,6 +134,19 @@ torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     return result.cast<torch::Tensor>();
 }
 
+void PyWrappedModel::commitSpeculativeState(const torch::Tensor& accepted_length) {
+    if (!kda_replay_enabled_) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("py_model.kda_replay_commit");
+    py::gil_scoped_acquire gil;
+    py_model_.attr("commit_speculative_state")(accepted_length);
+    static std::atomic<int> log_budget{8};
+    if (log_budget.fetch_sub(1) > 0) {
+        RTP_LLM_LOG_INFO("[KDA replay] commit submitted batch=%ld", accepted_length.size(0));
+    }
+}
+
 torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();

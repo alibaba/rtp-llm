@@ -148,6 +148,10 @@ public:
     virtual torch::Tensor snapshotMtpIndexerTopk(int64_t /*batch_size*/) {
         return torch::Tensor();
     }
+    virtual bool requiresSpeculativeStateCommit() const {
+        return false;
+    }
+    virtual void commitSpeculativeState(const torch::Tensor& /*accepted_length*/) {}
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-
     // prepared attention_inputs_ (e.g., after an MTP propose+verify re-gather).

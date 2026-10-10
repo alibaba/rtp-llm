@@ -806,6 +806,9 @@ void StreamCacheResource::waitStoreCacheDone(const std::shared_ptr<AsyncContext>
 }
 
 void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {
+    if (resource_context_.cache_manager->cacheConfig().linear_replay) {
+        return;  // Accepted states were replayed directly into their sequence pages.
+    }
     if (rhs == lhs) {
         return;
     }

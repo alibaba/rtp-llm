@@ -2369,8 +2369,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_input.last_hidden_states = model_output.all_hidden_states;
     }
 
-    // Record before broadcast/draft work so the worker waits only for
-    // accept_len/accept_tokens, not the queue tail.
+    if (model_->requiresSpeculativeStateCommit()) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(kda_replay_commit)");
+        auto accepted_length = speculative_sampler_output.accept_len;
+        if (!accepted_length.defined()) {
+            accepted_length = torch::empty({static_cast<int64_t>(batch_size)},
+                                           torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        }
+        if (parallelism_config_.tp_size > 1) {
+            execBroadcast({{accepted_length}, 0});
+        }
+        model_->commitSpeculativeState(accepted_length);
+    }
+
+    // Bookkeeping may release/cache the accepted state. Include replay commit
+    // in this event, but keep unrelated draft work outside its dependency.
     if (useStreamAsync()) {
         rejection_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         rejection_event->record(cuda_graph::graphGetCurrentStream());

@@ -31,7 +31,10 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
     const int  total_slots = needBlocksNum(seq_len, 0, reserve_step);
     const bool is_seq_tail =
         (seq_slots > 0) && (pos >= std::max(0, seq_slots - kResidentBlocksPerRequest)) && (pos < seq_slots);
-    const bool is_reserve = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
+    // Replay publishes only normal sequence pages. One extra physical page
+    // covers a chain crossing a page boundary; other reserve slots stay null.
+    const bool is_reserve =
+        (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots) && (!replay_mode_ || pos == seq_slots);
     if (request_cache_mode_) {
         // The state after the last completely reusable alignment unit may sit
         // well before the two-block working tail (for example position 7 for

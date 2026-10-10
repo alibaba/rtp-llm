@@ -89,6 +89,10 @@ public:
     }
     void          loadMtpIndexerTopk(const torch::Tensor& topk) override;
     torch::Tensor snapshotMtpIndexerTopk(int64_t batch_size) override;
+    bool          requiresSpeculativeStateCommit() const override {
+        return kda_replay_enabled_;
+    }
+    void commitSpeculativeState(const torch::Tensor& accepted_length) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -147,6 +151,7 @@ private:
     bool           use_spec_decoding_{false};
     bool           enable_device_perf_{false};
     bool           check_nan_{false};
+    bool           kda_replay_enabled_{false};
     MtpIndexerRole mtp_indexer_role_{MtpIndexerRole::NORMAL};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
@@ -293,6 +298,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         throw;
     }
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
+    kda_replay_enabled_ =
+        py::hasattr(py_model_, "kda_replay_enabled") && py_model_.attr("kda_replay_enabled").cast<bool>();
     if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model" && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(
             "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "

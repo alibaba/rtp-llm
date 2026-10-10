@@ -620,6 +620,9 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             linear_attn_config, parallelism_config, weights, gate_lower_bound
         )
         self.fuse_decode = os.environ.get("GLM53_KDA_DECODE_FUSION", "0") == "1"
+        self.fuse_verify = os.environ.get("GLM53_KDA_VERIFY_FUSION", "0") == "1"
+        self.replay_workspace = None
+        self._verify_fusion_logged = False
         self.decode_low_warps = (
             os.environ.get("GLM53_KDA_RECURRENT_LOW_WARPS", "0") == "1"
         )
@@ -720,6 +723,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_d,
             lower_bound=self.gate_lower_bound,
+            store_states=not (is_target_verify and self.replay_workspace is not None),
         )
 
         res = core_attn_out.reshape(
@@ -744,6 +748,66 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             kv_cache.kv_cache_base.shape[0], -1
         )
         is_target_verify = attn_meta.is_target_verify
+
+        if is_target_verify and (self.fuse_verify or self.replay_workspace is not None):
+            from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_short_conv import (
+                glm53_kda_short_conv_verify,
+                glm53_kda_verify_supported,
+            )
+
+            batch, tokens = self._get_bs_from_attention_input(
+                mixed_qkv, attn_inputs, True
+            )
+            conv_states = self._get_conv_states(kv_cache_tensor)
+            supported = glm53_kda_verify_supported(
+                mixed_qkv,
+                self.conv_weights,
+                conv_states,
+                kv_cache.seq_size_per_block,
+                batch,
+                tokens,
+            )
+            if not supported and self.replay_workspace is not None:
+                raise ValueError(
+                    "KDA replay cannot fall back to a per-position state tape"
+                )
+            if supported:
+                if not self._verify_fusion_logged:
+                    logging.info(
+                        "[KDA fusion] verify convolution enabled width=%d replay=%s",
+                        tokens,
+                        self.replay_workspace is not None,
+                    )
+                    self._verify_fusion_logged = True
+                qkv = glm53_kda_short_conv_verify(
+                    mixed_qkv,
+                    self.conv_weights,
+                    self._get_conv_states(kv_cache_tensor),
+                    attn_inputs.kv_cache_kernel_block_id_device,
+                    attn_inputs.sequence_lengths_plus_1_d,
+                    kv_cache.seq_size_per_block,
+                    batch,
+                    tokens,
+                    self.replay_workspace,
+                )
+                qkv = tuple(
+                    t.view(batch, tokens, self.local_num_k_heads, self.head_k_dim)
+                    for t in qkv
+                )
+                if self.replay_workspace is not None:
+                    self.replay_workspace.capture_gates(
+                        forget_gate.contiguous(), beta.contiguous(), batch, tokens
+                    )
+                return self._fla(
+                    mixed_qkv,
+                    forget_gate,
+                    beta,
+                    kv_cache_tensor,
+                    kv_cache.seq_size_per_block,
+                    attn_inputs,
+                    True,
+                    qkv=qkv,
+                )
 
         if (
             self.fuse_decode
@@ -993,7 +1057,8 @@ class KimiLinearKDA(nn.Module):
         ):
             # The caller already completed AG when communication/GEMM overlap
             # is unsuitable. Packing the four GEMMs is independent of that
-            # choice, including short inputs and Prefill without SP.
+            # choice. Keep combined-role context projection on its original
+            # path; this switch targets decode/verify only.
             from rtp_llm.models_py.distributed.glm53_collective_gemm import (
                 packed_kda_projections,
             )
@@ -1034,7 +1099,9 @@ class KimiLinearKDA(nn.Module):
             del projected_qkv, beta_input, forget_gate
 
         # 3. o_norm with sigmoid gating: y = RMSNorm(attn_out) * sigmoid(g_proj)
-        if self.decode_kda.fuse_decode and not attention_inputs.is_prefill:
+        if (self.decode_kda.fuse_decode and not attention_inputs.is_prefill) or (
+            self.decode_kda.fuse_verify and attn_meta.is_target_verify
+        ):
             from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
                 kimi_kda_rms_norm_sigmoid_gate,
             )
@@ -1493,6 +1560,12 @@ class KimiLinearModel(GptModelBase):
             ]
         )
         self.hc_enabled = model_config.hc_mult > 1
+        self.kda_replay_enabled = False
+        self._kda_replay_requested = os.environ.get("GLM53_KDA_REPLAY", "0") == "1"
+        self._kda_replay_batch_capacity = max_generate_batch_size
+        self._kda_replay_workspaces = []
+        self._kda_replay_descriptors = None
+        self._kda_replay_page_size = 0
         self.enable_kda_reuse_fusion = (
             os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1"
             and os.environ.get("GLM5_KDA_REUSE_FUSION", "1") != "0"
@@ -1518,6 +1591,79 @@ class KimiLinearModel(GptModelBase):
         )
 
         bind_indexer_block_table_group_ids(self.layers, self.kv_cache)
+        if (
+            self._kda_replay_requested
+            and self.parallelism_config.role_type != RoleType.PREFILL
+            and init_resource.is_speculative
+            and self.kv_cache is not None
+        ):
+            from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_replay import (
+                KDAReplayWorkspace,
+            )
+
+            if self.config.model_type != "glm5_3_flash":
+                raise ValueError("KDA replay currently supports the GLM53 target only")
+            if not self.kda_replay_enabled:
+                descriptors = []
+                for i, layer in enumerate(self.layers):
+                    if layer.layer_type != HybridAttentionType.LINEAR:
+                        continue
+                    decode = layer.self_attn.decode_kda
+                    if (
+                        decode.head_k_dim != 128
+                        or decode.head_v_dim != 128
+                        or decode.linear_conv_kernel_dim != 4
+                        or decode.ssm_state_dtype != torch.float32
+                        or decode.conv_state_dtype != torch.bfloat16
+                        or decode.conv_weights.dtype != torch.float32
+                        or decode.gate_lower_bound != -5.0
+                    ):
+                        raise ValueError(
+                            "GLM53 replay requires D128, four-tap FP32 convolution, BF16 history, FP32 state and gate bound -5"
+                        )
+                    cache = self.kv_cache.get_layer_cache(i)
+                    base = cache.kv_cache_base.reshape(cache.kv_cache_base.shape[0], -1)
+                    workspace = KDAReplayWorkspace(
+                        self._kda_replay_batch_capacity,
+                        decode.local_num_v_heads,
+                        decode.head_k_dim,
+                        base.device,
+                        decode._get_conv_states(base),
+                        decode._get_ssm_states(base),
+                    )
+                    self._kda_replay_page_size = cache.seq_size_per_block
+                    decode.replay_workspace = workspace
+                    self._kda_replay_workspaces.append(workspace)
+                    descriptors.append(
+                        workspace.descriptor()
+                        + [decode.alog.data_ptr(), decode.dt_bias.data_ptr()]
+                    )
+                if not descriptors:
+                    raise ValueError("GLM53 replay requires at least one KDA layer")
+                first = self._kda_replay_workspaces[0]
+                if any(
+                    (w.heads, w.dim, w.state.stride(0), w.conv.stride(0))
+                    != (
+                        first.heads,
+                        first.dim,
+                        first.state.stride(0),
+                        first.conv.stride(0),
+                    )
+                    for w in self._kda_replay_workspaces
+                ):
+                    raise ValueError(
+                        "Batched KDA replay requires uniform layer geometry"
+                    )
+                self._kda_replay_descriptors = torch.tensor(
+                    descriptors, device=first.qkv.device, dtype=torch.uint64
+                )
+                self.kda_replay_enabled = True
+                logging.info(
+                    "[KDA replay] enabled layers=%d capacity=%d payload_bytes=%d K-major FP32 batched commit",
+                    len(descriptors),
+                    first.batch,
+                    sum(w.nbytes for w in self._kda_replay_workspaces),
+                )
         if self.prefill_sequence_parallel:
             from rtp_llm.models_py.distributed.collective_torch import get_process_group
             from rtp_llm.models_py.distributed.glm53_collective_gemm import (
@@ -1528,6 +1674,21 @@ class KimiLinearModel(GptModelBase):
                 get_process_group(Group.TP), self.config.hidden_size
             )
         return True
+
+    def commit_speculative_state(self, accepted_length):
+        if not self.kda_replay_enabled:
+            return
+        from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_replay import (
+            commit_kda_replay,
+        )
+
+        commit_kda_replay(
+            self._kda_replay_descriptors,
+            self._kda_replay_workspaces,
+            accepted_length,
+            self._kda_replay_page_size,
+            -5.0,
+        )
 
     def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
         if not self.prefill_mla_cp:
