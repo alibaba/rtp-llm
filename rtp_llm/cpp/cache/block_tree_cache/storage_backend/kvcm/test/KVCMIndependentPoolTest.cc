@@ -376,6 +376,23 @@ TEST_F(KVCMIndependentPoolTest, WorkerRoutesRepeatedTagsAcrossIndependentOrdersA
     EXPECT_EQ(state_->destroyed, 3u);
 }
 
+TEST_F(KVCMIndependentPoolTest, WorkerRejectsUnknownTagBeforeAnyTransfer) {
+    ASSERT_TRUE(initialize());
+    RemoteOperationRequestPB operation;
+    operation.set_op(REMOTE_OPERATION_READ);
+    operation.add_group_tags(config_.groupTags().front());
+    operation.add_block_ids(blocks_.front());
+    operation.add_uris("registered");
+    operation.add_group_tags("unknown");
+    operation.add_block_ids(blocks_.front());
+    operation.add_uris("unknown");
+
+    RemoteOperationResponsePB response;
+    EXPECT_TRUE(backend_->execute(operation, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
+    EXPECT_EQ(state_->reads, (std::vector<size_t>{0, 0, 0}));
+}
+
 TEST_F(KVCMIndependentPoolTest, TimeoutQuarantinesUpperRequestPinsUntilShutdown) {
     ASSERT_TRUE(initialize());
     const kv_cache_manager::Locations locations = {
