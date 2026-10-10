@@ -7,6 +7,12 @@ _CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "situ_activation_adapter_test",
+    srcs = ["situ_activation_adapter_test.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+)
+
+py_test(
     name = "timeline_test",
     srcs = ["timeline_test.py"],
     deps = [
