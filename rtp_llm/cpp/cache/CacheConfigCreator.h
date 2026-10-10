@@ -34,7 +34,8 @@ public:
                                           const ParallelismConfig& parallelism_config,
                                           const KVCacheConfig&     kv_cache_config,
                                           int                      gen_num_per_cycle = 0);
-    // Builds main and draft layouts. Capacity is computed and finalized separately.
+    // Builds the main layout and one draft layout, independently of proposal
+    // width. Capacity is computed and finalized separately.
     static CacheConfig createConfig(const ModelConfig&                               model_config,
                                     const ParallelismConfig&                         parallelism_config,
                                     const KVCacheConfig&                             kv_cache_config,

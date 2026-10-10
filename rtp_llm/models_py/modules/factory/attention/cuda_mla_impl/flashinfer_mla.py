@@ -5,8 +5,6 @@ import torch
 
 # import flashinfer
 import torch.nn.functional as F
-import triton
-import triton.language as tl
 from flashinfer import (
     BatchMLAPagedAttentionWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -15,11 +13,16 @@ from flashinfer.jit import gen_batch_mla_module, gen_batch_prefill_module
 from flashinfer.utils import is_sm90a_supported
 
 from rtp_llm.models_py.modules.factory.linear.factory import LinearFactory
-from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
 from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.warmup import model_warm_up_enabled
+
+from rtp_llm.models_py.triton_kernels.common.activation import (
+    concat_and_cast_mha_k,
+    concat_and_cast_mha_k_kernel,
+    concat_and_cast_mha_k_triton,
+)
 
 g_workspace_buffer = None
 warm_up_done = False
@@ -83,84 +86,6 @@ def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
     for attr_name, default_tensor in default_tensors.items():
         if getattr(attention_inputs, attr_name) is None:
             setattr(attention_inputs, attr_name, default_tensor)
-
-
-# adapted from sglang/python/sglang/srt/layers/attention/utils.py
-@triton.jit
-def concat_and_cast_mha_k_kernel(
-    k_ptr,
-    k_nope_ptr,
-    k_rope_ptr,
-    head_cnt: tl.constexpr,
-    k_stride0: tl.constexpr,
-    k_stride1: tl.constexpr,
-    nope_stride0: tl.constexpr,
-    nope_stride1: tl.constexpr,
-    rope_stride0: tl.constexpr,
-    nope_dim: tl.constexpr,
-    rope_dim: tl.constexpr,
-):
-    pid_loc = tl.program_id(0)
-    head_range = tl.arange(0, head_cnt)
-
-    k_head_ptr = k_ptr + pid_loc * k_stride0 + head_range[:, None] * k_stride1
-
-    nope_offs = tl.arange(0, nope_dim)
-
-    src_nope_ptr = (
-        k_nope_ptr
-        + pid_loc * nope_stride0
-        + head_range[:, None] * nope_stride1
-        + nope_offs[None, :]
-    )
-    dst_nope_ptr = k_head_ptr + nope_offs[None, :]
-
-    src_nope = tl.load(src_nope_ptr)
-    tl.store(dst_nope_ptr, src_nope)
-
-    rope_offs = tl.arange(0, rope_dim)
-    src_rope_ptr = k_rope_ptr + pid_loc * rope_stride0 + rope_offs[None, :]
-    dst_rope_ptr = k_head_ptr + nope_dim + rope_offs[None, :]
-    src_rope = tl.load(src_rope_ptr)
-    tl.store(dst_rope_ptr, src_rope)
-
-
-def concat_and_cast_mha_k_triton(
-    k: torch.Tensor,
-    k_nope: torch.Tensor,
-    k_rope: torch.Tensor,
-):
-    # The source data type will be implicitly converted to the target data type.
-    assert (
-        len(k.shape) == 3 and len(k_nope.shape) == 3 and len(k_rope.shape) == 3
-    ), f"shape should be 3d, but got {k.shape=}, {k_nope.shape=}, {k_rope.shape=}"
-    assert (
-        k.shape[0] == k_nope.shape[0] and k.shape[0] == k_rope.shape[0]
-    ), f"invalid shape, got {k.shape=}, {k_nope.shape=}, {k_rope.shape=}"
-    assert (
-        k.shape[1] == k_nope.shape[1] and 1 == k_rope.shape[1]
-    ), f"invalid shape, got {k.shape=}, {k_nope.shape=}, {k_rope.shape=}"
-    assert (
-        k.shape[-1] == k_nope.shape[-1] + k_rope.shape[-1]
-    ), f"invalid shape, got {k.shape=}, {k_nope.shape=}, {k_rope.shape=}"
-
-    nope_dim = k_nope.shape[-1]
-    rope_dim = k_rope.shape[-1]
-    grid = (k.shape[0],)
-
-    concat_and_cast_mha_k_kernel[grid](
-        k,
-        k_nope,
-        k_rope,
-        k.shape[1],
-        k.stride(0),
-        k.stride(1),
-        k_nope.stride(0),
-        k_nope.stride(1),
-        k_rope.stride(0),
-        nope_dim,
-        rope_dim,
-    )
 
 
 class MlaFlashInferPrefillOp(object):
@@ -319,45 +244,21 @@ class MlaFlashInferPrefillOp(object):
         )
         return final_compressed_kv, final_k_pe
 
+    def _make_kv_b_proj(self, layer_id):
+        return LinearFactory.create_linear_from_weights(
+            self.weights[layer_id],
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
+            self.quant_config,
+        )
+
     def _concat_and_cast_mha_k(self, k_nope, k_pe):
-        # Temporary for DeepSeek V3/R1 only, but can generalize if needed
-        k_shape = (
-            k_nope.shape[0],
-            self.num_heads,
-            self.qk_nope_head_dim + self.qk_rope_head_dim,
+        return concat_and_cast_mha_k(
+            k_nope, k_pe, self.num_heads,
+            self.qk_nope_head_dim, self.qk_rope_head_dim,
         )
-        if (
-            is_cuda()
-            and (self.num_heads == 128)
-            and (self.qk_nope_head_dim == 128)
-            and (self.qk_rope_head_dim == 64)
-        ):
-            k = k_nope.new_empty(*k_shape)
-            rtp_llm_ops.mla_k_merge(k, k_nope, k_pe)
-        elif is_cuda() and self._is_triton_compatible():
-            # Triton kernel requires dimensions to be power of 2
-            attn_dtype = k_nope.dtype
-            k = k_nope.new_empty(*k_shape, dtype=attn_dtype)
-            concat_and_cast_mha_k_triton(k, k_nope, k_pe)
-        else:
-            # Fallback to PyTorch native operations for non-power-of-2 dimensions
-            k = k_nope.new_empty(*k_shape)
-            k[..., : self.qk_nope_head_dim] = k_nope
-            k[..., self.qk_nope_head_dim :] = k_pe
-        return k
 
-    def _is_triton_compatible(self):
-        """Check if dimensions are compatible with Triton kernel (must be power of 2)."""
-
-        def is_power_of_2(n):
-            return n > 0 and (n & (n - 1)) == 0
-
-        compatible = (
-            is_power_of_2(self.qk_nope_head_dim)
-            and is_power_of_2(self.qk_rope_head_dim)
-            and is_power_of_2(self.num_heads)
-        )
-        return compatible
 
     def forward(
         self,

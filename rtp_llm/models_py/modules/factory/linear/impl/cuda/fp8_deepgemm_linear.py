@@ -7,7 +7,9 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     fp8_gemm_nt,
+    fp8_gemm_nt_skip_head_mid,
     has_deep_gemm,
+    has_fp8_gemm_nt_skip_head_mid,
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
@@ -256,6 +258,51 @@ class CudaFp8DeepGEMMLinear(LinearBase):
                 scale_ue8m0=self.scale_ue8m0,
             )
         return input_fp8, input_scales
+
+    def supports_skip_head_mid(
+        self, input: torch.Tensor, head_splits: tuple[int, int, int]
+    ) -> bool:
+        if (not isinstance(input, torch.Tensor) or input.ndim != 2
+                or input.dtype != torch.bfloat16 or not input.is_cuda
+                or input.device != self.weight.device or input.shape[1] != self.K
+                or self.bias is not None or len(head_splits) != 3
+                or not has_fp8_gemm_nt_skip_head_mid()):
+            return False
+        left, middle, right = head_splits
+        return (
+            all(type(v) is int for v in head_splits)
+            and left > 0 and middle >= 0 and right > 0
+            and self.N % (left + right) == 0
+        )
+
+    def forward_skip_head_mid(
+        self,
+        input: torch.Tensor,
+        head_splits: tuple[int, int, int],
+        *,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if not self.supports_skip_head_mid(input, head_splits):
+            raise ValueError("unsupported FP8 skip-head-mid input or head layout")
+        left, middle, right = head_splits
+        heads = self.N // (left + right)
+        shape = (input.shape[0], heads * (left + middle + right))
+        if output is None:
+            output = torch.empty(shape, dtype=torch.bfloat16, device=input.device)
+        elif (
+            tuple(output.shape) != shape or output.dtype != torch.bfloat16
+            or output.device != input.device or not output.is_contiguous()
+        ):
+            raise ValueError("FP8 skip-head-mid output buffer mismatch")
+        if output.untyped_storage().data_ptr() == input.untyped_storage().data_ptr():
+            raise ValueError("FP8 skip-head-mid output must not alias input")
+        values, scales = self.quantize_input(input)
+        if input.shape[0]:
+            fp8_gemm_nt_skip_head_mid(
+                (values, scales), (self.weight, self.weight_scales), output,
+                head_splits, disable_ue8m0_cast=not self.scale_ue8m0,
+            )
+        return output
 
     def forward_quantized(
         self,

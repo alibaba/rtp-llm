@@ -15,7 +15,7 @@ py_test(
     ],
     deps = [
         "//rtp_llm/models_py/triton_kernels:fla",
-        "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/triton_kernels:kda",
     ] + [
         ":einops",
         ":numpy",
@@ -24,6 +24,6 @@ py_test(
         ":triton",
     ],
     visibility = ["//visibility:public"],
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13"},
+    tags = ["SM100_ARM_CU13"],
 )

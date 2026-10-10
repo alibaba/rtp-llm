@@ -1,7 +1,7 @@
 """Unit tests for KDA (Kimi Delta Attention) prefill and decode ops.
 
-Compares Triton kernel outputs against naive PyTorch reference implementations.
-Tests: fused_kda_gate, chunk_kda prefill, fused_recurrent_kda decode,
+Compares cuLA prefill and Triton recurrent outputs against naive PyTorch reference implementations.
+Tests: cuLA chunk prefill, fused_recurrent_kda decode,
        and prefill-decode consistency.
 """
 
@@ -15,11 +15,11 @@ import torch.nn.functional as F
 
 os.environ.setdefault("TRITON_F32_DEFAULT", "ieee")
 
-from rtp_llm.models_py.triton_kernels.kimi_kda import (
-    chunk_kda,
-    fused_kda_gate,
+from rtp_llm.models_py.triton_kernels.kda import (
     fused_recurrent_kda,
 )
+
+from cula.kda import chunk_kda
 
 logging.basicConfig(
     level="INFO",
@@ -61,17 +61,6 @@ def cos_sim(a: torch.Tensor, b: torch.Tensor) -> float:
 # ============================================================================
 # Naive PyTorch reference implementations
 # ============================================================================
-
-
-def naive_kda_gate(g_raw, A_log, dt_bias=None):
-    """Naive gate: g = -exp(A_log) * softplus(g_raw + dt_bias).
-    g_raw: [tokens, H, K], A_log: [H], dt_bias: [H, K] or None.
-    """
-    g = g_raw.float()
-    if dt_bias is not None:
-        g = g + dt_bias.float()
-    # A_log [H] -> [1, H, 1] for broadcast with [tokens, H, K]
-    return -torch.exp(A_log.float()).unsqueeze(0).unsqueeze(-1) * F.softplus(g)
 
 
 def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
@@ -134,27 +123,6 @@ def naive_recurrent_kda(q, k, v, g, beta, scale, initial_state, A_log, dt_bias):
 
 class TestKdaOps(unittest.TestCase):
 
-    def test_gate_vs_naive(self):
-        _, _, _, g_raw, _, A_log, dt_bias, _ = make_kda_inputs(1, 8)
-        g_flat = g_raw.reshape(8, H, K)
-        gate_kernel = fused_kda_gate(g_flat, A_log, dt_bias=dt_bias.reshape(H, K))
-        gate_naive = naive_kda_gate(g_flat, A_log, dt_bias=dt_bias.reshape(H, K))
-        sim = cos_sim(gate_kernel, gate_naive)
-        self.assertGreater(sim, COS_THRESH, f"Gate vs naive cos_sim={sim:.6f}")
-        self.assertTrue(
-            (gate_kernel <= 1e-6).all(), "Gate values should be non-positive"
-        )
-        logging.info(f"test_gate_vs_naive PASSED (cos_sim={sim:.6f})")
-
-    def test_gate_no_bias_vs_naive(self):
-        _, _, _, g_raw, _, A_log, _, _ = make_kda_inputs(1, 4)
-        g_flat = g_raw.reshape(4, H, K)
-        gate_kernel = fused_kda_gate(g_flat, A_log, dt_bias=None)
-        gate_naive = naive_kda_gate(g_flat, A_log, dt_bias=None)
-        sim = cos_sim(gate_kernel, gate_naive)
-        self.assertGreater(sim, COS_THRESH, f"Gate no-bias vs naive cos_sim={sim:.6f}")
-        logging.info(f"test_gate_no_bias_vs_naive PASSED (cos_sim={sim:.6f})")
-
     def test_decode_vs_naive(self):
         for B in [1, 4, 8]:
             with self.subTest(B=B):
@@ -200,6 +168,7 @@ class TestKdaOps(unittest.TestCase):
                     f"test_decode_vs_naive PASSED B={B} (o={sim_o:.6f}, s={sim_s:.6f})"
                 )
 
+    @torch.inference_mode()
     def test_prefill_vs_naive(self):
         for B, seq_len in [(1, 11), (1, 64), (1, 128), (2, 11), (2, 64), (2, 128)]:
             with self.subTest(B=B, seq_len=seq_len):
@@ -219,6 +188,8 @@ class TestKdaOps(unittest.TestCase):
                     use_qk_l2norm_in_kernel=True,
                     use_gate_in_kernel=True,
                     return_intermediate_states=True,
+                    use_beta_sigmoid_in_kernel=False,
+                    safe_gate=False,
                     A_log=A_log,
                     dt_bias=dt_bias,
                 )
@@ -251,6 +222,7 @@ class TestKdaOps(unittest.TestCase):
                     f"test_prefill_vs_naive PASSED B={B} T={seq_len} (o={sim_o:.6f}, s={sim_s:.6f})"
                 )
 
+    @torch.inference_mode()
     def test_prefill_then_decode(self):
         q_all, k_all, v_all, g_all, beta_all, A_log, dt_bias, state = make_kda_inputs(
             1, 12
@@ -267,6 +239,8 @@ class TestKdaOps(unittest.TestCase):
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             return_intermediate_states=True,
+            use_beta_sigmoid_in_kernel=False,
+            safe_gate=False,
             A_log=A_log,
             dt_bias=dt_bias,
         )
@@ -296,6 +270,8 @@ class TestKdaOps(unittest.TestCase):
             use_qk_l2norm_in_kernel=True,
             use_gate_in_kernel=True,
             return_intermediate_states=True,
+            use_beta_sigmoid_in_kernel=False,
+            safe_gate=False,
             A_log=A_log,
             dt_bias=dt_bias,
         )

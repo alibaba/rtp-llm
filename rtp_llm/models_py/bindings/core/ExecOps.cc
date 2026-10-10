@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -21,6 +22,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <memory>
+#include <limits>
 #include <mutex>
 #include <atomic>
 #include <stdexcept>
@@ -409,7 +411,29 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               kv_addr,
                               kv_block_stride_bytes,
                               kv_block_transfer_bytes);
-            if (use_opaque_key_prefix) {
+            const auto* linear_spec = dynamic_cast<const LinearKVCacheSpec*>(group.spec.get());
+            if (linear_spec != nullptr && cp_size > 1) {
+                RTP_LLM_CHECK_WITH_INFO(!has_kv_scale,
+                                        "head-sharded LINEAR cache-store does not support a scale buffer");
+                size_t segment_offset = 0;
+                const auto& segment_bytes = linear_spec->transferSegmentBytes();
+                RTP_LLM_CHECK_WITH_INFO(!segment_bytes.empty(),
+                                        "head-sharded LINEAR cache-store needs transfer segments");
+                for (size_t segment_id = 0; segment_id < segment_bytes.size(); ++segment_id) {
+                    const size_t size = segment_bytes[segment_id];
+                    RTP_LLM_CHECK_WITH_INFO(size > 0 && segment_offset + size <= kv_block_transfer_bytes
+                                                && size <= std::numeric_limits<uint32_t>::max(),
+                                            "invalid LINEAR transfer segment %zu offset=%zu size=%zu block=%zu",
+                                            segment_id, segment_offset, size, kv_block_transfer_bytes);
+                    auto* addr = static_cast<uint8_t*>(kv_addr) + segment_offset;
+                    request_blocks->addBlock(makeLinearCacheSegmentKey(segment_id, cache_key),
+                                             std::shared_ptr<void>(kv_cache_owner, addr),
+                                             static_cast<uint32_t>(size), kv_gpu_mem, true);
+                    segment_offset += size;
+                }
+                RTP_LLM_CHECK_WITH_INFO(segment_offset == kv_block_transfer_bytes,
+                                        "LINEAR transfer segments must cover physical block");
+            } else if (use_opaque_key_prefix) {
                 request_blocks->addBlock(
                     "kv_" + cache_key, kv_block_addr, static_cast<uint32_t>(kv_block_transfer_bytes), kv_gpu_mem, true);
             } else {

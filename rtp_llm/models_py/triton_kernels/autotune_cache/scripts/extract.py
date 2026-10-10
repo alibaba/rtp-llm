@@ -9,15 +9,6 @@
 # and write each `default_config` to `configs/{GPU}/{kernel}.json`.
 #
 # Usage:
-#     # Run op benchmark once, compare the picked config vs. the existing
-#     # committed JSON without modifying files:
-#     python -m rtp_llm.models_py.triton_kernels.autotune_cache.scripts.extract \
-#         --init-default --op kda --dry-run
-#
-#     # Same but actually write:
-#     python -m rtp_llm.models_py.triton_kernels.autotune_cache.scripts.extract \
-#         --init-default --op kda
-#
 #     # Extract from an existing Triton cache directory (no benchmark), write existing config:
 #     python -m rtp_llm.models_py.triton_kernels.autotune_cache.scripts.extract \
 #         --extract-once --triton-cache-dir ~/.triton/cache
@@ -306,8 +297,8 @@ def main() -> int:
     parser.add_argument(
         "--op",
         choices=available_ops(),
-        default="kda",
-        help=f"Op family to exercise (default: kda; available: {available_ops()}).",
+        default=None,
+        help=f"Registered op family to exercise (available: {available_ops()}).",
     )
     args = parser.parse_args()
 
@@ -318,6 +309,9 @@ def main() -> int:
         )
     if args.dry_run and not args.init_default:
         parser.error("--dry-run is only valid with --init-default.")
+
+    if args.init_default and args.op is None:
+        parser.error("--init-default requires a registered --op; cuLA owns KDA tuning.")
 
     output_dir = _resolve_output_dir(args.output_dir)
 

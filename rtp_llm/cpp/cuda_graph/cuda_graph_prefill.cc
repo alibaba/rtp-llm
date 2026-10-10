@@ -129,6 +129,10 @@ void CudaGraphRunner::capturePrefill() {
         if (!usesFixedCapacityMtpDraftPrefillCudaGraph()) {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
                 graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
+            auto& mtp_target_hidden_states = graph_instances_[seq_len].mem_hold_.mtp_target_hidden_states_;
+            if (mtp_target_hidden_states.defined()) {
+                mtp_target_hidden_states = mtp_target_hidden_states.slice(0, 0, seq_len);
+            }
         }
         capturePrefillOneSeqLen(seq_len);
         cuda_graph::finish_capture_session();

@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Sequence, Union
 
 from rtp_llm.config.cuda_graph import (
     CudaGraphSelectionMode,
@@ -90,13 +90,18 @@ def get_mla_impl(
     max_seq_len: int = 0,
     parallelism_config: Optional[ParallelismConfig] = None,
     cuda_graph_selection_mode: Optional[Union[str, CudaGraphSelectionMode]] = None,
+    *,
+    implementations: Optional[Sequence[type[MlaImplBase]]] = None,
 ) -> MlaImplBase:
+    """Select registered or model-scoped MLA implementations using one contract."""
 
     selection_mode = _normalize_cuda_graph_selection_mode(
         is_cuda_graph, cuda_graph_selection_mode
     )
 
-    mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
+    mla_impls = implementations
+    if mla_impls is None:
+        mla_impls = PREFILL_MLA_IMPS if attn_inputs.is_prefill else DECODE_MLA_IMPS
     for impl in mla_impls:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
@@ -107,7 +112,8 @@ def get_mla_impl(
         cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
         use_fast_path = (
-            attn_inputs.is_prefill
+            implementations is None
+            and attn_inputs.is_prefill
             and attn_inputs.cu_kv_seqlens_device.max().item()
             <= attn_configs.indexer_topk
             and not (

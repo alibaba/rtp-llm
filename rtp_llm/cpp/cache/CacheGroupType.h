@@ -89,7 +89,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
 
     const bool   block_round_robin       = policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
     const bool   compact_last_rank       = policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
-    const bool   sharded_full            = cp_size > 1 && block_round_robin;
+    const bool   dcp_sharded             = cp_size > 1 && block_round_robin;
     const bool   compact_swa_by_cp       = cp_size > 1 && compact_last_rank;
     const size_t key_projection_scale    = compact_swa_by_cp ? 1 : std::max<size_t>(1, key_blocks_per_logical_block);
     const auto   keyIndexForLogicalBlock = [&](size_t logical_index) {
@@ -123,10 +123,10 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
     plan.reserve(total_logical_blocks - std::min(start, total_logical_blocks));
     for (size_t pos = start; pos < total_logical_blocks; ++pos) {
         const int block_pos = static_cast<int>(pos);
-        if (sharded_full && block_pos % cp_size != cp_rank) {
+        if (dcp_sharded && block_pos % cp_size != cp_rank) {
             continue;
         }
-        plan.push_back({keyIndexForLogicalBlock(pos), sharded_full ? block_pos / cp_size : block_pos});
+        plan.push_back({keyIndexForLogicalBlock(pos), dcp_sharded ? block_pos / cp_size : block_pos});
     }
     return plan;
 }
