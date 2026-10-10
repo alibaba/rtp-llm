@@ -2,7 +2,7 @@ package org.flexlb.sync.schedule;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
@@ -39,7 +39,7 @@ class ExpirationCleanerTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            context.registerBean("configService", ConfigService.class, () -> configService);
+            context.getBeanFactory().registerSingleton("configService", configService);
             context.registerBean(CacheAwareService.class, () -> mock(CacheAwareService.class));
             context.registerBean(WorkerDirectory.class, () -> mock(WorkerDirectory.class));
             context.registerBean(TaskScheduler.class, () -> mock(TaskScheduler.class));
@@ -63,9 +63,9 @@ class ExpirationCleanerTest {
         WorkerStatus second = status("127.0.0.2", 8080);
         WorkerDirectory directory = new WorkerDirectory(registry);
         directory.currentOrDiscover(
-                RoleType.PREFILL, first.getIpPort(), () -> first);
+                RoleType.PREFILL, first.getLogicalIpPort(), () -> first);
         directory.currentOrDiscover(
-                RoleType.PREFILL, second.getIpPort(), () -> second);
+                RoleType.PREFILL, second.getLogicalIpPort(), () -> second);
 
         EndpointRegistry.DetachedGeneration firstDetached =
                 mock(EndpointRegistry.DetachedGeneration.class);
@@ -104,8 +104,8 @@ class ExpirationCleanerTest {
             releaseFirstAwait.countDown();
             cleaning.get(5, TimeUnit.SECONDS);
             assertTrue(directory.statusSnapshot(RoleType.PREFILL).isEmpty());
-            verify(cache).removeEngineBlockCache(first.getIpPort());
-            verify(cache).removeEngineBlockCache(second.getIpPort());
+            verify(cache).removeEngineBlockCache(first.getLogicalIpPort());
+            verify(cache).removeEngineBlockCache(second.getLogicalIpPort());
         } finally {
             releaseFirstAwait.countDown();
             executor.shutdownNow();
@@ -118,11 +118,11 @@ class ExpirationCleanerTest {
             WorkerEndpoint endpoint,
             EndpointRegistry.DetachedGeneration detached) {
         when(registry.get(
-                RoleType.PREFILL, status.getIpPort(), status))
+                RoleType.PREFILL, status.getLogicalIpPort(), status))
                 .thenReturn(endpoint);
         when(detached.ownsEndpoint(endpoint)).thenReturn(true);
         when(registry.detachAndBeginRetirement(
-                RoleType.PREFILL, status.getIpPort(), status))
+                RoleType.PREFILL, status.getLogicalIpPort(), status))
                 .thenAnswer(invocation -> {
                     status.beginRetirementAfterEndpointGateClosed();
                     return detached;

@@ -1,0 +1,149 @@
+# FlexLB PV request replay
+
+This tool turns a FlexLB PV log time window into two shareable artifacts:
+
+- `analysis.xlsx`: request-level route, cache-hit, WorkerStatus, and decision-snapshot analysis. It can be opened directly with Apple Numbers.
+- `replay.html`: a self-contained request replay page. It has no server or CDN dependency and can be shared as one file.
+
+The automation contract is raw `pv.log` data rather than a `.numbers` document:
+
+```text
+FlexLB pv.log -> analysis.xlsx -> replay.html
+```
+
+## One-command usage
+
+The current test workspace and deployment are the defaults, so a normal run only needs a local-log time window:
+
+```bash
+cd rtp_llm/flexlb/tools/pv_request_replay
+
+python3 generate_replay.py all \
+  --start '2026-08-11 01:55:00' \
+  --end   '2026-08-11 02:35:00'
+```
+
+Override the target when needed:
+
+```bash
+python3 generate_replay.py all \
+  --workspace ai-lab-test \
+  --deployment flexlb-hongyi-test-v1-flexlb \
+  --start '2026-08-11 01:55:00+08:00' \
+  --end   '2026-08-11 02:35:00+08:00' \
+  --output-dir /path/to/output
+```
+
+Naive timestamps are interpreted as `Asia/Shanghai`. The collector is read-only: it resolves running instances with `dashctl`, reads current and rotated `pv.log` files with paginated `tail`, and writes local snapshots.
+
+By default it includes available log records from five minutes before the requested window through ten minutes after it. The command does not sleep waiting for a future tail boundary. The workbook still includes only routes whose `requestTimeMs` is in `[start, end)`; the extra records are used to join delayed cache and WorkerStatus feedback.
+
+## Two-stage usage
+
+Collect once, then rebuild the workbook/page without reading the instance again:
+
+```bash
+python3 generate_replay.py collect \
+  --start '2026-08-11 01:55:00' \
+  --end   '2026-08-11 02:35:00' \
+  --output-dir /path/to/output
+
+python3 generate_replay.py build \
+  --input /path/to/output \
+  --start '2026-08-11 01:55:00' \
+  --end   '2026-08-11 02:35:00'
+```
+
+To rebuild only the HTML from an existing workbook:
+
+```bash
+python3 generate_replay.py html \
+  --input-xlsx /path/to/analysis.xlsx \
+  --output-html /path/to/replay.html
+```
+
+## Whale deployments
+
+`generate_replay.py` resolves instances with `dashctl`, which cannot enumerate a Whale
+deployment: a Whale zone is a carbon role behind a Spectrum dep shell, so `dashctl get inst`
+reports no instances for a role that is serving. Use the Whale entry point instead. It resolves
+the role's pods with `whale` and reads their logs with `asicli`:
+
+```bash
+python3 generate_replay_whale.py all \
+  --service dash_pd \
+  --deployment beijing_RTX_PRO_5000_72GB_p4tp_d2tp \
+  --role master \
+  --start '2026-09-19 19:55:00' \
+  --end   '2026-09-19 20:21:00'
+```
+
+Defaults are `--role master`, `--container load-balancer`, `--log-dir /home/admin/ai-whale/logs`
+and an output directory under `outputs/` (override with `--output-dir` or
+`FLEXLB_REPLAY_OUTPUT_ROOT`). `--deployment-id` skips service and deployment name resolution,
+and `--instance` repeats to restrict the run to specific pods. Both CLIs must be authenticated
+first (`whale config current-context`, `asicli auth status`).
+
+`asicli console exec` truncates stdout at 1048576 bytes, so reads are chunked by `--page-lines`
+(default 300) and every chunk is md5-verified against a remote digest. A chunk that reaches the
+cap fails the run rather than returning partial data; lower `--page-lines` when that happens.
+All remote commands are read-only. Keep `--end` at or before the current time, because `pv.log`
+keeps growing and lines appended after the count step would change the digest mid-collection.
+
+`build` and `html` are source-agnostic, so rebuild from a Whale collection with the original
+entry point:
+
+```bash
+python3 generate_replay.py build --input outputs/<run> \
+  --start '2026-09-19 19:55:00' --end '2026-09-19 20:21:00'
+```
+
+## Output layout
+
+```text
+output/
+  collect_manifest.json
+  manifest.json
+  raw/<flexlb-instance>/pv.log.snapshot
+  analysis.xlsx
+  replay.html
+  whale_manifest.json          # generate_replay_whale.py only
+  whale_raw/<pod>/pv.log       # generate_replay_whale.py only
+```
+
+`collect_manifest.json` records the requested window, collection grace period, resolved instances, files and line counts read, actual parsed log coverage, and warnings. `manifest.json` adds join/output summaries. `whale_manifest.json` records the resolved pods with their ASI coordinates and health, plus per-file window line counts and status (`complete`, `empty`, `outside_window`, `no_matching_lines`); `whale_raw/` keeps the lines exactly as read from the container before the collector re-filters them into `raw/`.
+
+The request window is applied to the routing record's `requestTimeMs`. Collection continues beyond the requested end by a configurable completion grace so that delayed `cache_hit_comparison` and `prefill_worker_status` records can still join to requests inside the window.
+
+The replay recognizes both `PREFILL` and fused `PDFUSION` routing records. When a
+PV record contains both roles, `PREFILL` retains priority; `DECODE` is never used
+as a substitute for a prefill decision.
+
+Every command returns a non-zero exit status when collection or request joins are partial, even if non-strict mode produced inspectable artifacts. Use `--strict` to stop before HTML generation when log coverage is incomplete or any routed request lacks cache/WorkerStatus first-token telemetry.
+
+## Cache comparison
+
+`cache_hit_comparison` contains the selected routing source, actual Engine hit tokens, routing prediction,
+KVCM local and local-plus-remote (`global`) predictions, and the Local Standby prediction. All `delta` values are
+actual minus predicted tokens. A negative value means overprediction; a positive value means underprediction.
+`routing` describes the active source's prediction. `kvcm` is present for KVCM-sourced decisions;
+`localStandby` requires an available Standby prediction. Missing predictions are unknown, while zero
+is a measured or predicted zero. The Requests sheet and HTML request detail expose these comparisons.
+
+## Semantics and limitations
+
+- The page ends a request at observed first token. PV does not contain Chat/Decode completion, so the page does not claim full request completion.
+- Both historical `shortestTtftDecisions` and current `routingDecisions` are supported, including mixed log windows. Historical token-work estimates remain in `Decision Snapshot Top5`; current millisecond estimates, role candidates, policy thresholds, rejection counts and committed decision groups appear in `Routing Decisions` and in the HTML candidate cards. Unknown values remain blank; they are not zero or terminal Engine measurements.
+- Current-only workbooks promote current fields in Requests and omit obsolete decision columns. Mixed workbooks retain both schemas in separate columns. The HTML summary switches units with the selected request; Prefill and Decode decisions are displayed separately without using Decode as a Prefill substitute.
+- Snapshot candidates are recorded facts, capped at 5 per role for current strategies with an explicit truncation flag. Prefill retains selected, shortest-TTFT and greatest-effective-hit candidates. Host lifecycle buckets are reconstructed from request timestamps.
+- If the source only has terminal WorkerStatus, RUNNING water level and step progress are interpolated between RUNNING and first-token boundaries; they are not a historical sequence of per-step snapshots.
+- Multiple FlexLB instances are kept separate while joining records. This avoids accidentally joining identical request IDs across instances.
+- Automatic deployment resolution sees the instances that are RUNNING at collection time. For a historical window that crossed a rollout or scale event, pass each still-accessible historical instance explicitly with repeated `--instance`, or build from an exported PV log bundle. The manifest cannot claim coverage for an instance that no longer exists.
+- A `.numbers` file is intentionally not generated. Numbers can open `analysis.xlsx`, while Python-native Numbers generation is not a stable automation interface.
+
+## Dependencies and tests
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 -m unittest discover -s tests
+```

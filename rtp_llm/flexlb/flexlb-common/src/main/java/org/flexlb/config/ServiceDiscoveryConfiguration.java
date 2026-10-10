@@ -1,26 +1,32 @@
 package org.flexlb.config;
 
-import org.flexlb.dao.route.ServiceRoute;
-import org.flexlb.discovery.LocalServiceDiscovery;
-import org.flexlb.discovery.ServiceDiscovery;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
+import org.flexlb.discovery.RoutingServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryProvider;
+import org.flexlb.discovery.StaticServiceDiscoveryProvider;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.List;
 
 @Configuration
 public class ServiceDiscoveryConfiguration {
 
-    @Bean
-    @ConditionalOnMissingBean(ServiceDiscovery.class)
-    public static ServiceDiscovery serviceDiscovery(ModelMetaConfig modelConfig) {
-        ServiceRoute route = modelConfig.getServiceRoute();
-        String file = route.getDiscoveryFile();
-        if (file == null || file.isBlank()) {
-            return new LocalServiceDiscovery(route.getHosts());
-        }
-        if (!route.getHosts().isEmpty()) {
-            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG must use either hosts or discovery_file");
-        }
-        return new LocalServiceDiscovery(file);
+    @Bean(destroyMethod = "")
+    public ServiceDiscoveryProvider staticEnvironmentServiceDiscoveryProvider() {
+        return new StaticServiceDiscoveryProvider();
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public RoutingServiceDiscovery routingServiceDiscovery(
+            List<ServiceDiscoveryProvider> providers,
+            ObjectProvider<ConfigService> configServiceProvider) {
+        ServiceDiscoveryRuntimeConfig defaults = new ServiceDiscoveryRuntimeConfig();
+        return new RoutingServiceDiscovery(providers, () -> {
+            ConfigService configService = configServiceProvider.getIfAvailable();
+            return configService == null
+                    ? defaults
+                    : configService.loadBalanceConfig().getServiceDiscovery();
+        });
     }
 }

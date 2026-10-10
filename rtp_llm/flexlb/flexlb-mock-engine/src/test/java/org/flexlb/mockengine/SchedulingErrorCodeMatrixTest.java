@@ -12,8 +12,8 @@ import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.pv.PvLogData;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -193,7 +193,7 @@ class SchedulingErrorCodeMatrixTest {
             var original = fixture.service.route(fixture.context());
             assertFailure(fixture.route(fixture.context()), 8406, UNSPECIFIED, "duplicate request_id");
             assertFalse(original.isDone());
-            fixture.service.cancelRequest(REQUEST_ID, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.service.cancelRequest(Long.toString(REQUEST_ID), 0L, CancelReason.CLIENT_CANCELLED);
             assertFailure(original.get(5, TimeUnit.SECONDS), 8504, UNSPECIFIED, "cancel");
             assertEquals(1, fixture.harness.decodeEndpoint(0).getInflightCount());
             assertTrue(fixture.harness.engineArrivalOrder.isEmpty());
@@ -260,7 +260,7 @@ class SchedulingErrorCodeMatrixTest {
             config.getDispatcher().setMaxInflightPerPrefillWorker(prefillCapacity);
             harness = new AutoTpmE2EHarness(61_500, 1, 1, "1", 1.0, true,
                     false, decision, true, config);
-            service = new RouteService(harness.scheduler, mock(RecentCacheKeyTraceReporter.class));
+            service = new RouteService(harness.scheduler, mock(TheoryCacheHitReporter.class));
         }
 
         BalanceContext context() { return harness.context(REQUEST_ID, 50); }
@@ -269,7 +269,7 @@ class SchedulingErrorCodeMatrixTest {
         void reserveDecode(int priority) {
             var endpoint = harness.decodeEndpoint(0);
             try (var pin = endpoint.tryPinGeneration()) {
-                assertNotNull(endpoint.reserveUnqueued(pin, REQUEST_ID - 1, 0L, 0L, priority));
+                assertNotNull(endpoint.reserveUnqueued(pin, Long.toString(REQUEST_ID - 1), 0L, 0L, priority));
             }
         }
 

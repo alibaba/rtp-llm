@@ -12,8 +12,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
@@ -79,7 +80,7 @@ class QueuedBatchDeliveryTest {
             sent.add(call.getArgument(2));
             return reply;
         });
-        dispatcher = new DefaultBatchDispatcher(grpc, service, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpc, service, NoOpFlexMonitor.getInstance(), 1, 1);
         strategy = new BatchDeliveryStrategy(dispatcher::tryPrepareSubmission, () -> 201L,
                 registry, new DeliveryMetrics(reporter));
         prefill = mock(PrefillEndpoint.class);
@@ -127,8 +128,8 @@ class QueuedBatchDeliveryTest {
         ScheduledRequest first = item(1L);
         ScheduledRequest second = item(2L);
         submit(List.of(first, second));
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(1L, 0L).deliveryClaimKind());
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(2L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState("1", 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState("2", 0L).deliveryClaimKind());
         assertOccupancy(1, 2);
         for (ScheduledRequest item : all ? List.of(first, second) : List.of(first)) {
             RequestSlot slot = registry.requestSlot(item.requestId());
@@ -144,12 +145,12 @@ class QueuedBatchDeliveryTest {
         releaseExecutor.countDown();
         awaitDispatchTasks();
         assertFalse(first.future().get(5, TimeUnit.SECONDS).isSuccess());
-        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState(1L, 0L).deliveryClaimKind());
+        assertEquals(DeliveryClaimKind.NONE, registry.getRequestState("1", 0L).deliveryClaimKind());
         int survivors = all ? 0 : 1;
         assertOccupancy(survivors, survivors);
         assertEquals(survivors, decode.routingView().engineCapacityUsed());
-        assertEquals(survivors, decode.routingView().inflightHardKv());
-        assertEquals(2L * survivors, decode.routingView().inflightExpectedKv());
+        assertEquals(survivors, decode.routingView().inputKvReserved());
+        assertEquals(2L * survivors, decode.routingView().inputAndMaxOutputKvReserved());
         assertEquals(survivors, sent.size());
         if (all) {
             assertFalse(second.future().get(5, TimeUnit.SECONDS).isSuccess());
@@ -157,18 +158,18 @@ class QueuedBatchDeliveryTest {
         } else {
             assertEquals(List.of(2L), sent.getFirst().getDpSlotsList().stream()
                     .flatMap(dp -> dp.getRequestsList().stream()).map(input -> input.getInput().getRequestId()).toList());
-            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, registry.getRequestState(2L, 0L).deliveryClaimKind());
+            assertEquals(DeliveryClaimKind.BATCH_ENQUEUE, registry.getRequestState("2", 0L).deliveryClaimKind());
             reply.complete(ack(2L));
             assertTrue(second.future().get(5, TimeUnit.SECONDS).isSuccess());
             ledger.finish(201L, second).forEach(fact -> registry.processPrefillStatus(prefill, RoleType.PREFILL, fact));
             DeliverySettlementTestSupport.decodeStatus(decode, 2L, true);
         }
         // Repeated terminal events cannot subtract the other member or leak a batch permit.
-        registry.cancelRequest(1L, 0L, CancelReason.CLIENT_CANCELLED);
+        registry.cancelRequest("1", 0L, CancelReason.CLIENT_CANCELLED);
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(0, decode.routingView().inflightHardKv());
-        assertEquals(0, decode.routingView().inflightExpectedKv());
+        assertEquals(0, decode.routingView().inputKvReserved());
+        assertEquals(0, decode.routingView().inputAndMaxOutputKvReserved());
         dispatcher.tryPrepareSubmission().value().close();
     }
 
@@ -177,7 +178,7 @@ class QueuedBatchDeliveryTest {
     void lateHandoffStartsOneBoundedObservationWindowWithoutFabricatingWorkerActivity(boolean ack)
             throws Exception {
         ScheduledRequest item = item(1L);
-        RequestSlot slot = registry.requestSlot(1L);
+        RequestSlot slot = registry.requestSlot("1");
         long lastStatus = System.currentTimeMillis() - TIMEOUT_MS + 10_000L;
         ReflectionTestUtils.setField(slot, "lastWorkerStatusAtMs", lastStatus);
         submit(List.of(item));
@@ -205,7 +206,7 @@ class QueuedBatchDeliveryTest {
     @Test
     void blockedRpcDoesNotHoldSlotOrTransactionMonitor() throws Exception {
         ScheduledRequest item = item(1L);
-        RequestSlot slot = registry.requestSlot(1L);
+        RequestSlot slot = registry.requestSlot("1");
         CountDownLatch rpcEntered = new CountDownLatch(1);
         CountDownLatch releaseRpc = new CountDownLatch(1);
         when(grpc.batchEnqueueAsync(anyString(), anyInt(), any())).thenAnswer(call -> {
@@ -254,8 +255,8 @@ class QueuedBatchDeliveryTest {
         verify(submission, times(1)).close();
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(0, decode.routingView().inflightHardKv());
-        assertEquals(0, decode.routingView().inflightExpectedKv());
+        assertEquals(0, decode.routingView().inputKvReserved());
+        assertEquals(0, decode.routingView().inputAndMaxOutputKvReserved());
         verifyNoInteractions(grpc);
     }
 
@@ -269,8 +270,8 @@ class QueuedBatchDeliveryTest {
         assertFalse(item.future().get(5, TimeUnit.SECONDS).isSuccess());
         assertOccupancy(0, 0);
         assertEquals(0, decode.routingView().engineCapacityUsed());
-        assertEquals(0, decode.routingView().inflightHardKv());
-        assertEquals(0, decode.routingView().inflightExpectedKv());
+        assertEquals(0, decode.routingView().inputKvReserved());
+        assertEquals(0, decode.routingView().inputAndMaxOutputKvReserved());
         verifyNoInteractions(grpc);
     }
 
@@ -281,7 +282,7 @@ class QueuedBatchDeliveryTest {
         var future = registry.register(context);
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, id, 1L, 2L, 50);
+            reservation = decode.reserveUnqueued(pin, Long.toString(id), 1L, 2L, 50);
         }
         assertNotNull(reservation);
         DeliverySettlementTestSupport.queueDecode(decode, reservation);

@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -33,7 +34,7 @@ import static org.mockito.Mockito.when;
 
 class RequestSlotTerminalSettlementTest {
     private static final DecodeEndpoint.ReservationHandle RESERVATION =
-            new DecodeEndpoint.ReservationHandle(1L, 2L, 3L);
+            new DecodeEndpoint.ReservationHandle(1L, "2", 3L);
 
     @Test
     void latePlacementDiagnosticsCannotOverwriteQueueTimeoutEvidence() {
@@ -180,13 +181,27 @@ class RequestSlotTerminalSettlementTest {
         verify(f.item().prefillEp(), never()).expireCommittedItem(any());
     }
 
+    @Test
+    void reportsEndpointCleanupFailureAndStillPublishesTheRequestResult() {
+        Fixture f = fixture(true);
+        doThrow(new IllegalStateException("endpoint cleanup failed"))
+                .when(f.item().decodeEp()).release(RESERVATION, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED);
+
+        f.slot().cancelRequest(0L, CancelReason.CLIENT_CANCELLED);
+
+        assertTrue(f.slot().future().isDone());
+        assertEquals(RequestState.Phase.CANCELLED, f.slot().snapshot().state());
+        verify(f.reporter()).reportLifecycleFailure("terminal_cleanup");
+    }
+
     private static Fixture fixture(boolean finishAdmission) {
         var config = SchedulingTestConfig.newConfig();
         BalanceContext context = RequestLifecycleTestSupport.context(config, RESERVATION.requestId());
         var publisher = mock(RequestCompletionPublisher.class);
         var timer = mock(ExpirationTimer.class);
+        var reporter = mock(org.flexlb.service.monitor.RequestSchedulerReporter.class);
         RequestSlot slot = new RequestSlot(publisher, context, timer,
-                new RequestTerminalCleanup(timer), () -> { });
+                new RequestTerminalCleanup(timer, reporter), () -> { });
         when(publisher.tryReservePublication(any(), any())).thenAnswer(call ->
                 new RequestCompletionPublisher.PublicationPermit(publisher, slot, call.getArgument(1)));
         doAnswer(call -> { ((RequestCompletionPublisher.SelectedPublication) call.getArgument(0)).complete(); return null; })
@@ -199,8 +214,9 @@ class RequestSlotTerminalSettlementTest {
         assertNotNull(admission);
         assertEquals(org.flexlb.balance.PlacementResult.Status.SUCCESS, slot.commitRoute(item, () -> true));
         if (finishAdmission) { admission.close(); }
-        return new Fixture(slot, item, admission);
+        return new Fixture(slot, item, admission, reporter);
     }
 
-    private record Fixture(RequestSlot slot, ScheduledRequest item, AdmissionHandle admission) { }
+    private record Fixture(RequestSlot slot, ScheduledRequest item, AdmissionHandle admission,
+                           org.flexlb.service.monitor.RequestSchedulerReporter reporter) { }
 }

@@ -8,10 +8,10 @@ import org.flexlb.util.Logger;
 import java.util.List;
 import java.util.Objects;
 
-/** No-throw metrics emitted after a delivery decision has committed. */
+/**
+ * No-throw metrics emitted after a delivery decision has committed.
+ */
 public final class DeliveryMetrics {
-
-    private static final String PREFILL_ROLE = RoleType.PREFILL.name();
 
     private final BatchSchedulerReporter reporter;
 
@@ -19,22 +19,26 @@ public final class DeliveryMetrics {
         this.reporter = Objects.requireNonNull(reporter, "reporter");
     }
 
-    public void routesDelivered(
-            int remainingQueueDepth,
-            List<ScheduledRequest> exactItems) {
+    public void routesDelivered(int remainingQueueDepth, List<ScheduledRequest> exactItems) {
         try {
             if (exactItems.isEmpty()) {
                 return;
             }
             ScheduledRequest head = exactItems.get(0);
             String engineIp = prefillIp(head);
+            String role = prefillRole(head);
+            var decisionGroup = head.ctx().getDecisionGroup();
+            if (decisionGroup != null) {
+                reporter.reportDispatchReason(role, engineIp, decisionGroup.reason());
+                reporter.reportBatchSize(role, engineIp, decisionGroup.reason(), exactItems.size());
+            }
             reporter.reportBatcherQueueSize(
-                    PREFILL_ROLE, engineIp,
+                    role, engineIp,
                     remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
             for (ScheduledRequest item : exactItems) {
                 reporter.reportBatchWaitTimeMs(
-                        PREFILL_ROLE,
+                        role,
                         engineIp,
                         Math.max(0L, nowMs - item.enqueuedAtMs()),
                         item.priority());
@@ -56,17 +60,18 @@ public final class DeliveryMetrics {
             }
             ScheduledRequest head = dispatched.get(0);
             String engineIp = prefillIp(head);
+            String role = prefillRole(head);
             reporter.reportDispatchReason(
-                    PREFILL_ROLE, engineIp, decisionReason);
+                    role, engineIp, decisionReason);
             reporter.reportBatcherQueueSize(
-                    PREFILL_ROLE, engineIp,
+                    role, engineIp,
                     remainingQueueDepth);
             long nowMs = System.currentTimeMillis();
             long hitTokens = 0L;
             long totalTokens = 0L;
             for (ScheduledRequest item : dispatched) {
                 reporter.reportBatchWaitTimeMs(
-                        PREFILL_ROLE,
+                        role,
                         engineIp,
                         Math.max(0L, nowMs - item.enqueuedAtMs()),
                         item.priority());
@@ -74,20 +79,27 @@ public final class DeliveryMetrics {
                 totalTokens = saturatedAdd(totalTokens, item.seqLen());
             }
             reporter.reportBatchCacheHitMetrics(
-                    PREFILL_ROLE, engineIp, hitTokens, totalTokens);
+                    role, engineIp, hitTokens, totalTokens);
             reporter.reportBatchSize(
-                    PREFILL_ROLE, engineIp, decisionReason, dispatched.size());
+                    role, engineIp, decisionReason, dispatched.size());
             reporter.reportBatchTotalTokens(
-                    PREFILL_ROLE, engineIp, decisionReason, totalTokens);
+                    role, engineIp, decisionReason, totalTokens);
             reporter.reportBatchPredictedTimeMs(
-                    PREFILL_ROLE, engineIp, Math.max(0L, predictedMs));
+                    role, engineIp, Math.max(0L, predictedMs));
         } catch (Throwable failure) {
             Logger.warn("Batch dispatch telemetry isolated", failure);
         }
     }
 
+    private static String prefillRole(ScheduledRequest item) {
+        var status = item.prefillEp().getStatus();
+        RoleType role = status == null ? null : status.getRole();
+        return role == null ? RoleType.PREFILL.name() : role.name();
+    }
+
     private static String prefillIp(ScheduledRequest item) {
-        return item.prefillEp().getIp();
+        var status = item.prefillEp().getStatus();
+        return status == null ? "" : status.getMetricIpPort();
     }
 
     private static long saturatedAdd(long left, long right) {

@@ -74,7 +74,7 @@ class RequestConfirmationTimeoutTest {
             var capacity = new DecodeEndpoint.AdmissionCapacity(1L, 90L);
             DecodeEndpoint.ReservationHandle reservation;
             try (var pin = decode.tryPinGeneration()) {
-                reservation = decode.reserve(pin, REQUEST_ID, 16L, 32L, 50, capacity);
+                reservation = decode.reserve(pin, Long.toString(REQUEST_ID), 16L, 32L, 50, capacity);
                 assertNotNull(reservation);
                 var acquired = decode.acquireDispatchPermit(reservation, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
@@ -83,7 +83,7 @@ class RequestConfirmationTimeoutTest {
             }
             var context = RequestLifecycleTestSupport.context(config, REQUEST_ID);
             var future = requests.register(context);
-            RequestSlot slot = requests.requestSlot(REQUEST_ID);
+            RequestSlot slot = requests.requestSlot(Long.toString(REQUEST_ID));
             ServerStatus prefillMetadata = new ServerStatus();
             prefillMetadata.setRole(RoleType.PREFILL);
             prefillMetadata.setServerIp("127.0.0.1");
@@ -91,7 +91,7 @@ class RequestConfirmationTimeoutTest {
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillMetadata,
                     null, prefill, decode, reservation, slot.createdAtMs());
             AtomicReference<PrefillState.RouteReservation> routeReservation = new AtomicReference<>();
-            try (var mutation = requests.claimAdmissionHandle(REQUEST_ID, future);
+            try (var mutation = requests.claimAdmissionHandle(Long.toString(REQUEST_ID), future);
                  var pin = prefill.tryPinGeneration()) {
                 assertNotNull(mutation);
                 assertNotNull(pin);
@@ -119,11 +119,11 @@ class RequestConfirmationTimeoutTest {
             if (waiting == ConfirmationWait.UNCERTAIN_REPLY) {
                 claim.complete(DeliveryResult.uncertain(new IllegalStateException("reply was lost")));
             }
-            assertEquals(1, requests.liveRequestCount());
+            assertEquals(1, requests.trackedRequestCount());
             assertFalse(future.isDone());
             assertEquals(1L, prefill.observedRequestCount());
-            assertEquals(16L, decode.routingView().inflightHardKv());
-            assertEquals(32L, decode.routingView().inflightExpectedKv());
+            assertEquals(16L, decode.routingView().inputKvReserved());
+            assertEquals(32L, decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
             if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
@@ -133,17 +133,17 @@ class RequestConfirmationTimeoutTest {
 
             // AUTOMATIC_TIMER relies only on ExpirationTimer; no manual expiry entry point runs.
             assertFalse(future.get(2L, TimeUnit.SECONDS).isSuccess());
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
+            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
+            assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, prefill.getLocallyOwnedRequestCount());
-            assertEquals(0L, decode.routingView().inflightHardKv());
-            assertEquals(0L, decode.routingView().inflightExpectedKv());
+            assertEquals(0L, decode.routingView().inputKvReserved());
+            assertEquals(0L, decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(0, decode.routingView().engineCapacityUsed());
 
             // Local expiration restores admission capacity without an Engine Cancel channel.
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 102L, 16L, 32L, 50, capacity);
+                var next = decode.reserve(pin, "102", 16L, 32L, 50, capacity);
                 assertNotNull(next);
                 var acquired = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquired.status());
@@ -152,8 +152,8 @@ class RequestConfirmationTimeoutTest {
             }
             requests.processPrefillStatus(prefill, RoleType.PREFILL, PrefillState.WorkerStatusFact.active(item));
             requests.processDecodeStatus(decode, DecodeEndpoint.WorkerStatusFact.active(reservation));
-            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(REQUEST_ID, 0L).state());
-            assertEquals(0, requests.liveRequestCount());
+            assertEquals(RequestState.Phase.TIMED_OUT, requests.getRequestState(Long.toString(REQUEST_ID), 0L).state());
+            assertEquals(0, requests.trackedRequestCount());
             assertEquals(0L, prefill.observedRequestCount());
             assertEquals(0, decode.routingView().engineCapacityUsed());
         } finally {
