@@ -657,7 +657,6 @@ whl_reqs = [
     "sympy",
     "typing-extensions",
     "importlib_metadata",
-    "transformers==5.2.0",
     "sentencepiece==0.2.0",
     "fastapi==0.115.6",
     "grpcio-tools==1.57.0",
@@ -683,7 +682,6 @@ whl_reqs = [
     "pydantic",
     "timm==0.9.12",
     "onnx",
-    "sentence-transformers==5.2.0",
     # "xfastertransformer_devel==1.8.1.1",
     # "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
@@ -709,7 +707,17 @@ whl_reqs = [
     "concurrent_log_handler",
     "apache-tvm-ffi",
     "xgrammar==0.2.5",
-] + whl_deps() + platform_deps() + xft_dep
+] + select({
+    # Keep SM120 wheel metadata aligned with its tested CUDA 13 runfiles.
+    "@//:using_cuda13_sm120": [
+        "transformers==4.57.1",
+        "sentence-transformers==2.7.0",
+    ],
+    "//conditions:default": [
+        "transformers==5.2.0",
+        "sentence-transformers==5.2.0",
+    ],
+}) + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
     name = "rtp_llm_frontend_whl",
