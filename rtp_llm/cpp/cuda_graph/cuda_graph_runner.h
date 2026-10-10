@@ -63,6 +63,9 @@ public:
                                       || role_ == CudaGraphRole::MTP_DRAFT_PREFILL
                                       || role_ == CudaGraphRole::GENERATIVE_PREFILL_NO_PREFIX;
         is_target_verify_     = role_ == CudaGraphRole::TARGET_VERIFY;
+        if (!is_prefill_cuda_graph_mode_ && graph_params.max_decode_batch_size > 0) {
+            max_bs_ = graph_params.max_decode_batch_size;
+        }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);

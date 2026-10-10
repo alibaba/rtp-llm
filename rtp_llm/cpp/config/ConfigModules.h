@@ -251,6 +251,11 @@ struct HWKernelConfig {
     // Decode CUDA Graph capture configuration
     // Comma-separated list of batch sizes, e.g., "1,2,4,8,16,32"
     std::vector<int> decode_capture_batch_sizes;
+    // Decode sequence capacity (sum of beams), independent of request concurrency.
+    // Zero is the internal unset value; resolve it to CONCURRENCY_LIMIT at startup.
+    int              decode_cuda_graph_max_batch_size = 0;
+    bool             enable_decode_cascade_attention  = false;
+    int              resolveDecodeCudaGraphMaxBatchSize(int concurrency_limit) const;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
     std::string      to_string() const;

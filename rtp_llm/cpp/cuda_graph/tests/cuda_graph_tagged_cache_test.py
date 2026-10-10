@@ -276,6 +276,56 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_decode_capacity_is_independent_of_request_capacity(self):
+        # Explicit beams > requests, automatic buckets, legacy default, and a
+        # deliberately smaller capture range must all preserve eager fallback.
+        for capacity, buckets, replay_sizes, fallback_size in (
+            (2048, [128, 256, 2048], [128, 200, 2048, 129], 2049),
+            (33, [], [1, 8, 32, 33], 34),
+            (0, [], [1, 7, 8], 9),
+            (2048, [128, 512], [128, 511, 512], 513),
+        ):
+            with self.subTest(capacity=capacity, buckets=buckets):
+                model = TaggedBlockTableModel()
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model,
+                    HIDDEN_SIZE,
+                    64,
+                    TOKENS_PER_BLOCK,
+                    TOKENS_PER_BLOCK,
+                    buckets,
+                    GROUP_TAGS,
+                    max_context_batch_size=8,
+                    max_decode_batch_size=capacity,
+                )
+                for batch_size in replay_sizes:
+                    inputs = _build_decode_inputs(
+                        GROUP_TAGS,
+                        {"full": 3, "aux": 5},
+                        batch_size=batch_size,
+                    )
+                    inputs.input_hiddens.copy_(
+                        torch.arange(batch_size, device="cuda", dtype=torch.bfloat16)
+                        .unsqueeze(1)
+                        .expand(-1, HIDDEN_SIZE)
+                    )
+                    self.assertTrue(runner.canRun(inputs))
+                    output = runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(
+                        output.hidden_states, model.forward(inputs).hidden_states
+                    )
+                self.assertFalse(
+                    runner.canRun(
+                        _build_decode_inputs(
+                            GROUP_TAGS,
+                            {"full": 3, "aux": 5},
+                            batch_size=fallback_size,
+                        )
+                    )
+                )
+
     def _assert_replay_signature(
         self, runner: CudaGraphRunner, inputs: PyModelInputs, expected: int
     ) -> None:

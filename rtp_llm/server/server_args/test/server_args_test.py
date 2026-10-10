@@ -3,6 +3,115 @@ import json
 import os
 import sys
 from unittest import TestCase, main
+from unittest.mock import patch
+
+
+class DecodeGraphCapacityArgumentsTest(TestCase):
+    @staticmethod
+    def create_engine(args=(), env=None):
+        from rtp_llm.config.engine_config import EngineConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, env or {}, clear=True):
+            return EngineConfig.create(server_args.setup_args(list(args)))
+
+    def test_unset_capacity_follows_request_concurrency(self):
+        for requests in (1, 8, 32):
+            with self.subTest(requests=requests):
+                config = self.create_engine(["--concurrency_limit", str(requests)])
+                self.assertEqual(
+                    config.hw_kernel_config.decode_cuda_graph_max_batch_size, requests
+                )
+                self.assertEqual(
+                    config.runtime_config.max_generate_batch_size, requests
+                )
+                self.assertEqual(config.hw_kernel_config.decode_capture_batch_sizes, [])
+
+    def test_explicit_capacity_does_not_change_request_limits(self):
+        config = self.create_engine(
+            env={
+                "CONCURRENCY_LIMIT": "8",
+                "DECODE_CUDA_GRAPH_MAX_BATCH_SIZE": "2048",
+                "ENABLE_CUDA_GRAPH": "1",
+                "DECODE_CAPTURE_CONFIG": "2048,128,256,128,1024",
+            }
+        )
+        self.assertEqual(config.concurrency_config.concurrency_limit, 8)
+        self.assertEqual(config.runtime_config.max_generate_batch_size, 8)
+        self.assertEqual(config.hw_kernel_config.decode_cuda_graph_max_batch_size, 2048)
+        self.assertEqual(
+            config.hw_kernel_config.decode_capture_batch_sizes, [128, 256, 1024, 2048]
+        )
+        self.assertEqual(
+            config.hw_kernel_config.full_prefill_cuda_graph_max_requests, 8
+        )
+
+    def test_cli_overrides_env_and_allows_smaller_capture_range(self):
+        config = self.create_engine(
+            [
+                "--decode_cuda_graph_max_batch_size",
+                "2048",
+                "--decode_capture_config",
+                "128,512",
+            ],
+            {
+                "CONCURRENCY_LIMIT": "8",
+                "DECODE_CUDA_GRAPH_MAX_BATCH_SIZE": "1024",
+                "ENABLE_CUDA_GRAPH": "1",
+            },
+        )
+        self.assertEqual(config.hw_kernel_config.decode_cuda_graph_max_batch_size, 2048)
+        self.assertEqual(config.hw_kernel_config.decode_capture_batch_sizes, [128, 512])
+
+    def test_bucket_cannot_silently_expand_capacity(self):
+        for capacity_args in ([], ["--decode_cuda_graph_max_batch_size", "128"]):
+            with self.subTest(capacity_args=capacity_args), self.assertRaisesRegex(
+                ValueError, "DECODE_CAPTURE_CONFIG.*256"
+            ):
+                self.create_engine(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--concurrency_limit",
+                        "8",
+                        "--decode_capture_config",
+                        "256",
+                    ]
+                    + capacity_args
+                )
+
+    def test_cascade_is_opt_in_and_cli_overrides_environment(self):
+        self.assertFalse(
+            self.create_engine().hw_kernel_config.enable_decode_cascade_attention
+        )
+        env = {"ENABLE_DECODE_CASCADE_ATTENTION": "1"}
+        enabled = self.create_engine(env=env)
+        self.assertTrue(enabled.hw_kernel_config.enable_decode_cascade_attention)
+        disabled = self.create_engine(["--enable_decode_cascade_attention", "0"], env)
+        self.assertFalse(disabled.hw_kernel_config.enable_decode_cascade_attention)
+
+    def test_disabling_graph_allows_rollback_with_retained_buckets(self):
+        config = self.create_engine(
+            ["--concurrency_limit", "8", "--decode_capture_config", "2048"]
+        )
+        self.assertFalse(config.hw_kernel_config.enable_cuda_graph)
+        self.assertEqual(config.hw_kernel_config.decode_cuda_graph_max_batch_size, 8)
+
+    def test_invalid_capacity_and_buckets_are_rejected(self):
+        from argparse import ArgumentTypeError
+
+        for option, values in (
+            ("--decode_cuda_graph_max_batch_size", ["0", "-1", "abc", "2147483647"]),
+            (
+                "--decode_capture_config",
+                ["0", "1,-1", "1,0", "abc", "1,", "2147483647"],
+            ),
+        ):
+            for value in values:
+                with self.subTest(option=option, value=value), self.assertRaises(
+                    (ArgumentTypeError, SystemExit)
+                ):
+                    self.create_engine([option, value])
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
