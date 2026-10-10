@@ -1,29 +1,8 @@
 """HA client metrics computed from frozen rows and explicit topology inputs."""
 
 from collections import Counter
-from typing import Optional
-
-HA_METRICS = {
-    "sample_count",
-    "success_rate",
-    "non_ok_count",
-    "target_share",
-    "target_count",
-    "route_share",
-    "route_count",
-    "failover_count",
-    "duplicate_ids",
-    "error_kind_count",
-    "wrong_error_code",
-    "failed_count",
-    "failed_rate_above_one",
-    "business_rate_above_one",
-    "visible_terminal_count",
-    "visible_terminal_share",
-    "prefill_max_share",
-    "prefill_peak_skew",
-}
-
+from dataclasses import dataclass
+from typing import Optional, Sequence
 
 def row_ts_ms(row: dict) -> Optional[float]:
     """Row send timestamp (ms epoch) — send_start_epoch_ms preferred,
@@ -68,70 +47,85 @@ def prefill_assignment_windows(rows: list, seconds: int = 5) -> dict:
     }
 
 
+@dataclass(frozen=True)
+class _ClientMetricInput:
+    params: dict
+    rows: list
+    target: Optional[str]
+    prefill_pool: Sequence[str]
+
+    def count(self, field, value):
+        return sum(row[field] == value for row in self.rows)
+
+    def count_param(self, field, parameter):
+        return sum(row[field] == self.params[parameter] for row in self.rows)
+
+    def share(self, count):
+        return count / len(self.rows) if self.rows else 0
+
+    def rate_above_one(self, count):
+        return self.share(count) if count > 1 else 0
+
+
+def _prefill_max_share(source):
+    pool = set(source.prefill_pool)
+    addresses = [r.get("prefill") for r in source.rows if r["status"] == "ok"]
+    if not addresses or any(address not in pool for address in addresses):
+        raise ValueError("successful HA requests lack known Prefill endpoints")
+    return max(Counter(addresses).values()) / len(addresses)
+
+
+def _prefill_peak_skew(source):
+    pool = set(source.prefill_pool)
+    windows = prefill_assignment_windows(source.rows)
+    assigned = {row.get("prefill") for row in source.rows if row.get("prefill")}
+    if not pool or not assigned <= pool:
+        raise ValueError("HA requests reference unknown Prefill endpoints")
+    eligible = [counts for counts in windows.values()
+                if sum(counts.values()) >= source.params["min_samples"]]
+    if not eligible:
+        raise ValueError("no HA rolling 5-second window has enough assigned Prefill samples")
+    return max(max(counts.values()) * len(pool) / sum(counts.values())
+               for counts in eligible)
+
+
+def _visible_terminal_count(source):
+    return sum(row["status"] == "ok" or row["error_kind"] in {"deadline", "transport", "business"}
+               for row in source.rows)
+
+
+def _wrong_error_code(source):
+    # This is a literal substring predicate; exact matching requires a structured code field.
+    return sum(str(source.params["code"]) not in str(row.get("error", "")) for row in source.rows)
+
+
+_CLIENT_METRICS = {
+    "sample_count": lambda s: len(s.rows),
+    "success_rate": lambda s: s.share(s.count("status", "ok")),
+    "non_ok_count": lambda s: sum(r["status"] != "ok" for r in s.rows),
+    "target_count": lambda s: s.count("master_target", s.target),
+    "target_share": lambda s: s.share(s.count("master_target", s.target)),
+    "route_count": lambda s: s.count_param("route_path", "route"),
+    "route_share": lambda s: s.share(s.count_param("route_path", "route")),
+    "failover_count": lambda s: sum(r["failover"] is True for r in s.rows),
+    "duplicate_ids": lambda s: sum(count > 1 for count in Counter(r["rid"] for r in s.rows).values()),
+    "error_kind_count": lambda s: s.count_param("error_kind", "error_kind"),
+    "wrong_error_code": _wrong_error_code,
+    "failed_count": lambda s: s.count("route_path", "failed"),
+    "failed_rate_above_one": lambda s: s.rate_above_one(s.count("route_path", "failed")),
+    "business_rate_above_one": lambda s: s.rate_above_one(s.count("error_kind", "business")),
+    "visible_terminal_count": _visible_terminal_count,
+    "visible_terminal_share": lambda s: s.share(_visible_terminal_count(s)),
+    "prefill_max_share": _prefill_max_share,
+    "prefill_peak_skew": _prefill_peak_skew,
+}
+HA_METRICS = frozenset(_CLIENT_METRICS)
+
+
 def measure_client_metric(params, rows, *, target=None, prefill_pool=()):
     """Measure one declared metric; the executor supplies live target/pool identity."""
-    metric = params["metric"].split("/", 1)[1]
-    if metric not in HA_METRICS:
+    metric = params["metric"].partition("/")[2]
+    calculator = _CLIENT_METRICS.get(metric)
+    if calculator is None:
         raise ValueError(f"unknown HA metric: {params['metric']}")
-    n = len(rows)
-    if metric == "sample_count":
-        actual = n
-    elif metric == "success_rate":
-        actual = sum(r["status"] == "ok" for r in rows) / n if n else 0
-    elif metric == "non_ok_count":
-        actual = sum(r["status"] != "ok" for r in rows)
-    elif metric in {"target_share", "target_count"}:
-        count = sum(r["master_target"] == target for r in rows)
-        actual = count / n if metric == "target_share" and n else count
-    elif metric in {"route_share", "route_count"}:
-        count = sum(r["route_path"] == params["route"] for r in rows)
-        actual = count / n if metric == "route_share" and n else count
-    elif metric == "failover_count":
-        actual = sum(r["failover"] is True for r in rows)
-    elif metric == "prefill_max_share":
-        pool = set(prefill_pool)
-        addresses = [r.get("prefill") for r in rows if r["status"] == "ok"]
-        if not addresses or any(address not in pool for address in addresses):
-            raise ValueError("successful HA requests lack known Prefill endpoints")
-        actual = max(Counter(addresses).values()) / len(addresses)
-    elif metric == "prefill_peak_skew":
-        pool = set(prefill_pool)
-        windows = prefill_assignment_windows(rows)
-        assigned = {row.get("prefill") for row in rows if row.get("prefill")}
-        if not pool or not assigned <= pool:
-            raise ValueError("HA requests reference unknown Prefill endpoints")
-        eligible = [counts for counts in windows.values()
-                    if sum(counts.values()) >= params["min_samples"]]
-        if not eligible:
-            raise ValueError("no HA rolling 5-second window has enough assigned Prefill samples")
-        actual = max(max(counts.values()) * len(pool) / sum(counts.values())
-                     for counts in eligible)
-    elif metric == "duplicate_ids":
-        actual = sum(count > 1 for count in Counter(r["rid"] for r in rows).values())
-    elif metric == "error_kind_count":
-        actual = sum(r["error_kind"] == params["error_kind"] for r in rows)
-    elif metric in {"failed_rate_above_one", "business_rate_above_one"}:
-        count = sum(
-            (
-                r["route_path"] == "failed"
-                if metric == "failed_rate_above_one"
-                else r["error_kind"] == "business"
-            )
-            for r in rows
-        )
-        actual = count / n if count > 1 and n else 0
-    elif metric in {"visible_terminal_count", "visible_terminal_share"}:
-        actual = sum(
-            r["status"] == "ok"
-            or r["error_kind"] in {"deadline", "transport", "business"}
-            for r in rows
-        )
-        if metric == "visible_terminal_share":
-            actual = actual / n if n else 0
-    elif metric == "wrong_error_code":
-        # Preserve the legacy literal substring predicate, not a typed/exact
-        # code claim. A strict check needs a structured client error-code field.
-        actual = sum(str(params["code"]) not in str(r.get("error", "")) for r in rows)
-    else:
-        actual = sum(r["route_path"] == "failed" for r in rows)
-    return actual
+    return calculator(_ClientMetricInput(params, rows, target, prefill_pool))

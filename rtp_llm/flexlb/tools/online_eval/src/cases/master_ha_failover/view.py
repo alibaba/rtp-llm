@@ -9,8 +9,6 @@ def validate(path, data, _fail):
         for stage, label in data["events"].items()
     ):
         _fail(path, "invalid HA event labels")
-    from monitoring.query_plan import load_plan, definitions
-    declared = definitions(load_plan(data["monitoring_query_plan"]))
     styles = data["curves"]
     if not isinstance(styles, dict) or not styles:
         _fail(path, "invalid HA metric presentation")
@@ -24,10 +22,9 @@ def validate(path, data, _fail):
                 and set(colors) == {"A", "B"} and all(type(c) is str and c for c in colors.values())):
             _fail(path, "invalid HA curve colors")
     panels = data["panels"]
-    if not isinstance(panels, list) or not panels or len({
-        panel.get("id") for panel in panels if isinstance(panel, dict)
-    }) != len(panels):
+    if not isinstance(panels, list) or not panels:
         _fail(path, "invalid HA panels")
+    ids = set()
     for panel in panels:
         if (not isinstance(panel, dict) or set(panel) != {"id", "title", "curve_ids", "caption"}
                 or any(type(panel[field]) is not str or not panel[field] for field in ("id", "title", "caption"))
@@ -35,3 +32,6 @@ def validate(path, data, _fail):
                 or any(type(identity) is not str or identity not in styles for identity in panel["curve_ids"])
                 or len(set(panel["curve_ids"])) != len(panel["curve_ids"])):
             _fail(path, "invalid HA panel")
+        if panel["id"] in ids:
+            _fail(path, "invalid HA panels")
+        ids.add(panel["id"])
