@@ -10,21 +10,6 @@ from cases.master_performance.inputs import validate
 from input_contract import finite_number as finite
 
 
-REQUIRED_PROVENANCE = (
-    "instance",
-    "configuration_sha256",
-    "master_artifact",
-    "mock_jar_sha256",
-    "actual_master_config",
-    "performance",
-    "topology",
-    "capacity",
-    "trace",
-    "client_environment",
-)
-
-
-
 def engine_tps_checks(evidence):
     """Scrape-time samples; sum priorities per engine, then equally weight engines.
 
@@ -106,26 +91,8 @@ def analyze(evidence):
         c = validate(evidence["criteria"], evidence.get("gate_input"))
         if not matches_schema(evidence, "performance_evidence_schema_version", 2):
             raise ValueError("unsupported evidence version")
-        p = evidence["provenance"]
-        for k in REQUIRED_PROVENANCE:
-            if not p.get(k):
-                raise ValueError("missing provenance: " + k)
-        if not isinstance(p["instance"], str) or not p["instance"].strip():
-            raise ValueError("missing/invalid instance identity")
-        for v in (
-            p["configuration_sha256"],
-            p["mock_jar_sha256"],
-            p.get("analyzer_sha256"),
-            p["master_artifact"].get("jar_sha256"),
-            p["trace"].get("sha256"),
-            p["trace"].get("workload_sha256"),
-        ):
-            if (
-                not isinstance(v, str)
-                or len(v) != 64
-                or any(x not in "0123456789abcdef" for x in v)
-            ):
-                raise ValueError("missing/invalid artifact or workload SHA256")
+        from workload.run_provenance import validate_gate_provenance
+        p = validate_gate_provenance(evidence["provenance"])
         if str(p["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {
             "1",
             "true",

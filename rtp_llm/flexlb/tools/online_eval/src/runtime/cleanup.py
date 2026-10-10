@@ -15,3 +15,21 @@ def cleanup_all(operations):
         timed_out = any(isinstance(exc, (TimeoutError, TimeoutExpired)) for _, exc in errors)
         error_type = TimeoutError if timed_out else RuntimeError
         raise error_type(message) from errors[0][1]
+
+
+def stop_process(process, deadline):
+    """Terminate, escalate and reap a process even after its budget expires."""
+    if process is None:
+        return
+    if process.alive():
+        process.proc.terminate()
+        try:
+            process.proc.wait(timeout=min(2, deadline.remaining()))
+        except (TimeoutExpired, TimeoutError):
+            process.proc.kill()
+    try:
+        remaining = deadline.remaining()
+    except TimeoutError:
+        process.proc.wait(timeout=0)
+        raise
+    process.proc.wait(timeout=remaining)

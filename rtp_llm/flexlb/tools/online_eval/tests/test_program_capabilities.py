@@ -10,7 +10,7 @@ from unittest import mock
 
 import yaml
 
-from cases.config import configure_program, validate_analysis
+from cases.config import configure_program
 from cases.registry import PROGRAMS
 from reporting import discover_reports, write_bundle
 from scenario import ScenarioError, compile_scenarios
@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProgramCapabilitiesTest(unittest.TestCase):
-    def test_second_program_loads_and_compiles_with_declared_analysis(self):
+    def test_second_program_loads_and_compiles_without_case_specific_framework_branches(self):
         original = yaml.safe_load((ROOT / 'config/scenarios/cache_scale_in.yaml').read_text())
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -39,18 +39,12 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             path = root / 'scenario.yaml'
             path.write_text(yaml.safe_dump(config))
             with mock.patch.dict(PROGRAMS, second_cache='second_cache'), mock.patch.dict(sys.modules, second_cache=module):
-                self.assertEqual(validate_analysis(config, str(path)), original['analysis'])
                 with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)):
                     first = compile_scenarios([('first', configure_program(original, 'first'))], handlers=handlers())
                     second = compile_scenarios([('second', configure_program(config, 'second'))], handlers=handlers())
                 self.assertEqual([p['stages'] for p in first], [p['stages'] for p in second])
-                del module.ANALYSIS_POLICY_VALIDATOR
-                with self.assertRaisesRegex(ScenarioError, 'does not support analysis'):
-                    configure_program(config, 'second')
-                with self.assertRaisesRegex(ScenarioError, 'does not support analysis'):
-                    configure_program(config, str(path))
-                config['analysis']['action'] = 'grant_permission'
-                with self.assertRaisesRegex(ScenarioError, 'cannot orchestrate'):
+                config['analysis'] = dict(alignment_event='withdraw_start')
+                with self.assertRaisesRegex(ScenarioError, 'unknown configuration fields'):
                     configure_program(config, 'second')
 
     def test_gate_inventory_keeps_roles_without_expanding_default_report(self):

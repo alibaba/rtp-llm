@@ -14,7 +14,9 @@ from scenario.actions import master
 from cases.master_ha_failover import actions as ha
 from scenario.contracts import PlanContext
 from scenario.runtime import Deadline, RuntimeContext
-from cases.master_ha_failover.runtime import HaMasterStateSampler, HaTrafficRunner
+from cases.master_ha_failover.observation import HaMasterStateSampler
+from cases.master_ha_failover.client import HaReplayClient
+from tests.ha_fixtures import client_resource, replay_source, replay_trace
 
 
 class MasterActionsTest(unittest.TestCase):
@@ -28,10 +30,12 @@ class MasterActionsTest(unittest.TestCase):
         manager.master_instance_target.side_effect = lambda _env, name: {
             "A": "127.0.0.1:18082", "B": "127.0.0.1:18085"
         }[name]
-        with patch("cases.master_ha_failover.runtime.ClientOps"):
-            runner = HaTrafficRunner(manager, env, root, "flow", [
+        with patch("cases.master_ha_failover.client.ClientOps"), patch(
+            "traffic.traffic_source.materialize", side_effect=replay_trace
+        ):
+            runner = HaReplayClient(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
-            ])
+            ], source=replay_source(), sampler_limits=dict(max_samples=10, max_bytes=10000))
         path = Path(runner._overrides["MASTER_DISCOVERY_FILE"])
         self.assertEqual({"hosts": [
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
@@ -82,12 +86,13 @@ class MasterActionsTest(unittest.TestCase):
             path.write_text('{"ts":0}\n{"ts":1000}\n')
             return path
 
-        with patch("cases.master_ha_failover.runtime.ClientOps"), patch(
+        with patch("cases.master_ha_failover.client.ClientOps"), patch(
             "traffic.traffic_source.materialize", side_effect=short_trace
         ), self.assertRaisesRegex(ValueError, "one-pass HA trace ends"):
-            HaTrafficRunner(manager, env, root, "flow", [
+            HaReplayClient(manager, env, root, "flow", [
                 "127.0.0.1:18082", "127.0.0.1:18085"
-            ], duration_s=10, replay_speed=2, source={"kind": "trace"})
+            ], duration_s=10, replay_speed=2, source={"kind": "trace"},
+              sampler_limits=dict(max_samples=10, max_bytes=10000))
 
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
         root = Path(self.tmp.name)
@@ -95,7 +100,8 @@ class MasterActionsTest(unittest.TestCase):
             "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=101),
             "B": SimpleNamespace(bind_ip="127.0.0.1", http_port=102),
         })
-        sampler = HaMasterStateSampler(env, root / "master_states.jsonl", 0.01)
+        sampler = HaMasterStateSampler(env, root / "master_states.jsonl", 0.01,
+                                       limits=dict(max_samples=10, max_bytes=10000))
 
         def fetch(url, timeout):
             if url.endswith(":101/rtp_llm/inflight_status"):
@@ -105,7 +111,7 @@ class MasterActionsTest(unittest.TestCase):
             sampler._stop.set()
             return None
 
-        with patch("cases.master_ha_failover.runtime.http_get_json", side_effect=fetch):
+        with patch("cases.master_ha_failover.observation.http_get_json", side_effect=fetch):
             sampler._run()
         rows = [json.loads(line) for line in sampler.path.read_text().splitlines()]
         self.assertEqual(["A", "B"], [row["master"] for row in rows])
@@ -308,12 +314,12 @@ class MasterActionsTest(unittest.TestCase):
     def test_ha_fails_compilation_for_wrong_environment(self):
         plan = SimpleNamespace(path="stage", environment={})
         with self.assertRaisesRegex(ValueError, "dual_standalone"):
-            ha._ha_validate({}, plan)
+            ha._ha_validate(dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000)), plan)
         plan.environment = {
             "master_layout": "dual_standalone",
             "master_stable_window_s": 0,
         }
-        self.assertEqual(["A", "B"], ha._ha_validate({}, plan)["targets"])
+        self.assertEqual(["A", "B"], ha._ha_validate(dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000)), plan)["targets"])
 
     def test_empty_client_rows_fail_even_zero_error_assertion(self):
         handle = self.ctx.register_resource("ha_rows", [])
@@ -357,7 +363,7 @@ class MasterActionsTest(unittest.TestCase):
     def test_client_nonzero_exit_and_malformed_rows_are_errors(self):
         root = Path(self.tmp.name)
         process = SimpleNamespace(proc=Mock())
-        client = ha.OwnedHaClient(SimpleNamespace(proc=process, out_dir=root))
+        client = client_resource(proc=process, out_dir=root)
         process.proc.wait.return_value = 7
         with self.assertRaisesRegex(RuntimeError, "exit code 7"):
             client.finish(self.deadline)

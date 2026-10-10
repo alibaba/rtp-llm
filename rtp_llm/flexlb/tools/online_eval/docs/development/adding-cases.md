@@ -13,7 +13,7 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 | 3 | `environment`、`execution` | 模型/拓扑、采集策略与时间预算 |
 | 4 | `parameters`、`parameter_schema` | 流量输入、指标绑定、门槛及约束 |
 | 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
-| 6 | `analysis`、`reports` | 分析策略及交付视图 |
+| 6 | `reports` | 交付视图 |
 
 `parameters` 按 `traffic` → `procedure` → `observation` → `analysis` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
 
@@ -65,7 +65,7 @@ program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `cases.nu
 
 固定测量能力在 Python 声明指标、单位、窗口和方向，YAML 提供阈值；通用指标检查可由 YAML 选择指标与窗口，但仍验证定义与允许选择。前者保障持续性、cohort 等算法的前提，后者用于无专属测量流程的标量比较。两者复用比较与依赖绑定，不把测量算法复制成 YAML 规则。消费方单位是算法要求，query plan 单位是生产声明；必须相等，不能直接抄生产单位代替消费断言。
 
-数值检查写明 `metric`、`unit`、`windows`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `parameters.analysis`；复杂归因和持续性计算仍由 Python 负责。根级 `analysis` 属于注册的多运行分析能力，与单次运行的 `parameters.analysis` 分别校验。
+数值检查写明 `metric`、`unit`、`windows`、`op`、`expected`；程序校验其与已注册测量规则一致，并将门槛冻结到运行证据。布尔或协议输出检查用 `output` 明确引用已声明阶段输出，不伪造数值指标。SLO 的逐请求定义、持续异常的阈值构造等是测量参数，放在 `parameters.analysis`；复杂归因和持续性计算仍由 Python 负责。场景不声明根级 `analysis`；多运行对比通过公共入口读取冻结报告，事件对齐由对比命令显式指定。
 
 QPS 只取 `traffic.client.playback.qps`，编译时核对请求数量和 goodput 下界不超过允许的 offered-load 范围。修改负载不自动缩放绝对阈值，需要同时核对时窗和门槛。priority 由 `traffic.source.parameters.priority` 定义，客户端环境从该值生成；显式客户端 PRIORITY 与来源冲突时报错。
 
@@ -92,7 +92,7 @@ case 主报告文件使用 `<case>.yaml`，公共视图使用 `default.yaml`，�
 
 `cases.registry.PROGRAMS` 将稳定 case 名映射到 program 模块；YAML 只能选择注册入口，不能导入代码。通用构建接口是 `cases.config.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
-program 的 `ACTION_HANDLERS` 声明所属能力；分析策略用 `ANALYSIS_POLICY_VALIDATOR` 校验，未声明则拒绝顶层 `analysis`。指标用 `case.metric(id, ...)` 声明依赖，编译检查 ID、单位与身份标签。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
+program 的 `ACTION_HANDLERS` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明依赖，编译检查 ID、单位与身份标签。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
 若需最终归档后刷新报告，program 声明可调用的 `REPORT_FINALIZER(directory)`；只读取已发布的结果与指标，不重判或重复生产指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
 

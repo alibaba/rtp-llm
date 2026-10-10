@@ -1,16 +1,13 @@
 """HA client lifecycle, window selection and case-specific adjudication."""
 
-import json
 import math
-import subprocess
-import time
 from pathlib import Path
 
 from cases.master_ha_failover.analysis import measure_client_metric, row_ts_ms
 from cases.master_ha_failover.inputs import validate_client_criterion, validate_wait
 from runtime.master_control import require_process
 from scenario.parameters import validate_fields
-from scenario.contracts import CheckResult, StageHandler, StageOutput
+from scenario.contracts import StageHandler, StageOutput
 
 
 def _ha_validate(params, plan):
@@ -30,6 +27,7 @@ def _ha_validate(params, plan):
             "loop",
             "capture",
         },
+        {"source", "capture"},
     )
     if "capture" in p:
         from runtime.observation import capture_limits
@@ -86,125 +84,8 @@ def _ha_validate(params, plan):
     return p
 
 
-class OwnedHaClient:
-    def __init__(self, flow):
-        self.flow = flow
-        self.finished = False
-
-    def evidence_snapshot(self):
-        """Persist partial rows even when a failed prerequisite skips finish."""
-        path = self.flow.out_dir / "client_events.jsonl"
-        rows, errors = [], []
-        if path.is_file():
-            for number, line in enumerate(path.read_text().splitlines(), 1):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                    if not isinstance(row, dict):
-                        raise ValueError("request event is not an object")
-                    rows.append(row)
-                except (ValueError, TypeError) as exc:
-                    errors.append(f"line {number}: {exc}")
-        else:
-            errors.append("missing client_events.jsonl")
-        # Java writes the final event file only on natural exit. A failed
-        # checkpoint can terminate the producer earlier; keep its live journal
-        # instead of discarding all requests observed before the failure.
-        lifecycle = self.flow.out_dir / "client_lifecycle.jsonl"
-        if not path.is_file() and lifecycle.is_file():
-            from runtime.client_journal import LiveClientEvents
-
-            journal = LiveClientEvents(lifecycle)
-            try:
-                journal.read()
-                if journal.pending:
-                    errors.append("incomplete live client journal tail")
-            except (ValueError, TypeError) as exc:
-                errors.append(f"live client journal: {exc}")
-            rows = [
-                journal.terminal.get(rid, issued)
-                for rid, issued in journal.issued.items()
-            ]
-            path = lifecycle
-        if not self.finished:
-            errors.append("HA client finish was not validated")
-        return dict(
-            records=rows,
-            complete=self.finished and bool(rows) and not errors,
-            errors=errors,
-            path=str(path),
-        )
-
-    def cleanup(self, deadline):
-        from runtime.cleanup import cleanup_all
-
-        def stop_client():
-            process = self.flow.proc
-            if process is None:
-                return
-            if process.alive():
-                process.proc.terminate()
-                try:
-                    process.proc.wait(timeout=min(2, deadline.remaining()))
-                except (subprocess.TimeoutExpired, TimeoutError):
-                    process.proc.kill()
-            try:
-                remaining = deadline.remaining()
-            except TimeoutError:
-                # Cancellation must still reach the owned process when the
-                # cleanup deadline expired before this callback was invoked.
-                process.proc.wait(timeout=0)
-                raise
-            process.proc.wait(timeout=remaining)
-
-        sampler = getattr(self.flow, "state_sampler", None)
-        operations = [("HA client", stop_client)]
-        if sampler is not None:
-            operations.append(("HA state sampler", sampler.stop))
-        cleanup_all(operations)
-
-    def finish(self, deadline, *, stop_sending=False):
-        if self.flow.proc is None:
-            raise RuntimeError("HA client was not started")
-        if stop_sending:
-            self.flow.stop_sending()
-        rc = self.flow.proc.proc.wait(timeout=deadline.remaining())
-        sampler = getattr(self.flow, "state_sampler", None)
-        if sampler is not None:
-            sampler.stop()
-        if rc != 0:
-            raise RuntimeError(f"HA client exit code {rc}")
-        path = self.flow.out_dir / "client_events.jsonl"
-        rows = [
-            json.loads(line) for line in path.read_text().splitlines() if line.strip()
-        ]
-        if not rows:
-            raise ValueError("HA client produced no request evidence")
-        for row in rows:
-            if not isinstance(row, dict) or not {
-                "rid",
-                "route_path",
-                "master_target",
-                "failover",
-                "error_kind",
-                "status",
-            } <= set(row):
-                raise ValueError("HA client evidence lacks required route fields")
-            if (
-                row["route_path"] not in {"master", "fallback", "failed"}
-                or type(row["failover"]) is not bool
-            ):
-                raise ValueError("invalid HA route evidence")
-            row_ts_ms(row)
-        if stop_sending:
-            self.flow.validate_drain(rows)
-        self.finished = True
-        return rows, path
-
-
 def _ha_start(ctx, params, deadline):
-    from cases.master_ha_failover.runtime import HaTrafficRunner
+    from cases.master_ha_failover.client import HaReplayClient
 
     for target in params["targets"]:
         require_process(ctx, target)
@@ -214,22 +95,22 @@ def _ha_start(ctx, params, deadline):
     ]
     directory = ctx.artifact_dir / f"ha-client-{len(ctx._resources)}"
     directory.mkdir(parents=True, exist_ok=True)
-    flow = HaTrafficRunner(
+    client = HaReplayClient(
         ctx.backend.manager,
         ctx.env,
         directory,
         "traffic",
         targets,
         duration_s=params["duration_s"],
-        sampler_limits=params.get("capture"),
+        sampler_limits=params["capture"],
         clock=ctx.clock, wall_clock=ctx.wall_clock,
         timeout_ms=params["timeout_ms"],
         enable_fallback=params["fallback"],
         live_events=params["live_events"],
         collection_profile=ctx.instance.get("collection_profile", "request"),
-        source=params.get("source"),
+        source=params["source"],
         source_dir=(
-            Path(ctx.instance["source_path"]).parent if params.get("source") else None
+            Path(ctx.instance["source_path"]).parent
         ),
         max_requests=params.get("max_requests"),
         loop=params["loop"],
@@ -242,10 +123,9 @@ def _ha_start(ctx, params, deadline):
             else {}
         ),
     )
-    owned = OwnedHaClient(flow)
-    handle = ctx.register_resource("ha_client", owned, owned.cleanup)
+    handle = ctx.register_resource("ha_client", client, client.cleanup)
     deadline.check()
-    flow.start()
+    client.start()
     deadline.check()
     return StageOutput({"client": handle})
 
@@ -262,7 +142,7 @@ def _ha_finish_validate(params, plan):
 def _ha_finish(ctx, params, deadline):
     client = ctx.resource(params["client"], "ha_client")
     rows, path = client.finish(deadline, stop_sending=params.get("stop_sending", False))
-    sampler = getattr(client.flow, "state_sampler", None)
+    sampler = getattr(client, "state_sampler", None)
     return StageOutput(
         {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
         artifacts=[str(path)] + ([str(sampler.path)] if sampler is not None else []),
@@ -331,7 +211,7 @@ def _window_validate(params, plan):
 
 
 def _window(ctx, params, deadline):
-    from cases.master_ha_failover.runtime import rows_between
+    from analysis.statistics import select_window
 
     deadline.check()
     rows = ctx.resource(params["rows"], "ha_rows")
@@ -340,7 +220,8 @@ def _window(ctx, params, deadline):
     from cases.windows import resolve_window
     lower, upper = resolve_window(lower, upper,
         lower_offset_s=params.get("from_offset_s", 0), upper_offset_s=params.get("until_offset_s", 0))
-    selected = rows_between(rows, lower, upper)
+    selected = select_window(rows, -math.inf if lower is None else lower,
+                             math.inf if upper is None else upper, time=lambda row: row_ts_ms(row) / 1000)
     for param, field in (
         ("route", "route_path"),
         ("status", "status"),

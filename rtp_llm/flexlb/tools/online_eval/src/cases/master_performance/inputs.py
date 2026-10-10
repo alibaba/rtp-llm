@@ -9,12 +9,7 @@ from cases.numeric_parameters import (
 )
 
 OBSERVATION_FIELDS = frozenset({"sample_s", "max_gap_s"})
-CHECK_FIELDS = frozenset({
-    "qps_tolerance", "min_requests", "max_pacing_lag_ms", "min_input_tps",
-    "min_output_tps", "min_goodput_rps", "min_slo_fraction", "max_error_rate",
-    "max_ttft_p99_ms", "max_e2e_p99_ms", "max_tpot_p99_ms", "slo_ttft_ms",
-    "slo_e2e_ms", "slo_tpot_ms", "max_inflight_growth_rps",
-})
+
 
 
 NUMERIC_PARAMETERS = {
@@ -98,6 +93,8 @@ RULES = {
     'tpot': ('max_tpot_p99_ms', 'tpot_p99_ms', 'le', 'ms', ('measurement',)),
     'inflight_growth': ('max_inflight_growth_rps', 'inflight_growth_rps', 'le', 'requests/s', ('measurement',)),
 }
+
+CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
 
 
 def compile_checks(case, checks, inputs):

@@ -103,7 +103,7 @@ def observe(ctx, p, deadline):
     pool = None
     futures = []
     try:
-        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=(__file__, cache_gate.__file__, program.__file__, inputs.__file__)))
+        evidence["provenance"].update(gate_provenance(ctx, flow, source_files=(__file__, cache_gate.__file__, program.__file__, inputs.__file__), analyzer_file=cache_gate.__file__))
         first = sample()
         initial = sorted(first["engines"])
         evidence["initial_engines"] = initial

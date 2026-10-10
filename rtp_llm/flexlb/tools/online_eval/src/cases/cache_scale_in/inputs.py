@@ -12,8 +12,7 @@ from cases.metric_inputs import metric_fields
 PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s"})
 OBSERVATION_FIELDS = frozenset({"warmup_timeout_s", "sample_s",
                                "window_s", "step_s", "max_gap_s"})
-CHECK_FIELDS = frozenset({"qps_tolerance", "baseline_min_hit", "baseline_max_spread",
-                         "absolute_min_hit", "max_drop", "min_completed", "sustain_s"})
+
 
 
 ENGINE_FIELDS = {"running": "requests", "waiting": "requests", "cache_evictions": "events",
@@ -114,6 +113,8 @@ RULES = {
     'baseline_stability': ('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', ('baseline',)),
     'completed': ('min_completed', 'min_window_completed', 'ge', 'requests', ('baseline', 'post')),
 }
+
+CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'sustain_s', 'absolute_min_hit', 'max_drop'}
 
 
 def compile_checks(case, checks, policy):

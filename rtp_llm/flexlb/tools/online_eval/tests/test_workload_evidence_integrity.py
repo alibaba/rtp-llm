@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from cases.master_ha_failover.actions import OwnedHaClient
+from tests.ha_fixtures import client_resource
 from workload.evidence_analysis import analyze_report as read_analysis
 
 def analyze_report(directory, result, evidence):
@@ -142,7 +142,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
             (p / "client_events.jsonl").write_text('{"rid":1}\n{"rid":')
-            client = OwnedHaClient(SimpleNamespace(out_dir=p))
+            client = client_resource(out_dir=p)
             evidence = client.evidence_snapshot()
             self.assertEqual(evidence["records"], [{"rid": 1}])
             self.assertFalse(evidence["complete"])
@@ -180,7 +180,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             (p / "client_lifecycle.jsonl").write_text(
                 "".join(json.dumps(row) + "\n" for row in rows)
             )
-            evidence = OwnedHaClient(SimpleNamespace(out_dir=p)).evidence_snapshot()
+            evidence = client_resource(out_dir=p).evidence_snapshot()
             self.assertEqual(evidence["records"], [rows[1], rows[2]])
             self.assertFalse(evidence["complete"])
             self.assertTrue(evidence["path"].endswith("client_lifecycle.jsonl"))

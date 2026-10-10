@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FIELDS = (
     'case_schema_version', 'case', 'program', 'metadata', 'profiles',
     'environment', 'execution', 'parameters', 'parameter_schema',
-    'variant_axis', 'variants', 'profile_overrides', 'analysis', 'reports',
+    'variant_axis', 'variants', 'profile_overrides', 'reports',
 )
 VIEW_FIELDS = ('report_view_schema_version', 'kind', 'report', 'metrics', 'charts', 'sections')
 VIEW_BLOCK_FIELDS = {

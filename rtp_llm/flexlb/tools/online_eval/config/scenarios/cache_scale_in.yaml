@@ -183,7 +183,5 @@ parameters:
       unit: boolean
       op: eq
       expected: 0
-analysis:
-  alignment_event: withdraw_start
 reports:
 - cache_scale_in.yaml

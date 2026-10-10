@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from cases.cache_scale_in import analysis as cache_analysis
-from cases.cache_scale_in.analysis import DRAIN_DIAGNOSTICS, MEASUREMENT_POLICY, align_send_counters, analyze, attribute_client
+from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, align_send_counters, analyze, attribute_client
 from cases.cache_scale_in.report import prepare_report
 from cases.cache_scale_in.publication import publish_cache
 
@@ -35,7 +35,6 @@ def cache_main():
                               sha256=hashlib.sha256(args.client_snapshot.read_bytes()).hexdigest())
                          if args.client_snapshot else None),
         original_errors=original_errors,
-        excluded_drain_diagnostics=[e for e in original_errors if e in DRAIN_DIAGNOSTICS],
         window_policy="preserve archived baseline/post windows and all thresholds",
         limitations=[] if evidence.get("measurement_policy") == MEASUREMENT_POLICY else
             ["historical admission timing cannot be reconstructed; detach-based windows retained"],

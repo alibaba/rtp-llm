@@ -16,12 +16,6 @@ COUNTERS = (
 MEASUREMENT_POLICY = "survivor-cache-with-attributed-client-load"
 
 
-DRAIN_DIAGNOSTICS = {
-    "graceful drain timed out; removal introduced request loss",
-    "intermediate graceful drain timed out; continuing observation",
-}
-
-
 def align_send_counters(evidence, issued):
     """Use actual send times, not the time a buffered lifecycle journal was read.
 
@@ -250,7 +244,7 @@ def window(rows, start, end, names, max_gap_s):
 
 def analyze(evidence):
     p, rows = evidence["criteria"], evidence["samples"]
-    errors = [e for e in evidence.get("errors", []) if e not in DRAIN_DIAGNOSTICS]
+    errors = list(evidence.get("errors", []))
     scoped = evidence.get("measurement_policy") == MEASUREMENT_POLICY
     if any(b["t"] <= a["t"] for a, b in zip(rows, rows[1:])):
         errors.append("sample clock must increase")
@@ -330,7 +324,9 @@ def analyze(evidence):
         gate_metrics=gate_metrics,
         measurement_scope=scope_contract(evidence) if scoped else {
             "policy": "historical-detach-window", "drain": "diagnostic only"},
-        excluded_drain_diagnostics=[e for e in evidence.get("errors", []) if e in DRAIN_DIAGNOSTICS],
+        drain_diagnostics=[dict(index=i, code="DRAIN_INCOMPLETE", remaining_work=row.get("remaining_work"))
+                           for i, row in enumerate(evidence.get("removals", []))
+                           if row.get("drained") is False],
         verdict=verdict,
         errors=sorted(set(errors)),
         threshold=threshold,

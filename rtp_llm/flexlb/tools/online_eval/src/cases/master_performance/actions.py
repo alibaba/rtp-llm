@@ -27,13 +27,11 @@ def observe_validate(params, plan):
 
 
 def provenance(ctx, flow):
-    from runtime.paths import MOCK_JAR
     from workload.run_provenance import gate_provenance
     from cases.master_performance import analysis, program, inputs
-    value = gate_provenance(ctx, flow, source_files=(__file__, analysis.__file__, program.__file__, inputs.__file__))
-    value.update(mock_jar_sha256=value["files"][str(MOCK_JAR)],
-                 analyzer_sha256=value["files"][str(analysis.__file__)])
-    return value
+    return gate_provenance(ctx, flow,
+        source_files=(__file__, analysis.__file__, program.__file__, inputs.__file__),
+        analyzer_file=analysis.__file__)
 
 
 def observe(ctx, p, deadline):

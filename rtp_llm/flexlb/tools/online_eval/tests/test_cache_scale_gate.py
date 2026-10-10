@@ -358,13 +358,12 @@ class CacheGateTest(unittest.TestCase):
     def test_drain_outcome_does_not_change_survivor_windows(self):
         evidence = self.evidence()
         before = analyze(evidence)
-        evidence.setdefault("errors", []).append("graceful drain timed out; removal introduced request loss")
         evidence["removals"] = [dict(drained=False, remaining_work={"owners": 12})]
         after = analyze(evidence)
         self.assertEqual(after["verdict"], before["verdict"])
         self.assertEqual(after["windows"], before["windows"])
-        self.assertEqual(len(after["excluded_drain_diagnostics"]), 1)
-        evidence["errors"].append("real collection failure")
+        self.assertEqual(len(after["drain_diagnostics"]), 1)
+        evidence.setdefault("errors", []).append("graceful drain timed out; removal introduced request loss")
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
     def test_failures_and_removal_diagnostics_do_not_decide_cache_gate(self):

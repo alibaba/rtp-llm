@@ -2,7 +2,6 @@
 
 import json
 import time
-import uuid
 from pathlib import Path
 
 from runtime.client_journal import LiveClientEvents
@@ -108,10 +107,8 @@ class JavaFlowGroup:
 
     def control_status(self):
         """Cheap process/control observation; request accounting remains in status()."""
-        path = self.control / "status.json"
-        state = json.loads(path.read_text()) if path.exists() else {}
-        if state and any(state.get(k) != v for k, v in self.identity.items()):
-            raise ValueError("flow control identity mismatch")
+        from runtime.flow_control import read_status
+        state = read_status(self.control, self.identity)
         state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
         return state
 
@@ -152,17 +149,8 @@ class JavaFlowGroup:
         state = self.status()
         if state.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"}:
             return state
-        if self.stop_command is None:
-            self.stop_command = uuid.uuid4().hex
-            command = dict(
-                run_id=self.identity["run_id"],
-                group_id=self.identity["group_id"],
-                operation="stop_sending",
-                command_id=self.stop_command,
-            )
-            temporary = self.control / "stop.json.tmp"
-            temporary.write_text(json.dumps(command))
-            temporary.replace(self.control / "stop.json")
+        from runtime.flow_control import stop_sending
+        self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
         return self._wait(
             lambda s: s.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"},
             deadline,
@@ -187,6 +175,9 @@ class JavaFlowGroup:
             raise RuntimeError(
                 "flow drain journal does not account for every submission"
             )
+        from runtime.flow_control import validate_drain
+        validate_drain(state, self.identity, terminal_count=state["observed_terminal"],
+                       command_id=self.stop_command)
         return state
 
     def checkpoint(self, label, deadline, predicate):

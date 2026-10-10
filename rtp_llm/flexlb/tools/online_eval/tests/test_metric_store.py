@@ -42,7 +42,7 @@ class MetricPlanTest(unittest.TestCase):
                     configure_program(config, "test")
 
     def test_ha_state_rejects_missing_fields_without_zero_fallback(self):
-        from cases.master_ha_failover.runtime import master_state_fields
+        from cases.master_ha_failover.observation import master_state_fields
         good = dict(scheduler_inflight=0, prefill_endpoints=[], decode_endpoints=[])
         self.assertEqual(master_state_fields(good)["prefill_inflight_requests"], 0)
         for broken in [dict(scheduler_inflight=0), dict(good, prefill_endpoints=[{}]),

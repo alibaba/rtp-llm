@@ -112,28 +112,11 @@ def program_module(name, source):
     return importlib.import_module(PROGRAMS[name])
 
 
-def validate_analysis(config, source, *, module=None):
-    """Resolve analysis capability from registered Python code, never YAML flags."""
-    data_only(config, source)
-    if type(config.get("case_schema_version")) is not int or config["case_schema_version"] != 2:
-        raise ScenarioError(f"{source}: analysis requires case_schema_version 2")
-    module = module or program_module(config.get("case"), source)
-    validator = getattr(module, "ANALYSIS_POLICY_VALIDATOR", None)
-    if not callable(validator):
-        raise ScenarioError(f"{source}: Python program does not support analysis")
-    try:
-        return validator(config["analysis"])
-    except ValueError as exc:
-        raise ScenarioError(f"{source}.analysis: {exc}") from exc
-
-
 def configure_program(config, source):
     """Build an internal plan using an allowlisted Python entry point, without I/O."""
     _validate_configuration(config, source)
     name = config.get("case")
     module = program_module(name, source)
-    if "analysis" in config:
-        validate_analysis(config, source, module=module)
     parameters = config.get("parameters", {})
     if not isinstance(parameters, dict):
         raise ScenarioError(f"{source}.parameters: expected mapping")
@@ -179,7 +162,6 @@ def _validate_configuration(config, source):
             "variants",
             "metadata",
             "parameter_schema",
-            "analysis",
             "reports",
         },
         source,
