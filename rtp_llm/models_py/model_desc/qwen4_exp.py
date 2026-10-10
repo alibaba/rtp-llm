@@ -454,11 +454,19 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         if qsa_runtime is not None:
             attn_kwargs["qsa_runtime"] = qsa_runtime
         hidden_states = self.self_attn(**attn_kwargs)
-        hyper_states = inject_into_residual(hyper_states, hidden_states, inject_weights)
-
-        hidden_states, hyper_states, inject_weights = self.mlp_hyper_connection(
-            hyper_states
-        )
+        if isinstance(self.mlp_hyper_connection, Qwen4ExpGatedResidual):
+            hidden_states, hyper_states, inject_weights = (
+                self.mlp_hyper_connection.forward_with_injection(
+                    hyper_states, hidden_states, inject_weights
+                )
+            )
+        else:
+            hyper_states = inject_into_residual(
+                hyper_states, hidden_states, inject_weights
+            )
+            hidden_states, hyper_states, inject_weights = self.mlp_hyper_connection(
+                hyper_states
+            )
         hidden_states = self.mlp(hidden_states)
         return inject_into_residual(hyper_states, hidden_states, inject_weights)
 

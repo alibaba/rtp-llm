@@ -147,6 +147,52 @@ class Qwen4ExpGatedResidual(nn.Module):
             )
         normed = self._norm(hyper_input)
 
+        return self._forward_normed(hyper_input, normed)
+
+    def forward_with_injection(
+        self,
+        hyper_input: torch.Tensor,
+        sublayer_out: torch.Tensor,
+        inject_weights: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        enabled = os.environ.get("RTP_LLM_QWEN4_FUSED_INJECT_NORM", "0").lower()
+        module_hooks = torch.nn.modules.module
+        preserve_module_call = (
+            type(self) is not Qwen4ExpGatedResidual
+            or "forward" in self.__dict__
+            or self._forward_pre_hooks
+            or self._forward_hooks
+            or module_hooks._global_forward_pre_hooks
+            or module_hooks._global_forward_hooks
+        )
+        if enabled in ("1", "true", "on") and not preserve_module_call:
+            from rtp_llm.models_py.modules.qwen4_exp.gated_residual_inject_norm_triton import (
+                inject_and_grouped_rms_norm,
+                is_supported,
+            )
+
+            if is_supported(
+                hyper_input,
+                sublayer_out,
+                inject_weights,
+                self.norm_gamma,
+                self.hidden_size,
+            ):
+                combined, normed = inject_and_grouped_rms_norm(
+                    hyper_input,
+                    sublayer_out,
+                    inject_weights,
+                    self.norm_gamma,
+                    self.hidden_size,
+                    self.norm_eps,
+                )
+                return self._forward_normed(combined, normed)
+        return self(inject_into_residual(hyper_input, sublayer_out, inject_weights))
+
+    def _forward_normed(
+        self, hyper_input: torch.Tensor, normed: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+
         inject_weights = None
         merged = self.merged_down_inject
         if (
