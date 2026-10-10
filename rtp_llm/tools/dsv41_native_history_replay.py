@@ -59,6 +59,7 @@ def reconstruct_native(
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
         fp32_mhc_prenorm,
         mhc_fp32,
+        mhc_post_reference,
     )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
         sparse_sink_div_rn,
@@ -123,9 +124,9 @@ def reconstruct_native(
         raw_mixes.append(result.clone())
         return result
 
-    with tp8_projection(True), mhc_fp32(True), compressor_bf16(
-        True, fused=True, hca_projection=True
-    ), sparse_sink_div_rn(
+    with tp8_projection(True), mhc_fp32(True), mhc_post_reference(
+        recipe.get("mhc_post_reference", False)
+    ), compressor_bf16(True, fused=True, hca_projection=True), sparse_sink_div_rn(
         recipe["sparse_sink_div_rn_prefill"],
         decode=recipe["sparse_sink_div_rn_decode"],
     ), patch.object(
@@ -288,11 +289,11 @@ def compare_prefix_current_histories(
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
         compressor_bf16,
     )
-    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import (
-        tp8_projection,
-    )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
         sparse_sink_div_rn,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import (
+        tp8_projection,
     )
 
     streams = {

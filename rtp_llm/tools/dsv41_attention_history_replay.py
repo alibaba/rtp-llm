@@ -48,15 +48,33 @@ def cpu_snapshot(values):
 def validate_native_recipe(traces, *, reference_kernel_sha256=None):
     base = "tp8_projection_mhc_fp32_compressor_recipe"
     recipes = {
-        base: (False, False, False),
-        f"{base}_shared_down_reference": (False, True, False),
-        f"{base}_expert_down_reference": (False, True, True),
+        base: (False, False, False, False),
+        f"{base}_shared_down_reference": (False, True, False, False),
+        f"{base}_expert_down_reference": (False, True, True, False),
         f"{base}_sparse_sink_div_rn_prefill_shared_down_reference": (
             True,
             True,
             False,
+            False,
         ),
-        f"{base}_sparse_sink_div_rn_prefill_expert_down_reference": (True, True, True),
+        f"{base}_sparse_sink_div_rn_prefill_expert_down_reference": (
+            True,
+            True,
+            True,
+            False,
+        ),
+        f"{base}_expert_down_reference_mhc_post_reference": (
+            False,
+            True,
+            True,
+            True,
+        ),
+        f"{base}_sparse_sink_div_rn_prefill_expert_down_reference_mhc_post_reference": (
+            True,
+            True,
+            True,
+            True,
+        ),
     }
     if not traces:
         raise ValueError("Native history requires nonempty recipe traces")
@@ -72,7 +90,7 @@ def validate_native_recipe(traces, *, reference_kernel_sha256=None):
             raise ValueError(
                 "Native history requires the composed TP8/mHC/compressor recipe"
             )
-        sparse, shared, routed = recipes[profile]
+        sparse, shared, routed, post = recipes[profile]
         expected = {
             "precision_profile": profile,
             "compressor_fused": True,
@@ -94,6 +112,16 @@ def validate_native_recipe(traces, *, reference_kernel_sha256=None):
             )
             if actual is not expected[field]:
                 raise ValueError(f"Native history recipe flag differs: {field}")
+        actual_post = (
+            metadata.get("mhc_post_reference", False)
+            if not post
+            else metadata.get("mhc_post_reference")
+        )
+        if actual_post is not post:
+            raise ValueError("Native history recipe flag differs: mhc_post_reference")
+        # Preserve the canonical recipe recorded by the older history reports.
+        if post:
+            expected["mhc_post_reference"] = True
         digest = metadata.get("down_reference_kernel_sha256")
         if shared:
             if (
@@ -290,8 +318,8 @@ def decode_capture(owner, cache, tables, captured, end):
 def execute_native(
     owner, cache, tables, x, start, reference, *, fixed_q=False, fixed_attention=False
 ):
+    from rtp_llm.models_py.modules.dsv4.fp8 import _v41_decode_attention_sm120 as decode
     from rtp_llm.models_py.modules.dsv4.fp8 import (
-        _v41_decode_attention_sm120 as decode,
         _v41_prefill_attention_sm120 as prefill,
     )
     from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_attention_owner_sm120 import (
@@ -440,11 +468,11 @@ def compare_official_history(args, config, reader, steps, identities, recipe=Non
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
         compressor_bf16,
     )
-    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import (
-        tp8_projection,
-    )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
         sparse_sink_div_rn,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import (
+        tp8_projection,
     )
 
     profiles = [
@@ -509,6 +537,7 @@ def main():
     parser.add_argument("report", type=Path)
     parser.add_argument("--input-artifact", type=Path, required=True)
     parser.add_argument("--native-traces", type=Path)
+    parser.add_argument("--prompt-index", type=int, default=0, choices=(0, 1))
     parser.add_argument("--steps", type=int, default=3, choices=(2, 3))
     cli = parser.parse_args()
     if cli.report.exists() or cli.input_artifact.exists():
@@ -519,13 +548,13 @@ def main():
     torch.set_default_dtype(torch.bfloat16)
     torch.set_float32_matmul_precision("highest")
     paths = [
-        cli.reference_traces / f"reference-prompt0-step{step}.pt"
+        cli.reference_traces / f"reference-prompt{cli.prompt_index}-step{step}.pt"
         for step in range(cli.steps)
     ]
     traces = [torch.load(path, map_location="cpu", weights_only=True) for path in paths]
     native_paths = (
         [
-            cli.native_traces / f"native-prompt0-step{step}.pt"
+            cli.native_traces / f"native-prompt{cli.prompt_index}-step{step}.pt"
             for step in range(cli.steps)
         ]
         if cli.native_traces is not None
@@ -678,6 +707,7 @@ def main():
         "rtp_llm/models_py/modules/dsv4/fp8/_v41_attention_triton.py",
     )
     report = {
+        "prompt_index": cli.prompt_index,
         "identities": identities,
         "native_recipe": native_recipe,
         "official_reconstruction": reconstruction,
@@ -728,7 +758,7 @@ def main():
         "limitations": [
             "One short L0-L2 request: retained caches use exact official attention inputs.",
             "Saved FFN outputs are substituted from each experiment's own trace; experts are not re-executed.",
-            "Native-input history uses the validated composed recipe and its optional sparse-prefill/output-GEMM diagnostics.",
+            "Native-input history uses the validated composed recipe and its optional sparse-prefill/output-GEMM/mHC-post diagnostics.",
             "TP8 output partials are simulated serially, without live collectives.",
             "Serving, distributed topology, graphs, full-model accuracy and latency remain separate.",
         ],
