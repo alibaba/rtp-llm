@@ -37,8 +37,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 # Ingress ownership / processor-kind decision table. Depends on the lean mm_processor_config
@@ -77,10 +77,10 @@ cc_test(
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 # ViT output RDMA slot planning + manifest reassembly, driven by a fake transport and CPU tensors.
@@ -100,8 +100,8 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],
-    exec_properties = {"gpu": "A10_CU13"},
     # Assertions are CPU-only, but linking torch pulls in libtorch_cuda, which needs
     # libcuda.so.1 just to load the process -- so this still has to land on a GPU node.
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

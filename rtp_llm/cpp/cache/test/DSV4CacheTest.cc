@@ -2569,6 +2569,34 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     EXPECT_EQ(allocator->freeBlocksNum(), expected_blocks);
 }
 
+TEST_F(DSV4AllocatorTest, ReportedTokenCapacityIgnoresFixedTailPools) {
+    auto              mc = makeFlashModelConfig();
+    ParallelismConfig pc;
+    for (const auto& tag : dsv4StateSwaTags()) {
+        setDsv4ExplicitPoolBlocks(mc, tag, 11);
+    }
+    auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    std::vector<uint32_t> block_nums;
+    for (const auto& tag : config.groupTags()) {
+        if (tag == "csa_kv") {
+            block_nums.push_back(35u);
+        } else {
+            block_nums.push_back(config.group(tag).policy.group_type == CacheGroupType::FULL ? 40u : 11u);
+        }
+    }
+    setGroupBlockNumsForTest(config, config.groupTags(), block_nums);
+
+    auto allocator = std::make_shared<CoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+
+    const size_t full_capacity = 34u * kDsv4TokensPerBlock;  // The smallest FULL pool has a reserved block zero.
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), full_capacity);
+    EXPECT_EQ(allocator->availableTokensNum(), full_capacity);
+    const auto capacity = allocator->tokenCapacity(config.seq_size_per_block);
+    EXPECT_EQ(capacity.total_tokens, full_capacity);
+    EXPECT_EQ(capacity.available_tokens, full_capacity);
+}
+
 TEST_F(DSV4AllocatorTest, CompressedBlockCopyIncludesEveryPageAndPadding) {
     constexpr size_t kBlockStrideBytes = 512;
     ModelConfig      model;

@@ -244,8 +244,8 @@ cc_test(
     copts = test_copts,
     deps = test_deps,
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -262,8 +262,8 @@ cc_test(
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -279,8 +279,8 @@ cc_test(
         "//rtp_llm/cpp/testing:device_test_utils",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -318,8 +318,8 @@ cc_test(
         ":block_pool_test_helper",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -336,8 +336,8 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -353,8 +353,8 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -371,8 +371,8 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -389,8 +389,8 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache",
     ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -400,10 +400,17 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        ":cache_config_test_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
     env = {},
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    # cache_config_test_utils -> cache_types -> torch_deps() keeps libtorch_cuda
+    # in the link closure, so like its sibling tests this one needs a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )
 
 cc_test(
@@ -443,6 +450,6 @@ cc_test(
     env = {
         "LOG_LEVEL": "ERROR",
     },
-    exec_properties = {"gpu": "A10_CU13"},
-    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

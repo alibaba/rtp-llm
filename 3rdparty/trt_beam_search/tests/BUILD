@@ -44,7 +44,7 @@ cc_test(
         ],
     }),
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10_CU13"},
+        "@//:using_cuda": {"gpu": "L20_CU13"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
@@ -52,7 +52,7 @@ cc_test(
     # falls through to "//conditions:default": {} -- empty exec_properties, which is
     # not a GPU request at all. Both tests then landed on a CPU-only worker and died
     # with "libcuda.so.1: cannot open shared object file" (exit 127) in run 69714248.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 # Focused regression for the V2 id-mapping math (addCumLogProbs strides, gatherId
@@ -75,7 +75,7 @@ cc_test(
         ],
     }),
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "A10_CU13"},
+        "@//:using_cuda": {"gpu": "L20_CU13"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
@@ -83,5 +83,5 @@ cc_test(
     # falls through to "//conditions:default": {} -- empty exec_properties, which is
     # not a GPU request at all. Both tests then landed on a CPU-only worker and died
     # with "libcuda.so.1: cannot open shared object file" (exit 127) in run 69714248.
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )

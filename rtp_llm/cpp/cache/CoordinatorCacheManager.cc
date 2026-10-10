@@ -1742,23 +1742,10 @@ size_t CoordinatorCacheManager::maxAvailableTokensNum() const {
 
 KVCacheTokenCapacity CoordinatorCacheManager::tokenCapacity(size_t default_seq_size_per_block) const {
     (void)default_seq_size_per_block;
-    if (group_block_pools_.empty()) {
-        return {};
-    }
-    size_t total_tokens     = std::numeric_limits<size_t>::max();
-    size_t available_tokens = std::numeric_limits<size_t>::max();
-    bool   has_pool         = false;
-    for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
-        const auto& pool = group_block_pools_[group_id];
-        if (!pool) {
-            continue;
-        }
-        const size_t seq_size = config_.topology().groups()[group_id].seqSizePerBlock();
-        total_tokens          = std::min(total_tokens, pool->totalBlocksNum() * seq_size);
-        available_tokens      = std::min(available_tokens, pool->availableBlocksNum() * seq_size);
-        has_pool              = true;
-    }
-    return has_pool ? KVCacheTokenCapacity{total_tokens, available_tokens} : KVCacheTokenCapacity{};
+    // Tail-sparse groups (LINEAR/SWA) do not retain one block per sequence
+    // block, so their pool size is not a token-length capacity. Keep the
+    // status response aligned with scheduler admission and cache metrics.
+    return {totalTokensNum(), availableTokensNum()};
 }
 
 size_t CoordinatorCacheManager::reserveBlocksForPoolMetrics(size_t pool_index) const {

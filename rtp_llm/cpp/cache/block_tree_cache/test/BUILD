@@ -55,12 +55,12 @@ pool_test_deps = [
 
 cc_test(
     name = "block_tree_cache_factory_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["BlockTreeCacheFactoryTest.cc"],
     copts = pool_test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = pool_test_deps + [
@@ -75,12 +75,12 @@ cc_test(
 
 cc_test(
     name = "block_tree_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["BlockTreeTest.cc"],
     copts = test_copts,
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 test_suite(
@@ -117,12 +117,12 @@ cc_library(
 
 cc_test(
     name = "block_tree_cache_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["BlockTreeCacheTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + [
@@ -134,12 +134,12 @@ cc_test(
 
 cc_test(
     name = "block_tree_cache_integration_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["BlockTreeCacheIntegrationTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + [":block_tree_cache_test_utils"],
@@ -193,7 +193,7 @@ cc_test(
 
 cc_test(
     name = "device_swa_cache_manager_malloc_range_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "DeviceSWACacheManagerMallocRangeTest.cc",
     ],
@@ -206,5 +206,5 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ] + torch_deps() + cuda13_torch_link_deps,
     env = {},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )

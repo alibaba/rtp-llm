@@ -39,21 +39,21 @@ cc_library(
 
 cc_test(
     name = "block_transfer_dispatcher_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["BlockTransferDispatcherTest.cc"],
     copts = test_copts,
     deps = test_deps,
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "per_rank_transfer_engine_device_host_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["PerRankBlockTransferEngineDeviceHostTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + [
@@ -65,7 +65,7 @@ cc_test(
 
 cc_test(
     name = "per_rank_transfer_engine_host_disk_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["PerRankBlockTransferEngineHostDiskTest.cc"],
     copts = test_copts,
@@ -74,17 +74,17 @@ cc_test(
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     ],
     env = {},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "per_rank_transfer_engine_data_correctness_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["PerRankBlockTransferEngineDataCorrectnessTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + [":block_transfer_engine_test_utils"],
@@ -102,12 +102,12 @@ test_suite(
 
 cc_test(
     name = "multi_rank_block_transfer_engine_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     testonly = True,
     srcs = ["MultiRankBlockTransferEngineTest.cc"],
     copts = test_copts,
     tags = [
-        "A10_CU13",
+        "L20_CU13",
         "exclusive-if-local",
     ],
     deps = test_deps + [
@@ -121,38 +121,38 @@ cc_test(
 
 cc_test(
     name = "block_transfer_request_converter_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["BlockTransferRequestConverterTest.cc"],
     copts = test_copts,
     deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "transfer_types_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["TransferTypesTest.cc"],
     copts = test_copts,
     deps = test_deps,
     env = {},
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "transfer_batch_async_context_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["TransferBatchAsyncContextTest.cc"],
     copts = test_copts,
     deps = test_deps,
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )
 
 cc_test(
     name = "transfer_stage_state_test",
-    exec_properties = {"gpu": "A10_CU13"},
+    exec_properties = {"gpu": "L20_CU13"},
     srcs = ["TransferStageStateTest.cc"],
     copts = test_copts,
     deps = test_deps,
-    tags = ["A10_CU13"],
+    tags = ["L20_CU13"],
 )

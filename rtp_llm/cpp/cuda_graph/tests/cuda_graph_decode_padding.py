@@ -151,13 +151,13 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         inputs.attention_inputs = attention_inputs
         return inputs
 
+    def _isclose_ratio(self, a_hidden, b_hidden, rows):
+        b = b_hidden.type(a_hidden.dtype)
+        close_mask = torch.isclose(a_hidden[:rows], b[:rows], rtol=1e-2, atol=1e-2)
+        return close_mask.float().mean().item()
+
     def _test_single(self, batch_size: int):
         inputs = self.build_inputs(
-            batch_size,
-            self.max_seq_len,
-            self.kernel_tokens_per_block,
-        )
-        inputs2 = self.build_inputs(
             batch_size,
             self.max_seq_len,
             self.kernel_tokens_per_block,
@@ -172,35 +172,81 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
         outputs1 = self.op.forward(inputs)
         torch.cuda.synchronize()
-        outputs2 = self.normal_model.forward(inputs2)
-        torch.cuda.synchronize()
 
         current_real_graph_size = self.op.getCurrentRealGraphSize()
         print(
             f"current_real_graph_size: {current_real_graph_size}, batch_size: {batch_size}"
         )
 
-        # With continuous capture from 1 to max_batch_size, real graph size should equal batch_size
+        # The replay executes at the smallest captured size covering batch_size.
         assert (
             current_real_graph_size >= batch_size
         ), f"Expected real graph size {batch_size}, got {current_real_graph_size}"
 
-        print(f"outputs1.hidden_states: {outputs1.hidden_states}")
-        print(f"outputs2.hidden_states: {outputs2.hidden_states}")
+        # Full-capture reference: replay the captured graph with every row a real
+        # request, no padding sentinel. Rows [0, batch_size) carry identical
+        # inputs in both builds (same ids, hidden values and block ids), so any
+        # deviation there means the sentinel rows perturbed live rows.
+        inputs_full = self.build_inputs(
+            current_real_graph_size,
+            self.max_seq_len,
+            self.kernel_tokens_per_block,
+        )
+        can_run_full = self.op.canRun(inputs_full)
+        assert can_run_full, (
+            "Expected canRun(inputs) to be True for the full-capture reference; "
+            "check the capture range if this fails."
+        )
+        outputs_full = self.op.forward(inputs_full)
+        torch.cuda.synchronize()
 
-        outputs2.hidden_states = outputs2.hidden_states.type(
-            outputs1.hidden_states.dtype
+        # Same-shape eager reference. Cross-shape agreement is not a correctness
+        # contract: kernel configuration can change with the batch dimension (on
+        # Ada, eager batch 7 disagrees with eager batch 6 beyond this tolerance
+        # with no padding or graph involved), so the padded replay must be
+        # checked against the shape it actually executes.
+        outputs_same = self.normal_model.forward(
+            self.build_inputs(
+                current_real_graph_size,
+                self.max_seq_len,
+                self.kernel_tokens_per_block,
+            )
         )
-        close_mask = torch.isclose(
-            outputs1.hidden_states[:batch_size],
-            outputs2.hidden_states,
-            rtol=1e-2,
-            atol=1e-2,
+        torch.cuda.synchronize()
+
+        padding_ratio = self._isclose_ratio(
+            outputs1.hidden_states, outputs_full.hidden_states, batch_size
         )
-        pass_ratio = close_mask.float().mean().item()
-        assert (
-            pass_ratio >= 0.999
-        ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.9%"
+        assert padding_ratio >= 0.999, (
+            f"Only {padding_ratio*100:.2f}% elements pass between the padded and "
+            f"full-capture replay, expected >= 99.9%"
+        )
+
+        graph_ratio = self._isclose_ratio(
+            outputs1.hidden_states, outputs_same.hidden_states, batch_size
+        )
+        assert graph_ratio >= 0.999, (
+            f"Only {graph_ratio*100:.2f}% elements pass between the graph replay "
+            f"and the same-shape eager forward, expected >= 99.9%"
+        )
+
+        # Cross-shape ratio stays informational: different batch sizes select
+        # different kernels and are not required to agree within this tolerance.
+        outputs2 = self.normal_model.forward(
+            self.build_inputs(
+                batch_size,
+                self.max_seq_len,
+                self.kernel_tokens_per_block,
+            )
+        )
+        torch.cuda.synchronize()
+        cross_ratio = self._isclose_ratio(
+            outputs1.hidden_states, outputs2.hidden_states, batch_size
+        )
+        print(
+            f"cross-shape pass ratio (graph@{current_real_graph_size} vs eager@{batch_size}): "
+            f"{cross_ratio*100:.2f}% (informational)"
+        )
 
     def test_batch_decode(self):
         batch_range = [

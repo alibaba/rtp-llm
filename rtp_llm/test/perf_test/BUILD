@@ -972,7 +972,7 @@ test_suite(
     tags = ["manual"],
 )
 
-# DeepSeek V4-Flash perf coverage on SM100 (B300 / GB200).
+# DeepSeek V4-Flash perf coverage on SM100/SM103 (GB200/GB300).
 #   v4_flash_cp4_ep4_prefill_64k_perf       → CP=4 EP=4 64k prefill timeline
 #   v4_flash_cp4_ep4_prefill_64k_page_rr_perf → CP=4 EP=4 64k prefill + page-RR KV sharding
 #   v4_flash_cp4_ep4_prefill_200k_perf      → CP=4 EP=4 200k prefill timeline
