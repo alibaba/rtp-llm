@@ -228,6 +228,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         }
         inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
         model = RoutingModel(["full"])
+        model.decode_cascade_max_requests = 8
 
         with patch(
             "rtp_llm.models_py.model_desc.module_base.AttnImplFactory.get_fmha_impl",
@@ -245,6 +246,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             factory.call_args.kwargs["cuda_graph_selection_mode"],
             "generation_prefill_graph",
         )
+        self.assertEqual(factory.call_args.kwargs["decode_cascade_max_requests"], 8)
 
     def test_default_model_prepares_every_tag(self):
         inputs_by_tag = {"group0": object(), "group1": object()}
@@ -259,6 +261,8 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
         self.assertEqual(fmha_impl, inputs_by_tag)
         self.assertEqual(factory.call_count, 2)
+        for call in factory.call_args_list:
+            self.assertEqual(call.kwargs["decode_cascade_max_requests"], 0)
 
     def test_dspark_commit_publishes_only_with_swa_inputs(self):
         model = object.__new__(DeepSeekV4DSparkModel)

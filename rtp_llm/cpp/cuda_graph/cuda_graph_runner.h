@@ -105,6 +105,9 @@ public:
         for (auto& counter : generation_prefill_cuda_graph_fallback_log_counts_) {
             counter.store(0, std::memory_order_relaxed);
         }
+        if (!is_prefill_cuda_graph_mode_ && graph_params.max_decode_batch_size > 0) {
+            max_bs_ = graph_params.max_decode_batch_size;
+        }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);

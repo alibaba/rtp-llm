@@ -411,6 +411,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.max_decode_batch_size = params.hw_kernel_config.resolveDecodeCudaGraphMaxBatchSize(params.concurrency_config.concurrency_limit);
         if (params.kv_cache_layer_layout.has_value()) {
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTagsSnapshot();
         }

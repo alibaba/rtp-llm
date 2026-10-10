@@ -4,6 +4,19 @@ load("@arch_config//:arch_select.bzl", "requirement")
 
 requirement(["filelock"])
 
+py_test(
+    name = "test_beam_search_cascade",
+    srcs = ["test_beam_search_cascade.py"],
+    data = ["//:th_transformer"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+        "//rtp_llm:flashinfer-python",
+    ],
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO"},
+)
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
