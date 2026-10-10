@@ -148,6 +148,8 @@ def render(spec):
             ],
         },
         "timeAxis": spec.get("timeAxis"),
+        "timeOriginEpochS": spec.get("timeOriginEpochS"),
+        "reportTimeline": spec.get("reportTimeline"),
         "events": spec.get("events", []),
         "timeOriginLabel": spec.get("timeOriginLabel"),
         "panels": [

@@ -97,11 +97,11 @@ def test_all_section_labels_and_open_states_use_common_components():
         view_details(data, 'audit', {})
 
 
-def test_missing_case_chart_label_fails_before_rendering():
+def test_view_cannot_override_run_time_origin():
     data = copy.deepcopy(view('cache_scale_in.yaml'))
-    del data['charts']['time_origin_label']
+    data['charts']['time_origin_label'] = 'different zero'
     with patch('reporting.view_config.load_document', return_value=data):
-        with pytest.raises(ScenarioError, match='requires time_origin_label'):
+        with pytest.raises(ScenarioError, match='charts'):
             view('cache_scale_in.yaml')
 
 

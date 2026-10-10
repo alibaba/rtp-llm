@@ -23,7 +23,7 @@ def metric_contract(producer, identity, calculation):
     if identity.startswith('request/'):
         if calculation is None:
             raise ValueError('request metric requires executable calculation: ' + identity)
-        return describe_calculation(calculation, windows={'measurement'})
+        return describe_calculation(calculation, windows={'measurement', 'traffic'})
     if calculation is not None:
         raise ValueError('performance gate owns its frozen calculation')
     key = identity.removeprefix('performance_gate/')
@@ -48,6 +48,14 @@ def values(evidence, definitions=None):
     ledger = RequestLedger(evidence['flow']['records'])
     window = evidence['window']
     windows = {'measurement': (window['start_epoch_ms'], window['end_epoch_ms'])}
+    if any(spec.get('calculation', {}).get('window') == 'traffic' for spec in definitions.values()):
+        # Display includes warmup and drain; gate calculations retain measurement.
+        starts = [row['send_start_epoch_ms'] for row in evidence['flow'].get('issued', [])]
+        starts.extend(ledger.sends)
+        if not starts:
+            raise ValueError('traffic display window requires issued request evidence')
+        finishes = [ledger.completion(row) for row in ledger.records]
+        windows['traffic'] = (min(starts), max([max(starts) + 1, *finishes]))
     return {identity: ledger.series(spec['calculation'], windows)
             for identity, spec in definitions.items() if spec.get('producer') == 'performance_requests'
             and 'calculation' in spec}

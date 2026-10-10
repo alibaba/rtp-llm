@@ -51,7 +51,6 @@ metrics:
   - master/flexlb_auto_tpm_decode_running_count
   - master/dispatch_qps
 charts:
-  time_origin_label: Seconds since observation began
   events:
     warmup_start:
       label: 预热开始

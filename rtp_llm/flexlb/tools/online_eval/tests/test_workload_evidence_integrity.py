@@ -153,7 +153,9 @@ class EvidenceIntegrityTest(unittest.TestCase):
             evidence = client.evidence_snapshot()
             self.assertEqual(evidence["records"], [{"rid": 1}])
             self.assertFalse(evidence["complete"])
-            self.assertEqual(len(evidence["errors"]), 2)
+            self.assertEqual(len(evidence["errors"]), 3)
+            self.assertIsNone(evidence["traffic_start"])
+            self.assertTrue(any("send_start_epoch_ms" in error for error in evidence["errors"]))
 
     def test_interrupted_ha_keeps_live_terminal_and_unfinished_requests(self):
         with tempfile.TemporaryDirectory() as d:

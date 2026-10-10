@@ -31,7 +31,9 @@ def provenance_from(analysis, inherited=None):
         workload=analysis.get("traffic_manifests") or meta.get("workload"),
         configuration=configuration,
         environment=analysis.get("runtime_provenance") or meta.get("environment"),
-        clock=analysis.get("clock_anchor") or meta.get("clock"),
+        clock=dict(acquisition=analysis.get("clock_anchor") or meta.get("clock"),
+                   report=analysis["report_timeline"]) if analysis.get("report_timeline") else
+              analysis.get("clock_anchor") or meta.get("clock"),
         evidence=dict(gate=meta.get("evidence"), requests=analysis.get("request_sources")),
     )
 
@@ -64,10 +66,14 @@ def canonical_spec(spec, analysis):
     result["sections"] = [checks_section(analysis), validity_section(analysis)] + [
         section for section in result.get("sections", [])
         if section.get("id") not in {"run.checks", "run.validity", "case.checks"}]
-    return result
+    from reporting.timeline import apply
+    return apply(result, analysis)
 
 def selected_spec(spec, analysis, presentation):
     from reporting.events import attach_events
-    return attach_events(canonical_spec(spec, analysis), presentation,
-                         origin=spec["timeOriginEpochS"],
+    result = canonical_spec(spec, analysis)
+    if (analysis.get('report_timeline') or {}).get('status') == 'UNAVAILABLE':
+        return result
+    return attach_events(result, presentation,
+                         origin=result["timeOriginEpochS"],
                          phases=analysis.get("phases", []), events=analysis.get("events", []))

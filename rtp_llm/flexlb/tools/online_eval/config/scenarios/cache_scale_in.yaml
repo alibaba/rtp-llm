@@ -183,5 +183,14 @@ parameters:
       unit: boolean
       op: eq
       expected: 0
+reporting:
+  time_axis:
+    origin:
+      event: traffic_started
+    range:
+      from: origin
+      until:
+        stage: drain
+        boundary: end
 reports:
 - cache_scale_in.yaml

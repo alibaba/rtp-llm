@@ -123,7 +123,7 @@ def build_spec(directory, evidence, result, prepared):
         title=title(evidence["provenance"]["instance"]),
         subtitle=presentation["report"]["subtitle"].format(
             verdict=result["verdict"], monitoring_status=monitoring_status),
-        timeOriginLabel=presentation["charts"]["time_origin_label"],
+        timeOriginLabel="秒；t=0 为观测开始",
         kpis=[
             dict(label=KPI_LABELS["verdict"], value=result["verdict"]),
             dict(label=KPI_LABELS["monitoring"], value=monitoring_status,
@@ -181,6 +181,10 @@ def write_report(directory, evidence, result, prepared=None, *, run=None):
         spec = selected_spec(spec, run, presentation)
         meta = provenance_from(run, meta)
         result = dict(result, run=run)
+    else:
+        from reporting.timeline import archived
+        from runtime.observation import verdict_status
+        spec = archived(spec, directory, presentation, status=verdict_status(result['verdict']))
     return write_bundle(
         directory,
         "run",
@@ -196,8 +200,6 @@ def write_report(directory, evidence, result, prepared=None, *, run=None):
 def validate_view(path, data, fail):
     from reporting.view_schema import validate_section_contract
 
-    if "time_origin_label" not in data["charts"]:
-        fail(str(path) + ".charts", "cache view requires time_origin_label")
     validate_section_contract(path, data, {
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,

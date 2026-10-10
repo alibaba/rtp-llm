@@ -186,6 +186,7 @@ def analyze_report(directory, result, evidence):
         clock_anchor=evidence["clock_anchor"],
         phases=evidence["phases"],
         events=evidence.get("events", []),
+        report_timeline=evidence.get("report_timeline"),
         series=series,
         statistic_sources=statistic_sources,
         request_sources=[],

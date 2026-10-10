@@ -9,16 +9,19 @@ ROOT = Path(__file__).resolve().parents[2]
 SCENARIO_FIELDS = (
     'case_schema_version', 'case', 'program', 'metadata', 'profiles',
     'environment', 'execution', 'parameters', 'parameter_schema',
-    'variant_axis', 'variants', 'profile_overrides', 'reports',
+    'variant_axis', 'variants', 'profile_overrides', 'reporting', 'reports',
 )
 VIEW_FIELDS = ('report_view_schema_version', 'kind', 'report', 'metrics', 'charts', 'sections')
 VIEW_BLOCK_FIELDS = {
     ('report',): ('subtitle', 'id', 'producer'),
     ('metrics',): ('query_plan', 'diagnostic_only'),
-    ('charts',): ('time_origin_label', 'events', 'event_ids', 'curves', 'panels', 'group_by',
+    ('charts',): ('events', 'event_ids', 'curves', 'panels', 'group_by',
                   'detail_labels', 'summaries', 'default_visible', 'max_points_per_series', 'presets'),
 }
 BLOCK_FIELDS = {
+    'reporting': ('time_axis',),
+    'time_axis': ('origin', 'range'),
+    'range': ('from', 'until'),
     'metadata': ('kind', 'description', 'category', 'tags'),
     'environment': ('backend', 'perf_preset', 'model_override', 'master_layout',
                     'discovery', 'n_prefill', 'n_decode', 'prefill_cache_policy',

@@ -163,6 +163,7 @@ def _validate_configuration(config, source):
             "metadata",
             "parameter_schema",
             "reports",
+            "reporting",
         },
         source,
     )
@@ -276,6 +277,14 @@ def _variant_contract(config, builder, source):
         _bind_metric_dependencies(builder.metric_dependencies, execution)
     variant = dict(metadata=metadata, execution=execution)
     _bind_reports(config, variant, source, builder.steps)
+    if "reporting" in config:
+        if metadata["kind"] != "workload":
+            raise ScenarioError("reporting.time_axis requires a workload case")
+        from reporting.timeline import validate_configuration
+        try:
+            variant["reporting"] = validate_configuration(config["reporting"], {stage["id"] for stage in builder.steps})
+        except ValueError as exc:
+            raise ScenarioError(f"{source}.reporting: {exc}") from exc
     if metadata["kind"] == "workload":
         from monitoring.query_plan import load_plan, DEFAULT_PLAN, validate_export_filter
         from monitoring.collection_plan import select_plan, frozen_plan

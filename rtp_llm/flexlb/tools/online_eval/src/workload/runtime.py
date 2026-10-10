@@ -208,12 +208,22 @@ class WorkloadPolicy:
         for epoch, values in producers.items():
             if epoch in self.environment_metadata:
                 self.environment_metadata[epoch]["load_client_workers"] = len(values)
+        from reporting.timeline import traffic_event, freeze
+        events = list(ctx.report_events)
+        onset = traffic_event(records)
+        if onset is not None:
+            if any(event['id'] == 'traffic_started' for event in events):
+                raise ValueError('traffic_started is reserved for issued-request evidence')
+            events.append(onset)
+        timeline = (freeze(ctx.instance['reporting'], events=events, phases=self.events)
+                    if 'reporting' in ctx.instance else None)
         payload = dict(
             workload_evidence_schema_version=1,
             instance_id=result["id"],
             clock_anchor=self.anchor,
             phases=self.events,
-            events=ctx.report_events,
+            events=events,
+            report_timeline=timeline,
             request_resources=records,
             incomplete_request_resources=incomplete,
             expected_telemetry=self.expected_telemetry,
@@ -257,7 +267,8 @@ class WorkloadPolicy:
         metric_plan = instance_plan(ctx.instance)
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
         metric_store.document["run"] = dict(id=result["id"],
-            configuration_sha256=result.get("implementation", {}).get("configuration_sha256"))
+            configuration_sha256=result.get("implementation", {}).get("configuration_sha256"),
+            report_timeline=timeline, phases=self.events, events=events)
         metric_store.save(ctx.artifact_dir)
         result["workload"]["metrics"] = str(ctx.artifact_dir / "metrics.json")
         program = ctx.instance.get("implementation", {}).get("program")

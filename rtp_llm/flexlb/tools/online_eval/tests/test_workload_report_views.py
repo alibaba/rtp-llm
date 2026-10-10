@@ -72,7 +72,12 @@ class WorkloadReportViewsTest(unittest.TestCase):
             analysis["configuration"] = {"environment": {"n_prefill": 2}}
             analysis["stages"] = [dict(id="finish", output=dict(rows=dict(kind="ha_rows", env_epoch=1)),
                                        artifacts=[str(requests), str(state)])]
-            analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11)]
+            analysis["phases"] = [dict(stage="kill_a", event="end", epoch_s=11),
+                                  dict(stage="finish", event="end", epoch_s=15)]
+            analysis["events"] = [dict(id="traffic_started", epoch_s=11.1)]
+            from reporting.timeline import freeze
+            declaration = load_document(ROOT / "config/scenarios/master_ha_failover.yaml")["reporting"]
+            analysis["report_timeline"] = freeze(declaration, events=analysis["events"], phases=analysis["phases"])
             from monitoring.metric_store import export_metrics
             from monitoring.query_plan import load_plan
             from monitoring.producers import produce
@@ -99,12 +104,15 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertTrue(all(curve["axis"] == "up" for curve in balance[3:]))
             self.assertTrue(all(panel["axes"]["up"]["position"] == "right"
                                 and panel["events"] for panel in panels.values()))
-            self.assertEqual(1, panels["request_qps"]["events"][0]["t"])
-            self.assertEqual(5, spec["timeAxis"]["max"])
+            self.assertAlmostEqual(-0.1, panels["request_qps"]["events"][0]["t"])
+            self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
+            self.assertEqual(11.1, spec["timeOriginEpochS"])
             self.assertEqual(spec["title"], "master_ha_failover : default : batch-window")
             self.assertEqual(spec["subtitle"], view("master_ha_failover.yaml")["report"]["subtitle"])
             default = json.loads((paths["default.yaml"].parent / "report-spec.json").read_text())
             self.assertNotIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
+            self.assertEqual(spec["timeAxis"], default["timeAxis"])
+            self.assertEqual(spec["timeOriginEpochS"], default["timeOriginEpochS"])
 
     def test_ha_balance_chart_matches_five_second_gate_window(self):
         rows = [
@@ -257,6 +265,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
                 dict(curve_id="mock/mock_decode_wall_tps_engine_mean/D", metric_id="mock/mock_decode_wall_tps_engine_mean/D", name="D detail", group="Decode 逐引擎 TPS", axis="forward", hidden=True, points=[]),
             ], {}),
         ):
+            from metric_fixtures import freeze_metrics
+            freeze_metrics(Path(d), "master_performance")
             bundle = report(d, {"criteria": {"measure_s": 1}, "window": {"start_epoch_ms": 0},
                                 "provenance": {"instance": "master_performance::default::single-nonbatch"}},
                             {"verdict": "PASS", "checks": [], "errors": [], "metrics": {}, "windows": []})

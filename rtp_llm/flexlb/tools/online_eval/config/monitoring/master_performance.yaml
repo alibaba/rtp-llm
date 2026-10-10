@@ -64,7 +64,7 @@ produced:
     labels: []
     calculation:
       calculator: quantile
-      window: measurement
+      window: traffic
       selection:
         time_basis: arrival
         status: ok

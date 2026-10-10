@@ -196,5 +196,14 @@ parameters:
         unit: tokens/s
         op: ge
         expected: 2230
+reporting:
+  time_axis:
+    origin:
+      event: traffic_started
+    range:
+      from: origin
+      until:
+        stage: drain
+        boundary: end
 reports:
 - master_performance.yaml

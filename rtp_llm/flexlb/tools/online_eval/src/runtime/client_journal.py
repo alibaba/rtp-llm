@@ -110,3 +110,26 @@ class LiveClientEvents:
                 continue
             selected[rid] = row
         return selected
+
+
+def first_request(rows):
+    """Freeze actual send onset from issued requests, never successful terminals only."""
+    import math
+    stamps = []
+    for row in rows:
+        value = row.get("send_start_epoch_ms")
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError("request onset requires positive finite send_start_epoch_ms")
+        stamps.append((value, row.get("rid")))
+    if not stamps:
+        return None
+    value, identity = min(stamps, key=lambda item: item[0])
+    return dict(epoch_s=value / 1000, rid=identity, field="send_start_epoch_ms")
+
+
+def request_timing(rows):
+    """Keep corrupt/partial timing visible in resource evidence without losing rows."""
+    try:
+        return dict(traffic_start=first_request(rows), errors=[])
+    except ValueError as exc:
+        return dict(traffic_start=None, errors=[str(exc)])

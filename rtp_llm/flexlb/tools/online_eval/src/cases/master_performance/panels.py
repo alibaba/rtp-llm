@@ -10,7 +10,6 @@ def prepare_curves(directory, evidence, presentation):
     import json
 
     lo = evidence.get("window", {}).get("start_epoch_ms", 0)
-    duration = evidence.get("criteria", {}).get("measure_s", 1)
     curves, audit = [], []
 
     def add(curve_id, points, description, *, name=None, labels=None, provenance=None):
@@ -53,7 +52,7 @@ def prepare_curves(directory, evidence, presentation):
                 name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(residual.items()))
             if any(c["name"] == name for c in curves):
                 name += " · epoch " + epoch
-            visible = [(t, v) for t, v in points if 0 <= t <= duration]
+            visible = points
             add(curve_id, visible, sources[key]["promql"], name=name, labels=labels, provenance=sources[key])
             audit.append(dict(name=name, samples=sum(v is not None for _,v in visible), **sources[key]))
     return curves, dict(queries=audit, gaps=gaps, errors=errors, available=bool(series), metric_classification=inventory)

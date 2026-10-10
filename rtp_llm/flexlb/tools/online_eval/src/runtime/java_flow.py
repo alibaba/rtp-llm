@@ -188,6 +188,7 @@ class JavaFlowGroup:
         return record
 
     def evidence_snapshot(self):
+        from runtime.client_journal import request_timing
         errors = []
         try:
             state = self.status()
@@ -219,6 +220,9 @@ class JavaFlowGroup:
             and state.get("submitted") == len(self.journal.terminal)
             and len(self.journal.issued) == len(self.journal.terminal)
         )
+        timing = request_timing(self.journal.issued.values())
+        errors.extend(timing["errors"])
+        complete = complete and not errors
         if not complete:
             errors.append(
                 "flow has not proven complete submission and terminal accounting"
@@ -235,6 +239,7 @@ class JavaFlowGroup:
                 for rid, row in self.journal.issued.items()
             ],
             issued=list(self.journal.issued.values()),
+            traffic_start=timing["traffic_start"],
             unfinished=[
                 r
                 for rid, r in self.journal.issued.items()

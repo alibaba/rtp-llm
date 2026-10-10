@@ -49,6 +49,10 @@ def write_report(directory, evidence, result, *, run=None):
         from reporting.run_context import selected_spec
         spec = selected_spec(spec, run, presentation)
         result = dict(result, run=run)
+    else:
+        from reporting.timeline import archived
+        from runtime.observation import verdict_status
+        spec = archived(spec, directory, presentation, status=verdict_status(result['verdict']))
     meta = run_meta(
         dict(id=p["instance"], verdict=result["verdict"]),
         implementation=p.get("master_artifact"), workload=p.get("trace"), configuration=p,

@@ -171,7 +171,11 @@ class HaReplayClient:
             path = lifecycle
         if not self.finished:
             errors.append("HA client finish was not validated")
+        from runtime.client_journal import request_timing
+        timing = request_timing(rows)
+        errors.extend(timing["errors"])
         return dict(
+            traffic_start=timing["traffic_start"],
             records=rows,
             complete=self.finished and bool(rows) and not errors,
             errors=errors,

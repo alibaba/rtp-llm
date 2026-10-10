@@ -251,5 +251,14 @@ variant_axis:
 variants:
 - id: non_rolling
   program: non_rolling
+reporting:
+  time_axis:
+    origin:
+      event: traffic_started
+    range:
+      from: origin
+      until:
+        stage: finish
+        boundary: end
 reports:
 - master_ha_failover.yaml

@@ -178,13 +178,10 @@ def validate_selected(path, data, fail):
             fail(str(path) + ".report", "invalid " + field)
     charts = data["charts"]
     if (not {"curves", "panels"} <= charts.keys()
-            or charts.keys() - {"curves", "panels", "time_origin_label", "events", "event_ids"}):
+            or charts.keys() - {"curves", "panels", "events", "event_ids"}):
         fail(str(path) + ".charts", "invalid selected chart fields")
     metrics = validate_curves(path, charts, fail)
     validate_panels(path, charts, metrics, fail)
-    if "time_origin_label" in charts and (type(charts["time_origin_label"]) is not str
-                                         or not charts["time_origin_label"].strip()):
-        fail(str(path) + ".charts", "invalid time_origin_label")
 
 
 def validate_section_contract(path, data, expected, fail):
