@@ -8,6 +8,7 @@ environment:
   perf_preset: deepseek_v4_flash_l20c
   metric_whitelist: flexlb_app_cache_,flexlb_app_flexlb_,flexlb_app_engine_balancing_master_,flexlb_auto_tpm_
   config_overrides:
+    # 沿用配套性能预设；测试用大上限使额外 TTFT 基本不限制缓存亲和路由。
     cache_affinity_max_extra_ttft_ms: 1000000000
   profile_overrides:
     batch-window:

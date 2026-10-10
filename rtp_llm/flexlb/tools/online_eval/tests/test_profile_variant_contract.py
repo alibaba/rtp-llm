@@ -38,6 +38,7 @@ def test_no_variants_matches_internal_default_without_inheritance():
     default['stages'] = default.pop('variants')[0]['stages']
     # Test annotations are not compiler defaults; compare executable content.
     implicit = compile_scenarios([('case.yaml', default)])
+    assert len(explicit) == len(implicit)
     for left, right in zip(explicit, implicit):
         for key in ('id', 'environment', 'stages'):
             assert left[key] == right[key]
