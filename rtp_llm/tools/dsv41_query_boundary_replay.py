@@ -12,8 +12,10 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
+from rtp_llm.models_py.modules.dsv4 import rope
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import _prefill_q_rope
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import _dense_down
@@ -190,6 +192,7 @@ def main():
     args = model_args(official, root, 256)
     config = json.loads((root / "config.json").read_text())["text_config"]
     reader, cases, tensors = NASReader(root), [], []
+    frequency_origins, frequency_tensors = [], []
     control_profile = official_history_control(history["native_recipe"])
     counts = {
         "native_query": 0,
@@ -207,14 +210,56 @@ def main():
             native.wq_b._sm120_linear.scales,
             native.q_norm,
         )
+        table_args = (
+            native._rope_dim,
+            native._rope_max_seq_len,
+            native._rope_o_seq_len,
+            native._rope_base,
+            native._rope_factor,
+            native._rope_beta_fast,
+            native._rope_beta_slow,
+        )
+        memo = rope._FREQS_CIS_CACHE
+        with patch.object(rope, "_FREQS_CIS_CACHE", {}):
+            with torch.device("cpu"):
+                cpu_table = rope.precompute_freqs_cis(*table_args).cuda()
+            with torch.device("cuda"):
+                cuda_table = rope.precompute_freqs_cis(
+                    *table_args, device=torch.device("cuda")
+                )
+        if rope._FREQS_CIS_CACHE is not memo:
+            raise AssertionError("Query frequency diagnostic lost the original memo")
+        frequency_origins.append(
+            {
+                "layer": layer,
+                "native_cpu_reconstruction": require_bytes(
+                    native.freqs_cis, cpu_table, f"layer{layer}.native_cpu_table"
+                ),
+                "released_cuda_reconstruction": require_bytes(
+                    shards[0].freqs_cis, cuda_table, f"layer{layer}.released_cuda_table"
+                ),
+                "difference": difference(
+                    torch.view_as_real(shards[0].freqs_cis),
+                    torch.view_as_real(native.freqs_cis),
+                ),
+            }
+        )
+        frequency_tensors.append(
+            {
+                "layer": layer,
+                "native": native.freqs_cis.cpu(),
+                "released": shards[0].freqs_cis.cpu(),
+                "recomputed_cpu": cpu_table.cpu(),
+                "recomputed_cuda": cuda_table.cpu(),
+            }
+        )
         for step, identity in enumerate(history["identities"]):
             start, rows = identity["start_pos"], len(identity["input_ids"])
             freqs = native.freqs_cis[start : start + rows]
             reference_freqs = shards[0].freqs_cis[start : start + rows]
-            require_bytes(reference_freqs, freqs, f"layer{layer}.step{step}.freqs")
             for stream in ("official", "native"):
                 value = artifact[f"{stream}_inputs"][step][layer].cuda().contiguous()
-                sources = (value, *weights, freqs)
+                sources = (value, *weights, freqs, reference_freqs)
                 before = [source.clone() for source in sources]
                 label = f"{stream}.step{step}.layer{layer:02d}"
                 a, released_a, substitute_a, restored_a, a_metrics = linear_pair(
@@ -253,8 +298,23 @@ def main():
                 candidate_released_rope = released_rotate(
                     official, native, candidate_b, reference_freqs
                 )
-                baseline_rope = released_rotate(official, native, b, reference_freqs)
-                held_reference_rope = rotate(native, released_b, freqs, start)
+                candidate_released_freq_native_rope = rotate(
+                    native, candidate_b, reference_freqs, start
+                )
+                baseline_rope = released_rotate(official, native, b, freqs)
+                baseline_released_freq_native_rope = rotate(
+                    native, b, reference_freqs, start
+                )
+                baseline_released_freq_released_rope = released_rotate(
+                    official, native, b, reference_freqs
+                )
+                held_reference_rope = rotate(native, released_b, reference_freqs, start)
+                held_reference_native_freq_native_rope = rotate(
+                    native, released_b, freqs, start
+                )
+                held_reference_native_freq_released_rope = released_rotate(
+                    official, native, released_b, freqs
+                )
                 saved = (
                     artifact["official_input_history"][control_profile][str(layer)][
                         step
@@ -300,10 +360,23 @@ def main():
                     "second_projection": {
                         name: values[4] for name, values in b_values.items()
                     },
+                    "frequency": difference(
+                        torch.view_as_real(reference_freqs), torch.view_as_real(freqs)
+                    ),
                     "rotation": {
-                        "native_projection": difference(baseline_rope, query),
-                        "released_projection": difference(
+                        "native_projection_native_frequency": difference(
+                            baseline_rope, query
+                        ),
+                        "native_projection_released_frequency": difference(
+                            baseline_released_freq_released_rope,
+                            baseline_released_freq_native_rope,
+                        ),
+                        "released_projection_released_frequency": difference(
                             reference_query, held_reference_rope
+                        ),
+                        "released_projection_native_frequency": difference(
+                            held_reference_native_freq_released_rope,
+                            held_reference_native_freq_native_rope,
                         ),
                     },
                     "query": difference(reference_query, query),
@@ -312,6 +385,18 @@ def main():
                     ),
                     "released_gemms_norm_released_rope": difference(
                         reference_query, candidate_released_rope
+                    ),
+                    "released_gemms_norm_released_freq_native_rope": difference(
+                        reference_query, candidate_released_freq_native_rope
+                    ),
+                    "native_gemms_norm_released_freq_native_rope": difference(
+                        reference_query, baseline_released_freq_native_rope
+                    ),
+                    "native_gemms_norm_native_freq_released_rope": difference(
+                        reference_query, baseline_rope
+                    ),
+                    "native_gemms_norm_released_freq_released_rope": difference(
+                        reference_query, baseline_released_freq_released_rope
                     ),
                 }
                 cases.append(record)
@@ -324,6 +409,10 @@ def main():
                         "released_query": reference_query.cpu(),
                         "candidate_native_rope": candidate.cpu(),
                         "candidate_released_rope": candidate_released_rope.cpu(),
+                        "candidate_released_freq_native_rope": candidate_released_freq_native_rope.cpu(),
+                        "native_released_freq_native_rope": baseline_released_freq_native_rope.cpu(),
+                        "native_native_freq_released_rope": baseline_rope.cpu(),
+                        "native_released_freq_released_rope": baseline_released_freq_released_rope.cpu(),
                         "native_a": a.cpu(),
                         "released_a": released_a.cpu(),
                         "native_qr": qr.cpu(),
@@ -347,6 +436,7 @@ def main():
                 "identities": history["identities"],
                 "native_recipe": history["native_recipe"],
                 "cases": tensors,
+                "frequency_tables": frequency_tensors,
             },
             stream,
         )
@@ -363,6 +453,7 @@ def main():
         "identities": history["identities"],
         "native_recipe": history["native_recipe"],
         "controls_exact": counts,
+        "frequency_origins": frequency_origins,
         "cases": cases,
         "weight_sha256": reader.hashes,
         "official_source_sha256": history["official_source_sha256"],
