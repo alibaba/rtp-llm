@@ -3545,6 +3545,10 @@ size_t KVCacheMemoryConnector::freeMemoryBlocks() const {
     return block_pool_ ? block_pool_->freeBlocksNum() : 0;
 }
 
+size_t KVCacheMemoryConnector::remoteEvictingMemoryBlocks() const {
+    return block_cache_ ? block_cache_->remoteEvictingSize() : 0;
+}
+
 std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem>
 KVCacheMemoryConnector::prepareRemoteEviction(size_t block_num) {
     if (!block_cache_ || !block_pool_ || block_num == 0 || isDualPool() || usePrefixTreeMemoryCache()) {

@@ -78,6 +78,7 @@ public:
     using HostBlockBuffers = std::vector<HostBlockBuffer>;
     size_t totalMemoryBlocks() const;
     size_t freeMemoryBlocks() const;
+    size_t remoteEvictingMemoryBlocks() const;
     std::vector<MemoryRemoteEvictionItem> prepareRemoteEviction(size_t block_num);
     bool buildHostBlockBuffers(const std::vector<MemoryRemoteEvictionItem>& items,
                                const std::vector<size_t>& selected_indices,

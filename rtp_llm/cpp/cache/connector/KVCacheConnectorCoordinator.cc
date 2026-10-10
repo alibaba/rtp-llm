@@ -768,9 +768,10 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
         }
         if (!victims.empty()) {
             remote_task_started = true;
+            const size_t remote_evict_inflight_at_start = memory_connector_->remoteEvictingMemoryBlocks();
             if (metrics_reporter_) {
                 RtpLLMMemoryRemoteEvictionMetricsCollector collector;
-                collector.memory_remote_evict_inflight_blocks = victims.size();
+                collector.memory_remote_evict_inflight_blocks = remote_evict_inflight_at_start;
                 metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
                                           RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
             }
@@ -799,13 +800,14 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                 capped_remote_evict_blocks,
                 victims.size(),
                 remote_evict_bytes,
-                victims.size(),
+                remote_evict_inflight_at_start,
                 memory_connector_->totalMemoryBlocks(),
                 memory_connector_->freeMemoryBlocks(),
                 estimated_d2h_blocks,
                 kv_cache_config_.memory_cache_remote_eviction_timeout_ms);
             const auto remote_evict_started = std::chrono::steady_clock::now();
-            bool remote_success = false;
+            bool remote_success             = false;
+            bool quarantine_remote_backing  = false;
             try {
                 auto lease = std::make_shared<std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem>>(victims);
                 auto meta  = std::make_shared<TieredEvictionMeta>(false, true, trace_id);
@@ -828,6 +830,8 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
                     remote_success = ctx->success();
+                    quarantine_remote_backing =
+                        !remote_success && ctx->errorInfo().code() == ErrorCode::LOAD_CACHE_TIMEOUT;
                 }
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_WARNING("memory remote eviction failed with exception, trace_id=%s, error=%s",
@@ -836,9 +840,19 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                 RTP_LLM_LOG_WARNING("memory remote eviction failed with unknown exception, trace_id=%s",
                                     trace_id.c_str());
             }
-            // Detached entries must always leave the in-flight state. On failure they
-            // are dropped according to the configured failure policy.
-            memory_connector_->finishRemoteEviction(victims, remote_success);
+            if (quarantine_remote_backing) {
+                // The SDK timed out after accepting the source buffers. Keep
+                // the detached cache entries and their BlockPool references
+                // alive until connector shutdown so a late RDMA READ cannot
+                // observe a reused host block.
+                RTP_LLM_LOG_WARNING(
+                    "memory remote eviction timed out; quarantining source blocks until shutdown, trace_id=%s, blocks=%zu",
+                    trace_id.c_str(),
+                    victims.size());
+            } else {
+                memory_connector_->finishRemoteEviction(victims, remote_success);
+            }
+            const size_t remote_evict_inflight = memory_connector_->remoteEvictingMemoryBlocks();
             const auto remote_evict_latency_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                                      std::chrono::steady_clock::now() - remote_evict_started)
                                                      .count();
@@ -851,19 +865,21 @@ void KVCacheConnectorCoordinator::runTieredEviction(const std::string& trace_id)
                 collector.memory_remote_evict_failed_block_count  = remote_success ? 0 : victims.size();
                 collector.memory_remote_evict_latency_us          = remote_evict_latency_us;
                 collector.memory_remote_evict_bytes               = remote_evict_bytes;
-                collector.memory_remote_evict_inflight_blocks     = 0;
+                collector.memory_remote_evict_inflight_blocks     = remote_evict_inflight;
                 metrics_reporter_->report<RtpLLMMemoryRemoteEvictionMetrics,
                                           RtpLLMMemoryRemoteEvictionMetricsCollector>(nullptr, &collector);
             }
             RTP_LLM_LOG_INFO(
-                "memory remote eviction finished, trace_id=%s, attempted_blocks=%zu, success_blocks=%zu, failed_blocks=%zu, bytes=%zu, latency_us=%ld, inflight=0, success=%d",
+                "memory remote eviction finished, trace_id=%s, attempted_blocks=%zu, success_blocks=%zu, failed_blocks=%zu, bytes=%zu, latency_us=%ld, inflight=%zu, success=%d, quarantined=%d",
                 trace_id.c_str(),
                 victims.size(),
                 remote_success ? victims.size() : 0,
                 remote_success ? 0 : victims.size(),
                 remote_evict_bytes,
                 remote_evict_latency_us,
-                remote_success);
+                remote_evict_inflight,
+                remote_success,
+                quarantine_remote_backing);
         }
     }
 #endif

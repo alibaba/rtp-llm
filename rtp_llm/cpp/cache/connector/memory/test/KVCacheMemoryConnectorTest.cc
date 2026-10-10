@@ -3680,6 +3680,7 @@ TEST_F(KVCacheMemoryConnectorTest, RemoteEvictionBuildsOnlySelectedCompleteHostB
 
     auto victims = connector_->prepareRemoteEviction(3);
     ASSERT_EQ(victims.size(), 3u);
+    EXPECT_EQ(connector_->remoteEvictingMemoryBlocks(), 3u);
     EXPECT_EQ(connector_->freeMemoryBlocks(), free_before - 3);
 
     KVCacheMemoryConnector::HostBlockBuffers buffers;
@@ -3698,6 +3699,7 @@ TEST_F(KVCacheMemoryConnectorTest, RemoteEvictionBuildsOnlySelectedCompleteHostB
     }
 
     connector_->finishRemoteEviction(victims, true);
+    EXPECT_EQ(connector_->remoteEvictingMemoryBlocks(), 0u);
     EXPECT_EQ(connector_->freeMemoryBlocks(), free_before);
 }
 

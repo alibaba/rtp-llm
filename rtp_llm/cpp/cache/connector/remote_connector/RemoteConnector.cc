@@ -666,11 +666,13 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
         }
         case ::RemoteOpType::REMOTE_OPERATION_WRITE_MEMORY: {
             kv_cache_manager::UriStrVec out_uris;
-            if (!WriteMemory(trace_id, block_ids, uris, out_uris)) {
-                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            const auto result = WriteMemory(trace_id, block_ids, uris, out_uris);
+            response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
+                                         result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                                                                             REMOTE_TRANSFER_STATUS_FAILED);
+            if (result != TransferResult::SUCCESS) {
                 return true;
             }
-            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
             for (const auto& uri : out_uris) {
                 *response.add_actual_uris() = uri;
             }
@@ -1278,13 +1280,13 @@ RemoteConnector::TransferResult RemoteConnector::Read(const std::string&        
     return TransferResult::SUCCESS;
 }
 
-bool RemoteConnector::WriteMemory(const std::string& trace_id,
-                                  const std::vector<int32_t>& block_ids,
-                                  const kv_cache_manager::UriStrVec& uri_str_vec,
-                                  kv_cache_manager::UriStrVec& out_uri_str_vec) {
+RemoteConnector::TransferResult RemoteConnector::WriteMemory(const std::string&                 trace_id,
+                                                              const std::vector<int32_t>&        block_ids,
+                                                              const kv_cache_manager::UriStrVec& uri_str_vec,
+                                                              kv_cache_manager::UriStrVec&       out_uri_str_vec) {
     auto memory = memory_connector_.lock();
     if (!memory || block_ids.size() != uri_str_vec.size()) {
-        return false;
+        return TransferResult::FAILED;
     }
     std::vector<KVCacheMemoryConnector::MemoryRemoteEvictionItem> items;
     std::vector<size_t> indices;
@@ -1298,7 +1300,7 @@ bool RemoteConnector::WriteMemory(const std::string& trace_id,
     }
     KVCacheMemoryConnector::HostBlockBuffers host_buffers;
     if (!memory->buildHostBlockBuffers(items, indices, host_buffers)) {
-        return false;
+        return TransferResult::FAILED;
     }
     kv_cache_manager::BlockBuffers buffers;
     buffers.reserve(host_buffers.size());
@@ -1316,11 +1318,14 @@ bool RemoteConnector::WriteMemory(const std::string& trace_id,
     RTP_LLM_LOG_INFO("memory remote SDK write, trace_id=%s, blocks=%zu, iovs=%zu, bytes=%zu",
                      trace_id.c_str(), buffers.size(), iov_count, total_bytes);
     auto result = client_wrapper_->saveKvCaches(uri_str_vec, buffers);
+    if (result.first == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+        return TransferResult::TIMEOUT;
+    }
     if (result.first != kv_cache_manager::ClientErrorCode::ER_OK) {
-        return false;
+        return TransferResult::FAILED;
     }
     out_uri_str_vec = std::move(result.second);
-    return true;
+    return TransferResult::SUCCESS;
 }
 
 RemoteConnector::TransferResult RemoteConnector::Write(const std::string&                 trace_id,
