@@ -943,7 +943,7 @@ def start_client_span(
 
     Returns (handle, metadata) where metadata carries W3C traceparent for gRPC.
     Scope guard: only produces a span when a RequestTraceState exists
-    (chat completions entry), so batch/embedding routes stay untraced.
+    (a traced request entry), so embedding routes stay untraced.
     Returns (None, []) whenever telemetry is inactive; never raises.
     """
     if not is_telemetry_active():
@@ -1000,6 +1000,35 @@ def start_internal_span(span_name: str) -> Optional[ClientSpanHandle]:
         return ClientSpanHandle(span, _internal_error_description, context_token)
     except Exception:  # noqa: BLE001 - fail-open
         return None
+
+
+def start_batch_item_span(
+    request_id: int, index: int
+) -> Tuple[Optional[ClientSpanHandle], List[Tuple[str, str]]]:
+    """Give each item its own parent carrier without activating shared context."""
+    if not is_telemetry_active():
+        return None, []
+    try:
+        state = CURRENT_TRACE_STATE.get()
+        tracer = get_tracer()
+        if state is None or state.server_context is None or tracer is None:
+            return None, []
+        span = tracer.start_span(
+            "rtp_llm.batch_request",
+            context=state.server_context,
+            kind=trace.SpanKind.INTERNAL,
+            attributes={
+                trace_attrs.REQUEST_ID: str(request_id),
+                "rtp_llm.batch.index": index,
+                trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                trace_attrs.GEN_AI_OPERATION_NAME: "generate",
+            },
+        )
+        metadata = inject_context_to_metadata(trace.set_span_in_context(span))
+        return ClientSpanHandle(span, _internal_error_description), metadata
+    except Exception:  # noqa: BLE001 - tracing must not break batch inference
+        return None, []
 
 
 def start_server_span(

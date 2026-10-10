@@ -30,7 +30,11 @@ from rtp_llm.server.request_headers import (
 )
 from rtp_llm.telemetry import CURRENT_TRACE_STATE
 from rtp_llm.telemetry import attributes as trace_attrs
-from rtp_llm.telemetry import inject_context_to_metadata, start_client_span
+from rtp_llm.telemetry import (
+    inject_context_to_metadata,
+    start_batch_item_span,
+    start_client_span,
+)
 from rtp_llm.utils.base_model_datatypes import (
     GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED,
     AuxInfo,
@@ -126,6 +130,13 @@ async def _wait_for_rpc_termination(
     return None
 
 
+async def _read_rpc_response(response_stream: Any) -> Any:
+    try:
+        return await response_stream.__anext__()
+    except StopAsyncIteration:
+        return None
+
+
 async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle state machine
     response_iterator: Any,
     client_span: Any,
@@ -133,6 +144,7 @@ async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle
     abandoned_event: "asyncio.Event",
     active_deadline: Optional[float] = None,
     include_all_sequences: bool = True,
+    terminal_read_task: Optional["asyncio.Task[Any]"] = None,
 ) -> Any:
     """Settle a CLIENT span without letting observation own an active call.
 
@@ -245,7 +257,8 @@ async def _settle_client_span_after_rpc(  # noqa: C901 - request-local lifecycle
         raise
     finally:
         pending_tasks = []
-        for task in (status_task, abandoned_task):
+        owned_read = terminal_read_task if abandoned_event.is_set() else None
+        for task in (status_task, abandoned_task, owned_read):
             if task is not None and not task.done():
                 task.cancel()
                 pending_tasks.append(task)
@@ -1036,6 +1049,7 @@ class ModelRpcClient(object):
         )
         stream_done = False
         terminal_seen = False
+        terminal_read_task = None
         client_settlement_task = None
         client_settlement_abandoned = None
         rpc_deadline = None
@@ -1056,8 +1070,9 @@ class ModelRpcClient(object):
         client_span, trace_metadata = start_client_span(
             client_span_name, target_address
         )
-        if client_span is not None:
+        if client_span is not None or use_fetch_response:
             client_settlement_abandoned = asyncio.Event()
+        if client_span is not None:
             # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
             client_span.set_attribute(trace_attrs.REQUEST_ID, str(input_py.request_id))
         last_output = None
@@ -1086,12 +1101,29 @@ class ModelRpcClient(object):
             else:
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
-            async for response in response_iterator.__aiter__():
+            response_stream = response_iterator.__aiter__()
+            while True:
+                if terminal_read_task is None:
+                    response = await _read_rpc_response(response_stream)
+                else:
+                    response = await asyncio.shield(terminal_read_task)
+                    terminal_read_task = None
+                if response is None:
+                    break
                 output_py = trans_output(input_py, response, stream_state)
                 last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
-                if _engine_reported_finished(output_py) and client_span is not None:
+                if terminal_seen:
+                    # Own the EOF read before publishing the terminal frame. An
+                    # upstream close must not cancel grpc.aio while it reads trailers.
+                    terminal_read_task = asyncio.create_task(
+                        _read_rpc_response(response_stream)
+                    )
+                    terminal_read_task.add_done_callback(_consume_settlement_task)
+                if _engine_reported_finished(output_py) and (
+                    client_span is not None or terminal_seen
+                ):
                     # The finished application frame is not the gRPC EOF. If it
                     # escapes first, an upstream renderer can close this generator
                     # while the server is still settling the RPC. The application
@@ -1106,6 +1138,7 @@ class ModelRpcClient(object):
                                 client_settlement_abandoned,
                                 active_deadline=rpc_deadline,
                                 include_all_sequences=include_all_sequences,
+                                terminal_read_task=terminal_read_task,
                             )
                         )
                         client_settlement_task.add_done_callback(
@@ -1200,14 +1233,24 @@ class ModelRpcClient(object):
             )
             raise e
         finally:
+            if (
+                client_settlement_task is not None
+                and not stream_done
+                and client_settlement_abandoned is not None
+            ):
+                client_settlement_abandoned.set()
+                # Settlement may have observed trailers before the consumer
+                # left. In that case its finally block could not yet reclaim
+                # the detached read; the generator remains its last owner.
+                if (
+                    client_settlement_task.done()
+                    and terminal_read_task is not None
+                    and not terminal_read_task.done()
+                ):
+                    terminal_read_task.cancel()
+                    await asyncio.gather(terminal_read_task, return_exceptions=True)
             try:
                 if client_span is not None:
-                    if (
-                        client_settlement_task is not None
-                        and not stream_done
-                        and client_settlement_abandoned is not None
-                    ):
-                        client_settlement_abandoned.set()
                     # Normal completion has a detached settlement task. Do not
                     # await it here, otherwise aclose() would reintroduce the
                     # finished-frame blocking regression.
@@ -1264,44 +1307,108 @@ class ModelRpcClient(object):
 
         max_timeout_ms = max((inp.generate_config.timeout_ms or 0) for inp in inputs)
         grpc_timeout_seconds = self._compute_grpc_timeout(max_timeout_ms)
-
-        batch_input_pb = BatchGenerateInputPB()
-        for inp in inputs:
-            inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-            input_pb = trans_input(inp)
-            batch_input_pb.inputs.append(input_pb)
-
         target_address = self._addresses[inputs[0].request_id % len(self._addresses)]
         logging.debug(
             f"batch request: [{len(inputs)} items] send to address: {target_address}"
         )
-
+        rpc_span, metadata = start_client_span(
+            "rtp_llm.batch_generate_call", target_address
+        )
+        if rpc_span is not None:
+            rpc_span.set_attribute(trace_attrs.REQUEST_ID, str(inputs[0].request_id))
+            rpc_span.set_attribute("rtp_llm.batch.size", len(inputs))
+        item_spans = []
+        rpc_status = None
+        response_call = None
+        failure = None
         try:
+            batch_input_pb = BatchGenerateInputPB()
+            for i, inp in enumerate(inputs):
+                span, item_metadata = start_batch_item_span(inp.request_id, i)
+                item_spans.append(span)
+                inp.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
+                input_pb = trans_input(inp)
+                # Shared RPC metadata identifies the transport. Each protobuf
+                # carries its independent logical request parent.
+                carrier = dict(item_metadata)
+                if carrier.get("traceparent"):
+                    input_pb.request_info.trace_context.traceparent = carrier[
+                        "traceparent"
+                    ]
+                    input_pb.request_info.trace_context.tracestate = carrier.get(
+                        "tracestate", ""
+                    )
+                batch_input_pb.inputs.append(input_pb)
+
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
-            response = await stub.BatchGenerateCall(
-                batch_input_pb, timeout=grpc_timeout_seconds
-            )
+            kwargs = {"timeout": grpc_timeout_seconds}
+            if metadata:
+                kwargs["metadata"] = metadata
+            response_call = stub.BatchGenerateCall(batch_input_pb, **kwargs)
+            response = await response_call
+            rpc_status = StatusCode.OK
 
             results = []
+            business_error = None
             for i, result_pb in enumerate(response.results):
-                if (
-                    result_pb.HasField("error_info")
-                    and result_pb.error_info.error_message
+                span = item_spans[i]
+                if result_pb.HasField("error_info") and (
+                    result_pb.error_info.error_code
+                    or result_pb.error_info.error_message
                 ):
-                    raise FtRuntimeException(
+                    error = FtRuntimeException(
                         ExceptionType.UNKNOWN_ERROR,
                         f"batch item {i} failed: {result_pb.error_info.error_message}",
                     )
-                stream_state = StreamState()
-                output = trans_output(inputs[i], result_pb.final_output, stream_state)
+                    if span is not None:
+                        span.set_attribute(
+                            trace_attrs.RTP_LLM_ERROR_CODE,
+                            result_pb.error_info.error_code,
+                        )
+                        span.finish(error=error, error_type="BusinessError")
+                    # Preserve the existing public failure condition. Code-only
+                    # errors are observable without changing response handling.
+                    if result_pb.error_info.error_message:
+                        business_error = business_error or error
+                        continue
+                if business_error is not None:
+                    if span is not None:
+                        span.finish()
+                    continue
+                output = trans_output(inputs[i], result_pb.final_output, StreamState())
                 results.append(output)
+                if span is not None:
+                    _record_client_span_usage(
+                        span,
+                        output,
+                        include_all_sequences=not inputs[
+                            i
+                        ].generate_config.has_num_beams(),
+                    )
+                    _record_client_span_latency(span, output)
+                    span.finish()
+            if business_error is not None:
+                raise business_error
             return results
-
-        except grpc.RpcError as e:
-            self._handle_grpc_error(e, f"batch request: [{len(inputs)} items]")
-        except FtRuntimeException:
+        except grpc.RpcError as error:
+            rpc_status = error.code()
+            failure = error
+            self._handle_grpc_error(error, f"batch request: [{len(inputs)} items]")
+        except BaseException as error:
+            failure = error
+            if isinstance(error, asyncio.CancelledError) and response_call is not None:
+                rpc_status = await _wait_for_rpc_termination(
+                    response_call, timeout_seconds=RPC_CLEANUP_TIMEOUT_SECONDS
+                )
             raise
-        except Exception as e:
-            logging.error(f"batch rpc unknown error: {str(e)}")
-            raise e
+        finally:
+            error_type = (
+                "Cancelled" if isinstance(failure, asyncio.CancelledError) else ""
+            )
+            for span in item_spans:
+                if span is not None:
+                    span.finish(error=failure, error_type=error_type)
+            if rpc_span is not None:
+                _record_client_rpc_status(rpc_span, rpc_status)
+                rpc_span.finish(error=failure, error_type=error_type)
