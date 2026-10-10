@@ -94,6 +94,13 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_sparse_order_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_order_replay.py"],
+    deps = [":dsv41_sparse_precision_replay", "//rtp_llm:torch", "//rtp_llm:triton"],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
