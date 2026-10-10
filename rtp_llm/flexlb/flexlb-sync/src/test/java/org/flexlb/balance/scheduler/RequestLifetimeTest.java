@@ -1,19 +1,22 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.DecodeResources;
 import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.projection.WorkSnapshot;
-import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
-import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
+import org.flexlb.balance.prediction.PrefillPredictionBoundary;
+import static org.flexlb.balance.scheduler.ContextResult.*;
+import static org.flexlb.balance.scheduler.ExpirationTimer.Kind.*;
+import org.flexlb.balance.scheduler.AdmissionHandle;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -43,6 +46,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RequestLifetimeTest {
+
     @Test
     void deadlineUsesTheActualDeliveryClockAndPreservesZeroAndSaturation() {
         WorkSnapshot preceding = emptyWork(1_000L);
@@ -70,8 +74,8 @@ class RequestLifetimeTest {
                 new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
                 new WorkSnapshot.RequestWork(2L, WorkSnapshot.Phase.ENGINE_QUEUED, 7_000L),
                 new WorkSnapshot.RequestWork(3L, WorkSnapshot.Phase.COMMITTED, 3_000L)), List.of(
-                new WorkSnapshot.BatchWork(4L, List.of(4L), WorkSnapshot.Phase.ENGINE_RUNNING, 8_000L),
-                new WorkSnapshot.BatchWork(5L, List.of(5L), WorkSnapshot.Phase.ENGINE_QUEUED, 4_000L)), 0L);
+                new WorkSnapshot.BatchWork(List.of(4L), WorkSnapshot.Phase.ENGINE_RUNNING, OptionalLong.of(8_000L)),
+                new WorkSnapshot.BatchWork(List.of(5L), WorkSnapshot.Phase.ENGINE_QUEUED, OptionalLong.of(4_000L))), 0L);
         assertEquals(63_500L, visibilityDeadline(preceding, 11_000L, 1, 500L).orElseThrow());
         assertEquals(56_000L, visibilityDeadline(preceding, 11_000L, 1, 11_000L).orElseThrow());
         assertEquals(66_000L, visibilityDeadline(preceding, 11_000L, 1, 31_000L).orElseThrow());
@@ -80,7 +84,7 @@ class RequestLifetimeTest {
     @Test
     void unknownPredecessorsNeverBecomeACompleteEstimate() {
         WorkSnapshot unknownBatch = new WorkSnapshot(1_000L, List.of(), List.of(
-                new WorkSnapshot.BatchWork(1L, List.of(1L), WorkSnapshot.Phase.COMMITTED,
+                new WorkSnapshot.BatchWork(List.of(1L), WorkSnapshot.Phase.COMMITTED,
                         OptionalLong.empty())), 0L);
         for (WorkSnapshot preceding : List.of(unknownWork(1_000L), unknownBatch)) {
             assertTrue(visibilityDeadline(preceding, 20_000L, 2, 60_000L).isEmpty());
@@ -97,350 +101,376 @@ class RequestLifetimeTest {
     @Test
     void latePrefillCompletionStartsOneFreshHandoffWindow() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "updateDeliveryPredictionLocked", emptyWork(1_000L), 100L, 1_000L);
-            assertEquals(11_200L, fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            observePrefillAt(fixture, false, 1_100L);
-            assertTrue(fixture.slot.decisionDeadlineAtMs().isEmpty());
-            observePrefillAt(fixture, true, 5_000L);
-            assertEquals(15_000L, fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            observePrefillAt(fixture, true, 5_020L);
-            assertEquals(15_000L, fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            var timer = mock(ExpirationTimer.DecisionDeadline.class);
-            when(timer.deadlineAtMs()).thenReturn(15_000L);
-            assertTrue(fixture.slot.installDecisionDeadline(timer));
-            assertTrue(fixture.slot.onDecisionVisibilityDeadline(timer).needsConfirmation());
-            org.springframework.test.util.ReflectionTestUtils.<DecodeAcceptance>invokeMethod(fixture.slot, "markDecodeAcceptedLocked");
-            assertTrue(fixture.slot.decisionDeadlineAtMs().isEmpty());
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "needsDecisionConfirmationLocked"));
-        }
+            predictDelivery(fixture.requestContext, emptyWork(1_000L), 100L, 1_000L);
+            assertEquals(11_200L, deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow());
+            recordPrefillStatusAt(fixture, false, 1_100L);
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).isEmpty());
+            recordPrefillStatusAt(fixture, true, 5_000L);
+            assertEquals(15_000L, deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow());
+            recordPrefillStatusAt(fixture, true, 5_020L);
+            assertEquals(15_000L, deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow());
+            var timer = fixture.requestContext.snapshot().deadlines().visibility();
+
+            assertTrue(matches(fixture.requestContext, timer));
+            expire(fixture.requestContext, timer);
+            assertTrue(RequestState.from(fixture.requestContext.snapshot()).detail().startsWith("SUSPECTED_LOST"));
+            decodeAccepted(fixture.requestContext);
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).isEmpty());
+            assertFalse(needsConfirmation(fixture.requestContext));
     }
 
     @Test
     void completionAndAcceptanceBeforeDeliveryRemainAuthoritative() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            observePrefillAt(fixture, true, 1_000L);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "updateDeliveryPredictionLocked", emptyWork(1_000L), 100L, 1_010L);
-            assertEquals(11_000L, fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            org.springframework.test.util.ReflectionTestUtils.<DecodeAcceptance>invokeMethod(fixture.slot, "markDecodeAcceptedLocked");
-            observePrefillAt(fixture, false, 2_000L);
-            observePrefillAt(fixture, true, 2_000L);
-            assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "decodeOwnsRequestLocked"));
-            assertTrue(fixture.slot.decisionDeadlineAtMs().isEmpty());
-            assertThrows(IllegalStateException.class,
-                    () -> org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "updateDeliveryPredictionLocked", emptyWork(2_000L), 100L, 2_000L));
-        }
+            recordPrefillStatusAt(fixture, true, 1_000L);
+            predictDelivery(fixture.requestContext, emptyWork(1_000L), 100L, 1_010L);
+            assertEquals(11_000L, deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow());
+            decodeAccepted(fixture.requestContext);
+            recordPrefillStatusAt(fixture, false, 2_000L);
+            recordPrefillStatusAt(fixture, true, 2_000L);
+            assertTrue(fixture.requestContext.snapshot().engine().decodeAccepted());
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).isEmpty());
+            assertThrows(IllegalStateException.class, () -> predictDelivery(fixture.requestContext, emptyWork(2_000L), 100L, 2_000L));
     }
 
     @Test
     void unknownPredictionCanStillStartHandoffDetectionAfterPrefillCompletes() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "updateDeliveryPredictionLocked", unknownWork(1_000L), 100L, 1_000L);
-            assertTrue(fixture.slot.decisionDeadlineAtMs().isEmpty());
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "needsDecisionConfirmationLocked"));
-            observePrefillAt(fixture, true, 2_000L);
-            assertEquals(12_000L, fixture.slot.decisionDeadlineAtMs().orElseThrow());
-        }
+            predictDelivery(fixture.requestContext, unknownWork(1_000L), 100L, 1_000L);
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).isEmpty());
+            assertFalse(needsConfirmation(fixture.requestContext));
+            recordPrefillStatusAt(fixture, true, 2_000L);
+            assertEquals(12_000L, deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow());
     }
 
     @Test
     void longRunningPrefillStillReceivesTheFullHandoffWindow() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "updateDeliveryPredictionLocked", emptyWork(1_000L), 100L, 1_000L);
-            observePrefillAt(fixture, false, 1_100L);
-            assertTrue(fixture.slot.decisionDeadlineAtMs().isEmpty());
-            observePrefillAt(fixture, true, 3_601_000L);
-            assertEquals(3_611_000L, fixture.slot.decisionDeadlineAtMs().orElseThrow());
-        }
+            predictDelivery(fixture.requestContext, emptyWork(1_000L), 100L, 1_000L);
+            recordPrefillStatusAt(fixture, false, 1_100L);
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).isEmpty());
+            recordPrefillStatusAt(fixture, true, 3_601_000L);
+            assertEquals(3_611_000L, deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow());
     }
 
     @Test
     void inactivityWatchSurvivesRouteResponseAndDecodeAcceptance() {
         Fixture fixture = fixture(true);
-        var exact = mock(ExpirationTimer.InactivityDeadline.class);
-        synchronized (fixture.slot) {
-            assertTrue(fixture.slot.installInactivityDeadline(exact));
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
-            org.springframework.test.util.ReflectionTestUtils.<DecodeAcceptance>invokeMethod(fixture.slot, "markDecodeAcceptedLocked");
-            assertTrue(fixture.slot.future().completeOwned(new Response()));
-            assertTrue(fixture.slot.future().isDone());
-            assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", exact));
-            assertFalse(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", exact));
-        }
+        var exact = fixture.requestContext.snapshot().deadlines().inactivity();
+            assertTrue(matches(fixture.requestContext, exact));
+            startDelivery(fixture.requestContext);
+            acknowledge(fixture.requestContext);
+            decodeAccepted(fixture.requestContext);
+            assertTrue(((RequestFuture) fixture.requestContext.data().getFuture()).completeOwned(new Response()));
+            assertTrue(((RequestFuture) fixture.requestContext.data().getFuture()).isDone());
+            assertNotNull(checkBeforeInactivityExpiry(fixture.requestContext, exact));
+            assertNull(checkBeforeInactivityExpiry(fixture.requestContext, exact));
     }
 
     @Test
     void missingEngineEvidenceMarksSuspicionWithoutReleasingRequestOwnership() {
         Fixture fixture = fixture(true);
-        var exact = mock(ExpirationTimer.DecisionDeadline.class);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            when(exact.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            assertTrue(fixture.slot.installDecisionDeadline(exact));
-            var expiry = fixture.slot.onDecisionVisibilityDeadline(exact);
-            assertTrue(expiry.needsConfirmation());
-            assertSame(fixture.item, expiry.item());
-            assertTrue(fixture.slot.isLiveGeneration());
-            assertFalse(fixture.slot.snapshot().state().isTerminal());
-            assertTrue(fixture.slot.snapshot().detail().contains("SUSPECTED_LOST"));
+        startDelivery(fixture.requestContext);
+        startPrediction(fixture.scheduler, fixture.requestContext);
+        var exact = fixture.requestContext.snapshot().deadlines().visibility();
 
-            assertNull(fixture.slot.onDecisionVisibilityDeadline(exact), "timer is consumed once");
-        }
+            assertTrue(matches(fixture.requestContext, exact));
+            expire(fixture.requestContext, exact);
+            assertSame(fixture.item, fixture.requestContext.snapshot().route());
+            assertTrue(needsConfirmation(fixture.requestContext));
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).isEmpty());
+            assertNull(fixture.requestContext.snapshot().deadlines().visibility());
+            assertTrue(fixture.requestContext.snapshot().phase() != Phase.CLOSED);
+            assertFalse(RequestState.from(fixture.requestContext.snapshot()).state().isTerminal());
+            assertTrue(RequestState.from(fixture.requestContext.snapshot()).detail().contains("SUSPECTED_LOST"));
+            assertStaleDecisionHasNoEffect(fixture, exact);
     }
 
     @Test
     void runningPrefillMayExceedPredictionAndOnlyCompletedHandoffCanBecomeUnresolved() {
         Fixture fixture = fixture(true);
-        var exact = mock(ExpirationTimer.DecisionDeadline.class);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            when(exact.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            assertTrue(fixture.slot.installDecisionDeadline(exact));
-            observePrefill(fixture.slot, fixture.item, false);
-            assertNull(fixture.slot.onDecisionVisibilityDeadline(exact));
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "needsDecisionConfirmationLocked"));
-            observePrefill(fixture.slot, fixture.item, true);
-            assertTrue(fixture.slot.decisionDeadlineAtMs().orElseThrow() > System.currentTimeMillis());
-            org.springframework.test.util.ReflectionTestUtils.<DecodeAcceptance>invokeMethod(fixture.slot, "markDecodeAcceptedLocked");
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "needsDecisionConfirmationLocked"));
-        }
+        startDelivery(fixture.requestContext);
+        startPrediction(fixture.scheduler, fixture.requestContext);
+        var exact = fixture.requestContext.snapshot().deadlines().visibility();
+
+            assertTrue(matches(fixture.requestContext, exact));
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            assertStaleDecisionHasNoEffect(fixture, exact);
+            assertFalse(needsConfirmation(fixture.requestContext));
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, true);
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow() > System.currentTimeMillis());
+            decodeAccepted(fixture.requestContext);
+            assertFalse(needsConfirmation(fixture.requestContext));
     }
 
     @Test
     void pdfusionEvidenceEndsMissingRequestDetectionButKeepsInactivityWatch() {
         Fixture fixture = fixture(false);
-        var full = mock(ExpirationTimer.InactivityDeadline.class);
-        var decision = mock(ExpirationTimer.DecisionDeadline.class);
-        synchronized (fixture.slot) {
-            fixture.slot.installInactivityDeadline(full);
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            when(decision.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            fixture.slot.installDecisionDeadline(decision);
-            observePrefill(fixture.slot, fixture.item, false);
-            assertNull(fixture.slot.onDecisionVisibilityDeadline(decision));
-            assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", full));
-        }
+        var full = fixture.requestContext.snapshot().deadlines().inactivity();
+        matches(fixture.requestContext, full);
+        startDelivery(fixture.requestContext);
+        startPrediction(fixture.scheduler, fixture.requestContext);
+        var decision = fixture.requestContext.snapshot().deadlines().visibility();
+
+            matches(fixture.requestContext, decision);
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            assertStaleDecisionHasNoEffect(fixture, decision);
+            assertNotNull(checkBeforeInactivityExpiry(fixture.requestContext, full));
     }
 
     @Test
     void committedInactivityCancellationWinsOverLateHandoffEvidence() {
         Fixture fixture = fixture(true);
-        var decision = mock(ExpirationTimer.DecisionDeadline.class);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            RequestLifecycleTestSupport.recordCancellation(fixture.slot, CancelReason.DEADLINE_EXCEEDED, "request inactive");
-            when(decision.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            fixture.slot.installDecisionDeadline(decision);
-            assertFalse(fixture.slot.onDecisionVisibilityDeadline(decision).needsConfirmation());
-            observePrefill(fixture.slot, fixture.item, true);
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "needsDecisionConfirmationLocked"));
-        }
+        startDelivery(fixture.requestContext);
+        startPrediction(fixture.scheduler, fixture.requestContext);
+        var decision = fixture.requestContext.snapshot().deadlines().visibility();
+            cancel(fixture.requestContext, CancelReason.DEADLINE_EXCEEDED, "request inactive");
+
+            matches(fixture.requestContext, decision);
+            expire(fixture.requestContext, decision);
+            assertFalse(RequestState.from(fixture.requestContext.snapshot()).detail().startsWith("SUSPECTED_LOST"));
+            assertEquals(CancelReason.DEADLINE_EXCEEDED, fixture.requestContext.snapshot().cancellation() == null ? null : fixture.requestContext.snapshot().cancellation().reason());
+            assertFalse(needsConfirmation(fixture.requestContext));
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, true);
+            assertFalse(needsConfirmation(fixture.requestContext));
     }
 
     @Test
     void latePrefillEvidenceInvalidatesTheExpiredDecision() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            assertTrue(expireDecision(fixture).needsConfirmation());
-            observePrefill(fixture.slot, fixture.item, false);
-            org.springframework.test.util.ReflectionTestUtils.<Void>invokeMethod(fixture.slot, "reconcileDecisionEvidenceLocked");
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "needsDecisionConfirmationLocked"));
-            assertFalse(fixture.slot.snapshot().detail().contains("SUSPECTED_LOST"));
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "decodeOwnsRequestLocked"));
-        }
+            expireDecision(fixture);
+            assertTrue(RequestState.from(fixture.requestContext.snapshot()).detail().startsWith("SUSPECTED_LOST"));
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            assertFalse(needsConfirmation(fixture.requestContext));
+            assertFalse(RequestState.from(fixture.requestContext.snapshot()).detail().contains("SUSPECTED_LOST"));
+            assertFalse(fixture.requestContext.snapshot().engine().decodeAccepted());
     }
 
     @Test
     void delayedUncertaintyCannotReplaceMatchingEngineEvidence() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
             expireDecision(fixture);
-            observePrefill(fixture.slot, fixture.item, false);
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "markAwaitingConfirmationLocked", "late transport uncertainty");
-            assertFalse(fixture.slot.snapshot().detail().contains("SUSPECTED_LOST"));
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "hasCancellationFirstCauseLocked"));
-            observePrefill(fixture.slot, fixture.item, true);
-            assertTrue(fixture.slot.decisionDeadlineAtMs().orElseThrow() > System.currentTimeMillis());
-        }
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, false);
+            uncertain(fixture.requestContext);
+            assertFalse(RequestState.from(fixture.requestContext.snapshot()).detail().contains("SUSPECTED_LOST"));
+            assertNull(fixture.requestContext.snapshot().cancellation());
+            preparePrefillStatusEffects(fixture.scheduler, fixture.requestContext, fixture.item, true);
+            assertTrue(deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow() > System.currentTimeMillis());
     }
 
     @Test
     void uncertainDeliveryKeepsTheInactivityDeadlineAndDoesNotCancelTheRequest() {
         Fixture fixture = fixture(true);
-        var deadline = mock(ExpirationTimer.InactivityDeadline.class);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            assertTrue(fixture.slot.installInactivityDeadline(deadline));
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "markAwaitingConfirmationLocked", "ambiguous transport");
-            assertTrue(fixture.slot.snapshot().detail().contains("SUSPECTED_LOST"));
-            assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "hasCancellationFirstCauseLocked"));
-            assertEquals(RequestState.Phase.DISPATCHING, fixture.slot.snapshot().state());
-            assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", deadline));
-            assertTrue(fixture.slot.inactivityDeadlineAtMs().isPresent());
-            assertSame(fixture.item, fixture.slot.activeItem());
-        }
+        var deadline = fixture.requestContext.snapshot().deadlines().inactivity();
+            startDelivery(fixture.requestContext);
+            startPrediction(fixture.scheduler, fixture.requestContext);
+            assertTrue(matches(fixture.requestContext, deadline));
+            uncertain(fixture.requestContext);
+            assertTrue(RequestState.from(fixture.requestContext.snapshot()).detail().contains("SUSPECTED_LOST"));
+            assertNull(fixture.requestContext.snapshot().cancellation());
+            assertEquals(RequestState.Phase.DISPATCHING, RequestState.from(fixture.requestContext.snapshot()).state());
+            assertNotNull(checkBeforeInactivityExpiry(fixture.requestContext, deadline));
+            assertTrue(deadlineAt(fixture.requestContext, INACTIVITY).isPresent());
+            assertSame(fixture.item, fixture.requestContext.snapshot().route());
     }
 
     @Test
     void cancellationFirstCauseCannotSuppressTheInactivityWatch() {
         Fixture fixture = fixture(true);
-        var deadline = mock(ExpirationTimer.InactivityDeadline.class);
-        var renewed = mock(ExpirationTimer.InactivityDeadline.class);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            assertTrue(fixture.slot.installInactivityDeadline(deadline));
-            RequestLifecycleTestSupport.recordCancellation(fixture.slot, CancelReason.CLIENT_CANCELLED, "client cancellation");
-            assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", deadline));
-            assertTrue(fixture.slot.installInactivityDeadline(renewed));
-            assertFalse(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", deadline));
-            assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", renewed));
-            assertEquals(CancelReason.CLIENT_CANCELLED, RequestLifecycleTestSupport.<CancelReason>inspect(fixture.slot, "requireCancellationFirstCauseLocked"));
+        var deadline = fixture.requestContext.snapshot().deadlines().inactivity();
+            startDelivery(fixture.requestContext);
+            assertTrue(matches(fixture.requestContext, deadline));
+            cancel(fixture.requestContext, CancelReason.CLIENT_CANCELLED, "client cancellation");
+            assertNotNull(checkBeforeInactivityExpiry(fixture.requestContext, deadline));
+            var renewed = fixture.requestContext.snapshot().deadlines().inactivity();
+            assertTrue(matches(fixture.requestContext, renewed));
+            assertNull(checkBeforeInactivityExpiry(fixture.requestContext, deadline));
+            assertNotNull(checkBeforeInactivityExpiry(fixture.requestContext, renewed));
+            assertEquals(CancelReason.CLIENT_CANCELLED, fixture.requestContext.snapshot().cancellation().reason());
+    }
+
+    @ParameterizedTest
+    @CsvSource({ "PREFILL,true", "DECODE,true", "PREFILL,false", "DECODE,false" })
+    void uncertaintyAllowsActualAckIndependentlyOfMatchingEngineEvidence(RoleType evidenceSource, boolean ackBeforeEvidence) throws Exception {
+        FlexlbConfig config = SchedulingTestConfig.batchConfig();
+        ConfigService service = mock(ConfigService.class);
+        when(service.loadBalanceConfig()).thenReturn(config);
+        AbstractRequestScheduler registry = SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),
+                mock(RequestSchedulerReporter.class), mock(RecentCacheKeyTraceReporter.class));
+        try {
+            RequestContext context = RequestProtocolTestSupport.context(config, 202L);
+            var future = RequestProtocolTestSupport.register(registry, context);
+            PrefillEndpoint prefill = mock(PrefillEndpoint.class);
+            DecodeEndpoint decode = RequestProtocolTestSupport.decodeEndpoint();
+            var reservation = new DecodeResources.ReservationHandle(1L, 202L, 1L);
+            RequestRoute item = SchedulingTestConfig.createRoute(context, new Response(), prefillServer(), null,
+                    prefill, decode, reservation, System.currentTimeMillis());
+            RequestProtocolTestSupport.bind(registry, new RequestProtocolTestSupport.Registered(item, future));
+            DeliveryClaim claim = RequestProtocolTestSupport.claimBatchWithoutPrediction(registry, item, 7L, () -> true);
+            assertNotNull(claim);
+            startPrediction(registry, context);
+            expire(context, context.snapshot().deadlines().visibility());
+            assertTrue(RequestState.from(context.snapshot()).detail().startsWith("SUSPECTED_LOST"));
+            assertNull(context.snapshot().cancellation());
+            if (ackBeforeEvidence) {
+                registry.onDeliveryEvidence(claim, new TransportResult(claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+                assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess(), "uncertainty cannot hold a real EnqueueBatch ACK");
+            } else { assertFalse(future.isDone()); }
+            registry.onEngineEvidence(context, new EngineEvidence(item, evidenceSource == RoleType.DECODE ? reservation : null,
+                    evidenceSource, EngineKind.ACTIVE, 0L, null, System.currentTimeMillis()));
+            if (!ackBeforeEvidence) {
+                assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
+                registry.onDeliveryEvidence(claim, new TransportResult(claim, DeliveryResult.delivered(), System.currentTimeMillis()));
+            }
+            assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess());
+            RequestProtocolTestSupport.awaitCondition(() -> evidenceSource == RoleType.DECODE
+                    ? context.snapshot().engine().decodeAccepted() : !needsConfirmation(context));
+            assertEquals(evidenceSource == RoleType.DECODE, context.snapshot().engine().decodeAccepted());
+            assertTrue(context.snapshot().phase() != Phase.CLOSED);
+            preparePrefillStatusEffects(registry, context, item, true);
+            assertFalse(needsConfirmation(context));
+            registry.onEngineEvidence(context, new EngineEvidence(item, reservation, RoleType.DECODE,
+                    EngineKind.COMPLETED, 0L, null, System.currentTimeMillis()));
+            SchedulerTestSupport.awaitRequestWork(registry.runtime);
+        } finally {
+            registry.runtime.shutdown();
         }
     }
 
     @ParameterizedTest
-    @CsvSource({"PREFILL,true", "DECODE,true", "PREFILL,false", "DECODE,false"})
-    void uncertaintyAllowsActualAckIndependentlyOfMatchingEngineEvidence(
-            RoleType evidenceSource, boolean ackBeforeEvidence) throws Exception {
-        FlexlbConfig config = SchedulingTestConfig.batchConfig();
-        ConfigService service = mock(ConfigService.class);
-        when(service.loadBalanceConfig()).thenReturn(config);
-        RequestRegistry registry = new RequestRegistry(service, mock(BatchSchedulerReporter.class),
-                mock(RequestSchedulerReporter.class));
-        try {
-            BalanceContext context = RequestLifecycleTestSupport.context(config, 202L);
-            var future = registry.register(context);
-            RequestSlot slot = registry.requestSlot(202L);
-            PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-            DecodeEndpoint decode = mock(DecodeEndpoint.class);
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, 202L, 1L);
-            ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillServer(), null,
-                    prefill, decode, reservation, System.currentTimeMillis());
-            RequestLifecycleTestSupport.bind(registry, new RequestLifecycleTestSupport.Registered(item, future));
-            DeliveryClaim claim = RequestLifecycleTestSupport.claimBatchWithoutPrediction(registry, item, 7L, () -> true);
-            assertNotNull(claim);
-            synchronized (slot) {
-                startPrediction(slot);
-                var deadline = mock(ExpirationTimer.DecisionDeadline.class);
-                when(deadline.deadlineAtMs()).thenReturn(slot.decisionDeadlineAtMs().orElseThrow());
-                assertTrue(slot.installDecisionDeadline(deadline));
-                assertTrue(slot.onDecisionVisibilityDeadline(deadline).needsConfirmation());
-                assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(slot, "hasCancellationFirstCauseLocked"));
-            }
-            if (ackBeforeEvidence) {
-                claim.complete(DeliveryResult.delivered());
-            }
-            if (ackBeforeEvidence) {
-                assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess(),
-                        "uncertainty cannot hold a real EnqueueBatch ACK");
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"install", "reject", "throw"})
+    void earlyTimerFiresOnlyAfterSuccessfulInstallation(String outcome) throws Exception {
+        Fixture fixture = fixture(true);
+        RequestContext context = fixture.requestContext;
+        AbstractRequestScheduler scheduler = fixture.scheduler;
+        var failure = new IllegalStateException("installation failed");
+        try (var timer = new ExpirationTimer(scheduler.requests)) {
+            var original = (java.util.concurrent.ScheduledThreadPoolExecutor)
+                    org.springframework.test.util.ReflectionTestUtils.getField(timer, "executor");
+            var executor = org.mockito.Mockito.spy(original);
+            org.springframework.test.util.ReflectionTestUtils.setField(timer, "executor", executor);
+            var token = new ExpirationTimer.Token(context, REQUEST, 10L, 1L);
+            var interceptFirst = new java.util.concurrent.atomic.AtomicBoolean(true);
+            var exactHandle = new java.util.concurrent.atomic.AtomicReference<Object>();
+            doAnswer(call -> {
+                var scheduled = call.callRealMethod();
+                if (!interceptFirst.compareAndSet(true, false)) { return scheduled; }
+                var slots = (java.util.Map<?, ?>) org.springframework.test.util.ReflectionTestUtils.getField(timer, "slots");
+                var handles = (java.util.Map<?, ?>) org.springframework.test.util.ReflectionTestUtils.invokeMethod(slots.get(context), "handles");
+                exactHandle.set(handles.get(REQUEST));
+                // A zero-delay task has run but cannot publish until schedule returns successfully.
+                executor.submit(() -> { }).get(5, TimeUnit.SECONDS);
+                verify(scheduler, never()).onDeadline(any(), anyLong());
+                if ("reject".equals(outcome)) { timer.update(context, new ExpirationTimer.Plan(11L, null, null, null)); }
+                if ("throw".equals(outcome)) { throw failure; }
+                return scheduled;
+            }).when(executor).schedule(any(Runnable.class), anyLong(), any(TimeUnit.class));
+            if ("throw".equals(outcome)) {
+                assertSame(failure, assertThrows(IllegalStateException.class,
+                        () -> timer.update(context, new ExpirationTimer.Plan(10L, token, null, null))));
             } else {
-                assertFalse(future.isDone());
+                timer.update(context, new ExpirationTimer.Plan(10L, token, null, null));
+                if ("install".equals(outcome)) { verify(scheduler).onDeadline(org.mockito.ArgumentMatchers.eq(token), anyLong()); }
             }
-
-            EndpointEventProjector projector = new EndpointEventProjector(registry);
-            if (evidenceSource == RoleType.PREFILL) {
-                projector.onPrefillStatus(prefill, RoleType.PREFILL,
-                        List.of(PrefillState.WorkerStatusFact.active(item)));
-            } else {
-                projector.onDecodeStatus(decode, List.of(DecodeEndpoint.WorkerStatusFact.active(reservation)));
-            }
-
-            if (!ackBeforeEvidence) {
-                assertFalse(future.isDone(), "Engine activity cannot create an EnqueueBatch ACK");
-                claim.complete(DeliveryResult.delivered());
-            }
-            assertTrue(future.get(1L, TimeUnit.SECONDS).isSuccess());
-            synchronized (slot) {
-                assertEquals(evidenceSource == RoleType.DECODE, RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
-                assertTrue(slot.isLiveGeneration());
-                observePrefill(slot, item, true);
-                assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(slot, "needsDecisionConfirmationLocked"));
-            }
-        } finally {
-            if (registry.closeAdmissionAndAwaitMutations()) {
-                registry.closeOutstandingAndTerminalize();
-                registry.closeExpiration();
-                registry.closePublisher();
-            }
+            assertNotNull(exactHandle.get());
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(exactHandle.get(), "fire");
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(exactHandle.get(), "publish");
+            org.springframework.test.util.ReflectionTestUtils.invokeMethod(exactHandle.get(), "cancel");
+            if (!"install".equals(outcome)) { verify(scheduler, never()).onDeadline(any(), anyLong()); }
+            else { verify(scheduler, org.mockito.Mockito.times(1)).onDeadline(org.mockito.ArgumentMatchers.eq(token), anyLong()); }
+            timer.remove(context);
+            timer.update(context, new ExpirationTimer.Plan(12L, null, null, null));
+            assertTrue(executor.getQueue().isEmpty());
         }
     }
 
     @Test
     void timerChecksInactivityAfterThePublicFutureHasCompleted() throws Exception {
-        Fixture fixture = fixture(true, true);
-        RequestRegistry registry = mock(RequestRegistry.class);
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(fixture.config);
-        when(registry.isCurrentSlot(fixture.slot)).thenReturn(true);
-        when(registry.snapshotSlots()).thenReturn(List.of(fixture.slot));
+        Fixture fixture = fixture(true);
+        AbstractRequestScheduler registry = fixture.scheduler;
         doAnswer(invocation -> {
-            synchronized (fixture.slot) {
-                assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", invocation.getArgument(0, ExpirationTimer.InactivityDeadline.class)));
-                assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "requestInactiveLocked", invocation.getArgument(1, Long.class)));
-                finishInactivity(fixture.slot);
-            }
+            var token = invocation.getArgument(0, ExpirationTimer.Token.class);
+            long nowMs = invocation.getArgument(1, Long.class);
+            var update = fixture.requestContext.recordDeadline(token, nowMs, null);
+            assertNotNull(update.after().pendingEnd());
+            finishInactivity(fixture.requestContext, nowMs);
             return null;
-        }).when(fixture.slot).onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-        try (var timer = new ExpirationTimer(registry, config)) {
-            synchronized (fixture.slot) {
-                RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-                RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
-                fixture.slot.future().completeOwned(new Response());
-                // This test expires an already delivered request; shortening
-                // the timeout before claim would instead reject the handoff.
-                fixture.slot.configureInactivityTimeout(20L);
-            }
-            assertNotNull(timer.attachInactivityDeadline(fixture.slot));
-            verify(fixture.slot, timeout(1000L).times(1)).onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-            verify(fixture.slot, never()).cancelRequest(anyLong(), any());
+        }).when(registry).onDeadline(any(), anyLong());
+        try (var timer = new ExpirationTimer(registry.requests)) {
+            startDelivery(fixture.requestContext);
+            acknowledge(fixture.requestContext);
+            ((RequestFuture) fixture.requestContext.data().getFuture()).completeOwned(new Response());
+            shortenInactivity(fixture.requestContext, 20L);
+            assertNotNull(fixture.requestContext.snapshot().deadlines().inactivity());
+            timer.update(fixture.requestContext, fixture.requestContext.snapshot().deadlines());
+            verify(registry, timeout(1000L).times(1)).onDeadline(any(), anyLong());
+            verify(registry, never()).cancel(anyLong(), anyLong(), any());
         }
     }
 
     @Test
+    void timerCloseWaitsForAnAlreadyStartedInactivityHandoff() throws Exception {
+        Fixture fixture = fixture(true);
+        AbstractRequestScheduler registry = fixture.scheduler;
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            entered.countDown();
+            boolean interrupted = false;
+            while (true) {
+                try { release.await(); break; }
+                catch (InterruptedException ignored) { interrupted = true; }
+            }
+            if (interrupted) { Thread.currentThread().interrupt(); }
+            return null;
+        }).when(registry).onDeadline(any(), anyLong());
+        ExpirationTimer timer = new ExpirationTimer(registry.requests);
+        Thread closer = null;
+        try {
+            shortenInactivity(fixture.requestContext, 20L);
+            timer.update(fixture.requestContext, fixture.requestContext.snapshot().deadlines());
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            closer = new Thread(timer::close);
+            closer.start();
+            assertTrue(closer.isAlive(), "close must wait for the running timer producer");
+        } finally {
+            release.countDown();
+            timer.close();
+            if (closer != null) { closer.join(5_000); }
+        }
+        assertFalse(closer.isAlive());
+    }
+
+    @Test
     void renewedActivityRearmsTheTimerUntilTheNewInactivityDeadline() throws Exception {
-        Fixture fixture = fixture(true, true);
-        RequestRegistry registry = mock(RequestRegistry.class);
-        ConfigService config = mock(ConfigService.class);
-        when(config.loadBalanceConfig()).thenReturn(fixture.config);
-        when(registry.isCurrentSlot(fixture.slot)).thenReturn(true);
-        when(registry.snapshotSlots()).thenReturn(List.of(fixture.slot));
-        long start = fixture.slot.createdAtMs();
+        Fixture fixture = fixture(true);
+        AbstractRequestScheduler registry = fixture.scheduler;
+        long start = fixture.requestContext.snapshot().createdAtMs();
         AtomicLong now = new AtomicLong(start + 100L);
         AtomicInteger checks = new AtomicInteger();
         CountDownLatch expired = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            synchronized (fixture.slot) {
-                assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(fixture.slot, "consumeInactivityDeadlineLocked", invocation.getArgument(0, ExpirationTimer.InactivityDeadline.class)));
-                if (checks.incrementAndGet() == 1) {
-                    // A matching status wins after the old timer fired but before cancellation.
-                    org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                            PrefillState.WorkerStatusFact.active(fixture.item), start + 50L);
-                    assertFalse(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "requestInactiveLocked", invocation.getArgument(1, Long.class)));
+        try (var timer = new ExpirationTimer(registry.requests, now::get)) {
+            doAnswer(invocation -> {
+                var token = invocation.getArgument(0, ExpirationTimer.Token.class);
+                long nowMs = invocation.getArgument(1, Long.class);
+                boolean renewed = checks.incrementAndGet() == 1;
+                if (renewed) { recordPrefill(fixture.requestContext, false, start + 50L); }
+                var update = fixture.requestContext.recordDeadline(token, nowMs, null);
+                if (renewed) {
+                    assertNull(update.after().pendingEnd(), "renewed activity must keep the request alive");
                     now.set(start + 150L);
+                    timer.update(fixture.requestContext, fixture.requestContext.snapshot().deadlines());
                 } else {
-                    assertTrue(RequestLifecycleTestSupport.<Boolean>inspect(fixture.slot, "requestInactiveLocked", invocation.getArgument(1, Long.class)));
-                    finishInactivity(fixture.slot);
+                    assertNotNull(update.after().pendingEnd());
+                    finishInactivity(fixture.requestContext, nowMs);
                     expired.countDown();
                 }
-            }
-            return null;
-        }).when(fixture.slot).onInactivityDeadline(any(ExpirationTimer.InactivityDeadline.class), anyLong());
-        try (var timer = new ExpirationTimer(registry, config, now::get)) {
-            synchronized (fixture.slot) {
-                fixture.slot.configureInactivityTimeout(100L);
-                RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-                RequestLifecycleTestSupport.markAcknowledged(fixture.slot);
-            }
-            assertNotNull(timer.attachInactivityDeadline(fixture.slot));
+                return null;
+            }).when(registry).onDeadline(any(), anyLong());
+            startDelivery(fixture.requestContext);
+            acknowledge(fixture.requestContext);
+            shortenInactivity(fixture.requestContext, 100L);
+            timer.update(fixture.requestContext, fixture.requestContext.snapshot().deadlines());
             assertTrue(expired.await(1L, TimeUnit.SECONDS));
             assertEquals(2, checks.get(), "the renewed request must retain a timer for later silence");
         }
@@ -449,47 +479,125 @@ class RequestLifetimeTest {
     @Test
     void oldVisibilityTimerCannotInstallAfterPrefillCompletion() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            long oldDeadline = fixture.slot.decisionDeadlineAtMs().orElseThrow();
-            var oldTimer = mock(ExpirationTimer.DecisionDeadline.class);
-            when(oldTimer.deadlineAtMs()).thenReturn(oldDeadline);
-            org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                    PrefillState.WorkerStatusFact.terminal(fixture.item,
-                            PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L), oldDeadline + 100L);
-            assertFalse(fixture.slot.installDecisionDeadline(oldTimer));
-            var handoffTimer = mock(ExpirationTimer.DecisionDeadline.class);
-            when(handoffTimer.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            assertTrue(fixture.slot.installDecisionDeadline(handoffTimer));
-            assertNull(fixture.slot.onDecisionVisibilityDeadline(oldTimer));
-            assertTrue(fixture.slot.onDecisionVisibilityDeadline(handoffTimer).needsConfirmation());
-        }
+            startDelivery(fixture.requestContext);
+            startPrediction(fixture.scheduler, fixture.requestContext);
+            long oldDeadline = deadlineAt(fixture.requestContext, VISIBILITY).orElseThrow();
+            var oldTimer = fixture.requestContext.snapshot().deadlines().visibility();
+
+            recordPrefill(fixture.requestContext, true, oldDeadline + 100L);
+            assertFalse(matches(fixture.requestContext, oldTimer));
+            var handoffTimer = fixture.requestContext.snapshot().deadlines().visibility();
+
+            assertTrue(matches(fixture.requestContext, handoffTimer));
+            assertStaleDecisionHasNoEffect(fixture, oldTimer);
+            expire(fixture.requestContext, handoffTimer);
+            assertTrue(RequestState.from(fixture.requestContext.snapshot()).detail().startsWith("SUSPECTED_LOST"));
     }
 
     @Test
     void decodeAcceptanceDetachesDecisionTimerButKeepsTheCancellationAndInactivityWatch() {
         Fixture fixture = fixture(true);
-        synchronized (fixture.slot) {
-            RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-            startPrediction(fixture.slot);
-            var timer = mock(ExpirationTimer.DecisionDeadline.class);
-            when(timer.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-            assertTrue(fixture.slot.installDecisionDeadline(timer));
-            RequestLifecycleTestSupport.recordCancellation(fixture.slot, CancelReason.CLIENT_CANCELLED, "client cancellation");
-            var acceptance = org.springframework.test.util.ReflectionTestUtils.<DecodeAcceptance>invokeMethod(fixture.slot, "markDecodeAcceptedLocked");
-            assertSame(timer, acceptance.detachedDecisionDeadline());
-            assertNull(fixture.slot.onDecisionVisibilityDeadline(timer));
-            assertEquals(CancelReason.CLIENT_CANCELLED, RequestLifecycleTestSupport.<CancelReason>inspect(fixture.slot, "requireCancellationFirstCauseLocked"));
-            assertTrue(fixture.slot.inactivityDeadlineAtMs().isPresent());
+            startDelivery(fixture.requestContext);
+            startPrediction(fixture.scheduler, fixture.requestContext);
+            var timer = fixture.requestContext.snapshot().deadlines().visibility();
+
+            assertTrue(matches(fixture.requestContext, timer));
+            cancel(fixture.requestContext, CancelReason.CLIENT_CANCELLED, "client cancellation");
+            var acceptance = decodeAccepted(fixture.requestContext);
+            assertSame(timer, acceptance);
+            assertStaleDecisionHasNoEffect(fixture, timer);
+            assertEquals(CancelReason.CLIENT_CANCELLED, fixture.requestContext.snapshot().cancellation().reason());
+            assertTrue(deadlineAt(fixture.requestContext, INACTIVITY).isPresent());
+    }
+
+    private static Update checkBeforeInactivityExpiry(RequestContext context, ExpirationTimer.Token exact) {
+        if (!matches(context, exact)) { return null; }
+        // An old wake-up still consumes its exact version after matching activity renews the deadline.
+        recordPrefill(context, false, exact.atMs() - 1L);
+        var update = context.recordDeadline(exact, exact.atMs(), null);
+        assertNull(update.after().pendingEnd(), "identity consumption must not expire the request");
+        return update;
+    }
+
+    private static void finishInactivity(RequestContext context, long nowMs) {
+        var terminal = (EndToken) ((Granted<?>) context.beginClose(null, nowMs)).value();
+        SchedulerTestSupport.settleTerminalFixture(context, terminal);
+        assertEquals(Phase.CLOSED, context.snapshot().phase());
+        assertEquals(RequestState.Phase.TIMED_OUT, RequestState.from(context.snapshot()).state());
+    }
+
+    private static OptionalLong deadlineAt(RequestContext context, ExpirationTimer.Kind kind) {
+        var token = context.snapshot().deadlines().token(kind);
+        return token == null ? OptionalLong.empty() : OptionalLong.of(token.atMs());
+    }
+
+    private static boolean matches(RequestContext context, ExpirationTimer.Token token) {
+        return token != null && context.snapshot().deadlines().token(token.kind()) == token;
+    }
+
+    private static void expire(RequestContext context, ExpirationTimer.Token token) {
+        if (token != null) { context.recordDeadline(token, token.atMs(), null); }
+    }
+
+    private static void startDelivery(RequestContext context) {
+        if (context.snapshot().delivery() != null) { return; }
+        long now = context.snapshot().lastWorkerAtMs();
+        var claim = (DeliveryClaim) ((Granted<?>) context.beginDelivery(context.snapshot().route(),
+                DeliveryClaimKind.BATCH_ENQUEUE, 1L, now)).value();
+        context.commitDelivery(claim, true, now);
+    }
+
+    private static void acknowledge(RequestContext context) {
+        var identity = context.snapshot().delivery().identity();
+        long now = context.snapshot().lastWorkerAtMs();
+        context.recordDeliveryResult(new TransportResult(identity, DeliveryResult.delivered(), now));
+        assertTrue(context.selectResponse(new ResponseCandidate(context, ResponseKind.CONFIRMATION, null, now)) instanceof Granted<?>);
+    }
+
+    private static ExpirationTimer.Token decodeAccepted(RequestContext context) {
+        var old = context.snapshot().deadlines().visibility();
+        var route = context.snapshot().route();
+        context.recordEngineEvidence(new EngineEvidence(route, route.decodeReservation(), RoleType.DECODE,
+                EngineKind.ACTIVE, 0L, null, context.snapshot().lastWorkerAtMs()));
+        return old;
+    }
+
+    private static void recordPrefill(RequestContext context, boolean completed, long nowMs) {
+        var route = context.snapshot().route();
+        context.recordEngineEvidence(new EngineEvidence(route, null,
+                route.decodeEp() == null ? RoleType.PDFUSION : RoleType.PREFILL,
+                completed ? EngineKind.COMPLETED : EngineKind.ACTIVE, 0L, null, nowMs));
+    }
+
+    private static boolean needsConfirmation(RequestContext context) {
+        var state = context.snapshot();
+        return state.cancellation() == null && state.outcome() == null && !state.engine().decodeAccepted()
+                && !(state.engine().prefillObserved() && state.engine().prefillCompletedAtMs() == 0L)
+                && (state.engine().visibilityOverdue() || state.delivery() != null && state.delivery().send() == SendState.UNKNOWN);
+    }
+
+    private static void cancel(RequestContext context, CancelReason reason, String detail) {
+        if (reason == CancelReason.DEADLINE_EXCEEDED) {
+            var deadline = context.snapshot().deadlines().inactivity();
+            context.recordDeadline(deadline, deadline.atMs(), new CancellationFacts(reason,
+                    org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED, detail, null));
+        } else {
+            context.requestCancel(new Cancellation(0L, reason, false, context.snapshot().lastWorkerAtMs(),
+                    org.flexlb.dao.loadbalance.StrategyErrorType.BATCH_SLO_EXPIRED, detail));
         }
     }
 
-    private static void finishInactivity(RequestSlot slot) {
-        TerminalAction terminal = org.springframework.test.util.ReflectionTestUtils.<TerminalAction>invokeMethod(slot, "claimTerminalActionLocked", null,
-                TerminalOutcome.timeout("request inactive"), null, false);
-        assertNotNull(terminal);
-        assertNotNull(slot.commitTerminalRecord(terminal).terminal());
+    private static void uncertain(RequestContext context) {
+        context.recordDeliveryResult(new TransportResult(context.snapshot().delivery().identity(),
+                DeliveryResult.uncertain(new IllegalStateException("sender result unknown")), context.snapshot().lastWorkerAtMs()));
+    }
+
+    private static void shortenInactivity(RequestContext context, long durationMs) {
+        org.springframework.test.util.ReflectionTestUtils.setField(context, "inactivityMs", durationMs);
+        var old = context.snapshot().deadlines().inactivity();
+        // Recompute the immutable desired plan without consuming the previous wake-up.
+        recordPrefill(context, false, context.snapshot().lastWorkerAtMs());
+        assertTrue(context.snapshot().deadlines().inactivity().atMs() <= old.atMs());
     }
 
     private static WorkSnapshot emptyWork(long capturedAtMs) {
@@ -500,64 +608,78 @@ class RequestLifetimeTest {
         return new WorkSnapshot(capturedAtMs, List.of(), List.of(), 1L);
     }
 
-    private static OptionalLong visibilityDeadline(WorkSnapshot preceding, long unstartedWorkMs,
-                                                   double lifetime, long deliveredAtMs) {
-        Fixture fixture = fixture(true);
-        fixture.config.getRequestLifecycle().getDecision().setLifetime(lifetime);
-        synchronized (fixture.slot) {
-            org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.slot, "updateDeliveryPredictionLocked", preceding, unstartedWorkMs, deliveredAtMs);
-            return fixture.slot.decisionDeadlineAtMs();
-        }
+    private static OptionalLong visibilityDeadline(WorkSnapshot preceding, long unstartedWorkMs, double lifetime, long deliveredAtMs) {
+        long at = PrefillPredictionBoundary.predictedVisibilityDeadlineMs(preceding, unstartedWorkMs, lifetime, deliveredAtMs);
+        return at == 0L ? OptionalLong.empty() : OptionalLong.of(at);
     }
 
-    private static void observePrefillAt(Fixture fixture, boolean completed, long nowMs) {
-        org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(fixture.slot, "applyPrefillStatusLocked", fixture.item.prefillEp(), RoleType.PREFILL,
-                completed ? PrefillState.WorkerStatusFact.terminal(fixture.item,
-                        PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                        : PrefillState.WorkerStatusFact.active(fixture.item), nowMs);
+    private static void recordPrefillStatusAt(Fixture fixture, boolean completed, long nowMs) {
+        recordPrefill(fixture.requestContext, completed, nowMs);
     }
 
-    private static Fixture fixture(boolean separateDecode) { return fixture(separateDecode, false); }
+    private static Fixture fixture(boolean separateDecode) {
+        return fixture(separateDecode, 2.0);
+    }
 
-    private static Fixture fixture(boolean separateDecode, boolean observeTimer) {
+    private static Fixture fixture(boolean separateDecode, double lifetime) {
         FlexlbConfig config = SchedulingTestConfig.newConfig();
+        config.getRequestLifecycle().getDecision().setLifetime(lifetime);
+        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
         SchedulingTestConfig.useNonBatchDispatcher(config);
-        BalanceContext context = RequestLifecycleTestSupport.context(config, 101L);
-        RequestSlot slot = new RequestSlot(mock(RequestCompletionPublisher.class), context, mock(ExpirationTimer.class), mock(RequestTerminalCleanup.class), () -> { });
-        if (observeTimer) { slot = org.mockito.Mockito.spy(slot); }
+        RequestContext context = RequestProtocolTestSupport.context(config, 101L);
+        AbstractRequestScheduler owner = mock(AbstractRequestScheduler.class);
+        var repository = mock(RequestRepository.class);
+        when(repository.isCurrent(context)).thenReturn(true);
+        org.springframework.test.util.ReflectionTestUtils.setField(owner, "requests", repository);
+        context.data().register(owner, new RequestFuture((kind, response, failure) -> false));
+        SchedulerTestSupport.bindOwner(context, owner);
+        context.register(101L, System.currentTimeMillis(), Long.MAX_VALUE, 60_000L);
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
-        DecodeEndpoint decode = separateDecode ? mock(DecodeEndpoint.class) : null;
-        DecodeEndpoint.ReservationHandle reservation = separateDecode
-                ? new DecodeEndpoint.ReservationHandle(1L, 101L, 1L) : null;
-        ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), prefillServer(), null,
+        DecodeEndpoint decode = separateDecode ? RequestProtocolTestSupport.decodeEndpoint() : null;
+        var reservation = separateDecode ? new DecodeResources.ReservationHandle(1L, 101L, 1L) : null;
+        RequestRoute item = SchedulingTestConfig.createRoute(context, new Response(), prefillServer(), null,
                 prefill, decode, reservation, System.currentTimeMillis());
-        synchronized (slot) {
-            slot.configureInactivityTimeout(60_000L);
-            AdmissionHandle mutation = slot.tryBeginAdmissionHandle();
-            assertNotNull(mutation);
-            assertTrue(org.springframework.test.util.ReflectionTestUtils.<Boolean>invokeMethod(slot, "tryBindItemForPublicationLocked", item));
-            mutation.close();
-        }
-        return new Fixture(config, slot, item);
+        var placement = (PlacementToken) ((Granted<?>) context.beginPlacement(null)).value();
+        context.bindPlacement(placement, item, PublicationResult.PREPARED);
+        context.bindPlacement(placement, item, PublicationResult.PUBLISHED);
+        context.completePlacement(placement, PublicationResult.PUBLISHED, System.currentTimeMillis());
+        return new Fixture(owner, config, context, item);
     }
 
-    private static RequestSlot.EngineObservation observePrefill(RequestSlot slot, ScheduledRequest item, boolean completed) {
-        return org.springframework.test.util.ReflectionTestUtils.<RequestSlot.EngineObservation>invokeMethod(slot, "applyPrefillStatusLocked", item.prefillEp(), RoleType.PREFILL,
-                completed ? PrefillState.WorkerStatusFact.terminal(item, PrefillState.WorkerStatusFact.Kind.COMPLETED, 0L)
-                        : PrefillState.WorkerStatusFact.active(item), System.currentTimeMillis());
+    private static void preparePrefillStatusEffects(AbstractRequestScheduler scheduler, RequestContext context, RequestRoute item, boolean completed) {
+        recordPrefill(context, completed, System.currentTimeMillis());
     }
 
-    private static void startPrediction(RequestSlot slot) {
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(slot, "updateDeliveryPredictionLocked", emptyWork(System.currentTimeMillis()), 100L, System.currentTimeMillis());
+    private static void predictDelivery(RequestContext context, WorkSnapshot work, long predictedMs, long nowMs) {
+        startDelivery(context);
+        long at = PrefillPredictionBoundary.predictedVisibilityDeadlineMs(work, predictedMs,
+                context.data().getConfig().getRequestLifecycle().getDecision().getLifetime(), nowMs);
+        context.recordDeliveryResult(new Prediction(context.snapshot().delivery().identity(), at, nowMs));
     }
 
-    private static RequestSlot.DecisionExpiry expireDecision(Fixture fixture) {
-        RequestLifecycleTestSupport.startRouteDelivery(fixture.slot);
-        startPrediction(fixture.slot);
-        var deadline = mock(ExpirationTimer.DecisionDeadline.class);
-        when(deadline.deadlineAtMs()).thenReturn(fixture.slot.decisionDeadlineAtMs().orElseThrow());
-        assertTrue(fixture.slot.installDecisionDeadline(deadline));
-        return fixture.slot.onDecisionVisibilityDeadline(deadline);
+    private static void startPrediction(AbstractRequestScheduler requestOwner, RequestContext requestContext) {
+        predictDelivery(requestContext, emptyWork(System.currentTimeMillis()), 100L, System.currentTimeMillis());
+    }
+
+    private static void assertStaleDecisionHasNoEffect(Fixture fixture, ExpirationTimer.Token stale) {
+        var before = fixture.requestContext.snapshot();
+        var installed = before.deadlines().visibility();
+        var deadline = deadlineAt(fixture.requestContext, VISIBILITY);
+        var visibility = before.engine();
+        expire(fixture.requestContext, stale);
+        assertSame(before, fixture.requestContext.snapshot());
+        assertSame(installed, fixture.requestContext.snapshot().deadlines().visibility());
+        assertEquals(deadline, deadlineAt(fixture.requestContext, VISIBILITY));
+        assertSame(visibility, fixture.requestContext.snapshot().engine());
+        assertSame(fixture.item, fixture.requestContext.snapshot().route());
+    }
+
+    private static void expireDecision(Fixture fixture) {
+        startDelivery(fixture.requestContext);
+        startPrediction(fixture.scheduler, fixture.requestContext);
+        var deadline = fixture.requestContext.snapshot().deadlines().visibility();
+        assertTrue(matches(fixture.requestContext, deadline));
+        expire(fixture.requestContext, deadline);
     }
 
     private static ServerStatus prefillServer() {
@@ -568,5 +690,6 @@ class RequestLifetimeTest {
         return server;
     }
 
-    private record Fixture(FlexlbConfig config, RequestSlot slot, ScheduledRequest item) { }
+    private record Fixture(AbstractRequestScheduler scheduler, FlexlbConfig config, RequestContext requestContext, RequestRoute item) {
+    }
 }

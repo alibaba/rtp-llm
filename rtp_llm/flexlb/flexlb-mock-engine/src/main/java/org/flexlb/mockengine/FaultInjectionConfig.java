@@ -20,7 +20,6 @@ import java.util.List;
 public final class FaultInjectionConfig {
 
     private final boolean failOnEnqueue;
-    private final long enqueueErrorCode;
     private final String enqueueErrorMessage;
     private final long enqueueDelayMs;
     private final long generateDelayMs;
@@ -68,7 +67,6 @@ public final class FaultInjectionConfig {
 
     private FaultInjectionConfig(Builder b) {
         this.failOnEnqueue = b.failOnEnqueue;
-        this.enqueueErrorCode = b.enqueueErrorCode;
         this.enqueueErrorMessage = b.enqueueErrorMessage;
         this.enqueueDelayMs = b.enqueueDelayMs;
         this.generateDelayMs = b.generateDelayMs;
@@ -99,10 +97,6 @@ public final class FaultInjectionConfig {
 
     public boolean isFailOnEnqueue() {
         return failOnEnqueue;
-    }
-
-    public long getEnqueueErrorCode() {
-        return enqueueErrorCode;
     }
 
     public String getEnqueueErrorMessage() {
@@ -247,7 +241,6 @@ public final class FaultInjectionConfig {
     public Builder toBuilder() {
         return new Builder()
                 .failOnEnqueue(failOnEnqueue)
-                .enqueueErrorCode(enqueueErrorCode)
                 .enqueueErrorMessage(enqueueErrorMessage)
                 .enqueueDelayMs(enqueueDelayMs)
                 .generateDelayMs(generateDelayMs)
@@ -280,7 +273,6 @@ public final class FaultInjectionConfig {
     public String toString() {
         return "FaultInjectionConfig{"
                 + "failOnEnqueue=" + failOnEnqueue
-                + ", enqueueErrorCode=" + enqueueErrorCode
                 + ", enqueueDelayMs=" + enqueueDelayMs
                 + ", generateDelayMs=" + generateDelayMs
                 + ", generateError=" + generateError
@@ -333,7 +325,6 @@ public final class FaultInjectionConfig {
 
     public static final class Builder {
         private boolean failOnEnqueue = false;
-        private long enqueueErrorCode = 13;
         private String enqueueErrorMessage = "mock enqueue failure";
         private long enqueueDelayMs = 0;
         private long generateDelayMs = 0;
@@ -366,11 +357,6 @@ public final class FaultInjectionConfig {
 
         public Builder failOnEnqueue(boolean fail) {
             this.failOnEnqueue = fail;
-            return this;
-        }
-
-        public Builder enqueueErrorCode(long code) {
-            this.enqueueErrorCode = code;
             return this;
         }
 

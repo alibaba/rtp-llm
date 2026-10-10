@@ -2752,7 +2752,7 @@ def atpm_comparator_frozen_weak(ctx: CaseContext):
 # ===========================================================================
 
 #: NO_DECODE_WORKER — the DECODE role's selection failure (RoleType.
-#: getErrorType → DefaultRouter.buildFailureResponse).  A PRIORITY queue
+#: getErrorType → RequestWorkerSelector.buildFailureResponse).  A PRIORITY queue
 #: deliberately retains the strict decode KV gate in ordinary routing
 #: (CostBasedDecodeStrategy.applyHardFilters), so kv_pressure-saturated
 #: decode endpoints surface here as 8403 before the eviction fallback —

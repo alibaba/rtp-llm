@@ -43,8 +43,4 @@ public enum PreemptionCancelPhase {
                 || this == NOT_FOUND_STALE
                 || this == CANCEL_UNKNOWN;
     }
-
-    public boolean requiresOrdinaryReconciliation() {
-        return this == NOT_FOUND_STALE || this == CANCEL_UNKNOWN;
-    }
 }

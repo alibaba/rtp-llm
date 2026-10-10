@@ -60,13 +60,6 @@ public final class PriorityNormalizer {
     }
 
     /**
-     * Normalize with the built-in default (50).
-     */
-    public static int normalize(int protoPriority, String headerValue) {
-        return normalize(protoPriority, headerValue, DEFAULT_PRIORITY);
-    }
-
-    /**
      * Normalize the request priority.
      *
      * @param protoPriority   value from the proto field; 0 means unset

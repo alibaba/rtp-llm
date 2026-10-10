@@ -13,6 +13,7 @@ import io.netty.util.concurrent.DefaultThreadFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.metric.SafeFlexMonitor;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
@@ -149,38 +150,44 @@ public class FlexlbGrpcServer {
         }
 
         // Gauges — auto-read from ThreadPoolExecutor on each scrape
-        Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+        SafeFlexMonitor.run(MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
+                () -> Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_ACTIVE_THREADS,
                         grpcExecutor, ThreadPoolExecutor::getActiveCount)
                 .description("gRPC server executor active thread count")
-                .register(meterRegistry);
+                .register(meterRegistry));
 
-        Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+        SafeFlexMonitor.run(MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
+                () -> Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_QUEUE_SIZE,
                         grpcExecutor, exec -> exec.getQueue().size())
                 .description("gRPC server executor pending task queue size")
-                .register(meterRegistry);
+                .register(meterRegistry));
 
-        Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+        SafeFlexMonitor.run(MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
+                () -> Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_POOL_SIZE,
                         grpcExecutor, ThreadPoolExecutor::getPoolSize)
                 .description("gRPC server executor current pool size")
-                .register(meterRegistry);
+                .register(meterRegistry));
 
-        Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+        SafeFlexMonitor.run(MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
+                () -> Gauge.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_MAX_POOL_SIZE,
                         grpcExecutor, ThreadPoolExecutor::getMaximumPoolSize)
                 .description("gRPC server executor maximum pool size")
-                .register(meterRegistry);
+                .register(meterRegistry));
 
         // FunctionCounters — monotonically increasing values read on each scrape
-        FunctionCounter.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS,
+        SafeFlexMonitor.run(MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS,
+                () -> FunctionCounter.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_COMPLETED_TASKS,
                         grpcExecutor, ThreadPoolExecutor::getCompletedTaskCount)
                 .description("gRPC server executor total completed tasks")
-                .register(meterRegistry);
+                .register(meterRegistry));
 
-        FunctionCounter.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
+        SafeFlexMonitor.run(MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
+                () -> FunctionCounter.builder(METRIC_PREFIX + MetricConstant.GRPC_SERVER_EXECUTOR_CALLER_RUNS,
                         countingAbortHandler, handler -> handler.getRejectionCount().doubleValue())
                 .description("gRPC server executor rejection count (AbortPolicy)")
-                .register(meterRegistry);
+                .register(meterRegistry));
 
-        Logger.info("FlexLB gRPC server executor metrics registered with MeterRegistry");
+        Logger.info("FlexLB gRPC server executor metric registration finished");
     }
 
     /** Called before Spring destroys any serving resources. */

@@ -4,6 +4,8 @@ import org.flexlb.balance.projection.RouteProjection;
 
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Materialized result of crossing one delivery-admission boundary.
  * A delivery wait may carry additional route-publication restrictions;
@@ -11,7 +13,7 @@ import java.util.Objects;
  */
 public record CapacityBoundary(
         Status status,
-        Availability availability,
+        Resource resource,
         RouteProjection.AdmissionBlockSemantics projectionSemantics,
         Throwable cause) {
 
@@ -22,29 +24,27 @@ public record CapacityBoundary(
         Objects.requireNonNull(status, "status");
         boolean unavailable = status == Status.UNAVAILABLE;
         boolean failed = status == Status.FAILED;
-        if (unavailable != (availability != null)
-                || failed != (cause != null)
-                || (!unavailable
-                        && (availability != null || projectionSemantics != null))) {
-            throw new IllegalArgumentException(
-                    "capacity boundary status requires its exact payload");
-        }
+        checkArgument(unavailable == (resource != null)
+                && failed == (cause != null)
+                && (unavailable
+                || projectionSemantics == null),
+                "capacity boundary status requires its exact payload");
     }
 
     public static CapacityBoundary unavailable(
-            Availability availability,
+            Resource resource,
             RouteProjection.AdmissionBlockSemantics projectionSemantics) {
         return new CapacityBoundary(Status.UNAVAILABLE,
-                Objects.requireNonNull(availability, "availability"),
+                Objects.requireNonNull(resource, "resource"),
                 Objects.requireNonNull(projectionSemantics,
                         "projectionSemantics"),
                 null);
     }
 
     /** Park delivery without restricting publication into the worker queue. */
-    public static CapacityBoundary deliveryUnavailable(Availability availability) {
+    public static CapacityBoundary deliveryUnavailable(Resource resource) {
         return new CapacityBoundary(Status.UNAVAILABLE,
-                Objects.requireNonNull(availability, "availability"),
+                Objects.requireNonNull(resource, "resource"),
                 null, null);
     }
 
@@ -63,27 +63,19 @@ public record CapacityBoundary(
         FAILED
     }
 
-    /**
-     * Non-blocking wake capability for the exact unavailable admission.
-     * Implementations must not acquire endpoint mutation locks while queried.
-     */
-    public interface Availability {
-
-        boolean isAvailable();
-
-        void addListener(Runnable listener);
-
-        void removeListener(Runnable listener);
+    /** Identifies the exhausted resource; waiting belongs to WorkerBatcher and notification to the capacity owner. */
+    public enum Resource {
+        DISPATCH_EXECUTOR,
+        PREFILL_BATCH,
+        DECODE_ENGINE
     }
 
     /** Either an accepted capability/value or one fully materialized boundary. */
     public record Attempt<T>(T value, CapacityBoundary boundary) {
 
         public Attempt {
-            if ((value == null) == (boundary == null)) {
-                throw new IllegalArgumentException(
-                        "capacity attempt requires exactly one value or boundary");
-            }
+            checkArgument((value == null) != (boundary == null),
+                    "capacity attempt requires exactly one value or boundary");
         }
 
         public static <T> Attempt<T> accepted(T value) {

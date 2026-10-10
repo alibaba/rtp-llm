@@ -78,9 +78,13 @@ public final class PrefillTimeFormula {
     );
 
     private final ArithmeticFormula formula;
+    private final boolean requiresBatchStatistics;
 
     private PrefillTimeFormula(ArithmeticFormula formula) {
         this.formula = formula;
+        this.requiresBatchStatistics = BATCH_SCOPED_VARIABLES.stream()
+                .filter(variable -> !variable.equals("batchSize"))
+                .anyMatch(formula::referencesVariable);
     }
 
     /**
@@ -109,5 +113,13 @@ public final class PrefillTimeFormula {
     /** Retain fractional and non-finite results until the prediction boundary validates them. */
     public double evaluateAsDouble(double[] vars, List<double[]> itemVars) {
         return formula.evaluateAsDouble(vars, itemVars);
+    }
+
+    public boolean requiresBatchStatistics() {
+        return requiresBatchStatistics;
+    }
+
+    public double evaluateBatch(double[] vars, List<? extends ArithmeticFormula.Variables> items) {
+        return formula.evaluateWithBindings(vars, items);
     }
 }

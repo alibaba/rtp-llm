@@ -59,7 +59,6 @@ public class HttpNettyConfig {
                                 .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
                                 .addLast("timeoutHandler", new ReadTimeoutHandler(responseTimeoutMs, TimeUnit.MILLISECONDS))
                                 .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
-                        handler.channelEnhance(ch);
                     }
                 });
         return handler;
@@ -94,7 +93,6 @@ public class HttpNettyConfig {
                                 .addLast(CommonConstants.CODEC, new HttpClientCodec(8192, 8192, nettyMaxChunkSize))
                                 .addLast(CommonConstants.TIMEOUT_HANDLER, new ReadTimeoutHandler(3, TimeUnit.SECONDS))
                                 .addLast(defaultEventExecutorGroup, "inboundHandler", handler);
-                        handler.channelEnhance(ch);
                     }
                 });
         return handler;

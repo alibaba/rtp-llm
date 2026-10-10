@@ -1,0 +1,242 @@
+{
+  "date": "2026-10-08",
+  "base_commit": "d45e6260dc1f3aaf1fbed0d6348b5ebd20292d82",
+  "scope": "Unify queued BATCH/NON_BATCH preparation, commit, rollback and temporary resource ownership in DeliveryTransaction. Preserve mode-specific transport, executor transfer, callback gate and route publication isolation.",
+  "production_net_lines_deleted": 103,
+  "removed_types": [
+    "BatchDeliveryStrategy.BatchTransaction",
+    "RouteDeliveryStrategy.RouteTransaction",
+    "RouteDeliveryStrategy.RouteTransaction.PreparedRoute",
+    "PrefillAdmissionResources.Preparation"
+  ],
+  "retained_contracts": [
+    "Exact request/route/generation identity checked by the owning scheduler",
+    "Existing request monitor, transaction monitor and Prefill ownership lock boundaries",
+    "Capacity boundary preserves the already prepared prefix",
+    "Accepted executor owns BATCH delivery; caller abort/close cannot reclaim it",
+    "Committed temporary resources close before DispatchGate opens",
+    "NON_BATCH claim/publication failures remain isolated by member"
+  ],
+  "intentional_fix": {
+    "description": "If capture into the prepared member list throws after acquiring a Decode permit, release that exact permit and preserve release errors on the capture failure. Previously BATCH lost the permit outside its member list.",
+    "test": "BatchDeliveryStrategyTest#failedMemberCaptureReleasesItsPermitAndOtherPreparedResources",
+    "baseline": "Two fault injection cases fail on d45e626: no permit release, and missing suppressed cleanup error.",
+    "latest": "Both cases pass as part of the final full UT.",
+    "baseline_fault_run_sha256": "e93f72b9a16487f8da81f6a344c33c4b030ddde276fe56772578cd543ea982f3"
+  },
+  "ut": {
+    "environment": "remote luoli_gpu, Java 21",
+    "tests": 2156,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1,
+    "modules": {
+      "common": 226,
+      "cache": 37,
+      "grpc": 15,
+      "sync": 1689,
+      "api": 175,
+      "mock-engine-cache": 14
+    },
+    "stdout_sha256": "697a0f0d096171b43a487faeb90a97ae512d1fd1220798aa417af3c3f5d396ae"
+  },
+  "performance": {
+    "host": "luoli.hn@11.163.39.110",
+    "container": "luoli_gpu",
+    "cpus": 256,
+    "jdk": "Corretto 21.0.12.1",
+    "snapshot_root": "/home/luoli.hn/work/rtp_llm_4/github-opensource/.tmp/flexlb-delivery-20261008",
+    "test": "MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix",
+    "workers": {
+      "prefill": 750,
+      "decode": 750
+    },
+    "target_qps": [
+      3000,
+      10000
+    ],
+    "jvm": "-Xms64g -Xmx64g",
+    "test_fork_pids_with_64g_min_initial_max": [
+      1385795,
+      1387777
+    ],
+    "warmup_ms": 10000,
+    "duration_ms": 10000,
+    "warmup_requests_per_prefill": 16,
+    "gates": {
+      "min_qps_ratio": 0.98,
+      "max_master_p99_ms": 50,
+      "max_client_p99_ms": 50,
+      "max_batch_wait_p99_ms": 50
+    },
+    "baseline": {
+      "metrics": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.8",
+          "master_avg": "10.190ms",
+          "master_p99": "12ms",
+          "client_p99": "22.448ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9984.5",
+          "master_qps": "10005.3",
+          "master_avg": "10.485ms",
+          "master_p99": "20ms",
+          "client_p99": "42.795ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "7ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2999.7",
+          "master_qps": "3000.4",
+          "master_avg": "0.004ms",
+          "master_p99": "<1ms",
+          "client_p99": "0.527ms",
+          "batch_wait_p99": "N/A",
+          "delivery_wait_p99": "1ms",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9994.7",
+          "master_qps": "10001.8",
+          "master_avg": "0.028ms",
+          "master_p99": "1ms",
+          "client_p99": "13.997ms",
+          "batch_wait_p99": "N/A",
+          "delivery_wait_p99": "1ms",
+          "route_submit_p99": "<1ms"
+        }
+      ],
+      "stdout_sha256": "2f636415bb176bf6e3d98e41bdc3cd07d06daaa9d7b2022e8898540b8013fb6b",
+      "source_inputs": 699,
+      "manifest_sha256": "e5148d8e3787b9d184890ca8be56e56ec13fb0167a778aa91241f00c3a5e4306",
+      "result": "PASS"
+    },
+    "latest": {
+      "metrics": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.7",
+          "master_avg": "10.252ms",
+          "master_p99": "13ms",
+          "client_p99": "28.928ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "1ms"
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9947.7",
+          "master_qps": "9971.3",
+          "master_avg": "10.504ms",
+          "master_p99": "20ms",
+          "client_p99": "45.128ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "6ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2999.7",
+          "master_qps": "3000.4",
+          "master_avg": "0.004ms",
+          "master_p99": "<1ms",
+          "client_p99": "0.662ms",
+          "batch_wait_p99": "N/A",
+          "delivery_wait_p99": "1ms",
+          "route_submit_p99": "<1ms"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9994.8",
+          "master_qps": "10001.3",
+          "master_avg": "0.046ms",
+          "master_p99": "2ms",
+          "client_p99": "18.121ms",
+          "batch_wait_p99": "N/A",
+          "delivery_wait_p99": "1ms",
+          "route_submit_p99": "2ms"
+        }
+      ],
+      "stdout_sha256": "ab92dc931a1007abb34a80b21fa826e3908ab21675796f0f402c663c2346815b",
+      "source_inputs": 700,
+      "manifest_sha256": "481da36250c2b870addff5f61539ade7d90a0b6f19975f6ec21b22e67a218da3",
+      "result": "PASS"
+    },
+    "interpretation": "All four scenarios meet the existing gates. This single paired run establishes gate compliance; it does not demonstrate a latency improvement.",
+    "log_directory": "<snapshot_root>/<baseline|latest>/evidence/perf-final"
+  },
+  "source_verification": {
+    "before_and_after_remote_tests": "No manifest mismatches for either snapshot.",
+    "after_tests_stdout_sha256": "d894219931e61ce99cb1f99175675266397e0414611ef2c3ad6475415e4f5a9b",
+    "changed_sources_sha256": {
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "4e2f030c01e982e98c771bf392fa48e3787651c50d579b5eed1fd9769f2c9701",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java": "ddd1ed5f34e42b089d18e23a79691f4b797639c7241f57a8ff7cc89566e8b522",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PrefillAdmissionResources.java": "57ed78caaa4076bc72ba25f9b8a758bfbf9fb359751505d02abc90d1ad7ea603",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RouteDeliveryStrategy.java": "d5be29f64b8b5047cd587de94cdab36ae1084c4ec9697d5cb0faecf276f4b3f9",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/BatchDeliveryStrategyTest.java": "dbe2961940f6d8f4731c9fa2af30083b5912c6c8782c9b2054ab145ee7372527",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DeliveryStrategyTestSupport.java": "f7df9f55bd832d7cc77e383c4f2d0039223de4f0ee15bfc0d59eee294217b72a",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestContextLifecycleTest.java": "7ee39ec1ed7e9650ba4a47e1a14ff5e83dbff6c55252ea543234ca296ad31bc3",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestProtocolTestSupport.java": "441d889940e9560ccace0ffa1ae54cf689b059fcf7a6e8557e4c908068c8467a",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryTransaction.java": "b4dbfc003771fa26fab78fdce2704aa29d905271a215d57bdc5404ae116f8b1a"
+    },
+    "excluded_parallel_work": [
+      "DecodeState import order",
+      "EndpointRegistry import/whitespace edits",
+      "PrefillState Javadoc edit",
+      "untracked review-regression-2026-10-06.json"
+    ]
+  },
+  "self_review_result": "No remaining blocking findings in this delivery iteration.",
+  "remaining_plan": "Consolidate Context/Scheduler request-end and preemption advancement next; those paths are unchanged in this iteration."
+}

@@ -23,8 +23,56 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class LearningPredictorTest {
+
+    @Test
+    void emptyLearningBatchStillTrainsTheBias() throws Exception {
+        var model = new LearningPredictor();
+        double before = snapshotWeights(model.evaluator())[0];
+        for (int i = 0; i < 4; i++) { model.learn(batchFeatures(), 0, 400); }
+        assertTrue(before != snapshotWeights(model.evaluator())[0]);
+    }
+
+    @Test
+    void incrementalPrefixesRemainBitExactAcrossLearningAndNumericEdges() {
+        LearningPredictor model = new LearningPredictor();
+        var random = new java.util.Random(115);
+        for (int round = 0; round < 64; round++) {
+            var frozen = model.evaluator();
+            var incremental = frozen.newBatchPrediction();
+            var independent = frozen.newBatchPrediction();
+            var prefix = new ArrayList<PrefillBatchFeatures.Item>();
+            for (int i = 0; i < 64; i++) {
+                long input = round == 0 ? new long[]{0, 1, (1L << 53) + 1, Long.MAX_VALUE}[i % 4]
+                        : random.nextInt(131072);
+                long hit = input == 0 ? 0 : Math.floorMod(random.nextLong(), input);
+                prefix.add(item(input, hit));
+                double expected = frozen.predictBatchMs(new PrefillBatchFeatures(prefix));
+                assertEquals(Double.doubleToLongBits(expected),
+                        Double.doubleToLongBits(incremental.append(input, hit)));
+                assertEquals(Double.doubleToLongBits(expected),
+                        Double.doubleToLongBits(independent.append(input, hit)));
+                // Publishing another model cannot alter an existing session's weights.
+                model.learn(batchFeatures(item(1000, 100), item(2000, 300)), 100, 200 + i);
+            }
+            assertNotSame(frozen, model.evaluator());
+        }
+    }
+
+    @Test
+    void invalidAppendDoesNotChangeThePrefix() {
+        var evaluator = new LearningPredictor().evaluator();
+        var incremental = evaluator.newBatchPrediction();
+        incremental.append(1000, 300);
+        for (long[] invalid : new long[][]{{-1, 0}, {1, -1}, {1, 2}}) {
+            assertThrows(IllegalArgumentException.class, () -> incremental.append(invalid[0], invalid[1]));
+        }
+        assertEquals(evaluator.predictBatchMs(batchFeatures(item(1000, 300), item(2000, 500))),
+                incremental.append(2000, 500));
+        assertEquals(evaluator.estimateMs(0, 0), evaluator.estimateMs(-1, -1));
+    }
 
     @Test
     @DisplayName("default model produces a non-negative estimate")

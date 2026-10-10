@@ -56,7 +56,7 @@ public class EngineLocalView {
      */
     public DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks, String role) {
         if (engineIPort == null || newCacheBlocks == null) {
-            return DiffResult.empty(engineIPort);
+            return DiffResult.empty();
         }
 
         Set<Long> oldCacheBlocks = getEngineCacheBlocks(engineIPort);
@@ -88,10 +88,8 @@ public class EngineLocalView {
         dynamicIntervalManager.updateDiffStatistics(diffSize);
 
         return DiffResult.builder()
-            .engineIp(engineIPort)
             .addedBlocks(addedBlocks)
             .removedBlocks(removedBlocks)
-            .version("1.0.0")
             .build();
 
     }

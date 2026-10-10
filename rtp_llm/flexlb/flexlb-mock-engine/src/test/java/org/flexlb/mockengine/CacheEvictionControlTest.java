@@ -87,7 +87,7 @@ class CacheEvictionControlTest {
     @Test
     void blockCacheEvictCountsEvictionsAndTruncatesPrefixHits() {
         MockLruBlockCache cache = new MockLruBlockCache(16);
-        assertTrue(cache.admit(List.of(101L, 102L, 103L)));
+        assertTrue(MockEngineTestSupport.seedCache(cache, List.of(101L, 102L, 103L)));
         assertEquals(3, cache.prefixHitBlocks(List.of(101L, 102L, 103L)));
 
         assertTrue(cache.evict(List.of(102L)), "evicting a present key must report changed");
@@ -166,7 +166,7 @@ class CacheEvictionControlTest {
         long versionAfterAdmit = cacheStatus(prefill).getVersion();
         long evictionsBefore = engineByName("prefill-0").get("cache_evictions").asLong();
 
-        HttpResponse<String> response = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> response = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[201]}");
         assertEquals(200, response.statusCode());
         JsonNode body = MAPPER.readTree(response.body());
@@ -204,7 +204,7 @@ class CacheEvictionControlTest {
 
         // First evict: changed=true, version +1.
         long versionBefore = cacheStatus(prefill).getVersion();
-        HttpResponse<String> first = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> first = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[301]}");
         assertEquals(200, first.statusCode());
         assertTrue(MAPPER.readTree(first.body()).get("changed").asBoolean());
@@ -213,7 +213,7 @@ class CacheEvictionControlTest {
 
         // Re-evicting the same key: no-op — changed=false, NO version bump,
         // so the master's cache-status poll never re-syncs on a stale evict.
-        HttpResponse<String> second = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> second = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[301]}");
         assertEquals(200, second.statusCode());
         JsonNode secondBody = MAPPER.readTree(second.body());
@@ -222,12 +222,12 @@ class CacheEvictionControlTest {
         assertEquals(versionAfterFirst, cacheStatus(prefill).getVersion());
 
         // Unknown keys and the empty array are no-ops too.
-        HttpResponse<String> unknown = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> unknown = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[999, 1000]}");
         assertEquals(200, unknown.statusCode());
         assertFalse(MAPPER.readTree(unknown.body()).get("changed").asBoolean());
 
-        HttpResponse<String> empty = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> empty = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[]}");
         assertEquals(200, empty.statusCode());
         assertFalse(MAPPER.readTree(empty.body()).get("changed").asBoolean());
@@ -247,22 +247,22 @@ class CacheEvictionControlTest {
         awaitEngineCacheKeys("decode-0", 2, 10_000);
 
         // Missing 'keys' -> 400.
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
+        assertEquals(400, httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\"}").statusCode());
         // 'keys' not an array -> 400.
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
+        assertEquals(400, httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":401}").statusCode());
         // Non-integer entry -> 400 (Jackson would otherwise coerce to 0).
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
+        assertEquals(400, httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[401,\"abc\"]}").statusCode());
         // Unknown engine -> 404; no engine/port -> 400 (dual addressing).
-        assertEquals(404, httpPostResponse(controlServer.getPort(), "/cache_evict",
+        assertEquals(404, httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-99\",\"keys\":[401]}").statusCode());
-        assertEquals(400, httpPostResponse(controlServer.getPort(), "/cache_evict",
+        assertEquals(400, httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"keys\":[401]}").statusCode());
 
         // Evicting on prefill-0 leaves decode-0's key set untouched.
-        HttpResponse<String> response = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> response = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"engine\":\"prefill-0\",\"keys\":[401]}");
         assertEquals(200, response.statusCode());
         assertTrue(MAPPER.readTree(response.body()).get("changed").asBoolean());
@@ -271,7 +271,7 @@ class CacheEvictionControlTest {
 
         // Port addressing (original Java scheme) hits the same engine, and
         // integral decimal strings parse as block keys (strict parsing).
-        HttpResponse<String> byPort = httpPostResponse(controlServer.getPort(), "/cache_evict",
+        HttpResponse<String> byPort = httpPostResponse(MockEngineTestSupport.controlPort(controlServer), "/cache_evict",
                 "{\"port\":" + prefill.getGrpcPort() + ",\"keys\":[\"402\"]}");
         assertEquals(200, byPort.statusCode());
         assertTrue(MAPPER.readTree(byPort.body()).get("changed").asBoolean());
@@ -351,7 +351,7 @@ class CacheEvictionControlTest {
     }
 
     private JsonNode engineByName(String name) throws Exception {
-        JsonNode engines = MAPPER.readTree(httpGet(controlServer.getPort(), "/snapshot")).get("engines");
+        JsonNode engines = MAPPER.readTree(httpGet(MockEngineTestSupport.controlPort(controlServer), "/snapshot")).get("engines");
         for (JsonNode engine : engines) {
             if (name.equals(engine.get("name").asText())) {
                 return engine;
@@ -378,12 +378,12 @@ class CacheEvictionControlTest {
                                 int expected, long timeoutMs) throws InterruptedException {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
         while (System.nanoTime() < deadline) {
-            if (service.getCompletedCount() >= expected) {
+            if (MockEngineTestSupport.getCompletedCount(service) >= expected) {
                 return;
             }
             Thread.sleep(5);
         }
         fail("timeout waiting for " + expected + " completions on port "
-                + service.getGrpcPort() + ", got " + service.getCompletedCount());
+                + service.getGrpcPort() + ", got " + MockEngineTestSupport.getCompletedCount(service));
     }
 }

@@ -16,7 +16,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** An offline worker cannot retain scheduler or endpoint accounting past request inactivity TTL. */
+/** Missing remote cleanup proof keeps accounting visible and prevents a successful shutdown. */
 class WorkerOfflineTest extends FlexLBMockTestBase {
 
     @Override
@@ -41,18 +41,25 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
         assertThrows(TimeoutException.class,
                 () -> offline.get(600, TimeUnit.MILLISECONDS));
         assertFalse(offline.isDone(), "post-send uncertainty stays pending before request TTL");
-        assertTrue(getPrefillEndpoint().getInflightBatchCount() >= 1);
-        assertTrue(getDecodeEndpoint().getInflightCount() >= 1);
+        assertTrue(getPrefillEndpoint().ownership.stats().batchCount() >= 1);
+        assertTrue(getDecodeEndpoint().resourceSnapshot().reservedCount() >= 1);
         assertEquals(0, mockDecodeWorker.getEnqueueCount());
 
         Response expired = offline.get(5, TimeUnit.SECONDS);
         assertFalse(expired.isSuccess());
         assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(), expired.getCode());
         assertTrue(expired.getErrorMessage().contains("REQUEST_INACTIVE"));
-        assertEquals(0, scheduler.getInflightSize());
-        assertEquals(0, getPrefillEndpoint().getInflightBatchCount());
-        assertEquals(0, getPrefillEndpoint().getLocallyOwnedRequestCount());
-        assertEquals(0, getDecodeEndpoint().getInflightCount());
+        assertTrue(requestRegistry().liveRequestCount() > 0);
+        assertTrue(getPrefillEndpoint().ownership.stats().locallyOwnedRequests() > 0);
+        assertTrue(getDecodeEndpoint().resourceSnapshot().reservedCount() > 0);
+        var prefill = getPrefillEndpoint();
+        var decode = getDecodeEndpoint();
+        assertThrows(IllegalStateException.class, schedulerRuntime::close);
+        assertEquals(0, requestRegistry().liveRequestCount());
+        assertEquals(0, prefill.ownership.stats().locallyOwnedRequests());
+        assertEquals(0, prefill.ownership.stats().batchCount());
+        assertEquals(0, decode.resourceSnapshot().reservedCount());
+        assertEquals(0, decode.resourceSnapshot().activeDispatchPermits());
         assertTrue(first.join().isSuccess(), "cleanup does not replace an already published ACK");
     }
 }

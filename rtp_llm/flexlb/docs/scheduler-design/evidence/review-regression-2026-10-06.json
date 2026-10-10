@@ -1,0 +1,684 @@
+{
+  "date": "2026-10-06",
+  "source": {
+    "head": "4635a6e2dca40e6ab2c507252bf8857498f91411",
+    "branch": "feature/flexlb_ref",
+    "tracked_input_files": 688,
+    "snapshot_sha256": "fe0580c7d4fc3d4d61c50186daf7382e4a16f77508941fa0fbb88ebae965b8ed",
+    "tested_uncommitted_files": [
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/DirectAdmissionContractTest.java",
+      "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/balance/scheduler/RequestProtocolTestSupport.java"
+    ],
+    "local_and_remote_hash_match": true,
+    "diff_sha256": "890ec6fc3f5600950e5ae4c26ae759218e9122347d154329b6d9923ebe3f19cc",
+    "post_test_local_and_remote_hash_match": true
+  },
+  "environment": {
+    "ssh_host": "luoli.hn@11.163.39.110",
+    "checkout": "/home/luoli.hn/work/rtp_llm_4/github-opensource",
+    "container": "luoli_gpu",
+    "jvm": "-Xms64g -Xmx64g",
+    "jdk": "Corretto 21.0.12.1",
+    "cpu_count": 256
+  },
+  "performance_parameters": {
+    "topology": "750P/750D",
+    "qps": [
+      3000,
+      10000
+    ],
+    "warmup_ms": 10000,
+    "measurement_issuance_ms": 10000,
+    "min_warmup_requests_per_prefill": 16,
+    "min_throughput_ratio": 0.98,
+    "max_client_p99_ms": 50,
+    "max_master_p99_ms": 50,
+    "max_batch_wait_p99_ms": 50
+  },
+  "performance_runs": [
+    {
+      "run": "acceptance",
+      "mode": "BATCH",
+      "jfr_profile": false,
+      "status": "failed",
+      "metrics": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.9",
+          "master_avg": "10.288ms",
+          "client_p50": "10.878ms",
+          "client_p90": "11.282ms",
+          "client_p95": "11.459ms",
+          "client_p99": "28.215ms",
+          "master_p50": "10ms",
+          "master_p90": "11ms",
+          "master_p95": "11ms",
+          "master_p99": "12ms",
+          "active_prefill_rpc": "750",
+          "active_prefill_route": "750",
+          "active_decode_route": "750",
+          "batch_wait_count": "30000",
+          "batch_wait_p50": "10ms",
+          "batch_wait_p90": "10ms",
+          "batch_wait_p95": "10ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_count": "30000",
+          "delivery_wait_p50": "10ms",
+          "delivery_wait_p90": "11ms",
+          "delivery_wait_p95": "11ms",
+          "delivery_wait_p99": "11ms",
+          "dispatch_ack_count": "537",
+          "dispatch_ack_p99": "1ms",
+          "engine_batches": "29953",
+          "batch_full": "0",
+          "window_timeout": "29953",
+          "predicted_execution_cap": "0",
+          "single_request": "0",
+          "avg_batch": "1.00",
+          "max_batch": "4",
+          "grpc_queue_p99": "<1ms",
+          "route_submit_p99": "1ms",
+          "ack_response_count": "537",
+          "ack_response_p99": "<1ms",
+          "terminal_without_ack_count": "29463"
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9693.1",
+          "master_qps": "10005.9",
+          "master_avg": "10.607ms",
+          "client_p50": "10.939ms",
+          "client_p90": "11.541ms",
+          "client_p95": "11.925ms",
+          "client_p99": "44.523ms",
+          "master_p50": "10ms",
+          "master_p90": "11ms",
+          "master_p95": "11ms",
+          "master_p99": "19ms",
+          "active_prefill_rpc": "750",
+          "active_prefill_route": "750",
+          "active_decode_route": "750",
+          "batch_wait_count": "100000",
+          "batch_wait_p50": "10ms",
+          "batch_wait_p90": "10ms",
+          "batch_wait_p95": "10ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_count": "100000",
+          "delivery_wait_p50": "10ms",
+          "delivery_wait_p90": "11ms",
+          "delivery_wait_p95": "11ms",
+          "delivery_wait_p99": "11ms",
+          "dispatch_ack_count": "8449",
+          "dispatch_ack_p99": "2ms",
+          "engine_batches": "97292",
+          "batch_full": "1",
+          "window_timeout": "97291",
+          "predicted_execution_cap": "0",
+          "single_request": "0",
+          "avg_batch": "1.03",
+          "max_batch": "16",
+          "grpc_queue_p99": "<1ms",
+          "route_submit_p99": "6ms",
+          "ack_response_count": "8449",
+          "ack_response_p99": "<1ms",
+          "terminal_without_ack_count": "91551"
+        }
+      ],
+      "assertion_failures": [
+        "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:679 client throughput 9693.1 QPS missed 98% of target 10000 QPS ==> expected: <true> but was: <false>"
+      ]
+    },
+    {
+      "run": "acceptance",
+      "mode": "NON_BATCH",
+      "jfr_profile": false,
+      "status": "passed",
+      "metrics": [
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.1",
+          "master_qps": "2996.9",
+          "master_avg": "2.205ms",
+          "client_p50": "0.562ms",
+          "client_p90": "10.632ms",
+          "client_p95": "18.118ms",
+          "client_p99": "35.750ms",
+          "master_p50": "<1ms",
+          "master_p90": "7ms",
+          "master_p95": "13ms",
+          "master_p99": "27ms",
+          "active_prefill_rpc": "0",
+          "active_prefill_route": "750",
+          "active_decode_route": "750",
+          "batch_wait_count": "0",
+          "batch_wait_p50": "N/A",
+          "batch_wait_p90": "N/A",
+          "batch_wait_p95": "N/A",
+          "batch_wait_p99": "N/A",
+          "delivery_wait_count": "30000",
+          "delivery_wait_p50": "<1ms",
+          "delivery_wait_p90": "1ms",
+          "delivery_wait_p95": "1ms",
+          "delivery_wait_p99": "1ms",
+          "dispatch_ack_count": "0",
+          "dispatch_ack_p99": "N/A",
+          "engine_batches": "0",
+          "batch_full": "N/A",
+          "window_timeout": "N/A",
+          "predicted_execution_cap": "N/A",
+          "single_request": "N/A",
+          "avg_batch": "N/A",
+          "max_batch": "N/A",
+          "grpc_queue_p99": "1ms",
+          "route_submit_p99": "25ms",
+          "ack_response_count": "0",
+          "ack_response_p99": "N/A",
+          "terminal_without_ack_count": "0"
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9994.8",
+          "master_qps": "10019.7",
+          "master_avg": "0.176ms",
+          "client_p50": "0.453ms",
+          "client_p90": "0.770ms",
+          "client_p95": "1.311ms",
+          "client_p99": "32.391ms",
+          "master_p50": "<1ms",
+          "master_p90": "<1ms",
+          "master_p95": "<1ms",
+          "master_p99": "5ms",
+          "active_prefill_rpc": "0",
+          "active_prefill_route": "750",
+          "active_decode_route": "750",
+          "batch_wait_count": "0",
+          "batch_wait_p50": "N/A",
+          "batch_wait_p90": "N/A",
+          "batch_wait_p95": "N/A",
+          "batch_wait_p99": "N/A",
+          "delivery_wait_count": "100000",
+          "delivery_wait_p50": "<1ms",
+          "delivery_wait_p90": "<1ms",
+          "delivery_wait_p95": "1ms",
+          "delivery_wait_p99": "1ms",
+          "dispatch_ack_count": "0",
+          "dispatch_ack_p99": "N/A",
+          "engine_batches": "0",
+          "batch_full": "N/A",
+          "window_timeout": "N/A",
+          "predicted_execution_cap": "N/A",
+          "single_request": "N/A",
+          "avg_batch": "N/A",
+          "max_batch": "N/A",
+          "grpc_queue_p99": "<1ms",
+          "route_submit_p99": "5ms",
+          "ack_response_count": "0",
+          "ack_response_p99": "N/A",
+          "terminal_without_ack_count": "0"
+        }
+      ],
+      "assertion_failures": []
+    },
+    {
+      "run": "jfr_diagnostic",
+      "mode": "BATCH",
+      "jfr_profile": true,
+      "status": "failed",
+      "metrics": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.5",
+          "master_avg": "10.271ms",
+          "client_p50": "10.891ms",
+          "client_p90": "11.242ms",
+          "client_p95": "11.395ms",
+          "client_p99": "27.379ms",
+          "master_p50": "10ms",
+          "master_p90": "11ms",
+          "master_p95": "11ms",
+          "master_p99": "12ms",
+          "active_prefill_rpc": "750",
+          "active_prefill_route": "750",
+          "active_decode_route": "750",
+          "batch_wait_count": "30000",
+          "batch_wait_p50": "10ms",
+          "batch_wait_p90": "10ms",
+          "batch_wait_p95": "10ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_count": "30000",
+          "delivery_wait_p50": "10ms",
+          "delivery_wait_p90": "11ms",
+          "delivery_wait_p95": "11ms",
+          "delivery_wait_p99": "11ms",
+          "dispatch_ack_count": "655",
+          "dispatch_ack_p99": "<1ms",
+          "engine_batches": "29966",
+          "batch_full": "0",
+          "window_timeout": "29966",
+          "predicted_execution_cap": "0",
+          "single_request": "0",
+          "avg_batch": "1.00",
+          "max_batch": "6",
+          "grpc_queue_p99": "<1ms",
+          "route_submit_p99": "1ms",
+          "ack_response_count": "655",
+          "ack_response_p99": "<1ms",
+          "terminal_without_ack_count": "29345"
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9744.1",
+          "master_qps": "9763.4",
+          "master_avg": "52.008ms",
+          "client_p50": "11.345ms",
+          "client_p90": "237.339ms",
+          "client_p95": "307.217ms",
+          "client_p99": "459.463ms",
+          "master_p50": "11ms",
+          "master_p90": "233ms",
+          "master_p95": "285ms",
+          "master_p99": "337ms",
+          "active_prefill_rpc": "750",
+          "active_prefill_route": "750",
+          "active_decode_route": "750",
+          "batch_wait_count": "100000",
+          "batch_wait_p50": "10ms",
+          "batch_wait_p90": "10ms",
+          "batch_wait_p95": "12ms",
+          "batch_wait_p99": "17ms",
+          "delivery_wait_count": "100000",
+          "delivery_wait_p50": "10ms",
+          "delivery_wait_p90": "11ms",
+          "delivery_wait_p95": "13ms",
+          "delivery_wait_p99": "19ms",
+          "dispatch_ack_count": "24514",
+          "dispatch_ack_p99": "13ms",
+          "engine_batches": "92724",
+          "batch_full": "2",
+          "window_timeout": "92722",
+          "predicted_execution_cap": "0",
+          "single_request": "0",
+          "avg_batch": "1.08",
+          "max_batch": "16",
+          "grpc_queue_p99": "19ms",
+          "route_submit_p99": "313ms",
+          "ack_response_count": "24514",
+          "ack_response_p99": "10ms",
+          "terminal_without_ack_count": "75486"
+        }
+      ],
+      "assertion_failures": [
+        "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:679 client throughput 9744.1 QPS missed 98% of target 10000 QPS ==> expected: <true> but was: <false>"
+      ]
+    }
+  ],
+  "unit_test_repairs": [
+    {
+      "file": "RequestProtocolTestSupport.java",
+      "problem": "Wait helper observed a transient true condition and then asserted a second observation, causing a false failure when the thread changed state.",
+      "change": "Return immediately on a successful observation; retain the original five-second deadline and timeout assertion."
+    },
+    {
+      "file": "DirectAdmissionContractTest.java",
+      "problem": "Fixture shut down a second runtime sharing the repository instead of the runtime owning the scheduler and asynchronous continuations.",
+      "change": "Close the actual request runtime, with the fixture endpoint registry attached."
+    }
+  ],
+  "limitations": [
+    "The diagnostic retry enabled JFR profile and is separate from the unprofiled acceptance run. Its latency cannot be treated as an unprofiled performance result.",
+    "This request tests latest source only. No causal claim about a particular historical commit is made.",
+    "An isolated passing run would not prove stable performance after an observed acceptance failure."
+  ],
+  "artifacts": {
+    "local_directory": "/tmp/flexlb-ut-perf-20261006",
+    "remote_directory": "luoli_gpu:/tmp/flexlb-ut-perf-20261006",
+    "performance_archive": "/tmp/flexlb-ut-perf-20261006/remote-perf-evidence.tar.gz",
+    "ut_log": "/tmp/flexlb-ut-perf-20261006/ut-remote.log",
+    "ut_log_gzip": "/tmp/flexlb-ut-perf-20261006/ut-remote.log.gz"
+  },
+  "jfr_diagnostics": {
+    "execution_hot_methods": [
+      {
+        "method": "ForkJoinPool.scan",
+        "samples_percent": 16.61
+      },
+      {
+        "method": "PrefillEndpoint.captureRouteProjectionInputs",
+        "samples_percent": 8.97
+      },
+      {
+        "method": "RouteTimelineProjector.projectWithPredictions",
+        "samples_percent": 4.57
+      }
+    ],
+    "allocation_sites_percent": {
+      "IntArrayList.addInt": 29.95,
+      "ProjectedQueue.create": 5.62,
+      "GroupPlanner.selectWithPrediction": 5.46,
+      "RouteTimelineProjector.projectWithPredictions": 5.01,
+      "GroupPlanner.Item.constructor": 3.02
+    },
+    "allocation_sample_summary": {
+      "events": 12678,
+      "sampled_weight_bytes": 157871469312,
+      "allocation_classes": [
+        [
+          "[I",
+          47366709168
+        ],
+        [
+          "[B",
+          21877022768
+        ],
+        [
+          "[Ljava/lang/Object;",
+          21242674080
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector$ProjectedQueue",
+          8877521840
+        ],
+        [
+          "org/flexlb/balance/planner/GroupPlanner$Selection",
+          7995441528
+        ],
+        [
+          "org/flexlb/balance/planner/GroupPlanner$Item",
+          7902823400
+        ],
+        [
+          "java/util/ImmutableCollections$List12",
+          4932685432
+        ],
+        [
+          "org/flexlb/balance/prediction/PrefillBatchFeatures$Item",
+          4787498968
+        ],
+        [
+          "[D",
+          2701458896
+        ],
+        [
+          "[Lorg/flexlb/balance/strategy/DecodeSelector$Availability;",
+          2520761856
+        ],
+        [
+          "java/util/stream/ReferencePipeline$3",
+          1355383344
+        ],
+        [
+          "java/util/stream/ReferencePipeline$Head",
+          1031605400
+        ]
+      ],
+      "allocation_sites": [
+        [
+          "org/flexlb/engine/grpc/EngineRpcService$GenerateInputPB$Builder.mergeFrom",
+          47292796688
+        ],
+        [
+          "org/flexlb/balance/planner/GroupPlanner.selectWithPrediction",
+          14617453608
+        ],
+        [
+          "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.scheduleRequest",
+          10965841184
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector$ProjectedQueue.create",
+          8877521840
+        ],
+        [
+          "org/flexlb/balance/endpoint/EndpointRegistry.decodeRoutingSnapshot",
+          8602791944
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector.projectWithPredictions",
+          7902823400
+        ],
+        [
+          "org/flexlb/balance/strategy/CostBasedPrefillStrategy.discoverAvailableEndpoints",
+          6481987824
+        ],
+        [
+          "org/flexlb/balance/strategy/DecodeSelector.select",
+          5222220752
+        ],
+        [
+          "org/flexlb/schedule/grpc/FlexlbScheduleProtocol$FlexlbScheduleRequestPB$Builder.mergeFrom",
+          4888131968
+        ],
+        [
+          "org/flexlb/balance/planner/GroupPlanner$Item.<init>",
+          4772546640
+        ],
+        [
+          "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.runTraffic",
+          4034281416
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector$PredictionBoundary.batchDurationMs",
+          3972953544
+        ],
+        [
+          "org/flexlb/balance/endpoint/PrefillState.reconcileWorkerStatus",
+          1118378088
+        ],
+        [
+          "org/flexlb/balance/scheduler/QueuedRequestScheduler.plan",
+          933653608
+        ],
+        [
+          "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.issueRequest",
+          924705472
+        ]
+      ],
+      "final_12s_allocation_sites": [
+        [
+          "org/flexlb/engine/grpc/EngineRpcService$GenerateInputPB$Builder.mergeFrom",
+          18789595368
+        ],
+        [
+          "org/flexlb/balance/planner/GroupPlanner.selectWithPrediction",
+          7396763128
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector$ProjectedQueue.create",
+          3945600640
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector.projectWithPredictions",
+          3592230416
+        ],
+        [
+          "org/flexlb/balance/endpoint/EndpointRegistry.decodeRoutingSnapshot",
+          3107005520
+        ],
+        [
+          "org/flexlb/balance/strategy/CostBasedPrefillStrategy.discoverAvailableEndpoints",
+          2268090512
+        ],
+        [
+          "org/flexlb/balance/projection/RouteTimelineProjector$PredictionBoundary.batchDurationMs",
+          2171481768
+        ],
+        [
+          "org/flexlb/balance/planner/GroupPlanner$Item.<init>",
+          2125580136
+        ],
+        [
+          "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.scheduleRequest",
+          1994640520
+        ],
+        [
+          "org/flexlb/schedule/grpc/FlexlbScheduleProtocol$FlexlbScheduleRequestPB$Builder.mergeFrom",
+          1712103064
+        ],
+        [
+          "org/flexlb/balance/strategy/DecodeSelector.select",
+          1457557456
+        ],
+        [
+          "org/flexlb/httpserver/MasterBatchEndToEndPerformanceTest.runTraffic",
+          901773560
+        ]
+      ]
+    },
+    "contention_observations": [
+      {
+        "method": "EndpointRoundRobin.next",
+        "events": 1618,
+        "avg_ms": 54.5,
+        "max_ms": 364
+      },
+      {
+        "method": "EndpointRoundRobin.next",
+        "events": 10319,
+        "avg_ms": 39.4,
+        "max_ms": 287
+      }
+    ],
+    "observed_young_gc_pause_ms": 164.324,
+    "interpretation": "Repeated route projection allocations and serialized address-ring selection are measured hotspots. Allocation pressure and GC pauses are plausible contributors to tail latency; the profiled run does not establish which factor caused the unprofiled throughput miss."
+  },
+  "unit_tests": {
+    "command": "./mvnw -B -P 'opensource,!internal' -pl flexlb-api,flexlb-mock-engine -am test '-Dtest=*' -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false",
+    "local": {
+      "status": "failed",
+      "modules": {
+        "flexlb-common": {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-cache": {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-grpc": {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-sync": {
+          "tests": 1633,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-api": {
+          "tests": 175,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1
+        }
+      },
+      "totals": {
+        "tests": 2086,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "failures": [
+        "[ERROR]   ProductionCaliberDecodeTest.fullBatchDrainRateMatchesProductionAnchor:164->assertWithinBand:245 full batch (running=128): 6544 tok/s outside production anchor 7726 ±15% ==> expected: <true> but was: <false>",
+        "[ERROR]   ProductionCaliberDecodeTest.lowBatchDrainRateMatchesProductionAnchor:151->assertWithinBand:245 low batch (running=4): 404 tok/s outside production anchor 519 ±15% ==> expected: <true> but was: <false>"
+      ]
+    },
+    "remote": {
+      "status": "passed",
+      "modules": {
+        "flexlb-common": {
+          "tests": 226,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-cache": {
+          "tests": 37,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-grpc": {
+          "tests": 15,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-sync": {
+          "tests": 1633,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        },
+        "flexlb-api": {
+          "tests": 175,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 1
+        },
+        "flexlb-mock-engine": {
+          "tests": 400,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0
+        }
+      },
+      "totals": {
+        "tests": 2486,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "failures": []
+    },
+    "remote_maven_exit_code": 0,
+    "mock_anchor_rates_remote_tok_per_sec": {
+      "low_batch": 514,
+      "full_batch": 7706,
+      "single_stream": 129
+    }
+  },
+  "decision": {
+    "commit": false,
+    "push": false,
+    "reason": "Unprofiled BATCH 750P/750D at 10000 QPS delivered 9693.1 client QPS, below the required 9800 QPS. NON_BATCH acceptance passed at both rates; remote full UT passed. Performance acceptance is incomplete."
+  }
+}

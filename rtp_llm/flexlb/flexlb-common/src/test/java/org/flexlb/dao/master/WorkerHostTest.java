@@ -16,7 +16,7 @@ class WorkerHostTest {
     void discoveryFactoryPreservesSiteAndDefaultPorts(String site) {
         // Keep the three-argument API used by the separately built internal VipServer adapter.
         List<WorkerHost> hosts = List.of("127.0.0.1").stream()
-                .map(ip -> WorkerHost.of(ip, 8080, site))
+                .map(ip -> new WorkerHost(ip, 8080, site))
                 .collect(Collectors.toList());
 
         WorkerHost host = hosts.get(0);

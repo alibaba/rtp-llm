@@ -2,16 +2,13 @@ package org.flexlb.balance.planner;
 
 import org.flexlb.balance.planner.GroupPlanner.Constraints;
 import org.flexlb.balance.planner.GroupPlanner.Item;
-import org.flexlb.balance.planner.GroupPlanner.Plan;
 import org.flexlb.balance.planner.GroupPlanner.Selection;
-import org.flexlb.balance.planner.GroupPlanner.Shape;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.OptionalDouble;
-import java.util.function.ToDoubleFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -21,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Exact-value contracts for the pure {@link GroupPlanner} domain
- * (Item / Shape / Constraints / Selection / Plan) and its selection and
+ * (Item / Constraints / Selection) and its selection and
  * readiness algorithm. Every expected value is computed directly from the
  * documented rules, not asserted loosely.
  */
@@ -30,31 +27,65 @@ class GroupPlannerTest {
 
     private static final long BIG = 1_000_000L;
     /** Each candidate group is predicted at exactly 100ms per member. */
-    private static final ToDoubleFunction<List<Item>> HUNDRED_PER_MEMBER =
-            items -> 100.0 * items.size();
+    private static final GroupPlanner.PrefixPrediction<Item> HUNDRED_PER_MEMBER =
+            (added, items) -> 100.0 * items.size();
 
     private static Item item(long id, long seqLen, long enqueuedAtMs) {
         return new Item(id, /* priority */ 0, /* enqueueSeq */ id,
                 enqueuedAtMs, /* expiresAtMs */ BIG, seqLen, /* hitCache */ 0L);
     }
 
+    private static Selection<Item> selectedShape(long... lengths) {
+        var items = java.util.stream.LongStream.of(lengths)
+                .mapToObj(length -> item(length, length, 0L)).toList();
+        return GroupPlanner.selectWithPrediction(items,
+                new Constraints(lengths.length, BIG, BIG, 0L, 0L), null);
+    }
+
+    @Test
+    void paddedTokensAndGroupGrowthRespectOverflowBoundaries() {
+        long[] lengths = {0L, 1L, 2L, 1L << 31, 1L << 32, 1L << 62,
+                Long.MAX_VALUE / 3, Long.MAX_VALUE / 3 + 1, Long.MAX_VALUE / 7, Long.MAX_VALUE};
+        int[] sizes = {1, 2, 3, 4, 7, 16};
+        var maximum = java.math.BigInteger.valueOf(Long.MAX_VALUE);
+        for (long length : lengths) {
+            for (int size : sizes) {
+                var items = java.util.stream.LongStream.rangeClosed(1L, size)
+                        .mapToObj(id -> item(id, length, 0L)).toList();
+                var selected = GroupPlanner.selectWithPrediction(items,
+                        new Constraints(size, Long.MAX_VALUE, Long.MAX_VALUE, 0L, 0L), null);
+                int expectedSize = 1;
+                while (expectedSize < size && java.math.BigInteger.valueOf(length)
+                        .multiply(java.math.BigInteger.valueOf(expectedSize + 1L)).compareTo(maximum) < 0) {
+                    expectedSize++;
+                }
+                long expectedTokens = java.math.BigInteger.valueOf(length)
+                        .multiply(java.math.BigInteger.valueOf(expectedSize)).longValueExact();
+                String input = "length=" + length + ", size=" + size;
+                assertEquals(expectedSize, selected.items().size(), input);
+                assertEquals(expectedTokens, selected.paddedTokens(), input);
+                assertEquals(expectedTokens, selected.kvTokens(), input);
+            }
+        }
+    }
+
     @Test
     void selectionShapePreservesOverflowAndRejectedGrowthBoundaries() {
         var huge = item(1, Long.MAX_VALUE / 2 + 1, 10);
         var tiny = item(2, 1, 0);
-        var selected = GroupPlanner.select(List.of(huge, tiny), GroupPlanner.itemAccess(),
-                new Constraints(1024, Long.MAX_VALUE, Long.MAX_VALUE, 0, 0), null);
+        var selected = GroupPlanner.selectWithPrediction(List.of(huge, tiny), new Constraints(1024, Long.MAX_VALUE, Long.MAX_VALUE, 0, 0), null);
         assertEquals(List.of(huge), selected.items());
-        assertEquals(Shape.empty().add(huge.seqLen()), selected.shape());
+        assertEquals(huge.seqLen(), selected.paddedTokens());
+        assertEquals(huge.seqLen(), selected.kvTokens());
         assertEquals(10, selected.windowOpenedAtMs(), "rejected items cannot open the window earlier");
 
         var first = item(3, 10, 20);
         var second = item(4, 20, 10);
         var third = item(5, 100, 0);
-        var budgeted = GroupPlanner.select(List.of(first, second, third), GroupPlanner.itemAccess(),
-                new Constraints(1024, BIG, BIG, 250, 0), HUNDRED_PER_MEMBER);
+        var budgeted = GroupPlanner.selectWithPrediction(List.of(first, second, third), new Constraints(1024, BIG, BIG, 250, 0), HUNDRED_PER_MEMBER);
         assertEquals(List.of(first, second), budgeted.items());
-        assertEquals(new Shape(2, 20, 40, 30), budgeted.shape());
+        assertEquals(40, budgeted.paddedTokens());
+        assertEquals(30, budgeted.kvTokens());
         assertEquals(10, budgeted.windowOpenedAtMs());
         assertEquals(200, budgeted.selectedPredictionMs().orElseThrow());
     }
@@ -96,40 +127,33 @@ class GroupPlannerTest {
 
         @Test
         void emptyShapeIsAllZero() {
-            Shape empty = Shape.empty();
-            assertEquals(0, empty.size());
-            assertEquals(0L, empty.maxSeqLen());
+            Selection<Item> empty = GroupPlanner.selectWithPrediction(List.<Item>of(),
+                    new Constraints(1, BIG, BIG, 0L, 0L), null);
             assertEquals(0L, empty.paddedTokens());
             assertEquals(0L, empty.kvTokens());
         }
 
         @Test
         void paddedTokensAreMaxSeqLenTimesSize() {
-            // add(100) -> size1,max100,padded100,kv100
-            Shape one = Shape.empty().add(100L);
-            assertEquals(1, one.size());
-            assertEquals(100L, one.maxSeqLen());
+            // One selected member.
+            Selection<Item> one = selectedShape(100L);
             assertEquals(100L, one.paddedTokens());
             assertEquals(100L, one.kvTokens());
 
-            // add(50) -> size2,max100,padded200,kv150
-            Shape two = one.add(50L);
-            assertEquals(2, two.size());
-            assertEquals(100L, two.maxSeqLen());
+            // Padding uses the longest selected member.
+            Selection<Item> two = selectedShape(100L, 50L);
             assertEquals(200L, two.paddedTokens());
             assertEquals(150L, two.kvTokens());
 
-            // add(200) -> size3,max200,padded600,kv350
-            Shape three = two.add(200L);
-            assertEquals(3, three.size());
-            assertEquals(200L, three.maxSeqLen());
+            // A longer member increases padding for the whole group.
+            Selection<Item> three = selectedShape(100L, 50L, 200L);
             assertEquals(600L, three.paddedTokens());
             assertEquals(350L, three.kvTokens());
         }
 
         @Test
         void fitsComputeIsStrictlyLessThanCapacity() {
-            Shape two = Shape.empty().add(100L).add(100L); // paddedTokens = 200
+            Selection<Item> two = selectedShape(100L, 100L); // paddedTokens = 200
             assertTrue(two.fitsCompute(201L));
             assertFalse(two.fitsCompute(200L), "capacity is a strict upper bound");
             assertFalse(two.fitsCompute(199L));
@@ -138,23 +162,12 @@ class GroupPlannerTest {
 
         @Test
         void fitsKvIsInclusiveAndTreatsMaxAsUnlimited() {
-            Shape two = Shape.empty().add(100L).add(50L); // kvTokens = 150
+            Selection<Item> two = selectedShape(100L, 50L); // kvTokens = 150
             assertTrue(two.fitsKv(150L), "KV capacity is inclusive");
             assertFalse(two.fitsKv(149L));
             assertTrue(two.fitsKv(Long.MAX_VALUE), "MAX means unlimited KV");
         }
 
-        @Test
-        void multiplyAndAddSaturateAtLongMax() {
-            Shape huge = Shape.empty().add(Long.MAX_VALUE).add(1L);
-            assertEquals(2, huge.size());
-            assertEquals(Long.MAX_VALUE, huge.maxSeqLen());
-            assertEquals(Long.MAX_VALUE, huge.paddedTokens());
-            assertEquals(Long.MAX_VALUE, huge.kvTokens());
-            // Saturated compute never fits any real capacity; MAX KV is unlimited.
-            assertFalse(huge.fitsCompute(Long.MAX_VALUE));
-            assertTrue(huge.fitsKv(Long.MAX_VALUE));
-        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -189,7 +202,7 @@ class GroupPlannerTest {
         @Test
         void emptySelectionCannotCarryAPrediction() {
             assertThrows(IllegalArgumentException.class,
-                    () -> new Selection<>(List.of(), Shape.empty(), Long.MAX_VALUE,
+                    () -> new Selection<>(List.of(), 0L, 0L, Long.MAX_VALUE,
                             false, OptionalDouble.of(10.0)));
         }
 
@@ -202,11 +215,10 @@ class GroupPlannerTest {
 
         @Test
         void emptyInputSelectsNothing() {
-            Selection<Item> selection = GroupPlanner.select(
-                    List.of(), GroupPlanner.itemAccess(),
-                    new Constraints(8, BIG, BIG, 0L, 300L), null);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    List.of(), new Constraints(8, BIG, BIG, 0L, 300L), null);
             assertTrue(selection.items().isEmpty());
-            assertEquals(0, selection.shape().size());
+            assertEquals(0, selection.items().size());
             assertEquals(Long.MAX_VALUE, selection.windowOpenedAtMs());
             assertFalse(selection.predictionBoundaryTriggered());
             assertTrue(selection.selectedPredictionMs().isEmpty());
@@ -218,16 +230,14 @@ class GroupPlannerTest {
                     item(1L, 10L, 1000L), item(2L, 10L, 2000L),
                     item(3L, 10L, 2000L), item(4L, 10L, 2000L),
                     item(5L, 10L, 2000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(3, BIG, BIG, 0L, 300L), null);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(3, BIG, BIG, 0L, 300L), null);
 
             assertEquals(List.of(1L, 2L, 3L),
                     selection.items().stream().map(Item::requestId).toList());
-            assertEquals(3, selection.shape().size());
-            assertEquals(10L, selection.shape().maxSeqLen());
-            assertEquals(30L, selection.shape().paddedTokens());
-            assertEquals(30L, selection.shape().kvTokens());
+            assertEquals(3, selection.items().size());
+            assertEquals(30L, selection.paddedTokens());
+            assertEquals(30L, selection.kvTokens());
             assertEquals(1000L, selection.windowOpenedAtMs(),
                     "window opens at the minimum enqueue time of the group");
             assertFalse(selection.predictionBoundaryTriggered());
@@ -236,9 +246,8 @@ class GroupPlannerTest {
         @Test
         void maxRequestsOneReturnsHeadOnly() {
             List<Item> items = List.of(item(1L, 10L, 1000L), item(2L, 10L, 1000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(1, BIG, BIG, 0L, 300L), null);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(1, BIG, BIG, 0L, 300L), null);
             assertEquals(List.of(1L),
                     selection.items().stream().map(Item::requestId).toList());
         }
@@ -250,11 +259,10 @@ class GroupPlannerTest {
             List<Item> items = List.of(
                     item(1L, 100L, 1000L), item(2L, 100L, 1000L),
                     item(3L, 100L, 1000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, 250L, BIG, 0L, 300L), null);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(10, 250L, BIG, 0L, 300L), null);
             assertEquals(2, selection.items().size());
-            assertEquals(200L, selection.shape().paddedTokens());
+            assertEquals(200L, selection.paddedTokens());
             assertFalse(selection.predictionBoundaryTriggered(),
                     "compute pressure stops growth but does not dispatch");
         }
@@ -265,11 +273,10 @@ class GroupPlannerTest {
             List<Item> items = List.of(
                     item(1L, 100L, 1000L), item(2L, 100L, 1000L),
                     item(3L, 100L, 1000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, 250L, 0L, 300L), null);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(10, BIG, 250L, 0L, 300L), null);
             assertEquals(2, selection.items().size());
-            assertEquals(200L, selection.shape().kvTokens());
+            assertEquals(200L, selection.kvTokens());
             assertFalse(selection.predictionBoundaryTriggered());
         }
 
@@ -280,9 +287,8 @@ class GroupPlannerTest {
             List<Item> items = List.of(
                     item(1L, 10L, 1000L), item(2L, 10L, 2000L),
                     item(3L, 10L, 3000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 200L, 300L), HUNDRED_PER_MEMBER);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(10, BIG, BIG, 200L, 300L), HUNDRED_PER_MEMBER);
             assertEquals(2, selection.items().size());
             assertTrue(selection.predictionBoundaryTriggered());
             assertEquals(OptionalDouble.of(200.0), selection.selectedPredictionMs());
@@ -296,9 +302,8 @@ class GroupPlannerTest {
             List<Item> items = List.of(
                     item(1L, 10L, 1000L), item(2L, 10L, 2000L),
                     item(3L, 10L, 3000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 150L, 300L), HUNDRED_PER_MEMBER);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(10, BIG, BIG, 150L, 300L), HUNDRED_PER_MEMBER);
             assertEquals(List.of(1L),
                     selection.items().stream().map(Item::requestId).toList());
             assertTrue(selection.predictionBoundaryTriggered());
@@ -310,10 +315,9 @@ class GroupPlannerTest {
             List<Item> items = List.of(
                     item(1L, 10L, 1000L), item(2L, 10L, 2000L),
                     item(3L, 10L, 3000L), item(4L, 10L, 4000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 150L, 300L),
-                    group -> switch (group.size()) {
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(10, BIG, BIG, 150L, 300L),
+                    (added, group) -> switch (group.size()) {
                         case 1 -> 100.0;
                         case 2 -> 120.0;
                         case 3 -> 200.0;
@@ -332,9 +336,8 @@ class GroupPlannerTest {
             // budget=100; head predicted=100 (>=100) -> singleton triggers, size1.
             List<Item> items = List.of(
                     item(1L, 10L, 1000L), item(2L, 10L, 2000L));
-            Selection<Item> selection = GroupPlanner.select(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 100L, 300L), HUNDRED_PER_MEMBER);
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    items, new Constraints(10, BIG, BIG, 100L, 300L), HUNDRED_PER_MEMBER);
             assertEquals(1, selection.items().size());
             assertTrue(selection.predictionBoundaryTriggered());
             assertEquals(OptionalDouble.of(100.0), selection.selectedPredictionMs());
@@ -352,25 +355,23 @@ class GroupPlannerTest {
                     item(1L, 10L, 1000L), item(2L, 10L, 1000L),
                     item(3L, 10L, 1000L), item(4L, 10L, 1000L));
             // window NOT elapsed (now == open) but BATCH_FULL takes precedence.
-            Plan<Item> plan = GroupPlanner.plan(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(3, BIG, BIG, 0L, 300L),
-                    /* nowMs */ 1000L, null);
-            assertTrue(plan.ready());
-            assertEquals(GroupPlanner.BATCH_FULL, plan.reason());
+            Constraints constraints = new Constraints(3, BIG, BIG, 0L, 300L);
+            Selection<Item> plan = GroupPlanner.selectWithPrediction(items, constraints, null);
+            String reason = GroupPlanner.dispatchReason(plan, constraints, 1000L);
+            assertTrue(reason != null);
+            assertEquals(GroupPlanner.BATCH_FULL, reason);
             assertEquals(3, plan.items().size());
-            assertEquals(1300L, plan.collectionDeadlineMs());
+            assertEquals(1300L, GroupPlanner.collectionDeadlineMs(plan.windowOpenedAtMs(), constraints.collectionWindowMs()));
         }
 
         @Test
         void predictedExecutionCapReason() {
             List<Item> items = List.of(item(1L, 10L, 1000L), item(2L, 10L, 2000L));
-            Plan<Item> plan = GroupPlanner.plan(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 200L, 300L),
-                    1000L, HUNDRED_PER_MEMBER);
-            assertTrue(plan.ready());
-            assertEquals(GroupPlanner.PREDICTED_EXECUTION_CAP, plan.reason());
+            Constraints constraints = new Constraints(10, BIG, BIG, 200L, 300L);
+            Selection<Item> plan = GroupPlanner.selectWithPrediction(items, constraints, HUNDRED_PER_MEMBER);
+            String reason = GroupPlanner.dispatchReason(plan, constraints, 1000L);
+            assertTrue(reason != null);
+            assertEquals(GroupPlanner.PREDICTED_EXECUTION_CAP, reason);
         }
 
         @Test
@@ -378,37 +379,34 @@ class GroupPlannerTest {
             List<Item> items = List.of(item(1L, 10L, 1000L), item(2L, 10L, 1000L));
             // 2 < maxRequests(10), no predictor. window opens at 1000, window=300.
             // now=1300 -> 1300-1000=300 >= 300 -> elapsed.
-            Plan<Item> plan = GroupPlanner.plan(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 0L, 300L),
-                    /* nowMs */ 1300L, null);
-            assertTrue(plan.ready());
-            assertEquals(GroupPlanner.FIXED_WINDOW_TIMEOUT, plan.reason());
-            assertEquals(1300L, plan.collectionDeadlineMs());
+            Constraints constraints = new Constraints(10, BIG, BIG, 0L, 300L);
+            Selection<Item> plan = GroupPlanner.selectWithPrediction(items, constraints, null);
+            String reason = GroupPlanner.dispatchReason(plan, constraints, 1300L);
+            assertTrue(reason != null);
+            assertEquals(GroupPlanner.FIXED_WINDOW_TIMEOUT, reason);
+            assertEquals(1300L, GroupPlanner.collectionDeadlineMs(plan.windowOpenedAtMs(), constraints.collectionWindowMs()));
         }
 
         @Test
         void waitingWhenWindowNotYetElapsed() {
             List<Item> items = List.of(item(1L, 10L, 1000L), item(2L, 10L, 1000L));
             // now=1299 -> 299 < 300 -> not elapsed, not full -> WAITING, no reason.
-            Plan<Item> plan = GroupPlanner.plan(
-                    items, GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 0L, 300L),
-                    /* nowMs */ 1299L, null);
-            assertFalse(plan.ready());
-            assertSame(null, plan.reason());
+            Constraints constraints = new Constraints(10, BIG, BIG, 0L, 300L);
+            Selection<Item> plan = GroupPlanner.selectWithPrediction(items, constraints, null);
+            String reason = GroupPlanner.dispatchReason(plan, constraints, 1299L);
+            assertFalse(reason != null);
+            assertSame(null, reason);
         }
 
         @Test
         void emptyPlanWaitsWithMaxWindowAndSaturatedDeadline() {
-            Plan<Item> plan = GroupPlanner.plan(
-                    List.of(), GroupPlanner.itemAccess(),
-                    new Constraints(8, BIG, BIG, 0L, 300L),
-                    /* nowMs */ Long.MAX_VALUE, null);
-            assertFalse(plan.ready());
+            Constraints constraints = new Constraints(8, BIG, BIG, 0L, 300L);
+            Selection<Item> plan = GroupPlanner.selectWithPrediction(List.of(), constraints, null);
+            String reason = GroupPlanner.dispatchReason(plan, constraints, Long.MAX_VALUE);
+            assertFalse(reason != null);
             assertTrue(plan.items().isEmpty());
             assertEquals(Long.MAX_VALUE, plan.windowOpenedAtMs());
-            assertEquals(Long.MAX_VALUE, plan.collectionDeadlineMs());
+            assertEquals(Long.MAX_VALUE, GroupPlanner.collectionDeadlineMs(plan.windowOpenedAtMs(), constraints.collectionWindowMs()));
         }
     }
 
@@ -455,34 +453,31 @@ class GroupPlannerTest {
         void oversizedSoloHeadIsStillSelectedWhenItExceedsComputeCapacity() {
             // Head padded tokens (1000) are NOT < capacity (100), yet a lone head
             // must still be selected — it cannot be split or silently dropped.
-            Selection<Item> selection = GroupPlanner.select(
-                    List.of(item(1L, 1000L, 1000L)), GroupPlanner.itemAccess(),
-                    new Constraints(10, /* batchTokenCapacity */ 100L, BIG, 0L, 300L),
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    List.of(item(1L, 1000L, 1000L)), new Constraints(10, /* batchTokenCapacity */ 100L, BIG, 0L, 300L),
                     null);
             assertEquals(List.of(1L),
                     selection.items().stream().map(Item::requestId).toList());
-            assertEquals(1000L, selection.shape().paddedTokens());
+            assertEquals(1000L, selection.paddedTokens());
         }
 
         @Test
         void oversizedSoloHeadIsStillSelectedWhenItExceedsKvCapacity() {
             // Head kvTokens (1000) exceed kvCapacity (100); the lone head remains.
-            Selection<Item> selection = GroupPlanner.select(
-                    List.of(item(1L, 1000L, 1000L)), GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, /* batchKvCapacity */ 100L, 0L, 300L),
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    List.of(item(1L, 1000L, 1000L)), new Constraints(10, BIG, /* batchKvCapacity */ 100L, 0L, 300L),
                     null);
             assertEquals(List.of(1L),
                     selection.items().stream().map(Item::requestId).toList());
-            assertEquals(1000L, selection.shape().kvTokens());
+            assertEquals(1000L, selection.kvTokens());
         }
 
         @Test
         void growthStopsAtAnOversizedSecondMemberButTheHeadIsKept() {
             // Head fits; the second member would push padded tokens over capacity,
             // so growth stops and exactly the head is selected.
-            Selection<Item> selection = GroupPlanner.select(
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
                     List.of(item(1L, 50L, 1000L), item(2L, 5000L, 2000L)),
-                    GroupPlanner.itemAccess(),
                     new Constraints(10, /* cap */ 1000L, BIG, 0L, 300L), null);
             assertEquals(List.of(1L),
                     selection.items().stream().map(Item::requestId).toList());
@@ -493,26 +488,24 @@ class GroupPlannerTest {
             // Beyond selection: an indivisible oversized head must still be able to
             // dispatch. With no larger group possible, the window timeout releases
             // it rather than deadlocking.
-            Plan<Item> plan = GroupPlanner.plan(
-                    List.of(item(1L, 1000L, 1000L)), GroupPlanner.itemAccess(),
-                    new Constraints(10, 100L, 100L, 0L, 300L),
-                    /* nowMs */ 1300L, null);
-            assertTrue(plan.ready());
-            assertEquals(GroupPlanner.FIXED_WINDOW_TIMEOUT, plan.reason());
+            Constraints constraints = new Constraints(10, 100L, 100L, 0L, 300L);
+            Selection<Item> plan = GroupPlanner.selectWithPrediction(List.of(item(1L, 1000L, 1000L)), constraints, null);
+            String reason = GroupPlanner.dispatchReason(plan, constraints, 1300L);
+            assertTrue(reason != null);
+            assertEquals(GroupPlanner.FIXED_WINDOW_TIMEOUT, reason);
             assertEquals(List.of(1L),
                     plan.items().stream().map(Item::requestId).toList());
         }
 
         @Test
         void zeroSeqLenHeadProducesAZeroShapeThatFitsAnyPositiveCapacity() {
-            Selection<Item> selection = GroupPlanner.select(
-                    List.of(item(1L, 0L, 1000L)), GroupPlanner.itemAccess(),
-                    new Constraints(10, BIG, BIG, 0L, 300L), null);
-            assertEquals(1, selection.shape().size());
-            assertEquals(0L, selection.shape().paddedTokens());
-            assertEquals(0L, selection.shape().kvTokens());
-            assertTrue(selection.shape().fitsCompute(1L));
-            assertTrue(selection.shape().fitsKv(0L));
+            Selection<Item> selection = GroupPlanner.selectWithPrediction(
+                    List.of(item(1L, 0L, 1000L)), new Constraints(10, BIG, BIG, 0L, 300L), null);
+            assertEquals(1, selection.items().size());
+            assertEquals(0L, selection.paddedTokens());
+            assertEquals(0L, selection.kvTokens());
+            assertTrue(selection.fitsCompute(1L));
+            assertTrue(selection.fitsKv(0L));
         }
     }
 
@@ -531,7 +524,7 @@ class GroupPlannerTest {
 
         @Test
         void atTheExactBoundaryComputeIsExclusiveButKvIsInclusive() {
-            Shape shape = Shape.empty().add(200L); // paddedTokens = 200, kvTokens = 200
+            Selection<Item> shape = selectedShape(200L); // paddedTokens = 200, kvTokens = 200
             assertEquals(200L, shape.paddedTokens());
             assertEquals(200L, shape.kvTokens());
             assertFalse(shape.fitsCompute(200L),

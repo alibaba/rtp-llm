@@ -87,7 +87,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
 
         try {
             if (workerStatus.getCacheStatus() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cache Status is null");
+                WorkerCacheUpdateResult result = buildFailureResult("Worker Cache Status is null");
                 cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
                 return result;
             }
@@ -95,7 +95,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             String ipPort = workerStatus.getIpPort();
             CacheStatus cacheStatus = workerStatus.getCacheStatus();
             if (cacheStatus.getCachedKeys() == null) {
-                WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, "Worker Cached Keys is null");
+                WorkerCacheUpdateResult result = buildFailureResult("Worker Cached Keys is null");
                 cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
                 return result;
             }
@@ -105,7 +105,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             // Update cache
             kvCacheManager.updateEngineCache(ipPort, role, cachedKeys);
 
-            WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
+            WorkerCacheUpdateResult result = WorkerCacheUpdateResult.builder().success(true).build();
 
             cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
 
@@ -114,7 +114,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
         } catch (Throwable e) {
             log.error("Error updating worker cache for: {}", engineIpPort, e);
 
-            WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
+            WorkerCacheUpdateResult result = buildFailureResult(e.getMessage());
 
             cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
 
@@ -128,26 +128,11 @@ public class DefaultCacheAwareService implements CacheAwareService {
     }
 
     /**
-     * Build success result
-     */
-    private WorkerCacheUpdateResult buildSuccessResult(WorkerStatus workerStatus, CacheStatus cacheStatus) {
-        return WorkerCacheUpdateResult.builder()
-            .success(true)
-            .engineIpPort(workerStatus.getIpPort())
-            .cacheBlockCount(cacheStatus.getCachedKeys() != null ? cacheStatus.getCachedKeys().size() : 0)
-            .availableKvCache(cacheStatus.getAvailableKvCache())
-            .totalKvCache(cacheStatus.getTotalKvCache())
-            .cacheVersion(cacheStatus.getVersion())
-            .build();
-    }
-
-    /**
      * Build failure result
      */
-    private WorkerCacheUpdateResult buildFailureResult(String engineIpPort, String errorMessage) {
+    private WorkerCacheUpdateResult buildFailureResult(String errorMessage) {
         return WorkerCacheUpdateResult.builder()
             .success(false)
-            .engineIpPort(engineIpPort)
             .errorMessage(errorMessage)
             .build();
     }

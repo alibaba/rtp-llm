@@ -66,26 +66,22 @@ class ShutdownDrainTest {
 
     @Test
     void drainZeroesCountersWithLongDecodeInflight() throws Exception {
-        MockPerformanceModel model = model("10"); // fast prefill hand-off
+        // Fast prefill hand-off, with a 60s decode step so completion cannot race the drain.
+        MockPerformanceModel model = MockEngineTestSupport.performanceModel(tempDir, "10", 1.0, 60_000.0);
         // decodeMaxConcurrency=4 so 10 requests per decode engine leave 4
         // running + 6 parked in the decode pending queue — the drain must
         // clear both populations.
         startCluster(model, 1, 2, 4);
-        for (JavaMockEngineCluster.FastRpcService decode : decodeServices) {
-            // ~60s per decode step: completions cannot fire during the test,
-            // reproducing the stop-time in-flight backlog.
-            decode.getPerformance().setOverrideDecodeStepMs(60_000.0);
-        }
 
         int n = 20;
         enqueueBatch(prefillServices.get(0), 9000, 1, n, decodeServices);
 
         // Wait until both decode engines have running AND queued requests.
         for (JavaMockEngineCluster.FastRpcService decode : decodeServices) {
-            await(() -> decode.getActiveDecodeCount() >= 4
+            await(() -> MockEngineTestSupport.getActiveDecodeCount(decode) >= 4
                             && decode.getDecodePendingQueueDepth() >= 1, 5_000,
                     "decode engine " + decode.getGrpcPort() + " never built a backlog: active="
-                            + decode.getActiveDecodeCount()
+                            + MockEngineTestSupport.getActiveDecodeCount(decode)
                             + " queued=" + decode.getDecodePendingQueueDepth());
         }
         assertTrue(totalInflight() > 0, "requests should be in flight before drain");
@@ -98,28 +94,28 @@ class ShutdownDrainTest {
         // All counters net to zero immediately (no 90s natural drain).
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             String port = "port " + service.getGrpcPort();
-            assertTrue(service.isShuttingDown(), port + " should be shutting down");
+            assertTrue(MockEngineTestSupport.isShuttingDown(service), port + " should be shutting down");
             assertTrue(service.isStopped(), port + " should be stopped");
             assertEquals(0, service.getInflightCount(), port + " pendingRequests");
             assertEquals(0, service.getRunningCount(), port + " runningTasks");
-            assertEquals(0, service.getActiveDecodeCount(), port + " activeDecodeRequests");
-            assertEquals(0, service.getActiveKvTokens(), port + " activeKvTokens");
+            assertEquals(0, MockEngineTestSupport.getActiveDecodeCount(service), port + " activeDecodeRequests");
+            assertEquals(0, MockEngineTestSupport.getActiveKvTokens(service), port + " activeKvTokens");
             assertEquals(0, service.getWaitingCount(), port + " waitingPrefillRequests");
-            assertEquals(0, service.getActivePrefillRequestCount(), port + " activePrefillRequests");
-            assertEquals(0, service.getActivePrefillBatchCount(), port + " activePrefillBatches");
+            assertEquals(0, MockEngineTestSupport.getActivePrefillRequestCount(service), port + " activePrefillRequests");
+            assertEquals(0, MockEngineTestSupport.getActivePrefillBatchCount(service), port + " activePrefillBatches");
             assertEquals(0, service.getDecodePendingQueueDepth(), port + " decodePendingQueue");
-            assertEquals(0, service.getPrefillPendingQueueDepth(), port + " prefillPendingQueue");
+            assertEquals(0, MockEngineTestSupport.getPrefillPendingQueueDepth(service), port + " prefillPendingQueue");
         }
 
         // The in-flight requests were cancelled, not leaked.
         long cancelled = services.values().stream()
-                .mapToLong(JavaMockEngineCluster.FastRpcService::getCancelledCount).sum();
+                .mapToLong(MockEngineTestSupport::getCancelledCount).sum();
         assertTrue(cancelled >= n, "expected >= " + n + " cancellations, got " + cancelled);
 
         // checkLeakDrain must not report while shutting down, even with zero grace.
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             service.checkLeakDrain(0);
-            assertFalse(service.isLeakDetected(),
+            assertFalse(MockEngineTestSupport.isLeakDetected(service),
                     "leak must NOT be detected during shutdown on port " + service.getGrpcPort());
         }
     }
@@ -136,8 +132,8 @@ class ShutdownDrainTest {
         enqueueBatch(prefill, 9100, 1, 4, decodeServices);
         enqueueBatch(prefill, 9101, 5, 4, decodeServices);
         enqueueBatch(prefill, 9102, 9, 4, decodeServices);
-        await(() -> prefill.getPrefillPendingQueueDepth() >= 2, 2_000,
-                "prefill pending queue never filled: depth=" + prefill.getPrefillPendingQueueDepth());
+        await(() -> MockEngineTestSupport.getPrefillPendingQueueDepth(prefill) >= 2, 2_000,
+                "prefill pending queue never filled: depth=" + MockEngineTestSupport.getPrefillPendingQueueDepth(prefill));
         assertTrue(prefill.getWaitingCount() >= 8, "queued prefill requests expected");
 
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
@@ -148,22 +144,22 @@ class ShutdownDrainTest {
         assertEquals(0, prefill.getInflightCount(), "pendingRequests");
         assertEquals(0, prefill.getRunningCount(), "runningTasks");
         assertEquals(0, prefill.getWaitingCount(), "waitingPrefillRequests");
-        assertEquals(0, prefill.getPrefillPendingQueueDepth(), "prefillPendingQueue");
+        assertEquals(0, MockEngineTestSupport.getPrefillPendingQueueDepth(prefill), "prefillPendingQueue");
 
         // The RUNNING batch's slot counters are freed by its already-scheduled
         // completion callback (all members cancelled → no further decrements).
-        await(() -> prefill.getActivePrefillBatchCount() == 0
-                        && prefill.getActivePrefillRequestCount() == 0, 7_000,
+        await(() -> MockEngineTestSupport.getActivePrefillBatchCount(prefill) == 0
+                        && MockEngineTestSupport.getActivePrefillRequestCount(prefill) == 0, 7_000,
                 "running prefill batch slot never freed: batches="
-                        + prefill.getActivePrefillBatchCount()
-                        + " reqs=" + prefill.getActivePrefillRequestCount());
+                        + MockEngineTestSupport.getActivePrefillBatchCount(prefill)
+                        + " reqs=" + MockEngineTestSupport.getActivePrefillRequestCount(prefill));
         // No negative drift from the completion racing the drain.
         assertEquals(0, prefill.getInflightCount(), "pendingRequests after completion");
         assertEquals(0, prefill.getWaitingCount(), "waitingPrefillRequests after completion");
 
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
             service.checkLeakDrain(0);
-            assertFalse(service.isLeakDetected(),
+            assertFalse(MockEngineTestSupport.isLeakDetected(service),
                     "leak must NOT be detected during shutdown on port " + service.getGrpcPort());
         }
     }
@@ -226,7 +222,7 @@ class ShutdownDrainTest {
 
         // NOT shutting down + grace expired → the real leak check still trips.
         prefill.checkLeakDrain(0);
-        assertTrue(prefill.isLeakDetected(),
+        assertTrue(MockEngineTestSupport.isLeakDetected(prefill),
                 "runtime leak detection must still fire when not shutting down");
     }
 

@@ -246,6 +246,23 @@
     <build>
         <plugins>
             <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.3.0</version>
+                <executions>
+                    <execution>
+                        <id>shared-test-fixtures</id>
+                        <phase>generate-test-sources</phase>
+                        <goals><goal>add-test-source</goal></goals>
+                        <configuration>
+                            <sources>
+                                <source>${project.basedir}/../flexlb-common/src/testFixtures/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.openrewrite.maven</groupId>
                 <artifactId>rewrite-maven-plugin</artifactId>
                 <version>6.21.1</version>
@@ -396,6 +413,7 @@
             <id>api-performance-regression</id>
             <properties>
                 <flexlb.perf.heap>2g</flexlb.perf.heap>
+                <flexlb.perf.jvm-args></flexlb.perf.jvm-args>
             </properties>
             <build>
                 <plugins>
@@ -421,6 +439,7 @@
                                     -->
                                     <argLine>
                                         -Xms${flexlb.perf.heap} -Xmx${flexlb.perf.heap}
+                                        ${flexlb.perf.jvm-args}
                                         --add-modules ALL-SYSTEM
                                         --add-opens java.base/java.lang=ALL-UNNAMED
                                         --add-opens java.base/java.lang.invoke=ALL-UNNAMED

@@ -243,14 +243,14 @@ class MetricsValidationTest {
         try (MockEngineTestCluster cluster =
                      MockEngineTestCluster.start(model, BASE_PORT + 100, 1, 1)) {
             JavaMockEngineCluster.FastRpcService prefill = cluster.prefill(0);
-            long spb = prefill.getSeqSizePerBlock();
+            long spb = MockEngineTestSupport.getSeqSizePerBlock(prefill);
 
             // Idle baseline: pool-derived availability, no keys.
             JsonNode idle = engineByPort(cluster, prefill.getGrpcPort());
             long idleAvailable = idle.get("available_kv_tokens").asLong();
             assertEquals(0, idle.get("cache_keys").asInt());
             assertEquals(
-                    Math.min(prefill.getTotalKvTokens(), (long) prefill.getCacheBlocks() * spb),
+                    Math.min(MockEngineTestSupport.getTotalKvTokens(prefill), (long) MockEngineTestSupport.getCacheBlocks(prefill) * spb),
                     idleAvailable,
                     "idle availability = min(total, pool blocks x spb)");
 

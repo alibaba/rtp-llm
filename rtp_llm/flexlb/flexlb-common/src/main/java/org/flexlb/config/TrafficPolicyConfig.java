@@ -2,7 +2,6 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
-import org.flexlb.dao.loadbalance.Request;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -20,16 +19,13 @@ public final class TrafficPolicyConfig {
     private List<Target> defaultTargets = new ArrayList<>();
     private List<Rule> rules = new ArrayList<>();
 
-    public Optional<String> resolveTargetGroup(Request request) {
-        if (request == null) {
-            return Optional.empty();
-        }
+    public Optional<String> resolveTargetGroup(long requestId, String apiKey, long seqLen) {
         for (Rule rule : rules) {
-            if (rule.matches(request)) {
-                return chooseWeightedTarget(rule.getTargets(), request, rule.getName());
+            if (rule.match != null && rule.match.matches(apiKey, seqLen)) {
+                return chooseWeightedTarget(rule.getTargets(), requestId, apiKey, seqLen, rule.getName());
             }
         }
-        return chooseWeightedTarget(defaultTargets, request, "default");
+        return chooseWeightedTarget(defaultTargets, requestId, apiKey, seqLen, "default");
     }
 
     static void validate(TrafficPolicyConfig config) {
@@ -90,13 +86,13 @@ public final class TrafficPolicyConfig {
     }
 
     private static Optional<String> chooseWeightedTarget(List<Target> targets,
-                                                          Request request,
+                                                          long requestId, String apiKey, long seqLen,
                                                           String salt) {
         if (targets == null || targets.isEmpty()) {
             return Optional.empty();
         }
         long totalWeight = targets.stream().mapToLong(Target::getWeight).sum();
-        long bucket = hashRequest(request, salt) % totalWeight;
+        long bucket = hashRequest(requestId, apiKey, seqLen, salt) % totalWeight;
         long cumulative = 0;
         for (Target target : targets) {
             cumulative += target.weight;
@@ -107,10 +103,10 @@ public final class TrafficPolicyConfig {
         throw new IllegalStateException("validated weighted target selection fell through");
     }
 
-    private static long hashRequest(Request request, String salt) {
+    private static long hashRequest(long requestId, String apiKey, long seqLen, String salt) {
         CRC32 crc32 = new CRC32();
-        String key = request.getRequestId() + "|" + request.getApiKey() + "|"
-                + request.getSeqLen() + "|" + salt;
+        String key = requestId + "|" + apiKey + "|"
+                + seqLen + "|" + salt;
         crc32.update(key.getBytes(StandardCharsets.UTF_8));
         return crc32.getValue();
     }
@@ -122,9 +118,6 @@ public final class TrafficPolicyConfig {
         private Match match;
         private List<Target> targets = new ArrayList<>();
 
-        private boolean matches(Request request) {
-            return match != null && match.matches(request);
-        }
     }
 
     @Getter
@@ -158,11 +151,11 @@ public final class TrafficPolicyConfig {
             }
         }
 
-        private boolean matches(Request request) {
-            if (!apiKeys.isEmpty() && !apiKeys.contains(request.getApiKey())) {
+        private boolean matches(String apiKey, long seqLen) {
+            if (!apiKeys.isEmpty() && !apiKeys.contains(apiKey)) {
                 return false;
             }
-            return inputTokens == null || inputTokens.matches(request.getSeqLen());
+            return inputTokens == null || inputTokens.matches(seqLen);
         }
     }
 

@@ -112,9 +112,9 @@ class SetPerfMaxWaitingBatchesTest {
 
         // The 7 admitted batches drain to completion despite the rejection.
         awaitInflightZero(prefill, 5_000);
-        assertEquals(7, prefill.getCompletedCount());
+        assertEquals(7, MockEngineTestSupport.getCompletedCount(prefill));
         assertEquals(0, prefill.getWaitingCount());
-        assertFalse(prefill.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 2: override beats the JSON-configured value ────────────
@@ -141,8 +141,8 @@ class SetPerfMaxWaitingBatchesTest {
                 .getErrorsCount(), "6th batch should hit the overridden cap of 3");
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(4, prefill.getCompletedCount(), "1st, 2nd, 4th, 5th should complete");
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(4, MockEngineTestSupport.getCompletedCount(prefill), "1st, 2nd, 4th, 5th should complete");
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 3: runtime 0 disables a configured cap ────────────
@@ -163,8 +163,8 @@ class SetPerfMaxWaitingBatchesTest {
         }
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(8, prefill.getCompletedCount());
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(8, MockEngineTestSupport.getCompletedCount(prefill));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 4: negative value → 400, live cap unchanged ────────────
@@ -191,8 +191,8 @@ class SetPerfMaxWaitingBatchesTest {
                 .getErrorsCount(), "cap must still be 1 after the rejected negative request");
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(2, prefill.getCompletedCount());
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(2, MockEngineTestSupport.getCompletedCount(prefill));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Harness ────────────
@@ -242,6 +242,6 @@ class SetPerfMaxWaitingBatchesTest {
     }
 
     private HttpResponse<String> httpPostResponse(String path, String body) throws Exception {
-        return MockEngineTestSupport.httpPostResponse(controlServer.getPort(), path, body);
+        return MockEngineTestSupport.httpPostResponse(MockEngineTestSupport.controlPort(controlServer), path, body);
     }
 }

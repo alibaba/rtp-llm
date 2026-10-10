@@ -17,6 +17,8 @@ import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /** Local domain-to-host discovery from a configured mapping or a reloadable JSON file. */
 @Slf4j
 public final class LocalServiceDiscovery implements ServiceDiscovery {
@@ -82,9 +84,7 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
      * so callers can never observe a half list.
      */
     private static Map<String, List<WorkerHost>> parseHosts(JsonNode root) {
-        if (root == null || !root.isObject()) {
-            throw new IllegalArgumentException("discovery hosts must be an object");
-        }
+        checkArgument(root != null && root.isObject(), "discovery hosts must be an object");
         Map<String, List<WorkerHost>> result = new LinkedHashMap<>();
         for (Iterator<Map.Entry<String, JsonNode>> it = root.fields(); it.hasNext(); ) {
             Map.Entry<String, JsonNode> entry = it.next();
@@ -109,14 +109,10 @@ public final class LocalServiceDiscovery implements ServiceDiscovery {
     /** Port interpretation follows the endpoint protocol. */
     private static WorkerHost parseHost(String hostStr) {
         String[] parts = hostStr.split(":");
-        if (parts.length != 2) {
-            throw new IllegalArgumentException("Invalid host format: " + hostStr + ", expected ip:port");
-        }
+        checkArgument(parts.length == 2, "Invalid host format: %s, expected ip:port", hostStr);
         String ip = parts[0].trim();
         int port = Integer.parseInt(parts[1].trim());
-        if (ip.isEmpty() || port < 1 || port > 65535) {
-            throw new IllegalArgumentException("Invalid host:port: " + hostStr);
-        }
+        checkArgument(!ip.isEmpty() && port >= 1 && port <= 65535, "Invalid host:port: %s", hostStr);
         return WorkerHost.of(ip, port);
     }
 

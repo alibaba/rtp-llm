@@ -95,14 +95,14 @@ class KvAllocatedReportOptInTest {
         // truly RUNNING request holds KV — queued requests stay uncounted
         // until run start, exactly today's behavior. Block-pool caliber:
         // inputLen=8 rounds up to ceil(8/1024)=1 block = 1024 tokens.
-        assertEquals(1024, decode.getActiveKvTokens(),
+        assertEquals(1024, MockEngineTestSupport.getActiveKvTokens(decode),
                 "default OFF: only the running request's block lease is counted");
 
         awaitDecodeQuiescence(decode, 30_000);
-        assertEquals(3, decode.getCompletedCount());
-        assertEquals(0, decode.getActiveKvTokens(), "KV must net to zero after quiescence");
+        assertEquals(3, MockEngineTestSupport.getCompletedCount(decode));
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode), "KV must net to zero after quiescence");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── State 2: flag ON → queued = KV_ALLOCATED, flips back on start ────────────
@@ -129,19 +129,19 @@ class KvAllocatedReportOptInTest {
         // the two queued requests hold their reservation from enqueue — all
         // three requests (1 running + 2 queued) are counted. Block-pool
         // caliber: 3 leases x 1 block = 3 x 1024 tokens.
-        assertEquals(3 * 1024, decode.getActiveKvTokens(),
+        assertEquals(3 * 1024, MockEngineTestSupport.getActiveKvTokens(decode),
                 "opt-in: queued requests must hold their KV reservation from enqueue");
 
         // As slots free, queued requests drain and their phase flips to
         // RUNNING; eventually everything completes with no leak.
         awaitDecodeQuiescence(decode, 30_000);
-        assertEquals(3, decode.getCompletedCount(),
+        assertEquals(3, MockEngineTestSupport.getCompletedCount(decode),
                 "queued requests must still drain and complete normally");
-        assertEquals(0, decode.getActiveKvTokens(),
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode),
                 "opt-in: enqueue-time KV must not be double-counted at run start "
                         + "(net zero after quiescence)");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     @Test
@@ -151,7 +151,7 @@ class KvAllocatedReportOptInTest {
 
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 1L, 8), -1, null));
         assertTrue(scheduleDecodeCompletion(decode, requestShape(model, 2L, 8), -1, null));
-        assertEquals(2 * 1024, decode.getActiveKvTokens(),
+        assertEquals(2 * 1024, MockEngineTestSupport.getActiveKvTokens(decode),
                 "opt-in: running + queued requests both hold KV before the cancel");
 
         // Cancel the QUEUED request (rid=2) through Decode's ordinary internal
@@ -162,7 +162,7 @@ class KvAllocatedReportOptInTest {
         // Cancel of a queued opt-in request must release its enqueue-time KV
         // reservation immediately (P2-5), leaving only the running request's
         // block lease (1 block = 1024 tokens).
-        assertEquals(1024, decode.getActiveKvTokens(),
+        assertEquals(1024, MockEngineTestSupport.getActiveKvTokens(decode),
                 "cancelling the queued request must release its KV reservation");
 
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
@@ -175,10 +175,10 @@ class KvAllocatedReportOptInTest {
                 "CANCELLED completion for request 2 must appear in WorkerStatus");
 
         awaitDecodeQuiescence(decode, 30_000);
-        assertEquals(1, decode.getCompletedCount(), "only the running request completes");
-        assertEquals(0, decode.getActiveKvTokens(), "KV must net to zero after quiescence");
+        assertEquals(1, MockEngineTestSupport.getCompletedCount(decode), "only the running request completes");
+        assertEquals(0, MockEngineTestSupport.getActiveKvTokens(decode), "KV must net to zero after quiescence");
         decode.checkLeakDrain(0L);
-        assertFalse(decode.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode));
     }
 
     // ──────────── Helpers ────────────

@@ -397,7 +397,7 @@ class BlockPoolMetricsObservabilityTest {
                 "the run-start slot claim is rolled back");
         assertEquals(0, decode.getRunningCount(), "no running-task residue");
         assertEquals(0, decode.getInflightCount(), "no pending residue");
-        assertFalse(decode.isLeakDetected(), "no leak detected");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak detected");
     }
 
     /**
@@ -584,8 +584,8 @@ class BlockPoolMetricsObservabilityTest {
                 "the P lease is released too");
         assertEquals(0, MockEngineTestSupport.activeDecodeRequests(decode),
                 "the cancelled request never ran on D");
-        assertFalse(prefill.isLeakDetected(), "no leak on P");
-        assertFalse(decode.isLeakDetected(), "no leak on D");
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill), "no leak on P");
+        assertFalse(MockEngineTestSupport.isLeakDetected(decode), "no leak on D");
     }
 
     // ────────────────── helpers ──────────────────
@@ -622,7 +622,7 @@ class BlockPoolMetricsObservabilityTest {
 
     private int controlPort() {
         assertNotNull(controlServer, "control server must be running");
-        return controlServer.getPort();
+        return MockEngineTestSupport.controlPort(controlServer);
     }
 
     /** Shape carrying hash-channel block keys AND a real output length. */

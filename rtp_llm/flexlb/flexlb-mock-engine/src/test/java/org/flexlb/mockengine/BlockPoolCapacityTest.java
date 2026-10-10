@@ -119,7 +119,7 @@ class BlockPoolCapacityTest {
         // No reserve for exact block arithmetic in this test.
         MockLruBlockCache cache = new MockLruBlockCache(5, 0.0);
         // Park 5 keys in the LRU (pool fully warm, nothing running).
-        assertTrue(cache.admit(List.of(1L, 2L, 3L, 4L, 5L)));
+        assertTrue(MockEngineTestSupport.seedCache(cache, List.of(1L, 2L, 3L, 4L, 5L)));
         assertEquals(5, cache.snapshotKeys().size());
         assertEquals(5, cache.availableBlocks(), "pure-LRU keys are available");
 
@@ -235,7 +235,7 @@ class BlockPoolCapacityTest {
         // A legacy no-lease admit while the keys are referenced must not reset
         // their reference counts (would unpin blocks mid-flight). It reports
         // no key-set change (nothing NEW entered the index)...
-        assertFalse(cache.admit(List.of(1L, 2L, 3L)));
+        assertFalse(MockEngineTestSupport.seedCache(cache, List.of(1L, 2L, 3L)));
         // ...and the live refs survive: still pinned, still un-evictable.
         assertFalse(cache.evict(List.of(1L)), "live ref must not be force-evictable");
         assertEquals(7, cache.availableBlocks(), "refs survived the legacy admit");
@@ -264,7 +264,7 @@ class BlockPoolCapacityTest {
                 ack.getErrors(0).getErrorInfo().getErrorCode(),
                 "LACK_MEM must surface MALLOC_FAILED (602), never the master's 8431");
         assertTrue(ack.getErrors(0).getErrorInfo().getErrorMessage().contains("LACK_MEM"));
-        assertEquals("rejected", prefill.getRequestStates().get(7L));
+        assertEquals("rejected", MockEngineTestSupport.getRequestStates(prefill).get(7L));
         assertEquals(0, prefill.getInflightCount(), "rejected request leaves no residue");
 
         // A request the pool CAN serve still succeeds afterwards — the pool
