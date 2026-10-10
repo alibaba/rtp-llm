@@ -773,6 +773,29 @@ def all_reduce(
     Returns:
         All-reduced tensor.
     """
+    stable_prefill = False
+    if os.environ.get("GLM53_PREFILL_STABLE_TP_REDUCE", "0") == "1":
+        from rtp_llm.models_py.modules.dsv4.forward_metadata import metadata_cache
+
+        # This scope exists only for GLM53 prefill, and excludes target verify.
+        stable_prefill = metadata_cache() is not None
+    if group == Group.TP and tensor.dtype == torch.bfloat16 and stable_prefill:
+        # Cold and cached prefills have different message sizes. BF16
+        # collectives can select different trees and round partial sums
+        # differently for identical per-rank inputs. Transport BF16 values,
+        # then add every source in the same rank order with FP32 accumulation.
+        process_group = _get_group(group)
+        parts = [
+            torch.empty_like(tensor)
+            for _ in range(torch.distributed.get_world_size(process_group))
+        ]
+        torch.distributed.all_gather(parts, tensor.contiguous(), group=process_group)
+        reduction = torch.zeros_like(tensor, dtype=torch.float32)
+        for part in parts:
+            reduction.add_(part)
+        tensor.copy_(reduction)
+        return tensor
+
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
