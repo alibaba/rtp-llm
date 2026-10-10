@@ -94,6 +94,21 @@ entries, but has no request-completion store target. Direct REMOTE inserts are u
 Backend availability does not bypass successful completion, `reuse_cache`, or allocator
 resource eligibility checks required to reach a DEVICE insert.
 
+### KVCM remote cache
+
+KVCM remote caching requires compatible SDK/Manager dependencies and a build with remote-cache support.
+Enable it with `--enable_remote_cache 1` and configure the Manager with `--kvcm_server_address`.
+For PACE, set `--kvcm_model_sdk_config '[{"type":"pace"}]'` (`RECO_MODEL_SDK_CONFIG`).
+
+The following arguments have equivalent upper-case environment variables:
+
+| Argument | Default | Meaning |
+|---|---:|---|
+| `--kvcm_read_backend_type` | 0 | 0=regular query; 1=3fs, 2=mooncake, 3=PACE, 4=NFS, 5=VCNS 3fs |
+| `--kvcm_min_replica_count` | 0 | Minimum readable replicas for StartWrite; the server treats 0 as 1 |
+
+See [KV cache event publisher](kv_cache_event_publisher.md) for HBM reporting.
+
 ### Ignoring request cache switches
 
 Setting `RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES=1` (default off) ignores the request's

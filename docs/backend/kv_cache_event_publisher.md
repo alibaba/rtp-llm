@@ -10,8 +10,8 @@ participates in prefix reuse is complete and matchable. Removing any required gr
 and LRU touches do not produce events.
 
 Cache mutations only attempt a bounded non-blocking enqueue; network I/O runs on the publisher worker. Queue overflow,
-request failure, heartbeat failure, and periodic reconciliation trigger an authoritative snapshot. Publishing is
-fail-open and never affects allocation, eviction, readiness, or inference responses.
+request failure, heartbeat failure, periodic reconciliation, and the server's `snapshot_required` feedback trigger an
+authoritative snapshot. Publishing is fail-open and never affects allocation, eviction, readiness, or inference responses.
 
 Only `tp_rank=0` publishes when `pp_size=1`. Pipeline parallelism and CP-sharded KV cache are unsupported because the
 runtime cannot assign an unambiguous external owner and block granularity. Each DP replica needs a distinct
@@ -19,14 +19,22 @@ runtime cannot assign an unambiguous external owner and block granularity. Each 
 host state. When the value is empty, RTP-LLM derives a per-rank endpoint as
 `server_ip:(start_port + rank_id * worker_info_port_num)`.
 
+Publishing supports DEVICE prefix caches only; tail-sparse and non-DEVICE cache groups are unsupported.
+
 ## KVCM lifecycle
 
-The publisher registers the instance and node, sends an `EVENT_BLOCK_SNAPSHOT`, then sends batched
-`EVENT_BLOCK_ADD`/`EVENT_BLOCK_DELETE` changes and `EVENT_HEARTBEAT`. It sends best-effort `EVENT_HOST_DOWN` during
-engine shutdown. Snapshots atomically replace the complete host/medium state; failed payloads retry with exponential
-backoff. The endpoint must support snapshot fencing and crash-safe commit semantics.
+The publisher registers the instance in prefix mode and registers the node, sends an `EVENT_BLOCK_SNAPSHOT`, then sends
+batched `EVENT_BLOCK_ADD`/`EVENT_BLOCK_DELETE` changes and independent `EVENT_HEARTBEAT` requests. It sends best-effort
+`EVENT_HOST_DOWN` during engine shutdown. Snapshots replace all medium state for that host identity;
+failed snapshot payloads are retained for retry. The endpoint must support snapshot fencing and crash-safe
+commit semantics.
 
-The initial version publishes device `SharedBlockCache` state as medium `hbm`; DRAM events are excluded.
+`snapshot_required` requests a fresh snapshot. `retry_after_ms` delays data-event reports while heartbeats continue.
+Registration is preserved during throttling; missing instances/nodes and leader errors trigger re-registration.
+
+Events use `ST_EVENT_REPORT_L1P5`, medium `hbm`, and an `event_report://host/hbm?size=...` URI containing the aggregate
+byte size. Configure the corresponding L1P5 event storage on the server and add it to the Instance Group's
+`event_report_storage_candidates`.
 
 ## Configuration
 
@@ -43,5 +51,4 @@ Arguments have equivalent upper-case environment variables.
 Invalid configuration disables publishing without disabling inference. The KVCM manager endpoint must already be
 resolved; service discovery and leader switching are outside this version.
 
-`KVCacheConfig` pickle state supports legacy 43-, 54-, and 57-element layouts plus the current 62-element layout.
-Processes exchanging this state must be upgraded or rolled back together.
+See [KVCM remote cache configuration](reuse_kv_cache.md#kvcm-remote-cache) for the shared backend settings.
