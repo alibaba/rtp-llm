@@ -111,7 +111,10 @@ def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
                     pool.reset()
                     fill_context(pool, test.device, seed=71 + replay)
                     swa_history = pool.tensors[SWA_KV][pool.block_tables[SWA_KV].long()]
-                    test.assertTrue(swa_history.flatten(2).any(2).all().item(), label)
+                    # [batch, blocks_per_request, bytes_per_block]
+                    test.assertEqual(swa_history.ndim, 3, label)
+                    populated_blocks = swa_history.any(dim=-1)
+                    test.assertTrue(populated_blocks.all().item(), label)
                     if batch_size > 1:
                         test.assertFalse(
                             torch.equal(swa_history[0], swa_history[1]), label
