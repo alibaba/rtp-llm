@@ -2,6 +2,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -18,9 +19,12 @@
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/V41PPAdmission.h"
 #include "rtp_llm/cpp/models/V41InputRejected.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 
 namespace rtp_llm {
 void registerExecCtxOps(pybind11::module& m);
@@ -100,6 +104,7 @@ public:
             {"zero_blocks", &GptModelInputs::kv_cache_blocks_to_zero},
             {"copy_mapping", &GptModelInputs::kv_cache_update_mapping},
             {"mask", &GptModelInputs::attention_mask},
+            {"lm_indexes", &GptModelInputs::lm_output_indexes},
         };
         return members;
     }
@@ -137,6 +142,7 @@ public:
     GptModelInputs inputs{};
     V41PPCacheBatchPtr batch;
     py::object dispatch = py::none();
+    PreparedPPModelInputsPtr model_dispatch;
 };
 
 class V41NativePPTransportTest {
@@ -316,6 +322,86 @@ public:
         global->batch = admission_->prepareWithWorker(global->inputs, preflight);
         global->dispatch = std::move(dispatch);
         return global->batch;
+    }
+
+    void attachModel(const py::object& worker, const torch::Tensor& head) {
+        requireOpen();
+        if (executor_->model_) {
+            throw std::invalid_argument("native PP fixture already has a model");
+        }
+        Weights weights;
+        weights.layers.resize(40);
+        if (pp_rank_ == 1) {
+            auto local_head = std::make_shared<DenseWeights>();
+            const int64_t width = head.size(0) / 4;
+            local_head->kernel = head.narrow(0, parallelism_.tp_rank * width, width).contiguous();
+            weights.lm_head = std::move(local_head);
+        }
+        GptModelInitParams params{
+            weights,
+            Executor::genModelDescription(model_config_, parallelism_, EPLBConfig{}, MoeConfig{}),
+            manager_->getMainModelGroupedCacheLayerLayout()};
+        params.parallelism_config = parallelism_;
+        params.max_seq_len = model_config_.max_seq_len;
+        params.hidden_size = model_config_.hidden_size;
+        params.tokens_per_block = params.kernel_tokens_per_block = 256;
+        params.cache_manager = manager_;
+        params.hc_mult = 4;
+        params.hw_kernel_config.enable_cuda_graph = false;
+        executor_->model_ = std::make_unique<PyWrappedModel>(
+            params, worker, false, false, false, DSparkCallPhase::NONE, false, false);
+        foreign_model_ = std::make_unique<PyWrappedModel>(
+            params, worker, false, false, false, DSparkCallPhase::NONE, false, false);
+    }
+
+    V41PPCacheBatchPtr prepareGlobalModel(const std::shared_ptr<V41PPGlobalInputs>& global, bool full_outputs) {
+        requireOpen();
+        if (!executor_->model_) {
+            throw std::invalid_argument("native PP fixture has no attached model");
+        }
+        if (!admission_) {
+            admission_ = std::make_unique<V41PPAdmission>(manager_, model_config_, parallelism_);
+        }
+        global->inputs.need_all_logits = global->inputs.need_all_hidden_states = full_outputs;
+        PreparedPPModelInputsPtr prepared;
+        auto batch = admission_->prepareWithWorker(
+            global->inputs, [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& local) {
+                prepared = executor_->model_->prepareV41PP(inputs, local);
+            });
+        global->batch = batch;
+        global->model_dispatch = std::move(prepared);
+        return batch;
+    }
+
+    py::dict executeGlobalModel(const PreparedPPModelInputsPtr& prepared, int64_t round,
+                                 const py::object& incoming, bool foreign) {
+        PPIntermediateTensors input;
+        PPIntermediateTensors output;
+        if (!incoming.is_none()) {
+            input.tensors = incoming.cast<std::map<std::string, torch::Tensor>>();
+        }
+        auto* model = foreign ? foreign_model_.get() : executor_->model_.get();
+        auto result = model->forwardV41PP(prepared, round,
+                                                       incoming.is_none() ? nullptr : &input,
+                                                       pp_rank_ == 0 ? &output : nullptr);
+        py::dict values;
+        values["payload"] = output.tensors;
+        values["hidden"] = result.hidden_states;
+        values["all_hidden"] = result.all_hidden_states;
+        values["logits"] = result.logits;
+        values["all_logits"] = result.all_logits;
+        return values;
+    }
+
+    void retireGlobalModel(const std::array<int64_t, 3>& identity) {
+        executor_->model_->retireV41PP(identity);
+        retireGlobal(identity);
+    }
+
+    void releaseModelDescriptor(const std::shared_ptr<V41PPGlobalInputs>& global) {
+        auto prepared = std::move(global->model_dispatch);
+        py::gil_scoped_release release;
+        std::thread([owned = std::move(prepared)]() mutable { owned.reset(); }).join();
     }
 
     void commitGlobal(const V41PPCacheBatchPtr& batch) {
@@ -519,6 +605,7 @@ public:
         admission_.reset();
         local_cache_.reset();
         executor_.reset();
+        foreign_model_.reset();
         manager_->stopMetricsReporting();
         manager_.reset();
     }
@@ -575,6 +662,7 @@ private:
     int64_t                               generation_ = 0;
     std::shared_ptr<KVCacheManager>         manager_;
     std::unique_ptr<PPExecutor>            executor_;
+    std::unique_ptr<PyWrappedModel>        foreign_model_;
     std::unique_ptr<V41PPLocalCache>       local_cache_;
     std::unique_ptr<V41PPAdmission>        admission_;
     PPTickets                             tickets_;
@@ -587,10 +675,15 @@ private:
 PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
     rtp_llm::registerExecCtxOps(m);
     py::register_exception<rtp_llm::V41InputRejected>(m, "NativeInputRejected", PyExc_RuntimeError);
+    py::class_<rtp_llm::PreparedPPModelInputs, rtp_llm::PreparedPPModelInputsPtr>(m, "PreparedModelInputs");
+    m.def("native_lm_logits", [](const torch::Tensor& hidden, const torch::Tensor& head) {
+        return torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), head);
+    });
     py::class_<rtp_llm::test::V41PPGlobalInputs, std::shared_ptr<rtp_llm::test::V41PPGlobalInputs>>(m, "GlobalInputs")
         .def_property_readonly("tensors", &rtp_llm::test::V41PPGlobalInputs::tensors)
         .def_readonly("batch", &rtp_llm::test::V41PPGlobalInputs::batch)
         .def_readonly("dispatch", &rtp_llm::test::V41PPGlobalInputs::dispatch)
+        .def_readonly("model_dispatch", &rtp_llm::test::V41PPGlobalInputs::model_dispatch)
         .def("set_tensor", &rtp_llm::test::V41PPGlobalInputs::setTensor)
         .def("control", &rtp_llm::test::V41PPGlobalInputs::control)
         .def_property_readonly("lease_count", [](const rtp_llm::test::V41PPGlobalInputs& global) {
@@ -648,6 +741,12 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
              py::arg("root_allocations") = std::vector<std::shared_ptr<rtp_llm::test::V41PPAllocation>>{})
         .def("prepare_global", &rtp_llm::test::V41NativePPTransportTest::prepareGlobal)
         .def("prepare_global_worker", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalWorker)
+        .def("attach_model", &rtp_llm::test::V41NativePPTransportTest::attachModel)
+        .def("prepare_global_model", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalModel)
+        .def("execute_global_model", &rtp_llm::test::V41NativePPTransportTest::executeGlobalModel,
+             py::arg("prepared"), py::arg("round"), py::arg("incoming"), py::arg("foreign") = false)
+        .def("retire_global_model", &rtp_llm::test::V41NativePPTransportTest::retireGlobalModel)
+        .def("release_model_descriptor", &rtp_llm::test::V41NativePPTransportTest::releaseModelDescriptor)
         .def("commit_global", &rtp_llm::test::V41NativePPTransportTest::commitGlobal)
         .def("initialize_global", &rtp_llm::test::V41NativePPTransportTest::initializeGlobal)
         .def("begin_global_execution", &rtp_llm::test::V41NativePPTransportTest::beginGlobalExecution)

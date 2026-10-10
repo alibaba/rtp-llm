@@ -43,6 +43,9 @@ public:
     bool initialized() const {
         return initialized_;
     }
+    bool executing() const {
+        return execution_started_ && !execution_completed_ && !committed_ && !bindings_.empty();
+    }
 
 private:
     friend class V41PPLocalCache;

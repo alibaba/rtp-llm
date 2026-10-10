@@ -88,6 +88,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._dp_group = None
         self._stage_agreement = None
         self._native_pp_owner = object()
+        self._native_pp_contract = None
+        self._native_pp_receiver = None
 
     def _configure_dp_group(self):
         args = self._v4_args
@@ -579,6 +581,84 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 # inputs. Break the saved-exception cycle so rejected leases
                 # release during unwinding rather than waiting for cyclic GC.
                 error = None
+
+    @torch.inference_mode()
+    def _configure_native_pp_engine(self, contract):
+        """Pin the checkpoint harness's immutable identities before admission."""
+        from rtp_llm.models_py.modules.dsv4.native_l20_transfer import (
+            NativeL20ReplicaReceiver,
+        )
+        from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import V41L20Contract
+
+        with self._worker_lock:
+            self._check_worker()
+            if (
+                self._worker_state != "ready"
+                or self._v4_args.pp_size != 2
+                or not isinstance(contract, V41L20Contract)
+                or self._native_pp_contract not in (None, contract)
+            ):
+                raise ValueError("Native V4.1 PP requires one initialized contract")
+            if self._native_pp_contract is None:
+                self._native_pp_contract = contract
+                if self._v4_args.pp_rank == 1:
+                    self._native_pp_receiver = NativeL20ReplicaReceiver(
+                        self._v4_args.v41_config,
+                        self.kv_cache,
+                        contract,
+                        self.parallelism_config.tp_rank,
+                    )
+
+    def _prepare_native_pp_engine(self, inputs):
+        with self._worker_lock:
+            self._check_worker()
+            error = None
+            try:
+                if self._native_pp_contract is None:
+                    error = ValueError("Native V4.1 PP checkpoint contract is missing")
+                self._agree_dp(
+                    error,
+                    (
+                        "native-pp-engine-contract",
+                        (
+                            None
+                            if self._native_pp_contract is None
+                            else self._native_pp_contract.fingerprint.hex()
+                        ),
+                    ),
+                    self._weight_device(),
+                    native_dispatch=True,
+                )
+            finally:
+                error = None
+            return self.prepare_native_pp_prefill(inputs)
+
+    @torch.inference_mode()
+    def _execute_native_pp_engine(self, dispatch, transfer_round, tensors=None):
+        from rtp_llm.models_py.modules.dsv4.native_pp_execution import l20_tables
+
+        with self._worker_lock:
+            self._check_worker()
+            receiver = self._native_pp_receiver
+            if receiver is not None:
+                for identity, tables in l20_tables(dispatch).items():
+                    if identity.request_id not in receiver._requests:
+                        receiver.begin_request(identity, tables)
+            return self._execute_native_pp_prefill(
+                dispatch,
+                self._native_pp_contract,
+                transfer_round,
+                receiver=receiver,
+                tensors=tensors,
+            )
+
+    def _retire_native_pp_engine(self, identity):
+        from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import V41CacheIdentity
+
+        with self._worker_lock:
+            self._check_worker()
+            if self._native_pp_receiver is not None:
+                self._native_pp_receiver.release(V41CacheIdentity(*identity))
 
     @torch.inference_mode()
     def _execute_native_pp_prefill(

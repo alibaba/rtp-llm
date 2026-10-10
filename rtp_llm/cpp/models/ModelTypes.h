@@ -17,7 +17,15 @@
 namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
+class V41PPCacheBatch;
 struct PPIntermediateTensors;
+
+// An admitted model descriptor may outlive the prepare call and its caller's
+// inputs. Implementations retain local inputs and their native allocation.
+struct PreparedPPModelInputs {
+    virtual ~PreparedPPModelInputs() = default;
+};
+using PreparedPPModelInputsPtr = std::shared_ptr<PreparedPPModelInputs>;
 
 struct GptModelDescription {
     rtp_llm::AttentionConfigs attention_conf;
@@ -157,6 +165,13 @@ public:
     virtual GptModelOutputs forwardPP(const GptModelInputs&        inputs,
                                       const PPIntermediateTensors* input_tensors,
                                       PPIntermediateTensors*       output_tensors);
+    virtual PreparedPPModelInputsPtr prepareV41PP(const GptModelInputs& inputs,
+                                                   const std::shared_ptr<V41PPCacheBatch>& batch);
+    virtual GptModelOutputs forwardV41PP(const PreparedPPModelInputsPtr& prepared,
+                                          int64_t transfer_round,
+                                          const PPIntermediateTensors* input_tensors,
+                                          PPIntermediateTensors* output_tensors);
+    virtual void retireV41PP(const std::array<int64_t, 3>& identity);
     /* Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
     virtual PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
     virtual void                  releaseBuffers() {}

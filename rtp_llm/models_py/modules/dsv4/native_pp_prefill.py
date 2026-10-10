@@ -212,12 +212,27 @@ def prepare_native_pp_prefill_dispatch(
             "prefix_lengths",
             "sequence_lengths",
             "cu_seqlens",
+            "cu_seqlens_device",
             "combo_position_ids",
         ):
             _same_common(getattr(attn, name), getattr(value, name), name)
         for name in _CP_FIELDS:
             other = getattr(value.context_parallel_info, name, None)
             _same_common(cp_fields[name], other, name)
+        # Native CP publishes CUDA lengths and CUDA cumulative boundaries.
+        # Its CPU cumulative mirror is deliberately empty. Component callers
+        # may supply only a populated CPU mirror; validate every supplied copy.
+        host_cu, device_cu = value.cu_seqlens, value.cu_seqlens_device
+        cumulative = [host_cu] if host_cu is not None and host_cu.numel() else []
+        if device_cu is not None:
+            cumulative.append(device_cu)
+        valid_cu = bool(cumulative) and all(
+            boundary.dtype in (torch.int32, torch.int64)
+            and boundary.ndim == 1
+            and boundary.is_contiguous()
+            and torch.equal(boundary.cpu().long(), cu)
+            for boundary in cumulative
+        )
         if (
             value.input_lengths is None
             or value.input_lengths.dtype not in (torch.int32, torch.int64)
@@ -226,9 +241,8 @@ def prepare_native_pp_prefill_dispatch(
             or not torch.equal(value.input_lengths.cpu().long(), lengths.cpu().long())
             or not torch.equal(value.prefix_lengths.cpu().long(), prefixes.cpu().long())
             or (value.sequence_lengths is not None and value.sequence_lengths.numel())
-            or value.cu_seqlens is None
-            or value.cu_seqlens.dtype not in (torch.int32, torch.int64)
-            or not torch.equal(value.cu_seqlens.cpu().long(), cu)
+            or not valid_cu
+            or (device_cu is not None and device_cu.device != device)
         ):
             raise ValueError(f"V4.1 {tag} CP request boundaries disagree")
         positions = value.combo_position_ids

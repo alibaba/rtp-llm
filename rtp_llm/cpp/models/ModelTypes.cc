@@ -17,6 +17,19 @@ GptModelOutputs ModelBase::forwardPP(const GptModelInputs&, const PPIntermediate
     RTP_LLM_FAIL("PP forward is not implemented by this model");
 }
 
+PreparedPPModelInputsPtr ModelBase::prepareV41PP(const GptModelInputs&, const std::shared_ptr<V41PPCacheBatch>&) {
+    RTP_LLM_FAIL("Native V4.1 PP preparation is not implemented by this model");
+}
+
+GptModelOutputs ModelBase::forwardV41PP(const PreparedPPModelInputsPtr&, int64_t,
+                                        const PPIntermediateTensors*, PPIntermediateTensors*) {
+    RTP_LLM_FAIL("Native V4.1 PP execution is not implemented by this model");
+}
+
+void ModelBase::retireV41PP(const std::array<int64_t, 3>&) {
+    RTP_LLM_FAIL("Native V4.1 PP retirement is not implemented by this model");
+}
+
 PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&, bool) {
     RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
 }
