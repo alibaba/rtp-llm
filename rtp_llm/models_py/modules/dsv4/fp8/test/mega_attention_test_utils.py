@@ -17,8 +17,8 @@ class TaggedKVCache:
 
     def __init__(self, tensors: dict[str, torch.Tensor], tokens_per_block: int):
         self.layers = {
-            tag: LayerKVCache(tensor, tokens_per_block, 0, group_id, tag)
-            for group_id, (tag, tensor) in enumerate(tensors.items())
+            tag: LayerKVCache(tensor, tokens_per_block, layer_id=0, tag=tag)
+            for tag, tensor in tensors.items()
         }
 
     def get_layer_cache(self, layer_id: int, tag: str) -> LayerKVCache:
