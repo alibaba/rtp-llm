@@ -48,6 +48,14 @@ public:
         py_model_inputs_.engram_token_windows                      = inputs.engram_token_windows;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
 
+        py_model_inputs_.attention_inputs.valid_token_mask = inputs.attention_inputs.valid_token_mask;
+        py_model_inputs_.attention_inputs.logical_token_count = inputs.attention_inputs.logical_token_count;
+        py_model_inputs_.attention_inputs.logical_request_count = inputs.attention_inputs.logical_request_count;
+        py_model_inputs_.attention_inputs.physical_token_count = inputs.attention_inputs.physical_token_count;
+        py_model_inputs_.attention_inputs.physical_request_count = inputs.attention_inputs.physical_request_count;
+
+        py_model_inputs_.attention_inputs.is_mtp_draft_update = inputs.attention_inputs.is_mtp_draft_update;
+
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
         py_model_inputs_.attention_inputs.cu_seqlens_device       = inputs.attention_inputs.cu_seqlens_device;
