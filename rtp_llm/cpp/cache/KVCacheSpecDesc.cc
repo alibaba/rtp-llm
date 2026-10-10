@@ -7,6 +7,20 @@ namespace rtp_llm {
 
 KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
     RTP_LLM_CHECK_WITH_INFO(!desc.tag.empty(), "KVCacheSpecDesc tag must not be empty");
+    RTP_LLM_CHECK_WITH_INFO(ctx.parallelism_config == nullptr
+                                || !ctx.parallelism_config->prefill_cp_config.kv_cache_sharded
+                                || ctx.required_spec_projection_tags != nullptr,
+                            "CP spec build requires cache-resolved physical requirements");
+    if (ctx.required_spec_projection_tags != nullptr
+        && ctx.required_spec_projection_tags->count(desc.tag) != 0) {
+        const bool compressed = desc.cache_type == KVCacheSpecType::OpaqueKV && ctx.compressed_layouts != nullptr
+                                && ctx.compressed_layouts->count(desc.tag) != 0;
+        const bool fixed = desc.cache_type == KVCacheSpecType::OpaqueState
+                           && ((ctx.state_entry_layouts != nullptr && ctx.state_entry_layouts->count(desc.tag) != 0)
+                               || (ctx.swa_byte_layouts != nullptr && ctx.swa_byte_layouts->count(desc.tag) != 0));
+        RTP_LLM_CHECK_WITH_INFO(
+            compressed || fixed, "cache tag=%s requires a resolved physical spec layout", desc.tag.c_str());
+    }
     switch (desc.cache_type) {
         case KVCacheSpecType::MultiHeadAttention:
             return MHAKVCacheSpec::build(desc, ctx);
@@ -80,14 +94,6 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         }
         if (desc.tail->validate_tail_blocks.has_value()) {
             policy.validate_tail_blocks = *desc.tail->validate_tail_blocks;
-        }
-    }
-    if (desc.cp.has_value()) {
-        if (desc.cp->mapping.has_value()) {
-            policy.cp_mapping = *desc.cp->mapping;
-        }
-        if (desc.cp->slice.has_value()) {
-            policy.cp_slice = *desc.cp->slice;
         }
     }
     return policy;

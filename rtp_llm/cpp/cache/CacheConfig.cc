@@ -134,6 +134,51 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.sliding_window_size == rhs.sliding_window_size;
 }
 
+void CacheConfig::finalizeStorageLayout(const ParallelismConfig& parallelism, bool warmup) {
+    RTP_LLM_CHECK_WITH_INFO(!cache_key_layout_resolved, "cache storage layout must be finalized exactly once");
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache base block tokens must be positive");
+    const size_t cp_size =
+        !warmup && parallelism.prefill_cp_config.kv_cache_sharded && parallelism.tp_size > 1 ? parallelism.tp_size : 1;
+    RTP_LLM_CHECK_WITH_INFO(cp_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
+                            "cache storage CP size exceeds int range");
+    RTP_LLM_CHECK_WITH_INFO(parallelism.tp_rank < cp_size || cp_size == 1, "cache storage CP rank exceeds size");
+    const size_t base_tokens = seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(base_tokens <= std::numeric_limits<size_t>::max() / cp_size,
+                            "cache storage CP token stride overflows size_t");
+    const size_t key_stride     = base_tokens * cp_size;
+    storage_cp_size             = static_cast<int>(cp_size);
+    storage_cp_rank             = cp_size == 1 ? 0 : static_cast<int>(parallelism.tp_rank);
+    request_projection_required = cp_size > 1;
+    cache_info_block_tokens     = key_stride;
+    reuse_unit_tokens           = base_tokens;
+    bool first_full             = false;
+    for (const auto& group : topology().groups()) {
+        capacity_tokens_per_block[group.tag] =
+            cp_size > 1 && group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ? key_stride :
+                                                                                              group.seqSizePerBlock();
+        if (first_full || group.policy.group_type != CacheGroupType::FULL) {
+            continue;
+        }
+        first_full                = true;
+        const size_t reuse_tokens = cp_size == 1 ? base_tokens :
+                                    group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN ?
+                                                   key_stride :
+                                                   group.seqSizePerBlock();
+        RTP_LLM_CHECK_WITH_INFO(reuse_tokens > 0, "cache reuse unit tokens must be positive");
+        reuse_unit_tokens = reuse_tokens;
+    }
+    if (cp_size > 1) {
+        auto groups = topology().groups();
+        for (auto& group : groups) {
+            auto spec                    = group.spec->clone();
+            spec->cache_key_token_stride = key_stride;
+            group.spec                   = std::move(spec);
+        }
+        setTopology(std::move(groups), topology().layers());
+    }
+    cache_key_layout_resolved = true;
+}
+
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
     RTP_LLM_CHECK_WITH_INFO(!new_groups.empty(), "CacheConfig::setTopology requires at least one cache group");
     RTP_LLM_CHECK_WITH_INFO(!new_layers.empty(), "CacheConfig::setTopology requires at least one cache layer");

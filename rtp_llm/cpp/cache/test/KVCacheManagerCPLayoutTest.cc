@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -45,7 +44,20 @@ static BatchKVCacheResourcePtr makeResource(int batch_size, const CacheConfig& c
     return res;
 }
 
-class KVCacheManagerCPSlotMapperTest: public ::testing::Test {
+static void resolveManagerCpLayout(CacheConfig& config, ParallelismConfig parallelism) {
+    auto policies = std::vector<CacheGroupPolicy>{};
+    for (const auto& group : config.topology().groups()) {
+        auto policy = group.policy;
+        if (policy.group_type == CacheGroupType::FULL) {
+            policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+        }
+        policies.push_back(policy);
+    }
+    setTestGroupPolicies(config, policies);
+    config.finalizeStorageLayout(parallelism);
+}
+
+class KVCacheManagerCPLayoutTest: public ::testing::Test {
 protected:
     void SetUp() override {
         rtp_llm::initLogger();
@@ -53,7 +65,7 @@ protected:
     }
 };
 
-TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCpShardsThem) {
+TEST_F(KVCacheManagerCPLayoutTest, DecodeTpReplicatesFullPagesWhilePrefillCpShardsThem) {
     ModelConfig model;
     model.num_layers                          = 1;
     model.attn_config.tokens_per_block        = 256;
@@ -93,16 +105,25 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
             par.prefill_cp_config.prefill_cp_size  = 2;
             PDSepConfig pd;
             pd.role_type = role;
-            auto config  = finalizeCacheConfig(CacheConfigCreator::createConfig(model, par, {}), 20);
+
+            // Decode keeps every received FULL page. Its manager still carries
+            // the upstream TP/CP parallelism, but its cache-owned storage layout
+            // is intentionally CP1.
+            ParallelismConfig layout_parallelism = par;
+            layout_parallelism.tp_size            = role == RoleType::PREFILL ? 2 : 1;
+            auto config = finalizeCacheConfig(CacheConfigCreator::createConfig(model, layout_parallelism, {}), 20);
             EXPECT_EQ(config.group(full.tag).seqSizePerBlock(), 256u);
             EXPECT_EQ(config.group(swa.tag).seqSizePerBlock(), 512u);
+            EXPECT_EQ(config.request_projection_required, role == RoleType::PREFILL);
             auto manager = std::make_shared<KVCacheManager>(
                 config, false, nullptr, KVCacheConfig{}, par, RuntimeConfig{}, SpeculativeExecutionConfig{}, pd);
             ASSERT_TRUE(manager->init());
-            EXPECT_EQ(manager->cpSlotMapper() != nullptr, role == RoleType::PREFILL);
+            EXPECT_EQ(manager->cacheConfig().request_projection_required, role == RoleType::PREFILL);
             auto       resource = makeResource(1, config);
             auto       tokens   = makeTokenIds(1, 783, 256);
-            const auto result   = manager->malloc(MallocInfo{resource, tokens});
+            MallocInfo malloc_info{resource, tokens};
+            malloc_info.request_layout = snapshotGlobalCacheRequest(*resource, *tokens);
+            const auto result          = manager->malloc(malloc_info);
             ASSERT_TRUE(result.success);
             const size_t full_blocks = role == RoleType::PREFILL ? 2 : 4;
             EXPECT_EQ(resource->blocksNum(0, full.tag), full_blocks);
@@ -117,8 +138,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DecodeTpReplicatesFullPagesWhilePrefillCp
     }
 }
 
-// When kv_cache_sharded is false (default), cpSlotMapper() should return nullptr.
-TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
+// A non-sharded direct manager keeps the ordinary request layout contract.
+TEST_F(KVCacheManagerCPLayoutTest, NoCPShardingKeepsOrdinaryRequestLayout) {
     auto              config = makeTestConfig();
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
@@ -127,16 +148,13 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = false;
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
-
-    EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    EXPECT_FALSE(mgr->cacheConfig().request_projection_required);
 }
 
-// When tp_size == 1, cpSlotMapper() should return nullptr even if kv_cache_sharded is true.
-TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
+// One rank needs no sharded request projection even if the CP flag is set.
+TEST_F(KVCacheManagerCPLayoutTest, SingleRankKeepsOrdinaryRequestLayout) {
     auto              config = makeTestConfig();
     ParallelismConfig par;
     par.role_type                          = RoleType::PREFILL;
@@ -145,16 +163,13 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
     par.tp_size                            = 1;
     par.prefill_cp_config.kv_cache_sharded = true;
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
-
-    EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    EXPECT_FALSE(mgr->cacheConfig().request_projection_required);
 }
 
-// When kv_cache_sharded is true and tp_size > 1, cpSlotMapper() should return a valid mapper.
-TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
+// Sharded direct construction consumes a cache-finalized storage layout.
+TEST_F(KVCacheManagerCPLayoutTest, CPShardingConsumesFinalizedLayout) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -164,22 +179,27 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     par.tp_rank                            = 1;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(config, par);
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
-
-    auto mapper = mgr->cpSlotMapper();
-    ASSERT_NE(mapper, nullptr);
-    EXPECT_TRUE(mapper->isSharded());
-    EXPECT_EQ(mapper->cpRank(), 1);
-    EXPECT_EQ(mapper->cpSize(), 2);
-    EXPECT_EQ(mapper->blockSize(), seq_size_per_block);
-    EXPECT_EQ(mapper->virtualBlockSize(), seq_size_per_block * 2);
+    EXPECT_TRUE(mgr->cacheConfig().request_projection_required);
+    ASSERT_TRUE(mgr->cacheConfig().cache_info_block_tokens.has_value());
+    EXPECT_EQ(*mgr->cacheConfig().cache_info_block_tokens, static_cast<size_t>(seq_size_per_block * 2));
 }
 
-TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
+TEST_F(KVCacheManagerCPLayoutTest, CPShardingRequiresFinalizedStorageConfig) {
+    auto config = makeTestConfig();
+    ParallelismConfig par;
+    par.role_type                          = RoleType::PREFILL;
+    par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+    par.tp_size                            = 2;
+    par.prefill_cp_config.kv_cache_sharded = true;
+    EXPECT_ANY_THROW((void)std::make_shared<KVCacheManager>(
+        config, /*warmup=*/true, nullptr, KVCacheConfig{}, par));
+}
+
+TEST_F(KVCacheManagerCPLayoutTest, CPShardingEnabled_CacheInfoReportsVirtualBlockSize) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -189,6 +209,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtual
     par.tp_rank                            = 0;
     par.tp_size                            = 4;
     par.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(config, par);
 
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
@@ -197,16 +218,83 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtual
     EXPECT_EQ(info.block_size, static_cast<size_t>(seq_size_per_block * par.tp_size));
 }
 
+TEST_F(KVCacheManagerCPLayoutTest, StorageLayoutAlignsCacheInfoAndFullCapacityUnits) {
+    for (int cp_size : {1, 2, 4}) {
+        auto config = makeTestConfig(/*block_num=*/20, /*seq_size_per_block=*/4);
+        ParallelismConfig par;
+        par.role_type                          = RoleType::PREFILL;
+        par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        par.tp_rank                            = 0;
+        par.tp_size = cp_size;
+        par.prefill_cp_config.kv_cache_sharded = true;
+
+        resolveManagerCpLayout(config, par);
+        ASSERT_TRUE(config.cache_info_block_tokens.has_value());
+        EXPECT_EQ(*config.cache_info_block_tokens, static_cast<size_t>(4 * cp_size));
+        EXPECT_EQ(config.capacity_tokens_per_block.at("default"), static_cast<size_t>(4 * cp_size));
+
+        auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+        ASSERT_TRUE(manager->init());
+        const auto info = manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+        EXPECT_EQ(info.block_size, static_cast<size_t>(4 * cp_size));
+        // Upstream b252e385 makes CacheInfo use the same virtual FULL
+        // bundle span as maxAvailableTokensNum.
+        // One sentinel block is excluded from this 20-block fixture's pool.
+        EXPECT_EQ(info.total_kv_cache, static_cast<size_t>(76 * cp_size));
+        EXPECT_EQ(info.available_kv_cache, static_cast<size_t>(76 * cp_size));
+        EXPECT_EQ(manager->maxAvailableTokensNum(), static_cast<size_t>(76 * cp_size));
+    }
+}
+
+TEST_F(KVCacheManagerCPLayoutTest, TheoryWindowSnapshotPreservesPerBatchTailAndCanonicalKeys) {
+    for (int cp_size : {1, 2, 4}) {
+        auto config = makeTestConfig();
+        ParallelismConfig par;
+        par.role_type                          = RoleType::PREFILL;
+        par.prefill_cp_config.method           = CPRotateMethod::ALL_GATHER;
+        par.tp_rank                            = 0;
+        par.tp_size = cp_size;
+        par.prefill_cp_config.kv_cache_sharded = true;
+        config.finalizeStorageLayout(par);
+
+        auto resource = makeResource(2, config);
+        resource->setBatchCacheKeys(0, {10, 11, 12, 13});
+        resource->setBatchCacheKeys(1, {20, 21, 22, 23, 24});
+        resource->setLastBlockAligned(false);
+        auto tokens = makeTokenIds(2, /*seq_len=*/20, /*block_size=*/4);
+        const auto without_metric = snapshotGlobalCacheRequest(*resource, *tokens);
+        EXPECT_FALSE(without_metric->theory_window_keys.has_value());
+        const auto with_metric = snapshotGlobalCacheRequest(*resource, *tokens, -1, true);
+        ASSERT_TRUE(with_metric->theory_window_keys.has_value());
+        ASSERT_EQ(with_metric->theory_window_keys->size(), 2u);
+        CacheKeysType canonical_theory;
+        for (const auto& batch_keys : *with_metric->theory_window_keys) {
+            const auto canonical_batch = config.canonicalCacheKeys(batch_keys);
+            canonical_theory.insert(canonical_theory.end(), canonical_batch.begin(), canonical_batch.end());
+        }
+        const CacheKeysType expected = cp_size == 1 ? CacheKeysType{10, 11, 12, 20, 21, 22, 23} :
+                                       cp_size == 2 ? CacheKeysType{11, 21, 23} : CacheKeysType{23};
+        EXPECT_EQ(canonical_theory, expected);
+        EXPECT_EQ(resource->cacheKeys(0), (CacheKeysType{10, 11, 12, 13}));
+        EXPECT_EQ(resource->cacheKeys(1), (CacheKeysType{20, 21, 22, 23, 24}));
+    }
+}
+
 // Partial tails may be allocated as live KV blocks before they become cacheable
 // full blocks. CP invariants must therefore be based on logical sequence length,
 // not cacheKeys().size().
-TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCacheKey) {
+TEST_F(KVCacheManagerCPLayoutTest, CPShardedMallocAllowsPartialTailWithoutCacheKey) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
     ParallelismConfig par;
     par.role_type                = RoleType::PREFILL;
     par.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    ParallelismConfig layout_parallelism = par;
+    layout_parallelism.tp_size = 2;
+    layout_parallelism.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(config, layout_parallelism);
+    par = layout_parallelism;
 
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/false, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
@@ -215,26 +303,25 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
-    auto       cp_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
-    mgr->cp_slot_mapper_ = cp_mapper;
-    mgr->coordinator_manager_->setCPSlotMapper(cp_mapper);
+    info.request_layout = snapshotGlobalCacheRequest(*resource, *token_ids);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, "default"), 1);
 
     token_ids->setSeqLength(2);
+    info.request_layout = snapshotGlobalCacheRequest(*resource, *token_ids);
     result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, "default"), 1);
     EXPECT_EQ(resource->cacheKeys(0).size(), 0);
 }
 
-// malloc() should use the manager-level cpSlotMapper.
+// malloc() uses the immutable global request snapshot and cache-owned storage mapping.
 // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.
 // A sequence of 16 tokens needs ceil(16/8)=2 physical blocks per batch (not 4).
 // Keep this pre-existing multi-rank case disabled pending its dedicated harness.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCount) {
+TEST_F(KVCacheManagerCPLayoutTest, DISABLED_MallocAutoInjectReducesBlockCount) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -244,9 +331,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(config, par);
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
+    // The fixture has complete capacities; manager construction does not run collectives.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
@@ -255,6 +342,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
+    info.request_layout = snapshotGlobalCacheRequest(*resource, *token_ids);
     auto       result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -265,7 +353,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocAutoInjectReducesBlockCoun
 
 // Without CP sharding, the same seq_len should allocate more blocks.
 // Keep this pre-existing multi-rank case disabled pending its dedicated harness.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBlocks) {
+TEST_F(KVCacheManagerCPLayoutTest, DISABLED_MallocWithoutCPAllocatesFullBlocks) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -276,8 +364,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = false;
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
+    // The fixture has complete capacities; manager construction does not run collectives.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
@@ -293,9 +380,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_MallocWithoutCPAllocatesFullBloc
     EXPECT_EQ(resource->blocksNum(0, "default"), 4);
 }
 
-// Allocator-level cp_slot_mapper should drive malloc sharding.
+// Cache-owned storage layout drives malloc sharding.
 // Keep this pre-existing multi-rank case disabled pending its dedicated harness.
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
+TEST_F(KVCacheManagerCPLayoutTest, DISABLED_StorageLayoutControlsMalloc) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/30, seq_size_per_block);
 
@@ -305,9 +392,12 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
+    auto layout_parallelism = par;
+    layout_parallelism.tp_size = 4;
+    resolveManagerCpLayout(config, layout_parallelism);
+    par = layout_parallelism;
 
-    // The fixture has complete capacities; manager construction does not run
-    // collectives. cp_slot_mapper_ is constructed in both warmup and normal modes.
+    // The fixture has complete capacities; manager construction does not run collectives.
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
@@ -315,22 +405,20 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     auto      resource  = makeResource(1, config);
     auto      token_ids = makeTokenIds(1, seq_len, seq_size_per_block);
 
-    auto explicit_mapper = std::make_shared<CPSlotMapper>(0, 4, seq_size_per_block);
     // virtual_block_size = 4 * 4 = 16
     // effectiveSeqLenForAlloc(64) = ceil(64/16)*4 = 16 tokens => ceil(16/4) = 4 blocks
 
     MallocInfo info{resource, token_ids};
-    mgr->cp_slot_mapper_ = explicit_mapper;
-    mgr->coordinator_manager_->setCPSlotMapper(explicit_mapper);
+    info.request_layout = snapshotGlobalCacheRequest(*resource, *token_ids);
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
     EXPECT_EQ(resource->blocksNum(0, "default"), 4);
 }
 
-// insertIntoCache() should also use the manager-level mapper.
+// insertIntoCache() derives canonical keys from the cache storage layout.
 // DISABLED: same reason as above (multi-rank harness needed).
-TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
+TEST_F(KVCacheManagerCPLayoutTest, DISABLED_InsertDerivesCanonicalKeys) {
     const int seq_size_per_block = 4;
     auto      config             = makeTestConfig(/*block_num=*/20, seq_size_per_block);
 
@@ -340,6 +428,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     par.tp_rank                            = 0;
     par.tp_size                            = 2;
     par.prefill_cp_config.kv_cache_sharded = true;
+    resolveManagerCpLayout(config, par);
 
     KVCacheConfig kv_cfg;
     kv_cfg.reuse_cache         = true;
@@ -357,11 +446,11 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache         = true;
     malloc_info.enable_cache_lookup = true;
+    malloc_info.request_layout      = snapshotGlobalCacheRequest(*resource, *token_ids);
     auto result                     = mgr->malloc(malloc_info);
     ASSERT_TRUE(result.success);
 
-    // Insert into cache using the allocator-level cp_slot_mapper.
-    // This should not crash and should use sharded insert logic.
+    // The cache derives canonical keys before publishing the sharded insertion.
     InsertInfo insert_info{resource, token_ids, /*is_resident=*/false};
     {
         size_t resident_prefix_length = 0;
@@ -373,6 +462,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     MallocInfo malloc_info2{resource2, token_ids};
     malloc_info2.reuse_cache         = true;
     malloc_info2.enable_cache_lookup = true;
+    malloc_info2.request_layout      = snapshotGlobalCacheRequest(*resource2, *token_ids);
     auto result2                     = mgr->malloc(malloc_info2);
     ASSERT_TRUE(result2.success);
     // With CP sharding (cp_size=2, block_size=4), virtual_block_size=8.

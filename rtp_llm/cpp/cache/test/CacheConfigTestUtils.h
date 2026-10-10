@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
@@ -17,9 +18,38 @@
 #include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
+#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::test {
+
+// Mirror the caller's immutable global request input. Cache derives the
+// group-local coordinates from this snapshot during malloc and async load.
+inline std::shared_ptr<const MallocInfo::RequestLayout> snapshotGlobalCacheRequest(const BatchKVCacheResource& resource,
+                                                                                   const CompleteTokenIds&     tokens,
+                                                                                   int  incr_seq_len_override = -1,
+                                                                                   bool capture_theory_window = false) {
+    auto snapshot                    = std::make_shared<MallocInfo::RequestLayout>();
+    snapshot->match_keys             = resource.cacheKeys();
+    snapshot->request_seq_len        = tokens.seqLength();
+    snapshot->request_incr_seq_len   = incr_seq_len_override >= 0 ? incr_seq_len_override : tokens.seqLength();
+    snapshot->request_common_seq_len = tokens.commonSeqLength();
+    snapshot->request_total_seq_len  = tokens.totalSeqLength();
+    snapshot->request_reserve_step   = tokens.getReserveStep();
+    if (capture_theory_window) {
+        std::vector<CacheKeysType> theory_keys;
+        theory_keys.reserve(resource.batchSize());
+        for (int batch = 0; batch < resource.batchSize(); ++batch) {
+            CacheKeysType keys = resource.cacheKeys(batch);
+            if (!resource.lastBlockAligned() && !keys.empty()) {
+                keys.pop_back();
+            }
+            theory_keys.push_back(std::move(keys));
+        }
+        snapshot->theory_window_keys = std::move(theory_keys);
+    }
+    return snapshot;
+}
 
 // Used only when first-seen or merged publication order is itself the assertion.
 inline std::vector<std::string> publishedGroupTags(const CacheTopology& topology) {

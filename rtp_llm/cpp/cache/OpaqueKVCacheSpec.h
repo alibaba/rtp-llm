@@ -4,6 +4,7 @@
 #include <memory>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -106,75 +107,8 @@ protected:
         block_stride_bytes_ = block_stride_bytes;
     }
 
-    static bool cpScaleSeqSize(const KVCacheSpecDesc& desc) {
-        return desc.cp.has_value() && desc.cp->scale_seq_size.value_or(false);
-    }
-
-    static bool cpAlignPayload(const KVCacheSpecDesc& desc) {
-        return desc.cp.has_value() && desc.cp->align_payload.value_or(false);
-    }
-
-    static CpPrefillSliceLayout cpPrefillSliceLayout(const KVCacheSpecDesc& desc) {
-        if (!desc.cp.has_value() || !desc.cp->prefill_slice_layout.has_value()) {
-            return CpPrefillSliceLayout::NONE;
-        }
-        return *desc.cp->prefill_slice_layout;
-    }
-
-    static bool cpPrefillSlicePayload(const KVCacheSpecDesc& desc) {
-        return cpPrefillSliceLayout(desc) == CpPrefillSliceLayout::PAYLOAD;
-    }
-
-    static bool cpPrefillSliceBlockStride(const KVCacheSpecDesc& desc) {
-        return cpPrefillSliceLayout(desc) == CpPrefillSliceLayout::BLOCK_STRIDE;
-    }
-
-    static uint32_t fixedRegionCpSize(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
-        const bool needs_cp_size = cpScaleSeqSize(desc) || cpAlignPayload(desc) || cpPrefillSlicePayload(desc)
-                                   || cpPrefillSliceBlockStride(desc);
-        if (!needs_cp_size) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(ctx.parallelism_config != nullptr,
-                                "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
-                                desc.tag.c_str(),
-                                static_cast<int>(desc.cache_type));
-        const auto& parallelism_config = *ctx.parallelism_config;
-        if (!parallelism_config.prefill_cp_config.kv_cache_sharded) {
-            return 1;
-        }
-        if (parallelism_config.role_type == RoleType::PREFILL && parallelism_config.tp_size > 1) {
-            return static_cast<uint32_t>(parallelism_config.tp_size);
-        }
-        if (parallelism_config.role_type == RoleType::DECODE
-            && parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-            RTP_LLM_CHECK_WITH_INFO(
-                parallelism_config.prefill_cp_config.prefill_cp_size > 1,
-                "fixed/SWA CP sharding decode requires explicit prefill_cp_size when PREFILL_CP and kv_cache_sharded are enabled");
-            return static_cast<uint32_t>(parallelism_config.prefill_cp_config.prefill_cp_size);
-        }
-        return 1;
-    }
-
-    static bool isPrefillCpSliced(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
-        const auto cp_size = fixedRegionCpSize(desc, ctx);
-        if (cp_size <= 1) {
-            return false;
-        }
-        RTP_LLM_CHECK_WITH_INFO(ctx.parallelism_config != nullptr,
-                                "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.parallelism_config",
-                                desc.tag.c_str(),
-                                static_cast<int>(desc.cache_type));
-        return ctx.parallelism_config->role_type == RoleType::PREFILL;
-    }
-
-    static uint32_t seqSizePerBlock(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
-        const uint32_t ctx_seq_size = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        const uint32_t cp_size      = fixedRegionCpSize(desc, ctx);
-        if (cpScaleSeqSize(desc) && cp_size > 1) {
-            return ctx_seq_size * cp_size;
-        }
-        return ctx_seq_size;
+    static uint32_t seqSizePerBlock(const SpecBuildContext& ctx) {
+        return ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
     }
 
     static uint32_t alignUpToMultiple(uint32_t value, uint32_t multiple) {
@@ -218,13 +152,6 @@ protected:
                 break;
         }
 
-        const auto cp_size = fixedRegionCpSize(desc, ctx);
-        if (cp_size > 1 && (cpAlignPayload(desc) || cpPrefillSlicePayload(desc))) {
-            entries = alignUpToMultiple(entries, cp_size);
-            if (cpPrefillSlicePayload(desc) && isPrefillCpSliced(desc, ctx)) {
-                entries /= cp_size;
-            }
-        }
         return entries;
     }
 
@@ -244,28 +171,6 @@ protected:
                    * desc.block_stride_bytes_alignment;
         }
         return payload_bytes;
-    }
-
-    static size_t fixedStateBlockStrideBytes(const KVCacheSpecDesc&  desc,
-                                             size_t                  payload_bytes,
-                                             uint32_t                entry_count,
-                                             const SpecBuildContext& ctx) {
-        const auto cp_size = fixedRegionCpSize(desc, ctx);
-        if (cp_size <= 1 || !cpPrefillSliceBlockStride(desc)) {
-            return blockStrideBytes(desc, payload_bytes, entry_count);
-        }
-        const size_t align             = desc.block_stride_bytes_alignment > 0 ?
-                                             std::lcm(desc.block_stride_bytes_alignment, static_cast<size_t>(cp_size)) :
-                                             static_cast<size_t>(cp_size);
-        const size_t full_stride_bytes = ((payload_bytes + align - 1) / align) * align;
-        RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % cp_size == 0,
-                                "CP prefill byte slicing tag=%s full stride %zu must be divisible by cp_size %u",
-                                desc.tag.c_str(),
-                                full_stride_bytes,
-                                cp_size);
-        // Both PD roles must agree on the complete physical block. Only the
-        // prefill allocation stores one rank's contiguous byte slice.
-        return isPrefillCpSliced(desc, ctx) ? full_stride_bytes / cp_size : full_stride_bytes;
     }
 
 protected:
@@ -289,6 +194,12 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         type = KVCacheSpecType::OpaqueKV;
     }
 
+    static ResolvedCompressedLayouts resolveLayouts(const std::vector<std::vector<KVCacheSpecDesc>>& descs,
+                                                    const ParallelismConfig&                         parallelism,
+                                                    uint32_t                                         base_block_tokens,
+                                                    uint32_t kernel_block_tokens,
+                                                    uint32_t gen_num_per_cycle);
+
     static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(desc.entry_elems > 0,
                                 "COMPRESSED_KV KVCacheSpecDesc tag=%s requires positive entry_elems",
@@ -297,13 +208,23 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
                                 "COMPRESSED_KV KVCacheSpecDesc tag=%s requires valid entry_dtype",
                                 desc.tag.c_str());
 
-        const auto seq                   = seqSizePerBlock(desc, ctx);
+        uint32_t seq = seqSizePerBlock(ctx);
+        const ResolvedCompressedLayout* resolved = nullptr;
+        if (ctx.compressed_layouts != nullptr) {
+            const auto it = ctx.compressed_layouts->find(desc.tag);
+            if (it != ctx.compressed_layouts->end()) {
+                resolved = &it->second;
+                seq      = resolved->seq_size_per_block;
+            }
+        }
         const auto kernel                = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         auto       spec                  = std::make_shared<CompressedKVCacheSpec>(desc.tag, seq, kernel, 1);
         spec->entry_dtype_               = desc.entry_dtype;
         auto page_ctx                    = ctx;
         page_ctx.kernel_tokens_per_block = kernel;
-        const uint32_t entries           = entryCount(desc, page_ctx);
+        const uint32_t entries           = resolved != nullptr ? resolved->entries_per_kernel_block :
+                                                                 entryCount(desc, page_ctx);
+        spec->entries_per_kernel_block_  = entries;
         const size_t   payload           = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
         const size_t   stride            = blockStrideBytes(desc, payload, entries);
         const size_t   bpk =
@@ -322,6 +243,14 @@ struct CompressedKVCacheSpec: public OpaqueKVCacheSpec {
         return std::make_shared<CompressedKVCacheSpec>(*this);
     }
 
+    uint32_t entriesPerKernelBlock() const {
+        return entries_per_kernel_block_;
+    }
+
+private:
+    uint32_t entries_per_kernel_block_ = 0;
+
+public:
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "CompressedKVCacheSpec{\n";
@@ -340,6 +269,17 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
         type = KVCacheSpecType::OpaqueState;
     }
 
+    static ResolvedStateEntryLayouts resolveEntryLayouts(const std::vector<std::vector<KVCacheSpecDesc>>& descs,
+                                                         const ParallelismConfig&                         parallelism,
+                                                         uint32_t base_block_tokens,
+                                                         uint32_t gen_num_per_cycle,
+                                                         uint32_t kernel_block_tokens);
+    static ResolvedSwaByteLayouts    resolveSwaByteLayouts(const std::vector<std::vector<KVCacheSpecDesc>>& descs,
+                                                           const ParallelismConfig&                         parallelism,
+                                                           uint32_t base_block_tokens,
+                                                           uint32_t gen_num_per_cycle,
+                                                           uint32_t kernel_block_tokens);
+
     static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
         RTP_LLM_CHECK_WITH_INFO(
             desc.entry_elems > 0, "FIXED_STATE KVCacheSpecDesc tag=%s requires positive entry_elems", desc.tag.c_str());
@@ -347,18 +287,45 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
                                 "FIXED_STATE KVCacheSpecDesc tag=%s requires valid entry_dtype",
                                 desc.tag.c_str());
 
-        const auto seq         = seqSizePerBlock(desc, ctx);
+        const ResolvedStateEntryLayout* resolved = nullptr;
+        if (ctx.state_entry_layouts != nullptr) {
+            const auto it = ctx.state_entry_layouts->find(desc.tag);
+            if (it != ctx.state_entry_layouts->end()) {
+                resolved = &it->second;
+            }
+        }
+        const ResolvedSwaByteLayout* resolved_swa = nullptr;
+        if (ctx.swa_byte_layouts != nullptr) {
+            const auto it = ctx.swa_byte_layouts->find(desc.tag);
+            if (it != ctx.swa_byte_layouts->end()) {
+                resolved_swa = &it->second;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(resolved == nullptr || resolved_swa == nullptr,
+                                "fixed region tag=%s cannot use entry and packed-byte projections together",
+                                desc.tag.c_str());
+        const auto seq = resolved ? resolved->seq_size_per_block :
+                         resolved_swa ? resolved_swa->seq_size_per_block : seqSizePerBlock(ctx);
         const auto kernel      = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);
         auto       spec        = std::make_shared<FixedStateCacheSpec>(desc.tag, seq, kernel, 1);
         spec->entry_dtype_     = desc.entry_dtype;
-        const uint32_t entries = entryCount(desc, ctx);
-        const size_t   payload = payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
-        const size_t   stride  = fixedStateBlockStrideBytes(desc, payload, entries, ctx);
+        if (resolved != nullptr) {
+            spec->state_entry_layout_ = *resolved;
+        }
+        if (resolved_swa != nullptr) {
+            spec->swa_byte_layout_ = *resolved_swa;
+        }
+        const uint32_t entries = resolved ? resolved->local_entries :
+                                 resolved_swa ? resolved_swa->full_entries : entryCount(desc, ctx);
+        const size_t payload = resolved_swa ? resolved_swa->full_payload_bytes :
+                                            payloadBytes(desc.entry_elems, entries, desc.entry_dtype);
+        const size_t stride = resolved_swa ? resolved_swa->local_stride_bytes :
+                                              blockStrideBytes(desc, payload, entries);
         spec->setLayout(desc.entry_elems,
                         entries,
                         payload,
                         stride,
-                        isPrefillCpSliced(desc, ctx) && cpPrefillSliceBlockStride(desc));
+                        resolved_swa != nullptr && stride < payload);
         return spec;
     }
 
@@ -366,6 +333,19 @@ struct FixedStateCacheSpec: public OpaqueKVCacheSpec {
         return std::make_shared<FixedStateCacheSpec>(*this);
     }
 
+    const ResolvedStateEntryLayout* stateEntryLayout() const {
+        return state_entry_layout_ ? &*state_entry_layout_ : nullptr;
+    }
+
+    const ResolvedSwaByteLayout* swaByteLayout() const {
+        return swa_byte_layout_ ? &*swa_byte_layout_ : nullptr;
+    }
+
+private:
+    std::optional<ResolvedStateEntryLayout> state_entry_layout_;
+    std::optional<ResolvedSwaByteLayout>    swa_byte_layout_;
+
+public:
     std::string debugString(size_t indent = 0) const override {
         std::ostringstream os;
         os << std::string(indent, ' ') << "FixedStateCacheSpec{\n";

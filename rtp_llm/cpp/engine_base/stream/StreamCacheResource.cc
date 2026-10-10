@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <limits>
 #include <thread>
+#include <unordered_map>
 
 using namespace std;
 
@@ -36,6 +38,32 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
         return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
     }();
     return topology;
+}
+
+std::shared_ptr<const MallocInfo::RequestLayout> makeRequestTokenSnapshot(const BatchKVCacheResource& resource,
+                                                                          const CompleteTokenIds&     tokens,
+                                                                          int  incr_seq_len_override,
+                                                                          bool capture_theory_keys) {
+    auto snapshot                    = std::make_shared<MallocInfo::RequestLayout>();
+    snapshot->match_keys             = resource.cacheKeys(0);
+    snapshot->request_seq_len        = tokens.seqLength();
+    snapshot->request_incr_seq_len   = incr_seq_len_override >= 0 ? incr_seq_len_override : tokens.seqLength();
+    snapshot->request_common_seq_len = tokens.commonSeqLength();
+    snapshot->request_total_seq_len  = tokens.totalSeqLength();
+    snapshot->request_reserve_step   = tokens.getReserveStep();
+    if (capture_theory_keys) {
+        std::vector<CacheKeysType> keys_by_batch;
+        keys_by_batch.reserve(resource.batchSize());
+        for (int batch = 0; batch < resource.batchSize(); ++batch) {
+            auto batch_keys = resource.cacheKeys(batch);
+            if (!resource.lastBlockAligned() && !batch_keys.empty()) {
+                batch_keys.pop_back();
+            }
+            keys_by_batch.push_back(std::move(batch_keys));
+        }
+        snapshot->theory_window_keys = std::move(keys_by_batch);
+    }
+    return snapshot;
 }
 
 }  // namespace
@@ -197,6 +225,20 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.malloc_begin_time_us         = currentTimeUs();
+    if (is_first_malloc && !batch_kv_cache_resource_->cacheKeysInitialized()) {
+        initCacheKeys(batch_kv_cache_resource_, malloc_info.complete_token_ids, seqSizePerBlock());
+        malloc_info.cache_keys_initialized_now = true;
+    } else if (!is_first_malloc) {
+        updateCacheKeys(batch_kv_cache_resource_, malloc_info.complete_token_ids, seqSizePerBlock());
+    }
+    malloc_info.cache_keys_prepared = true;
+    malloc_info.request_layout =
+        makeRequestTokenSnapshot(*batch_kv_cache_resource_,
+                                 *malloc_info.complete_token_ids,
+                                 -1,
+                                 is_first_malloc && malloc_info.cache_keys_initialized_now
+                                     && resource_context_.cache_manager->needsPrefillHitSnapshot());
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -390,6 +432,22 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.malloc_begin_time_us         = currentTimeUs();
+    if (batch_kv_cache_resource_->curBlocksNum() == 0) {
+        if (!batch_kv_cache_resource_->cacheKeysInitialized()) {
+            initCacheKeys(batch_kv_cache_resource_, malloc_info.complete_token_ids, seqSizePerBlock());
+            malloc_info.cache_keys_initialized_now = true;
+        }
+    } else {
+        updateCacheKeys(batch_kv_cache_resource_, malloc_info.complete_token_ids, seqSizePerBlock());
+    }
+    malloc_info.cache_keys_prepared = true;
+    malloc_info.request_layout =
+        makeRequestTokenSnapshot(*batch_kv_cache_resource_,
+                                 *malloc_info.complete_token_ids,
+                                 seq_len_override,
+                                 batch_kv_cache_resource_->curBlocksNum() == 0 && malloc_info.cache_keys_initialized_now
+                                     && resource_context_.cache_manager->needsPrefillHitSnapshot());
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

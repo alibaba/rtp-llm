@@ -790,11 +790,11 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, CreateSpConfigPreservesQwenPacking
     ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
     const auto full_pool_config =
         DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().group("full"));
-    const auto& full_layouts = full_pool_config.memory_layouts;
-    ASSERT_EQ(full_layouts.size(), 3u);
-    EXPECT_EQ(full_layouts[0].layer_num, 2u);
-    EXPECT_EQ(full_layouts[1].layer_num, 1u);
-    EXPECT_EQ(full_layouts[2].layer_num, 1u);
+    const auto& request_layouts = full_pool_config.memory_layouts;
+    ASSERT_EQ(request_layouts.size(), 3u);
+    EXPECT_EQ(request_layouts[0].layer_num, 2u);
+    EXPECT_EQ(request_layouts[1].layer_num, 1u);
+    EXPECT_EQ(request_layouts[2].layer_num, 1u);
     const auto linear_pool_config =
         DeviceBlockPoolConfigHelper::createConfigForGroup(config, config.topology().group("linear"));
     const auto& linear_layouts = linear_pool_config.memory_layouts;

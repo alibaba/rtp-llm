@@ -87,7 +87,7 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
+        "//rtp_llm/cpp/distribute/context_parallel:cp_transfer_projection",
         "//rtp_llm/cpp/disaggregate/cache_store",
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",

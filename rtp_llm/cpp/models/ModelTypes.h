@@ -76,6 +76,11 @@ struct GptModelInitParams {
 
     std::vector<int64_t>    hidden_state_capture_layer_ids;
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
+
+    // Physical producer cache rank and size. NormalExecutor sets this for main
+    // and draft models from their bound manager; warmup uses {0, 1}. Direct
+    // construction must supply it for a sharded producer cache.
+    std::optional<std::pair<int, int>> cache_store_producer_cp_topology;
 };
 
 enum GptModelInputIndex : size_t {

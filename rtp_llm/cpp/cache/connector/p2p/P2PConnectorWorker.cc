@@ -8,7 +8,9 @@ namespace rtp_llm {
 P2PConnectorWorker::P2PConnectorWorker(P2PConnectorWorkerConfig                    config,
                                        const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                                        const kmonitor::MetricsReporterPtr&         metrics_reporter):
-    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {}
+    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {
+    (void)config_.resolvedCacheKeyCoordinates();
+}
 
 P2PConnectorWorker::~P2PConnectorWorker() = default;
 

@@ -16,7 +16,6 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
-#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
@@ -151,11 +150,21 @@ static void setGroupBlockNumsForTest(CacheConfig&                    config,
     rtp_llm::test::setGroupBlockLayout(config, tags, block_nums, kv_strides, scale_strides);
 }
 
+static CacheConfig createResolvedDSV4ManagerConfig(const ModelConfig&       model,
+                                                   const ParallelismConfig& parallelism,
+                                                   const KVCacheConfig&     options,
+                                                   bool                     warmup) {
+    if (warmup) {
+        return CacheConfigCreator::createWarmupConfig(model, parallelism, options);
+    }
+    return CacheConfigCreator::createConfig(model, parallelism, options);
+}
+
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
     ParallelismConfig pc;
     auto              mc = makeDSV4ManagerFlashModelConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto config = createResolvedDSV4ManagerConfig(mc, pc, KVCacheConfig{}, /*warmup=*/true);
     setGroupBlockNumsForTest(
         config, config.groupTags(), std::vector<uint32_t>(static_cast<size_t>(config.groupNums()), block_num));
     return config;
@@ -223,11 +232,14 @@ static void expectDsv4SwaAllocatedBlocks(const CacheConfig&      config,
 
 // Creates an intentionally tight DSV4 config for eviction stress tests: FULL
 // groups use a large paged pool, while SWA groups use a small independent pool.
-static CacheConfig makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size) {
+static CacheConfig
+makeDSV4ConfigWithConcurrencyPool(uint32_t full_block_num, uint32_t swa_batch_size, int cp_size = 1) {
     ParallelismConfig pc;
+    pc.tp_size                            = cp_size;
+    pc.prefill_cp_config.kv_cache_sharded = cp_size > 1;
     auto              mc = makeDSV4ManagerFlashModelConfig();
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
-    auto                          config = CacheConfigCreator::createWarmupConfig(mc, pc, 0);
+    auto config = createResolvedDSV4ManagerConfig(mc, pc, KVCacheConfig{}, /*warmup=*/cp_size == 1);
     std::vector<CacheGroupPolicy> policies;
     for (const auto& group : config.topology().groups()) {
         policies.push_back(group.policy);
@@ -257,7 +269,7 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     setDsv4ExplicitPoolBlocks(mc, "hca_state", hca_state_pool_blocks);
     runtime_config.max_generate_batch_size                      = max_concurrency;
     runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;
-    auto       config    = CacheConfigCreator::createConfig(mc, pc, kv_cache_config);
+    auto       config    = createResolvedDSV4ManagerConfig(mc, pc, kv_cache_config, /*warmup=*/false);
     const auto candidate = CacheConfigCreator::computeLocalBlockNum(config, mc, runtime_config, kv_cache_config, pc);
     return rtp_llm::test::finalizeCacheConfig(std::move(config), candidate);
 }
@@ -666,7 +678,7 @@ TEST_F(KVCacheManagerTest, UnresolvedNormalConfigCannotBeUsedForWarmup) {
     auto          model = makeDSV4ManagerFlashModelConfig();
     KVCacheConfig options;
     options.test_block_num = 3;
-    const auto config      = CacheConfigCreator::createConfig(model, {}, options);
+    const auto config      = createResolvedDSV4ManagerConfig(model, {}, options, /*warmup=*/false);
     EXPECT_ANY_THROW(KVCacheManager(config, true));
 }
 
@@ -2343,13 +2355,17 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     ASSERT_NE(hybrid_allocator, nullptr);
 
     const size_t physical_capacity = hybrid_allocator->maxAvailableTokensNum();
-    auto         cp_slot_mapper =
-        std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, static_cast<int>(cache_config.seq_size_per_block));
-    kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
-    hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
+    auto cp_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3, /*cp_size=*/2);
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    auto cp_manager = std::make_shared<KVCacheManager>(cp_config, /*warmup=*/true, nullptr, KVCacheConfig{}, parallelism);
+    ASSERT_TRUE(cp_manager->init());
+    auto cp_allocator = std::dynamic_pointer_cast<CoordinatorCacheManager>(cp_manager->coordinator_manager_);
+    ASSERT_NE(cp_allocator, nullptr);
 
     size_t      expected_logical_capacity = std::numeric_limits<size_t>::max();
-    const auto& pools                     = hybrid_allocator->groupBlockPools();
+    const auto& pools                     = cp_allocator->groupBlockPools();
     for (size_t gid = 0; gid < pools.size(); ++gid) {
         if (gid < static_cast<size_t>(cache_config.groupNums())
             && cache_config.group(cache_config.groupTags()[gid]).policy.group_type != CacheGroupType::FULL) {
@@ -2360,11 +2376,46 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
                      pools[gid]->totalBlocksNum() * static_cast<size_t>(cache_config.seq_size_per_block * 2));
     }
 
-    EXPECT_EQ(kv_cache_manager->maxAvailableTokensNum(), expected_logical_capacity);
-    EXPECT_GT(kv_cache_manager->maxAvailableTokensNum(), physical_capacity);
-    const auto info = kv_cache_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+    EXPECT_EQ(cp_manager->maxAvailableTokensNum(), expected_logical_capacity);
+    EXPECT_GT(cp_manager->maxAvailableTokensNum(), physical_capacity);
+    const auto info = cp_manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
     EXPECT_EQ(info.total_kv_cache, expected_logical_capacity);
     EXPECT_EQ(info.available_kv_cache, expected_logical_capacity);
+}
+
+TEST_F(KVCacheManagerTest, ResolvedHybridCapacityUsesFullGroupsAndKeepsPhysicalMetrics) {
+    for (int cp_size : {1, 2, 4}) {
+        auto         config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3, cp_size);
+        const size_t base_block = config.seq_size_per_block;
+        ParallelismConfig par;
+        par.tp_rank = 0;
+        par.tp_size = cp_size;
+        par.prefill_cp_config.kv_cache_sharded = true;
+        EXPECT_EQ(config.capacity_tokens_per_block.at("csa_kv"), base_block * cp_size);
+        EXPECT_EQ(config.capacity_tokens_per_block.at("swa_kv"), config.group("swa_kv").seqSizePerBlock());
+        EXPECT_EQ(config.capacity_tokens_per_block.at("csa_state"), config.group("csa_state").seqSizePerBlock());
+
+        auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
+        ASSERT_TRUE(manager->init());
+        const auto info = manager->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
+        EXPECT_EQ(info.block_size, base_block * cp_size);
+        // Upstream b252e385 aligns CacheInfo with FULL-only admission capacity.
+        // Excluding block zero leaves fifteen FULL blocks; the five-block
+        // SWA pool does not limit token-length capacity.
+        EXPECT_EQ(info.total_kv_cache, 15 * base_block * cp_size);
+        EXPECT_EQ(info.available_kv_cache, 15 * base_block * cp_size);
+        EXPECT_EQ(manager->maxAvailableTokensNum(), 15 * base_block * cp_size);
+
+        const auto pool_snapshots = manager->coordinator_manager_->poolMetricsSnapshots();
+        ASSERT_EQ(pool_snapshots.size(), static_cast<size_t>(config.groupNums()));
+        for (const auto& snapshot : pool_snapshots) {
+            EXPECT_EQ(snapshot.used_blocks, snapshot.total_blocks - snapshot.free_blocks);
+            EXPECT_GT(snapshot.block_size_bytes, 0u);
+            ASSERT_LT(snapshot.pool_index, config.groupTags().size());
+            EXPECT_EQ(snapshot.block_size_bytes,
+                      config.blockSizeBytesForGroup(config.groupTags()[snapshot.pool_index]));
+        }
+    }
 }
 
 TEST_F(KVCacheManagerTest, GetKVCacheInfo_IncludesMemoryBlocksInTotalAndAvailable) {
