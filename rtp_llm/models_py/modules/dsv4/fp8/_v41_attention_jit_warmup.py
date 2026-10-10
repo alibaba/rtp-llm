@@ -830,6 +830,20 @@ def _warm_indexer_layout(
                     "dense token TopK",
                     enabled=topk.is_supported(logits, typed_visible),
                 )
+                if cached is not None and selected is not None:
+                    # Candidate publication defers finite filtering to its
+                    # epilogue. Exercise the same adapter with a caller-owned
+                    # output; shapes/strides remain runtime kernel parameters.
+                    raw_output = torch.empty_like(selected)
+                    raw_selected = topk.try_select_tokens(
+                        logits,
+                        typed_visible,
+                        bounds=cached,
+                        out=raw_output,
+                        filter_finite=False,
+                    )
+                    _require_launch(raw_selected, "deferred-filter token TopK")
+                    topk.finish_tokens(logits, cached[1], raw_selected)
     config = attn.v41_config
     count = int(config.get("candidate_topk_blocks", 0))
     block = int(config.get("candidate_block_size", 0))

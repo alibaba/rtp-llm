@@ -78,7 +78,9 @@ def _select_tokens(
     out=None,
     filter_finite=True,
 ) -> torch.Tensor:
-    """Use native v3 selection, which canonicalizes both NaN signs."""
+    """Select unchanged FP32 scores, retaining native v3 as the fallback."""
+    from . import _v41_prefill_deepselect as deepselect
+
     rows, width = logits.shape
     if bounds is None:
         ends = torch.empty((rows,), device=logits.device, dtype=torch.int32)
@@ -87,6 +89,12 @@ def _select_tokens(
         )
     else:
         ends = bounds[1]
+    if deepselect.is_available(logits.device):
+        selected = deepselect.try_select_tokens(
+            logits, ends, out=out, filter_finite=filter_finite
+        )
+        if selected is not None:
+            return selected
     output = (
         out
         if out is not None

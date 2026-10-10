@@ -23,8 +23,7 @@ dsv4_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
 # DeepSelect uses Blackwell TMA and 256-bit memory operations. Compile only
 # architecture-specific cubins. The small vendored subset uses C++17 syntax
 # to work with RTP's Bazel CUDA wrapper as well as GCC 13 / CUDA 13.2.
-deepselect_bf16_cuda_copts = [
-    "-DRTP_DEEPSELECT_BF16_ENABLED",
+deepselect_cuda_copts = [
     "-O3",
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
@@ -37,6 +36,8 @@ deepselect_bf16_cuda_copts = [
     "--cuda-include-ptx=sm_100a", "--cuda-gpu-arch=sm_100a",
     "--cuda-include-ptx=sm_103a", "--cuda-gpu-arch=sm_103a",
 ]
+deepselect_bf16_cuda_copts = ["-DRTP_DEEPSELECT_BF16_ENABLED"] + deepselect_cuda_copts
+deepselect_fp32_cuda_copts = ["-DRTP_DEEPSELECT_FP32_ENABLED"] + deepselect_cuda_copts
 
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
@@ -243,6 +244,31 @@ cc_library(
         "@//:using_cuda13_x86": deepselect_bf16_cuda_copts,
         "@//:using_cuda13_arm": deepselect_bf16_cuda_copts,
         "@//:using_cuda12_9": deepselect_bf16_cuda_copts,
+        "//conditions:default": [],
+    }),
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "@//:using_cuda13_x86": ["@cutlass_cu13//:cutlass"],
+        "@//:using_cuda13_arm": ["@cutlass_cu13//:cutlass"],
+        "@//:using_cuda12_9": ["@cutlass//:cutlass"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "deepselect_fp32",
+    srcs = ["deepselect_fp32.cu"],
+    hdrs = ["deepselect_fp32.h"] + glob([
+        "deepselect/**/*.h",
+        "deepselect/**/*.cuh",
+    ]),
+    copts = copts() + cuda_default_copts_without_arch() + select({
+        "@//:using_cuda13_x86": deepselect_fp32_cuda_copts,
+        "@//:using_cuda13_arm": deepselect_fp32_cuda_copts,
+        "@//:using_cuda12_9": deepselect_fp32_cuda_copts,
         "//conditions:default": [],
     }),
     deps = torch_deps() + [

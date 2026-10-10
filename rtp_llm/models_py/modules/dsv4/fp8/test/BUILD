@@ -318,3 +318,13 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "test_v41_prefill_deepselect",
+    srcs = ["test_v41_prefill_deepselect.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"},
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+    timeout = "moderate",
+)
