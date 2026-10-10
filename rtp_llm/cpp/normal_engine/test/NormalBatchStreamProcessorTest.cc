@@ -1,5 +1,6 @@
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <future>
 #include <limits>
@@ -90,7 +91,119 @@ protected:
     }
 };
 
+TEST_F(NormalBatchStreamProcessorTest, testDeviceInputPlacementUsesStartupSnapshot) {
+    const char*       previous       = std::getenv("RTP_LLM_DEVICE_INPUT");
+    const bool        had_previous   = previous != nullptr;
+    const std::string previous_value = had_previous ? previous : "";
+    struct RestoreEnvironment {
+        bool        existed;
+        std::string value;
+        ~RestoreEnvironment() {
+            if (existed) {
+                setenv("RTP_LLM_DEVICE_INPUT", value.c_str(), 1);
+            } else {
+                unsetenv("RTP_LLM_DEVICE_INPUT");
+            }
+        }
+    } restore{had_previous, previous_value};
+
+    NormalModelInputGathererConfig config;
+    setenv("RTP_LLM_DEVICE_INPUT", "0", 1);
+    NormalModelInputGatherer host_gatherer(config);
+    setenv("RTP_LLM_DEVICE_INPUT", "1", 1);
+    NormalModelInputGatherer device_gatherer(config);
+    // Mutating the process environment must not change an existing collector.
+    unsetenv("RTP_LLM_DEVICE_INPUT");
+    std::list<GenerateStreamPtr> streams;
+    StreamGroups                 groups(streams);
+    TensorHolder                 host_holder;
+    TensorHolder                 device_holder;
+    auto                         host_input   = host_gatherer.gather(groups, host_holder);
+    auto                         device_input = device_gatherer.gather(groups, device_holder);
+    ASSERT_TRUE(host_input.ok());
+    ASSERT_TRUE(device_input.ok());
+    EXPECT_FALSE(host_input->lm_output_indexes.is_cuda());
+    EXPECT_TRUE(device_input->lm_output_indexes.is_cuda());
+    EXPECT_FALSE(host_input->combo_tokens.is_cuda());
+    EXPECT_TRUE(device_input->combo_tokens.is_cuda());
+}
+
 class OutputDispatchTest: public NormalBatchStreamProcessorTest, public ::testing::WithParamInterface<int> {};
+
+TEST_F(NormalBatchStreamProcessorTest, testNonemptyDeviceInputUsesStartupSnapshot) {
+    const char* previous = std::getenv("RTP_LLM_DEVICE_INPUT");
+    struct RestoreEnvironment {
+        bool        existed;
+        std::string value;
+        ~RestoreEnvironment() {
+            if (existed) {
+                setenv("RTP_LLM_DEVICE_INPUT", value.c_str(), 1);
+            } else {
+                unsetenv("RTP_LLM_DEVICE_INPUT");
+            }
+        }
+    } restore{previous != nullptr, previous ? previous : ""};
+
+    for (bool device_input : {false, true}) {
+        for (bool context : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "device_input=" << device_input << " context=" << context);
+            setenv("RTP_LLM_DEVICE_INPUT", device_input ? "1" : "0", 1);
+            NormalModelInputGathererConfig config;
+            config.vocab_size       = 128;
+            config.input_vocab_size = 128;
+            NormalModelInputGatherer gatherer(config);
+            setenv("RTP_LLM_DEVICE_INPUT", device_input ? "0" : "1", 1);
+
+            ResourceContext resource_context;
+            ModelConfig     model_config;
+            model_config.max_seq_len = 128;
+            model_config.vocab_size  = 128;
+            RuntimeConfig runtime_config;
+            auto          query    = make_shared<GenerateInput>();
+            query->input_ids       = hostIntBuffer({1, 2, 3});
+            query->generate_config = make_shared<GenerateConfig>();
+            auto stream =
+                make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+            stream->generate_status_->status = StreamState::RUNNING;
+            stream->setIsContextStream(context);
+            if (context) {
+                stream->setReuseLength(1);
+            } else {
+                const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+                stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+                    .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+                    .next_seq_len_gpu      = torch::full({1}, 11, cuda_i32),
+                    .last_real_seq_len     = 10,
+                    .next_real_seq_len     = 11,
+                });
+            }
+            std::list<GenerateStreamPtr> streams{stream};
+            StreamGroups                 groups(streams);
+            TensorHolder                 holder;
+            auto                         input = gatherer.gather(groups, holder);
+            ASSERT_TRUE(input.ok()) << input.status();
+            // Keep pinned host inputs alive until all asynchronous publication
+            // and CUDA index construction have finished.
+            cuda_graph::graphDeviceSynchronize();
+            EXPECT_EQ(input->combo_tokens.is_cuda(), device_input);
+            EXPECT_EQ(input->input_lengths.is_cuda(), device_input);
+            EXPECT_EQ(input->lm_output_indexes.is_cuda(), device_input);
+            EXPECT_EQ(input->combo_tokens.scalar_type(), torch::kInt32);
+            EXPECT_EQ(input->lm_output_indexes.scalar_type(), torch::kInt32);
+            EXPECT_EQ(toVec<int>(input->combo_tokens),
+                      context ? vector<int>({2, 3}) : vector<int>({device_input ? 42 : 3}));
+            EXPECT_EQ(toVec<int>(input->input_lengths), vector<int>({context ? 2 : 3}));
+            EXPECT_EQ(toVec<int>(input->lm_output_indexes), vector<int>({context ? 1 : 0}));
+            if (context) {
+                EXPECT_EQ(input->prefix_lengths.is_cuda(), device_input);
+                EXPECT_EQ(toVec<int>(input->prefix_lengths), vector<int>({1}));
+            } else {
+                EXPECT_EQ(input->sequence_lengths.is_cuda(), device_input);
+                EXPECT_EQ(toVec<int>(input->sequence_lengths), vector<int>({device_input ? 10 : 2}));
+            }
+        }
+    }
+}
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, OutputDispatchTest, ::testing::Values(0, 2));
 
