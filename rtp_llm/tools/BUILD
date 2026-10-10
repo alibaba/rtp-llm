@@ -128,6 +128,18 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_block_norm_replay",
+    testonly = True,
+    srcs = ["dsv41_block_norm_replay.py"],
+    deps = [
+        ":dsv41_corrected_history_replay",
+        ":dsv41_mhc_collapse_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_block_norm_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
     name = "dsv41_corrected_history_replay",
     testonly = True,
     srcs = ["dsv41_corrected_history_replay.py"],
