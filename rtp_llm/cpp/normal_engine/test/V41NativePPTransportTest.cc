@@ -324,6 +324,12 @@ public:
         admission_->commit(batch);
     }
 
+    void initializeGlobal(const V41PPCacheBatchPtr& batch) {
+        requireOpen();
+        requireAdmission();
+        admission_->initializeFresh(batch);
+    }
+
     void abortGlobal(const V41PPCacheBatchPtr& batch) {
         requireOpen();
         requireAdmission();
@@ -601,6 +607,7 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
             return fresh;
         })
         .def_property_readonly("kernel_block_table", &rtp_llm::V41PPCacheBatch::kernelBlockTable)
+        .def_property_readonly("initialized", &rtp_llm::V41PPCacheBatch::initialized)
         .def_property_readonly("canonical_columns", [](const rtp_llm::V41PPCacheBatch& batch) {
             std::map<std::string, size_t> columns;
             for (const auto& group : batch.bindings().at(0).lease->topologyPtr()->groups()) {
@@ -630,6 +637,7 @@ PYBIND11_MODULE(libth_v41_native_pp_transport_test, m) {
         .def("prepare_global", &rtp_llm::test::V41NativePPTransportTest::prepareGlobal)
         .def("prepare_global_worker", &rtp_llm::test::V41NativePPTransportTest::prepareGlobalWorker)
         .def("commit_global", &rtp_llm::test::V41NativePPTransportTest::commitGlobal)
+        .def("initialize_global", &rtp_llm::test::V41NativePPTransportTest::initializeGlobal)
         .def("abort_global", &rtp_llm::test::V41NativePPTransportTest::abortGlobal)
         .def("retire_global", &rtp_llm::test::V41NativePPTransportTest::retireGlobal)
         .def_property_readonly("active_global", &rtp_llm::test::V41NativePPTransportTest::activeGlobal)

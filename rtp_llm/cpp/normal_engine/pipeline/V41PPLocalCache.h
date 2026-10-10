@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -14,6 +15,7 @@
 namespace rtp_llm {
 
 class V41PPLocalCache;
+class V41PPAdmission;
 
 // Allocation exhaustion is a recoverable admission failure, distinct from an
 // unexpected implementation/CUDA error that must poison a coordinated session.
@@ -38,9 +40,13 @@ public:
     }
     std::vector<KVCacheAllocationLeasePtr> leases() const;
     torch::Tensor kernelBlockTable() const;
+    bool initialized() const {
+        return initialized_;
+    }
 
 private:
     friend class V41PPLocalCache;
+    friend class V41PPAdmission;
     struct Allocation {
         ~Allocation();
         std::shared_ptr<KVCacheManager> manager;
@@ -63,6 +69,8 @@ private:
     std::vector<Binding>                      bindings_;
     int64_t                                   source_high_water_ = 0;
     bool                                      committed_ = false;
+    bool                                      worker_ready_ = false;
+    bool                                      initialized_ = false;
 };
 
 using V41PPCacheBatchPtr = std::shared_ptr<V41PPCacheBatch>;
@@ -89,8 +97,13 @@ public:
     }
 
 private:
+    friend class V41PPAdmission;
     using Allocation = V41PPCacheBatch::Allocation;
     using Request = V41PPCacheBatch::Request;
+    using InitializationOps = std::vector<std::pair<torch::Tensor, torch::Tensor>>;
+
+    // Construct every tagged operation before the coordinator agrees to write.
+    InitializationOps prepareInitialization(const V41PPCacheBatchPtr& batch) const;
 
     std::shared_ptr<Allocation> allocate(int64_t request_id, const KVCacheAllocationLeasePtr& root_lease);
     void requireLease(const KVCacheAllocationLeasePtr& lease) const;

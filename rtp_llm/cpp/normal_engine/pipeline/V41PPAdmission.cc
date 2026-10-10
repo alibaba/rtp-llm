@@ -240,8 +240,66 @@ V41PPCacheBatchPtr V41PPAdmission::prepareImpl(GptModelInputs& inputs, const Wor
             throw;
         }
     }
+    batch->worker_ready_ = preflight != nullptr;
     inputs = std::move(prepared);
     return batch;
+}
+
+void V41PPAdmission::initializeFresh(const V41PPCacheBatchPtr& batch) {
+    if (failed_) {
+        throw std::runtime_error("V4.1 tagged initialization cannot enter a failed session");
+    }
+    auto packet = torch::full({3}, 1, torch::kInt64);
+    auto* status = packet.data_ptr<int64_t>();
+    status[1] = 4;  // Agree on the complete write plan before the first store.
+    status[2] = round_;
+    std::string error;
+    V41PPLocalCache::InitializationOps operations;
+    try {
+        operations = local_.prepareInitialization(batch);
+    } catch (const std::invalid_argument& exception) {
+        status[0] = 0;
+        error = exception.what();
+    } catch (const std::exception& exception) {
+        status[0] = 2;
+        error = exception.what();
+    }
+    try {
+        if (worldRejected(packet, error)) {
+            throw V41InputRejected(error.empty() ? "V4.1 peer rejected tagged initialization" : error);
+        }
+    } catch (const V41InputRejected&) {
+        throw;
+    } catch (...) {
+        failed_ = true;
+        throw;
+    }
+    status[1] = 5;  // Publish initialization only after every rank completes.
+    error.clear();
+    writing_batch_ = batch;
+    try {
+        for (auto& [raw, indices] : operations) {
+            raw.index_fill_(0, indices, 0);
+        }
+    } catch (const std::exception& exception) {
+        status[0] = 2;
+        error = exception.what();
+    } catch (...) {
+        status[0] = 2;
+        error = "unknown V4.1 tagged initialization failure";
+    }
+    try {
+        if (worldRejected(packet, error)) {
+            throw std::runtime_error("V4.1 tagged initialization completion disagrees");
+        }
+        batch->initialized_ = true;
+        writing_batch_.reset();
+    } catch (...) {
+        // Writes may have started. Keep the pending batch and its leases until
+        // the caller drains CUDA/consumers and explicitly aborts this session.
+        failed_ = true;
+        throw;
+    }
 }
 
 void V41PPAdmission::commit(const V41PPCacheBatchPtr& batch) {
@@ -252,7 +310,13 @@ void V41PPAdmission::commit(const V41PPCacheBatchPtr& batch) {
 }
 
 void V41PPAdmission::abort(const V41PPCacheBatchPtr& batch) {
-    local_.abort(batch);
+    // A failed writer may outlive every caller descriptor. After draining,
+    // the caller can abort the coordinator's retained batch with a null handle.
+    const auto pending = batch ? batch : writing_batch_;
+    local_.abort(pending);
+    if (writing_batch_ == pending) {
+        writing_batch_.reset();
+    }
 }
 
 void V41PPAdmission::retire(const std::array<int64_t, 3>& source) {

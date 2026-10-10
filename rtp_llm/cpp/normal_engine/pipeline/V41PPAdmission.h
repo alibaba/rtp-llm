@@ -9,7 +9,8 @@ namespace rtp_llm {
 
 // One serialized eager CEP4PP2 admission session. This coordinator uses the
 // registered WORLD group before either stage writes caches or waits for an
-// activation. It does not execute a model, initialize pages or send PP frames.
+// activation. Fresh tagged initialization is an explicit later phase; this
+// coordinator does not execute a model or send PP frames.
 class V41PPAdmission final {
 public:
     // Must perform its stage-agreed read-only preflight on every member. This
@@ -24,6 +25,9 @@ public:
     // The caller must retain this batch through transport/consumer completion.
     V41PPCacheBatchPtr prepare(GptModelInputs& inputs);
     V41PPCacheBatchPtr prepareWithWorker(GptModelInputs& inputs, const WorkerPreflight& preflight);
+    // Clear fresh requests only, after worker readiness and WORLD agreement.
+    // A fatal failure retains pending leases; drain GPU work before aborting.
+    void initializeFresh(const V41PPCacheBatchPtr& batch);
     void commit(const V41PPCacheBatchPtr& batch);
     void abort(const V41PPCacheBatchPtr& batch);
     void retire(const std::array<int64_t, 3>& source);
@@ -41,6 +45,7 @@ private:
     bool           root_;
     bool           failed_ = false;
     int64_t        round_ = 0;
+    V41PPCacheBatchPtr writing_batch_;
 };
 
 }  // namespace rtp_llm

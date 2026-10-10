@@ -44,7 +44,13 @@ cc_library(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/config:model_config",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
-    ] + torch_deps(),
+    ] + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }) + torch_deps(),
     visibility = ["//visibility:public"],
 )
 

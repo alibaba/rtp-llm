@@ -7,6 +7,10 @@
 #include <string>
 #include <utility>
 
+#if USING_CUDA
+#include <c10/cuda/CUDAGraphsC10Utils.h>
+#endif
+
 namespace rtp_llm {
 
 V41PPCacheBatch::Allocation::~Allocation() {
@@ -233,6 +237,54 @@ void V41PPLocalCache::requirePending(const V41PPCacheBatchPtr& batch) const {
     if (!ownsBatch(batch) || batch->committed_ || pending_.lock() != batch) {
         throw std::invalid_argument("V4.1 local PP operation requires its current uncommitted dispatch");
     }
+}
+
+V41PPLocalCache::InitializationOps
+V41PPLocalCache::prepareInitialization(const V41PPCacheBatchPtr& batch) const {
+    requirePending(batch);
+    if (!batch->worker_ready_ || batch->initialized_) {
+        throw std::invalid_argument("V4.1 tagged initialization requires a new worker-ready dispatch");
+    }
+#if USING_CUDA
+    if (c10::cuda::currentStreamCaptureStatusMayInitCtx() != c10::cuda::CaptureStatus::None) {
+        throw std::invalid_argument("V4.1 tagged initialization requires eager execution");
+    }
+#else
+    throw std::invalid_argument("V4.1 tagged initialization requires CUDA");
+#endif
+    const auto layout = manager_->allLayerCacheBase();
+    if (layout.topologyPtr() != topology_) {
+        throw std::runtime_error("V4.1 tagged initialization lost allocator provenance");
+    }
+    std::map<std::string, std::set<int64_t>> pages;
+    for (const auto& binding : batch->bindings_) {
+        requireLease(binding.lease);
+        if (binding.newly_admitted) {
+            for (const auto& [tag, blocks] : binding.lease->blockTables()) {
+                pages[tag].insert(blocks.front());
+            }
+        }
+    }
+    InitializationOps result;
+    for (const auto& [tag, blocks] : pages) {
+        const auto& group = topology_->groupById(topology_->groupIdForTag(tag));
+        auto indices = torch::tensor(std::vector<int64_t>(blocks.begin(), blocks.end()), torch::kInt64);
+        for (const auto layer_id : group.layer_ids) {
+            const auto& view = layout.at(tag, layer_id);
+            const auto& raw = view.kv_addr;
+            if (!raw.defined() || !raw.is_cuda() || raw.dim() < 2 || !raw.is_contiguous()
+                || *blocks.begin() <= 0 || *blocks.rbegin() >= raw.size(0)
+                || raw.numel() * static_cast<int64_t>(raw.element_size())
+                       != raw.size(0) * static_cast<int64_t>(group.kv_block_stride_bytes)
+                || view.kv_scale_addr.defined()) {
+                throw std::runtime_error("V4.1 tagged initialization requires complete native physical pages");
+            }
+            // These are physical per-tag pages, never another pool's IDs or
+            // the subdivided attention-kernel table. Keep reserved page zero.
+            result.emplace_back(raw, indices.to(raw.device()));
+        }
+    }
+    return result;
 }
 
 void V41PPLocalCache::commit(const V41PPCacheBatchPtr& batch) {
