@@ -2,9 +2,12 @@ package org.flexlb.dao.loadbalance;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RequestTest {
 
@@ -54,9 +57,9 @@ class RequestTest {
 
     @Test
     void should_not_include_api_key_in_to_string() {
-        Request request = new Request();
-        request.setRequestId(12345L);
-        request.setApiKey("secret-api-key");
+        Request request = Request.builder()
+                .requestId(12345L)
+                .apiKey("secret-api-key").build();
 
         assertFalse(request.toString().contains("secret-api-key"));
     }
@@ -66,5 +69,37 @@ class RequestTest {
         Request request = objectMapper.readValue("{\"request_id\":123}", Request.class);
 
         assertEquals(Request.DEFAULT_GENERATE_TIMEOUT_MS, request.getGenerateTimeout());
+    }
+
+    @Test
+    void constructionCopiesCacheKeysAndBuilderReuseDoesNotChangeTheRequest() {
+        var keys = new ArrayList<>(List.of(11L, 22L));
+        var builder = Request.builder().requestId(7L).blockCacheKeys(keys).seqLen(64L).maxNewTokens(32);
+        var request = builder.build();
+        keys.clear();
+        builder.seqLen(1L).maxNewTokens(2);
+        assertEquals(List.of(11L, 22L), request.getBlockCacheKeys());
+        assertThrows(UnsupportedOperationException.class, () -> request.getBlockCacheKeys().clear());
+        assertEquals(64L, request.getHardKvTokens());
+        assertEquals(96L, request.getExpectedKvTokens());
+    }
+
+    @Test
+    void immutableJsonInputPreservesAliasesDefaultsAndWirePriority() throws Exception {
+        for (String alias : List.of("api_key", "apikey", "apiKey")) {
+            var request = objectMapper.readValue("{\"" + alias + "\":\"secret\",\"priority\":73}", Request.class);
+            assertEquals("secret", request.getApiKey());
+            assertEquals(73, request.getRawPriority());
+            assertEquals(1, request.getMaxNewTokens());
+            assertEquals(1, request.getNumBeams());
+            assertEquals(Request.DEFAULT_GENERATE_TIMEOUT_MS, request.getGenerateTimeout());
+            assertEquals(List.of(), request.getBlockCacheKeys());
+            var json = objectMapper.valueToTree(request);
+            assertEquals(73, json.get("priority").asInt());
+            assertFalse(json.has("rawPriority"));
+            assertFalse(json.has("hardKvTokens"));
+            assertFalse(json.has("expectedKvTokens"));
+            assertEquals(request.getRawPriority(), objectMapper.treeToValue(json, Request.class).getRawPriority());
+        }
     }
 }

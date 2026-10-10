@@ -111,7 +111,7 @@ class CrashAfterTest {
                     "pre-crash sanity: completed requests' keys must sit in the LRU");
 
             // Arm the crash on the 3rd EnqueueBatch and deliver it.
-            httpPost(controlServer.getPort(), "/inject",
+            httpPost(MockEngineTestSupport.controlPort(controlServer), "/inject",
                     "{\"port\":" + prefillPort
                             + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
             assertEquals(3, prefill.getFaultConfig().getCrashAfterNRequests());
@@ -157,7 +157,7 @@ class CrashAfterTest {
 
             // Recovery: /start_engine rebuilds the gRPC server on CLEAN state
             // (also disarms the fault config and resets the enqueue counter).
-            httpPost(controlServer.getPort(), "/start_engine",
+            httpPost(MockEngineTestSupport.controlPort(controlServer), "/start_engine",
                     "{\"port\":" + prefillPort + "}");
             assertFalse(prefill.isStopped(), "engine must run again after /start_engine");
             assertEquals(0, prefill.getFaultConfig().getCrashAfterNRequests(),
@@ -205,7 +205,7 @@ class CrashAfterTest {
             }
 
             // Arm + trigger while both 300ms executions are still running.
-            httpPost(controlServer.getPort(), "/inject",
+            httpPost(MockEngineTestSupport.controlPort(controlServer), "/inject",
                     "{\"port\":" + prefillPort
                             + ",\"type\":\"crash_after\",\"enabled\":true,\"n\":3}");
             EngineRpcService.EnqueueBatchResponsePB crashAck = enqueue(prefill,

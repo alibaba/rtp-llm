@@ -90,8 +90,8 @@ class ProductionCaliberDecodeTest {
         // External semantics kept: decodeMs = steps × step × scale ("duration of
         // outputLen tokens"). 26 tokens solo = 10 steps × 19.675 = 196.75 → 197;
         // 27 tokens needs 11 steps → 216.
-        assertEquals(197L, model.decodeMs(26, 1));
-        assertEquals(216L, model.decodeMs(27, 1));
+        assertEquals(197L, MockEngineTestSupport.decodeMs(model, 26, 1));
+        assertEquals(216L, MockEngineTestSupport.decodeMs(model, 27, 1));
     }
 
     @Test

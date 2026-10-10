@@ -2,6 +2,8 @@ package org.flexlb.engine.grpc;
 
 import org.flexlb.dao.route.RoleType;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Bidirectional converter between {@link RoleType} (domain enum) and
  * {@link EngineRpcService.RoleTypePB} (proto-generated enum).
@@ -71,17 +73,13 @@ public final class RoleTypeProtoConverter {
     }
 
     private static RoleType requireKnown(RoleType role, String source) {
-        if (role == null) {
-            throw new IllegalArgumentException("unknown RoleAddrPB " + source);
-        }
+        checkArgument(role != null, "unknown RoleAddrPB %s", source);
         return role;
     }
 
     private static RoleType merge(RoleType resolved, RoleType candidate, String source) {
-        if (resolved != null && resolved != candidate) {
-            throw new IllegalArgumentException("conflicting RoleAddrPB role from " + source
-                    + ": resolved=" + resolved + ", candidate=" + candidate);
-        }
+        checkArgument(resolved == null || resolved == candidate,
+                "conflicting RoleAddrPB role from %s: resolved=%s, candidate=%s", source, resolved, candidate);
         return candidate;
     }
 

@@ -1,0 +1,412 @@
+{
+  "date": "2026-10-08",
+  "baseline_commit": "b28a71bfd6190334477106c63b9c8a88a031c6df",
+  "scope": "Independent request/Worker assignment model; concurrent delivery-transaction changes excluded from the commit candidate.",
+  "production_sync": {
+    "before_files": 101,
+    "before_lines": 24492,
+    "after_files": 100,
+    "after_lines": 24432,
+    "net_lines": -60
+  },
+  "changes": [
+    "Delete RoutingResult; use RequestRoute for request-to-Worker assignments before and after exact capacity association.",
+    "Share frozen WorkerAssignment facts; remove duplicated endpoints, role metadata and hitCache fields from RequestRoute.",
+    "Rename SelectedRole to WorkerAssignment; remove SELECTOR/ROUTING_RESULT/CLOSED enum. Only the generation permit maintains open/closed state; one-shot assignment is a separate CAS guard.",
+    "Keep exact immutable reservation and route identity; preserve queue offer and direct DeliveryClaim handoff points.",
+    "Export frozen DTO copies; construct successful frontend responses with one deep copy."
+  ],
+  "validation": {
+    "modules": {
+      "flexlb-common": {
+        "tests": 226,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "flexlb-cache": {
+        "tests": 37,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "flexlb-grpc": {
+        "tests": 15,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "flexlb-sync": {
+        "tests": 1719,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "flexlb-api": {
+        "tests": 175,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      "flexlb-mock-engine": {
+        "tests": 14,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    "total_tests": 2186,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 1,
+    "deadlock_subprocess_tests": 5,
+    "review": "Self-review of the exact commit candidate, no new lock or ownership-release path; no confirmed blocking finding.",
+    "preliminary_failures": "One shared-snapshot full API run returned UNAUTHENTICATED instead of UNAVAILABLE in FlexlbGrpcForwarderAsyncTest. Its 12-test class rerun and final independent full reactor passed without a forwarder source change. Earlier mixed-snapshot compile failures came from concurrent transaction interfaces. These are retained in local raw logs; no root cause is inferred."
+  },
+  "new_cases": [
+    "WorkerAssignmentTest.metadataIsFrozenBeforeCallerOrResponseMutations",
+    "WorkerAssignmentTest.aClosedGenerationCannotBeAssignedEvenWhenNoRequestConsumedIt",
+    "DefaultRouterTest.callerAndDeliveredResponseChangesCannotMutateTheRouteTemplate"
+  ],
+  "remote": {
+    "host": "luoli.hn@11.163.39.110",
+    "container": "luoli_gpu",
+    "root": "/home/luoli.hn/work/rtp_llm_4/github-opensource/.tmp/flexlb-assignment-refactor-20261008",
+    "jdk": "Corretto 21.0.12.1",
+    "jvm": "-Xms64g -Xmx64g -XX:+UseZGC -XX:+ZGenerational -XX:+AlwaysPreTouch",
+    "topology": "750P/750D",
+    "rates": [
+      3000,
+      10000
+    ],
+    "warmup_ms": 10000,
+    "measurement_ms": 10000,
+    "gates": {
+      "qps_ratio": 0.98,
+      "server_p99_ms": 50,
+      "client_p99_ms": 50,
+      "batch_wait_p99_ms": 50
+    },
+    "final_revision": "owned/perf",
+    "source_seal": "source-manifest.sha256 verified before and after the remote run; every changed production file matches the isolated commit candidate."
+  },
+  "performance": {
+    "baseline/perf": {
+      "scenarios": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "3000",
+          "client_qps": "2996.7",
+          "master_p99": "11ms",
+          "client_p99": "11.903ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "10000",
+          "client_qps": "9980.7",
+          "master_p99": "11ms",
+          "client_p99": "12.059ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "3000",
+          "client_qps": "2999.1",
+          "master_p99": "<1ms",
+          "client_p99": "0.674ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "10000",
+          "client_qps": "9990.2",
+          "master_p99": "<1ms",
+          "client_p99": "0.782ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        }
+      ],
+      "logs": {
+        "BATCH": {
+          "sha256": "c03c32f3779189122eddd61b41a3cd03e1bab414e93c7b3ab29dd9584ef24e39",
+          "exit": 0
+        },
+        "NON_BATCH": {
+          "sha256": "a56e94e9ec58eb83204aec16b6cc870395889a1d3db297dcbba2fd0d10aaaeab",
+          "exit": 0
+        }
+      }
+    },
+    "baseline/perf-final": {
+      "scenarios": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "3000",
+          "client_qps": "2996.8",
+          "master_p99": "11ms",
+          "client_p99": "12.017ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "10000",
+          "client_qps": "9978.1",
+          "master_p99": "19ms",
+          "client_p99": "29.946ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "3ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "3000",
+          "client_qps": "2999.3",
+          "master_p99": "<1ms",
+          "client_p99": "0.705ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "10000",
+          "client_qps": "9990.2",
+          "master_p99": "<1ms",
+          "client_p99": "0.661ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        }
+      ],
+      "logs": {
+        "BATCH": {
+          "sha256": "08a4dc4cb99b86614c973b24a2927ec8220c94a7e39f0f0206014979d87f0c73",
+          "exit": 0
+        },
+        "NON_BATCH": {
+          "sha256": "bf761a53096ed4b0bd1bc848a1a6262898baa2dd8a8a4e74a04ffb99adf15d72",
+          "exit": 0
+        }
+      }
+    },
+    "latest/perf": {
+      "scenarios": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "3000",
+          "client_qps": "2996.7",
+          "master_p99": "11ms",
+          "client_p99": "11.951ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "10000",
+          "client_qps": "9986.3",
+          "master_p99": "72ms",
+          "client_p99": "81.505ms",
+          "batch_wait_p99": "15ms",
+          "route_submit_p99": "53ms",
+          "passes_strict_gate": false
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "3000",
+          "client_qps": "2999.2",
+          "master_p99": "<1ms",
+          "client_p99": "0.676ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "10000",
+          "client_qps": "9990.4",
+          "master_p99": "<1ms",
+          "client_p99": "0.741ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        }
+      ],
+      "logs": {
+        "BATCH": {
+          "sha256": "ff690da50886a4eed8db78b40b3f4dea33a9e928e32cdd74fd9ae436e8a237e0",
+          "exit": 1
+        },
+        "NON_BATCH": {
+          "sha256": "d283d6e82fb37bdd2dd5fe6fc73afe7593baa1facbc054f78f3c6e3bfe62b600",
+          "exit": 0
+        }
+      }
+    },
+    "final/perf-final": {
+      "scenarios": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "3000",
+          "client_qps": "2996.7",
+          "master_p99": "18ms",
+          "client_p99": "19.880ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "4ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "10000",
+          "client_qps": "9986.1",
+          "master_p99": "12ms",
+          "client_p99": "12.395ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "3000",
+          "client_qps": "2999.2",
+          "master_p99": "<1ms",
+          "client_p99": "0.667ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "10000",
+          "client_qps": "9990.2",
+          "master_p99": "<1ms",
+          "client_p99": "0.715ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        }
+      ],
+      "logs": {
+        "BATCH": {
+          "sha256": "0126d1d03860b715b826dbb731f7b4a38a0383a40efd2dc1726a4c4d076b490c",
+          "exit": 0
+        },
+        "NON_BATCH": {
+          "sha256": "a9fde4faf55d56491e3256b85e182a3e013ba5bb7f0aecea2017558d4a68bb16",
+          "exit": 0
+        }
+      }
+    },
+    "owned/perf": {
+      "scenarios": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "3000",
+          "client_qps": "2996.7",
+          "master_p99": "11ms",
+          "client_p99": "11.921ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "target_qps": "10000",
+          "client_qps": "9988.8",
+          "master_p99": "17ms",
+          "client_p99": "23.019ms",
+          "batch_wait_p99": "10ms",
+          "route_submit_p99": "4ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "3000",
+          "client_qps": "2999.2",
+          "master_p99": "<1ms",
+          "client_p99": "0.757ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        },
+        {
+          "delivery": "NON_BATCH",
+          "decision": "SINGLE",
+          "target_qps": "10000",
+          "client_qps": "9990.3",
+          "master_p99": "<1ms",
+          "client_p99": "0.736ms",
+          "batch_wait_p99": "N/A",
+          "route_submit_p99": "<1ms",
+          "passes_strict_gate": true
+        }
+      ],
+      "logs": {
+        "BATCH": {
+          "sha256": "9f6857fcbd2d27912509b136cda209551168c3058ae2488f82602ba93118e853",
+          "exit": 0
+        },
+        "NON_BATCH": {
+          "sha256": "5c3cb603eace14cf7149f10361cabed5e5f4892221a830a5524aba83a3459373",
+          "exit": 0
+        }
+      }
+    }
+  },
+  "performance_interpretation": "The independent commit candidate passes all four strict scenarios. Intermediate shared snapshots are included for traceability and contain concurrent transaction edits; they are not measurements of this isolated commit. The earlier 81.505ms client tail is retained. No causal attribution of its disappearance to DTO copy removal, nor stable long-tail improvement over the baseline, is claimed. Production JVM defaults and gates were not changed.",
+  "production_sha256": {
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/WorkerEndpoint.java": "5e2e3ce5a66fff2da72f3ce1f8cec5f9510eee611e6380da4c519c8f99571104",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "8bcb62f49b1f65443a15d7fce6c37616b5f35c029215ecdcc4edff6ca2d8b513",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "390b1a78d90ac514b0ea6104a8bf131b0dc1fd65e4f0ac99ea800af2b2f5bd37",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultRouter.java": "5349e38b9279be350fce570d8334d6a4ea1fc879c83d85aa3745435114831743",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DirectRequestScheduler.java": "30ababbe2b33a6f9d2cc27a35e6d6292b032c276b3af0920078aa40746668b69",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java": "703c4553a0c81abb60de26572cd965f248835b40de99a9246a6cefe9ec63e1b2",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java": "0f09fb2edeba9bbeb4b1a353b7c139fa420611a5a054dcaa10f1b593f0a783b7",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/CostBasedPrefillStrategy.java": "2108c422ecac7aa852451956b2ea7514d1941c48cb499d85a6dbf3ff9cc35bca",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelector.java": "eb2f9d672232b6fc320299c34da8c537192d1bb2fcdadec5c5f0b60c20ac9528",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/RandomStrategy.java": "614b71c9b8b7407b5bd12623c83b67e0f9af487e4a672c1831a1715fae24ad42",
+    "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/WorkerAssignment.java": "249999ea2642778883a8dbea4aea29371cf04fdc44c5089d902f3bd4e67d2fbe"
+  },
+  "excluded_parallel_scope": [
+    "DeliveryStrategy / DeliveryTransaction / PrefillAdmissionResources and their ledger, timestamp, permit and test changes",
+    "PrefillEndpoint batcher rename and matching reflection helpers",
+    "tools/routing-hotspots/SnapshotBench.java"
+  ],
+  "raw_artifacts": {
+    "local": "/tmp/flexlb-assignment-refactor-20261008",
+    "remote": "<root>/<baseline|latest|final|owned>/evidence/<perf|perf-final>"
+  },
+  "ut_log_sha256": {
+    "flexlb-assignment-owned-final-ut.log": "ce4aa69f3ac1dee99660641e4f705f1afbe785dd64641748e5cc1af8034c3d72",
+    "flexlb-assignment-owned-mock-ut.log": "159e743681d828f6158d8bc52ac7def33a9fa1b2b8922bf71d572930a79f23ed"
+  }
+}

@@ -161,7 +161,7 @@ public class MetricConstant {
 
     /**
      * FlexLB scheduler inflight size — the scheduler's own inflight request count.
-     * <p>Reported by BatchSchedulerReporter using role=PREFILL + engineIp="scheduler" tags.
+     * <p>Reported by DeliveryMetricsReporter using role=PREFILL + engineIp="scheduler" tags.
      * Formerly kept as a separate name from the now-removed per-engine local inflight size metric
      * to avoid tag schema conflict (per-engine vs scheduler-level).
      */
@@ -170,7 +170,7 @@ public class MetricConstant {
     /**
      * FlexLB batcher queue size — number of pending (not-yet-batched) requests
      * in the per-engine WorkerBatcher queue.
-     * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
+     * <p>Reported by DeliveryMetricsReporter with role and engineIp tags.
      * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
      * (which uses type=batchQueue tag for backward compatibility).
      */
@@ -408,51 +408,11 @@ public class MetricConstant {
     public static final String ROUTING_QUEUE_LENGTH = "app.routing.queue.length";
 
     /**
-     * Queue entry QPS
-     */
-    public static final String ROUTING_QUEUE_ENTRY_QPS = "app.routing.queue.entry.qps";
-
-    /**
-     * Timeout QPS
-     */
-    public static final String ROUTING_QUEUE_TIMEOUT_QPS = "app.routing.queue.timeout.qps";
-
-    /**
-     * Queue full rejection QPS
-     */
-    public static final String ROUTING_QUEUE_REJECTED_QPS = "app.routing.queue.rejected.qps";
-
-    /**
      * Wait time in milliseconds
      */
     public static final String ROUTING_QUEUE_WAIT_TIME_MS = "app.routing.queue.wait.time.ms";
 
-    /**
-     * Routing execution time in milliseconds
-     */
-    public static final String ROUTING_ROUTE_EXECUTION_TIME_MS = "app.routing.route.execution.time.ms";
-
-    /**
-     * Routing success QPS
-     */
-    public static final String ROUTING_SUCCESS_QPS = "app.routing.success.qps";
-
-    /**
-     * Routing failure QPS
-     */
-    public static final String ROUTING_FAILURE_QPS = "app.routing.failure.qps";
-
-    /**
-     * Routing retry QPS
-     */
-    public static final String ROUTING_RETRY_QPS = "app.routing.retry.qps";
-
     /* ------------------------ Resource Monitoring -------------------------- */
-
-    /**
-     * Worker permit capacity
-     */
-    public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
 
     /**
      * Network transfer delay: time from client requestTimeMs to gRPC server entry, in milliseconds.
@@ -461,7 +421,7 @@ public class MetricConstant {
     public static final String REQUEST_NETWORK_DELAY_MS = "app.request.network.delay.ms";
 
     /**
-     * gRPC server processing time: from gRPC server entry to BalanceContext creation (startTime), in milliseconds.
+     * gRPC server processing time: from gRPC server entry to RequestContext creation (startTime), in milliseconds.
      * Reported as: startTime - grpcEntryTime
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
@@ -541,11 +501,6 @@ public class MetricConstant {
     public static final String AUTO_TPM_REQUEST_COUNT = "auto_tpm.request.count";
 
     /**
-     * Auto-TPM per-request SLO in ms (timer), tags: priority, seq_bucket
-     */
-    public static final String AUTO_TPM_REQUEST_SLO_MS = "auto_tpm.request.slo_ms";
-
-    /**
      * Auto-TPM schedule latency in ms (timer), tags: priority, result
      */
     public static final String AUTO_TPM_SCHEDULE_LATENCY_MS = "auto_tpm.schedule.latency_ms";
@@ -591,12 +546,6 @@ public class MetricConstant {
      * true TTFT (first token on the engine) is not observable here.
      */
     public static final String AUTO_TPM_TTFT_MS = "auto_tpm.ttft_ms";
-
-    /**
-     * Auto-TPM deadline miss count (QPS), tags: priority.
-     * Counted when schedule completion exceeds the request deadlineMs.
-     */
-    public static final String AUTO_TPM_DEADLINE_MISS_COUNT = "auto_tpm.deadline_miss.count";
 
     /**
      * Auto-TPM priority preemption count (QPS), tags: stage
@@ -658,12 +607,4 @@ public class MetricConstant {
      * engine-facing load from Prefill-queued reservations.
      */
     public static final String AUTO_TPM_DECODE_ENGINE_LOAD = "auto_tpm.decode.engine_load";
-
-    /**
-     * Auto-TPM inflight settle misses (QPS): a finishYielded/PreemptedById
-     * found no inflight entry, tags: kind (yielded/preempted).
-     * Harmless in isolation, but a burst points at a registration/cleanup
-     * race — alert-worthy where a warn log is not.
-     */
-    public static final String AUTO_TPM_INFLIGHT_SETTLE_MISS = "auto_tpm.inflight_settle_miss.count";
 }

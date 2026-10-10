@@ -101,14 +101,14 @@ class PrefillWaitingQueueCapTest {
         assertEquals(5, prefill.getInflightCount(), "rejected request must not leak pendingRequests");
         assertEquals(4, prefill.getWaitingCount(), "rejected request must not leak waitingPrefillRequests");
         assertEquals(5, prefill.getRunningCount(), "rejected request must not leak runningTasks");
-        assertEquals("rejected", prefill.getRequestStates().get(6L));
+        assertEquals("rejected", MockEngineTestSupport.getRequestStates(prefill).get(6L));
 
         // The 5 admitted batches drain to completion despite the rejection.
         awaitInflightZero(prefill, 5_000);
         assertEquals(0, prefill.getWaitingCount());
         assertEquals(0, prefill.getRunningCount());
-        assertEquals(5, prefill.getCompletedCount());
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(5, MockEngineTestSupport.getCompletedCount(prefill));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     @Test
@@ -139,8 +139,8 @@ class PrefillWaitingQueueCapTest {
                         batch(1500 + i, slot(0, inputWithDecode(i, 10, BASE_PORT + 1))));
                 assertEquals(1, response.getSuccessesCount());
             }
-            long prefillOccupiedBefore = prefill.getOccupiedKvTokens();
-            long decodeOccupiedBefore = decode.getOccupiedKvTokens();
+            long prefillOccupiedBefore = MockEngineTestSupport.getOccupiedKvTokens(prefill);
+            long decodeOccupiedBefore = MockEngineTestSupport.getOccupiedKvTokens(decode);
             long decodeAvailableBefore = decode.getAvailableKvTokens();
 
             EngineRpcService.EnqueueBatchResponsePB rejected = enqueue(
@@ -148,8 +148,8 @@ class PrefillWaitingQueueCapTest {
                     batch(1503, slot(0, inputWithDecode(3, 10, BASE_PORT + 1))));
 
             assertEquals(1, rejected.getErrorsCount());
-            assertEquals(prefillOccupiedBefore, prefill.getOccupiedKvTokens());
-            assertEquals(decodeOccupiedBefore, decode.getOccupiedKvTokens());
+            assertEquals(prefillOccupiedBefore, MockEngineTestSupport.getOccupiedKvTokens(prefill));
+            assertEquals(decodeOccupiedBefore, MockEngineTestSupport.getOccupiedKvTokens(decode));
             assertEquals(decodeAvailableBefore, decode.getAvailableKvTokens());
         } finally {
             releaseScheduler.countDown();
@@ -181,9 +181,9 @@ class PrefillWaitingQueueCapTest {
         assertEquals(0, retry.getErrorsCount());
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(4, prefill.getCompletedCount(), "3 initial + 1 retry should complete");
+        assertEquals(4, MockEngineTestSupport.getCompletedCount(prefill), "3 initial + 1 retry should complete");
         assertEquals(0, prefill.getWaitingCount());
-        assertFalse(prefill.isLeakDetected());
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Test 3: cap <= 0 disables the gate (unbounded, legacy) ────────────
@@ -200,8 +200,8 @@ class PrefillWaitingQueueCapTest {
         }
 
         awaitInflightZero(prefill, 5_000);
-        assertEquals(10, prefill.getCompletedCount());
-        assertFalse(prefill.isLeakDetected());
+        assertEquals(10, MockEngineTestSupport.getCompletedCount(prefill));
+        assertFalse(MockEngineTestSupport.isLeakDetected(prefill));
     }
 
     // ──────────── Harness ────────────

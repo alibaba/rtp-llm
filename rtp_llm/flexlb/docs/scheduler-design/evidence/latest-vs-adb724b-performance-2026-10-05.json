@@ -1,0 +1,2783 @@
+{
+  "date": "2026-10-05",
+  "baseline": "adb724b28dc6a530dd446bf7c44d1ab154cdb12a",
+  "latest": {
+    "frozen_at": "2026-10-05T10:01:06.253713+00:00",
+    "head": "d30039da7ccda514c6257adfb3a28905e96d44cb",
+    "baseline": "adb724b28dc6a530dd446bf7c44d1ab154cdb12a",
+    "inputs": 515,
+    "production_fingerprint": "e1d32b0ef616292f205c6254798262e3aeaac55611888d1bb025f82910c0d6cf",
+    "working_tree_included": true,
+    "production_files": 238,
+    "changed_production_files": [
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DirectRequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestCompletionPublisher.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContinuationExecutor.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRepository.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java"
+    ],
+    "production_hashes": {
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/Application.java": "d3dacb9d7048d45448019b8b97dfa84bf979054679ae42f810b7754814ea9bc0",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/OpenTelemetryBootstrap.java": "a81dff3609dd462a42633c0bae4785081e85376dcb642b73c8e54cc80e30d7ee",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/TraceConfig.java": "ba47a9a6730f2dff0127e4fbea7dfde5d043807462679db4005a494890e5dd61",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/config/CorsConfig.java": "96db3f91c88e86dec93ec6f9e436a95db91627e3798a4a2bce06882d12a6d1c0",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/config/NettyServerConfig.java": "ffa664b7d9536084e459a4cda0af3afae9dae3afe594bfee54a3b84b8c373515",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/AppStateHookServer.java": "cc338bb26de2c8cdb495f6c40baaef29117ec3b11987f2a670d7c323839660f8",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcForwarder.java": "6971c2ca82832171a48d1fb565a17f4f46672383999ecfb0e2b3a315e65917b9",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbGrpcServer.java": "8e5e8f88129821a44eb8da1216aa51ba4e777bacab4d968809d2480ef3f22444",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/FlexlbServiceImpl.java": "fedb6060070072abaaaedf8d278f19992e03b7c03e2d44059f860df16b09ad82",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/HealthCheckServer.java": "cb289f3c08cb4e4b81969dd3427039ab1f025a1f01b5ce9295852cfac9a9e250",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/HttpLoadBalanceServer.java": "2c094d0faeec03b5c959f422e9e73f33022be0abc91dcda8332a5427b857b76c",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/httpserver/ServerScheduleLatencyRecorder.java": "f8e82ec44b299f9dae4db6f35e0925cc1a7e6c8e2dbaab1b6ee9f488c6a4c49a",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/interceptor/GrpcQosHeaderInterceptor.java": "c40c8d62766f6bc205a5305adf8d273841db3c727d486ff7b88f7acd0509dcb2",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/interceptor/GrpcServerTimingInterceptor.java": "75e7178ae72489d94e4321129bbd6550e68e04d400cfba51b60512795a057876",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/interceptor/GrpcTraceInterceptor.java": "12a27095a8a3b2060595ca4c2989aa4d033fed03123eef8c664a127832c94a56",
+      "rtp_llm/flexlb/flexlb-api/src/main/java/org/flexlb/service/grace/ApplicationLifecycle.java": "b780c73de8459193ada8829a201ed9bcf201c09b913ee501a42e48b504d2b89c",
+      "rtp_llm/flexlb/flexlb-api/src/main/resources/application.yml": "bcfedf2e1ffc9f14c81edea171322edef10cb85c20ee6a76410f1c10282c9185",
+      "rtp_llm/flexlb/flexlb-api/src/main/resources/logback-spring.xml": "c1acec9009928a9d5c61177e3caf00fd9a9953c10053d8b05beb4d51d6e23b98",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/core/EngineLocalView.java": "36dad5007a0facc5e897e921dec84708c3e6b438a9a75f30a6b878ce0ce1bf98",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/core/GlobalCacheIndex.java": "f4969b4bc83e0143fa5bb07aa911b3f0f9013332f7eb4d2f69aafc03134894f7",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/core/KvCacheManager.java": "03145764e4b6b3cde15f08f3b21dac79a19fe807a6703ad39622a6d1b0be26b9",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/core/RecentCacheKeyWindow.java": "ebd3f0a1fcff0bdf3b8b7e5d053472f60f200e1aeead6dae7c893a58e230ca8c",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/domain/DiffResult.java": "6661e8ea3eeca18f0114c08d469fe8a76955ebcc34590cc35364ca8ff45448d1",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/domain/WorkerCacheUpdateResult.java": "c886e904a5d2e2f9a4cb4ad5cbb8291dfe6f78d523fd5f4533668a5e681c6593",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/monitor/CacheHitTheoryStats.java": "892faa23334330f10cdf80b3f7ee27878590984fec177b2092886a5e0961dfd4",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/monitor/CacheMetricsReporter.java": "b9d68b071a9318e2fcbb2165013b801158fcf1d5f8d2e1856325b217f6dc9fe7",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/service/CacheAwareService.java": "da771ef49db247c0d7825c3ab1850359c3101c732b2ea0bf1797f4d3846e2ca5",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/service/DynamicCacheIntervalService.java": "d94349469fae58800280cd14e654ba7515b27c4f228c2c11d19697779a33c050",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultCacheAwareService.java": "5d33cfa529bce28196793c3d63eeacd6b82edb68ab3ee9cd4a4315d33600acd6",
+      "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultDynamicCacheIntervalService.java": "942f74160844a42eba23525e8fc69d4def0917fb3f12dbd1298971790d1f1e3a",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormula.java": "68edae6aa18201160e05ff36416a822af4cca571437bbd37ea0f9e989b46d03f",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormulaAst.java": "a60f1e4289eddbb69c3f3bb3e37ff7c84e96e5d3bd03eaed19f5be53c95c7c71",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormulaCompiler.java": "9104ecb9e2fd4f4cd9b800234cb8aae875eefa4b9e4961ab5c2f18a6c077e7dc",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/balance/prediction/ArithmeticFormulaParser.java": "2b90aa5da9cc057c0086642d41b4b659d9bf98f99dfd0202244e072f32aa1d9c",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/balance/prediction/DecodeCostFormula.java": "f03aa42a7392369a643089a8ec67f22044f13ad0f4cae42ca471fc09d123c114",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/balance/prediction/PrefillTimeFormula.java": "c73b559fb3901ce149941ed72bb722bef1ee0094aff13e67bc7d7a55c1fda1c0",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/ConfigService.java": "a2ac18f8527232c72ef2c5262e9323bce0f09f2e9ed16e0e4d8065529ee20e12",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/ConfigValidationException.java": "05b310d2216fc4ac2d99fbf23b4994a1f97afb191c29891010a298a500e21ecc",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/DecisionPolicyConfig.java": "0005e057a27a8dcf54ddf3a84fcc920aaf3642dfe791a1ab644248f93d05e963",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/DispatcherConfig.java": "84028c36db677ef844b484118e47c3e617de8cef6cd0d6ac4040268c7c3ecc64",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/FlexlbConfig.java": "d550ec9ec10740313fd99d18f7e5212b72638018ef57d7506371b3c690a3b3b5",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/FlexlbConfigValidator.java": "804f3973dfc17e57dcf74d4a29a0ae2b12c574e4a004828830ef5f0e41d6da5b",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/InternalRuntimeSettings.java": "00d6313d78f8c54dbc1fd8cbf1c60fade4bcefabe08494ed74a52bd69f1d6cf2",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/MetricsCardinalityConfig.java": "97b3a45979431ef8833187a274c8a1b0d2775a7b53b672f4f2e0903be2392164",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/ModelMetaConfig.java": "9836f3e5d0ff748000a0fc631be9ac8e5c61e182339df2e86872f83ad30dc25c",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/MonitorClientConfig.java": "dae4180b7b438fcc973a24f5a19c8ce4c4e4c0de5dad9caae11729130beb31a1",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/MonitorDisableConfig.java": "1c25c3d39e56cda178eaf04c27195675ff9f8af50c3f3473effe730ffc33a047",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/ObservabilityConfig.java": "9458277902b5eba7818635fee1fa1f43336bd220479ef126444e9680448afd15",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/OtelPropagationConfiguration.java": "62f6b7e578da3398b0b377c42b071999fb297ff7bedb17ffa0116b448d4c31e2",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/PreemptionConfig.java": "69adaf84abed71699d22f8544f736c15e70093d190905b689b12de52f6a530fd",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/QueueOrderingConfig.java": "fbc603962ccb91d99dfd6b2e4ee10e7ba7c7ca5a40f7b8e7b1bf1a8777f3c34e",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/RequestLifecycleConfig.java": "2d65ad074dd2babd1e492897cbd1adde0b6f25ad6562bdde1ced40a8ec67fec1",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/RoutingConfig.java": "5c447feffeaa5237473a4696ee3ec972a86d073d91990bed39f6e9de776c1dce",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/SchedulerConfig.java": "d71270d3c3309bceb9bb4d4cb29dfc7952b234dba6643c3bcebfbf94d0e964d9",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/ServiceDiscoveryConfiguration.java": "7bd505a57fe49145e5446c90e7b6f8899cd12c0f0340174e0850e2a0095c1eda",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/TrafficPolicyConfig.java": "dbebc85adfa43fbb23cc6e61368e9384393080f6abb9993634018d217759579a",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/VictimStage.java": "d062f47d2d24daef2ba407ba137e0dd6a6988278de45555570e064b834fa776c",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/WhitelistMetricsFilterConfig.java": "16027e307eaf65cb883527f3d9c614dfc4060647634b1963102e87ad9ed252e2",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/config/WorkerRegistryConfig.java": "16be9f0e226bf212685bb3ea95735497e35cd69a3f0bfe0e98fcb8dca4694a29",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/constant/CommonConstants.java": "bb7ea334111c9426180449c66fc40333f2d6ed0f1f102b7e52673b37901fae7f",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/constant/HttpHeaderNames.java": "6db47733b81b0069a128ca4deeee1345aea0ab0fcebb8e306676ffba063f0343",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/constant/MetricConstant.java": "b7ece4282de3c062c5a3400920fe6b1b417681a1f6d20e4579a6945de7b586ea",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/constant/ZkMasterEvent.java": "71dbcf5159317f2870b57f499908e469b9f62aeb9de116b8d54b4a589b1acc07",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/SchedulingMetadata.java": "287355e59d6985003b96ecd67474f00eaa1de221a908c21eddcea34d348cb9ae",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/AdmissionRejectReason.java": "3ea0e5d95a234e1d028f72ee77c857f7586c96feda5fa441c0198a730b24c174",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/DebugInfo.java": "5a1c1aef129afa20b09351194d6cfea1ac4454341aa56d882d9c73302ed20930",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/LogLevelUpdateRequest.java": "2eb4c5a46ce2155dae9f87c8a0f177bed553d1c1852d095704cc406227718b16",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/QueueSnapshotResponse.java": "5df142343aef994effd504b8fee82272f58687a89e4c056b73f56621894d1919",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Request.java": "76a305748e5fed208398a823a0e0a2d46bd293c16d26d5f42d39659cc89de712",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/Response.java": "f29e945df01f3f3291743572374afc5f7ca6e827be1325ab233f0f454e1c0192",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/ServerStatus.java": "2ee3c0653b5b9dcd609151da1f90c2a6182bcacc10b4f6bd0ffa57c09f248194",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/loadbalance/StrategyErrorType.java": "47681a0673b4d6a9b7015b385ab5a51889a1e63a16bd4c4703581fc31726bc41",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/master/CacheStatus.java": "edc5c4ffc8781bb92c6b7454cbd809575015a593d3fa810a6076497a66493d81",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/master/TaskInfo.java": "60b5fa570a8d123156562f505981d644009906d353df9a9d657371497bdda4ae",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/master/WorkerHost.java": "95609b5031e3031709bddc740499178f3fe7a69aae316b614cd86eb2626c2eae",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatus.java": "9cd32af68d5316b7ee0172e28233032b08131e93d900bd54dbb8899da93f5717",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/master/WorkerStatusResponse.java": "7672da7a0ffc0819cec419268830f289e8c909e2f4a47aa8f62bf8c1a812936f",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/netty/HttpNettyChannelContext.java": "cde378fd3e4d03d01567752eb5359d187cd7fd7a01324ee128a62cf48c62754f",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/route/Endpoint.java": "98a4fda24582963f19013675e5586be9210291ed4940a8660196459a24369ae0",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/route/GroupRoleEndPoint.java": "be8f4bdd6a082df4e2dc75fdb60041f38d93b3b1dc8ffa81fe5cc509dd7fafd6",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/route/RoleType.java": "e4fe10bc150700acbc739bab7c286049abcd0a98ab103fed4a52bd48dfcec874",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/dao/route/ServiceRoute.java": "ba95cd37fae5e7a6c93e0ecb3416c4f4f9fb9b32fddcb6dd124eb9f3bff96ef7",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/discovery/LocalServiceDiscovery.java": "b71c692e9e93b1d3dfc9943236dc6f56615895f50f20e5c700646123f55eb180",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/discovery/ServiceDiscovery.java": "3e05664d5f8eaeb1d0c94a34d7cae28b12cd9ad8275e276ca4329f764fc56999",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/discovery/ServiceHostListener.java": "dbeaabde381b6a1a50eafa11d3b5887879fa31c733606b74bb3adf7f23a4f5c0",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/BackendServiceProtocolEnum.java": "50911bbb0cbd5c245c8fe7869a8ac1eff8d5f2b48466d728c064190c25030e1e",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/BalanceStatusEnum.java": "4be54c02df2a56f6c058367b7d969941b4cfc6881560d685b454be9b8c868034",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/DecodeTaskPhase.java": "65e3bbf2d594c4a5f0997d3b4b051a9bd145e4d73520474ca92af78b4be2b77c",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/FlexMetricType.java": "98b34be1af486110c6c6e7ec82aa43d3728e35503054154a8853055cc07acef1",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/FlexPriorityType.java": "a13d407fc178e03909f5f1ed6d226390015c482d6c88b960aad4a7613e611084",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/LogLevel.java": "a4027c3f0c8366b7eb954a44f3f593944a952f6151fde4c25c2fb88602698bb3",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/PriorityPreemptionProgress.java": "312ff19386fcdaa50c45e54a55711d59b63af127614d8642e4b633e84b3ad848",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/StatusEnum.java": "2de24ee247f22e9a0608ef05a3fc6981e80e0842198518acfc460fac7574e44d",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/enums/TaskPhase.java": "040c045dd548904dd98f1f8b7202f1e5e758e8d2697385d7b06ac301e446ddc2",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/EngineAbnormalDisconnectException.java": "8920d11948be9edae95e6e65df837feb8cdad97b57743f19117e641419450425",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/EngineReadTimeoutException.java": "1b19ec77d5f2ac42da59ae2391010de4ffc070c8fe30a5b4df3ce6042e1075b1",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/FlexLBException.java": "ba4ad0c04fffefead20eb19814744c849fc645bb45543428f82de98973e437d6",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/JsonMapperException.java": "45e6315649d10c86639cb9b5070d46eafaccadd4606e8273ef33a06d6bc92e1a",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/exception/NettyCatchException.java": "2dfb58607d3ad79fb8e70acf5a4d300ecd6e682bd55b8f64b612964260213653",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/FlexMetricTags.java": "c8b34bfd584f5e56874820fefbe61ece1d1a17971f6d6d68ac05ce2ecfefe146",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/FlexMonitor.java": "2ab36cf27437ebd2ac6731aebbf03ea72de3206f3d991dcdfe61f3ce8f8c3d09",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/FlexStatisticsType.java": "7c4c0b94235eefca85bb196d85d53e5d6cb3cb84df936c7c4788e0f826f382e1",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/MasterStatusProvider.java": "8b0554b0ac30da4d3330d6f84cfaa100eb6cdc98ca4936d66171649747bc5f42",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/MicrometerFlexMonitor.java": "b1be80b8e937260d605866db4a9f4e69fbd3a29ad7572295815bf1d5600c9023",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/NoOpFlexMonitor.java": "2d91296426df4f5ef0b77256133ea6da4cc003d9d7c0d2af4ee3eb66a6041ed0",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/metric/NoOpMasterStatusProvider.java": "95d4ba02a0c60c713d55d46f196647df4d17de739bedaaeaa411c0f642285c1c",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/telemetry/FlexlbTrace.java": "01d9d0c10950b83878048dc97ce07e46d0d0e7fe455c5d19a5494ed23f7e200a",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/transport/GeneralHttpNettyService.java": "3eecb878ff473a955650ca217b3c773c4c95804f9dd1497857266c885c1e2965",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/transport/HttpNettyClientHandler.java": "3dfffd5c95a7a72d03773c4e0b4aa2fb5bfd7195df50c692245b38efccfaea6b",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/transport/HttpNettyConfig.java": "e17f6ac3261d848f4c899ca968c1ecf0b62dc4097fe8aa9e6585aabd43fd89fe",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/CommonUtils.java": "861017d32d848514472d6ff05efa97cbd8463a17ac2b2215a700133f27263ef4",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/IdUtils.java": "901ea522d4c929ca9ce6982ffc56dee2e83748e57fc16a830890dcf918d71898",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/JsonUtils.java": "ec81cf0b441793ce7c69b56f74eff948144c43e03311983ce839bd56ed81b1d2",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/Logger.java": "1d5d5522c8001b36a80919924f58bc1913c74ec4d72731d1a4fcd51b7f732617",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/NettyUtils.java": "b07bd64e161a45dae3917046cd9cc2c067d5fe498e0f9c4c5038a67aae30285f",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/Prioritized.java": "54729380c323089f8f52c783705299de06309549275a272bad015aa1da86a218",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/PriorityNormalizer.java": "8b00825110593936b593afa7ad1653160c9f5d8cc6fee2a432f06ab62f280268",
+      "rtp_llm/flexlb/flexlb-common/src/main/java/org/flexlb/util/PriorityOrdering.java": "53de05c4b4820d27cdd55eb27bfe657f188ec3a6203138d0aed64d81fb79e3c1",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/AbstractGrpcClient.java": "369546d0931fae060808f6a535f4da08c14a07706650a1c83e8add7551bfa444",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/EngineGrpcClient.java": "dca073a7c73127c2c6d281f4628ecac71e53ec80f650864a395d162f8e9d66cf",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/RoleTypeProtoConverter.java": "537f99fc79ad368afeafd2290b0730d6969c1b8076035cdaccdf82ba5e8ec92d",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/config/ChannelConfiguration.java": "947226d1a6e1645a12b89f7b9ce5828c584932a1f0ff5f86fc4d50da4491cdce",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/monitor/GrpcReporter.java": "a0a69c6606014950b95a48da842d3397ad36f06d7bdbca02f73819e9df7ac5cd",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/CustomNameResolver.java": "ba7a1e0c673a04a4ca4303f3fbc75584b8c4a32a1d5d7971bdf7da6b77a33455",
+      "rtp_llm/flexlb/flexlb-grpc/src/main/java/org/flexlb/engine/grpc/nameresolver/EngineAddressNameResolver.java": "4c2b7285184efca24d9e00cdac7ebeeed5045415975a32eee9c4f99686a264d6",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/DiscoveryFileStore.java": "0f4e7f688c0a3f06e3dbee5b7579e2fbcab44a09abf546854740a0ae7dc82064",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/DynamicEngineManager.java": "218c32115108214455c9c917998f11aed4d6a67daebc16bc040ba3856a99e6d6",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/FaultInjectionConfig.java": "7bf3edb6c9aea3775441033d49bf1089200e860042053c0e6c3225deb5763206",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaLoadClient.java": "1f20b901b520aa3de7bec8bb24e1b197e367b50a949af6331d2bcdfc3d3d7398",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/JavaMockEngineCluster.java": "9db2f8d8650ad178a8bc723d544075d70c9bcf4cf72c10803b4e19774a880d35",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MasterTargetRouter.java": "cb52087f1486bd5689750fb2ca8b8935c568269f37aeca3d194ee38723156db5",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockControlServer.java": "0bbe539f31b15aa3087715ab165fb0502ab1889f1a11ec2538e498bf28a3d665",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockEngineCancelChannel.java": "0448e1e460071b2cc22f7e56e94f9b60efcd94e9ba16e53a011f1e0a5806159d",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockLruBlockCache.java": "de90ba516ba49054c8efe0a1752b955ae8ec88bf1e1438d60601b3286f06b635",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/MockPerformanceModel.java": "c746ee86d8fecae36c7d336b54ba6f57a3a040491394a976eabb02a3e02dc203",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/java/org/flexlb/mockengine/StabilityMonitor.java": "8791c95c7b87a0f4773019e830db19d1d1eab22e22ff3a2957217813375dbff3",
+      "rtp_llm/flexlb/flexlb-mock-engine/src/main/resources/logback.xml": "2f5705472d0d56750af1bf9d54873ccc69c4b2a771a2db0c22e96b07ee9a3e08",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/PlacementResult.java": "c7e9c6bbdaafc34a57deb8f4582885ac9ccb88dd1a60f5ed0e9169cf99b268db",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/composition/DeliveryBindingConfiguration.java": "a4dadf53ba3e34a0090080bd22f7781a64d7340942e0ffe0f3e0978e14677732",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/CapacityBoundary.java": "4efef206419122ae5a90c528f1bac6c1c6dc6f1e4a30636734ccc2159f548f62",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryResult.java": "2ac3d64fa01bc955f20292da9655f3cbd0fe8db45d0fe8e1fb83fc75e717f856",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/delivery/DeliveryStrategy.java": "37bc6f9f7dca327ab2d472d945122d85e708317d00aaa78950b0a0f1d8fe38cf",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeEndpoint.java": "f273f427e99e2b616888455ee75d812f7298f029652282ed03c351fde08f5965",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/DecodeState.java": "cf7eb7bb5f9df99202a9ba2eb5968b53637b3e588985b76429dc0318e5d57dee",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointGenerationLifecycle.java": "9de2a9dc723228e33b8eb2ef8d480b2e9eb6664c90ffe87be6ed61a923d648c6",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/EndpointRegistry.java": "2d6ccfb3fba7883648a9c59fbf3aee44f9d687e0a6c19d0456bd6a24bfb8c19a",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillActiveIndex.java": "feb110b76cfd17a9a557258e1aa9dc933b3e0c7f9dc06ed076dbf9782386e407",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillEndpoint.java": "f1cbb1b5eb85d8b7b94e7ed94798f854d1cb5103606be99207faa67650968dff",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/PrefillState.java": "a746c4ff68102b669e2898d0adfc5dafa27e8f1e1605aeda29da0e17bde4d942",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/endpoint/WorkerEndpoint.java": "27972abd9ec20a0a58c7251fad7c40f6feb9111cfe08d7e1c169e29f9c8b8d4f",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodeEvictionProposal.java": "21be38139a764c91e5daee1c56eb954e6a6cac6828c0aca411631bad244764a7",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/DecodePreemptionCoordinator.java": "bad96c993b3a5e0326310668cf2294deebbe606828d9ab22946c68eb32aba2a9",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/EngineCancelChannel.java": "d2e8be10b3916e3a96087a877703472e07244fccfe44b7c96025ede73cc03b8e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/EvictionManager.java": "caa6f697bb6c67b1ee797ff6774f52d83415f3bae98f3bad4f3de407c4ce830d",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/EvictionPlanner.java": "dfa1ad623bc2cdab6225e7182244ff94f73458b680bc412e5d3e07a057fb0667",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/GrpcEngineCancelChannel.java": "6aa63a073ef2f75809ec94bffa6c50ae9ac4abedb9f73f57d05ad97bed6cf7eb",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityCostFunction.java": "ca510b5201785c91bbb93e672a546a49c1620314650bf4969aa22c5426cde02d",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/eviction/PriorityHarmProfile.java": "711dd49a327e40afba4cf96007910983fd85da71a41028a001a15cdf3445e671",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupPlanner.java": "3d1e51404e77510798e588be49b9d3af8efe275015fa9c18cf0f018d8bba55f4",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/planner/GroupingPolicy.java": "96d3ac71a64577c4e4074db40195ab88da293d513c6e816d1688183d4a88a4ac",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/FormulaPredictor.java": "037ff38cb864656bd7d31d80369535c5a17cd8d5faef814e358957f5817b3cf0",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/InvalidPrefillPredictionException.java": "2e010db56b588e82209fca026d47b0d8c4b6f89cd46b28bc45620e4c0add7fb4",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/LearningPredictor.java": "c1568248b5143e2b83e76b727c27ab8a2b8bfe99d3e608ba4d26a7faf93b43fc",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillBatchFeatures.java": "3b3f93b626a3cbc34362062a7d2c27c5a76bfc72a059930680f1eb287848bb6d",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillPredictionBoundary.java": "c320b82e3d53b6a0d87d0503324af2518367ec40d46d1930f80178261ebc0e87",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimePredictor.java": "bc4923936129f1ce6d383cca9a5567d6de3abd8420f6b64ecabb61c68245073e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/prediction/PrefillTimeVariableBindings.java": "56d101e87375a2606d41f4ed129b1dc3aa3c2975725734f6bb3aeca0084808a9",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/CancelTarget.java": "06b2bbb2e4722fb95a99a1b1fbc86371ccc07cb654f666395cb36a3ba212d888",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/PreemptionCancelPhase.java": "877568068034914a6f8d9c8a04ba0f83dbfef33e26e0782934bdb0b7606fdc5b",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/preemption/VictimTerminal.java": "76c784e0b2a20e12d121610e4e15453110636d275e86697050a9939eafee3118",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/projection/QueueSnapshot.java": "394254fc6da90178ec05061a77309355d8e4fcfe8c6f83969bf90260e7a20ec9",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteProjection.java": "f596d0f46efddeffe25717794b2f46e0a443b03a3c0251fdb7376bca99a1593a",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/projection/RouteTimelineProjector.java": "aa2baa669f62f3182f039b288d51d612657d1d574f62f93119b4f6a79e1d2a3e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/projection/WorkSnapshot.java": "2ceb5732bd4c36de449a51ecd33bb348b0a5536d68a03ab52865d40219f77bb7",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/AbstractRequestScheduler.java": "d1a85e83d568d126e2f842ab036d0a21f285c7f5318d73dceaf83a8894519994",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BalanceContext.java": "52c3f9accb8d87204e7b7ea68ac13e747dd474bec4f7fe5dd3afb332f435ac7d",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/BatchDeliveryStrategy.java": "a93567090bf8a7b6bdf546d0b2344e96a9bea73a26c9a516514a4f8b8994f81d",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/CancelReason.java": "f90c53385a92222bad202ec7ee4de947d0f70122cb75086653fe9d3efc3ce31e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultBatchDispatcher.java": "adfaae5138cf9733efe9cea25bed4bbdebdfa4ad11036f62082224d156d2c054",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DefaultRouter.java": "84fe67ffd4894e61975f9754922ed10934dc765078a74fdfb7d2275ac7387187",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryClaimKind.java": "4eb335a4ea3d7d241ee004869e9ab18da5cb2d9e3945da7795881ef5c432a7f3",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DeliveryCleanupTask.java": "ae8ec46d450478ac46e2fbfbd4a20a691fb993194e0639cf2a955855059bc397",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/DirectRequestScheduler.java": "e24bcf69589f0aa4c12957d4ce46d63dc3a6e131512c2d074bf64dbb74e057ff",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ExpirationTimer.java": "fb5cdc25c197370e71c3166aa57e491b9ffdd019d7bec286ec3a9d8123085fe0",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/GlobalQueueEntry.java": "aaf69e8146c462059a99eec8e0cb4a975f1102d89967bad1e10f5156f7a878a6",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/OrderedRequestQueue.java": "801cb024a14867914abea9a9f521d4ddc51a680e95b8fc38cf13146809288e18",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementAvailability.java": "348c9366603d79baef741a022fa29d3ca3e635292aa02b6450c306321f3fd400",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementConfiguration.java": "6ef6eeaa5699329dc550a0109dd54b1bf0acee8cbbee634914c7916e55fdb183",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementKey.java": "6fa29e62d90549d4312a4afc4d8869c2e928389e226103861ab0212ef1aed13c",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PlacementWaitQueue.java": "ebe93c0424d269bf7eafc564c4d2ea5228c8b7b009cf20f34d32dc12614adde4",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PreemptionRegistration.java": "2bdbd0156910d1fc0d5f021aaed456de3e0c09db784035288825f04400d8266c",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/PrefillAdmissionResources.java": "bf09c3458b1585f47fde01e026a1faf35c736c99005d029c491ffe074f41baae",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/ProvisionalRoute.java": "efc767068d3ab18a190c57cf1a9556226ad15654f65fde1411c416b320a0d06b",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueueExecutionSettings.java": "430006276688d69bb70716f20a45adb908291e87cf3c86e79cdc0bd95a25cd77",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/QueuedRequestScheduler.java": "e58b8ce29a7948abf9c81e268fb3fb73e2f18fa7a311a783bea494fcff5f2f9f",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestCompletionPublisher.java": "ffae48d8c00e01cbd9f19ee20a17a60a3434fd084e792b9cb76890e41bbd00cd",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestContinuationExecutor.java": "1827de1ac635e98d5a63b5430ce343fc98d8aead025f6f8e99d67d9c82a7deec",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRepository.java": "ac262f8914b30d78b9154f8168a62fb52d39544d16cfe6cc3a19c96c5458ee02",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRequirements.java": "1aa6744e84846598d040077bf357aad3d69ebf42c9f113d9b732016facf52555",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestRoute.java": "28850d8719edbccb86d099a4d2f24ce720f7140c4da1276fa6f9df33bdacbb79",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestScheduler.java": "38134d12481f452ebcd8079afb74ccc828fdc4c32be5f9513f6e015e41a43e4e",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RequestState.java": "07c76ed5fb6385e386a9419ec17a415c9d94111f7c53eb398e47e7dcb7bce02c",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/RouteDeliveryStrategy.java": "6f649903da2b239afb6dc3826f336aaae1b7dd3ab8d2dc2ba88445096ec3fa46",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/SchedulerRuntime.java": "bbc29b2728d05ac3668433bedfa10772d05421e2ced290873d45166a68642b48",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/TerminalOutcome.java": "71eb89d3ab6b8aaa004fea18fd4a3d9940937d400235b89511e2155a81a1b2dd",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/scheduler/WorkerBatcher.java": "688e7cca30b329f5d7c518fc75764b9ba0fff339eb6207511514cae25a3100c4",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/CostBasedPrefillStrategy.java": "dc793c9c3ca8a770c62ea40e058309aa78392c298858be02a411521bd6a48bd7",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/DecodeSelector.java": "88fe62e7ce43337f7fe5c098267df9f025dfad2e9c311613d5f5a5f930f51b10",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/EndpointRoundRobin.java": "9950ddc6e22c6182ed3b72353aeec073fd04f8659b60797cef18edaf6e0d3aa5",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/PrefillCandidateSet.java": "636fdfc5f323c624fb8d736f8fcf82d77fb8edfb0a3bc6a6214f1224dab08205",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/RandomStrategy.java": "bd7414397658c703cec53a883230c25bef534119030a88fbd933f9459db4a037",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/balance/strategy/SelectedRole.java": "cc736bab7fa4918bd85ca1b2a5c6117e9d0885226bdc27b18bd6a8a1708582a4",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/LBStatusConsistencyService.java": "c38daac18d11efc7e5a2d9065ffe9c3e41c531b19607e8ceabc066d6522498f8",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/MasterElectService.java": "dcda08338b99b749194b0ce6255053b2cac4d3719ff512fcdaff96b58bcf6e2b",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/ZkMasterStatusProvider.java": "a29da4a409375716d719bc076e1ddae2449e030d738634a952010b32196a2086",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/consistency/ZookeeperMasterElectService.java": "c0a148c8c6dee185d03d2dbc61539aa93cd69858409266b9d52d99daa6991378",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/dao/pv/PvLogData.java": "7f3d2877c34bf265b8cac0a0a969a4f21532b4553b10b5b3d8ed93054d2f0e6a",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/LBConsistencyConfig.java": "47292e073f88dd11443d63ffdcd2184dd2d1f5d8439c614bc4c9f6cc18958a18",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyReq.java": "a36aaa5fee6991e3981d11507393d172cc7609009dba7be4c02ccbf6d6ba9962",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/MasterChangeNotifyResp.java": "3a96cbbbb64ae3221abe3f2a6609756d924156dc81ffd429e4892630c20b3db0",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusReq.java": "eeececef26cdd00037e788a4fc3b8fe9aaf8f804c91074f38e0671d14b299233",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/domain/consistency/SyncLBStatusResp.java": "4ae3116b82a4698d284bb8ff0504caaaeb60ef24927b487e37c7b381118c63ea",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/RecentCacheKeyTraceReporter.java": "adf1b05abfcb16257a6f10d03e3486202fbe1ffde40743006afa58e2e60edba6",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/address/WorkerAddressService.java": "d9a5cb38a61ac88a49f9b122f42eecb2fec2558e02c1c6c07f0c4765cf6ea4f7",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grace/GracefulLifecycleReporter.java": "882cbc5700b809c5677fb939496148a3e9c8d20a2fcec40eea7feaaee0f9d7c7",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineGrpcService.java": "feb09b7bfa2d439b7373d245f0f6d071ed112ac3888d1ac9146e078f15390bda",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/grpc/EngineStatusConverter.java": "040eebe9d74e1df9160763e9718c5701b48603964f7812e35807139a10d2cae2",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/BatchSchedulerReporter.java": "2f66cba2fbb7063f83660cc93c4f3d0c4c921ee53af37bae8a22b45b56995d69",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/EngineHealthReporter.java": "7772142d80eb2920b925fd8f0dcae507cb78cf64fcf31bb1a4247abca572cfef",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/RequestSchedulerReporter.java": "75625e05fa5b0322cf6cd8149c8823809d8bc5ca35232f752bcc3be58a1d1319",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/service/monitor/SyncSchedulerConfig.java": "fd07d59429350d17deddc222b5affee8ae1153cc290d0df4146de97a56b19394",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/EngineSyncRunner.java": "1dd395977b92fde3d75afc15864cd8c8484a7a65fd03514c8caee742447cb718",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcCacheStatusCheckRunner.java": "ab8b0624838d3185e3729b92ec39e6fcad95120c490f5ca17884e74569067efe",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/GrpcWorkerStatusRunner.java": "515f46798d46f81d8f52b6f94ffe323fd265c65f55c5b63cc1373d763bdaa8c5",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/runner/PollCompletion.java": "5cef1a4e67fc78333016b4c3b8ac6e000df480e466d3456da6753da0f659cfd6",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/schedule/ExpirationCleaner.java": "b6d8319063d50de00e92fc0f0ee1d269dabef3ed29cfa951a8a0b03d7d94a378",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/sync/synchronizer/MasterEngineSynchronizer.java": "91711440a618312eea1873170157ad60cb53ec4879c1fb266da2b6b757f9d6d8",
+      "rtp_llm/flexlb/flexlb-sync/src/main/java/org/flexlb/util/Failures.java": "034ebd904a01b57b0678052b49acdcc7ada6f25923f57eb1bd1dff2d6c775148"
+    },
+    "final_primary_production_hashes_match": true
+  },
+  "environment": {
+    "ssh": "luoli.hn@11.163.39.110",
+    "checkout": "/home/luoli.hn/work/rtp_llm_4/github-opensource",
+    "container": "luoli_gpu",
+    "java": "Corretto 21.0.12.1+12-LTS",
+    "processors": 256,
+    "jvm_heap": "-Xms64g -Xmx64g",
+    "topology": "750P/750D",
+    "delivery_modes": [
+      "BATCH / FIXED_WINDOW",
+      "NON_BATCH / SINGLE"
+    ],
+    "qps": [
+      3000,
+      10000
+    ],
+    "warmup_ms": 10000,
+    "measurement_issue_duration_ms": 10000,
+    "minimum_warmup_requests_per_prefill": 16,
+    "throughput_ratio_floor": 0.98,
+    "master_p99_limit_exclusive_ms": 50,
+    "existing_test_client_p99_limit_ms": 250,
+    "user_client_p99_goal_exclusive_ms": 50,
+    "jfr": false,
+    "carrier_parallelism_override": false,
+    "planner_parallelism_override": false,
+    "actual_GPU_model_inference": false
+  },
+  "method": "R5 ABBA: baseline A, candidate A, candidate B, baseline B, each BATCH then NON_BATCH. During R5 the primary SchedulerRuntime gained a shutdown-failure notification, so R6 re-froze latest and ran candidate final A/B, each BATCH then NON_BATCH. Final comparisons use R5 exact-commit baselines and R6 latest candidates; R5 candidate results remain separately visible. No assertion changes, no production edits by this task.",
+  "comparisons": [
+    {
+      "delivery": "BATCH",
+      "qps": 3000,
+      "baseline_master_p99": [
+        "12ms",
+        "12ms"
+      ],
+      "latest_master_p99": [
+        "12ms",
+        "12ms"
+      ],
+      "baseline_client_p99": [
+        "29.251ms",
+        "29.824ms"
+      ],
+      "latest_client_p99": [
+        "29.252ms",
+        "29.695ms"
+      ],
+      "baseline_client_qps": [
+        2996.8,
+        2996.8
+      ],
+      "latest_client_qps": [
+        2996.8,
+        2996.8
+      ],
+      "baseline_route_submit_p99": [
+        "1ms",
+        "1ms"
+      ],
+      "latest_route_submit_p99": [
+        "1ms",
+        "1ms"
+      ]
+    },
+    {
+      "delivery": "BATCH",
+      "qps": 10000,
+      "baseline_master_p99": [
+        "26ms",
+        "19ms"
+      ],
+      "latest_master_p99": [
+        "21ms",
+        "22ms"
+      ],
+      "baseline_client_p99": [
+        "54.749ms",
+        "45.630ms"
+      ],
+      "latest_client_p99": [
+        "43.776ms",
+        "48.430ms"
+      ],
+      "baseline_client_qps": [
+        9989.2,
+        9989.2
+      ],
+      "latest_client_qps": [
+        9989.1,
+        9989.2
+      ],
+      "baseline_route_submit_p99": [
+        "13ms",
+        "6ms"
+      ],
+      "latest_route_submit_p99": [
+        "8ms",
+        "7ms"
+      ]
+    },
+    {
+      "delivery": "NON_BATCH",
+      "qps": 3000,
+      "baseline_master_p99": [
+        "1ms",
+        "<1ms"
+      ],
+      "latest_master_p99": [
+        "<1ms",
+        "<1ms"
+      ],
+      "baseline_client_p99": [
+        "4.508ms",
+        "4.561ms"
+      ],
+      "latest_client_p99": [
+        "0.877ms",
+        "1.746ms"
+      ],
+      "baseline_client_qps": [
+        2999.6,
+        2999.1
+      ],
+      "latest_client_qps": [
+        2999.5,
+        2999.6
+      ],
+      "baseline_route_submit_p99": [
+        "<1ms",
+        "<1ms"
+      ],
+      "latest_route_submit_p99": [
+        "<1ms",
+        "<1ms"
+      ]
+    },
+    {
+      "delivery": "NON_BATCH",
+      "qps": 10000,
+      "baseline_master_p99": [
+        "4ms",
+        "1ms"
+      ],
+      "latest_master_p99": [
+        "3ms",
+        "3ms"
+      ],
+      "baseline_client_p99": [
+        "28.353ms",
+        "1.366ms"
+      ],
+      "latest_client_p99": [
+        "28.835ms",
+        "25.929ms"
+      ],
+      "baseline_client_qps": [
+        9995.6,
+        9994.7
+      ],
+      "latest_client_qps": [
+        9994.6,
+        9994.5
+      ],
+      "baseline_route_submit_p99": [
+        "4ms",
+        "<1ms"
+      ],
+      "latest_route_submit_p99": [
+        "3ms",
+        "3ms"
+      ]
+    }
+  ],
+  "final_latest_runs": [
+    {
+      "label": "candidate-final-a-BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "29.194",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.731",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=973529 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3000.6",
+            "master_avg": "10.309ms",
+            "client_p50": "10.906ms",
+            "client_p90": "11.313ms",
+            "client_p95": "11.491ms",
+            "client_p99": "29.252ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "689",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "29862",
+            "batch_full": "0",
+            "window_timeout": "29862",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "5",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "689",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29311"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.1",
+            "master_qps": "10007.6",
+            "master_avg": "10.544ms",
+            "client_p50": "10.905ms",
+            "client_p90": "11.398ms",
+            "client_p95": "11.650ms",
+            "client_p99": "43.776ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "21ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "6846",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "97697",
+            "batch_full": "0",
+            "window_timeout": "97697",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.02",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "8ms",
+            "ack_response_count": "6846",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "93154"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-a-BATCH.log",
+          "sha256": "856300197435a30c4265c9926224a1a6dee01adeb8abbebdc4c0e30ffeea0166"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-a-BATCH.xml",
+          "sha256": "4f45ce6a24cdd8de8886f684a00d65e064f9df8f04774e350e678211a5327d2f"
+        }
+      }
+    },
+    {
+      "label": "candidate-final-a-NON_BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.426",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "31.191",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=975611 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.5",
+            "master_qps": "3000.4",
+            "master_avg": "0.005ms",
+            "client_p50": "0.419ms",
+            "client_p90": "0.493ms",
+            "client_p95": "0.528ms",
+            "client_p99": "0.877ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "<1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9994.6",
+            "master_qps": "10001.5",
+            "master_avg": "0.084ms",
+            "client_p50": "0.414ms",
+            "client_p90": "0.521ms",
+            "client_p95": "0.868ms",
+            "client_p99": "28.835ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "3ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "3ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-a-NON_BATCH.log",
+          "sha256": "630f76407e195f95719110e1ddb3dd003e1a661418b5cd03e9f892381d835900"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-a-NON_BATCH.xml",
+          "sha256": "8183d3463c4af47f69b869b29e7117a14782e66228274ec52b64566f97171c60"
+        }
+      }
+    },
+    {
+      "label": "candidate-final-b-BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "29.302",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "34.106",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=977223 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3002.2",
+            "master_avg": "10.328ms",
+            "client_p50": "10.877ms",
+            "client_p90": "11.291ms",
+            "client_p95": "11.471ms",
+            "client_p99": "29.695ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "727",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "29905",
+            "batch_full": "0",
+            "window_timeout": "29905",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "4",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "727",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29273"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.2",
+            "master_qps": "10009.6",
+            "master_avg": "10.669ms",
+            "client_p50": "10.922ms",
+            "client_p90": "11.548ms",
+            "client_p95": "12.199ms",
+            "client_p99": "48.430ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "22ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "7468",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "97523",
+            "batch_full": "0",
+            "window_timeout": "97523",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.03",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "7ms",
+            "ack_response_count": "7468",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "92532"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-b-BATCH.log",
+          "sha256": "fb5bbf3a2c4b616e8ca10446098d7c642a77266f785321ac8c5e89b0bba5ecd4"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-b-BATCH.xml",
+          "sha256": "be0af4989d6e1a2b087fb48f0540f78c1494d3dbf420d428939b7fcab3a93451"
+        }
+      }
+    },
+    {
+      "label": "candidate-final-b-NON_BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.511",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "31.599",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=979076 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.6",
+            "master_qps": "3000.4",
+            "master_avg": "0.007ms",
+            "client_p50": "0.439ms",
+            "client_p90": "0.515ms",
+            "client_p95": "0.556ms",
+            "client_p99": "1.746ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9994.5",
+            "master_qps": "10004.6",
+            "master_avg": "0.101ms",
+            "client_p50": "0.422ms",
+            "client_p90": "0.527ms",
+            "client_p95": "0.734ms",
+            "client_p99": "25.929ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "3ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "3ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-b-NON_BATCH.log",
+          "sha256": "ac59d1069c4d4dbda0b8071c029b5493d2801af4afae6832df68ed3a8eb58ba0"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r6/candidate-final-b-NON_BATCH.xml",
+          "sha256": "541a4f613d02b98c661341878f79150d49900ea08c0bd725f44fd4fb3bd275dc"
+        }
+      }
+    }
+  ],
+  "baseline_runs": [
+    {
+      "label": "baseline-a-BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "29.089",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.572",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=958506 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3001.3",
+            "master_avg": "10.281ms",
+            "client_p50": "10.808ms",
+            "client_p90": "11.198ms",
+            "client_p95": "11.380ms",
+            "client_p99": "29.251ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "415",
+            "dispatch_ack_p99": "<1ms",
+            "engine_batches": "29941",
+            "batch_full": "0",
+            "window_timeout": "29941",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "415",
+            "ack_response_p99": "3ms",
+            "terminal_without_ack_count": "29585"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.2",
+            "master_qps": "10019.0",
+            "master_avg": "10.835ms",
+            "client_p50": "10.963ms",
+            "client_p90": "11.650ms",
+            "client_p95": "12.286ms",
+            "client_p99": "54.749ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "12ms",
+            "master_p99": "26ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "9080",
+            "dispatch_ack_p99": "3ms",
+            "engine_batches": "96835",
+            "batch_full": "4",
+            "window_timeout": "96831",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.03",
+            "max_batch": "16",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "13ms",
+            "ack_response_count": "9080",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "90920"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": false,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-BATCH.log",
+          "sha256": "5747c1ad743d8d08c7992bede7d9395e504c568ddf9daaa64d3051edeab0d8f6"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-BATCH.xml",
+          "sha256": "94be56ce3dad9242112e921d5f0d7e694edc02fda864717aae476a48cc3a74bc"
+        }
+      }
+    },
+    {
+      "label": "baseline-a-NON_BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.401",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "30.95",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=960403 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.6",
+            "master_qps": "3002.0",
+            "master_avg": "0.025ms",
+            "client_p50": "0.441ms",
+            "client_p90": "0.528ms",
+            "client_p95": "0.585ms",
+            "client_p99": "4.508ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "<1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9995.6",
+            "master_qps": "10002.1",
+            "master_avg": "0.114ms",
+            "client_p50": "0.405ms",
+            "client_p90": "0.507ms",
+            "client_p95": "0.674ms",
+            "client_p99": "28.353ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "4ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "4ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-NON_BATCH.log",
+          "sha256": "4db4f66a5e33a7cb4a4064fb527b31461b17e8f8cf117418e37c52002ee07d09"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-NON_BATCH.xml",
+          "sha256": "76615f3ef5167ceccc67ef57893932ec62c69573d639ee0058a06b19ab3d6b39"
+        }
+      }
+    },
+    {
+      "label": "baseline-b-BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "30.198",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.713",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=969508 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3000.7",
+            "master_avg": "10.337ms",
+            "client_p50": "10.913ms",
+            "client_p90": "11.316ms",
+            "client_p95": "11.494ms",
+            "client_p99": "29.824ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "726",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "29875",
+            "batch_full": "0",
+            "window_timeout": "29875",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "7",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "726",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29274"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.2",
+            "master_qps": "10004.5",
+            "master_avg": "10.465ms",
+            "client_p50": "10.910ms",
+            "client_p90": "11.330ms",
+            "client_p95": "11.519ms",
+            "client_p99": "45.630ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "19ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "7129",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "97985",
+            "batch_full": "0",
+            "window_timeout": "97985",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.02",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "6ms",
+            "ack_response_count": "7129",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "92871"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-BATCH.log",
+          "sha256": "8e90b0c651614ff12ffabc2fb36fb674aef85f367870c12e973ea8d61d6e3e64"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-BATCH.xml",
+          "sha256": "012df7f79377792b9bd974eedf9ed48bafe8efd8224bb02d3a539ae9fe2e43e4"
+        }
+      }
+    },
+    {
+      "label": "baseline-b-NON_BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.329",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "30.617",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=971605 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.1",
+            "master_qps": "3000.8",
+            "master_avg": "0.023ms",
+            "client_p50": "0.410ms",
+            "client_p90": "0.488ms",
+            "client_p95": "0.537ms",
+            "client_p99": "4.561ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9994.7",
+            "master_qps": "10002.1",
+            "master_avg": "0.052ms",
+            "client_p50": "0.433ms",
+            "client_p90": "0.731ms",
+            "client_p95": "0.794ms",
+            "client_p99": "1.366ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-NON_BATCH.log",
+          "sha256": "4a2d3031164f54839532025fd481cce602ded2fe0c403be63ff9b3a8e4760073"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-NON_BATCH.xml",
+          "sha256": "2ab857791c79d55611c31505f2afcdfd86405b702908c7d4403fd7959912185b"
+        }
+      }
+    }
+  ],
+  "initial_abba_all_runs": [
+    {
+      "label": "baseline-a-BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "29.089",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.572",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=958506 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3001.3",
+            "master_avg": "10.281ms",
+            "client_p50": "10.808ms",
+            "client_p90": "11.198ms",
+            "client_p95": "11.380ms",
+            "client_p99": "29.251ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "415",
+            "dispatch_ack_p99": "<1ms",
+            "engine_batches": "29941",
+            "batch_full": "0",
+            "window_timeout": "29941",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "415",
+            "ack_response_p99": "3ms",
+            "terminal_without_ack_count": "29585"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.2",
+            "master_qps": "10019.0",
+            "master_avg": "10.835ms",
+            "client_p50": "10.963ms",
+            "client_p90": "11.650ms",
+            "client_p95": "12.286ms",
+            "client_p99": "54.749ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "12ms",
+            "master_p99": "26ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "9080",
+            "dispatch_ack_p99": "3ms",
+            "engine_batches": "96835",
+            "batch_full": "4",
+            "window_timeout": "96831",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.03",
+            "max_batch": "16",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "13ms",
+            "ack_response_count": "9080",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "90920"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": false,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-BATCH.log",
+          "sha256": "5747c1ad743d8d08c7992bede7d9395e504c568ddf9daaa64d3051edeab0d8f6"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-BATCH.xml",
+          "sha256": "94be56ce3dad9242112e921d5f0d7e694edc02fda864717aae476a48cc3a74bc"
+        }
+      }
+    },
+    {
+      "label": "baseline-a-NON_BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.401",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "30.95",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=960403 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.6",
+            "master_qps": "3002.0",
+            "master_avg": "0.025ms",
+            "client_p50": "0.441ms",
+            "client_p90": "0.528ms",
+            "client_p95": "0.585ms",
+            "client_p99": "4.508ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "<1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9995.6",
+            "master_qps": "10002.1",
+            "master_avg": "0.114ms",
+            "client_p50": "0.405ms",
+            "client_p90": "0.507ms",
+            "client_p95": "0.674ms",
+            "client_p99": "28.353ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "4ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "4ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-NON_BATCH.log",
+          "sha256": "4db4f66a5e33a7cb4a4064fb527b31461b17e8f8cf117418e37c52002ee07d09"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-a-NON_BATCH.xml",
+          "sha256": "76615f3ef5167ceccc67ef57893932ec62c69573d639ee0058a06b19ab3d6b39"
+        }
+      }
+    },
+    {
+      "label": "baseline-b-BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "30.198",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.713",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=969508 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3000.7",
+            "master_avg": "10.337ms",
+            "client_p50": "10.913ms",
+            "client_p90": "11.316ms",
+            "client_p95": "11.494ms",
+            "client_p99": "29.824ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "726",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "29875",
+            "batch_full": "0",
+            "window_timeout": "29875",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "7",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "726",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29274"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.2",
+            "master_qps": "10004.5",
+            "master_avg": "10.465ms",
+            "client_p50": "10.910ms",
+            "client_p90": "11.330ms",
+            "client_p95": "11.519ms",
+            "client_p99": "45.630ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "19ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "7129",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "97985",
+            "batch_full": "0",
+            "window_timeout": "97985",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.02",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "6ms",
+            "ack_response_count": "7129",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "92871"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-BATCH.log",
+          "sha256": "8e90b0c651614ff12ffabc2fb36fb674aef85f367870c12e973ea8d61d6e3e64"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-BATCH.xml",
+          "sha256": "012df7f79377792b9bd974eedf9ed48bafe8efd8224bb02d3a539ae9fe2e43e4"
+        }
+      }
+    },
+    {
+      "label": "baseline-b-NON_BATCH",
+      "variant": "baseline",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.329",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "30.617",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=baseline pid=971605 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.1",
+            "master_qps": "3000.8",
+            "master_avg": "0.023ms",
+            "client_p50": "0.410ms",
+            "client_p90": "0.488ms",
+            "client_p95": "0.537ms",
+            "client_p99": "4.561ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9994.7",
+            "master_qps": "10002.1",
+            "master_avg": "0.052ms",
+            "client_p50": "0.433ms",
+            "client_p90": "0.731ms",
+            "client_p95": "0.794ms",
+            "client_p99": "1.366ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-NON_BATCH.log",
+          "sha256": "4a2d3031164f54839532025fd481cce602ded2fe0c403be63ff9b3a8e4760073"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/baseline-b-NON_BATCH.xml",
+          "sha256": "2ab857791c79d55611c31505f2afcdfd86405b702908c7d4403fd7959912185b"
+        }
+      }
+    },
+    {
+      "label": "candidate-a-BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 1,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "29.152",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.575",
+          "failures": [
+            {
+              "message": "client E2E P99 473.324 ms exceeds ceiling 250.000 ms ==> expected: <true> but was: <false>",
+              "type": "org.opentest4j.AssertionFailedError"
+            }
+          ]
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=962105 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3004.2",
+            "master_avg": "10.327ms",
+            "client_p50": "10.874ms",
+            "client_p90": "11.294ms",
+            "client_p95": "11.469ms",
+            "client_p99": "29.075ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "764",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "29850",
+            "batch_full": "0",
+            "window_timeout": "29850",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.01",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "764",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29236"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.1",
+            "master_qps": "10004.7",
+            "master_avg": "57.730ms",
+            "client_p50": "12.017ms",
+            "client_p90": "232.742ms",
+            "client_p95": "348.852ms",
+            "client_p99": "473.324ms",
+            "master_p50": "11ms",
+            "master_p90": "160ms",
+            "master_p95": "320ms",
+            "master_p99": "463ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "11ms",
+            "batch_wait_p95": "12ms",
+            "batch_wait_p99": "25ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "12ms",
+            "delivery_wait_p95": "13ms",
+            "delivery_wait_p99": "26ms",
+            "dispatch_ack_count": "33874",
+            "dispatch_ack_p99": "16ms",
+            "engine_batches": "86959",
+            "batch_full": "0",
+            "window_timeout": "86959",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.15",
+            "max_batch": "15",
+            "grpc_queue_p99": "23ms",
+            "route_submit_p99": "448ms",
+            "ack_response_count": "33874",
+            "ack_response_p99": "10ms",
+            "terminal_without_ack_count": "66126"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": false,
+            "client_p99_below_50ms": false,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-a-BATCH.log",
+          "sha256": "dc2f856eacd05a99b37a54019cdd2be0a8ae30a015b98acc97e4df88443a38da"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-a-BATCH.xml",
+          "sha256": "d0f2b3c1052184b829da1cad8ad30b220e695ed0f394ac0d21918b995f712a68"
+        }
+      }
+    },
+    {
+      "label": "candidate-a-NON_BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.296",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "30.523",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=964226 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.6",
+            "master_qps": "3000.4",
+            "master_avg": "0.009ms",
+            "client_p50": "0.398ms",
+            "client_p90": "0.479ms",
+            "client_p95": "0.516ms",
+            "client_p99": "1.408ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "<1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9994.5",
+            "master_qps": "10005.9",
+            "master_avg": "0.071ms",
+            "client_p50": "0.407ms",
+            "client_p90": "0.514ms",
+            "client_p95": "0.680ms",
+            "client_p99": "17.505ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "3ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "3ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-a-NON_BATCH.log",
+          "sha256": "d1bb3c4e54998a9a72e122614b9dcc02c98c833d621dcae6d0b41acb29bd420f"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-a-NON_BATCH.xml",
+          "sha256": "cd506861e49601af7305ddb08f5a7799297d9a462dd2fc7fcc98ca09784b7fc8"
+        }
+      }
+    },
+    {
+      "label": "candidate-b-BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "29.153",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "33.725",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=965769 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2996.8",
+            "master_qps": "3001.5",
+            "master_avg": "10.334ms",
+            "client_p50": "10.911ms",
+            "client_p90": "11.349ms",
+            "client_p95": "11.543ms",
+            "client_p99": "28.439ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "12ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "30000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "575",
+            "dispatch_ack_p99": "<1ms",
+            "engine_batches": "29917",
+            "batch_full": "0",
+            "window_timeout": "29917",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.00",
+            "max_batch": "6",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "1ms",
+            "ack_response_count": "575",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "29425"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "BATCH",
+            "decision": "FIXED_WINDOW",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9989.1",
+            "master_qps": "10011.2",
+            "master_avg": "10.598ms",
+            "client_p50": "10.944ms",
+            "client_p90": "11.583ms",
+            "client_p95": "11.958ms",
+            "client_p99": "47.079ms",
+            "master_p50": "10ms",
+            "master_p90": "11ms",
+            "master_p95": "11ms",
+            "master_p99": "17ms",
+            "active_prefill_rpc": "750",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "100000",
+            "batch_wait_p50": "10ms",
+            "batch_wait_p90": "10ms",
+            "batch_wait_p95": "10ms",
+            "batch_wait_p99": "10ms",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "10ms",
+            "delivery_wait_p90": "11ms",
+            "delivery_wait_p95": "11ms",
+            "delivery_wait_p99": "11ms",
+            "dispatch_ack_count": "6761",
+            "dispatch_ack_p99": "1ms",
+            "engine_batches": "97440",
+            "batch_full": "0",
+            "window_timeout": "97440",
+            "predicted_execution_cap": "0",
+            "single_request": "0",
+            "avg_batch": "1.03",
+            "max_batch": "8",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "5ms",
+            "ack_response_count": "6761",
+            "ack_response_p99": "<1ms",
+            "terminal_without_ack_count": "93239"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-b-BATCH.log",
+          "sha256": "38c7df5cab1d040430d0f1bee90ccbd791a93663ef5f14f7ae2ba368bce3b43c"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-b-BATCH.xml",
+          "sha256": "a162fc6733014648ba192fbea6a414b2d446da1bb9e7b2ca7f4cb9e04bba6a07"
+        }
+      }
+    },
+    {
+      "label": "candidate-b-NON_BATCH",
+      "variant": "candidate",
+      "suite": {
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cases": [
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[1]",
+          "time_seconds": "28.276",
+          "failures": []
+        },
+        {
+          "name": "masterMeetsRateSloAcrossEngineScaleMatrix{int, int, int}[2]",
+          "time_seconds": "30.856",
+          "failures": []
+        }
+      ],
+      "identity": "FlexLB identity: variant=candidate pid=967746 heap_max=68719476736 processors=256 args=[-Xms64g, -Xmx64g, --add-modules=ALL-SYSTEM, --add-opens=java.base/java.lang=ALL-UNNAMED, --add-opens=java.base/java.lang.invoke=ALL-UNNAMED, --add-opens=java.base/java.util=ALL-UNNAMED, --add-opens=java.base/java.util.concurrent=ALL-UNNAMED, --add-opens=java.base/jdk.internal.misc=ALL-UNNAMED, --add-opens=java.base/java.nio=ALL-UNNAMED, --add-opens=java.base/sun.nio.ch=ALL-UNNAMED, --add-opens=java.instrument/sun.instrument=ALL-UNNAMED]",
+      "measurements": [
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "3000",
+            "requests": "30000",
+            "client_qps": "2999.7",
+            "master_qps": "3005.0",
+            "master_avg": "0.025ms",
+            "client_p50": "0.432ms",
+            "client_p90": "0.518ms",
+            "client_p95": "0.570ms",
+            "client_p99": "4.679ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "<1ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "30000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "<1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "<1ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        },
+        {
+          "metrics": {
+            "delivery": "NON_BATCH",
+            "decision": "SINGLE",
+            "prefill": "750",
+            "decode": "750",
+            "target_qps": "10000",
+            "requests": "100000",
+            "client_qps": "9994.7",
+            "master_qps": "10001.3",
+            "master_avg": "0.106ms",
+            "client_p50": "0.412ms",
+            "client_p90": "0.542ms",
+            "client_p95": "0.898ms",
+            "client_p99": "28.277ms",
+            "master_p50": "<1ms",
+            "master_p90": "<1ms",
+            "master_p95": "<1ms",
+            "master_p99": "3ms",
+            "active_prefill_rpc": "0",
+            "active_prefill_route": "750",
+            "active_decode_route": "750",
+            "batch_wait_count": "0",
+            "batch_wait_p50": "N/A",
+            "batch_wait_p90": "N/A",
+            "batch_wait_p95": "N/A",
+            "batch_wait_p99": "N/A",
+            "delivery_wait_count": "100000",
+            "delivery_wait_p50": "<1ms",
+            "delivery_wait_p90": "<1ms",
+            "delivery_wait_p95": "<1ms",
+            "delivery_wait_p99": "1ms",
+            "dispatch_ack_count": "0",
+            "dispatch_ack_p99": "N/A",
+            "engine_batches": "0",
+            "batch_full": "N/A",
+            "window_timeout": "N/A",
+            "predicted_execution_cap": "N/A",
+            "single_request": "N/A",
+            "avg_batch": "N/A",
+            "max_batch": "N/A",
+            "grpc_queue_p99": "<1ms",
+            "route_submit_p99": "3ms",
+            "ack_response_count": "0",
+            "ack_response_p99": "N/A",
+            "terminal_without_ack_count": "0"
+          },
+          "user_slo": {
+            "master_p99_below_50ms": true,
+            "client_p99_below_50ms": true,
+            "client_qps_at_least_98_percent": true,
+            "master_qps_at_least_98_percent": true
+          }
+        }
+      ],
+      "artifacts": {
+        "log": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-b-NON_BATCH.log",
+          "sha256": "f33ce37052862684be15b5704c681d0283f94f08e0af797e6fe7daf6a9b631d1"
+        },
+        "xml": {
+          "path": "/tmp/flexlb-latest-vs-adb-20261005-r5/candidate-b-NON_BATCH.xml",
+          "sha256": "36197e67c0448d208e43002a4bda5bf6109ad19ada9957a50728cfa88693ea5e"
+        }
+      }
+    }
+  ],
+  "totals": {
+    "all_forks": 12,
+    "all_tests": 24,
+    "failures": 1,
+    "errors": 0,
+    "skipped": 0,
+    "final_latest_tests": 8,
+    "final_latest_failures": 0,
+    "final_latest_user_slo_checks_passed": 8
+  },
+  "observed_initial_failure": {
+    "snapshot": "R5 before latest shutdown-failure notification",
+    "label": "candidate-a-BATCH",
+    "qps": 10000,
+    "master_p99_ms": 463,
+    "client_p99_ms": 473.324,
+    "route_submit_p99_ms": 448,
+    "actual_failure": "client E2E P99 473.324 ms exceeds ceiling 250.000 ms",
+    "not_discarded": true,
+    "causality": "Stage latency shows a route-submit tail but there is no JFR capture for this run; cannot assign its cause to a specific lock or the refactor. The R5-to-R6 production change is a shutdown error branch, so passing R6 does not prove that the observed route tail was fixed."
+  },
+  "conclusion": "The final latest working tree passes all eight measured cases, with Master and client P99 below 50ms and throughput above 98%. BATCH P99 is in the same range as the exact adb724b baseline, with no consistent improvement proven. NON_BATCH remains comparable. Earlier same-normal-routing-path 463ms tail remains a stability concern; do not claim it was fixed by the shutdown error-path edit.",
+  "raw_evidence": [
+    "/tmp/flexlb-latest-vs-adb-20261005-r5",
+    "/tmp/flexlb-latest-vs-adb-20261005-r6"
+  ],
+  "restore_audits": [
+    {
+      "raw_directory": "/tmp/flexlb-latest-vs-adb-20261005-r5",
+      "inputs": 522,
+      "differences": [],
+      "original_api_mock_test_compile": "passed"
+    },
+    {
+      "raw_directory": "/tmp/flexlb-latest-vs-adb-20261005-r6",
+      "inputs": 522,
+      "differences": [],
+      "original_api_mock_test_compile": "passed"
+    }
+  ],
+  "manifest_sha256": {
+    "/tmp/flexlb-latest-vs-adb-20261005-r5/source-manifest.json": "237e2bdfa5a62b8bc073eee2c0a18c3317905624257b91a4f089e95ad5465fdd",
+    "/tmp/flexlb-latest-vs-adb-20261005-r6/source-manifest.json": "4cfaa70098a18421ec2a70692b9328991dc2e6bd2cb518b38ea6d832c1105e0b"
+  }
+}

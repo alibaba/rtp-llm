@@ -1,0 +1,106 @@
+{
+  "base_commit": "a13c000ac720691eea514d3cd0db0c7056774b57",
+  "scope": "all FlexLB production modules, tests, test fixtures, mock-engine and tools",
+  "deleted": [
+    "DeliveryDispatcher three-argument constructor used only by tests",
+    "WorkerBatcher.capacityAvailableSignal accessor used only by tests",
+    "InternalRuntimeSettings.queueDecisionThreadJoinTimeoutMs and generated getter",
+    "deliverRoutes decisionReason and evaluator parameters",
+    "unused Netty and Otel bean injection parameters",
+    "two duplicate local aliases"
+  ],
+  "preserved": [
+    "production five-argument Spring constructor and original test default arguments",
+    "stable capacity callback identity, subscriptions and notification order",
+    "generation/request exact identities, locks, resource settlement and finally cleanup",
+    "record facts, Jackson fields, SPI and Spring lifecycle entry points",
+    "historical baseline tool adaptations"
+  ],
+  "scan_rounds": [
+    "source callers and exact signatures",
+    "all-module production bytecode with inheritance, virtual calls and method references",
+    "three independent cross reviews and final diff",
+    "post-change bytecode scan and caller recheck"
+  ],
+  "reviewers": [
+    "scheduler_audit",
+    "state_projection_audit",
+    "library_audit"
+  ],
+  "review_result": "no blocking findings; final removeQueued alias removal preserves every operation and diagnostic",
+  "tests": {
+    "flexlb-common": {
+      "tests": 254,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failure_details": []
+    },
+    "flexlb-cache": {
+      "tests": 39,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failure_details": []
+    },
+    "flexlb-grpc": {
+      "tests": 26,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failure_details": []
+    },
+    "flexlb-sync": {
+      "tests": 1864,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0,
+      "failure_details": []
+    },
+    "flexlb-api": {
+      "tests": 177,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 1,
+      "failure_details": [
+        {
+          "class": "org.flexlb.OpenTelemetryBootstrapTest",
+          "test": "sharedJsonContract",
+          "message": "expected: not <null>"
+        }
+      ]
+    }
+  },
+  "final_regression": {
+    "classes": [
+      "DeliveryDispatcherTest",
+      "WorkerBatcherQueueTest",
+      "RoutePublicationTest",
+      "BatchDeliveryTest"
+    ],
+    "tests": 136,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "all_module_and_mock_engine_test_compilation": "passed"
+  },
+  "known_api_failure": {
+    "test": "OpenTelemetryBootstrapTest.sharedJsonContract",
+    "cause": "telemetry/test/trace_config_cases.json fixture absent; fails before configuration parsing",
+    "test_and_bootstrap_sources": "unchanged from base; same failure previously reproduced on a3c4437874"
+  },
+  "production_java_physical_lines": {
+    "before": 37850,
+    "after": 37836,
+    "delta": -14,
+    "scope": "src/main/java excluding mock-engine, includes blanks and comments",
+    "sync_before": 23794,
+    "sync_after": 23785
+  },
+  "performance_test": "not run: no scheduling, resource, timer or executor behavior change",
+  "raw_logs": [
+    "/tmp/flexlb-a13-cleanup-ut.log",
+    "/tmp/flexlb-a13-cleanup-final-regression.log"
+  ],
+  "remaining_candidates": "no additional deletion confirmed; generated/reflective/SPI access is retained"
+}

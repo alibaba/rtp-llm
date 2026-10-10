@@ -1,14 +1,14 @@
 package org.flexlb.service;
 
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.strategy.SelectedRole;
-import org.flexlb.dao.BalanceContext;
+import org.flexlb.balance.strategy.WorkerAssignment;
+import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.VitCacheDirectory.Candidate;
-import org.flexlb.sync.status.WorkerDirectory;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -26,7 +26,7 @@ public class VitCacheSelector {
     private static final long MAX_PENDING_TTL_MS = 600_000;
     private static final int MAX_PENDING = 100_000;
     private final VitCacheDirectory directory;
-    private final WorkerDirectory workers;
+    private final EndpointRegistry workers;
     private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
     private long pendingPrunedAt;
 
@@ -52,13 +52,13 @@ public class VitCacheSelector {
         }
     }
 
-    public VitCacheSelector(VitCacheDirectory directory, WorkerDirectory workers) {
+    public VitCacheSelector(VitCacheDirectory directory, EndpointRegistry workers) {
         this.directory = directory;
         this.workers = workers;
     }
 
-    public synchronized ServerStatus select(BalanceContext ctx, String group) {
-        var keys = ctx.getRequest().getCacheAffinityKeys();
+    public synchronized ServerStatus select(RequestContext ctx, String group) {
+        var keys = ctx.data().getRequest().getCacheAffinityKeys();
         if (keys == null || keys.isEmpty() || keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
@@ -98,7 +98,7 @@ public class VitCacheSelector {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
         Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
-        long timeout = ctx.getRequest().getGenerateTimeout();
+        long timeout = ctx.data().getRequest().getGenerateTimeout();
         long ttl = timeout <= 0 ? MIN_PENDING_TTL_MS
                 : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
         for (String key : keys) {
@@ -109,7 +109,7 @@ public class VitCacheSelector {
         while (pending.size() > MAX_PENDING) {
             pending.remove(pending.keySet().iterator().next());
         }
-        return status(selected.worker(), ctx.getRequestId());
+        return status(selected.worker(), ctx.data().getRequestId());
     }
 
     /**
@@ -117,12 +117,12 @@ public class VitCacheSelector {
      * current endpoint generation. Address equality alone cannot identify a worker
      * after replacement; generation zero is not a wildcard.
      */
-    public synchronized ServerStatus validate(BalanceContext ctx, String group) {
-        ServerStatus selected = ctx.getRequest().getSelectedVit();
+    public synchronized ServerStatus validate(RequestContext ctx, String group) {
+        ServerStatus selected = ctx.data().getRequest().getSelectedVit();
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
-        try (var pin = workers.captureEndpoint(RoleType.VIT,
+        try (var pin = workers.capture(RoleType.VIT,
                 selected.getServerIp() + ":" + selected.getHttpPort())) {
             WorkerStatus worker = pin == null ? null : pin.endpoint().getStatus();
             if (selected.getRole() != RoleType.VIT || worker == null
@@ -132,17 +132,17 @@ public class VitCacheSelector {
                     || selected.getWorkerGeneration() != pin.generationId()) {
                 return errorStatus(StrategyErrorType.NO_VIT_WORKER);
             }
-            return status(worker, ctx.getRequestId());
+            return status(worker, ctx.data().getRequestId());
         }
     }
 
     /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
-        ServerStatus result = ctx.getRequest().getSelectedVit() == null ? select(ctx, group) : validate(ctx, group);
+    public synchronized WorkerAssignment selectPinned(RequestContext ctx, String group) {
+        ServerStatus result = ctx.data().getRequest().getSelectedVit() == null ? select(ctx, group) : validate(ctx, group);
         if (!result.isSuccess()) {
             return null;
         }
-        WorkerEndpoint.GenerationPin pin = workers.captureEndpoint(RoleType.VIT,
+        WorkerEndpoint.GenerationPin pin = workers.capture(RoleType.VIT,
                 result.getServerIp() + ":" + result.getHttpPort());
         if (pin == null) {
             return null;
@@ -151,7 +151,7 @@ public class VitCacheSelector {
             pin.close();
             return null;
         }
-        return SelectedRole.stateless(pin, result);
+        return WorkerAssignment.stateless(pin, result);
     }
 
     private static ServerStatus errorStatus(StrategyErrorType error) {

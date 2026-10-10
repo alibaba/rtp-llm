@@ -1,0 +1,3625 @@
+{
+  "startup": {
+    "zgc_pretouch_soft48": {
+      "runs": [
+        {
+          "elapsed_s": 11.610661581158638,
+          "user_s": 0.057197,
+          "system_s": 48.781114,
+          "max_rss_kb": 67120820,
+          "minor_faults": 16785426,
+          "major_faults": 0,
+          "exit": 0
+        }
+      ],
+      "elapsed_median_s": 11.610661581158638,
+      "rss_max_gib": 64.01140213012695,
+      "minor_faults_median": 16785426,
+      "effective_flags": {
+        "AlwaysPreTouch": "true",
+        "UseZGC": "true",
+        "ZGenerational": "true",
+        "ConcGCThreads": "64",
+        "SoftMaxHeapSize": "51539607552"
+      }
+    },
+    "zgc_soft48": {
+      "runs": [
+        {
+          "elapsed_s": 9.984439447522163,
+          "user_s": 0.039879,
+          "system_s": 10.369722,
+          "max_rss_kb": 36676,
+          "minor_faults": 7395,
+          "major_faults": 0,
+          "exit": 0
+        }
+      ],
+      "elapsed_median_s": 9.984439447522163,
+      "rss_max_gib": 0.034976959228515625,
+      "minor_faults_median": 7395,
+      "effective_flags": {
+        "AlwaysPreTouch": "false",
+        "UseZGC": "true",
+        "ZGenerational": "true",
+        "ConcGCThreads": "64",
+        "SoftMaxHeapSize": "51539607552"
+      }
+    },
+    "zgc_threads128": {
+      "runs": [
+        {
+          "elapsed_s": 9.337189206853509,
+          "user_s": 0.042428,
+          "system_s": 10.028301,
+          "max_rss_kb": 36576,
+          "minor_faults": 7769,
+          "major_faults": 0,
+          "exit": 0
+        }
+      ],
+      "elapsed_median_s": 9.337189206853509,
+      "rss_max_gib": 0.034881591796875,
+      "minor_faults_median": 7769,
+      "effective_flags": {
+        "AlwaysPreTouch": "false",
+        "UseZGC": "true",
+        "ZGenerational": "true",
+        "ConcGCThreads": "128",
+        "SoftMaxHeapSize": "68719476736"
+      }
+    },
+    "zgc_pretouch_threads128": {
+      "runs": [
+        {
+          "elapsed_s": 10.697769744321704,
+          "user_s": 0.077134,
+          "system_s": 61.841767,
+          "max_rss_kb": 67076648,
+          "minor_faults": 16785731,
+          "major_faults": 0,
+          "exit": 0
+        }
+      ],
+      "elapsed_median_s": 10.697769744321704,
+      "rss_max_gib": 63.969276428222656,
+      "minor_faults_median": 16785731,
+      "effective_flags": {
+        "AlwaysPreTouch": "true",
+        "UseZGC": "true",
+        "ZGenerational": "true",
+        "ConcGCThreads": "128",
+        "SoftMaxHeapSize": "68719476736"
+      }
+    }
+  },
+  "cases": [
+    {
+      "profile": "g1",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": null,
+        "Old": null
+      },
+      "mode": "BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 78.067 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 4,
+      "gc_pause_max_ms_measured": 108.816,
+      "gc_pause_sum_ms_measured": 280.376,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 154.895,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 6.05078125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 109.631715,
+      "heap_used_max_gib_observed_at_gc_measured": 6.05078125,
+      "process_rss_max_gib_entire_vm": 9.479568481445312,
+      "process_cpu_mean_cores_measured": 9.019315206670488,
+      "process_cpu_max_cores_measured": 20.889057672616637,
+      "process_rss_max_gib_measured": 9.461990356445312,
+      "minor_faults_approx_measured": 453554,
+      "minor_faults_per_s_approx_measured": 50299.878008206724,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791537962787",
+          "start_uptime_ms": "3928",
+          "end_epoch_ms": "1791537972799",
+          "end_uptime_ms": "13939"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791537974215",
+          "start_uptime_ms": "15356",
+          "end_epoch_ms": "1791537984226",
+          "end_uptime_ms": "25367"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/g1/BATCH-3000-r1",
+      "test_log_sha256": "4aa4cff3c1771105b2b70bea09995a9bb7343c53ce555a4967aa115c980d3414",
+      "gc_log_sha256": {
+        "gc-1721991.log": "f70ab5baec87a136a69e54d5cbb523c7cb650d76fcd362f4a004240c8098939d"
+      },
+      "process_log_sha256": "b814244aca575562e8a70874fe837d9cc4d66a5d5067f0e01cd85dff07afa1ef",
+      "client_qps": 2996.8,
+      "client_p50_ms": 11.067,
+      "client_p99_ms": 78.067,
+      "server_p99": "14ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 28918,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": null,
+        "Old": null
+      },
+      "mode": "NON_BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 1,
+      "gc_pause_max_ms_measured": 71.479,
+      "gc_pause_sum_ms_measured": 71.479,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 82.706,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 3.9931640625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 72.107929,
+      "heap_used_max_gib_observed_at_gc_measured": 3.9931640625,
+      "process_rss_max_gib_entire_vm": 6.413726806640625,
+      "process_cpu_mean_cores_measured": 4.007056220506096,
+      "process_cpu_max_cores_measured": 13.122302497860538,
+      "process_rss_max_gib_measured": 6.413726806640625,
+      "minor_faults_approx_measured": 108806,
+      "minor_faults_per_s_approx_measured": 12066.762781412888,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538165317",
+          "start_uptime_ms": "3033",
+          "end_epoch_ms": "1791538175321",
+          "end_uptime_ms": "13037"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538176365",
+          "start_uptime_ms": "14080",
+          "end_epoch_ms": "1791538186366",
+          "end_uptime_ms": "24081"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/g1/NON_BATCH-3000-r1",
+      "test_log_sha256": "f9d1abdc4a2db1b773731faa49a228e062451178d1d3c3102ebb995c5159eaa7",
+      "gc_log_sha256": {
+        "gc-1728116.log": "5f5c8a0f35da080556af71dc7c27e63f4257f74a40058a037543d50d865afded"
+      },
+      "process_log_sha256": "213e31ab4d8be3819954f9f423ca65b33db4030ac4053f48f71106b00fb65562",
+      "client_qps": 2999.7,
+      "client_p50_ms": 0.419,
+      "client_p99_ms": 1.473,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "g1_pretouch",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": null,
+        "Old": null
+      },
+      "mode": "BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 4,
+      "gc_pause_max_ms_measured": 36.736,
+      "gc_pause_sum_ms_measured": 141.48,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 49.485,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 5.83203125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 37.562228,
+      "heap_used_max_gib_observed_at_gc_measured": 5.83203125,
+      "process_rss_max_gib_entire_vm": 66.90114212036133,
+      "process_cpu_mean_cores_measured": 6.16206378503655,
+      "process_cpu_max_cores_measured": 9.118464244174293,
+      "process_rss_max_gib_measured": 66.8890380859375,
+      "minor_faults_approx_measured": 17025,
+      "minor_faults_per_s_approx_measured": 1888.3096716947648,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538064409",
+          "start_uptime_ms": "3708",
+          "end_epoch_ms": "1791538074420",
+          "end_uptime_ms": "13719"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538075744",
+          "start_uptime_ms": "15043",
+          "end_epoch_ms": "1791538085755",
+          "end_uptime_ms": "25054"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/g1_pretouch/BATCH-3000-r1",
+      "test_log_sha256": "ab551a92ab398848bae4ad3663abf242fc0d8ee0ceb0a9ea20009705bec3ab6b",
+      "gc_log_sha256": {
+        "gc-1724963.log": "c5f34e960ccff48010e8c2e0c5bdc6bafd422f478f4f073ef9ea80c40ac0e328"
+      },
+      "process_log_sha256": "922318749797857db9bb90a0881026e9517dd99c7a2666e86659e37f6837e11f",
+      "client_qps": 2996.8,
+      "client_p50_ms": 11.1,
+      "client_p99_ms": 35.331,
+      "server_p99": "12ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 29364,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "g1_pretouch",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": null,
+        "Old": null
+      },
+      "mode": "NON_BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 2,
+      "gc_pause_max_ms_measured": 34.46,
+      "gc_pause_sum_ms_measured": 60.818,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 34.46,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 4.01171875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 34.938991,
+      "heap_used_max_gib_observed_at_gc_measured": 4.01171875,
+      "process_rss_max_gib_entire_vm": 65.83447265625,
+      "process_cpu_mean_cores_measured": 2.3522323782865766,
+      "process_cpu_max_cores_measured": 4.43387927984469,
+      "process_rss_max_gib_measured": 65.76725387573242,
+      "minor_faults_approx_measured": 32329,
+      "minor_faults_per_s_approx_measured": 3586.532061238074,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538265529",
+          "start_uptime_ms": "3388",
+          "end_epoch_ms": "1791538275533",
+          "end_uptime_ms": "13393"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538276440",
+          "start_uptime_ms": "14300",
+          "end_epoch_ms": "1791538286441",
+          "end_uptime_ms": "24301"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/g1_pretouch/NON_BATCH-3000-r1",
+      "test_log_sha256": "62a2f57a3a7ffc421b2eae9ac3f0f360a1be1dbec4f51f9ae0b42e9c6bd198f4",
+      "gc_log_sha256": {
+        "gc-1730826.log": "4ee4c86783ebc17fc24331f05303a5806a8af084f700dc2e3e7b38b634e5f5eb"
+      },
+      "process_log_sha256": "0fe16913a57caed1f6527eeee57025f5482d25c36e26c633a7b7767a48bfd548",
+      "client_qps": 2999.7,
+      "client_p50_ms": 0.442,
+      "client_p99_ms": 1.284,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "<1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 28,
+      "gc_pause_max_ms_measured": 0.333,
+      "gc_pause_sum_ms_measured": 2.3499999999999996,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.369,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 64.0,
+      "allocation_stall_events": [
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 74.113,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 97.211,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 90.849,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 99.723,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 99.556,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 73.663,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 57.013,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 86.867,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 81.48,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 80.686,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 98.328,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 76.064,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 73.528,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 96.784,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 94.842,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 71.761,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 94.096,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 70.708,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 70.696,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 95.263,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 69.575,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 67.955,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.649,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.674,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.12,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 60.435,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 82.011,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 62.408,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 58.218,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 59.648,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 98.838,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 59.492,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 87.524,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 88.764,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 58.793,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 87.367,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 85.352,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 86.776,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 85.314,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 99.308,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 85.072,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 84.184,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 84.439,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 84.637,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 83.786,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 83.034,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 82.09,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 98.84,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 82.044,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 97.888,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 78.936,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 79.641,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 79.269,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 80.698,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 77.903,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 77.662,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 78.322,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 77.417,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 77.413,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 76.84,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 76.059,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 77.074,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 75.598,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 97.748,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 75.69,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 89.008,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 89.517,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 97.328,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 73.46,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 72.787,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 72.54,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 72.272,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 72.435,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 71.713,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 96.624,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 72.201,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 71.458,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 70.842,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 69.862,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 71.093,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 69.659,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 70.404,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 93.687,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 70.675,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 75.353,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 69.577,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 69.648,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 69.581,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 69.254,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 68.801,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 93.459,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 67.109,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 93.508,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 68.174,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 92.468,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 67.53,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 73.993,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.507,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.389,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 91.113,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.037,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 64.306,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 90.693,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 61.72,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 82.792,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 88.991,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 74.052,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 73.962,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392227.0,
+          "duration_ms": 66.701,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791538392226.0,
+          "duration_ms": 90.513,
+          "phase": "warmup"
+        }
+      ],
+      "allocation_stall_count_entire_vm": 110,
+      "allocation_stall_max_ms_entire_vm": 99.723,
+      "safepoint_max_ms_measured": 0.548972,
+      "heap_used_max_gib_observed_at_gc_measured": 40.103515625,
+      "process_rss_max_gib_entire_vm": 67.84795761108398,
+      "process_cpu_mean_cores_measured": 29.556042196058144,
+      "process_cpu_max_cores_measured": 33.58376614723922,
+      "process_rss_max_gib_measured": 67.7811393737793,
+      "minor_faults_approx_measured": 517296,
+      "minor_faults_per_s_approx_measured": 57356.24792105555,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791538375588",
+          "start_uptime_ms": "14638",
+          "end_epoch_ms": "1791538394156",
+          "end_uptime_ms": "33206"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791538402881",
+          "start_uptime_ms": "41932",
+          "end_epoch_ms": "1791538412925",
+          "end_uptime_ms": "51975"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc/BATCH-20000-r1",
+      "test_log_sha256": "9846af671debef8e8ea809ce21fb39db8a40d476350543f002b177af9d8183fd",
+      "gc_log_sha256": {
+        "gc-1733379.log": "200cdbccfbbbdfe4752bf1e312f3d57c0e3aee6bcfeac02fff5ae13d7f4728bc"
+      },
+      "process_log_sha256": "4b394243455d650b02534be9d25860156600b764eadf7ca44ca2abbe76dbe8b9",
+      "client_qps": 19913.7,
+      "client_p50_ms": 11.267,
+      "client_p99_ms": 38.094,
+      "server_p99": "28ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 155106,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 0,
+      "gc_pause_max_ms_measured": 0,
+      "gc_pause_sum_ms_measured": 0,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.351,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 12.94921875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.448397,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 16.30028533935547,
+      "process_cpu_mean_cores_measured": 5.018812745183323,
+      "process_cpu_max_cores_measured": 12.325418537600749,
+      "process_rss_max_gib_measured": 15.761222839355469,
+      "minor_faults_approx_measured": 479686,
+      "minor_faults_per_s_approx_measured": 53192.060323796846,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538116426",
+          "start_uptime_ms": "8890",
+          "end_epoch_ms": "1791538126437",
+          "end_uptime_ms": "18901"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538128209",
+          "start_uptime_ms": "20673",
+          "end_epoch_ms": "1791538138220",
+          "end_uptime_ms": "30684"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc/BATCH-3000-r1",
+      "test_log_sha256": "f7b41e8b734dc489d140c1e6f2ddf2831c2175bdf2b76b9231cb9e534f546542",
+      "gc_log_sha256": {
+        "gc-1726431.log": "4e58eff20464901dd506e42baf35bbb08d2d8b20134da787b845ec889f5f9fe2"
+      },
+      "process_log_sha256": "14e2c742c12a75b3b597da1f6b7bc5df3d9be9697f6855313a90200098664141",
+      "client_qps": 2996.7,
+      "client_p50_ms": 11.067,
+      "client_p99_ms": 12.274,
+      "server_p99": "11ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 29686,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "NON_BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 0,
+      "gc_pause_max_ms_measured": 0,
+      "gc_pause_sum_ms_measured": 0,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.346,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 6.515625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.624369,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 7.222858428955078,
+      "process_cpu_mean_cores_measured": 2.1184026024793012,
+      "process_cpu_max_cores_measured": 2.425887741603184,
+      "process_rss_max_gib_measured": 7.041217803955078,
+      "minor_faults_approx_measured": 191846,
+      "minor_faults_per_s_approx_measured": 21280.75429839157,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538315759",
+          "start_uptime_ms": "8371",
+          "end_epoch_ms": "1791538325766",
+          "end_uptime_ms": "18377"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538326764",
+          "start_uptime_ms": "19375",
+          "end_epoch_ms": "1791538336767",
+          "end_uptime_ms": "29378"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc/NON_BATCH-3000-r1",
+      "test_log_sha256": "427313b8ab016bd67a4eed5ebb46ae70ef6694b41dfe5bfd2c45847e0b8bbd92",
+      "gc_log_sha256": {
+        "gc-1732002.log": "9b3cb767d5b936f8bbeea8786a85d8101b5be374b10b61e22e30d5c58ed394ab"
+      },
+      "process_log_sha256": "bb74b0c626cde0c7de71aaf4ba3fe98ad0b3eed63c3ed1babbb3a43f0e3ca94f",
+      "client_qps": 2999.1,
+      "client_p50_ms": 0.49,
+      "client_p99_ms": 1.097,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "<1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 20,
+      "gc_pause_max_ms_measured": 0.295,
+      "gc_pause_sum_ms_measured": 1.3989999999999998,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.821,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 47.810546875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 1.004246,
+      "heap_used_max_gib_observed_at_gc_measured": 47.810546875,
+      "process_rss_max_gib_entire_vm": 68.7065315246582,
+      "process_cpu_mean_cores_measured": 29.715649147517464,
+      "process_cpu_max_cores_measured": 34.02281103520284,
+      "process_rss_max_gib_measured": 68.57373046875,
+      "minor_faults_approx_measured": 439493,
+      "minor_faults_per_s_approx_measured": 48735.08538478598,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791538579507",
+          "start_uptime_ms": "13219",
+          "end_epoch_ms": "1791538589552",
+          "end_uptime_ms": "23264"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791538598248",
+          "start_uptime_ms": "31959",
+          "end_epoch_ms": "1791538608286",
+          "end_uptime_ms": "41997"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_pretouch/BATCH-20000-r1",
+      "test_log_sha256": "dcd3f062c21b993218c091833e8ac4be6318f8728383a0b7289798e3e20de907",
+      "gc_log_sha256": {
+        "gc-1738252.log": "57739d133e9eecd3d0d011c2a873f1e7d9546f5690867ba8a8c882c42f22c7b6"
+      },
+      "process_log_sha256": "062c61d979d589ba913f68ed4e9428028e8064945aaac388840b187a11ea9a61",
+      "client_qps": 19924.8,
+      "client_p50_ms": 11.248,
+      "client_p99_ms": 27.638,
+      "server_p99": "23ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 157221,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 0.262,
+      "gc_pause_sum_ms_measured": 0.455,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.371,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 13.380859375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.352751,
+      "heap_used_max_gib_observed_at_gc_measured": 13.380859375,
+      "process_rss_max_gib_entire_vm": 66.19660186767578,
+      "process_cpu_mean_cores_measured": 5.051012149942346,
+      "process_cpu_max_cores_measured": 15.349215964152704,
+      "process_rss_max_gib_measured": 66.19464874267578,
+      "minor_faults_approx_measured": 120412,
+      "minor_faults_per_s_approx_measured": 13356.849694952856,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538013026",
+          "start_uptime_ms": "8683",
+          "end_epoch_ms": "1791538023038",
+          "end_uptime_ms": "18695"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538024418",
+          "start_uptime_ms": "20074",
+          "end_epoch_ms": "1791538034429",
+          "end_uptime_ms": "30085"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_pretouch/BATCH-3000-r1",
+      "test_log_sha256": "be2b4a73cc5ca7e6ae98342d0c4d989e8d261a49d712f8c0abfb73a6154d8fba",
+      "gc_log_sha256": {
+        "gc-1723532.log": "c28ce6b5b5d7974df76c34da2603b69021c387007cff4d4ea79cbbc94a5978ee"
+      },
+      "process_log_sha256": "1267ce2786255f100ce070044a5cab973d8df5e3c61d5f4d90bd74e907a679ed",
+      "client_qps": 2996.8,
+      "client_p50_ms": 11.072,
+      "client_p99_ms": 11.99,
+      "server_p99": "11ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 29767,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "NON_BATCH",
+      "target_qps": 3000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 0,
+      "gc_pause_max_ms_measured": 0,
+      "gc_pause_sum_ms_measured": 0,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.306,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 6.5625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.472748,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 64.76166915893555,
+      "process_cpu_mean_cores_measured": 2.0081168617331473,
+      "process_cpu_max_cores_measured": 2.115141679063773,
+      "process_rss_max_gib_measured": 64.74995040893555,
+      "minor_faults_approx_measured": 15449,
+      "minor_faults_per_s_approx_measured": 1713.3192857935012,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664349976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538215686",
+          "start_uptime_ms": "8810",
+          "end_epoch_ms": "1791538225692",
+          "end_uptime_ms": "18816"
+        },
+        {
+          "first_request_id": "1152921505367146976",
+          "requests": "30000",
+          "target_qps": "3000",
+          "start_epoch_ms": "1791538226580",
+          "start_uptime_ms": "19703",
+          "end_epoch_ms": "1791538236583",
+          "end_uptime_ms": "29706"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_pretouch/NON_BATCH-3000-r1",
+      "test_log_sha256": "2b75d7efec8c077d5310bc3565ab995539ea72fc3a8c914231f3ae1ad60065da",
+      "gc_log_sha256": {
+        "gc-1729485.log": "0bb7d065050eaceb3911a653b4e6fc09d1dfcb19210c34fa2c63aad8edd769c6"
+      },
+      "process_log_sha256": "a7cde351bfbb9363484ddc269f8a39befed2271ee19524a6688fa2d035a45174",
+      "client_qps": 2999.2,
+      "client_p50_ms": 0.459,
+      "client_p99_ms": 0.929,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch_soft48",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 21,
+      "gc_pause_max_ms_measured": 0.316,
+      "gc_pause_sum_ms_measured": 2.021,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.368,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 39.017578125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.535575,
+      "heap_used_max_gib_observed_at_gc_measured": 39.017578125,
+      "process_rss_max_gib_entire_vm": 68.7435417175293,
+      "process_cpu_mean_cores_measured": 27.898031434412694,
+      "process_cpu_max_cores_measured": 31.65703017169893,
+      "process_rss_max_gib_measured": 68.6126823425293,
+      "minor_faults_approx_measured": 444552,
+      "minor_faults_per_s_approx_measured": 49296.0745176314,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791538452737",
+          "start_uptime_ms": "13532",
+          "end_epoch_ms": "1791538462786",
+          "end_uptime_ms": "23581"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791538471340",
+          "start_uptime_ms": "32135",
+          "end_epoch_ms": "1791538481378",
+          "end_uptime_ms": "42173"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_pretouch_soft48/BATCH-20000-r1",
+      "test_log_sha256": "c8901e71004b0d8ff3f02fe31ad24036676f8f474f6e3baeb99a322fe6616ae9",
+      "gc_log_sha256": {
+        "gc-1734962.log": "da359df7310729312e82891570aa6a9d17c0acf02d11fd62b5e9247940d9919e"
+      },
+      "process_log_sha256": "9eac98e1456711cc64000f9bf96db869b02dfcc86675724ba42ba15a1b1c86e3",
+      "client_qps": 19925.4,
+      "client_p50_ms": 11.204,
+      "client_p99_ms": 22.658,
+      "server_p99": "19ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 156799,
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch_threads128",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 128,
+        "Old": 128
+      },
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 3,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 0.41,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 35.580078125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 68.23577880859375,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_pretouch_threads128/BATCH-20000-r1",
+      "test_log_sha256": "eefe5a375dfdcb6c47098fdd03b1e2e4f66ad343c6c9584b07bdf3b78ba42594",
+      "gc_log_sha256": {
+        "gc-1741677.log": "b7b29e35ffbfc8fab98d7077292dae8c496e8467ce07c671cbcea14562ed10f8"
+      },
+      "process_log_sha256": "a97e429b4949c27f75106d3f7aa1b4ac0e7f501b9b69d0e20ae3f6ac398f329d",
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": false,
+      "failure_classification": "grpc_executor_rejection_during_warmup"
+    },
+    {
+      "profile": "zgc_soft48",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 64,
+        "Old": 64
+      },
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 63,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 0.35,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 30.1953125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 34.12527847290039,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_soft48/BATCH-20000-r1",
+      "test_log_sha256": "ff625aced7f62a14b8e8669f1682a041a164fc0837f60a02fc8ab9b4b4fb405f",
+      "gc_log_sha256": {
+        "gc-1739881.log": "bc0f9c5dd5efaebeac92fc37c1a478e0d7e40db8d1e1175262c1e2b369b7c836"
+      },
+      "process_log_sha256": "3443f4ed8ed1aafdaa87f138ab33e08d20f6c80c73cb69cc431af1005cb73afb",
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": false,
+      "failure_classification": "grpc_executor_rejection_during_warmup"
+    },
+    {
+      "profile": "zgc_threads128",
+      "zgc_workers_max_observed_entire_vm": {
+        "Young": 128,
+        "Old": 128
+      },
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 6,
+        "rst_stream_mentions": 2,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 0.426,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 59.423828125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 62.87752151489258,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009/evidence/zgc_threads128/BATCH-20000-r1",
+      "test_log_sha256": "0dbef25a69dafa9fef753e41b5634f64c8b8ab487214da0db8fc8882ca0ae431",
+      "gc_log_sha256": {
+        "gc-1736482.log": "e1eb8bad1018559af06c461248dc9eb026a2a0e9bc7fb60d980adfa278161c2f"
+      },
+      "process_log_sha256": "29a38928cfa001a5130e8af8de0d3c6feae139e5702ed93dd1a05871f42c2782",
+      "experiment": "flexlb-gc-tuning-20261009",
+      "slo_pass": false,
+      "failure_classification": "grpc_executor_rejection_during_warmup"
+    }
+  ],
+  "previous_matrix_cases_with_memory": [
+    {
+      "profile": "g1",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 232.006 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 7,
+      "gc_pause_max_ms_measured": 269.582,
+      "gc_pause_sum_ms_measured": 831.8929999999999,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 269.582,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 22.9609375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 270.660482,
+      "heap_used_max_gib_observed_at_gc_measured": 22.9609375,
+      "process_rss_max_gib_entire_vm": 28.768795013427734,
+      "process_cpu_mean_cores_measured": 25.735984753691184,
+      "process_cpu_max_cores_measured": 57.64592596399755,
+      "process_rss_max_gib_measured": 28.766708374023438,
+      "minor_faults_approx_measured": 1367914,
+      "minor_faults_per_s_approx_measured": 151720.71872227153,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535451749",
+          "start_uptime_ms": "5123",
+          "end_epoch_ms": "1791535461764",
+          "end_uptime_ms": "15138"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535465853",
+          "start_uptime_ms": "19227",
+          "end_epoch_ms": "1791535475898",
+          "end_uptime_ms": "29272"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/BATCH-10000-r1",
+      "test_log_sha256": "8885daf27784245aeb083cacd0ed47a61ddfe416fc847cca50ff52a3fa66564d",
+      "gc_log_sha256": {
+        "gc-1676788.log": "e67104003a6f57094a247d2ed98cf5400b5e0934bc1b8d48ef3df3b7cd823294"
+      },
+      "process_log_sha256": "a5e5273671a489343a50a4bd06bafb1e72dd5f7d756c908460693ed86cb0220a",
+      "client_qps": 9955.4,
+      "client_p50_ms": 11.036,
+      "client_p99_ms": 232.006,
+      "server_p99": "26ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 80949,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 2,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 64.958 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 9,
+      "gc_pause_max_ms_measured": 72.468,
+      "gc_pause_sum_ms_measured": 423.446,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 76.174,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 25.6123046875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 73.571329,
+      "heap_used_max_gib_observed_at_gc_measured": 25.6123046875,
+      "process_rss_max_gib_entire_vm": 34.56156921386719,
+      "process_cpu_mean_cores_measured": 18.832773445736237,
+      "process_cpu_max_cores_measured": 23.864150328725156,
+      "process_rss_max_gib_measured": 34.56156921386719,
+      "minor_faults_approx_measured": 82011,
+      "minor_faults_per_s_approx_measured": 9093.136711387071,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791537121244",
+          "start_uptime_ms": "5175",
+          "end_epoch_ms": "1791537131255",
+          "end_uptime_ms": "15186"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791537135313",
+          "start_uptime_ms": "19245",
+          "end_epoch_ms": "1791537145325",
+          "end_uptime_ms": "29256"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/BATCH-10000-r2",
+      "test_log_sha256": "aaf92100d28788e7d8562031defca034f6c1d47669ee77166ec51a907bd5ec04",
+      "gc_log_sha256": {
+        "gc-1718691.log": "6c5d0efdd13b5b4d29a101b70e8227ebee614143ceefbcfdcd715beea26f5db6"
+      },
+      "process_log_sha256": "2382701b48171b5f3d7efd19fbf3071782b5097fb0f58a8b45a6e5a4fe22fc76",
+      "client_qps": 9989.0,
+      "client_p50_ms": 11.041,
+      "client_p99_ms": 64.958,
+      "server_p99": "30ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 86542,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1",
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 641.834 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 11,
+      "gc_pause_max_ms_measured": 581.058,
+      "gc_pause_sum_ms_measured": 1874.335,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 581.058,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 34.5888671875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 582.654242,
+      "heap_used_max_gib_observed_at_gc_measured": 34.5888671875,
+      "process_rss_max_gib_entire_vm": 40.47280502319336,
+      "process_cpu_mean_cores_measured": 57.10192847938694,
+      "process_cpu_max_cores_measured": 97.21035543401037,
+      "process_rss_max_gib_measured": 40.45522689819336,
+      "minor_faults_approx_measured": 1835864,
+      "minor_faults_per_s_approx_measured": 203577.73342204478,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536096182",
+          "start_uptime_ms": "8313",
+          "end_epoch_ms": "1791536106821",
+          "end_uptime_ms": "18952"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536115359",
+          "start_uptime_ms": "27490",
+          "end_epoch_ms": "1791536125371",
+          "end_uptime_ms": "37502"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/BATCH-20000-r1",
+      "test_log_sha256": "ee1e5e388fc710203d0f9015313628fef04dd9b64798c3e7ab48b514736ce6e9",
+      "gc_log_sha256": {
+        "gc-1693783.log": "8ca5b5f1c4348ea51e51696a79318c6e72c93c0d5f6b8e80bfbdf0e36e84f3a4"
+      },
+      "process_log_sha256": "7a41c1d8f3da66495d2d9ac3b6e18d031be05759038b7e8decf0307cb199384f",
+      "client_qps": 19977.5,
+      "client_p50_ms": 11.308,
+      "client_p99_ms": 641.834,
+      "server_p99": "300ms",
+      "delivery_wait_p99": "141ms",
+      "terminal_without_ack_count": 96938,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1",
+      "mode": "BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 2,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 370.131,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 47.6103515625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 52.685386657714844,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/BATCH-40000-r1",
+      "test_log_sha256": "0556de29d8b1d37de1a99c4621a53e08c59b6c3d4be8ff635849a88bd7e4cd37",
+      "gc_log_sha256": {
+        "gc-1700845.log": "5f10eef9738d11c756818f78bbd69b7c752fba093e3904554d2defc8fbd297e1"
+      },
+      "process_log_sha256": "ffb5a9a322a97c85b5f207b971e094365bc2a7ad5d9f316be1897453f4c1df8c",
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1",
+      "mode": "NON_BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 41.144,
+      "gc_pause_sum_ms_measured": 171.21,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 65.813,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 7.8896484375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 41.784702,
+      "heap_used_max_gib_observed_at_gc_measured": 7.8896484375,
+      "process_rss_max_gib_entire_vm": 10.310348510742188,
+      "process_cpu_mean_cores_measured": 8.571831819240606,
+      "process_cpu_max_cores_measured": 12.14747059494065,
+      "process_rss_max_gib_measured": 10.310348510742188,
+      "minor_faults_approx_measured": 15192,
+      "minor_faults_per_s_approx_measured": 1685.0044365572317,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535674503",
+          "start_uptime_ms": "4958",
+          "end_epoch_ms": "1791535684513",
+          "end_uptime_ms": "14968"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535687305",
+          "start_uptime_ms": "17760",
+          "end_epoch_ms": "1791535697311",
+          "end_uptime_ms": "27766"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/NON_BATCH-10000-r1",
+      "test_log_sha256": "71365138dc3c877cc61293dfe4e6ff53e832c00ff3aa3e71d628c6264b81fbc5",
+      "gc_log_sha256": {
+        "gc-1683254.log": "75115ea703eac11559b10be2d281229648318687d49733edd1b7689787be1c12"
+      },
+      "process_log_sha256": "ed1a50be9afea00b1706b184110f88a5cca7f1820504fa13da44003e8239d7ae",
+      "client_qps": 9994.1,
+      "client_p50_ms": 0.406,
+      "client_p99_ms": 27.327,
+      "server_p99": "3ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "g1",
+      "mode": "NON_BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 695.348 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 290.002,
+      "gc_pause_sum_ms_measured": 524.918,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 290.002,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 32.2880859375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 291.24442,
+      "heap_used_max_gib_observed_at_gc_measured": 32.2880859375,
+      "process_rss_max_gib_entire_vm": 40.88326644897461,
+      "process_cpu_mean_cores_measured": 25.181454134642646,
+      "process_cpu_max_cores_measured": 143.71980571874806,
+      "process_rss_max_gib_measured": 40.88131332397461,
+      "minor_faults_approx_measured": 1387669,
+      "minor_faults_per_s_approx_measured": 153911.8234250222,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536337413",
+          "start_uptime_ms": "7538",
+          "end_epoch_ms": "1791536347439",
+          "end_uptime_ms": "17564"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536355910",
+          "start_uptime_ms": "26036",
+          "end_epoch_ms": "1791536365923",
+          "end_uptime_ms": "36048"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/NON_BATCH-20000-r1",
+      "test_log_sha256": "0177eab00154e2c63e51554f88f9557c31d1ee5f8b0c249312558501858f2265",
+      "gc_log_sha256": {
+        "gc-1699566.log": "5558112a14834741d2bae2001ee0c5f1f4922ce45a00f86fb8b846c20164fd77"
+      },
+      "process_log_sha256": "b448e4031f584d1ff004cdf5c430ee1454dc399950bb383b106a8a1872d70f45",
+      "client_qps": 19975.9,
+      "client_p50_ms": 0.441,
+      "client_p99_ms": 695.348,
+      "server_p99": "290ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1",
+      "mode": "NON_BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:681 client throughput 39110.8 QPS missed 98% of target 40000 QPS ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 6,
+      "gc_pause_max_ms_measured": 145.49,
+      "gc_pause_sum_ms_measured": 383.621,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 299.211,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 59.158203125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 145.944457,
+      "heap_used_max_gib_observed_at_gc_measured": 59.158203125,
+      "process_rss_max_gib_entire_vm": 60.75419998168945,
+      "process_cpu_mean_cores_measured": 27.724165227193872,
+      "process_cpu_max_cores_measured": 56.80075793377986,
+      "process_rss_max_gib_measured": 60.75419998168945,
+      "minor_faults_approx_measured": 4598600,
+      "minor_faults_per_s_approx_measured": 458896.31773276115,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664386976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536663070",
+          "start_uptime_ms": "12919",
+          "end_epoch_ms": "1791536675022",
+          "end_uptime_ms": "24870"
+        },
+        {
+          "first_request_id": "1152921505370846976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536686072",
+          "start_uptime_ms": "35920",
+          "end_epoch_ms": "1791536696299",
+          "end_uptime_ms": "46147"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1/NON_BATCH-40000-r1",
+      "test_log_sha256": "cc29dde6eeae73adcd8c0579fd37c448a4c2e22146d00823e449a83ca70caa85",
+      "gc_log_sha256": {
+        "gc-1707995.log": "2107ec5072559b68876a60e53972f218a9c216049ef6097febb9bb234bb8a935"
+      },
+      "process_log_sha256": "f6db6905e58f1cc0553de7cc05df5043467a8fe5dca0fbe58b7cb61a89df2548",
+      "client_qps": 39110.8,
+      "client_p50_ms": 28.367,
+      "client_p99_ms": 869.836,
+      "server_p99": "622ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:681 client throughput 9502.6 QPS missed 98% of target 10000 QPS ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 583.794,
+      "gc_pause_sum_ms_measured": 790.671,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 583.794,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 31.8427734375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 584.742112,
+      "heap_used_max_gib_observed_at_gc_measured": 31.8427734375,
+      "process_rss_max_gib_entire_vm": 67.1444320678711,
+      "process_cpu_mean_cores_measured": 24.321794323312325,
+      "process_cpu_max_cores_measured": 105.00153923577872,
+      "process_rss_max_gib_measured": 67.1444320678711,
+      "minor_faults_approx_measured": 1890614,
+      "minor_faults_per_s_approx_measured": 188684.03193612775,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535562029",
+          "start_uptime_ms": "5856",
+          "end_epoch_ms": "1791535572041",
+          "end_uptime_ms": "15868"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535576408",
+          "start_uptime_ms": "20235",
+          "end_epoch_ms": "1791535586932",
+          "end_uptime_ms": "30758"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/BATCH-10000-r1",
+      "test_log_sha256": "55ea5e57037b21cfd1615e50a64301b965285fa2a3dab127945fa3327b3e28fe",
+      "gc_log_sha256": {
+        "gc-1680104.log": "91cbb13215fc740b6a72a5e8c86fc0aa8995daf1a0e7d48eaa345daeaff8b14e"
+      },
+      "process_log_sha256": "39407fdef5206ebcbbac90618ccd8879d5661149082dff63f02846a4307116f5",
+      "client_qps": 9502.6,
+      "client_p50_ms": 11.094,
+      "client_p99_ms": 523.503,
+      "server_p99": "20ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 86731,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 2,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 152.501 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 13,
+      "gc_pause_max_ms_measured": 115.38,
+      "gc_pause_sum_ms_measured": 590.934,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 115.38,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 42.3916015625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 116.078742,
+      "heap_used_max_gib_observed_at_gc_measured": 42.3916015625,
+      "process_rss_max_gib_entire_vm": 66.99966049194336,
+      "process_cpu_mean_cores_measured": 20.314933958773114,
+      "process_cpu_max_cores_measured": 48.29394875514141,
+      "process_rss_max_gib_measured": 66.99575424194336,
+      "minor_faults_approx_measured": 39165,
+      "minor_faults_per_s_approx_measured": 4342.980705256154,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791537011288",
+          "start_uptime_ms": "5678",
+          "end_epoch_ms": "1791537021301",
+          "end_uptime_ms": "15692"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791537025465",
+          "start_uptime_ms": "19856",
+          "end_epoch_ms": "1791537035477",
+          "end_uptime_ms": "29867"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/BATCH-10000-r2",
+      "test_log_sha256": "1ec115b1f97f4076d961d437753e6659c7b98ffd9adb4b32952ba1715ebc4fb5",
+      "gc_log_sha256": {
+        "gc-1715177.log": "3c22dc0acd3ded8736834dd6b27a358b1e0f899206b0e9a576cf3bdf5d6ef358"
+      },
+      "process_log_sha256": "ae5ef68a03d0481010b3d7a828f0885b0d27d35e9b73d68a254362067344e9d5",
+      "client_qps": 9988.9,
+      "client_p50_ms": 11.05,
+      "client_p99_ms": 152.501,
+      "server_p99": "37ms",
+      "delivery_wait_p99": "31ms",
+      "terminal_without_ack_count": 86067,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 185.875 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 7,
+      "gc_pause_max_ms_measured": 168.287,
+      "gc_pause_sum_ms_measured": 672.5250000000001,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 168.287,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 58.865234375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 169.272441,
+      "heap_used_max_gib_observed_at_gc_measured": 58.865234375,
+      "process_rss_max_gib_entire_vm": 67.27685165405273,
+      "process_cpu_mean_cores_measured": 39.270471453958265,
+      "process_cpu_max_cores_measured": 70.84733792295465,
+      "process_rss_max_gib_measured": 67.25413513183594,
+      "minor_faults_approx_measured": 1558909,
+      "minor_faults_per_s_approx_measured": 172847.21144251025,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791535969481",
+          "start_uptime_ms": "8559",
+          "end_epoch_ms": "1791535979501",
+          "end_uptime_ms": "18578"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791535987847",
+          "start_uptime_ms": "26925",
+          "end_epoch_ms": "1791535997858",
+          "end_uptime_ms": "36936"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/BATCH-20000-r1",
+      "test_log_sha256": "86a920fc50b9cf6f418669cd85e85e85e03ccc0636023f3372cc9c77ba52516b",
+      "gc_log_sha256": {
+        "gc-1690357.log": "110685cf7cd39c66ffc8042adf9271280fbf7e0fdecbdea9e8f86c4ca4e4e689"
+      },
+      "process_log_sha256": "199ea3bfbf08d998f022c6aedcb189b4c6f8f1042b6dc9bbab9820679bcd8e84",
+      "client_qps": 19977.8,
+      "client_p50_ms": 11.187,
+      "client_p99_ms": 185.875,
+      "server_p99": "71ms",
+      "delivery_wait_p99": "12ms",
+      "terminal_without_ack_count": 125087,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 2,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 130.61,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 57.0341796875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 67.40606307983398,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/BATCH-40000-r1",
+      "test_log_sha256": "b938f896dd82ad0f17ad7f4f7166032e446a0166d6ccfa4df0c937d2b7742527",
+      "gc_log_sha256": {
+        "gc-1704325.log": "0de1203ef6596e91f8eff6eaffe9c98efac7d09422b51c73f021574d5bce899d"
+      },
+      "process_log_sha256": "ef389f240f89adc5e1e43e8ae4a03370ca70fb9c1add3ae0ff70b745e0c67db8",
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "NON_BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 0,
+      "gc_pause_max_ms_measured": 0,
+      "gc_pause_sum_ms_measured": 0,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 80.059,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 21.9091796875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.578065,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 65.98962783813477,
+      "process_cpu_mean_cores_measured": 6.651749534752028,
+      "process_cpu_max_cores_measured": 8.095057845630437,
+      "process_rss_max_gib_measured": 65.98767471313477,
+      "minor_faults_approx_measured": 11510,
+      "minor_faults_per_s_approx_measured": 1276.7609539656128,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535779588",
+          "start_uptime_ms": "5541",
+          "end_epoch_ms": "1791535789599",
+          "end_uptime_ms": "15552"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535792671",
+          "start_uptime_ms": "18624",
+          "end_epoch_ms": "1791535802679",
+          "end_uptime_ms": "28632"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/NON_BATCH-10000-r1",
+      "test_log_sha256": "ae734c6f8454272543f4ed285804dad5c5f9ce37d188256f3fd3a8320c564b0c",
+      "gc_log_sha256": {
+        "gc-1685889.log": "3f3a3d97d58e37419bf8e1c4e270561b2adc1b1d3760e2e421bce2b08f92dddd"
+      },
+      "process_log_sha256": "db2cc3b5cb75c3024b7a9dee427ede9a2fd1be596d721bf4f694fc02867caea6",
+      "client_qps": 9991.7,
+      "client_p50_ms": 0.451,
+      "client_p99_ms": 2.19,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "NON_BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 9,
+      "gc_pause_max_ms_measured": 43.774,
+      "gc_pause_sum_ms_measured": 359.36199999999997,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 43.774,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 16.4775390625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 45.5103,
+      "heap_used_max_gib_observed_at_gc_measured": 15.4951171875,
+      "process_rss_max_gib_entire_vm": 65.97932052612305,
+      "process_cpu_mean_cores_measured": 16.33235944179204,
+      "process_cpu_max_cores_measured": 17.923236743991943,
+      "process_rss_max_gib_measured": 65.97335815429688,
+      "minor_faults_approx_measured": 9078,
+      "minor_faults_per_s_approx_measured": 1007.1000665631241,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536218642",
+          "start_uptime_ms": "8420",
+          "end_epoch_ms": "1791536228660",
+          "end_uptime_ms": "18437"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536234420",
+          "start_uptime_ms": "24197",
+          "end_epoch_ms": "1791536244435",
+          "end_uptime_ms": "34212"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/NON_BATCH-20000-r1",
+      "test_log_sha256": "a9345237754343e334becc601160708f9abdd47f292cf844b48469f4b2abd85e",
+      "gc_log_sha256": {
+        "gc-1696797.log": "cae8c87241bbb16b06f04bd7cee0ba72602f8a116c76ef22fb0461a8527e46aa"
+      },
+      "process_log_sha256": "e4b85d13d9940ecd50f4c3b1dbda3a027390bf4f4aee3705cfc3ceee1e4b0d03",
+      "client_qps": 19970.2,
+      "client_p50_ms": 0.459,
+      "client_p99_ms": 38.38,
+      "server_p99": "12ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "g1_pretouch",
+      "mode": "NON_BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:681 client throughput 39034.3 QPS missed 98% of target 40000 QPS ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 41.385,
+      "gc_pause_sum_ms_measured": 179.452,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 64.978,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 58.8203125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 42.137927,
+      "heap_used_max_gib_observed_at_gc_measured": 58.8203125,
+      "process_rss_max_gib_entire_vm": 66.18485260009766,
+      "process_cpu_mean_cores_measured": 68.93075097116375,
+      "process_cpu_max_cores_measured": 83.20970426049897,
+      "process_rss_max_gib_measured": 66.14381790161133,
+      "minor_faults_approx_measured": 196641,
+      "minor_faults_per_s_approx_measured": 21805.389221556885,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664386976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536806622",
+          "start_uptime_ms": "14017",
+          "end_epoch_ms": "1791536821829",
+          "end_uptime_ms": "29225"
+        },
+        {
+          "first_request_id": "1152921505370846976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536833111",
+          "start_uptime_ms": "40506",
+          "end_epoch_ms": "1791536843359",
+          "end_uptime_ms": "50754"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/g1_pretouch/NON_BATCH-40000-r1",
+      "test_log_sha256": "c5d0e41e8997776396c4c41ff39c46d0501a7ac040a1020f8b922e371b28fd8e",
+      "gc_log_sha256": {
+        "gc-1710708.log": "a08e27926dd7edaca50159794c61edf72f5521db80d08eea558b06e985944a88"
+      },
+      "process_log_sha256": "dea994ce33e1f4c1aa1d143b3b4f65c99a4380f631d57cc31d35232642d0abba",
+      "client_qps": 39034.3,
+      "client_p50_ms": 0.742,
+      "client_p99_ms": 308.086,
+      "server_p99": "307ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 121.416 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 8,
+      "gc_pause_max_ms_measured": 0.301,
+      "gc_pause_sum_ms_measured": 0.6930000000000001,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.349,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 36.939453125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 2.033116,
+      "heap_used_max_gib_observed_at_gc_measured": 36.939453125,
+      "process_rss_max_gib_entire_vm": 39.99305725097656,
+      "process_cpu_mean_cores_measured": 25.792261921582178,
+      "process_cpu_max_cores_measured": 52.2210132367295,
+      "process_rss_max_gib_measured": 39.96572494506836,
+      "minor_faults_approx_measured": 4134651,
+      "minor_faults_per_s_approx_measured": 458590.3948535936,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535620878",
+          "start_uptime_ms": "11233",
+          "end_epoch_ms": "1791535630894",
+          "end_uptime_ms": "21249"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535635183",
+          "start_uptime_ms": "25539",
+          "end_epoch_ms": "1791535645195",
+          "end_uptime_ms": "35551"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/BATCH-10000-r1",
+      "test_log_sha256": "9465a9220ede153f82675b4532ade6ef1fa2d1bc7760b280662135a734b47b39",
+      "gc_log_sha256": {
+        "gc-1681633.log": "db4ed9f3f592bad19b25056f31aff8127d61dfec65a0dee0cfbea2fc949b3913"
+      },
+      "process_log_sha256": "9c83cb89faf20bc703fcb1948f861cd7ed0577ed185b1fab3296cf6fd506e314",
+      "client_qps": 9988.7,
+      "client_p50_ms": 11.222,
+      "client_p99_ms": 121.416,
+      "server_p99": "53ms",
+      "delivery_wait_p99": "14ms",
+      "terminal_without_ack_count": 65303,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 2,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 119.054 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 10,
+      "gc_pause_max_ms_measured": 0.318,
+      "gc_pause_sum_ms_measured": 1.276,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.33,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 39.646484375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.793322,
+      "heap_used_max_gib_observed_at_gc_measured": 39.646484375,
+      "process_rss_max_gib_entire_vm": 42.56055450439453,
+      "process_cpu_mean_cores_measured": 20.56097898818605,
+      "process_cpu_max_cores_measured": 49.782460037092015,
+      "process_rss_max_gib_measured": 42.56055450439453,
+      "minor_faults_approx_measured": 4792456,
+      "minor_faults_per_s_approx_measured": 530961.2231331709,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791536956165",
+          "start_uptime_ms": "11529",
+          "end_epoch_ms": "1791536966201",
+          "end_uptime_ms": "21565"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791536970548",
+          "start_uptime_ms": "25912",
+          "end_epoch_ms": "1791536980572",
+          "end_uptime_ms": "35936"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/BATCH-10000-r2",
+      "test_log_sha256": "1eedc6f91a6e75db700ce3d146a8f77338d47be2901c9d3d4bf150d2ce87945d",
+      "gc_log_sha256": {
+        "gc-1713434.log": "aa5fa5f289412bb4cb8eff02ed7522c0c54b68c068b3ca5306cf112d5a33488e"
+      },
+      "process_log_sha256": "4044cc0ffeb9ffee398f4e7bd8dc03cf0cc743045b9f961d631264fb41aaa34b",
+      "client_qps": 9977.0,
+      "client_p50_ms": 11.203,
+      "client_p99_ms": 119.054,
+      "server_p99": "44ms",
+      "delivery_wait_p99": "12ms",
+      "terminal_without_ack_count": 77064,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc",
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 53.641 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 21,
+      "gc_pause_max_ms_measured": 0.711,
+      "gc_pause_sum_ms_measured": 2.0829999999999997,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.711,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 64.0,
+      "allocation_stall_events": [
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 384.358,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 392.072,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 383.928,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 388.905,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.937,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.47,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.526,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 386.205,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 391.995,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 391.344,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 391.541,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 390.986,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 390.716,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 390.343,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 390.239,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 390.194,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 389.842,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 389.594,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 391.2,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 391.924,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 391.197,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 389.322,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 388.442,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 381.405,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 388.293,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.941,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 389.009,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 388.332,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.85,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 388.119,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 392.453,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.575,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 378.758,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.182,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.69,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 385.83,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.335,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.197,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 392.217,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 383.051,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 384.981,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 386.174,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 387.242,
+          "phase": "warmup"
+        },
+        {
+          "epoch_ms": 1791535915110.0,
+          "duration_ms": 389.454,
+          "phase": "warmup"
+        }
+      ],
+      "allocation_stall_count_entire_vm": 44,
+      "allocation_stall_max_ms_entire_vm": 392.453,
+      "safepoint_max_ms_measured": 0.891821,
+      "heap_used_max_gib_observed_at_gc_measured": 41.9375,
+      "process_rss_max_gib_entire_vm": 67.8145637512207,
+      "process_cpu_mean_cores_measured": 27.772125748074394,
+      "process_cpu_max_cores_measured": 32.49845756354362,
+      "process_rss_max_gib_measured": 67.56319808959961,
+      "minor_faults_approx_measured": 645996,
+      "minor_faults_per_s_approx_measured": 71626.12263000333,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791535897293",
+          "start_uptime_ms": "14356",
+          "end_epoch_ms": "1791535916900",
+          "end_uptime_ms": "33962"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791535925271",
+          "start_uptime_ms": "42333",
+          "end_epoch_ms": "1791535935306",
+          "end_uptime_ms": "52368"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/BATCH-20000-r1",
+      "test_log_sha256": "47d88f7a70b1f748b2a654ce9274cb791125858990e446b2d49934a15c87a8cb",
+      "gc_log_sha256": {
+        "gc-1688773.log": "f177721394ff099dbffb96e84b85e912dfc5ef5cabb8151afc0282cbe2cd864d"
+      },
+      "process_log_sha256": "c25271b2746669abd6c0732f1d38563d39f939b5de7a222b68afbf24d23c1a8d",
+      "client_qps": 19931.8,
+      "client_p50_ms": 11.165,
+      "client_p99_ms": 53.641,
+      "server_p99": "37ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 150819,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc",
+      "mode": "BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 1762,
+        "rst_stream_mentions": 2,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 0.396,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 63.236328125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 69.4582748413086,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/BATCH-40000-r1",
+      "test_log_sha256": "6e1bdf0d033a0c5470b6adb42274e465c60ffa58dd6ef29d7f55de0ba3ae1c01",
+      "gc_log_sha256": {
+        "gc-1705983.log": "11af52467150cf89651078fce7e3e3e848278c0d94e7b1d22b38f237e3d9c7a1"
+      },
+      "process_log_sha256": "03a551cec36841611ac09e4f2131dce05fd7daa6db87121c2ba3c1bfd1d57d75",
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc",
+      "mode": "NON_BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 0.248,
+      "gc_pause_sum_ms_measured": 0.5650000000000001,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.308,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 19.732421875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.551305,
+      "heap_used_max_gib_observed_at_gc_measured": 19.732421875,
+      "process_rss_max_gib_entire_vm": 20.589481353759766,
+      "process_cpu_mean_cores_measured": 7.8843812530659,
+      "process_cpu_max_cores_measured": 22.004927532987562,
+      "process_rss_max_gib_measured": 20.556278228759766,
+      "minor_faults_approx_measured": 1767534,
+      "minor_faults_per_s_approx_measured": 196065.89018302827,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535836034",
+          "start_uptime_ms": "11318",
+          "end_epoch_ms": "1791535846055",
+          "end_uptime_ms": "21339"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535848802",
+          "start_uptime_ms": "24086",
+          "end_epoch_ms": "1791535858823",
+          "end_uptime_ms": "34107"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/NON_BATCH-10000-r1",
+      "test_log_sha256": "67e11cf3628058e9e770893a33482583b4a742dd83e7f469792ed6d2ef154e49",
+      "gc_log_sha256": {
+        "gc-1687331.log": "fe6b3b8fc7a0b3105ee0390a96c65f7b556d0ce9a8fa96eca9a58f1da2d61a17"
+      },
+      "process_log_sha256": "d27647e866c82396a3b362ffc9bb56c119bce45ea6819185a2dba1a5be1d2e1a",
+      "client_qps": 9980.0,
+      "client_p50_ms": 0.423,
+      "client_p99_ms": 1.135,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc",
+      "mode": "NON_BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 8,
+      "gc_pause_max_ms_measured": 0.29,
+      "gc_pause_sum_ms_measured": 0.744,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.357,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 21.662109375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.901625,
+      "heap_used_max_gib_observed_at_gc_measured": 21.662109375,
+      "process_rss_max_gib_entire_vm": 23.333248138427734,
+      "process_cpu_mean_cores_measured": 12.733519096137,
+      "process_cpu_max_cores_measured": 16.763330092023832,
+      "process_rss_max_gib_measured": 23.309810638427734,
+      "minor_faults_approx_measured": 573467,
+      "minor_faults_per_s_approx_measured": 63612.53466444814,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536161689",
+          "start_uptime_ms": "14074",
+          "end_epoch_ms": "1791536171724",
+          "end_uptime_ms": "24109"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536177052",
+          "start_uptime_ms": "29437",
+          "end_epoch_ms": "1791536187085",
+          "end_uptime_ms": "39470"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/NON_BATCH-20000-r1",
+      "test_log_sha256": "b1715a0d6babf29155731d42f663a1c67025693785da1e5fcee8747cb577fadc",
+      "gc_log_sha256": {
+        "gc-1695444.log": "137c8cbdce387c3df81122fef438ae2a0e495b1a33788c415cbb762c9697b2d3"
+      },
+      "process_log_sha256": "921ca92b90ffa70a896bdbca42edc41eb28003a7dccb41113356d744f46b5c87",
+      "client_qps": 19935.3,
+      "client_p50_ms": 0.464,
+      "client_p99_ms": 16.557,
+      "server_p99": "11ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc",
+      "mode": "NON_BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:681 client throughput 38908.2 QPS missed 98% of target 40000 QPS ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 11,
+      "gc_pause_max_ms_measured": 0.297,
+      "gc_pause_sum_ms_measured": 0.809,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.432,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 49.0546875,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.543517,
+      "heap_used_max_gib_observed_at_gc_measured": 49.0546875,
+      "process_rss_max_gib_entire_vm": 52.467994689941406,
+      "process_cpu_mean_cores_measured": 26.445673431475388,
+      "process_cpu_max_cores_measured": 34.46104183099567,
+      "process_rss_max_gib_measured": 52.400970458984375,
+      "minor_faults_approx_measured": 3456443,
+      "minor_faults_per_s_approx_measured": 345057.70190675854,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664386976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536886434",
+          "start_uptime_ms": "21235",
+          "end_epoch_ms": "1791536898366",
+          "end_uptime_ms": "33166"
+        },
+        {
+          "first_request_id": "1152921505370846976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536909485",
+          "start_uptime_ms": "44286",
+          "end_epoch_ms": "1791536919766",
+          "end_uptime_ms": "54567"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc/NON_BATCH-40000-r1",
+      "test_log_sha256": "447efec8e22457a4e4304468c2d7c96243a05486a5ee84ac7d02ea4fc82e5a02",
+      "gc_log_sha256": {
+        "gc-1712115.log": "0c101e6bb05f1dec3c9e7e6a4e98c27bc0f1b7f7a0bd8790ce2d958a31ee1c78"
+      },
+      "process_log_sha256": "52c0558269040485dd2101cd4d453631a9417fcd6a0c110727fa740d74c29db5",
+      "client_qps": 38908.2,
+      "client_p50_ms": 167.389,
+      "client_p99_ms": 762.21,
+      "server_p99": "645ms",
+      "delivery_wait_p99": "7ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 6,
+      "gc_pause_max_ms_measured": 0.301,
+      "gc_pause_sum_ms_measured": 0.873,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.341,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 33.3828125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.450411,
+      "heap_used_max_gib_observed_at_gc_measured": 33.3828125,
+      "process_rss_max_gib_entire_vm": 67.12191009521484,
+      "process_cpu_mean_cores_measured": 13.547259358272429,
+      "process_cpu_max_cores_measured": 16.68854598999547,
+      "process_rss_max_gib_measured": 67.11019134521484,
+      "minor_faults_approx_measured": 300159,
+      "minor_faults_per_s_approx_measured": 33284.43113772455,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535506937",
+          "start_uptime_ms": "9980",
+          "end_epoch_ms": "1791535516960",
+          "end_uptime_ms": "20003"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535521193",
+          "start_uptime_ms": "24236",
+          "end_epoch_ms": "1791535531218",
+          "end_uptime_ms": "34260"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/BATCH-10000-r1",
+      "test_log_sha256": "e99835ea19732d67f52344bc486d0a46614be479da07b13c76081d4c7bb5d80c",
+      "gc_log_sha256": {
+        "gc-1678460.log": "11090938208e0d4b3ca08d9129ca283fc187d10126fdf94afa43ee780d5f6e8d"
+      },
+      "process_log_sha256": "08aea7480c53389c0b59d82025baf1d78e9fcc567c525d79dbd6488546826d89",
+      "client_qps": 9976.2,
+      "client_p50_ms": 11.041,
+      "client_p99_ms": 12.254,
+      "server_p99": "11ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 93520,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "BATCH",
+      "target_qps": 10000,
+      "repeat": 2,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 6,
+      "gc_pause_max_ms_measured": 0.348,
+      "gc_pause_sum_ms_measured": 0.755,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.664,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 36.177734375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.785134,
+      "heap_used_max_gib_observed_at_gc_measured": 36.177734375,
+      "process_rss_max_gib_entire_vm": 67.8880500793457,
+      "process_cpu_mean_cores_measured": 13.492217403288059,
+      "process_cpu_max_cores_measured": 17.03568739721021,
+      "process_rss_max_gib_measured": 67.8880500793457,
+      "minor_faults_approx_measured": 290462,
+      "minor_faults_per_s_approx_measured": 32194.857016182665,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791537067549",
+          "start_uptime_ms": "10269",
+          "end_epoch_ms": "1791537077572",
+          "end_uptime_ms": "20291"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791537081739",
+          "start_uptime_ms": "24458",
+          "end_epoch_ms": "1791537091758",
+          "end_uptime_ms": "34477"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/BATCH-10000-r2",
+      "test_log_sha256": "95901d6231f0dfb4790271e418fbae81c0cf49b2c190e3b61586bab137b871c5",
+      "gc_log_sha256": {
+        "gc-1716721.log": "84b140ce85b793f3720601ca176e4a893af3cc61c28cd39c466751017e669430"
+      },
+      "process_log_sha256": "719ea71e6cbec779fe230aa170e32766af203a7f21736b38ef1c75fda112a947",
+      "client_qps": 9980.8,
+      "client_p50_ms": 11.041,
+      "client_p99_ms": 27.274,
+      "server_p99": "15ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 91292,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 22,
+      "gc_pause_max_ms_measured": 0.325,
+      "gc_pause_sum_ms_measured": 1.579,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.344,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 42.5,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.486653,
+      "heap_used_max_gib_observed_at_gc_measured": 37.6796875,
+      "process_rss_max_gib_entire_vm": 69.28546905517578,
+      "process_cpu_mean_cores_measured": 28.29524006902888,
+      "process_cpu_max_cores_measured": 30.5229050502533,
+      "process_rss_max_gib_measured": 69.20558166503906,
+      "minor_faults_approx_measured": 418299,
+      "minor_faults_per_s_approx_measured": 46369.47123378782,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536033649",
+          "start_uptime_ms": "13461",
+          "end_epoch_ms": "1791536043674",
+          "end_uptime_ms": "23485"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536051973",
+          "start_uptime_ms": "31785",
+          "end_epoch_ms": "1791536062023",
+          "end_uptime_ms": "41834"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/BATCH-20000-r1",
+      "test_log_sha256": "6c6a8478339466450246cd87e631f876c49858fcb43da55a4d09f198a1cd8ef6",
+      "gc_log_sha256": {
+        "gc-1692067.log": "d4f54bbc91aba4c3ee363d2019f214a3aca102a6fcb3405cc047afa10a0315ea"
+      },
+      "process_log_sha256": "2f1a9040b1212310e58dedc88b129aae4df6445868123af6e18705d2739d3c91",
+      "client_qps": 19902.1,
+      "client_p50_ms": 11.124,
+      "client_p99_ms": 23.884,
+      "server_p99": "20ms",
+      "delivery_wait_p99": "11ms",
+      "terminal_without_ack_count": 158353,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 486,
+        "rst_stream_mentions": 2,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": false,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:563->runTraffic:895 » Execution",
+      "gc_pause_count_measured": null,
+      "gc_pause_max_ms_measured": null,
+      "gc_pause_sum_ms_measured": null,
+      "allocation_stall_count_measured": null,
+      "allocation_stall_max_ms_measured": null,
+      "gc_pause_max_ms_entire_vm": 0.415,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 51.80859375,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": null,
+      "heap_used_max_gib_observed_at_gc_measured": null,
+      "process_rss_max_gib_entire_vm": 70.32807540893555,
+      "process_cpu_mean_cores_measured": null,
+      "process_cpu_max_cores_measured": null,
+      "process_rss_max_gib_measured": null,
+      "minor_faults_approx_measured": null,
+      "minor_faults_per_s_approx_measured": null,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/BATCH-40000-r1",
+      "test_log_sha256": "4dbdf41e994ee7dfc7005b3c49ac5db94b038475252e229885531dc079778a39",
+      "gc_log_sha256": {
+        "gc-1702489.log": "80101b17bdaa5bc6037e39e1cd0bf08edf8f3107f9f9fac157126cec63e42072"
+      },
+      "process_log_sha256": "8006857501bf598db5f96413a011b93e71470afdf6a89475c50519b4e3173123",
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "NON_BATCH",
+      "target_qps": 10000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 0.259,
+      "gc_pause_sum_ms_measured": 0.523,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.398,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 19.705078125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.362001,
+      "heap_used_max_gib_observed_at_gc_measured": 19.705078125,
+      "process_rss_max_gib_entire_vm": 65.58584976196289,
+      "process_cpu_mean_cores_measured": 6.595713726342448,
+      "process_cpu_max_cores_measured": 18.57770176856604,
+      "process_rss_max_gib_measured": 65.58194351196289,
+      "minor_faults_approx_measured": 133287,
+      "minor_faults_per_s_approx_measured": 14785.02495840266,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664356976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535726419",
+          "start_uptime_ms": "9789",
+          "end_epoch_ms": "1791535736439",
+          "end_uptime_ms": "19809"
+        },
+        {
+          "first_request_id": "1152921505367846976",
+          "requests": "100000",
+          "target_qps": "10000",
+          "start_epoch_ms": "1791535739155",
+          "start_uptime_ms": "22525",
+          "end_epoch_ms": "1791535749174",
+          "end_uptime_ms": "32544"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/NON_BATCH-10000-r1",
+      "test_log_sha256": "3d1c7eeb20f0c60bb75e0c2a2b4a961e5b098ebe35804051c2890e8477ecbdb1",
+      "gc_log_sha256": {
+        "gc-1684610.log": "c940a5f06fc80f568173248b2e235e79eba4259d67bed22795455ee80c1ef593"
+      },
+      "process_log_sha256": "24f63cc7904808b5eeb3512e642d7f6718478049ebcaae3017e36bf781c414ea",
+      "client_qps": 9981.4,
+      "client_p50_ms": 0.355,
+      "client_p99_ms": 0.632,
+      "server_p99": "<1ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "NON_BATCH",
+      "target_qps": 20000,
+      "repeat": 1,
+      "exit": 0,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "",
+      "gc_pause_count_measured": 5,
+      "gc_pause_max_ms_measured": 0.314,
+      "gc_pause_sum_ms_measured": 0.523,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.374,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 20.53515625,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.43871,
+      "heap_used_max_gib_observed_at_gc_measured": 19.021484375,
+      "process_rss_max_gib_entire_vm": 65.8162841796875,
+      "process_cpu_mean_cores_measured": 12.88812336090083,
+      "process_cpu_max_cores_measured": 15.888490489984585,
+      "process_rss_max_gib_measured": 65.8045654296875,
+      "minor_faults_approx_measured": 116417,
+      "minor_faults_per_s_approx_measured": 12909.403415391438,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664366976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536279590",
+          "start_uptime_ms": "12668",
+          "end_epoch_ms": "1791536289624",
+          "end_uptime_ms": "22702"
+        },
+        {
+          "first_request_id": "1152921505368846976",
+          "requests": "200000",
+          "target_qps": "20000",
+          "start_epoch_ms": "1791536295257",
+          "start_uptime_ms": "28335",
+          "end_epoch_ms": "1791536305289",
+          "end_uptime_ms": "38367"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/NON_BATCH-20000-r1",
+      "test_log_sha256": "8b44541fe101a5e5cf819ffbe422f0891a03c0d54b77be984ce616bc2bc80fd3",
+      "gc_log_sha256": {
+        "gc-1698118.log": "583b044ba73e2cdf4449f8e6c906dc90951b7605803bb2a54d26ff3aab5ff55b"
+      },
+      "process_log_sha256": "4468f27d30012de264bce2630de24f4f9dc8867c872d3a2bd54db6a84b545672",
+      "client_qps": 19935.9,
+      "client_p50_ms": 0.479,
+      "client_p99_ms": 18.503,
+      "server_p99": "12ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": true
+    },
+    {
+      "profile": "zgc_pretouch",
+      "mode": "NON_BATCH",
+      "target_qps": 40000,
+      "repeat": 1,
+      "exit": 1,
+      "failure_log_counts": {
+        "rejected_execution_mentions": 0,
+        "rst_stream_mentions": 0,
+        "out_of_memory_mentions": 0
+      },
+      "measured_window_present": true,
+      "error": "[ERROR]   MasterBatchEndToEndPerformanceTest.masterMeetsRateSloAcrossEngineScaleMatrix:689 client E2E P99 117.796 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>",
+      "gc_pause_count_measured": 11,
+      "gc_pause_max_ms_measured": 0.312,
+      "gc_pause_sum_ms_measured": 0.82,
+      "allocation_stall_count_measured": 0,
+      "allocation_stall_max_ms_measured": 0,
+      "gc_pause_max_ms_entire_vm": 0.365,
+      "heap_used_max_gib_observed_at_gc_entire_vm": 39.876953125,
+      "allocation_stall_events": [],
+      "allocation_stall_count_entire_vm": 0,
+      "allocation_stall_max_ms_entire_vm": 0,
+      "safepoint_max_ms_measured": 0.530869,
+      "heap_used_max_gib_observed_at_gc_measured": 39.876953125,
+      "process_rss_max_gib_entire_vm": 67.57637023925781,
+      "process_cpu_mean_cores_measured": 21.99670196530758,
+      "process_cpu_max_cores_measured": 26.496896335935627,
+      "process_rss_max_gib_measured": 67.53644943237305,
+      "minor_faults_approx_measured": 278446,
+      "minor_faults_per_s_approx_measured": 30876.691062319802,
+      "zgc_10s_allocation_rate_mean_mbps_max_observed": null,
+      "traffic_windows": [
+        {
+          "first_request_id": "1152921504664386976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536735679",
+          "start_uptime_ms": "17999",
+          "end_epoch_ms": "1791536746374",
+          "end_uptime_ms": "28693"
+        },
+        {
+          "first_request_id": "1152921505370846976",
+          "requests": "400000",
+          "target_qps": "40000",
+          "start_epoch_ms": "1791536757030",
+          "start_uptime_ms": "39349",
+          "end_epoch_ms": "1791536767106",
+          "end_uptime_ms": "49425"
+        }
+      ],
+      "raw_directory": "/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009/evidence/zgc_pretouch/NON_BATCH-40000-r1",
+      "test_log_sha256": "c5554ea66fda4a9257817fb82b29dc8eadaf65f025f5dcfd7ee53dd9235defa1",
+      "gc_log_sha256": {
+        "gc-1709214.log": "2be41a1dc9e2eeb99b22e8780a5874a0808b835b8d165c2f5464ad8fabda7664"
+      },
+      "process_log_sha256": "bc8e3bcde43d111da4418b2aebbec66189b4e130b06c3050bdd55c522c7907fa",
+      "client_qps": 39700.1,
+      "client_p50_ms": 0.468,
+      "client_p99_ms": 117.796,
+      "server_p99": "90ms",
+      "delivery_wait_p99": "1ms",
+      "terminal_without_ack_count": 0,
+      "experiment": "flexlb-gc-factorial-20261009",
+      "slo_pass": false
+    }
+  ],
+  "source_commit": "81b068f3229e23ec6f29955a531f98987e453fa5",
+  "archive_sha256": "d87def39e25e4c327977c29166af0c5d20553a91cb60237c3591aa42efba7f47",
+  "source_manifest_verified_before_and_after_matrix": true,
+  "environment": "81b068f3229e23ec6f29955a531f98987e453fa5\nopenjdk version \"21.0.12.1\" 2026-08-18 LTS\nOpenJDK Runtime Environment Corretto-21.0.12.12.1 (build 21.0.12.1+12-LTS)\nOpenJDK 64-Bit Server VM Corretto-21.0.12.12.1 (build 21.0.12.1+12-LTS, mixed mode, sharing)\nLinux e01-cn-yb84rbk1807 6.6.102-5.200.al8.x86_64 #1 SMP PREEMPT_DYNAMIC Mon Dec 29 14:24:07 CST 2025 x86_64 x86_64 x86_64 GNU/Linux\n256\nmax 100000\n[always] madvise never\nalways within_size advise [never] deny force\n              total        used        free      shared  buff/cache   available\nMem:          3.9Ti       1.3Ti       747Gi       724Gi       2.7Ti       2.7Ti\nSwap:            0B          0B          0B\n",
+  "heap_flags": "-Xms64g -Xmx64g",
+  "topology": "750P/750D",
+  "remote_host": "luoli.hn@11.163.39.110",
+  "container": "luoli_gpu",
+  "profiles": {
+    "g1": "-XX:+UseG1GC -XX:-AlwaysPreTouch",
+    "g1_pretouch": "-XX:+UseG1GC -XX:+AlwaysPreTouch",
+    "zgc": "-XX:+UseZGC -XX:+ZGenerational -XX:-AlwaysPreTouch",
+    "zgc_pretouch": "-XX:+UseZGC -XX:+ZGenerational -XX:+AlwaysPreTouch",
+    "zgc_soft48": "ZGC without PreTouch + -XX:SoftMaxHeapSize=48g",
+    "zgc_threads128": "ZGC without PreTouch + -XX:ConcGCThreads=128",
+    "zgc_pretouch_soft48": "ZGC with PreTouch + -XX:SoftMaxHeapSize=48g",
+    "zgc_pretouch_threads128": "ZGC with PreTouch + -XX:ConcGCThreads=128"
+  },
+  "test": "MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix",
+  "warmup_ms": 10000,
+  "measurement_ms": 10000,
+  "minimum_qps_ratio": 0.98,
+  "client_p99_ceiling_ms": 50,
+  "memory_definitions": {
+    "process_rss_max_gib_entire_vm": "Maximum observed /proc PID stat RSS for benchmark JVM, 1 second samples over startup/warmup/measurement/drain; excludes Maven launcher. RSS includes Java heap and resident native memory. Not exact unique physical memory accounting for shared mappings.",
+    "process_rss_max_gib_measured": "Same RSS sampling restricted to formal traffic window; null for warmup failure.",
+    "heap_used_max_gib_observed_at_gc_entire_vm": "Maximum observed heap usage in GC logs; not continuously sampled peak, not retained live-set after full GC, not reserved/committed capacity.",
+    "heap_capacity": "64 GiB committed heap by configuration, distinct from RSS and used heap; SoftMaxHeapSize=48g does not lower Xms64g."
+  },
+  "limits": [
+    "Same frozen source as prior matrix, excludes concurrent agent code changes. No production Java or JVM configuration changed.",
+    "Real Master/scheduler with synthetic loopback workers and synthetic terminal events. No GPU inference; NON_BATCH omits frontend fetch and actual delivery.",
+    "Harness retains payloads/responses/received batches, so allocation and live data include test machinery and grow with offered QPS.",
+    "3K cases and tuning cases are single runs unless additional repeats are recorded. Short ten second warmup and measurement; no claim of production capacity or long-term stability.",
+    "Two contemporaneous untuned 20K BATCH controls included. Previous and new controls retained separately, not cherry-picked.",
+    "No OS huge-page, THP, NUMA or host sysctl settings changed. ConcGCThreads128 leaves dynamic worker scaling enabled; 128 is an upper bound, not guaranteed active thread count.",
+    "Whole-VM allocation stalls and GC peaks include warmup/drain and are distinct from formal measurement metrics. CPU includes client/mocks/GC, not GC alone.",
+    "SoftMaxHeapSize and ConcGCThreads varied independently with and without PreTouch; no heap increase or SLO relaxation.",
+    "The JVM flag checks are startup initialization runs, not service readiness measurements."
+  ],
+  "runner_script": "#!/usr/bin/env bash\nset -euo pipefail\nexport JAVA_HOME=/opt/flexlb-jdk21-20261002\nexport PATH=\"$JAVA_HOME/bin:$PATH\"\nexport MAVEN_OPTS=\"-Xms512m -Xmx2g -Duser.home=/data0/luoli.hn/data0 -Dmaven.repo.local=/data0/luoli.hn/data0/.m2/repository\"\nunset JAVA_TOOL_OPTIONS JDK_JAVA_OPTIONS _JAVA_OPTIONS || true\nsource_root=/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-factorial-20261009\nroot=/data0/luoli.hn/data0/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009\nmkdir -p \"$root\"\ncd \"$root\"\ncp \"$source_root/revision.txt\" \"$source_root/archive.sha256\" \"$source_root/source-manifest.sha256\" \"$root/\"\ncd \"$source_root\"\nsha256sum --quiet -c source-manifest.sha256\ncd \"$root\"\nmkdir -p evidence\n{ cat revision.txt; java -version; uname -a; getconf _NPROCESSORS_ONLN; cat /sys/fs/cgroup/cpu.max 2>/dev/null || true; cat /sys/kernel/mm/transparent_hugepage/enabled; cat /sys/kernel/mm/transparent_hugepage/shmem_enabled; free -h; } > evidence/environment.txt 2>&1\nflags_for() {\n case \"$1\" in\n  g1) flags='-XX:+UseG1GC -XX:-AlwaysPreTouch';;\n  g1_pretouch) flags='-XX:+UseG1GC -XX:+AlwaysPreTouch';;\n  zgc) flags='-XX:+UseZGC -XX:+ZGenerational -XX:-AlwaysPreTouch';;\n  zgc_pretouch) flags='-XX:+UseZGC -XX:+ZGenerational -XX:+AlwaysPreTouch';;\n  zgc_soft48) flags='-XX:+UseZGC -XX:+ZGenerational -XX:-AlwaysPreTouch -XX:SoftMaxHeapSize=48g';;\n  zgc_threads128) flags='-XX:+UseZGC -XX:+ZGenerational -XX:-AlwaysPreTouch -XX:ConcGCThreads=128';;\n  zgc_pretouch_soft48) flags='-XX:+UseZGC -XX:+ZGenerational -XX:+AlwaysPreTouch -XX:SoftMaxHeapSize=48g';;\n  zgc_pretouch_threads128) flags='-XX:+UseZGC -XX:+ZGenerational -XX:+AlwaysPreTouch -XX:ConcGCThreads=128';;\n esac\n}\nfor profile in zgc_soft48 zgc_threads128 zgc_pretouch_soft48 zgc_pretouch_threads128; do\n flags_for \"$profile\"\n mkdir -p \"evidence/startup/$profile\"\n python3 \"$root/startup.py\" \"evidence/startup/$profile/1\" java -Xms64g -Xmx64g $flags -XX:+PrintFlagsFinal -version\ndone\ncd \"$source_root/rtp_llm/flexlb\"\nrun_case() {\n profile=\"$1\"; mode=\"$2\"; qps=\"$3\"; repeat=\"$4\"\n flags_for \"$profile\"\n out=\"$root/evidence/$profile/$mode-$qps-r$repeat\"\n mkdir -p \"$out\"\n printf '%s\\n' \"$flags\" > \"$out/flags.txt\"\n decision=FIXED_WINDOW\n if [[ \"$mode\" == NON_BATCH ]]; then decision=SINGLE; fi\n python3 \"$root/monitor.py\" \"$source_root\" \"$out/process.jsonl\" \"$out/monitor.stop\" &\n monitor_pid=$!\n echo \"START $profile $mode $qps repeat=$repeat $(date -Is)\"\n code=0\n ./mvnw -B -P 'opensource,!internal,api-performance-regression' -pl flexlb-api -am \\\n  '-Dtest=MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix' \\\n  -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false \\\n  -Dflexlb.perf.heap=64g \\\n  \"-Dflexlb.perf.jvm-args=$flags -XX:+ExitOnOutOfMemoryError -Xlog:gc*,safepoint:file=$out/gc-%p.log:time,uptime,level,tags\" \\\n  \"-Dflexlb.perf.delivery-mode=$mode\" \"-Dflexlb.perf.decision-mode=$decision\" \\\n  -Dflexlb.perf.engine-matrix-topologies=750x750 \\\n  \"-Dflexlb.perf.engine-matrix-target-qps=$qps\" \\\n  -Dflexlb.perf.engine-matrix-duration-ms=10000 \\\n  -Dflexlb.perf.engine-matrix-warmup-ms=10000 \\\n  -Dflexlb.perf.engine-matrix-warmup-requests-per-prefill=16 \\\n  -Dflexlb.perf.engine-matrix-min-qps-ratio=0.98 \\\n  -Dflexlb.perf.engine-matrix-max-server-p99-ms=50 \\\n  -Dflexlb.perf.engine-matrix-max-client-p99-ms=50 \\\n  -Dflexlb.perf.engine-matrix-max-batch-wait-p99-ms=50 \\\n  test > \"$out/test.log\" 2>&1 || code=$?\n touch \"$out/monitor.stop\"\n wait \"$monitor_pid\"\n printf '%s\\n' \"$code\" > \"$out/test.exit\"\n awk '/FlexLB Master engine-scale E2E:|FlexLB Master traffic failure:|\\[ERROR\\]   Master|OutOfMemoryError|BUILD SUCCESS|BUILD FAILURE/' \"$out/test.log\"\n echo \"END $profile $mode $qps repeat=$repeat exit=$code $(date -Is)\"\n}\nfor mode in BATCH NON_BATCH; do\n for profile in g1 zgc_pretouch g1_pretouch zgc; do run_case \"$profile\" \"$mode\" 3000 1; done\ndone\nfor profile in zgc zgc_pretouch_soft48 zgc_threads128 zgc_pretouch zgc_soft48 zgc_pretouch_threads128; do\n run_case \"$profile\" BATCH 20000 1\ndone\ncd \"$source_root\"\nsha256sum --quiet -c source-manifest.sha256\nprintf 'done\\n' > \"$root/matrix.done\"\n",
+  "monitor_script": "import json,os,sys,time\nroot=sys.argv[1];output=sys.argv[2];stop=sys.argv[3];ticks=os.sysconf('SC_CLK_TCK');page=os.sysconf('SC_PAGE_SIZE');previous={}\nwith open(output,'w') as f:\n while not os.path.exists(stop):\n  now=time.time()\n  for name in os.listdir('/proc'):\n   if not name.isdigit():continue\n   try:\n    cmd=open('/proc/'+name+'/cmdline','rb').read().split(b'\\0')\n    if not cmd or not cmd[0].endswith(b'/bin/java') or b'-Xms64g' not in cmd:continue\n    if not any(root.encode() in arg and b'surefirebooter' in arg for arg in cmd):continue\n    st=open('/proc/'+name+'/stat').read().rsplit(')',1)[1].split();cpu=int(st[11])+int(st[12]);p=previous.get(name);pct=(cpu-p[1])/ticks/(now-p[0])*100 if p and now>p[0] else None\n    row={'epoch_ms':round(now*1000),'pid':int(name),'cpu_percent':pct,'rss_bytes':int(st[21])*page,'minor_faults':int(st[7]),'major_faults':int(st[9]),'threads':int(st[17])}\n    previous[name]=(now,cpu);f.write(json.dumps(row)+'\\n');f.flush()\n   except (OSError,ValueError,IndexError):continue\n  time.sleep(1)\n",
+  "analyzer_script": "from pathlib import Path\nimport re,json,datetime,statistics,hashlib,csv\nroot=Path(__file__).parent/'remote-evidence';evidence=root/'evidence'\ndef epoch(line):\n m=re.match(r'^\\[([^\\]]+)\\]',line)\n if not m:return None\n try:return datetime.datetime.strptime(m[1],'%Y-%m-%dT%H:%M:%S.%f%z').timestamp()*1000\n except ValueError:return None\ncases=[]\nfor directory in sorted(evidence.glob('*/*-r*')):\n if not (directory/'test.exit').exists():continue\n text=(directory/'test.log').read_text(errors='replace');mode,qps,repeat=directory.name.rsplit('-',2);repeat=int(repeat[1:]);qps=int(qps)\n summaries=[dict(re.findall(r'(\\w+)=([^ ]+)',l)) for l in text.splitlines() if l.startswith('FlexLB Master engine-scale E2E:')]\n windows=[dict(re.findall(r'(\\w+)=([^ ]+)',l)) for l in text.splitlines() if l.startswith('FlexLB traffic window:')]\n measured=windows[-1] if len(windows)>=2 else None;a=int(measured['start_epoch_ms']) if measured else None;b=int(measured['end_epoch_ms']) if measured else None\n workers={'Young':[],'Old':[]};pauses=[];all_pauses=[];stalls=[];all_stalls=[];stall_events=[];safepoints=[];used=[];all_used=[];alloc=[];gcfiles=list(directory.glob('gc-*.log'));pids={int(p.stem.split('-')[1]) for p in gcfiles}\n for path in gcfiles:\n  for line in path.read_text(errors='replace').splitlines():\n   worker=re.search(r'Using (\\d+) Workers for (Young|Old) Generation',line)\n   if worker:workers[worker[2]].append(int(worker[1]))\n   t=epoch(line);inside=a is not None and t is not None and a<=t<=b\n   stall=re.search(r'Allocation Stall \\(.+\\) ([0-9.]+)ms',line)\n   if stall:\n    all_stalls.append(float(stall[1]));stall_events.append({'epoch_ms':t,'duration_ms':float(stall[1]),'phase': 'measurement' if inside else ('warmup' if windows and int(windows[0]['start_epoch_ms'])<=t<=int(windows[0]['end_epoch_ms']) else 'outside_traffic_windows')})\n   m=re.search(r'Pause .* ([0-9.]+)ms$',line)\n   if m:all_pauses.append(float(m[1]))\n   m=re.search(r'([0-9.]+)([MG])->([0-9.]+)([MG])\\(',line)\n   if m:all_used.extend([float(m[1])/(1024 if m[2]=='M' else 1),float(m[3])/(1024 if m[4]=='M' else 1)])\n   if 'Used:' in line:all_used.extend(float(x)/1024 for x in re.findall(r'([0-9.]+)M\\s+\\(',line))\n   if not inside:continue\n   m=re.search(r'Pause .* ([0-9.]+)ms$',line)\n   if m:pauses.append(float(m[1]))\n   if stall:stalls.append(float(stall[1]))\n   m=re.search(r'safepoint.*Total: ([0-9]+) ns',line)\n   if m:safepoints.append(int(m[1])/1e6)\n   m=re.search(r'([0-9.]+)([MG])->([0-9.]+)([MG])\\(',line)\n   if m:used.extend([float(m[1])/(1024 if m[2]=='M' else 1),float(m[3])/(1024 if m[4]=='M' else 1)])\n   if 'Used:' in line:used.extend(float(x)/1024 for x in re.findall(r'([0-9.]+)M\\s+\\(',line))\n   m=re.search(r'Memory: Allocation Rate\\s+([0-9.]+) / ([0-9.]+)',line)\n   if m:alloc.append([float(m[1]),float(m[2])])\n samples=[json.loads(l) for l in (directory/'process.jsonl').read_text().splitlines() if l.strip()]\n selected=[x for x in samples if x['pid'] in pids and a is not None and a<=x['epoch_ms']<=b]\n cpu=[x['cpu_percent']/100 for x in selected if x['cpu_percent'] is not None]\n faults=None;fault_rate=None\n if len(selected)>=2:\n  faults=selected[-1]['minor_faults']-selected[0]['minor_faults'];fault_rate=faults/((selected[-1]['epoch_ms']-selected[0]['epoch_ms'])/1000)\n code=int((directory/'test.exit').read_text());failure_counts={'rejected_execution_mentions':text.count('RejectedExecutionException'),'rst_stream_mentions':text.count('RST_STREAM'),'out_of_memory_mentions':text.count('OutOfMemoryError')};error='\\n'.join(l for l in text.splitlines() if '[ERROR]   Master' in l or 'OutOfMemoryError' in l)\n c={'profile':directory.parent.name,'zgc_workers_max_observed_entire_vm':{k:max(v,default=None) for k,v in workers.items()},'mode':mode,'target_qps':qps,'repeat':repeat,'exit':code,'failure_log_counts':failure_counts,'measured_window_present':bool(measured),'error':error[:1500], 'gc_pause_count_measured':len(pauses),'gc_pause_max_ms_measured':max(pauses,default=0) if measured else None,'gc_pause_sum_ms_measured':sum(pauses),'allocation_stall_count_measured':len(stalls),'allocation_stall_max_ms_measured':max(stalls,default=0),'gc_pause_max_ms_entire_vm':max(all_pauses,default=0),'heap_used_max_gib_observed_at_gc_entire_vm':max(all_used,default=None),'allocation_stall_events':stall_events,'allocation_stall_count_entire_vm':len(all_stalls),'allocation_stall_max_ms_entire_vm':max(all_stalls,default=0),'safepoint_max_ms_measured':max(safepoints,default=0),'heap_used_max_gib_observed_at_gc_measured':max(used,default=None),'process_rss_max_gib_entire_vm':max((x['rss_bytes']/1024**3 for x in samples if x['pid'] in pids),default=None),'process_cpu_mean_cores_measured':statistics.mean(cpu) if cpu else None,'process_cpu_max_cores_measured':max(cpu,default=None),'process_rss_max_gib_measured':max((x['rss_bytes']/1024**3 for x in selected),default=None),'minor_faults_approx_measured':faults,'minor_faults_per_s_approx_measured':fault_rate,'zgc_10s_allocation_rate_mean_mbps_max_observed':max((x[0] for x in alloc),default=None),'traffic_windows':windows,'raw_directory':str(directory),'test_log_sha256':hashlib.sha256((directory/'test.log').read_bytes()).hexdigest(),'gc_log_sha256':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in gcfiles},'process_log_sha256':hashlib.sha256((directory/'process.jsonl').read_bytes()).hexdigest()}\n if summaries:\n  s=summaries[-1];c.update({'client_qps':float(s['client_qps']),'client_p50_ms':float(s['client_p50'].removesuffix('ms')),'client_p99_ms':float(s['client_p99'].removesuffix('ms')),'server_p99':s['master_p99'],'delivery_wait_p99':s['delivery_wait_p99'],'terminal_without_ack_count':int(s['terminal_without_ack_count'])})\n cases.append(c)\nstartup={}\nfor profile in [p.name for p in (evidence/'startup').iterdir()]:\n paths=sorted((evidence/'startup'/profile).glob('*.json'));rows=[json.loads(p.read_text()) for p in paths]\n if rows:startup[profile]={'runs':rows,'elapsed_median_s':statistics.median(x['elapsed_s'] for x in rows),'rss_max_gib':max(x['max_rss_kb'] for x in rows)/1024**2,'minor_faults_median':statistics.median(x['minor_faults'] for x in rows)}\nreport={'startup':startup,'cases':cases}\nPath(__file__).with_name('summary.json').write_text(json.dumps(report,indent=2)+'\\n')\nfor c in cases:print(c['profile'],c['mode'],c['target_qps'],c['repeat'],'exit='+str(c['exit']),'qps='+str(c.get('client_qps')),'p99='+str(c.get('client_p99_ms')),'gc='+str(c['gc_pause_max_ms_measured']),'stalls='+str(c['allocation_stall_count_entire_vm']),'cpu='+str(round(c['process_cpu_mean_cores_measured'],1) if c['process_cpu_mean_cores_measured'] else None),'faults/s='+str(round(c['minor_faults_per_s_approx_measured']) if c['minor_faults_per_s_approx_measured'] is not None else None))\n",
+  "raw_host_directory": "/home/luoli.hn/work/rtp_llm_4/github-opensource/.tmp/flexlb-gc-tuning-20261009",
+  "assessment": {
+    "new_cases_pass_fail": {
+      "fail": 4,
+      "pass": 10
+    },
+    "soft48_pretouch_single_trial": "22.658ms vs contemporaneous untuned27.638ms; both pass, allocation stalls0, RSS68.74 vs68.71GiB. No demonstrated memory saving or stable latency improvement.",
+    "threads128": "Both with and without PreTouch failed during warmup with executor rejection; observed128 young and128 old workers. Does not establish that GC contention caused rejection, and no formal latency is available.",
+    "soft48_without_pretouch": "Warmup executor rejection; no formal P99, zero allocation stalls before failure is not proof of sufficient reclamation.",
+    "baseline_zgc": "110 warmup allocation stalls, maximum99.723ms, formal P99 38.094ms. Formal SLO pass does not remove warmup stalls.",
+    "recommendation": "Keep original ZGC + PreTouch profile as the validated candidate for this synthetic benchmark. No production configuration change; extra tunings not established as preferable."
+  }
+}

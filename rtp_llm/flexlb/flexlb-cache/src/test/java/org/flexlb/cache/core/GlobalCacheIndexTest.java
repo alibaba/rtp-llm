@@ -72,7 +72,7 @@ class GlobalCacheIndexTest {
     void testBasicPrefixMatching() {
         // Set up test data
         // Block 1L: engine1, engine2, engine3
-        // Block 2L: engine1, engine3  
+        // Block 2L: engine1, engine3
         // Block 3L: engine1
         globalCacheIndex.addCacheBlock(1L, "engine1");
         globalCacheIndex.addCacheBlock(1L, "engine2");

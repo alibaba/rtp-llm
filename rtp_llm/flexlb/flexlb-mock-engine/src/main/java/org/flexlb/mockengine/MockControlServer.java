@@ -110,10 +110,6 @@ final class MockControlServer {
         httpServer.stop(0);
     }
 
-    int getPort() {
-        return httpServer.getAddress().getPort();
-    }
-
     // ────────────────── Dual addressing (Python compat) ──────────────────
 
     /** Carries an HTTP error status + message back to the handler wrapper. */
@@ -297,7 +293,7 @@ final class MockControlServer {
                     // ── Cancel-RPC fault family (RPC-layer failures simulated
                     // BEFORE the engine cancel state machine is touched — no
                     // fences, no terminal records; the gRPC Cancel handler and the
-                    // in-process MockEngineCancelChannel run the same gate) ──
+                    // in-process test cancel adapter run the same gate) ──
                     case "cancel_no_respond" -> builder.cancelNoRespond(enabled);
                     case "cancel_error" -> builder.cancelError(enabled);
                     case "cancel_unexpected_status" -> builder.cancelUnexpectedStatus(enabled);
@@ -545,7 +541,7 @@ final class MockControlServer {
      * Test-only cancel injection (C1-②, accepted-eviction 8429 wiring): POST
      * {@code {"engine"|"port": ..., "request_id": ...}} drives the same
      * three-branch {@link JavaMockEngineCluster.FastRpcService#cancelRequest}
-     * contract as the in-process MockEngineCancelChannel — on the found branch
+     * contract as the in-process test cancel adapter — on the found branch
      * the request is removed and the CANCELLED completion surfaces in the next
      * WorkerStatus finished list (iron rule 4: WorkerStatus stays the sole
      * release-confirmation source). Response: {@code {status, found, phase,
@@ -572,7 +568,7 @@ final class MockControlServer {
             }
             long requestId = parseRequestId(body.get("request_id"));
             // Cancel-RPC fault-injection gate — same arriveCancelRpc entry as
-            // the gRPC Cancel handler and the in-process MockEngineCancelChannel:
+            // the gRPC Cancel handler and the in-process test cancel adapter:
             // the arrival is counted once, the armed fault short-circuits
             // BEFORE cancelRequest so the engine cancel state machine is never
             // touched (production semantics "RPC failed = engine state

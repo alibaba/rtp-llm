@@ -21,6 +21,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.google.common.base.Preconditions.checkArgument;
+
 /**
  * Standalone stability monitor that replaces {@code stability_monitor.py}.
  *
@@ -320,18 +322,12 @@ public final class StabilityMonitor {
                 config.leakGraceS = Integer.parseInt(grace);
             }
 
-            if (config.flexlbHttpAddr == null || config.flexlbHttpAddr.isEmpty()) {
-                throw new IllegalArgumentException("FLEXLB_HTTP_ADDR is required");
-            }
-            if (config.mockControlHost == null || config.mockControlHost.isEmpty()) {
-                throw new IllegalArgumentException("MOCK_CONTROL_HOST is required");
-            }
-            if (config.mockControlPort == 0) {
-                throw new IllegalArgumentException("MOCK_CONTROL_PORT is required");
-            }
-            if (config.outputDir == null || config.outputDir.isEmpty()) {
-                throw new IllegalArgumentException("OUTPUT_DIR is required");
-            }
+            checkArgument(config.flexlbHttpAddr != null && !config.flexlbHttpAddr.isEmpty(),
+                    "FLEXLB_HTTP_ADDR is required");
+            checkArgument(config.mockControlHost != null && !config.mockControlHost.isEmpty(),
+                    "MOCK_CONTROL_HOST is required");
+            checkArgument(config.mockControlPort != 0, "MOCK_CONTROL_PORT is required");
+            checkArgument(config.outputDir != null && !config.outputDir.isEmpty(), "OUTPUT_DIR is required");
             return config;
         }
     }

@@ -17,6 +17,62 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FormulaPredictorTest {
 
+    @Test
+    void directItemBindingsMatchArrayEvaluationAtTokenBoundaries() {
+        List<String> expressions = List.of(
+                "sum(computeTokens)+0.3*sum(hitCacheTokens)",
+                "sum(inputTokens-hitCacheTokens)",
+                "sum(sum(computeTokens))+sum(hasHitCache)",
+                "sum(computeTokens^2)+sqrt(sum(inputTokens))",
+                "totalInputTokens+totalHitCacheTokens+totalComputeTokens+maxInputTokens+maxComputeTokens",
+                "batchSize+sum(1)+inputTokens+hitCacheTokens+computeTokens+hasHitCache",
+                "sum(-0.0)", "42");
+        long[] boundaries = {0L, 1L, (1L << 53) - 1L, (1L << 53) + 1L, Long.MAX_VALUE};
+        List<PrefillBatchFeatures.Item> items = new ArrayList<>();
+        for (long input : boundaries) {
+            items.add(item(input, 0L));
+            items.add(item(input, input / 2L));
+            items.add(item(input, input));
+        }
+        for (String expression : expressions) {
+            FormulaPredictor predictor = new FormulaPredictor(expression);
+            PrefillTimeFormula arrayFormula = PrefillTimeFormula.parse(expression);
+            for (int size = 1; size <= items.size(); size++) {
+                PrefillBatchFeatures features = new PrefillBatchFeatures(items.subList(0, size));
+                double[] batch = new double[PrefillTimeFormula.VAR_COUNT];
+                List<double[]> arrays = new ArrayList<>();
+                long totalInput = 0L, totalHit = 0L, maxInput = 0L, maxCompute = 0L;
+                for (PrefillBatchFeatures.Item feature : features.items()) {
+                    double[] vars = new double[PrefillTimeFormula.VAR_COUNT];
+                    vars[PrefillTimeFormula.IDX_INPUT_TOKENS] = feature.seqLen();
+                    vars[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS] = feature.hitCache();
+                    vars[PrefillTimeFormula.IDX_COMPUTE_TOKENS] = feature.seqLen() - feature.hitCache();
+                    vars[PrefillTimeFormula.IDX_HAS_HIT_CACHE] = feature.hitCache() > 0L ? 1.0 : 0.0;
+                    arrays.add(vars);
+                    long input = (long) vars[PrefillTimeFormula.IDX_INPUT_TOKENS];
+                    long hit = (long) vars[PrefillTimeFormula.IDX_HIT_CACHE_TOKENS];
+                    totalInput += input;
+                    totalHit += hit;
+                    maxInput = Math.max(maxInput, input);
+                    maxCompute = Math.max(maxCompute, input - hit);
+                }
+                batch[PrefillTimeFormula.IDX_BATCH_SIZE] = size;
+                batch[PrefillTimeFormula.IDX_TOTAL_INPUT_TOKENS] = totalInput;
+                batch[PrefillTimeFormula.IDX_TOTAL_HIT_CACHE_TOKENS] = totalHit;
+                batch[PrefillTimeFormula.IDX_TOTAL_COMPUTE_TOKENS] = totalInput - totalHit;
+                batch[PrefillTimeFormula.IDX_MAX_INPUT_TOKENS] = maxInput;
+                batch[PrefillTimeFormula.IDX_MAX_COMPUTE_TOKENS] = maxCompute;
+                double expected = arrayFormula.evaluateAsDouble(batch, arrays);
+                assertEquals(Double.doubleToLongBits(expected),
+                        Double.doubleToLongBits(predictor.predictBatchMs(features)), expression + " size=" + size);
+                // A scalar call must not leave bindings visible to the next batch.
+                predictor.estimateMs(Long.MAX_VALUE, Long.MAX_VALUE / 2L);
+                assertEquals(Double.doubleToLongBits(expected),
+                        Double.doubleToLongBits(predictor.predictBatchMs(features)), expression);
+            }
+        }
+    }
+
     // ---- formula parsing ----
 
     @Test

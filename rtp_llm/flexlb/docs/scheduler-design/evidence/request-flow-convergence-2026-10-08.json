@@ -1,0 +1,838 @@
+{
+  "date": "2026-10-08",
+  "base_commit": "dc6eb97430c1ce1db8c1fb593714c7bad5a3e778",
+  "scope": "Centralize request status/end/preemption workflows in AbstractRequestScheduler; BalanceContext retains request facts and atomic state transitions. Separate performance follow-up moves routing candidate capture/sort outside shared address cursor lock.",
+  "production_lines": {
+    "before": 4604,
+    "after": 4620,
+    "net_change": 16,
+    "BalanceContext_before": 2306,
+    "BalanceContext_after": 1944,
+    "note": "Moving responsibilities is not counted as deleted implementation."
+  },
+  "removed_context_workflows": [
+    "acceptPrefillStatus",
+    "applyPrefillStatusLocked",
+    "acceptDecodeStatus",
+    "settleAdmissionLocked",
+    "decideInactivityLocked",
+    "processRequestEndLocked",
+    "processPendingEventsUnderPreemptionLocked",
+    "finishPreemptedRequestLocked",
+    "acknowledgeDeliveryLocked"
+  ],
+  "convergence": [
+    "Decode allocation and pending preemption facts share advanceAfterDecodeReconciliationLocked after exact ledger reconciliation.",
+    "Prefill and preemption capacity publication share one outside-context continuation with unchanged failure ordering.",
+    "Context no longer calls Scheduler to construct effects or Endpoint to query/update ledgers."
+  ],
+  "naming": {
+    "VictimTerminal": "VictimResolution",
+    "terminalObservation": "requestResolution",
+    "note": "Request-side resolution may mean finalized or resumed delivery. Cancel ACK and Decode release proof remain separate."
+  },
+  "retained_contracts": [
+    "Old route/generation callbacks are fenced by exact identity.",
+    "Authoritative Worker terminal precedence is unchanged.",
+    "NOT_FOUND does not prove resource release; actual allocation and exact Decode reconciliation are still required.",
+    "Cleanup with retained terminal keeps its finished claim until request resolution publication.",
+    "Delivery ACK does not overwrite a newer selected terminal response.",
+    "RUN_AGAIN preserves facts received while cleanup is running.",
+    "Resource reconciliation keeps Context -> Decode State lock order; capacity notifications and Future completion occur outside Context.",
+    "Failed or empty candidate captures do not advance the routing cursor.",
+    "Address ring fairness across dynamic candidate sets/groups and concurrent selection remains linearizable."
+  ],
+  "ut": {
+    "local_request_protocol": {
+      "tests": 599,
+      "failures": 0,
+      "errors": 0
+    },
+    "local_routing": {
+      "tests": 83,
+      "failures": 0,
+      "errors": 0
+    },
+    "remote_final_modules": [
+      {
+        "tests": 226,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 37,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 15,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 1691,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "tests": 175,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 1
+      },
+      {
+        "tests": 14,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    ],
+    "remote_final_totals": {
+      "tests": 2158,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 1
+    },
+    "new_tests": [
+      "capturingOneSnapshotDoesNotBlockAnotherSelection",
+      "emptyAndFailedCapturesDoNotAdvanceCursor"
+    ],
+    "note": "Remote full UT used the final optimized source manifest. Local routing run preceded the equivalent Arrays.asList().indexOf() form; final remote UT covers that final form."
+  },
+  "performance": {
+    "host": "luoli.hn@11.163.39.110",
+    "container": "luoli_gpu",
+    "cpus": 256,
+    "jdk": "Corretto 21.0.12.1",
+    "jvm": "-Xms64g -Xmx64g",
+    "workers": {
+      "prefill": 750,
+      "decode": 750
+    },
+    "target_qps": [
+      3000,
+      10000
+    ],
+    "warmup_ms": 10000,
+    "duration_ms": 10000,
+    "warmup_requests_per_prefill": 16,
+    "gates": {
+      "min_qps_ratio": 0.98,
+      "max_master_p99_ms": 50,
+      "max_client_p99_ms": 50,
+      "max_batch_wait_p99_ms": 50
+    },
+    "test": "MasterBatchEndToEndPerformanceTest#masterMeetsRateSloAcrossEngineScaleMatrix",
+    "baseline": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "requests": "30000",
+        "client_qps": "2996.9",
+        "master_qps": "3000.6",
+        "master_avg": "10.242ms",
+        "master_p99": "12ms",
+        "client_p99": "26.974ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "1ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9989.2",
+        "master_qps": "10006.4",
+        "master_avg": "10.572ms",
+        "master_p99": "19ms",
+        "client_p99": "42.314ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "6ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "requests": "30000",
+        "client_qps": "2999.7",
+        "master_qps": "3000.3",
+        "master_avg": "0.007ms",
+        "master_p99": "<1ms",
+        "client_p99": "0.617ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "<1ms",
+        "route_submit_p99": "<1ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9994.8",
+        "master_qps": "10001.0",
+        "master_avg": "0.045ms",
+        "master_p99": "2ms",
+        "client_p99": "15.594ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "1ms",
+        "route_submit_p99": "1ms",
+        "gates_pass": true
+      }
+    ],
+    "request_flow_before_cursor_fix": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "requests": "30000",
+        "client_qps": "2996.8",
+        "master_qps": "3000.8",
+        "master_avg": "10.280ms",
+        "master_p99": "12ms",
+        "client_p99": "26.134ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "<1ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9662.4",
+        "master_qps": "10007.1",
+        "master_avg": "10.932ms",
+        "master_p99": "23ms",
+        "client_p99": "47.422ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "9ms",
+        "gates_pass": false
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "requests": "30000",
+        "client_qps": "2999.6",
+        "master_qps": "3000.3",
+        "master_avg": "0.009ms",
+        "master_p99": "<1ms",
+        "client_p99": "0.911ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "1ms",
+        "route_submit_p99": "<1ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9995.1",
+        "master_qps": "10001.8",
+        "master_avg": "0.043ms",
+        "master_p99": "2ms",
+        "client_p99": "13.605ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "1ms",
+        "route_submit_p99": "2ms",
+        "gates_pass": true
+      }
+    ],
+    "final": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "requests": "30000",
+        "client_qps": "2996.9",
+        "master_qps": "3000.6",
+        "master_avg": "10.334ms",
+        "master_p99": "11ms",
+        "client_p99": "25.439ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "<1ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9989.0",
+        "master_qps": "10005.3",
+        "master_avg": "10.427ms",
+        "master_p99": "14ms",
+        "client_p99": "38.386ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "2ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "3000",
+        "requests": "30000",
+        "client_qps": "2999.6",
+        "master_qps": "3000.3",
+        "master_avg": "0.007ms",
+        "master_p99": "<1ms",
+        "client_p99": "0.849ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "<1ms",
+        "route_submit_p99": "<1ms",
+        "gates_pass": true
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9995.1",
+        "master_qps": "10001.3",
+        "master_avg": "0.070ms",
+        "master_p99": "3ms",
+        "client_p99": "20.404ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "1ms",
+        "route_submit_p99": "3ms",
+        "gates_pass": true
+      }
+    ],
+    "profile_before_cursor_fix": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9983.5",
+        "master_qps": "10002.2",
+        "master_avg": "10.814ms",
+        "master_p99": "25ms",
+        "client_p99": "54.650ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "12ms",
+        "gates_pass": false
+      },
+      {
+        "delivery": "NON_BATCH",
+        "decision": "SINGLE",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9995.0",
+        "master_qps": "10001.8",
+        "master_avg": "0.035ms",
+        "master_p99": "1ms",
+        "client_p99": "11.964ms",
+        "batch_wait_p99": "N/A",
+        "delivery_wait_p99": "1ms",
+        "route_submit_p99": "1ms",
+        "gates_pass": true
+      }
+    ],
+    "profile_after_cursor_fix": [
+      {
+        "delivery": "BATCH",
+        "decision": "FIXED_WINDOW",
+        "prefill": "750",
+        "decode": "750",
+        "target_qps": "10000",
+        "requests": "100000",
+        "client_qps": "9988.4",
+        "master_qps": "10003.9",
+        "master_avg": "10.977ms",
+        "master_p99": "18ms",
+        "client_p99": "39.796ms",
+        "batch_wait_p99": "10ms",
+        "delivery_wait_p99": "11ms",
+        "route_submit_p99": "5ms",
+        "gates_pass": true
+      }
+    ],
+    "note": "All failed pre-fix measurements are retained. Instrumented JFR runs are diagnostic, not uninstrumented acceptance evidence; run-to-run latency differences alone are not causal effect estimates. Uses existing Mock Worker E2E harness, not GPU model execution.",
+    "suite_reports": {
+      "baseline/perf-final": {
+        "BATCH": {
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        },
+        "NON_BATCH": {
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        }
+      },
+      "baseline/perf-repeat": {
+        "BATCH": {
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        }
+      },
+      "latest/perf-final": {
+        "BATCH": {
+          "tests": 2,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": [
+            "client throughput 9662.4 QPS missed 98% of target 10000 QPS ==> expected: <true> but was: <false>"
+          ]
+        },
+        "NON_BATCH": {
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        }
+      },
+      "latest/perf-repeat": {
+        "BATCH": {
+          "tests": 2,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": [
+            "client E2E P99 594.714 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>"
+          ]
+        }
+      },
+      "latest/perf-diagnostic": {
+        "BATCH": {
+          "tests": 1,
+          "failures": 1,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": [
+            "client E2E P99 54.650 ms exceeds ceiling 50.000 ms ==> expected: <true> but was: <false>"
+          ]
+        },
+        "NON_BATCH": {
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        }
+      },
+      "optimized/perf-final": {
+        "BATCH": {
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        },
+        "NON_BATCH": {
+          "tests": 2,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        }
+      },
+      "optimized/perf-diagnostic": {
+        "BATCH": {
+          "tests": 1,
+          "failures": 0,
+          "errors": 0,
+          "skipped": 0,
+          "failure_messages": []
+        }
+      }
+    },
+    "hotspots": {
+      "before": {
+        "recording": "RECORDING 2026-10-08T03:22:47.742951941Z 2026-10-08T03:23:22.949525944Z",
+        "inferred_measurement_window": "INFERRED_TRAFFIC_PACE_SAMPLES_LINE_590 2026-10-08T03:23:07.453105870Z 2026-10-08T03:23:17.375769067Z",
+        "summary": "SUMMARY samples=4264 gc_count=3 gc_ms=158.938863 gc_max_ms=67.510899",
+        "CPU_LEAF": {
+          "org.flexlb.balance.endpoint.PrefillEndpoint$ProjectionSource.materialize": 615,
+          "com.google.protobuf.CodedInputStream$ArrayDecoder.readRawVarint32": 270,
+          "org.flexlb.balance.strategy.PrefillCandidateSet.ensureCapacity": 246,
+          "org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.paceUntil": 226,
+          "org.flexlb.balance.endpoint.DecodeState.routingViewSnapshot": 213,
+          "java.util.concurrent.ForkJoinPool.awaitWork": 210,
+          "org.flexlb.balance.strategy.DecodeSelector.select": 207,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB$Builder.mergeFrom": 203,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.discoverAvailableEndpoints": 155,
+          "org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.runTraffic": 102
+        },
+        "CPU_APP": {
+          "<test/framework>": 1053,
+          "org.flexlb.balance.endpoint.PrefillEndpoint$ProjectionSource.materialize": 615,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB$Builder.mergeFrom": 473,
+          "org.flexlb.balance.strategy.PrefillCandidateSet.ensureCapacity": 246,
+          "org.flexlb.balance.endpoint.DecodeState.routingViewSnapshot": 222,
+          "org.flexlb.balance.strategy.DecodeSelector.select": 210,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB.writeTo": 190,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.discoverAvailableEndpoints": 160,
+          "org.flexlb.balance.projection.RouteTimelineProjector.projectWithPredictions": 96,
+          "org.flexlb.balance.strategy.PrefillCandidateSet.endpointAddress": 79
+        },
+        "CPU_INCLUSIVE": {
+          "org.flexlb.balance.scheduler.QueuedRequestScheduler.lambda$submitPlan$5": 2462,
+          "org.flexlb.balance.scheduler.QueuedRequestScheduler$$Lambda.0x00007f776455da40.run": 2462,
+          "org.flexlb.balance.scheduler.QueuedRequestScheduler.plan": 2455,
+          "org.flexlb.balance.scheduler.RequestSchedulerTestRuntime$BindingRouter.select": 2148,
+          "org.flexlb.balance.scheduler.DefaultRouter.select": 2148,
+          "org.flexlb.balance.scheduler.DefaultRouter.selectRole": 2147,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.select": 1582,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.evaluateCandidates": 1319,
+          "org.flexlb.balance.endpoint.PrefillEndpoint.captureRouteProjectionInputs": 674,
+          "org.flexlb.balance.endpoint.PrefillEndpoint$ProjectionSource.materialize": 640
+        },
+        "MONITOR_NS": {
+          "org.flexlb.balance.strategy.EndpointRoundRobin$Cursor org.flexlb.balance.strategy.EndpointRoundRobin.next": 8139986705,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.register": 496616967,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.archive": 220464862
+        },
+        "MONITOR_COUNT": {
+          "org.flexlb.balance.strategy.EndpointRoundRobin$Cursor org.flexlb.balance.strategy.EndpointRoundRobin.next": 579,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.register": 16,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.archive": 7
+        },
+        "MONITOR_MAX_NS": {
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.archive": 32125503,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.register": 32044142,
+          "org.flexlb.balance.strategy.EndpointRoundRobin$Cursor org.flexlb.balance.strategy.EndpointRoundRobin.next": 22839257
+        },
+        "REQUEST_FLOW_SAMPLE": {
+          "org.flexlb.balance.scheduler.BalanceContext.prepareGenerateInput": 299,
+          "org.flexlb.balance.scheduler.BalanceContext.lambda$setGenerateInputPb$0": 298,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.completeFutureResult": 44,
+          "org.flexlb.balance.scheduler.BalanceContext$RequestFuture.completeOwned": 44,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$submitSelectedResponse$61": 42,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.claimAdmissionHandle": 8,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.prepareDispatch": 7,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.executeEngineEffects": 6,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.register": 6,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.registerRequest": 6,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$acceptPrefillStatus$20": 6,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.isCurrentContext": 6,
+          "org.flexlb.balance.scheduler.BalanceContext.requireContextLock": 5,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.commitTerminalRecord": 3,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.resumeCleanup": 3,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.commitRoute": 3,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.ownsPreparedDeliveryLocked": 3,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$enqueueCleanup$64": 3,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$executeEngineEffects$39": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$submitDeliveryResponse$60": 2,
+          "org.flexlb.balance.scheduler.BalanceContext.ownsActiveGenerationLocked": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.acceptDeliveryResult": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.acceptDeliveryClaim": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.beginAdmission": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.decisionDeadlineAtMs": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.advanceStageLocked": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.submitContinuation": 1,
+          "org.flexlb.config.FlexlbConfig.allowsPreemption": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$claimDelivery$13": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.installDecisionDeadline": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.assertInvariantLocked": 1,
+          "org.flexlb.balance.scheduler.BalanceContext.installRequestDeadline": 1,
+          "org.flexlb.balance.scheduler.BalanceContext$DeliveryClaim.complete": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.onDecodeStatus": 1
+        },
+        "ALLOC_WEIGHT": {
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB$Builder.mergeFrom": 16966912368,
+          "<test/framework>": 4831210928,
+          "org.flexlb.balance.endpoint.EndpointRegistry.decodeRoutingSnapshot": 2720867504,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.discoverAvailableEndpoints": 2502935440,
+          "org.flexlb.balance.strategy.DecodeSelector.select": 2330338736,
+          "org.flexlb.balance.projection.RouteTimelineProjector$PredictionBoundary.batchDurationMs": 1946199640,
+          "org.flexlb.balance.planner.GroupPlanner.selectWithPrediction": 1484123792,
+          "org.flexlb.schedule.grpc.FlexlbScheduleProtocol$FlexlbScheduleRequestPB$Builder.mergeFrom": 1478952080,
+          "org.flexlb.engine.grpc.RpcServiceGrpc$RpcServiceFutureStub.enqueueBatch": 863706320,
+          "org.flexlb.balance.projection.RouteTimelineProjector.projectWithPredictions": 709935104
+        }
+      },
+      "after": {
+        "recording": "RECORDING 2026-10-08T03:35:36.969641248Z 2026-10-08T03:36:12.193267076Z",
+        "inferred_measurement_window": "INFERRED_TRAFFIC_PACE_SAMPLES_LINE_590 2026-10-08T03:35:56.470471557Z 2026-10-08T03:36:06.434473331Z",
+        "summary": "SUMMARY samples=4757 gc_count=2 gc_ms=94.618717 gc_max_ms=56.677907",
+        "CPU_LEAF": {
+          "java.util.concurrent.ForkJoinPool.scan": 2115,
+          "org.flexlb.balance.projection.RouteTimelineProjector.project": 460,
+          "com.google.protobuf.CodedInputStream$ArrayDecoder.readRawVarint32": 169,
+          "org.flexlb.balance.endpoint.DecodeState.routingViewSnapshot": 136,
+          "java.util.concurrent.ForkJoinPool.awaitWork": 115,
+          "org.flexlb.httpserver.MasterBatchEndToEndPerformanceTest.paceUntil": 107,
+          "org.flexlb.balance.strategy.DecodeSelector.select": 106,
+          "org.flexlb.balance.projection.RouteTimelineProjector.projectWithPredictions": 102,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB$Builder.mergeFrom": 101,
+          "java.util.ComparableTimSort.binarySort": 91
+        },
+        "CPU_APP": {
+          "<test/framework>": 2690,
+          "org.flexlb.balance.projection.RouteTimelineProjector.project": 460,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB$Builder.mergeFrom": 276,
+          "org.flexlb.balance.strategy.EndpointRoundRobin.next": 275,
+          "org.flexlb.balance.endpoint.DecodeState.routingViewSnapshot": 140,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB.writeTo": 117,
+          "org.flexlb.balance.strategy.DecodeSelector.select": 106,
+          "org.flexlb.balance.projection.RouteTimelineProjector.projectWithPredictions": 102,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.discoverAvailableEndpoints": 90,
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB.getSerializedSize": 39
+        },
+        "CPU_INCLUSIVE": {
+          "org.flexlb.balance.scheduler.QueuedRequestScheduler$$Lambda.0x00007f32f455fda0.run": 1623,
+          "org.flexlb.balance.scheduler.QueuedRequestScheduler.lambda$submitPlan$5": 1623,
+          "org.flexlb.balance.scheduler.QueuedRequestScheduler.plan": 1621,
+          "org.flexlb.balance.scheduler.RequestSchedulerTestRuntime$BindingRouter.select": 1454,
+          "org.flexlb.balance.scheduler.DefaultRouter.select": 1454,
+          "org.flexlb.balance.scheduler.DefaultRouter.selectRole": 1452,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.select": 1117,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.evaluateCandidates": 772,
+          "org.flexlb.balance.projection.RouteTimelineProjector.projectView": 641,
+          "org.flexlb.balance.projection.RouteTimelineProjector.project": 640
+        },
+        "MONITOR_NS": {
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.register": 533446405,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.archive": 236992012
+        },
+        "MONITOR_COUNT": {
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.register": 16,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.archive": 7
+        },
+        "MONITOR_MAX_NS": {
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.archive": 34297360,
+          "java.lang.Object org.flexlb.balance.scheduler.RequestRepository.register": 34229796
+        },
+        "REQUEST_FLOW_SAMPLE": {
+          "org.flexlb.balance.scheduler.BalanceContext.prepareGenerateInput": 158,
+          "org.flexlb.balance.scheduler.BalanceContext.lambda$setGenerateInputPb$0": 158,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.completeFutureResult": 28,
+          "org.flexlb.balance.scheduler.BalanceContext$RequestFuture.completeOwned": 28,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$submitSelectedResponse$61": 26,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.claimAdmissionHandle": 9,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.register": 8,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.registerRequest": 8,
+          "org.flexlb.balance.scheduler.BalanceContext.activate": 5,
+          "org.flexlb.balance.scheduler.BalanceContext.beginAdmission": 4,
+          "org.flexlb.balance.scheduler.BalanceContext.advanceStageLocked": 4,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.prepareDispatch": 3,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.resumeCleanup": 2,
+          "org.flexlb.balance.scheduler.BalanceContext.requireContextLock": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.executeEngineEffects": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.commitTerminalRecord": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$submitDeliveryResponse$60": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$enqueueCleanup$64": 2,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$acceptPrefillStatus$20": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$acceptDecodeStatus$23": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.execute": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.ownsPreparedDeliveryLocked": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$executeEngineEffects$40": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$executeFinalization$49": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.claimDelivery": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$finalizationEffects$54": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$finalizationEffects$56": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.lambda$finishTerminal$51": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.finishTerminal": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.executeFinalization": 1,
+          "org.flexlb.balance.scheduler.AbstractRequestScheduler.isCurrentContext": 1
+        },
+        "ALLOC_WEIGHT": {
+          "org.flexlb.engine.grpc.EngineRpcService$GenerateInputPB$Builder.mergeFrom": 21518337088,
+          "org.flexlb.balance.strategy.EndpointRoundRobin.next": 4577663624,
+          "<test/framework>": 4113996848,
+          "org.flexlb.balance.endpoint.EndpointRegistry.decodeRoutingSnapshot": 3454299456,
+          "org.flexlb.balance.projection.RouteTimelineProjector$PredictionBoundary.batchDurationMs": 3265478184,
+          "org.flexlb.balance.strategy.CostBasedPrefillStrategy.discoverAvailableEndpoints": 2004965280,
+          "org.flexlb.schedule.grpc.FlexlbScheduleProtocol$FlexlbScheduleRequestPB$Builder.mergeFrom": 1816240336,
+          "org.flexlb.balance.strategy.DecodeSelector.select": 1812117880,
+          "org.flexlb.balance.planner.GroupPlanner.selectWithPrediction": 1672701392,
+          "org.flexlb.dao.master.WorkerStatus$TaskObservation.copyOf": 1192940864
+        }
+      }
+    },
+    "reverse_order_repeat_before_cursor_fix": {
+      "latest": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3000.3",
+          "master_avg": "10.208ms",
+          "master_p99": "12ms",
+          "client_p99": "23.050ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "<1ms",
+          "gates_pass": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9989.2",
+          "master_qps": "10015.4",
+          "master_avg": "62.913ms",
+          "master_p99": "591ms",
+          "client_p99": "594.714ms",
+          "batch_wait_p99": "18ms",
+          "delivery_wait_p99": "19ms",
+          "route_submit_p99": "580ms",
+          "gates_pass": false
+        }
+      ],
+      "baseline": [
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "3000",
+          "requests": "30000",
+          "client_qps": "2996.8",
+          "master_qps": "3001.6",
+          "master_avg": "10.208ms",
+          "master_p99": "12ms",
+          "client_p99": "25.684ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "<1ms",
+          "gates_pass": true
+        },
+        {
+          "delivery": "BATCH",
+          "decision": "FIXED_WINDOW",
+          "prefill": "750",
+          "decode": "750",
+          "target_qps": "10000",
+          "requests": "100000",
+          "client_qps": "9982.7",
+          "master_qps": "10008.3",
+          "master_avg": "10.442ms",
+          "master_p99": "19ms",
+          "client_p99": "48.031ms",
+          "batch_wait_p99": "10ms",
+          "delivery_wait_p99": "11ms",
+          "route_submit_p99": "5ms",
+          "gates_pass": true
+        }
+      ]
+    },
+    "profile_settings": {
+      "java_execution_sample_period_ms": 10,
+      "java_monitor_enter_threshold_ms": 10,
+      "measurement_window": "Inferred from paced traffic stack samples at the unchanged performance test line 590; warmup/startup excluded."
+    },
+    "profile_after_cursor_fix_identity": [
+      {
+        "pid": 1434696,
+        "jfr_file": "hotspot-pid-1434696-id-1-2026_10_08_11_36_12.jfr",
+        "jfr_sha256": "709dea921186c4ad1b41a8c357dcb2b9e86b199a7ceb4cca565f4ca8c14ca837",
+        "gc_file": "gc-1434696.log"
+      }
+    ],
+    "routing_lock_review": {
+      "snapshot_inputs": "Both callers provide operation-local captured eligibility and endpoint addresses. Each predicate/address callback is evaluated once outside the shared lock.",
+      "cursor_linearization": "The last selected address is read and changed only under the same role/group cursor monitor. Binary search selects the first strictly greater eligible address, wrapping to the smallest; original index lookup preserves exact endpoint identity.",
+      "tradeoff": "Two temporary reference arrays and per-selection sorting replace the fleet-sized serialized scan. Sorting appears in CPU samples; measured acceptance remains within all existing gates."
+    },
+    "hotspot_interpretation": [
+      "Before the cursor change, the inferred ~10s traffic window recorded 579 Cursor waits >=10ms, totaling 8.139986705 seconds across threads. After the change, no Cursor wait >=10ms was recorded. This is cumulative monitor wait, not request latency or zero contention proof.",
+      "Moved request-status/end/preemption workflows are not dominant CPU sample sites.",
+      "Existing projection work and ForkJoinPool.scan remain CPU sample sites; the final fork has 2115/4757 execution samples in ForkJoinPool.scan. Sampling alone does not establish request critical-path delay or that this refactor introduced the scanning.",
+      "Pre-fix first 10k BATCH failed client throughput and reverse repeat failed routing P99. These failures remain in the record; no threshold was relaxed and no host interference attribution is claimed without evidence.",
+      "Final uninstrumented 750P/750D BATCH and NON_BATCH 3k/10k gates and the separately instrumented BATCH 10k diagnostic all pass."
+    ],
+    "verified_64g_test_fork_pids": [
+      1431001,
+      1432908
+    ]
+  },
+  "source_verification": {
+    "baseline": {
+      "inputs": 701,
+      "sha256": "8eaaaf7b8c2cfcced76d17c57560ed5c97a1896a6bf48a82555c38129db139c0"
+    },
+    "latest": {
+      "inputs": 701,
+      "sha256": "f3407f55329aa82b57cfdc24811c57f2b5af8aea5a293ee616ca2012bb1b1c6b"
+    },
+    "optimized": {
+      "inputs": 701,
+      "sha256": "ed52ea807e4a8dbf47a02cf3036b67aa52567df9438ffcc08868b462d639c510"
+    },
+    "git_index": {
+      "inputs": 701,
+      "index_mismatches": [],
+      "removed_type_absent": true,
+      "manifest_sha256": "ed52ea807e4a8dbf47a02cf3036b67aa52567df9438ffcc08868b462d639c510"
+    }
+  },
+  "self_review": {
+    "result": "No actionable issue found in final changed workflows after lock, identity, resource ownership, continuation, response competition and naming review. Regression tests completed without deadlock.",
+    "limits": [
+      "UT and E2E regression cover exercised schedules, not all possible production interleavings.",
+      "Prefill projection, fleet candidate discovery and protobuf handling still consume CPU; no claim that every existing system hotspot is eliminated.",
+      "Sampling percentages and recorded monitor waits depend on profiling thresholds; missing samples do not prove zero execution or zero waiting."
+    ]
+  },
+  "raw_snapshot_root": "/home/luoli.hn/work/rtp_llm_4/github-opensource/.tmp/flexlb-request-flow-20261008",
+  "preserved_unrelated_work": [
+    "DecodeState.java import edit",
+    "EndpointRegistry.java import/spacing edit",
+    "PrefillState.java Javadoc edit",
+    "review-regression-2026-10-06.json"
+  ]
+}

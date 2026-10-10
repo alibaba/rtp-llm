@@ -94,7 +94,7 @@ class MultiShardRoutingTest {
 
         // Assert no leak_detected flag on any engine
         for (JavaMockEngineCluster.FastRpcService service : services.values()) {
-            assertFalse(service.isLeakDetected(),
+            assertFalse(MockEngineTestSupport.isLeakDetected(service),
                     "no leak should be detected on port " + service.getGrpcPort());
         }
 
@@ -102,12 +102,12 @@ class MultiShardRoutingTest {
         for (int shard = 0; shard < prefillByShard.size(); shard++) {
             List<JavaMockEngineCluster.FastRpcService> prefillEngines = prefillByShard.get(shard);
             long shardPrefillTotal = prefillEngines.stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getAcceptedCount)
+                    .mapToLong(MockEngineTestSupport::getAcceptedCount)
                     .sum();
             assertEquals(requestsPerShard, shardPrefillTotal,
                     "shard " + shard + " prefill engines should accept " + requestsPerShard + " total");
             for (JavaMockEngineCluster.FastRpcService engine : prefillEngines) {
-                double ratio = (double) engine.getAcceptedCount() / shardPrefillTotal;
+                double ratio = (double) MockEngineTestSupport.getAcceptedCount(engine) / shardPrefillTotal;
                 assertTrue(ratio <= 0.55,
                         "prefill engine port " + engine.getGrpcPort()
                                 + " handles " + String.format("%.1f%%", ratio * 100)
@@ -119,12 +119,12 @@ class MultiShardRoutingTest {
         for (int shard = 0; shard < decodeByShard.size(); shard++) {
             List<JavaMockEngineCluster.FastRpcService> decodeEngines = decodeByShard.get(shard);
             long shardDecodeTotal = decodeEngines.stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                    .mapToLong(MockEngineTestSupport::getCompletedCount)
                     .sum();
             assertEquals(requestsPerShard, shardDecodeTotal,
                     "shard " + shard + " decode engines should complete " + requestsPerShard + " total");
             for (JavaMockEngineCluster.FastRpcService engine : decodeEngines) {
-                double ratio = (double) engine.getCompletedCount() / shardDecodeTotal;
+                double ratio = (double) MockEngineTestSupport.getCompletedCount(engine) / shardDecodeTotal;
                 assertTrue(ratio <= 0.55,
                         "decode engine port " + engine.getGrpcPort()
                                 + " handles " + String.format("%.1f%%", ratio * 100)
@@ -181,12 +181,12 @@ class MultiShardRoutingTest {
         for (int shard = 0; shard < prefillByShard.size(); shard++) {
             List<JavaMockEngineCluster.FastRpcService> prefillEngines = prefillByShard.get(shard);
             long shardPrefillTotal = prefillEngines.stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getAcceptedCount)
+                    .mapToLong(MockEngineTestSupport::getAcceptedCount)
                     .sum();
             assertEquals(requestsPerShard, shardPrefillTotal,
                     "shard " + shard + " prefill should accept " + requestsPerShard);
             for (JavaMockEngineCluster.FastRpcService engine : prefillEngines) {
-                double ratio = (double) engine.getAcceptedCount() / shardPrefillTotal;
+                double ratio = (double) MockEngineTestSupport.getAcceptedCount(engine) / shardPrefillTotal;
                 assertTrue(ratio <= 0.6,
                         "prefill engine port " + engine.getGrpcPort()
                                 + " handles " + String.format("%.1f%%", ratio * 100)
@@ -198,12 +198,12 @@ class MultiShardRoutingTest {
         for (int shard = 0; shard < decodeByShard.size(); shard++) {
             List<JavaMockEngineCluster.FastRpcService> decodeEngines = decodeByShard.get(shard);
             long shardDecodeTotal = decodeEngines.stream()
-                    .mapToLong(JavaMockEngineCluster.FastRpcService::getCompletedCount)
+                    .mapToLong(MockEngineTestSupport::getCompletedCount)
                     .sum();
             assertEquals(requestsPerShard, shardDecodeTotal,
                     "shard " + shard + " decode should complete " + requestsPerShard);
             for (JavaMockEngineCluster.FastRpcService engine : decodeEngines) {
-                double ratio = (double) engine.getCompletedCount() / shardDecodeTotal;
+                double ratio = (double) MockEngineTestSupport.getCompletedCount(engine) / shardDecodeTotal;
                 assertTrue(ratio <= 0.55,
                         "decode engine port " + engine.getGrpcPort()
                                 + " handles " + String.format("%.1f%%", ratio * 100)

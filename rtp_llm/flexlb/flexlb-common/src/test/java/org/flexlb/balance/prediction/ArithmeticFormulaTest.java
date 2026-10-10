@@ -24,6 +24,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ArithmeticFormulaTest {
 
     @Test
+    void repeatedParsingKeepsBindingAndValidationInputsIsolated() {
+        var variables = new java.util.HashMap<>(Map.of("signal", 0));
+        var excluded = new java.util.HashSet<String>();
+        var original = ArithmeticFormula.parse("sum(signal)", variables, excluded, true);
+        List<double[]> items = List.of(new double[]{7, 11});
+        assertEquals(7, original.evaluateAsDouble(new double[]{0, 0}, items));
+        variables.put("signal", 1);
+        var changed = ArithmeticFormula.parse("sum(signal)", variables, excluded, true);
+        assertEquals(11, changed.evaluateAsDouble(new double[]{0, 0}, items));
+        assertEquals(7, original.evaluateAsDouble(new double[]{0, 0}, items));
+        assertThrows(IllegalArgumentException.class,
+                () -> ArithmeticFormula.parse("sum(signal)", variables, excluded, false));
+        excluded.add("signal");
+        assertThrows(IllegalArgumentException.class,
+                () -> ArithmeticFormula.parse("sum(signal)", variables, excluded, true));
+        excluded.clear();
+        assertEquals(11, ArithmeticFormula.parse("sum(signal)", variables, excluded, true)
+                .evaluateAsDouble(new double[]{0, 0}, items));
+        variables.put("unused", -1);
+        assertThrows(IllegalArgumentException.class,
+                () -> ArithmeticFormula.parse("sum(signal)", variables, excluded, true));
+        for (int index = 0; index < 256; index++) {
+            assertEquals(index, ArithmeticFormula.parse(Integer.toString(index), Map.of())
+                    .evaluateAsDouble(new double[0], null));
+        }
+        assertEquals(7, original.evaluateAsDouble(new double[]{0, 0}, items));
+        assertEquals(7, ArithmeticFormula.parse("sum(signal)", Map.of("signal", 0), Set.of(), true)
+                .evaluateAsDouble(new double[]{0, 0}, items));
+    }
+
+    @Test
     void evaluatesScalarVariablesWithCallerDefinedIndices() {
         ArithmeticFormula formula = ArithmeticFormula.parse(
                 "running_size / max_running_size + cache_ratio^2",
@@ -344,6 +375,16 @@ class ArithmeticFormulaTest {
         ArithmeticFormula formula = aggregateFormula(terms.getFirst());
         assertEquals(8_002_000.0, formula.evaluateAsDouble(new double[]{1}, null));
         assertEquals(8_006_000.0, formula.evaluateAsDouble(new double[]{2}, null));
+
+        ArithmeticFormula batch = aggregateFormula("sum(" + terms.getFirst() + ")");
+        double expected = batch.evaluateAsDouble(new double[]{0},
+                List.of(new double[]{1}, new double[]{2}));
+        List<ArithmeticFormula.Variables> items = List.of(index -> 1.0, index -> 2.0);
+        assertEquals(16_008_000.0, expected);
+        assertEquals(Double.doubleToLongBits(expected),
+                Double.doubleToLongBits(batch.evaluateWithBindings(new double[]{0}, items)));
+        assertEquals(8_002_000.0, batch.evaluateWithBindings(new double[]{1}, List.of()));
+        assertEquals(3.0, aggregateFormula("sum(x)").evaluateWithBindings(new double[]{0}, items));
     }
 
     @Test

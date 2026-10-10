@@ -12,10 +12,10 @@ import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.config.ConfigService;
-import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.consistency.MasterStatusService;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.service.RouteService;
-import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.flexlb.balance.scheduler.AbstractRequestScheduler;
+import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
@@ -49,15 +49,12 @@ class FlexlbGrpcDrainTest {
                 {"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
                 """));
-        var routes = mock(RouteService.class);
+        var routes = mock(org.flexlb.balance.scheduler.RequestScheduler.class);
         var success = new Response();
         success.setSuccess(true);
         success.setCode(200);
-        when(routes.route(any())).thenReturn(CompletableFuture.completedFuture(success));
-        var service = new FlexlbServiceImpl(routes, mock(LBStatusConsistencyService.class),
-                mock(EngineHealthReporter.class), mock(FlexlbGrpcForwarder.class), config,
-                mock(BatchSchedulerReporter.class), mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class));
+        when(routes.submit(any())).thenReturn(CompletableFuture.completedFuture(success));
+        var service = FlexlbServiceTestSupport.create(routes, org.flexlb.balance.scheduler.SchedulerTestSupport.repository(mock(AbstractRequestScheduler.class)), mock(MasterStatusService.class), mock(EngineHealthReporter.class), mock(FlexlbGrpcForwarder.class), config, mock(DeliveryMetricsReporter.class), mock(ServerScheduleLatencyRecorder.class), mock(RequestSchedulerReporter.class));
         ServerInterceptor pauseBeforeSchedule = new ServerInterceptor() {
             @Override
             public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
@@ -99,7 +96,7 @@ class FlexlbGrpcDrainTest {
             assertTrue(drainer.isAlive());
             resume.countDown();
             assertTrue(pending.get(3, TimeUnit.SECONDS).getSuccess());
-            verify(routes, times(1)).route(any());
+            verify(routes, times(1)).submit(any());
             drainer.join(3000);
             assertFalse(drainer.isAlive());
         } finally {

@@ -1,0 +1,112 @@
+{
+  "base_commit": "21e29e0038651bc3001a29edc99d66726c6d66a4",
+  "date": "2026-10-13",
+  "scope": "FlexLB Java production sources across API/common/cache/grpc/sync/mock-engine; source callers, UT fixtures and tool callers examined. Generated protobuf members, framework callbacks and external configuration contracts are retained.",
+  "rounds": [
+    {
+      "round": 1,
+      "method": "Source declarations, function signatures, production versus UT call sites, constructors and stale names."
+    },
+    {
+      "round": 2,
+      "method": "Compiled call/field graph with declaring-owner inheritance resolution, virtual/interface dispatch and invokedynamic method handles; account for Lombok and compile-time constants."
+    },
+    {
+      "round": 3,
+      "method": "Trace consumers of result objects, record facts, JSON snapshots and lifecycle callbacks; detect fields whose only reads are their generated accessors."
+    },
+    {
+      "round": 4,
+      "method": "Three independent agents review the final five-file patch, then source and bytecode rescans and reactor regression."
+    }
+  ],
+  "reviews": [
+    {
+      "agent": "scheduler_audit",
+      "scope": "30 scheduler source files, plus cross-module callers",
+      "initial": "No further scheduler cleanup candidate confirmed.",
+      "final_patch": "Pass; request identities, cache version advancement, errors and metric order preserved."
+    },
+    {
+      "agent": "state_projection_audit",
+      "scope": "35 endpoint/planner/projection/prediction/strategy/eviction files",
+      "initial": "No safe ordinary field/function/local removal confirmed.",
+      "final_patch": "Pass; canonical versions and generation fencing intact."
+    },
+    {
+      "agent": "library_audit",
+      "scope": "Common/cache/grpc/API and non-balance sync sources, UT/tool consumers",
+      "initial": "Confirmed seven unused internal DTO metadata fields.",
+      "final_patch": "Pass; all obsolete assignments and signatures migrated."
+    }
+  ],
+  "removed": {
+    "DiffResult": [
+      "engineIp",
+      "version"
+    ],
+    "WorkerCacheUpdateResult": [
+      "engineIpPort",
+      "cacheBlockCount",
+      "availableKvCache",
+      "totalKvCache",
+      "cacheVersion"
+    ],
+    "function": "DefaultCacheAwareService.buildSuccessResult",
+    "parameters": [
+      "DiffResult.empty engineIp parameter",
+      "DefaultCacheAwareService.buildFailureResult engineIpPort parameter"
+    ],
+    "ut_assignments": "Three cacheVersion builder assignments with no consumer or assertion."
+  },
+  "preserved": [
+    "Diff added/removed sets drive the same local/global index updates.",
+    "Cache update success/errorMessage still determines retry and indexedVersion publication.",
+    "CacheStatus.version and WorkerStatus indexedVersion remain canonical; generation/current-poll checks unchanged.",
+    "Null-input, success and exception branches keep the original metrics/logging/update order.",
+    "No locks, executor boundaries, admission/resource protocol or callback order changed."
+  ],
+  "rescans": {
+    "ordinary_unread_fields": "No new confirmed candidate after hierarchy-aware graph scan.",
+    "ut_only_sync_functions": "No confirmed safe hand-written function deletion; generated record accessors and framework callbacks checked individually.",
+    "stale_names": "No legacy RequestSlot/BalanceContext/RoutingResult/SelectedRole production names in the scheduler scope; remaining slot variables are real protocol or planner slots."
+  },
+  "tests": {
+    "sync_and_dependencies": {
+      "tests": 2180,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "api": {
+      "tests": 177,
+      "passed": 175,
+      "failures": 1,
+      "errors": 0,
+      "skipped": 1
+    },
+    "known_failure": "OpenTelemetryBootstrapTest.sharedJsonContract lacks telemetry/test/trace_config_cases.json; reproduced on unmodified a3c4437874 in the prior round. Test source and dependency were not changed or skipped.",
+    "mock_engine": "Main and test sources compile successfully through the reactor; additional performance tests were not run for this removal."
+  },
+  "size": {
+    "production_java_lines_removed": 33,
+    "sync_production_java_lines": 24081,
+    "cache_production_java_lines": 1880,
+    "production_java_lines_excluding_mock_engine": 38137
+  },
+  "source_sha256": {
+    "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/domain/DiffResult.java": "d63eb850a888a1e299e5d2005e43a1635bca530938c8f0c17af2e8a8e63b6a4c",
+    "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/domain/WorkerCacheUpdateResult.java": "13dd65dbbe10f6deb577013b92b23b1490d33e23fc4ea742821667e94cb55014",
+    "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/core/EngineLocalView.java": "f91351bc547e49e89ff2f9b6638ba197a70295af407621c61cde81832c5b503b",
+    "rtp_llm/flexlb/flexlb-cache/src/main/java/org/flexlb/cache/service/impl/DefaultCacheAwareService.java": "0270eb382004d0bef9a44f51011a6898b68aa877a69e9b15bdf0d56f7eb47d72",
+    "rtp_llm/flexlb/flexlb-sync/src/test/java/org/flexlb/sync/runner/GrpcCacheStatusCheckRunnerTest.java": "5834850fcdf07122519b734abe37d476ca20086bff05b15ab83ee0964995d2a6"
+  },
+  "logs": {
+    "reactor": "/tmp/flexlb-multiround-ut.log",
+    "prior_baseline_failure": "/tmp/flexlb-unused-baseline-telemetry.log",
+    "before_graph": "/tmp/flexlb-multiround-20261013/graph-candidates.txt",
+    "after_graph": "/tmp/flexlb-multiround-20261013/graph-after.txt",
+    "mock_engine_compile": "/tmp/flexlb-multiround-mock-compile.log"
+  },
+  "limits": "No further confirmed cleanup item within these scans, not proof that every future dynamic caller or concurrency sequence is correct. Public DTO getter/setter/builder/all-args constructor shapes shrink; repository callers are rebuilt and tested, external precompiled Java compatibility is not promised. Existing default-G1 performance and missing telemetry fixture issues are outside this cleanup."
+}

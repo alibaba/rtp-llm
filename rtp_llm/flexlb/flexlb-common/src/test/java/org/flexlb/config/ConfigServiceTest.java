@@ -1,5 +1,7 @@
 package org.flexlb.config;
 
+import org.flexlb.config.ConfigTestSupport;
+
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -80,9 +82,9 @@ class ConfigServiceTest {
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isFixedWindowDecision());
         assertEquals(3600000L, config.queueScheduler().getQueueTimeoutMs());
-        assertEquals(8, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(300L, config.fixedWindowDecision().getMaxCollectionWaitMs());
-        assertNull(config.fixedWindowDecision().getMaxPredictedExecutionMs());
+        assertEquals(8, config.decisionPolicy().getMaxRequests());
+        assertEquals(300L, config.decisionPolicy().getMaxCollectionWaitMs());
+        assertNull(config.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
         var prefill = config.getRouter().getRoles().getPrefill();
         assertEquals(RoutingConfig.EstimatorType.FORMULA, prefill.getExecutionTimeEstimator().getType());
@@ -191,8 +193,8 @@ class ConfigServiceTest {
         assertTrue(config.isPriorityOrdering());
         assertEquals(60, config.priorityOrdering().getDefaultPriority());
         assertTrue(config.priorityOrdering().getPreemption().allows(VictimStage.DECODE_ENGINE_OWNED));
-        assertEquals(12, config.fixedWindowDecision().getMaxRequests());
-        assertEquals(90L, config.fixedWindowDecision().getMaxPredictedExecutionMs());
+        assertEquals(12, config.decisionPolicy().getMaxRequests());
+        assertEquals(90L, config.decisionPolicy().getMaxPredictedExecutionMs());
         assertEquals(4, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(25L, config.getRouter().getRoles().getPrefill().getCacheAffinity().getMaxExtraTtftMs());
         assertEquals(128L, config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
@@ -305,7 +307,7 @@ class ConfigServiceTest {
     void priority_defaults_to_all_preemption_stages_and_preserves_explicit_subsets() {
         var allStages = java.util.EnumSet.allOf(VictimStage.class);
         assertEquals(allStages, new PreemptionConfig().getAllowedVictimStages());
-        assertEquals(allStages, QueueOrderingConfig.priority().getPreemption().getAllowedVictimStages());
+        assertEquals(allStages, ConfigTestSupport.priority().getPreemption().getAllowedVictimStages());
         for (String ordering : new String[]{
                 "{\"type\":\"PRIORITY\"}",
                 "{\"type\":\"PRIORITY\",\"preemption\":{}}",
@@ -323,7 +325,7 @@ class ConfigServiceTest {
             assertFalse(config.allowsPreemption(VictimStage.DECODE_ENGINE_OWNED));
         }
         FlexlbConfig fifo = ConfigTestFixtures.parse("{}");
-        assertTrue(fifo.queueScheduler().getOrdering().preemptionPolicy().isEmpty());
+        assertTrue(ConfigTestSupport.preemptionPolicy(fifo.queueScheduler().getOrdering()).isEmpty());
         for (VictimStage stage : allStages) { assertFalse(fifo.allowsPreemption(stage)); }
         assertInvalid("""
                 {"scheduler":{"ordering":{"type":"PRIORITY","preemption":{"allowedVictimStages":[]}}}}

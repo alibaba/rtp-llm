@@ -6,6 +6,9 @@ import org.flexlb.enums.FlexPriorityType;
 /**
  * FlexMonitor - Unified monitoring interface
  *
+ * <p>Operations are best-effort: backend failures must not escape to business callers.
+ * Use {@link SafeFlexMonitor#wrap(FlexMonitor)} for external implementations.
+ *
  * @author saichen.sm
  */
 public interface FlexMonitor extends AutoCloseable {

@@ -14,7 +14,7 @@
 
 namespace rtp_llm {
 
-enum class PriorityCancelResult : uint8_t {
+enum class RequestCancelResult : uint8_t {
     ACCEPTED,
     TOMBSTONED,
     NOT_FOUND,
@@ -45,8 +45,8 @@ public:
 
     grpc::Status RemoteFinish(grpc::ServerContext* context, const RemoteFinishRequestPB* request, EmptyPB* response);
 
-    // AutoTPM Cancel targets an active batch request. ACCEPTED is a weak ACK:
-    // the priority first-cause latch is installed and P-to-D cancellation is
+    // Cancel targets a batch request. ACCEPTED is a weak ACK:
+    // the cancellation first-cause latch is installed and P-to-D cancellation is
     // triggered, while completion is reported later through WorkerStatus.
     grpc::Status Cancel(grpc::ServerContext* context, const CancelRequestPB* request, CancelResponsePB* response);
 
@@ -54,13 +54,14 @@ protected:
     // Shared with the derived batch server (each batch slot reuses these).
     grpc::Status prepareAllocateResource(PrefillGenerateContext& prefill_context);
     grpc::Status finishStream(PrefillGenerateContext& prefill_context);
-    grpc::Status preferPriorityPreemption(PrefillGenerateContext& prefill_context, const grpc::Status& fallback);
+    grpc::Status preferCancellation(PrefillGenerateContext& prefill_context, const grpc::Status& fallback);
     void         setContextError(PrefillGenerateContext& prefill_context, const ErrorInfo& error_info);
     void         setContextError(PrefillGenerateContext& prefill_context,
                                  const ErrorInfo&        error_info,
                                  const grpc::Status&     error_status);
-    virtual PriorityCancelResult onCancelRequest(int64_t request_id) {
-        return PriorityCancelResult::NOT_FOUND;
+    virtual bool isDecodeCleanupComplete(int64_t request_id) const { return false; }
+    virtual RequestCancelResult onCancelRequest(int64_t request_id, RequestCancelReasonPB reason) {
+        return RequestCancelResult::NOT_FOUND;
     }
 
 private:
