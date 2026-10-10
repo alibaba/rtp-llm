@@ -1,0 +1,77 @@
+{
+    "model_type": "atom_qwen4_exp",
+    "model_path": "/mnt/nas1/hf/Qwen3.8-Flash-Next-PTPC-FP8",
+    "endpoint": "/v1/chat/completions",
+    "query_result": [
+        {
+            "query": {
+                "model": "Qwen3.8-Flash-Next-PTPC-FP8",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is 1+1? Answer with only the number."
+                    }
+                ],
+                "max_tokens": 16,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_template_kwargs": {
+                    "enable_thinking": false
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "2",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 25,
+                    "completion_tokens": 2,
+                    "total_tokens": 27
+                }
+            }
+        },
+        {
+            "query": {
+                "model": "Qwen3.8-Flash-Next-PTPC-FP8",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is the capital of China? Answer in Chinese with only the city name."
+                    }
+                ],
+                "max_tokens": 16,
+                "temperature": 0,
+                "top_p": 1,
+                "chat_template_kwargs": {
+                    "enable_thinking": false
+                }
+            },
+            "result": {
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "北京",
+                            "partial": false
+                        },
+                        "finish_reason": "stop"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 28,
+                    "completion_tokens": 2,
+                    "total_tokens": 30
+                }
+            }
+        }
+    ]
+}

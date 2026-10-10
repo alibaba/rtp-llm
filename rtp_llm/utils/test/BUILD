@@ -153,6 +153,16 @@ py_test(
 )
 
 py_test(
+    name = "import_util_test",
+    srcs = [
+        "import_util_test.py",
+    ],
+    deps = [
+        "//rtp_llm:utils",
+    ],
+)
+
+py_test(
     name = "util_test",
     srcs = [
         "util_test.py",
