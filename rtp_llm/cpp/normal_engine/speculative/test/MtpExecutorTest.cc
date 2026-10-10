@@ -2,6 +2,7 @@
 #include <memory>
 #include <chrono>
 #include "torch/all.h"
+#include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -384,7 +385,8 @@ public:
 
     MtpExecutorComponents createMtpExecutorComponents(
         const MtpExecutorTestConfig&                    test_config,
-        MtpExecutor::CacheStatusSnapshotRefreshCallback cache_status_snapshot_refresh_callback = {}) {
+        MtpExecutor::CacheStatusSnapshotRefreshCallback cache_status_snapshot_refresh_callback = {},
+        bool                                            defer_connector_start                  = false) {
         CustomConfig               config;
         ModelConfig                model_config;
         RuntimeConfig              runtime_config;
@@ -438,7 +440,7 @@ public:
 
         // Create cache managers
         auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
-        cache_manager->init();
+        cache_manager->init(defer_connector_start);
 
         // Create MtpExecutor
         auto executor = std::make_unique<MtpExecutor>(params,
@@ -993,18 +995,30 @@ TEST_F(MtpExecutorTest, testCudaSelectedMtpLogprobsAvoidDenseAcceptedRowCopy) {
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
+    autil::EnvGuard                 snapshot_env("RTP_LLM_CACHE_STATUS_SNAPSHOT", "1");
+    std::shared_ptr<KVCacheManager> cache_manager;
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     bool target_forward_finished  = false;
     bool target_sampler_started   = false;
     int  refresh_count            = 0;
-    auto components =
-        createMtpExecutorComponents(test_config, [&](const std::list<GenerateStreamPtr>& refresh_streams) {
+    auto components               = createMtpExecutorComponents(
+        test_config,
+        [&](const std::list<GenerateStreamPtr>& refresh_streams) {
             EXPECT_TRUE(target_forward_finished);
             EXPECT_FALSE(target_sampler_started);
             EXPECT_EQ(refresh_streams.size(), 1);
             ++refresh_count;
-        });
+            // SCR prefill runs the real MTP callback before connectors are started.
+            ASSERT_NE(cache_manager, nullptr);
+            EXPECT_EQ(cache_manager->connectorCoordinator(), nullptr);
+            cache_manager->refreshKVCacheInfoSnapshot();
+            EXPECT_EQ(cache_manager->cache_status_snapshot_, nullptr);
+        },
+        /*defer_connector_start=*/true);
+    cache_manager = components.executor->cache_manager_;
+    ASSERT_NE(cache_manager->allocator_, nullptr);
+    ASSERT_EQ(cache_manager->connectorCoordinator(), nullptr);
 
     size_t batch_size = 1;
 
@@ -1073,6 +1087,13 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
+
+    // After SCR release, snapshot refresh must resume normally.
+    cache_manager->startDeferredServices();
+    ASSERT_NE(cache_manager->connectorCoordinator(), nullptr);
+    cache_manager->refreshKVCacheInfoSnapshot();
+    ASSERT_NE(cache_manager->cache_status_snapshot_, nullptr);
+    EXPECT_GT(cache_manager->getKVCacheInfo(-1, true).total_kv_cache, 0);
 }
 
 TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
