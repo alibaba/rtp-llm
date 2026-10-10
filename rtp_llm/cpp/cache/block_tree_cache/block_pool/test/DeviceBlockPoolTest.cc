@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
-#include <cstdint>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -173,7 +172,6 @@ TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMa
     EXPECT_GE(pool.getAllocationSizeBytes(), pool.getTotalSizeBytes());
     const long page_size = sysconf(_SC_PAGESIZE);
     ASSERT_GT(page_size, 0);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(pool.getBaseAddress()) % static_cast<size_t>(page_size), 0u);
     EXPECT_EQ(pool.getAllocationSizeBytes() % static_cast<size_t>(page_size), 0u);
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());

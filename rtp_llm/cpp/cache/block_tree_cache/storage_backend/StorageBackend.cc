@@ -220,8 +220,10 @@ void StorageBackend::shutdown() {
     uint64_t                                                               quarantine_generation;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        RTP_LLM_CHECK(active_transfer_count_ == 0);
         released_tasks.swap(quarantined_tasks_);
         quarantined_block_count_ = 0;
+        quarantine_active_.store(false, std::memory_order_release);
         quarantine_generation    = ++quarantine_generation_;
     }
     onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0);
@@ -243,6 +245,7 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     uint64_t generation;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        quarantine_active_.store(true, std::memory_order_release);
         quarantined_block_count_ += state->pins.size();
         quarantined_tasks_.push_back(state);
         task_count  = quarantined_tasks_.size();
@@ -255,9 +258,23 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     onQuarantineChanged(generation, task_count, block_count);
 }
 
-bool StorageBackend::quarantineActive() {
+bool StorageBackend::quarantineActive() const {
+    return quarantine_active_.load(std::memory_order_acquire);
+}
+
+bool StorageBackend::tryBeginTransfer() {
     std::lock_guard<std::mutex> lock(quarantine_mutex_);
-    return !quarantined_tasks_.empty();
+    if (quarantine_active_.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    ++active_transfer_count_;
+    return true;
+}
+
+void StorageBackend::endTransfer() {
+    std::lock_guard<std::mutex> lock(quarantine_mutex_);
+    RTP_LLM_CHECK(active_transfer_count_ > 0);
+    --active_transfer_count_;
 }
 
 std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepare(StorageRequest request) {
@@ -266,10 +283,10 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
 
-    // Once completion is unknown, new work must not pin more blocks until
-    // shutdown drains the transport and releases the quarantined request.
-    std::lock_guard<std::mutex> quarantine_lock(quarantine_mutex_);
-    if (!quarantined_tasks_.empty()) {
+    // Avoid serializing the potentially large pinning loop. A second check
+    // below closes the race with a transfer entering quarantine while pins
+    // are acquired; tryBeginTransfer() is the final admission boundary.
+    if (quarantineActive()) {
         return nullptr;
     }
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
@@ -282,6 +299,10 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
                 state->pins.push_back({pool, handle.block});
             }
         }
+    }
+    if (quarantineActive()) {
+        state->finish();
+        return nullptr;
     }
     return state;
 }
@@ -364,7 +385,8 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                               ErrorInfo::OkStatus() :
                               ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "storage backend is not accepting reads");
         bool quarantine = false;
-        if (error.ok() && quarantineActive()) {
+        const bool transfer_started = error.ok() && tryBeginTransfer();
+        if (error.ok() && !transfer_started) {
             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
                               "storage backend is quarantined after unknown transfer completion");
         }
@@ -383,7 +405,11 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
         }
         if (quarantine) {
             quarantineTask(state);
-        } else {
+        }
+        if (transfer_started) {
+            endTransfer();
+        }
+        if (!quarantine) {
             state->finish();
         }
         if (done) {
@@ -406,7 +432,8 @@ bool StorageBackend::write(StorageWriteTask task) {
     auto state = std::move(task.state_);
     return dispatch([this, state](Lifecycle outcome) {
         bool quarantine = false;
-        if (outcome == Lifecycle::ACCEPTING && !quarantineActive()) {
+        const bool transfer_started = outcome == Lifecycle::ACCEPTING && tryBeginTransfer();
+        if (transfer_started) {
             try {
                 writeImpl(state->request);
             } catch (const StorageOperationCompletionUnknown&) {
@@ -415,7 +442,11 @@ bool StorageBackend::write(StorageWriteTask task) {
         }
         if (quarantine) {
             quarantineTask(state);
-        } else {
+        }
+        if (transfer_started) {
+            endTransfer();
+        }
+        if (!quarantine) {
             state->finish();
         }
     });

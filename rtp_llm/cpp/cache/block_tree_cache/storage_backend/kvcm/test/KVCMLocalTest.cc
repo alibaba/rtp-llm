@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <array>
+#include <cstdint>
+#include <unistd.h>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -164,6 +166,13 @@ TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
             const auto& registration = registrations.front();
             EXPECT_EQ(registration.span.base, environment.device_pool->getBaseAddress());
             EXPECT_EQ(registration.span.size, environment.device_pool->getAllocationSizeBytes());
+            const long page_size = sysconf(_SC_PAGESIZE);
+            EXPECT_GT(page_size, 0);
+            if (page_size <= 0) {
+                return false;
+            }
+            EXPECT_EQ(reinterpret_cast<uintptr_t>(registration.span.base) % static_cast<size_t>(page_size), 0u);
+            EXPECT_EQ(registration.span.size % static_cast<size_t>(page_size), 0u);
             EXPECT_TRUE(registration.memory_registrations.has_value());
             if (!registration.memory_registrations.has_value()) {
                 return false;
@@ -184,6 +193,18 @@ TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
                                /*metrics_reporter=*/nullptr,
                                /*gdr_enabled=*/true);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+}
+
+TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {
+    FunctionResponsePB response;
+    response.mutable_remote_response();
+    std::string serialized;
+    ASSERT_TRUE(response.SerializeToString(&serialized));
+
+    FunctionResponsePB parsed;
+    ASSERT_TRUE(parsed.ParseFromString(serialized));
+    ASSERT_TRUE(parsed.has_remote_response());
+    EXPECT_EQ(parsed.remote_response().transfer_status(), REMOTE_TRANSFER_STATUS_UNSPECIFIED);
 }
 
 TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {

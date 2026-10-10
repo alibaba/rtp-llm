@@ -243,6 +243,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->deadlineExceeded());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
@@ -274,6 +275,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialRequestsTimeout) {
     ASSERT_NE(result, nullptr);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_TRUE(result->deadlineExceeded());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_PartialResponseRpcStatusFailed) {
@@ -561,6 +563,7 @@ TEST_F(BroadcastManagerTest, WaitDone_Fatal_CqEventNotOk) {
     result->finishRank(/*rank=*/0, /*cq_event_ok=*/false);
 
     EXPECT_THROW(result->waitDone(), rtp_llm::RTPException);
+    EXPECT_FALSE(result->deadlineExceeded());
 }
 
 TEST_F(BroadcastManagerTest, CqFailureStillPublishesCompletionCallback) {

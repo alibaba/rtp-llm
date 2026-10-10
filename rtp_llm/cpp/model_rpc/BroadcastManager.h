@@ -68,6 +68,10 @@ public:
         return all_request_success_.load(std::memory_order_acquire);
     }
 
+    bool deadlineExceeded() const {
+        return deadline_exceeded_.load(std::memory_order_acquire);
+    }
+
     void onDone(DoneCallback callback) {
         if (!callback) {
             return;
@@ -116,6 +120,7 @@ public:
                     fatal_error_ = "broadcast rpc cq event failed, rank=" + std::to_string(rank)
                                    + " addr=" + ctx->server_addr;
                 } else if (ctx->status.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED) {
+                    deadline_exceeded_.store(true, std::memory_order_release);
                     fatal_error_ = "broadcast rpc timeout, timeout_ms=" + std::to_string(ctx->timeout_ms)
                                    + " rank=" + std::to_string(rank) + " err="
                                    + std::to_string(ctx->status.error_code()) + "(" + ctx->status.error_message()
@@ -154,6 +159,7 @@ private:
     int                                            finished_count_{0};
     std::atomic<bool>                              already_done_{false};
     std::atomic<bool>                              all_request_success_{false};
+    std::atomic<bool>                              deadline_exceeded_{false};
     bool                                           grpc_status_failure_seen_{false};
     std::string                                    fatal_error_;
     mutable std::mutex                             wait_done_mutex_;
