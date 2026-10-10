@@ -3,21 +3,25 @@ package org.flexlb.service.grace;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.route.KvcmConfig;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.flexlb.engine.grpc.client.KvcmLeaderResolver;
 import org.flexlb.engine.grpc.client.KvcmMetaServiceClient;
 import org.flexlb.engine.grpc.client.KvcmWorkerMetadataResolver;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
 import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
+import org.flexlb.exception.KvcmQueryException;
 import org.flexlb.httpserver.FlexlbGrpcServer;
 import org.flexlb.listener.ApplicationWarmupState;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.env.Environment;
-import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -87,14 +91,19 @@ class ApplicationLifecycleTest {
     }
 
     @Test
-    void springCanWireProductionConstructor() {
+    @DisplayName("Spring 无循环依赖地注入共享 warmup，online 前不累计 KVCM 查询失败")
+    void springWiresSharedWarmupIntoQueryClient() {
         try (var context = new AnnotationConfigApplicationContext()) {
             context.setAllowCircularReferences(false);
             context.registerBean(LBStatusConsistencyService.class,
                     () -> mock(LBStatusConsistencyService.class));
             context.registerBean(CacheMatchConfiguration.class, () -> {
                 var configuration = mock(CacheMatchConfiguration.class);
-                when(configuration.getKvcmRuntimeConfig()).thenReturn(new KvcmCacheMatchingConfig());
+                var runtimeConfig = new KvcmCacheMatchingConfig();
+                runtimeConfig.setLeaderRefreshIntervalMs(60_000);
+                when(configuration.isKvcmEnabled()).thenReturn(true);
+                when(configuration.getKvcmConfig()).thenReturn(new KvcmConfig());
+                when(configuration.getKvcmRuntimeConfig()).thenReturn(runtimeConfig);
                 return configuration;
             });
             context.registerBean(KvcmMetaServiceClient.class, () -> mock(KvcmMetaServiceClient.class));
@@ -115,13 +124,15 @@ class ApplicationLifecycleTest {
             assertFalse(context.getBean(ApplicationWarmupState.class).isWarmupFinished());
 
             var client = context.getBean(KvcmGrpcClient.class);
-            ReflectionTestUtils.invokeMethod(client, "recordHeartbeat", false);
-            assertEquals(0, client.healthSnapshot().consecutiveHeartbeatFailures());
+            assertThrows(KvcmQueryException.class, () -> client.findMatchingEngines(
+                    "warmup-query", List.of(11L), 2192L, RoleType.PREFILL, "default"));
+            assertEquals(0, client.healthSnapshot().consecutiveQueryFailures());
 
             context.getBean(ApplicationLifecycle.class).online();
             assertTrue(context.getBean(ApplicationWarmupState.class).isWarmupFinished());
-            ReflectionTestUtils.invokeMethod(client, "recordHeartbeat", false);
-            assertEquals(1, client.healthSnapshot().consecutiveHeartbeatFailures());
+            assertThrows(KvcmQueryException.class, () -> client.findMatchingEngines(
+                    "online-query", List.of(11L), 2192L, RoleType.PREFILL, "default"));
+            assertEquals(1, client.healthSnapshot().consecutiveQueryFailures());
         }
     }
 

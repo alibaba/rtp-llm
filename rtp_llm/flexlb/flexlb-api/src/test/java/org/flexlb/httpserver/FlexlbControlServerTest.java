@@ -12,6 +12,7 @@ import org.flexlb.enums.LogLevel;
 import org.flexlb.service.monitor.FlexlbLogManager;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -27,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
@@ -162,6 +164,7 @@ class FlexlbControlServerTest {
     }
 
     @Test
+    @DisplayName("恢复不健康的 KVCM 主源返回 500 和拒绝原因")
     void rejectsUnsafePrimaryRecoveryWithServerError() {
         doThrow(new IllegalStateException("KVCM is unhealthy"))
                 .when(cacheMatchQueryOrchestrator)
@@ -174,10 +177,12 @@ class FlexlbControlServerTest {
                         "action",
                         CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
                 .exchange()
-                .expectStatus().is5xxServerError();
+                .expectStatus().isEqualTo(500)
+                .expectBody(String.class).isEqualTo("KVCM is unhealthy");
     }
 
     @Test
+    @DisplayName("从节点将激活备用操作转发到主节点地址，不在本地执行")
     void forwardsCacheMatchFailoverOnFollower() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
@@ -200,8 +205,8 @@ class FlexlbControlServerTest {
                 .expectStatus().isOk();
 
         verify(generalHttpNettyService).request(
-                any(CacheMatchFailoverRequest.class),
-                any(URI.class),
+                argThat((CacheMatchFailoverRequest request) -> request.action() == CacheMatchFailoverAction.ACTIVATE_FALLBACK),
+                eq(URI.create("http://10.0.0.1:7001")),
                 eq("/flexlb/cache_match/failover"),
                 eq(CacheMatchStatus.class));
         verify(cacheMatchQueryOrchestrator, never())

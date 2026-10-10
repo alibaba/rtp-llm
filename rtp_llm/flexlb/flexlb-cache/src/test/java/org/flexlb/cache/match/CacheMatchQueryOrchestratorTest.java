@@ -1,5 +1,6 @@
 package org.flexlb.cache.match;
 
+import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.cache.domain.CacheMatchQuery;
@@ -14,6 +15,7 @@ import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.cache.HostCacheMatch;
 import org.flexlb.dao.route.RoleType;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 
@@ -24,11 +26,16 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class CacheMatchQueryOrchestratorTest {
@@ -64,9 +71,7 @@ class CacheMatchQueryOrchestratorTest {
             assertFalse(result.querySucceeded());
             assertEquals(Map.of(), result.hostMatches());
             verify(localStandbyProvider, never()).findMatchingEngines(
-                    org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
-                    org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                    org.mockito.ArgumentMatchers.any());
+                    any(), any(), anyLong(), any(), any());
         }
     }
 
@@ -92,7 +97,7 @@ class CacheMatchQueryOrchestratorTest {
                 query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group()))
                 .thenThrow(new IllegalStateException("KVCM unavailable"));
         CacheMatchQueryOrchestrator orchestrator = orchestrator();
-        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(CacheMatchQueryOrchestrator.class);
+        var logger = (Logger) LoggerFactory.getLogger(CacheMatchQueryOrchestrator.class);
         ListAppender<ILoggingEvent> appender = new ListAppender<>();
         appender.start();
         logger.addAppender(appender);
@@ -122,11 +127,7 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(CacheMatchSource.LOCAL_SYNC, result.source());
         assertEquals(2, result.exactHostMatch("10.0.0.1:8080@0").localMatchBlocks());
         verify(kvcmProvider, never()).findMatchingEngines(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
+                any(), any(), anyLong(), any(), any());
     }
 
     @Test
@@ -171,6 +172,7 @@ class CacheMatchQueryOrchestratorTest {
     }
 
     @Test
+    @DisplayName("KVCM 单次查询失败只回退当前请求，下一次仍查询 KVCM")
     void fallsBackCurrentRequestAndTracksResolvedPredictionOnKvcmFailure() {
         CacheMatchQuery standbyQuery = standbyQuery();
         CacheMatchResult standbyResult = new CacheMatchResult(
@@ -186,18 +188,39 @@ class CacheMatchQueryOrchestratorTest {
                 standbyQuery.blockSize(),
                 standbyQuery.roleType(),
                 standbyQuery.group()))
-                .thenThrow(new IllegalStateException("KVCM unavailable"));
+                .thenThrow(new IllegalStateException("KVCM unavailable"))
+                .thenReturn(Map.of("10.0.0.2:8080", HostCacheMatch.local(2)));
         when(localStandbyProvider.findMatchingEngines(
                 standbyQuery.requestId(), standbyQuery.blockCacheKeys(), standbyQuery.blockSize(),
                 standbyQuery.roleType(), standbyQuery.group()))
                 .thenReturn(standbyResult.hostMatches());
 
-        CacheMatchResult result = orchestrator().findMatchingEngines(standbyQuery);
+        CacheMatchQueryOrchestrator orchestrator = orchestrator();
+        CacheMatchResult result = orchestrator.findMatchingEngines(standbyQuery);
 
         assertEquals(CacheMatchSource.LOCAL_STANDBY, result.source());
+        assertTrue(result.querySucceeded());
+        assertEquals(standbyResult.hostMatches(), result.hostMatches());
+        assertEquals(standbyQuery.blockSize(), result.blockSize());
         verify(comparisonService)
                 .trackResolvedLocalStandbyPrediction(standbyQuery, result);
         verify(cacheMetricsReporter).reportStandbyFallback("kvcm_query_failure");
+
+        CacheMatchResult nextResult = orchestrator.findMatchingEngines(standbyQuery);
+
+        assertEquals(CacheMatchSource.KVCM, nextResult.source());
+        assertTrue(nextResult.querySucceeded());
+        assertEquals(2, nextResult.exactHostMatch("10.0.0.2:8080").localMatchBlocks());
+        verify(kvcmProvider, times(2)).findMatchingEngines(
+                standbyQuery.requestId(), standbyQuery.blockCacheKeys(), standbyQuery.blockSize(),
+                standbyQuery.roleType(), standbyQuery.group());
+        verify(localStandbyProvider).findMatchingEngines(
+                standbyQuery.requestId(), standbyQuery.blockCacheKeys(), standbyQuery.blockSize(),
+                standbyQuery.roleType(), standbyQuery.group());
+        verify(failoverManager, atLeastOnce()).activeSource();
+        verifyNoMoreInteractions(failoverManager);
+        verify(cacheMetricsReporter, never()).reportCacheMatchSourceChange(
+                any(), any());
     }
 
     @Test
@@ -236,8 +259,7 @@ class CacheMatchQueryOrchestratorTest {
                 .thenReturn(standbyResult.hostMatches());
         doThrow(new IllegalStateException("comparison unavailable"))
                 .when(comparisonService)
-                .trackResolvedLocalStandbyPrediction(org.mockito.ArgumentMatchers.eq(standbyQuery),
-                        org.mockito.ArgumentMatchers.any());
+                .trackResolvedLocalStandbyPrediction(eq(standbyQuery), any());
 
         CacheMatchResult result = orchestrator().findMatchingEngines(standbyQuery);
 
@@ -258,11 +280,7 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(Map.of(), result.hostMatches());
         assertEquals(empty.blockSize(), result.blockSize());
         verify(kvcmProvider, never()).findMatchingEngines(
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
+                any(), any(), anyLong(), any(), any());
     }
 
     @Test
@@ -306,9 +324,7 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(Map.of(), result.hostMatches());
         assertEquals(0L, result.blockSize());
         verify(localStandbyProvider, never()).findMatchingEngines(
-                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any());
+                any(), any(), anyLong(), any(), any());
     }
 
     private CacheMatchQueryOrchestrator orchestrator() {
