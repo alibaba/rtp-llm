@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import logging
 import struct
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
 from functools import cache
+from itertools import chain
 from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 import torch
@@ -37,6 +38,21 @@ if TYPE_CHECKING:
 _INT32_MIN = -2_147_483_648
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
+
+_LOGGING_CONSENT_HEADERS = {
+    "x-dashscope-loggingconsent",
+    "x-dashscope-inner-loggingconsent",
+}
+
+
+def is_logging_consent_allowed(headers: Iterable[tuple[object, object]]) -> bool:
+    """Allow absent consent or 'all', ignoring case without trimming values."""
+    for key, value in headers:
+        if value is None or str(key).lower() not in _LOGGING_CONSENT_HEADERS:
+            continue
+        if not isinstance(value, str) or value.lower() != "all":
+            return False
+    return True
 
 
 class LLMFinishReason(IntEnum):
@@ -709,6 +725,7 @@ class DashScRequestControls:
     traffic_reject_priority: int | None = None
     reasoning_effort: str | None = None
     request_headers: dict[str, str] = field(default_factory=dict)
+    log_input_output: bool = True
 
 
 @dataclass(frozen=True)
@@ -964,6 +981,8 @@ def parse_sampling_params(
 def parse_request_controls(
     request: predict_v2_pb2.ModelInferRequest,
     ds_attrs: dict[str, Any] | None = None,
+    *,
+    invocation_metadata: Iterable[tuple[object, object]] = (),
 ) -> DashScRequestControls:
     """Parse non-sampling request controls.
 
@@ -1046,11 +1065,16 @@ def parse_request_controls(
         traffic_reject_priority=traffic_reject_priority,
         reasoning_effort=reasoning_effort,
         request_headers=request_headers,
+        log_input_output=is_logging_consent_allowed(
+            chain(ds_attrs.items(), invocation_metadata)
+        ),
     )
 
 
 def parse_dash_sc_grpc_request(
     request: predict_v2_pb2.ModelInferRequest,
+    *,
+    invocation_metadata: Iterable[tuple[object, object]] = (),
 ) -> tuple[ParsedInputIds | None, SamplingParams | None, DashScRequestControls | None]:
     """Parse one ``ModelInferRequest`` into ids, sampling, and request controls.
 
@@ -1064,7 +1088,9 @@ def parse_dash_sc_grpc_request(
     return (
         ids,
         parse_sampling_params(request, ds_attrs),
-        parse_request_controls(request, ds_attrs),
+        parse_request_controls(
+            request, ds_attrs, invocation_metadata=invocation_metadata
+        ),
     )
 
 
@@ -1460,6 +1486,7 @@ def build_stream_response_from_generate_outputs(
     *,
     stream_finished: bool | None = None,
     token_ids: list[int] | None = None,
+    log_input_output: bool = True,
 ) -> predict_v2_pb2.ModelStreamInferResponse:
     """Build ``ModelStreamInferResponse`` from one ``GenerateOutputs`` chunk.
 
@@ -1508,7 +1535,11 @@ def build_stream_response_from_generate_outputs(
         generate_think_token_num=generate_think_token_num,
     )
 
-    logging.debug("[DashScGrpc] [%s] generated_ids: %s", request_log_tag, generated_ids)
+    logging.debug(
+        "[DashScGrpc] [%s] generated_ids: %s",
+        request_log_tag,
+        generated_ids if log_input_output else None,
+    )
     logging.debug(
         "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
         request_log_tag,
@@ -1548,6 +1579,7 @@ class StreamResponseBuilder:
         "_template_prompt_tokens",
         "_template_cached_tokens",
         "_template_think_token_num",
+        "_log_input_output",
     )
 
     def __init__(
@@ -1562,6 +1594,7 @@ class StreamResponseBuilder:
         generate_config: Any = None,
         eos_token_id: int | None = None,
         max_token_id: int | None = None,
+        log_input_output: bool = True,
     ) -> None:
         self._dash_sc_request_id = dash_sc_request_id
         self._model_name = model_name
@@ -1572,6 +1605,7 @@ class StreamResponseBuilder:
         self._generate_config = generate_config
         self._eos_token_id = eos_token_id
         self._max_token_id = max_token_id
+        self._log_input_output = log_input_output
         self._template: predict_v2_pb2.ModelStreamInferResponse | None = None
         self._generated_index = -1
         self._finish_index = -1
@@ -1659,7 +1693,7 @@ class StreamResponseBuilder:
             logging.debug(
                 "[DashScGrpc] [%s] generated_ids: %s",
                 self._request_log_tag,
-                generated_ids,
+                generated_ids if self._log_input_output else None,
             )
             logging.debug(
                 "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
@@ -1713,7 +1747,7 @@ class StreamResponseBuilder:
         logging.debug(
             "[DashScGrpc] [%s] generated_ids: %s",
             self._request_log_tag,
-            generated_ids,
+            generated_ids if self._log_input_output else None,
         )
         logging.debug(
             "[DashScGrpc] [%s] return_input_ids=%s prompt_len=%s is_streaming=%s",
