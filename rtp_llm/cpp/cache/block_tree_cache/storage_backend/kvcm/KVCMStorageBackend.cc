@@ -332,7 +332,7 @@ public:
         if (tags.size() != blocks.size() || blocks.size() != uris.size()) {
             RTP_LLM_LOG_WARNING("KVCM transfer tag/block/URI count mismatch");
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
-            return true;
+            return false;
         }
         if (tags.empty()) {
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
@@ -342,13 +342,13 @@ public:
         kv_cache_manager::BlockBuffers buffers;
         if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
-            return true;
+            return false;
         }
         const auto result = executeTagTransfers(request.op(), tags, blocks, uris, buffers, response);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
-        return true;
+        return result == TransferResult::SUCCESS;
     }
 
     void shutdown() noexcept {

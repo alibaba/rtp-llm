@@ -369,7 +369,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerRoutesRepeatedTagsAcrossIndependentOrdersA
     EXPECT_EQ(response.actual_uris(3), operation.uris(3) + "_actual");
     state_->fail_pool = 1;
     RemoteOperationResponsePB failed;
-    EXPECT_TRUE(backend_->execute(operation, failed));
+    EXPECT_FALSE(backend_->execute(operation, failed));
     EXPECT_EQ(failed.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
     EXPECT_EQ(failed.actual_uris_size(), 0);
     backend_->shutdown();
@@ -388,7 +388,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerRejectsUnknownTagBeforeAnyTransfer) {
     operation.add_uris("unknown");
 
     RemoteOperationResponsePB response;
-    EXPECT_TRUE(backend_->execute(operation, response));
+    EXPECT_FALSE(backend_->execute(operation, response));
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
     EXPECT_EQ(state_->reads, (std::vector<size_t>{0, 0, 0}));
 }
@@ -436,7 +436,7 @@ TEST_F(KVCMIndependentPoolTest, WorkerReportsTimeoutWithoutCreatingLocalPins) {
     // needed, quarantines the StorageBackend request pins.
     state_->timeout_pool = 1;
     RemoteOperationResponsePB response;
-    EXPECT_TRUE(backend_->execute(operation, response));
+    EXPECT_FALSE(backend_->execute(operation, response));
     EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_TIMEOUT);
     for (size_t group = 0; group < pools_.size(); ++group) {
         EXPECT_EQ(pools_[group]->refCount(blocks_[group]), ref_counts[group]);

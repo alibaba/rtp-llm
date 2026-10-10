@@ -399,6 +399,16 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesDestinationBlock) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
+
+    EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
+    const auto blocked_read = readResult(*backend.backend, makeStorageRequest(environment), nullptr);
+    EXPECT_EQ(blocked_read.code(), ErrorCode::EXECUTION_EXCEPTION);
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).Times(0);
+    const auto blocked_match = match(*backend.backend, makeStorageRequest(environment));
+    EXPECT_FALSE(blocked_match.success);
+    EXPECT_EQ(blocked_match.matched_blocks_num, 0u);
+
     backend.backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
