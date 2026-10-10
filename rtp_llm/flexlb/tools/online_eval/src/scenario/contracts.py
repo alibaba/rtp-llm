@@ -67,6 +67,6 @@ class PlanContext:
     profiles: tuple[str, ...] = ()
 
     def reference(self, value, expected_kind=None):
-        from scenario.compiler import reference
+        from scenario.stage_compiler import reference
 
         return reference(value, self.path, self.outputs, expected_kind)

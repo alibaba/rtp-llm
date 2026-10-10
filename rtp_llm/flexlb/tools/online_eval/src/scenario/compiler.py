@@ -1,14 +1,13 @@
 """Compile explicit instances and typed stage references without process imports."""
 
 import copy
-import math
 
 from flexlb_cfg import PROFILES
 
 from runtime.resource_plan import VICTIM_OFFSETS
 from runtime.perf_presets import capture_defaults
-from scenario.contracts import PlanContext
 from scenario.validation import fail, mapping, identifier, number, names
+from scenario.stage_compiler import OUTPUTS, stages
 from scenario.environment_config import environment, variant_environment_fields, CAPABILITIES
 
 CATEGORIES = {
@@ -32,189 +31,6 @@ def plan_counts(plans):
         "instances": len(plans),
         "checks": sum(len(s["check_ids"]) for p in plans for s in p["stages"]),
     }
-
-
-# A deliberately bounded first compilation vocabulary. Other actions require an
-# adapter and result contract before their names can be accepted by compilation.
-OUTPUTS = {
-    "setup": {"environment": "environment"},
-    "request": {"requests": "requests", "count": "integer"},
-    "wait": {"completed": "boolean", "error_count": "integer"},
-    "cancel": {"issued": "integer"},
-    "check": {"passed": "boolean"},
-    "teardown": {"clean": "boolean"},
-}
-
-
-def reference(value, path, outputs, expected=None):
-    mapping(value, path, {"$ref"}, {"$ref"})
-    ref = value["$ref"]
-    if not isinstance(ref, str):
-        fail(path, "$ref must be a string")
-    parts = ref.split(".")
-    if len(parts) != 4 or parts[0] != "stages" or parts[2] != "output":
-        fail(path, "expected stages.<earlier_stage>.output.<field>")
-    kind = outputs.get(parts[1], {}).get(parts[3])
-    if kind is None:
-        fail(path, f"unknown or forward reference {ref!r}")
-    if expected is not None and kind != expected:
-        fail(path, f"reference is {kind}, expected {expected}")
-    return kind
-
-
-def stages(values, path, default_timeout, handlers, env=None, profiles=(), case=None):
-    if not isinstance(values, list) or not values:
-        fail(path, "expected nonempty stage list")
-    outputs, compiled = {}, []
-    setup_seen, torn_down = False, False
-    active_environment = copy.deepcopy(env or {})
-    for i, value in enumerate(values):
-        loc = f"{path}[{i}]"
-        mapping(
-            value,
-            loc,
-            {"id", "action", "timeout_s", "params", "purpose"},
-            {"id", "action"},
-        )
-        if value.get("purpose", "operation") not in {"operation", "observation"}:
-            fail(loc + ".purpose", "expected operation or observation")
-        sid = identifier(value["id"], loc + ".id")
-        if sid in outputs:
-            fail(loc, f"duplicate stage id {sid}")
-        action = value["action"]
-        if not isinstance(action, str) or action not in (set(OUTPUTS) | set(handlers)):
-            fail(loc + ".action", f"unsupported action {action!r}")
-        if torn_down:
-            fail(loc, "no stage may follow teardown")
-        if action == "setup":
-            if setup_seen or i != 0:
-                fail(loc, "setup must occur exactly once as the first stage")
-            setup_seen = True
-        elif not setup_seen:
-            fail(loc, "setup must precede actions")
-        timeout = number(
-            value.get("timeout_s", default_timeout), loc + ".timeout_s", minimum=0.001
-        )
-        params = copy.deepcopy(value.get("params", {}))
-        if action in handlers:
-            descriptor = handlers[action]
-            if descriptor.owners and case not in descriptor.owners:
-                fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
-            params = descriptor.validate(
-                params,
-                PlanContext(
-                    loc + ".params",
-                    dict(outputs),
-                    copy.deepcopy(active_environment),
-                    tuple(profiles),
-                ),
-            )
-            if not isinstance(params, dict):
-                fail(loc, "adapter validate must return a mapping")
-        elif action in ("setup", "teardown"):
-            mapping(params, loc + ".params", set())
-            torn_down = action == "teardown"
-        elif action == "request":
-            mapping(
-                params,
-                loc + ".params",
-                {
-                    "input_len",
-                    "output_len",
-                    "count",
-                    "consume",
-                    "block_keys",
-                    "priority",
-                    "qos_level",
-                    "schedule_timeout_s",
-                    "stream_timeout_s",
-                    "post_issue_delay_s",
-                },
-            )
-            for key, default in (("input_len", 2048), ("output_len", 10), ("count", 1)):
-                params[key] = number(
-                    params.get(key, default),
-                    loc + ".params." + key,
-                    minimum=1,
-                    integer=True,
-                )
-            params.setdefault("consume", "immediate")
-            if params["consume"] not in ("immediate", "deferred"):
-                fail(loc, "consume must be immediate or deferred")
-            if "post_issue_delay_s" in params:
-                pause = number(
-                    params["post_issue_delay_s"], loc + ".params.post_issue_delay_s"
-                )
-                if pause > 2:
-                    fail(loc, "post_issue_delay_s cannot exceed two seconds")
-            if "block_keys" in params:
-                keys = params["block_keys"]
-                if (
-                    not isinstance(keys, list)
-                    or not 1 <= len(keys) <= 4096
-                    or any(
-                        type(k) is not int or not -(2**63) <= k < 2**63 for k in keys
-                    )
-                ):
-                    fail(loc, "block_keys must be 1..4096 explicit int64 keys")
-            for key in ("priority", "qos_level"):
-                if key in params and (
-                    type(params[key]) is not int or not -(2**31) <= params[key] < 2**31
-                ):
-                    fail(loc, f"{key} must be an explicit int32 protocol value")
-            for key in ("schedule_timeout_s", "stream_timeout_s"):
-                if key in params:
-                    params[key] = number(
-                        params[key], loc + ".params." + key, minimum=0.001
-                    )
-                    if params[key] > 60:
-                        fail(loc, f"{key} cannot exceed 60 seconds")
-        elif action in ("wait", "cancel"):
-            mapping(params, loc + ".params", {"requests"}, {"requests"})
-            reference(params["requests"], loc + ".params.requests", outputs, "requests")
-        elif action == "check":
-            mapping(
-                params,
-                loc + ".params",
-                {"actual", "op", "expected"},
-                {"actual", "op", "expected"},
-            )
-            kind = reference(params["actual"], loc + ".params.actual", outputs)
-            expected_types = {
-                "boolean": (bool,),
-                "integer": (int,),
-                "number": (int, float),
-                "string": (str,),
-            }.get(kind, ())
-            if type(params["expected"]) not in expected_types or (
-                type(params["expected"]) is float
-                and not math.isfinite(params["expected"])
-            ):
-                fail(
-                    loc,
-                    "checks compare scalar values with matching types, not live handles",
-                )
-            if params["op"] not in ("eq", "le", "ge") or (
-                kind in ("boolean", "string") and params["op"] != "eq"
-            ):
-                fail(loc, "invalid comparison for output type")
-        compiled.append(
-            {
-                "id": sid,
-                "action": action,
-                "timeout_s": timeout,
-                "params": params,
-                **({"purpose": value["purpose"]} if "purpose" in value else {}),
-            }
-        )
-        outputs[sid] = (
-            handlers[action].outputs if action in handlers else OUTPUTS[action]
-        )
-        if action in handlers and handlers[action].next_environment is not None:
-            active_environment = copy.deepcopy(
-                handlers[action].next_environment(params)
-            )
-    return compiled
 
 
 def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):

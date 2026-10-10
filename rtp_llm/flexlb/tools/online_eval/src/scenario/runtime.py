@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
-from scenario.compiler import OUTPUTS
+from scenario.stage_compiler import OUTPUTS
 from scenario.contracts import CheckResult, ResourceHandle, StageOutput
 
 
