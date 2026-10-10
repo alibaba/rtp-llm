@@ -88,15 +88,54 @@ class AiterDecodeAsmLayoutTest(unittest.TestCase):
                         (1, 1), dtype=torch.int32, device="cuda"
                     ),
                 )
-                query = torch.ones(
-                    (1, 4 * gqa, 128), dtype=query_dtype, device="cuda"
-                )
+                query = torch.ones((1, 4 * gqa, 128), dtype=query_dtype, device="cuda")
 
                 actual = op.forward(query, kv_cache, params)
                 torch.cuda.synchronize()
                 torch.testing.assert_close(
                     actual, torch.ones_like(actual), rtol=0, atol=0.01
                 )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a ROCm GPU")
+    def test_asm_kernel_reads_nonzero_keys_in_production_layout(self):
+        op = AiterDecodeAttnOpAsm.__new__(AiterDecodeAttnOpAsm)
+        op.head_num_kv = 1
+        op.head_dim = 128
+        op.tokens_per_block = 16
+        op.enable_cuda_graph = False
+
+        # The allocator exposes [block, K/V, head, page, dim], but the ROCm
+        # cache writer stores K as [dim/x, page, x] and V as [page/x, dim, x].
+        cache_base = torch.zeros(
+            (1, 2 * 16 * 128 + 32), dtype=torch.bfloat16, device="cuda"
+        )
+        cache = cache_base[:, : 2 * 16 * 128].view(1, 2, 1, 16, 128)
+        key = torch.zeros((16, 128), dtype=torch.bfloat16, device="cuda")
+        key[:, 0] = torch.arange(16, device="cuda", dtype=torch.float32) / 4 - 2
+        value = torch.zeros_like(key)
+        value[:, 0] = torch.arange(16, device="cuda", dtype=torch.float32) / 16
+        key_physical = cache[:, 0].view(1, 1, 16, 16, 8)
+        value_physical = cache[:, 1].view(1, 1, 2, 128, 8)
+        for token in range(16):
+            key_physical[0, 0, :, token, :] = key[token].view(16, 8)
+            value_physical[0, 0, token // 8, :, token % 8] = value[token]
+
+        query = torch.zeros((1, 4, 128), dtype=torch.bfloat16, device="cuda")
+        query[:, :, 0] = 8
+        kv_cache = SimpleNamespace(kv_cache_base=cache_base, kv_scale_base=None)
+        params = SimpleNamespace(
+            seq_lens=torch.tensor([16], dtype=torch.int32, device="cuda"),
+            kv_cache_block_id_device=torch.zeros(
+                (1, 1), dtype=torch.int32, device="cuda"
+            ),
+        )
+
+        actual = op.forward(query, kv_cache, params).view(1, 4, 128)
+        scores = torch.matmul(key.float(), query[0, 0].float()) / 128**0.5
+        expected = (torch.softmax(scores, dim=0) @ value.float()).to(actual.dtype)
+        torch.testing.assert_close(
+            actual[0], expected.expand(4, -1), rtol=0.03, atol=0.02
+        )
 
 
 if __name__ == "__main__":
