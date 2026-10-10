@@ -36,7 +36,10 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from rtp_llm.config.cuda_graph import CudaGraphSelectionMode, GenerationPrefillCudaGraphUnsupportedBackend
+from rtp_llm.config.cuda_graph import (
+    CudaGraphSelectionMode,
+    GenerationPrefillCudaGraphUnsupportedBackend,
+)
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -292,6 +295,7 @@ def _args_from_model_config(
         o_groups=attn_config.o_groups,
         o_lora_rank=attn_config.o_lora_rank,
         window_size=attn_config.sliding_window,
+        kernel_tokens_per_block=attn_config.kernel_tokens_per_block,
         compress_ratios=list(attn_config.layer_compress_ratios)[
             : model_config.num_layers
         ],
