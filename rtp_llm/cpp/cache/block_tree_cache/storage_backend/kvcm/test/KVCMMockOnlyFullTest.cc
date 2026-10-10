@@ -286,7 +286,8 @@ TEST(KVCMMockOnlyFullTest, RejectsMismatchedTransferVectorsBeforeClientIO) {
     request.add_group_tags("default");
     request.add_block_ids(environment.block_id);
     RemoteOperationResponsePB response;
-    EXPECT_FALSE(backend->execute(request, response));
+    EXPECT_TRUE(backend->execute(request, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
 }
 
 class KVCMSdkCheckTest: public ::testing::TestWithParam<std::tuple<const char*, const char*, bool>> {};

@@ -91,6 +91,7 @@ TEST(DeviceBlockPoolTest, InitKeepsBlockZeroInvalid) {
     DeviceBlockPool pool(config);
 
     ASSERT_TRUE(pool.init());
+    EXPECT_FALSE(pool.usesDedicatedDeviceAllocation());
     EXPECT_FALSE(pool.isAllocated(0));
     EXPECT_FALSE(pool.validBlock(0));
     EXPECT_EQ(pool.totalBlocksNum(), config->physical_block_count - 1);
@@ -166,6 +167,8 @@ TEST(DeviceBlockPoolTest, MultiLayoutMtpConfigUsesMainBlockCountAndGlobalLayerMa
 
     DeviceBlockPool pool(config);
     ASSERT_TRUE(pool.init());
+    EXPECT_TRUE(pool.usesDedicatedDeviceAllocation());
+    EXPECT_GE(pool.getAllocationSizeBytes(), pool.getTotalSizeBytes());
     auto block = pool.malloc();
     ASSERT_TRUE(block.has_value());
 

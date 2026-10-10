@@ -16,6 +16,14 @@ ClientFactory::createTransferClient(const std::string& config, const kv_cache_ma
     return kv_cache_manager::TransferClient::Create(config, init_params);
 }
 
+std::unique_ptr<kv_cache_manager::TransferClient>
+ClientFactory::createTransferClientWithMemory(
+    const std::string&                                config,
+    const kv_cache_manager::InitParams&                init_params,
+    const kv_cache_manager::ClientMemoryRegistrations& memory_registrations) const {
+    return kv_cache_manager::TransferClient::Create(config, init_params, memory_registrations);
+}
+
 std::unique_ptr<Subscriber> ClientFactory::createSubscriber(bool enable_vipserver) const {
     if (enable_vipserver) {
         return std::make_unique<VIPServerSubscriber>();
