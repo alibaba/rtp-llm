@@ -27,6 +27,15 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_library(
+    name = "v41_mhc_collapse_reference_testlib",
+    testonly = True,
+    srcs = ["v41_mhc_collapse_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
     name = "v41_deep_history_testlib",
     testonly = True,
     srcs = [

@@ -126,6 +126,17 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_mhc_collapse_replay",
+    testonly = True,
+    srcs = ["dsv41_mhc_collapse_replay.py"],
+    deps = [
+        ":dsv41_deep_attention_history_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
