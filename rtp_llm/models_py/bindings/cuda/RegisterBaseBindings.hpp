@@ -1,3 +1,4 @@
+#include "rtp_llm/models_py/bindings/common/FusedCopyOp.h"
 #pragma once
 
 #include "rtp_llm/models_py/bindings/common/RtpNorm.h"
@@ -26,6 +27,8 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("fused_multimodal_copy_", &fusedMultimodalCopy,
+                  py::arg("dst"), py::arg("srcs"), py::arg("row_offsets"));
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",
