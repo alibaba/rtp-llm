@@ -494,6 +494,20 @@ class BuildRecordTest(TestCase):
         self.assertEqual(payload["input_ids"], [10, 20, 30])
         self.assertEqual(payload["generated_ids"], [10, 20, 30, 40])
 
+    def test_long_list_input_ids_are_not_retained_in_access_log(self) -> None:
+        input_ids = list(range(4097))
+        rec = _make_record()
+        rec.capture_structured_request(
+            _make_infer_request(),
+            input_ids=input_ids,
+        )
+
+        payload = rec.build_record(server_id=1, rank_id=0)
+
+        self.assertEqual(payload["input_token_len"], len(input_ids))
+        self.assertIsNone(payload["input_ids"])
+        self.assertIs(rec._repetition_monitor.input_ids, input_ids)
+
     def test_logging_consent_omits_tokens_without_disabling_repetition(self) -> None:
         rec = _make_record(log_input_output=False)
         rec.capture_structured_request(_make_infer_request(input_ids=[10, 20]))

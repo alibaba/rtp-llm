@@ -574,6 +574,7 @@ class GrpcAccessRecord:
         if aux_info is None or (not overwrite and self.aux_info is not None):
             return
         self.aux_info = aux_info
+
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
 
@@ -668,8 +669,11 @@ class GrpcAccessRecord:
                     input_ids = None
             if input_ids is not None:
                 self.input_len = len(input_ids)
-                self.input_ids = input_ids
                 self._repetition_monitor.set_input_ids(input_ids)
+                # Avoid retaining and serializing multi-megabyte token lists in
+                # access logs. Long-context cache-grid requests only need their
+                # length and repetition statistics here.
+                self.input_ids = list(input_ids) if len(input_ids) <= 4096 else None
         if self.generate_config is None:
             try:
                 if sampling is None or request_controls is None:

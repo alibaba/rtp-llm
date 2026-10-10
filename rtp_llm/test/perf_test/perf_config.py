@@ -6,6 +6,15 @@ import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import engine_section
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
+    fingerprint as profile_fingerprint,
+)
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
+    load_profile,
+    merge_engine_args,
+    resolve_int,
+)
 from rtp_llm.test.perf_test.dataclass import PerfTestConfig
 from rtp_llm.test.perf_test.dataset import KNOWN_DATASETS, extract_arg
 from rtp_llm.test.perf_test.hub_download import (
@@ -86,10 +95,23 @@ def parse_args(
         ),
     )
     perf.add_argument(
+        "--cache_shared_seed",
+        action="store_true",
+        help="Seed one shared prefix for batch=1 input_ids cache cases",
+    )
+    perf.add_argument(
         "--cache_measure_runs",
         type=int,
         default=3,
         help="Measured requests per cache-grid case (default: 3)",
+    )
+    perf.add_argument(
+        "--cache_skip_reuse_validation",
+        action="store_true",
+        help=(
+            "Record observed cache reuse without failing when it differs from "
+            "the requested cache length"
+        ),
     )
     perf.add_argument(
         "--cache_request_timeout",
@@ -106,6 +128,39 @@ def parse_args(
             "before measurement (default: 4096)"
         ),
     )
+    perf.add_argument(
+        "--cache_workspace_tokens",
+        type=int,
+        help="Fixed packed-token capacity including padding and output reserve",
+    )
+    perf.add_argument("--cache_profile_runs", type=int, default=0)
+    perf.add_argument("--cache_profile_case_ids", type=int, nargs="+", default=[])
+    perf.add_argument("--cache_profile_only", action="store_true")
+    perf.add_argument("--cache_profile_flat_output", action="store_true")
+    perf.add_argument("--cache_profile_trace_timeout", type=float, default=120.0)
+    perf.add_argument(
+        "--cache_profile_backend", choices=("kineto", "nsys"), default="kineto"
+    )
+    perf.add_argument("--cache_nsys_path", default="nsys")
+    perf.add_argument("--cache_nsys_session", default="")
+    perf.add_argument("--cache_nsys_tail_seconds", type=float, default=0.1)
+    perf.add_argument("--materialize_cache_cases", type=str, default="")
+    perf.add_argument(
+        "--cache_request_transport",
+        choices=("http_prompt", "dashsc_input_ids"),
+        default="dashsc_input_ids",
+    )
+    perf.add_argument("--cache_grpc_port", type=int, default=0)
+    perf.add_argument("--cache_case_files", type=str, default="")
+    perf.add_argument(
+        "--profile",
+        type=str,
+        default="",
+        help="JSON profile; explicit CLI values take precedence",
+    )
+    perf.add_argument("--cache_checkpoint_every", type=int, default=100)
+    perf.add_argument("--require_cache_resume", action="store_true")
+    perf.add_argument("--allow_resume_mismatch", action="store_true")
     perf.add_argument(
         "--num_measures",
         type=int,
@@ -163,6 +218,80 @@ def parse_args(
 
     parsed_argv = sys.argv[1:] if argv is None else argv
     args, remaining = parser.parse_known_args(parsed_argv)
+    if any(arg.split("=", 1)[0] == "--expected_cache_block_size" for arg in remaining):
+        parser.error(
+            "--expected_cache_block_size was removed; set "
+            "grid.generator.cache_alignment"
+        )
+    explicit_options = {item.split("=", 1)[0] for item in parsed_argv}
+    if args.cache_profile_runs < 0 or args.cache_profile_trace_timeout <= 0:
+        parser.error(
+            "cache profile runs must be non-negative and trace timeout positive"
+        )
+    if bool(args.cache_profile_runs) != bool(args.cache_profile_case_ids):
+        parser.error(
+            "--cache_profile_runs and --cache_profile_case_ids must be supplied together"
+        )
+    if args.cache_profile_backend == "nsys" and (
+        not args.cache_profile_only or not args.cache_nsys_session
+    ):
+        parser.error("nsys requires --cache_profile_only and --cache_nsys_session")
+    if not 0 <= args.cache_nsys_tail_seconds <= 60:
+        parser.error("cache_nsys_tail_seconds must be between 0 and 60")
+    if args.cache_profile_flat_output and not args.cache_profile_only:
+        parser.error("--cache_profile_flat_output requires --cache_profile_only")
+    if args.cache_profile_only and args.require_cache_resume:
+        parser.error(
+            "--cache_profile_only creates a fresh replay directory; "
+            "omit --require_cache_resume"
+        )
+    if args.cache_profile_only and not args.cache_profile_runs:
+        parser.error("--cache_profile_only requires --cache_profile_runs and case IDs")
+    if args.cache_profile_runs and (not args.cache_grid_json or args.partial != 2):
+        parser.error("cache profiling requires --cache_grid_json and --partial=2")
+
+    profile = None
+    profile_sha256 = None
+    if args.profile:
+        profile = load_profile(args.profile)
+        profile_sha256 = profile_fingerprint(profile)
+        engine = engine_section(profile)
+        args.cache_measure_runs = resolve_int(
+            profile,
+            "cache_grid",
+            "measure_runs",
+            (
+                args.cache_measure_runs
+                if "--cache_measure_runs" in explicit_options
+                else None
+            ),
+            3,
+        )
+        for name, fallback in (
+            ("dp_size", 1),
+            ("max_seq_len", 8192),
+            ("concurrency_limit", 64),
+        ):
+            if name in engine:
+                setattr(
+                    args,
+                    name,
+                    resolve_int(
+                        profile,
+                        "engine",
+                        name,
+                        (
+                            getattr(args, name)
+                            if f"--{name}" in explicit_options
+                            else None
+                        ),
+                        fallback,
+                    ),
+                )
+        remaining = merge_engine_args(profile, remaining)
+
+    args._profile = profile
+    args._profile_sha256 = profile_sha256
     args.batch_size_explicit = any(
         item == "--batch_size" or item.startswith("--batch_size=")
         for item in parsed_argv

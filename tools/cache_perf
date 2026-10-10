@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+"""Source-tree frontend; the existing Bazel target executes the test."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rtp_llm.test.perf_test.cache_grid.runner.cache_perf import main
+
+if __name__ == "__main__":
+    sys.exit(main())

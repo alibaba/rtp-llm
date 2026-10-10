@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "label": "Qwen2.5-0.5B Cache Perf Pipeline Smoke",
+  "model_label": "Qwen2.5-0.5B",
+  "engine": {
+    "model_type": "qwen_2",
+    "checkpoint_path": "/mnt/hf3fs/3fs/liukan.lk/models/Qwen2.5-0.5B",
+    "tokenizer_path": "/mnt/hf3fs/3fs/liukan.lk/models/Qwen2.5-0.5B",
+    "tp_size": 1,
+    "dp_size": 1,
+    "world_size": 1,
+    "max_seq_len": 4096,
+    "max_batch_tokens_size": 4096,
+    "max_context_batch_size": 1,
+    "concurrency_limit": 1,
+    "seq_size_per_block": 64
+  },
+  "engine_args": {
+    "--reuse_cache": 1,
+    "--enable_device_cache": 1,
+    "--act_type": "BF16",
+    "--enable_cuda_graph": 0,
+    "--warm_up": 0,
+    "--timeout_keep_alive": 600
+  },
+  "cache_grid": {
+    "cache_alignment": 64,
+    "commit_tail_tokens": 64,
+    "measure_runs": 3
+  },
+  "engine_env": {
+    "TOKENIZERS_PARALLELISM": "false"
+  },
+  "runtime_env": {},
+  "chart": {
+    "model_label": "Qwen2.5-0.5B",
+    "token_unit": 512
+  },
+  "bazel": {
+    "configs": [
+      "cuda13",
+      "daily_aone_bazel_cache"
+    ],
+    "executable": "bazelisk",
+    "test_timeout": 1800
+  }
+}

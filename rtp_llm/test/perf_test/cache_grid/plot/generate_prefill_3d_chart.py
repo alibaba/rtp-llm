@@ -5,101 +5,88 @@ Examples::
 
   python3 generate_prefill_3d_chart.py \
     --input /path/Prefill_Result.final.json \
-    --output /tmp/deepseek_v4_prefill_3d.svg --batch-size 1
+    --output /tmp/prefill_3d.svg --batch-size 1
 
-The plot has exactly three data coordinates: X=measured prefill RT (TTFT) in
-milliseconds, Y=cached tokens, Z=compute tokens.  Every usable row for the
-selected batch is emitted; there is no point decimation and colour is uniform
-so it cannot be mistaken for a fourth data dimension.
+The plot has exactly three data coordinates: X=compute tokens, Y=cached
+tokens, Z=server first_token_cost_time in milliseconds. Every usable row for the
+selected batch is emitted with no point decimation. Dot colour depth shows
+local query density on the compute/cache plane; TTFT remains encoded solely by
+the Z coordinate.
 """
 from __future__ import annotations
 
 import argparse
-import csv
 import html
 import json
+import math
 import pathlib
 from collections import defaultdict
 from statistics import median
 from typing import Any
 
-from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import (
-    DSV4_FORMULA_BATCH_SIZE,
-    _first_nonblank,
-    _integer,
-    _load_json_metrics,
-    _median_run_time,
-    _status_ok,
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
+    extract_embedded_profile,
 )
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
+    fingerprint as profile_fingerprint,
+)
+from rtp_llm.test.perf_test.cache_grid.config.perf_profile import (
+    load_profile,
+    resolve_int,
+    resolve_label,
+    resolve_title,
+)
+from rtp_llm.test.perf_test.cache_grid.runner.result_schema import current_metrics
+from rtp_llm.test.perf_test.cache_grid.runner.result_schema import (
+    finite_number as _number,
+)
+from rtp_llm.test.perf_test.cache_grid.runner.result_schema import measurement_rows
+
+QUERY_DENSITY_PALETTE = ("#dbeafe", "#93c5fd", "#60a5fa", "#2563eb", "#1e3a8a")
+
+
+def _query_density(
+    rows: list[dict[str, float]], compute_max: float, cache_max: float, bins: int = 16
+) -> tuple[list[int], int]:
+    """Count query geometries in local compute/cache bins.
+
+    Density deliberately ignores TTFT: colour describes where query shapes are
+    concentrated, while the Z coordinate remains the sole encoding of latency.
+    """
+    counts: defaultdict[tuple[int, int], int] = defaultdict(int)
+    locations: list[tuple[int, int]] = []
+    compute_scale = max(compute_max, 1.0)
+    cache_scale = max(cache_max, 1.0)
+    for row in rows:
+        compute_bin = min(bins - 1, int(row["compute"] / compute_scale * bins))
+        cache_bin = min(bins - 1, int(row["cache"] / cache_scale * bins))
+        location = (compute_bin, cache_bin)
+        locations.append(location)
+        counts[location] += 1
+    densities = [counts[location] for location in locations]
+    return densities, max(densities, default=0)
+
+
+def _query_density_color(density: int, maximum: int) -> str:
+    """Map density to a log-scaled light-to-dark blue ramp."""
+    if maximum <= 1:
+        return QUERY_DENSITY_PALETTE[0]
+    ratio = math.log(density) / math.log(maximum)
+    index = round(ratio * (len(QUERY_DENSITY_PALETTE) - 1))
+    return QUERY_DENSITY_PALETTE[index]
 
 
 def load_rows(path: pathlib.Path, batch_size: int) -> list[dict[str, float]]:
-    """Load a production-audited DSV4 cache-grid file or fail it atomically."""
-    if batch_size != DSV4_FORMULA_BATCH_SIZE:
-        raise ValueError(
-            f"{path}: DSV4 chart generation requires batch_size="
-            f"{DSV4_FORMULA_BATCH_SIZE}, got {batch_size}"
-        )
-    if path.suffix.lower() == ".csv":
-        raise ValueError(
-            f"{path}: chart input must be runner JSON with complete audit evidence"
-        )
-
-    metrics, provenance = _load_json_metrics(path)
-    if provenance["production_audited"] is not True:
-        failed = sorted(
-            name
-            for name, passed in provenance["provenance_checks"].items()
-            if not passed
-        )
-        raise ValueError(f"{path}: JSON provenance audit failed: {', '.join(failed)}")
-
-    rows: list[dict[str, float]] = []
-    for index, item in enumerate(metrics):
-        location = f"{path}: metrics[{index}]"
-        if not isinstance(item, dict):
-            raise ValueError(f"{location}: expected an object")
-        if not _status_ok(item):
-            raise ValueError(f"{location}: status must be 'ok'")
-        if _integer(item.get("batch_size")) != batch_size:
-            raise ValueError(f"{location}: batch_size must be {batch_size}")
-        if (
-            not isinstance(item.get("run_fingerprint"), str)
-            or item.get("run_fingerprint") != provenance["run_fingerprint"]
-        ):
-            raise ValueError(f"{location}: run_fingerprint mismatch")
-        input_len = _integer(item.get("input_len"))
-        requested_cache = _integer(
-            _first_nonblank(item, "cache_len_requested", "cache_len")
-        )
-        if (
-            input_len is None
-            or requested_cache is None
-            or requested_cache < 0
-            or requested_cache >= input_len
-        ):
-            raise ValueError(f"{location}: invalid input/cache geometry")
-        rt, observed_cache, reason = _median_run_time(item, requested_cache)
-        if rt is None or observed_cache is None:
-            raise ValueError(f"{location}: invalid measurement evidence: {reason}")
-        rows.append(
-            {
-                "compute": float(input_len - observed_cache),
-                "cache": float(observed_cache),
-                "rt": rt,
-                "input": float(input_len),
-            }
-        )
-
-    # Keep one deterministic point per exact requested geometry.
-    grouped: defaultdict[tuple[float, float, float], list[dict[str, float]]] = (
-        defaultdict(list)
-    )
-    for row in rows:
-        grouped[(row["input"], row["cache"], row["compute"])].append(row)
+    """Load server first-token latency from cache_grid_results.json."""
+    data = json.loads(path.read_text(encoding="utf-8"))
     return [
-        {**values[0], "rt": median(item["rt"] for item in values)}
-        for _, values in sorted(grouped.items())
+        {
+            "compute": row["compute_len"],
+            "cache": row["cache_len"],
+            "rt": row["prefill_rt"],
+            "input": row["input_len"],
+        }
+        for row in measurement_rows(data, batch_size, strict=True)
     ]
 
 
@@ -108,21 +95,20 @@ def esc(value: object) -> str:
 
 
 def fmt_tokens(value: float) -> str:
-    def scaled(number: float, suffix: str) -> str:
-        decimals = 2 if number < 10 else 1 if number < 100 else 0
-        text = f"{number:.{decimals}f}"
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return text + suffix
-
-    if abs(value) >= 1_000_000:
-        return scaled(value / 1_000_000, "M")
-    if abs(value) >= 1000:
-        return scaled(value / 1000, "K")
+    if value >= 1_000_000:
+        return "1M"
+    if value >= 1000:
+        return f"{value / 1000:.0f}K"
     return f"{value:.0f}"
 
 
-def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) -> str:
+def render(
+    rows: list[dict[str, float]],
+    source: pathlib.Path,
+    batch_size: int,
+    *,
+    annotate_cold_threshold: int = 1_048_575,
+) -> str:
     if not rows:
         raise SystemExit("no usable rows for the requested batch size")
     width, height = 2200, 1350
@@ -188,7 +174,7 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}}</style>
 <text x="1100" y="52" text-anchor="middle" class="title">Prefill RT — dense 3D measurement view</text>
-<text x="1100" y="85" text-anchor="middle" class="sub">X = measured TTFT / prefill RT (ms) · Y = cached tokens · Z = compute tokens; every selected geometry is plotted</text>"""
+<text x="1100" y="85" text-anchor="middle" class="sub">X = measured Server first-token latency (ms) · Y = cached tokens · Z = compute tokens; every selected geometry is plotted</text>"""
     ]
 
     out.append(
@@ -314,25 +300,30 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
             f'<text x="{p[0]-28:.1f}" y="{p[1]+5:.1f}" text-anchor="end" class="tick">{fmt_tokens(zmax*t)}</text>'
         )
     out += [
-        f'<text x="{project(.55,0,0)[0]:.1f}" y="{project(.55,0,0)[1]+78:.1f}" text-anchor="middle" class="axis">TTFT / prefill RT (X, ms)</text>',
+        f'<text x="{project(.55,0,0)[0]:.1f}" y="{project(.55,0,0)[1]+78:.1f}" text-anchor="middle" class="axis">Server first-token latency (X, ms)</text>',
         f'<text x="{project(0,.55,0)[0]-80:.1f}" y="{project(0,.55,0)[1]+78:.1f}" text-anchor="middle" class="axis">cached tokens (Y)</text>',
         f'<text x="{project(0,0,.58)[0]-70:.1f}" y="{project(0,0,.58)[1]:.1f}" text-anchor="middle" transform="rotate(-90 {project(0,0,.58)[0]-70:.1f},{project(0,0,.58)[1]:.1f})" class="axis">compute tokens (Z)</text>',
     ]
 
-    long_cold = next(
-        (row for row in rows if row["input"] >= 1_048_575 and row["cache"] == 0), None
+    one_m = next(
+        (
+            row
+            for row in rows
+            if row["input"] >= annotate_cold_threshold and row["cache"] == 0
+        ),
+        None,
     )
-    if long_cold is not None:
-        x, y = project(long_cold["rt"] / xscale, 0, long_cold["compute"] / zscale)
+    if one_m is not None:
+        x, y = project(one_m["rt"] / xscale, 0, one_m["compute"] / zscale)
         out.append(line((x, y), (x + 110, y - 70), "#b42318", 2, "5 4"))
         out.append(
             f'<rect x="{x+105:.1f}" y="{y-115:.1f}" width="330" height="78" rx="10" fill="#fff7ed" stroke="#b42318" stroke-width="2"/>'
         )
         out.append(
-            f'<text x="{x+125:.1f}" y="{y-82:.1f}" class="body" fill="#991b1b">{fmt_tokens(long_cold["input"])} cold (BS={batch_size}, cache=0)</text>'
+            f'<text x="{x+125:.1f}" y="{y-82:.1f}" class="body" fill="#991b1b">1M cold (BS={batch_size}, cache=0)</text>'
         )
         out.append(
-            f'<text x="{x+125:.1f}" y="{y-53:.1f}" class="body" fill="#991b1b">TTFT = {long_cold["rt"]:.1f} ms</text>'
+            f'<text x="{x+125:.1f}" y="{y-53:.1f}" class="body" fill="#991b1b">TTFT = {one_m["rt"]:.1f} ms</text>'
         )
 
     px, py, pw, ph = 1450, 145, 690, 760
@@ -342,7 +333,7 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
     out.append(f'<text x="{px+30}" y="{py+45}" class="paneltitle">Exact dataset</text>')
     details = [
         f"all rows in source = {len(data_metrics(source)):,}",
-        f"plotted audited batch={batch_size} = {len(rows):,} (every audited row)",
+        f"plotted batch={batch_size} = {len(rows):,} (every row)",
         f"seq/input range = {min(r['input'] for r in rows):,.0f} .. {max(r['input'] for r in rows):,.0f}",
         f"TTFT range = {min(r['rt'] for r in rows):.1f} .. {xmax:.1f} ms",
         "uniform colour; coordinates are X/Y/Z only",
@@ -359,7 +350,7 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
     )
     for i, value in enumerate(
         [
-            "X right: larger TTFT / prefill RT (slower).",
+            "X right: larger Server first-token latency (slower).",
             "Y up: more KV reuse; cache dimension.",
             "Z up: more compute tokens (uncached work).",
             "Triangular footprint: input = compute + cache.",
@@ -385,23 +376,25 @@ def render(rows: list[dict[str, float]], source: pathlib.Path, batch_size: int) 
 
 
 def data_metrics(path: pathlib.Path) -> list[Any]:
-    if path.suffix.lower() == ".csv":
-        with path.open(newline="", encoding="utf-8") as handle:
-            return list(csv.DictReader(handle))
     data = json.loads(path.read_text(encoding="utf-8"))
-    return data.get("metrics", data.get("results", []))
+    return current_metrics(data, str(path))
 
 
 def render_cold_miss_2d(
-    rows: list[dict[str, float]], source: pathlib.Path, batch_size: int
+    rows: list[dict[str, float]],
+    source: pathlib.Path,
+    batch_size: int,
+    model_label: str = "Model",
 ) -> str:
     """Render the cache-miss sequence-length trend as a readable 2-D SVG.
 
     Only rows whose observed cache is zero are included.  The main chart uses
-    a linear token axis over the actual dataset extent; an inset expands the
+    a linear token axis so the 1M boundary is honest; an inset expands the
     short-sequence region that would otherwise be compressed near the origin.
     """
-    cold = sorted((row for row in rows if row["cache"] == 0), key=lambda row: row["input"])
+    cold = sorted(
+        (row for row in rows if row["cache"] == 0), key=lambda row: row["input"]
+    )
     if not cold:
         raise SystemExit("no cache-miss rows for the requested batch size")
     width, height = 1800, 1050
@@ -442,28 +435,34 @@ def render_cold_miss_2d(
 
     points = [(sx(row["input"]), sy(row["rt"])) for row in cold]
     out = [
-        f'''<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+        f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
 <rect width="100%" height="100%" fill="#ffffff"/>
 <style>text{{font-family:Arial,"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:#172033}}
 .title{{font-size:34px;font-weight:700}} .sub{{font-size:18px;fill:#475569}}
 .axis{{font-size:20px;fill:#334155;font-weight:600}} .tick{{font-size:15px;fill:#475569}}
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}}</style>
-<text x="70" y="55" class="title">DeepSeek-V4-Pro：Cache miss 的 seq_len–RT 趋势</text>
-<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用完整成功测量的中位 prefill RT / TTFT</text>'''
+<text x="70" y="55" class="title">{esc_text(model_label)}：Cache miss 的 seq_len–RT 趋势</text>
+<text x="70" y="88" class="sub">BS={batch_size} · observed cache_len=0 · 每个 seq_len 使用三次成功测量的中位 服务端 first_token_cost_time</text>"""
     ]
     out.append(line(x0, y1, x1, y1, "#0f172a", 2))
     out.append(line(x0, y0, x0, y1, "#0f172a", 2))
-    # Scale ticks to the actual dataset extent. Clamping a fixed 1M tick list
-    # onto a shorter long-only dataset stacks several labels at the right edge.
-    for index in range(7):
-        tick = xmax * index / 6
-        x = sx(tick)
+    for tick in (
+        0,
+        64 * 1024,
+        128 * 1024,
+        256 * 1024,
+        384 * 1024,
+        512 * 1024,
+        768 * 1024,
+        1024 * 1024,
+    ):
+        x = sx(min(tick, xmax))
         out.append(line(x, y1, x, y1 + 9, "#0f172a", 1.3))
         out.append(
             f'<text x="{x:.1f}" y="{y1 + 34:.1f}" text-anchor="middle" class="tick">{esc_text(fmt_tokens(tick))}</text>'
         )
-        if index not in (0, 6):
+        if x < x1 - 1:
             out.append(line(x, y0, x, y1, "#e2e8f0", 1, "5 7"))
     for index in range(7):
         value = ymax * index / 6
@@ -481,21 +480,28 @@ def render_cold_miss_2d(
     out.extend(circle(x, y, 2.8) for x, y in points)
     out += [
         f'<text x="{(x0 + x1) / 2:.1f}" y="{y1 + 78:.1f}" text-anchor="middle" class="axis">seq_len（tokens，线性轴）</text>',
-        f'<text x="42" y="{(y0 + y1) / 2:.1f}" text-anchor="middle" transform="rotate(-90 42 {(y0 + y1) / 2:.1f})" class="axis">中位 prefill RT / TTFT（ms）</text>',
+        f'<text x="42" y="{(y0 + y1) / 2:.1f}" text-anchor="middle" transform="rotate(-90 42 {(y0 + y1) / 2:.1f})" class="axis">中位 服务端 first_token_cost_time（ms）</text>',
     ]
 
-    # Inset for the short-sequence region, where the full-range linear axis
-    # hides useful detail. It is a zoom of the same points, not a second dataset.
+    # Inset for the short-sequence region, where a full 1M linear axis hides
+    # useful detail.  It is a zoom of the same points, not a second dataset.
     inset_x, inset_y, inset_w, inset_h = 980.0, 225.0, 400.0, 260.0
     inset_xmax = min(131_072.0, xmax)
     inset_rows = [row for row in cold if row["input"] <= inset_xmax]
+    inset_left = inset_x + 45.0
+    inset_right = inset_x + inset_w - 15.0
+    inset_top = inset_y + 45.0
+    inset_bottom = inset_y + inset_h - 35.0
+
+    out.append(
+        f'<rect x="{inset_x:.1f}" y="{inset_y:.1f}" width="{inset_w:.1f}" height="{inset_h:.1f}" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>'
+    )
+    out.append(
+        f'<text x="{inset_x + 15:.1f}" y="{inset_y + 28:.1f}" class="body" font-weight="700">放大：0–{fmt_tokens(inset_xmax)} tokens</text>'
+    )
     if inset_rows:
         inset_ymin = min(row["rt"] for row in inset_rows)
         inset_ymax = max(row["rt"] for row in inset_rows) * 1.08
-        inset_left = inset_x + 45.0
-        inset_right = inset_x + inset_w - 15.0
-        inset_top = inset_y + 45.0
-        inset_bottom = inset_y + inset_h - 35.0
 
         def ix(value: float) -> float:
             return inset_left + value / max(inset_xmax, 1.0) * (
@@ -508,30 +514,10 @@ def render_cold_miss_2d(
             ) * (inset_bottom - inset_top)
 
         out.append(
-            f'<rect x="{inset_x:.1f}" y="{inset_y:.1f}" width="{inset_w:.1f}" height="{inset_h:.1f}" rx="10" fill="#f8fafc" stroke="#64748b" stroke-width="1.5"/>'
+            line(inset_left, inset_bottom, inset_right, inset_bottom, "#334155", 1.2)
         )
         out.append(
-            f'<text x="{inset_x + 15:.1f}" y="{inset_y + 28:.1f}" class="body" font-weight="700">放大：0–{fmt_tokens(inset_xmax)} tokens</text>'
-        )
-        out.append(
-            line(
-                inset_left,
-                inset_bottom,
-                inset_right,
-                inset_bottom,
-                "#334155",
-                1.2,
-            )
-        )
-        out.append(
-            line(
-                inset_left,
-                inset_top,
-                inset_left,
-                inset_bottom,
-                "#334155",
-                1.2,
-            )
+            line(inset_left, inset_top, inset_left, inset_bottom, "#334155", 1.2)
         )
         inset_points = [(ix(row["input"]), iy(row["rt"])) for row in inset_rows]
         out.append(
@@ -549,21 +535,26 @@ def render_cold_miss_2d(
         out.append(
             f'<text x="{inset_x + 34:.1f}" y="{inset_y + inset_h / 2:.1f}" text-anchor="middle" transform="rotate(-90 {inset_x + 34:.1f} {inset_y + inset_h / 2:.1f})" class="tick">RT</text>'
         )
+    else:
+        out.append(
+            f'<text x="{inset_x + inset_w / 2:.1f}" y="{inset_y + inset_h / 2:.1f}" text-anchor="middle" class="note">短序列区间无样本，未绘制插图</text>'
+        )
 
-    longest = max(cold, key=lambda row: row["input"])
-    longest_label = fmt_tokens(longest["input"])
+    one_m = max(cold, key=lambda row: row["input"])
     out.append(
-        f'<line x1="{sx(longest["input"]):.1f}" y1="{sy(longest["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(longest["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
+        f'<line x1="{sx(one_m["input"]):.1f}" y1="{sy(one_m["rt"]):.1f}" x2="{x1 - 22:.1f}" y2="{sy(one_m["rt"]) - 44:.1f}" stroke="#b42318" stroke-width="1.8" stroke-dasharray="5 4"/>'
     )
     out.append(
-        f'<text x="{x1 - 15:.1f}" y="{sy(longest["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">{longest_label} cold：{longest["rt"]:.1f} ms</text>'
+        f'<text x="{x1 - 15:.1f}" y="{sy(one_m["rt"]) - 52:.1f}" text-anchor="end" class="body" fill="#991b1b" font-weight="700">1M cold：{one_m["rt"]:.1f} ms</text>'
     )
 
     panel_x, panel_y, panel_w, panel_h = 1490.0, 150.0, 275.0, 670.0
     out.append(
         f'<rect x="{panel_x:.1f}" y="{panel_y:.1f}" width="{panel_w:.1f}" height="{panel_h:.1f}" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>'
     )
-    out.append(f'<text x="{panel_x + 20:.1f}" y="{panel_y + 42:.1f}" class="paneltitle">怎么读</text>')
+    out.append(
+        f'<text x="{panel_x + 20:.1f}" y="{panel_y + 42:.1f}" class="paneltitle">怎么读</text>'
+    )
     median_rt = median(row["rt"] for row in cold)
     sorted_rt = sorted(row["rt"] for row in cold)
     p95_rt = sorted_rt[min(len(sorted_rt) - 1, int(len(sorted_rt) * 0.95))]
@@ -572,16 +563,12 @@ def render_cold_miss_2d(
         f"seq 范围：{fmt_tokens(min(row['input'] for row in cold))}–{fmt_tokens(xmax)}",
         f"RT 中位数：{median_rt:.1f} ms",
         f"RT P95：{p95_rt:.1f} ms",
-        f"最长冷点（{longest_label}）：{longest['rt']:.1f} ms",
+        f"1M 冷点：{one_m['rt']:.1f} ms",
         "",
         "每个圆点 = 一个 seq_len",
         "蓝线 = 按 seq_len 排序",
-        (
-            "右上插图 = 放大短序列"
-            if inset_rows
-            else "短序列区间无样本，未绘制插图"
-        ),
-        "RT 取全部完整成功测量中位数",
+        "右上插图 = 放大短序列",
+        "RT 取三次成功测量中位数",
     ]
     for index, value in enumerate(details):
         out.append(
@@ -595,13 +582,18 @@ def render_cold_miss_2d(
 
 
 def render_clean(
-    rows: list[dict[str, float]], source: pathlib.Path, batch_size: int
+    rows: list[dict[str, float]],
+    source: pathlib.Path,
+    batch_size: int,
+    *,
+    title: str = "Model Prefill — readable 3D view",
+    annotate_cold_threshold: int = 1_048_575,
 ) -> str:
     """Render a legible 3-D view without the old dense drop-line clutter.
 
-    X is TTFT, Y is observed cache reuse, and Z is compute tokens.  Every
-    geometry remains a low-opacity dot; only a handful of representative
-    fixed-cache/fixed-compute slices are drawn as guide lines.
+    X is compute tokens, Y is observed cache reuse, and Z is TTFT.  Every
+    geometry remains a dot coloured by local query density; only a handful of
+    representative fixed-cache/fixed-compute slices are drawn as guide lines.
     """
     if not rows:
         raise SystemExit("no usable rows for the requested batch size")
@@ -614,9 +606,9 @@ def render_clean(
     cache_max = max(row["cache"] for row in rows)
     compute_max = max(row["compute"] for row in rows)
     xscale, yscale, zscale = (
-        max(rt_max, 1.0),
-        max(cache_max, 1.0),
         max(compute_max, 1.0),
+        max(cache_max, 1.0),
+        max(rt_max, 1.0),
     )
 
     def project(nx: float, ny: float, nz: float) -> tuple[float, float]:
@@ -640,11 +632,13 @@ def render_clean(
         )
 
     def circle(
-        point: tuple[float, float], radius=3.2, fill="#2563eb", opacity=0.50
+        point: tuple[float, float], density: int, maximum_density: int, radius=3.2
     ) -> str:
+        fill = _query_density_color(density, maximum_density)
         return (
             f'<circle cx="{point[0]:.1f}" cy="{point[1]:.1f}" r="{radius}" '
-            f'fill="{fill}" fill-opacity="{opacity}" stroke="#ffffff" stroke-width=".55"/>'
+            f'fill="{fill}" fill-opacity=".82" stroke="#ffffff" stroke-width=".55" '
+            f'data-query-density="{density}"><title>local query density: {density}</title></circle>'
         )
 
     def polyline(points: list[tuple[float, float]], stroke: str, dash: str = "") -> str:
@@ -665,8 +659,8 @@ def render_clean(
 .axis{{font-size:18px;fill:#334155;font-weight:600}} .tick{{font-size:15px;fill:#475569}}
 .paneltitle{{font-size:23px;font-weight:700}} .body{{font-size:17px;fill:#334155}}
 .note{{font-size:15px;fill:#64748b}} .legend{{font-size:16px;fill:#334155}}</style>
-<text x="1100" y="52" text-anchor="middle" class="title">DeepSeek-V4-Pro：三轴等距投影</text>
-<text x="1100" y="85" text-anchor="middle" class="sub">X = TTFT / prefill RT (ms) · Y = observed cached tokens · Z = compute tokens · all {len(rows):,} audited geometries shown</text>"""
+<text x="1100" y="52" text-anchor="middle" class="title">{esc(title)}</text>
+<text x="1100" y="85" text-anchor="middle" class="sub">X = compute tokens · Y = observed cached tokens · Z = Server first-token latency (ms) · all {len(rows):,} geometries shown</text>"""
     ]
 
     # Ground plane and a sparse grid keep the perspective legible.
@@ -681,26 +675,19 @@ def render_clean(
         out.append(line(project(0, 0, t), project(1, 0, t), "#dbe4ee", 1, "5 6", 0.75))
         out.append(line(project(0, 0, t), project(0, 1, t), "#dbe4ee", 1, "5 6", 0.75))
 
-    # Every point is kept, but dots are deliberately faint so the axes and
-    # representative slices remain visible at report scale.
-    for index, row in enumerate(sorted(rows, key=lambda item: item["compute"])):
-        # Keep every point. A regular sample of drop-lines supplies depth cues
-        # without turning the full cloud into a grey barcode.
-        nx = row["rt"] / xscale
-        ny = row["cache"] / yscale
-        nz = row["compute"] / zscale
-        if index % 8 == 0:
-            out.append(
-                line(
-                    project(nx, ny, 0),
-                    project(nx, ny, nz),
-                    "#94a3b8",
-                    0.55,
-                    opacity=0.28,
-                )
-            )
+    # Every point is kept. Colour depth represents local query-geometry
+    # density on the compute/cache plane; TTFT remains encoded only by Z.
+    sorted_rows = sorted(rows, key=lambda item: item["compute"])
+    densities, maximum_density = _query_density(sorted_rows, compute_max, cache_max)
+    for row, density in zip(sorted_rows, densities):
         out.append(
-            circle(project(nx, ny, nz))
+            circle(
+                project(
+                    row["compute"] / xscale, row["cache"] / yscale, row["rt"] / zscale
+                ),
+                density,
+                maximum_density,
+            )
         )
 
     # Solid warm lines are fixed-cache slices; dashed cool lines are
@@ -757,9 +744,9 @@ def render_clean(
             representative["rt"] = rt_value
             points.append(
                 project(
-                    representative["rt"] / xscale,
+                    representative["compute"] / xscale,
                     representative["cache"] / yscale,
-                    representative["compute"] / zscale,
+                    representative["rt"] / zscale,
                 )
             )
         return points
@@ -804,7 +791,7 @@ def render_clean(
         t = i / 4
         p = project(t, 0, 0)
         out.append(
-            f'<text x="{p[0]+4:.1f}" y="{p[1]+34:.1f}" text-anchor="middle" class="tick">{rt_max*t:.0f} ms</text>'
+            f'<text x="{p[0]+4:.1f}" y="{p[1]+34:.1f}" text-anchor="middle" class="tick">{fmt_tokens(compute_max*t)}</text>'
         )
         p = project(0, t, 0)
         out.append(
@@ -814,30 +801,33 @@ def render_clean(
         t = i / 5
         p = project(0, 0, t)
         out.append(
-            f'<text x="{p[0]-18:.1f}" y="{p[1]+5:.1f}" text-anchor="end" class="tick">{fmt_tokens(compute_max*t)}</text>'
+            f'<text x="{p[0]-18:.1f}" y="{p[1]+5:.1f}" text-anchor="end" class="tick">{rt_max*t:.0f} ms</text>'
         )
     out += [
-        f'<text x="{project(.55,0,0)[0]:.1f}" y="{project(.55,0,0)[1]+70:.1f}" text-anchor="middle" class="axis">TTFT / prefill RT (X, ms)</text>',
+        f'<text x="{project(.55,0,0)[0]:.1f}" y="{project(.55,0,0)[1]+70:.1f}" text-anchor="middle" class="axis">compute tokens (X)</text>',
         f'<text x="{project(0,.55,0)[0]-75:.1f}" y="{project(0,.55,0)[1]+70:.1f}" text-anchor="middle" class="axis">cached tokens (Y)</text>',
-        f'<text x="{project(0,0,.57)[0]-62:.1f}" y="{project(0,0,.57)[1]:.1f}" text-anchor="middle" transform="rotate(-90 {project(0,0,.57)[0]-62:.1f},{project(0,0,.57)[1]:.1f})" class="axis">compute tokens (Z)</text>',
+        f'<text x="{project(0,0,.57)[0]-62:.1f}" y="{project(0,0,.57)[1]:.1f}" text-anchor="middle" transform="rotate(-90 {project(0,0,.57)[0]-62:.1f},{project(0,0,.57)[1]:.1f})" class="axis">Server first-token latency (Z, ms)</text>',
     ]
 
-    long_cold = next(
-        (row for row in rows if row["input"] >= 1_048_575 and row["cache"] == 0), None
+    one_m = next(
+        (
+            row
+            for row in rows
+            if row["input"] >= annotate_cold_threshold and row["cache"] == 0
+        ),
+        None,
     )
-    if long_cold is not None:
-        px, py = project(
-            long_cold["rt"] / xscale, 0, long_cold["compute"] / zscale
-        )
+    if one_m is not None:
+        px, py = project(one_m["compute"] / xscale, 0, one_m["rt"] / zscale)
         out.append(line((px, py), (px + 125, py - 70), "#b42318", 2, "5 4"))
         out.append(
             f'<rect x="{px+120:.1f}" y="{py-114:.1f}" width="315" height="76" rx="10" fill="#fff7ed" stroke="#b42318" stroke-width="2"/>'
         )
         out.append(
-            f'<text x="{px+140:.1f}" y="{py-82:.1f}" class="body" fill="#991b1b">{fmt_tokens(long_cold["input"])} cold (cache=0)</text>'
+            f'<text x="{px+140:.1f}" y="{py-82:.1f}" class="body" fill="#991b1b">1M cold (cache=0)</text>'
         )
         out.append(
-            f'<text x="{px+140:.1f}" y="{py-53:.1f}" class="body" fill="#991b1b">TTFT = {long_cold["rt"]:.1f} ms</text>'
+            f'<text x="{px+140:.1f}" y="{py-53:.1f}" class="body" fill="#991b1b">TTFT = {one_m["rt"]:.1f} ms</text>'
         )
 
     px, py, pw, ph = 1450, 145, 690, 790
@@ -849,10 +839,10 @@ def render_clean(
     )
     text_lines = [
         f"source rows = {len(data_metrics(source)):,}; plotted = {len(rows):,}",
-        "dots = every physical geometry (faint on purpose)",
-        "X right = higher TTFT / slower prefill",
+        "dots = every physical geometry; darker means denser queries",
+        "X right = more uncached compute tokens",
         "Y up = more observed KV-cache reuse",
-        "Z up = more uncached compute tokens",
+        "Z up = higher TTFT / slower prefill",
         "input length = cache + compute",
         "solid warm = fixed-cache median guides",
         "dashed cool = fixed-compute median guides",
@@ -886,6 +876,18 @@ def render_clean(
         out.append(
             f'<text x="{px+405}" y="{yy}" class="legend">compute ≈ {fmt_tokens(level)}</text>'
         )
+    density_y = py + 650
+    out.append(
+        f'<text x="{px+30}" y="{density_y}" class="paneltitle">Query distribution density</text>'
+    )
+    swatch_width = 82
+    for index, colour in enumerate(QUERY_DENSITY_PALETTE):
+        out.append(
+            f'<rect x="{px+30+index*swatch_width}" y="{density_y+22}" width="{swatch_width}" height="24" fill="{colour}"/>'
+        )
+    out.append(
+        f'<text x="{px+30}" y="{density_y+70}" class="note">sparse · local 16×16 compute/cache bins · dense (max {maximum_density})</text>'
+    )
     out.append("</svg>")
     return "".join(out)
 
@@ -900,17 +902,71 @@ def main() -> None:
         help="Optional cache-miss 2-D SVG. Defaults to <output stem>_cold_miss.svg.",
     )
     parser.add_argument("--batch-size", default=1, type=int)
+    parser.add_argument("--title", default=None, help="Override the chart title.")
+    parser.add_argument(
+        "--model-label", default=None, help="Model label used to build the title."
+    )
+    parser.add_argument(
+        "--annotate-cold-threshold",
+        type=int,
+        default=None,
+        help="Minimum input_len for the cold-point annotation (default: 1048575).",
+    )
+    parser.add_argument(
+        "--profile", default=None, help="JSON profile for parameter defaults."
+    )
     args = parser.parse_args()
+
+    profile = None
+    profile_sha256 = None
+    if args.profile:
+        profile = load_profile(args.profile)
+        profile_sha256 = profile_fingerprint(profile)
+    else:
+        try:
+            input_data = json.loads(args.input.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            input_data = None
+        if isinstance(input_data, dict):
+            embedded_sha = input_data.get("profile_sha256")
+            embedded = extract_embedded_profile(input_data)
+            if embedded is not None:
+                profile = embedded
+                profile_sha256 = (
+                    embedded_sha
+                    if isinstance(embedded_sha, str)
+                    else profile_fingerprint(profile)
+                )
+
+    model_label = resolve_label(profile, args.model_label, "Model")
+    default_title = f"{model_label} Prefill — readable 3D view"
+    title = resolve_title(profile, args.title, default_title)
+    cold_threshold = args.annotate_cold_threshold
+    if cold_threshold is None and profile is not None:
+        cold_threshold = resolve_int(
+            profile, "chart", "annotate_cold_threshold", None, 1_048_575
+        )
+    if cold_threshold is None:
+        cold_threshold = 1_048_575
+
     rows = load_rows(args.input, args.batch_size)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(
-        render_clean(rows, args.input, args.batch_size), encoding="utf-8"
+        render_clean(
+            rows,
+            args.input,
+            args.batch_size,
+            title=title,
+            annotate_cold_threshold=cold_threshold,
+        ),
+        encoding="utf-8",
     )
     cold_output = args.cold_output or args.output.with_name(
         f"{args.output.stem}_cold_miss{args.output.suffix}"
     )
     cold_output.write_text(
-        render_cold_miss_2d(rows, args.input, args.batch_size), encoding="utf-8"
+        render_cold_miss_2d(rows, args.input, args.batch_size, model_label),
+        encoding="utf-8",
     )
     print(
         json.dumps(
@@ -921,6 +977,9 @@ def main() -> None:
                 "output": str(args.output),
                 "cold_output": str(cold_output),
                 "cold_rows": sum(row["cache"] == 0 for row in rows),
+                "title": title,
+                "profile": profile,
+                "profile_sha256": profile_sha256,
             },
             ensure_ascii=False,
         )

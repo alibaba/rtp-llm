@@ -1,0 +1,80 @@
+{
+  // JSONC supports // line comments and /* block comments */. No trailing commas.
+  // 先复制成本机配置；不要把凭证、token、access key 写在这里。
+  "schema_version": 1,
+  "label": "DSV4 local cache-grid",
+  "model_label": "DeepSeek-V4-Pro",
+  "engine": {// 模型和并行拓扑配置
+    "model_type": "deepseek_v4",
+    // 必改：模型和 tokenizer 在测试机器/容器内可读的绝对路径。
+    "checkpoint_path": "/path/to/DeepSeek-V4-Pro",
+    "tokenizer_path": "/path/to/DeepSeek-V4-Pro",
+    // 按实际 GPU 拓扑修改；当前配置是 8 卡 TP/EP、DP=1。
+    "tp_size": 8,
+    "ep_size": 8,
+    "dp_size": 1,
+    "world_size": 8,
+    // 按照实际情况修改并发和推理长度等
+    "max_seq_len": 1048576,
+    "max_batch_tokens_size": 1048576,
+    "max_context_batch_size": 1,
+    "concurrency_limit": 1,
+    "seq_size_per_block": 512,
+    "kernel_seq_size_per_block": 128
+  },
+  "engine_args": { // 会以 --key=value 的形式传给引擎启动命令
+    "--timeout_keep_alive": 3600,
+    // 按照实际上线的功能配置开关进行配置
+    "--cp_rotate_method": "ALL_GATHER",
+    "--prefill_cp_kv_cache_sharded": 1,
+    "--fp8_kv_cache": 1,
+    "--reuse_cache": 1,
+    "--enable_device_cache": 1,
+    "--use_deepep_moe": 1,
+    "--use_deepep_low_latency": 0,
+    "--act_type": "BF16",
+    "--load_method": "fastsafetensors",
+    "--enable_cuda_graph": 0,
+    "--reserver_runtime_mem_mb": 81920
+  },
+  "cache_grid": {
+    // CP8 × physical block512 = visible reuse4096；不是 kernel block128。
+    "cache_alignment": 4096,
+    "commit_tail_tokens": 4096,
+    // 每个case 运行次数
+    "measure_runs": 3
+  },
+  "engine_env": {
+    // 影响执行路径的配置，续测不得悄悄修改；Pro batch 需要 MegaMoE。
+    "DSV4_USE_MEGA_MOE": "1",
+    "DSV4_USE_MEGA_MOE_SE": "1",
+    "DSV4_CHUNK_TOKENS": "8192",
+    "DSV4_PREFILL_CP_OVERLAP": "0",
+    "DG_JIT_CPP_STANDARD": "20",
+    "WORLD_SIZE": "8",
+    "TOKENIZERS_PARALLELISM": "false",
+    "PERF_PROFILE_RUNS": "0"
+  },
+  "runtime_env": {
+    // 必改/确认：编译器、CUDA 和库路径；这里不会展开 $PATH、~ 或执行命令。
+    // 可以使用command -v gcc, command -v g++来确认位置
+    "CC": "/opt/rh/gcc-toolset-12/root/usr/bin/gcc",
+    "CXX": "/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+    "CUDAHOSTCXX": "/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+    "NVCC_PREPEND_FLAGS": "-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++",
+    "PATH": "/opt/rh/gcc-toolset-12/root/usr/bin:/usr/local/cuda-13.2/bin:/opt/conda310/bin:/usr/local/bin:/usr/bin:/bin",
+    "LD_LIBRARY_PATH": "/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda-13.2/lib64:/opt/conda310/lib:/usr/lib64:/usr/local/lib64:/usr/lib:/lib64",
+    // 必改：有写权限的持久化缓存目录；多个实验可复用 JIT cache。
+    "DG_JIT_CACHE_DIR": "/path/to/cache/jit_cache",
+    "TRITON_CACHE_DIR": "/path/to/cache/triton_cache",
+    "TILELANG_CACHE_DIR": "/path/to/cache/tilelang_cache"
+  },
+  "bazel": {
+    // 仅 tools/cache_perf 使用；不是转发给模型的参数。
+    "executable": "bazelisk",
+    "configs": ["cuda13", "sm10x"],
+    // 可选：本机 Bazel 输出目录；也可删除此项使用 Bazel 默认值, 默认在～/.cache/bazel下，home盘空间不足时更改
+    "output_base": "/path/to/cache_grid_bazel_output",
+    "test_timeout": 345600
+  }
+}

@@ -12,12 +12,9 @@ py_library(
     srcs = [
         "batch_decode_test.py",
         "batch_perf_impl.py",
-        "cache_grid_runner.py",
         "dataclass.py",
         "dataset.py",
-        "deepseek_v4_prefill_formula_fit.py",
         "distribution_runner.py",
-        "generate_prefill_3d_chart.py",
         "grid_runner.py",
         "hub_download.py",
         "offline_bench_test.py",
@@ -29,7 +26,15 @@ py_library(
         "server.py",
         "test_util.py",
         "visualization.py",
-    ],
+    ] + glob(
+        ["cache_grid/**/*.py"],
+        exclude = ["cache_grid/tests/**"],
+    ),
+    data = glob([
+        "cache_grid/config/*.json",
+        "cache_grid/config/*.jsonc",
+        "cache_grid/examples/*",
+    ]),
     deps = [
         "//rtp_llm:testlib",
         "//rtp_llm/test/utils:maga_server_manager",
@@ -41,6 +46,7 @@ py_library(
 py_test(
     name = "batch_decode_test_test",
     srcs = ["batch_decode_test_test.py"],
+    data = ["cache_grid/config/dsv4_pro_prefill.json"],
     deps = [
         ":perf_test_lib",
     ],
@@ -990,4 +996,144 @@ test_suite(
         ":v4_flash_dp4_decode_64k_mtp_grid_perf",
     ],
     tags = ["manual"],
+)
+
+py_test(
+    name = "cache_grid_result_schema_test",
+    main = "cache_grid/tests/result_schema_test.py",
+    srcs = ["cache_grid/tests/result_schema_test.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "cache_grid_server_latency_test",
+    main = "cache_grid/tests/server_latency_test.py",
+    srcs = ["cache_grid/tests/server_latency_test.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "cache_perf_pipeline_test",
+    main = "cache_grid/tests/cache_perf_pipeline_test.py",
+    srcs = [
+        "cache_grid/tests/cache_perf_pipeline_test.py",
+        "cache_grid/tests/result_schema_test.py",
+    ],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "cache_perf_test",
+    main = "cache_grid/tests/cache_perf_test.py",
+    srcs = ["cache_grid/tests/cache_perf_test.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "cache_workspace_budget_test",
+    main = "cache_grid/tests/workspace_budget_test.py",
+    srcs = ["cache_grid/tests/workspace_budget_test.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_binary(
+    name = "generate_cache_grid",
+    main = "cache_grid/runner/generate_cache_grid.py",
+    srcs = ["cache_grid/runner/generate_cache_grid.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "generate_cache_grid_test",
+    main = "cache_grid/tests/generate_cache_grid_test.py",
+    srcs = ["cache_grid/tests/generate_cache_grid_test.py"],
+    deps = [
+        ":generate_cache_grid",
+        ":perf_test_lib",
+    ],
+)
+
+py_test(
+    name = "generate_prefill_3d_chart_test",
+    main = "cache_grid/tests/generate_prefill_3d_chart_test.py",
+    srcs = ["cache_grid/tests/generate_prefill_3d_chart_test.py"],
+    deps = [":prefill_3d_chart_lib"],
+)
+
+py_binary(
+    name = "generate_prefill_interactive_chart",
+    main = "cache_grid/plot/generate_prefill_interactive_chart.py",
+    srcs = ["cache_grid/plot/generate_prefill_interactive_chart.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "generate_prefill_interactive_chart_test",
+    main = "cache_grid/tests/generate_prefill_interactive_chart_test.py",
+    srcs = ["cache_grid/tests/generate_prefill_interactive_chart_test.py"],
+    deps = [
+        ":prefill_interactive_chart_lib",
+        ":perf_test_lib",
+    ],
+)
+
+py_test(
+    name = "generate_random_batch_grid_test",
+    main = "cache_grid/tests/generate_random_batch_grid_test.py",
+    srcs = ["cache_grid/tests/generate_random_batch_grid_test.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "perf_profile_test",
+    main = "cache_grid/tests/perf_profile_test.py",
+    srcs = ["cache_grid/tests/perf_profile_test.py"],
+    deps = [
+        ":perf_test_lib",
+    ],
+)
+
+py_library(
+    name = "prefill_3d_chart_lib",
+    srcs = ["cache_grid/plot/generate_prefill_3d_chart.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_binary(
+    name = "prefill_formula_fit",
+    main = "cache_grid/formula/prefill_formula_fit.py",
+    srcs = ["cache_grid/formula/prefill_formula_fit.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_library(
+    name = "prefill_formula_fit_lib",
+    srcs = ["cache_grid/formula/prefill_formula_fit.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "prefill_formula_fit_test",
+    main = "cache_grid/tests/prefill_formula_fit_test.py",
+    srcs = ["cache_grid/tests/prefill_formula_fit_test.py"],
+    deps = [
+        ":prefill_formula_fit_lib",
+        ":perf_test_lib",
+    ],
+)
+
+py_library(
+    name = "prefill_interactive_chart_lib",
+    srcs = ["cache_grid/plot/generate_prefill_interactive_chart.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "restricted_symbolic_fit_test",
+    main = "cache_grid/tests/restricted_symbolic_fit_test.py",
+    srcs = ["cache_grid/tests/restricted_symbolic_fit_test.py"],
+    deps = [
+        ":prefill_formula_fit_lib",
+        ":perf_test_lib",
+    ],
 )
