@@ -140,6 +140,18 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_kv_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_kv_boundary_replay.py"],
+    deps = [
+        ":dsv41_block_norm_replay",
+        ":dsv41_query_boundary_replay",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
     name = "dsv41_corrected_history_replay",
     testonly = True,
     srcs = ["dsv41_corrected_history_replay.py"],
