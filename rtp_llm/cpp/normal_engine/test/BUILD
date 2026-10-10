@@ -227,7 +227,10 @@ cc_binary(
     name = "th_v41_native_engine_test",
     deps = [":v41_native_engine_test_lib"],
     linkshared = 1,
-    visibility = ["//rtp_llm/models_py/modules/dsv4/fp8/test:__pkg__"],
+    visibility = [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:__pkg__",
+        "//rtp_llm/models_py/modules/dsv4/test:__pkg__",
+    ],
 )
 
 cc_library(
