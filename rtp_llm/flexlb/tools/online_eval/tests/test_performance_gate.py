@@ -193,8 +193,8 @@ class PerformanceGateTest(unittest.TestCase):
             archive.parent.mkdir(parents=True)
             archive.write_text(json.dumps(dict(
                 start=100, end=110, step=1, targets={}, queries={
-                    "mock/rtp_llm_generate_tps_engine_mean": dict(
-                        promql="avg by (role) (rtp_llm_generate_tps{job=\"mock\"})",
+                    "mock/mock_decode_wall_tps_engine_mean": dict(
+                        promql="avg by (role) (mock_decode_wall_tps{job=\"mock\"})",
                         result=[dict(metric=dict(role="decode"),
                                      values=[[100, "120"], [110, "130"]])],
                     ),
@@ -299,7 +299,7 @@ class PerformanceGateTest(unittest.TestCase):
         self.assertEqual(result["verdict"], "INVALID")
         self.assertIn("observer coverage gap", result["errors"])
         self.assertEqual(result["metrics"]["error_rate"], 0)
-        self.assertEqual(result["metrics"]["mock/rtp_llm_generate_tps"], 120)
+        self.assertEqual(result["metrics"]["mock/mock_decode_wall_tps"], 120)
         self.assertEqual(len(result["windows"]), 10)
 
     def test_engine_tps_floors_are_independent_of_client_tps(self):

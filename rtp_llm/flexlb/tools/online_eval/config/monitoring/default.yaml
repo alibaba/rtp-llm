@@ -243,8 +243,8 @@ sources:
         requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps_with_cache
-    rtp_llm_generate_tps_engine_mean:
-      promql: avg by (role) (rtp_llm_generate_tps${selector})
+    mock_decode_wall_tps_engine_mean:
+      promql: avg by (role) (mock_decode_wall_tps${selector})
       unit: tokens/s
       value_kind: gauge
       labels:
@@ -255,7 +255,7 @@ sources:
         accuracy: sampled
         requires_request_identity: false
       exported_metrics:
-      - rtp_llm_generate_tps
+      - mock_decode_wall_tps
     context_execution_tps_avg:
       promql: avg by (role) (rtp_llm_context_tps${selector})
       unit: tokens/s

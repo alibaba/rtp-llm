@@ -39,8 +39,8 @@ sources:
         requires_request_identity: false
       exported_metrics:
       - rtp_llm_context_tps_with_cache
-    rtp_llm_generate_tps:
-      promql: rtp_llm_generate_tps${selector}
+    mock_decode_wall_tps:
+      promql: mock_decode_wall_tps${selector}
       mode: scrape
       unit: tokens/s
       value_kind: gauge
@@ -54,7 +54,7 @@ sources:
         accuracy: sampled
         requires_request_identity: false
       exported_metrics:
-      - rtp_llm_generate_tps
+      - mock_decode_wall_tps
 produced:
   request/ttft_p99_ms:
     producer: performance_requests
@@ -143,7 +143,7 @@ produced:
     unit: tokens/s
     value_kind: scalar
     labels: []
-  performance_gate/rtp_llm_generate_tps_scrape_engine_mean:
+  performance_gate/mock_decode_wall_tps_scrape_engine_mean:
     producer: performance_requests
     source_type: prometheus
     unit: tokens/s
@@ -161,7 +161,7 @@ produced:
     unit: engines
     value_kind: scalar
     labels: []
-  performance_gate/rtp_llm_generate_tps_engine_count:
+  performance_gate/mock_decode_wall_tps_engine_count:
     producer: performance_requests
     source_type: prometheus
     unit: engines

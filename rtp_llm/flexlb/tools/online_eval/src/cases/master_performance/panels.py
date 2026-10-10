@@ -66,7 +66,7 @@ def report_panels(curves, criteria, presentation):
     floor_metrics = {
         "mock/rtp_llm_context_tps_engine_mean/P": "mock/rtp_llm_context_tps",
         "mock/rtp_llm_context_tps_with_cache_engine_mean/P": "mock/rtp_llm_context_tps_with_cache",
-        "mock/rtp_llm_generate_tps_engine_mean/D": "mock/rtp_llm_generate_tps",
+        "mock/mock_decode_wall_tps_engine_mean/D": "mock/mock_decode_wall_tps",
     }
     for panel, descriptor in zip(panels, presentation["charts"]["panels"]):
         selected = panel["series"]

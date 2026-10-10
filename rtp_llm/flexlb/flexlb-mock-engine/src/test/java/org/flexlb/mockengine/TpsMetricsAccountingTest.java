@@ -79,6 +79,8 @@ class TpsMetricsAccountingTest {
             p.cancel(301L);
             awaitTps(p, 1024);
             assertEquals(1024, p.prefillTpsSnapshot().computeTokens());
+            assertEquals(1024, p.cacheHitSnapshot().inputTokens(),
+                    "cache reuse observations survive cancellation after execution starts");
             assertEquals(512L, p.getSnapshot().get("context_tokens_total"),
                     "business completion counter remains separate from executed work");
         }
@@ -120,13 +122,14 @@ class TpsMetricsAccountingTest {
             long before = System.nanoTime();
             String body = httpGet(cluster.controlPort(), "/metrics");
             long after = System.nanoTime();
-            double rate = value(body, "rtp_llm_generate_tps", "role=\"decode\"");
+            double rate = value(body, "mock_decode_wall_tps", "role=\"decode\"");
             assertTrue(rate >= CounterRateMetrics.rate(work.tokens(), after - work.startedNanos()) - 0.000001);
             assertTrue(rate <= CounterRateMetrics.rate(work.tokens(), before - work.startedNanos()) + 0.000001);
+            assertEquals(work.tokens(), value(body, "rtp_llm_generate_tps", "role=\"decode\""));
             assertEquals(work.tokens(), value(body, "mock_decode_step_tokens_total", "role=\"decode\""));
             // A new HTTP scrape sees no new execution; the Whale reader still sees it.
             assertEquals(0.0, value(httpGet(cluster.controlPort(), "/metrics"),
-                    "rtp_llm_generate_tps", "role=\"decode\""));
+                    "mock_decode_wall_tps", "role=\"decode\""));
             Map<String, Double> reports = new HashMap<>();
             var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
                     getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
@@ -139,7 +142,8 @@ class TpsMetricsAccountingTest {
             before = System.nanoTime();
             monitor.sample(d);
             after = System.nanoTime();
-            rate = reports.get("rtp_llm_generate_tps");
+            assertEquals((double) work.tokens(), reports.get("rtp_llm_generate_tps"));
+            rate = reports.get("mock_decode_wall_tps");
             assertTrue(rate >= CounterRateMetrics.rate(work.tokens(), after - work.startedNanos()));
             assertTrue(rate <= CounterRateMetrics.rate(work.tokens(), before - work.startedNanos()));
         }

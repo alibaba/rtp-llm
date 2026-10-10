@@ -15,6 +15,21 @@ from monitoring.sources import evidence_collector
 from scenario.loader import ScenarioError
 
 
+@pytest.mark.parametrize('name', ['cache_scale_in.yaml', 'master_ha_failover.yaml',
+                                  'master_performance.yaml'])
+def test_decode_rate_query_and_scrape_filter_use_the_same_wall_metric(name):
+    plan = load_plan(name)
+    names = physical_metrics(plan, 'mock')
+    assert 'mock_decode_wall_tps' in names
+    assert 'rtp_llm_generate_tps' not in names  # Native gauge counts window tokens.
+    queries = [spec for spec in plan['sources']['mock'].values()
+               if 'mock_decode_wall_tps' in spec['promql']]
+    assert queries
+    for spec in queries:
+        assert spec['unit'] == 'tokens/s'
+        assert 'mock_decode_wall_tps' in spec['exported_metrics']
+
+
 def test_physical_whitelists_follow_case_plan_and_keep_all_query_dependencies():
     plan = load_plan('master_performance.yaml')
     names = physical_metrics(plan, 'client')

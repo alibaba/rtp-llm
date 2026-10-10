@@ -48,7 +48,7 @@ VIPServer 调整只限测试部署实际引用的域名，保留其他注册参�
 |---|---|---|
 | Prefill context TPS | `rtp_llm_context_tps`，有效 compute token / 对应执行时间 | 主性能指标 |
 | Prefill with-cache TPS | `rtp_llm_context_tps_with_cache`，含复用输入 / 对应执行时间 | 与 context TPS 同时观察，禁止称作单独 cache token TPS |
-| Decode generate TPS | `rtp_llm_generate_tps`；对照真实 emitter 与 Mock 上报窗口 | D 性能；不与 frontend output TPS 混用 |
+| Decode 执行量与速率 | `rtp_llm_generate_tps` 是真实 emitter 的窗口 token 数；`mock_decode_wall_tps` 为按秒归一化的执行速率 | D 速率门禁使用 wall TPS；不与 frontend output TPS 混用 |
 | TTFT / TPOT | frontend 对应面板，保留单位、均值和可用分位数 | 延迟护栏；不能平均各实例 p99 得出全局 p99 |
 | Output length | 成功完成请求的实际输出长度及分布 | 检查 EOS、截断和成功率造成的偏差 |
 | 实际缓存命中率 | 同窗 `sum(rtp_llm_kv_cache_reuse_length) / sum(rtp_llm_input_token_length)` | 实际复用；不是 30min key 理论命中率；分母为零时显示无样本 |

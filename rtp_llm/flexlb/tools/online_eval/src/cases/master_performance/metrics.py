@@ -14,7 +14,7 @@ GATE_POPULATIONS = {
     'arrival_cohort_successes': frozenset({'ttft_p99_ms', 'e2e_p99_ms', 'tpot_p99_ms'}),
     'full_request_lifetimes': frozenset({'inflight_growth_rps'}),
 }
-ENGINE_METRICS = frozenset({'rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'rtp_llm_generate_tps'})
+ENGINE_METRICS = frozenset({'rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'mock_decode_wall_tps'})
 
 
 def metric_contract(producer, identity, calculation):

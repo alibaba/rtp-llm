@@ -22,7 +22,7 @@ NUMERIC_PARAMETERS = {
         'checks.e2e.expected',
         'checks.engine_tps.rtp_llm_context_tps.expected',
         'checks.engine_tps.rtp_llm_context_tps_with_cache.expected',
-        'checks.engine_tps.rtp_llm_generate_tps.expected',
+        'checks.engine_tps.mock_decode_wall_tps.expected',
         'checks.goodput.expected',
         'checks.inflight_growth.expected',
         'checks.input_tps.expected',

@@ -25,7 +25,7 @@ Token 成员在执行开始时冻结，完成派发后与实际执行时间原�
 
 Decode 的 `rtp_llm_sp_estimate_tpot_us` 使用模拟 step 微秒除以实际推进 stream 新产生 token 的平均数；不包含 Prefill 首 token、中途加入或 KV 增长失败的 stream。它是执行估计，不能替代客户端 TTFT / TPOT，也不伪造 draft proposal 和接受率。
 
-Decode 的 `rtp_llm_generate_tps` 在 HTTP 与 Whale 均为实际执行步骤产生的 token 增量除以各自观察窗口秒数。两者共用 `CounterRateMetrics` 累计账本与计算规则，保留独立游标；首次采样包含引擎启动以来的执行，重启按新 generation 重建窗口。`mock_decode_step_tokens_total` 是对应执行累计量，`mock_generate_tokens_total` 仍是成功完成请求的输出 token 累计量，不能混用。
+Decode 的 `rtp_llm_generate_tps` 对齐真实 `RtpLLMTokenPSMetricsCollector::generateTPS()`：它是观察窗口内的执行 token 数，单位为 token，名字中的 TPS 不代表按秒归一化。`mock_decode_wall_tps` 才是该增量除以观察窗口秒数，性能门禁与速率曲线使用后者。HTTP 与 Whale 共用 `CounterRateMetrics` 累计账本，保留独立游标；首次采样包含引擎启动以来的执行，重启按新 generation 重建窗口。`mock_decode_step_tokens_total` 是对应执行累计量，`mock_generate_tokens_total` 是成功完成请求的输出 token 累计量，不能混用。
 
 两个 sink 的完成数、device cache 驱逐数和准入 cache-key 数统一使用 `mock_engine_completed_total`、`mock_engine_cache_evictions_total`、`mock_engine_cache_key_hits_total`、`mock_engine_cache_keys_requested_total`。平台 dashboard 别名及微秒到毫秒转换保留在 Whale 适配器中。HTTP 的汇总模式和单引擎模式共用导出定义；report interval 仅按单引擎导出，平均执行时间按样本数加权。
 
@@ -45,15 +45,28 @@ Decode 的 `rtp_llm_generate_tps` 在 HTTP 与 Whale 均为实际执行步骤产
 ## KV 与 Memory cache
 
 `rtp_llm_kv_cache_pool_total_blocks` 表示模拟 device pool 容量，
+`rtp_llm_kv_cache_pool_used_ratio` 为 `(total - free) / total * 100`，包括可回收缓存，不能用 `total - available` 代替。
 `rtp_llm_kv_cache_pool_available_blocks` 包括 free 与可驱逐 cache block，排除 held 和被请求引用的 block。
 `mock_engine_held_blocks` 是无 key 分配，`mock_engine_referenced_blocks` 是在用的 cache-key block，二者之和才是本模型的请求持有量，不能把任一项改名为 free 或完整 request-ref。
 
 Device 与 Memory 复用 token 分别由
-`rtp_llm_stream_cache_device_reuse_length` 和 `rtp_llm_stream_cache_memory_reuse_length` 表示，不重叠；
-`rtp_llm_kv_cache_hit_rate` 是总复用 token / 输入 token 的百分比。
-Memory `...available_block_num` 包括可回收条目，`...used_ratio` 描述 pinned 容量；常驻前缀的占用需看 `mock_memory_cache_occupancy_ratio`。
+`rtp_llm_kv_cache_device_reuse_length` 和 `rtp_llm_kv_cache_host_reuse_length` 表示，不重叠。复用事件在资源准备完成、执行开始时记录，执行后的取消不抹去匹配观测。
+`rtp_llm_kv_cache_hit_rate` 按一分钟窗口的总复用 token / 总输入 token 计算百分比，窗口不足或没有输入不补零，不能平均逐请求百分比。
+Memory `mock_memory_cache_available_blocks` 包括可回收条目，`mock_memory_cache_unavailable_ratio` 描述 pinned 与 pending 容量的百分比；常驻前缀的占用需看 `mock_memory_cache_occupancy_ratio`。
 
-`rtp_llm_kv_cache_evicted_block_lifetime_ms` 必须按 `scope=gpu,backing=device` 或 `scope=memory,backing=memory` 分开分析。没有驱逐表示没有 lifetime 观测，不能补 0。容量比较还需固定 block size、CP 与拓扑；这些是元数据模型，不是实际内存页观测。
+`mock_cache_evicted_entry_age_ms` 必须按 `scope=gpu,backing=device` 或 `scope=memory,backing=memory` 分开分析。没有驱逐表示没有年龄观测，不能补 0。容量比较还需固定 block size、CP 与拓扑；这些是元数据模型，不是实际内存页观测。
+
+## 指标命名与保留依据
+
+`rtp_llm_` 名称必须存在于当前 C++ 指标注册表，并对齐生产者的单位、窗口和采样边界；注册表测试检查名称，语义测试检查窗口与分母。真实名称存在不意味着任意 Mock 值都可以使用它。
+
+`mock_` 用于模拟器独有的准入/排空状态、执行累计量和明确区分的辅助观测。理论历史 key 命中与物理缓存复用不同；累计事件与真实窗口 gauge 不同；Memory pending/pinned 元数据不等同真实 transfer 或统一 block-pool 观测。保留这些指标时必须说明边界，不能只因名字相近就合并。
+
+`mock_prefill_admitted_requests` 包含已准入、预留执行批次中的请求，`rtp_llm_running_stream_size` 只数已开始执行的请求；两者不共享 running 名称。等待与 Decode 执行计数使用对应的 scheduler 指标，不再重复发布同值指标。
+
+`mock_backend_ttft_us`、`mock_backend_latency_us` 和 `mock_decode_success_qps` 分别记录后端延迟与成功终态速率。它们的边界不等于 frontend ingress 到客户端响应，不发布 `py_rtp_` 前端别名；转换单位或更换标签不能使两者等价。
+
+模拟缓存条目的移除数量、创建到移除的年龄和 host 元数据容量使用 `mock_` 名称；它们不能代替真实的驱逐计划数量、candidate idle/age、tier residence 或 host pool 指标。没有实际传输计时就不产生传输延迟样本。
 
 ## 引擎移除准入
 

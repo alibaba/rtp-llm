@@ -37,26 +37,25 @@ class WhaleModeConfigurationTest {
         var decode = java.util.Map.of("role", "ROLE_TYPE_DECODE", "engine", "decode-1",
                 "hippo_role", "mock.decode_part0", "hippo_app", "mock-app");
         var prefill = java.util.Map.of("role", "ROLE_TYPE_PREFILL", "engine", "prefill-1");
-        monitor.sample(java.util.Map.of("mock_engine_completed_total", 0), decode, now, true);
-        monitor.sample(java.util.Map.of("mock_engine_completed_total", 8), decode, now + 2_000_000_000L, true);
-        monitor.sample(java.util.Map.of("mock_engine_completed_total", 8), decode, now + 3_000_000_000L, true);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 0), decode, now);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 8), decode, now + 2_000_000_000L);
+        monitor.sample(java.util.Map.of("mock_engine_completed_total", 8), decode, now + 3_000_000_000L);
         monitor.sample(java.util.Map.of("mock_engine_completed_total", 20), prefill, now + 3_000_000_000L);
         assertEquals(List.of(0.0, 4.0, 0.0), reports);
-        assertEquals(List.of(0.0, 8.0, 0.0), dashboardReports);
-        assertEquals(java.util.Map.of("hippo_role", "mock.decode_part0", "hippo_app", "mock-app"),
-                dashboardTags.get(1));
+        assertTrue(dashboardReports.isEmpty());
+        assertTrue(dashboardTags.isEmpty());
         monitor.sample(java.util.Map.of("mock_engine_completed_total", 9), decode, now + 4_000_000_000L);
-        assertEquals(3, dashboardReports.size());
+        assertTrue(dashboardReports.isEmpty());
     }
 
     @Test
-    void prefillFirstTokenLatencyUsesDashboardMillisecondsAndRoleOnly() {
+    void backendFirstTokenLatencyNeverMasqueradesAsFrontendLatency() {
         var values = new ArrayList<Double>();
         var labels = new ArrayList<java.util.Map<String, String>>();
         var sink = (org.flexlb.metric.FlexMonitor) java.lang.reflect.Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
                 (proxy, method, args) -> {
-                    if (method.getName().equals("report") && args[0].equals("py_rtp_response_first_token_rt")) {
+                    if (method.getName().equals("report") && args[0].equals("mock_backend_ttft_us")) {
                         values.add(((Number) args[2]).doubleValue());
                         labels.add(((org.flexlb.metric.FlexMetricTags) args[1]).getTags());
                     }
@@ -69,9 +68,8 @@ class WhaleModeConfigurationTest {
         monitor.reportEvent(java.util.Map.of("rtp_llm_first_token_latency_us", 90_000), prefill);
         monitor.reportEvent(java.util.Map.of("mock_backend_ttft_us", 42_000),
                 java.util.Map.of("role", "ROLE_TYPE_DECODE", "hippo_role", "mock.decode_part0"));
-        assertEquals(List.of(415.0), values);
-        assertEquals(List.of(java.util.Map.of("hippo_role", "mock.prefill_part0", "hippo_app", "mock-app")),
-                labels);
+        assertEquals(List.of(415000.0), values);
+        assertEquals(List.of(prefill), labels);
     }
 
     @Test
@@ -104,17 +102,17 @@ class WhaleModeConfigurationTest {
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("rtp_llm_context_tps=")));
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("mock_context_tokens_total=")));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), d, true);
+        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), d);
         assertTrue(reports.contains("mock_backend_latency_us=425000.0"));
-        assertTrue(reports.contains("py_rtp_framework_rt=425.0"));
+        assertFalse(reports.stream().anyMatch(s -> s.startsWith("py_rtp_")));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), d, false);
+        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), d);
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("py_rtp_framework_rt=")));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 100_000), d, true);
+        monitor.reportEvent(java.util.Map.of("rtp_llm_latency_us", 100_000), d);
         assertFalse(reports.stream().anyMatch(s -> s.startsWith("py_rtp_framework_rt=")));
         reports.clear();
-        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), p, true);
+        monitor.reportEvent(java.util.Map.of("mock_backend_latency_us", 425_000), p);
         assertTrue(reports.isEmpty());
     }
 
@@ -391,7 +389,7 @@ class WhaleModeConfigurationTest {
                 getClass().getClassLoader(), new Class<?>[]{org.flexlb.metric.FlexMonitor.class},
                 (proxy, method, args) -> {
                     if (method.getName().equals("report") && args.length == 3
-                            && args[0].equals("rtp_llm_generate_tps"))
+                            && args[0].equals("mock_decode_wall_tps"))
                         rates.add(((Number) args[2]).doubleValue());
                     return null;
                 });

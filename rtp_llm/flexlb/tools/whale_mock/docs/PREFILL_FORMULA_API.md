@@ -65,5 +65,5 @@ Mock 控制 HTTP 端口提供 `GET /prefill_formula` 和 `POST /prefill_formula`
 ## 关联 metric
 
 - `rtp_llm_context_batch_size`：每个启动的 prefill 执行 batch 上报一个样本。空闲轮询不产生 0 样本，要看空闲占用请用 running-stream 指标。
-- `rtp_llm_device_reuse_length`：与 `rtp_llm_stream_cache_device_reuse_length` 是同一 device-only token 值的别名，不含 memory reuse。
+- `rtp_llm_kv_cache_device_reuse_length`：资源准备完成时的 device-only 复用 token，不含 host reuse；host 部分使用 `rtp_llm_kv_cache_host_reuse_length`。
 - `rtp_llm_input_token_length`：沿用既有上报点，不新增重复事件。

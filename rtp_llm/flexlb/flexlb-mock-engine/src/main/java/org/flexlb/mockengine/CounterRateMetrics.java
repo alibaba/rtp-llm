@@ -16,16 +16,20 @@ final class CounterRateMetrics {
         private Snapshot previous;
         private long reportedAt;
         private double last;
+        private long lastTokens;
         synchronized double last() { return last; }
-        synchronized void reset() { previous = null; reportedAt = 0; last = 0; }
+        synchronized long lastTokens() { return lastTokens; }
+        synchronized void reset() { previous = null; reportedAt = 0; last = 0; lastTokens = 0; }
         synchronized double sample(Snapshot current, long now) {
             if (previous == null || previous.generation() != current.generation()) {
                 previous = new Snapshot(current.generation(), current.startedNanos(), 0);
                 reportedAt = current.startedNanos();
                 last = 0;
+                lastTokens = 0;
             }
             if (now <= reportedAt) return last;
-            last = rate(current.tokens() - previous.tokens(), now - reportedAt);
+            lastTokens = Math.max(0, current.tokens() - previous.tokens());
+            last = rate(lastTokens, now - reportedAt);
             previous = current;
             reportedAt = now;
             return last;

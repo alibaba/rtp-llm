@@ -17,6 +17,7 @@ final class WhaleMockMonitor implements AutoCloseable {
         boolean schedulerReported;
         final PrefillTpsMetrics.Reader prefillTps = new PrefillTpsMetrics.Reader();
         final CounterRateMetrics.Reader decodeTps = new CounterRateMetrics.Reader();
+        final CacheHitMetrics.Reader cacheHits = new CacheHitMetrics.Reader();
         long sampledAt = System.nanoTime();
     }
     private final Map<Map<String, String>, EngineSample> samples = new HashMap<>();
@@ -64,9 +65,14 @@ final class WhaleMockMonitor implements AutoCloseable {
         long now = System.nanoTime();
         Map<String, String> labels = service.whaleMetricTags();
         Map<String, Number> values = new HashMap<>(service.whaleMetrics());
-        if ("ROLE_TYPE_DECODE".equals(labels.get("role")))
-            values.put("rtp_llm_generate_tps", state(labels).decodeTps.sample(service.decodeTpsSnapshot(), now));
-        sample(values, labels, now, service.autoFetchEnabled());
+        if ("ROLE_TYPE_DECODE".equals(labels.get("role"))) {
+            var reader = state(labels).decodeTps;
+            values.put("mock_decode_wall_tps", reader.sample(service.decodeTpsSnapshot(), now));
+            values.put("rtp_llm_generate_tps", reader.lastTokens());
+        }
+        state(labels).cacheHits.sample(service.cacheHitSnapshot(), now)
+                .ifPresent(value -> values.put("rtp_llm_kv_cache_hit_rate", value));
+        sample(values, labels, now);
         if ("ROLE_TYPE_PREFILL".equals(labels.get("role")))
             samplePrefillTps(service.prefillTpsSnapshot(), labels, System.nanoTime());
     }
@@ -75,48 +81,16 @@ final class WhaleMockMonitor implements AutoCloseable {
                                        Map<String, String> labels, long now) {
         Map<String, Number> values = new HashMap<>();
         state(labels).prefillTps.sample(snapshot, now).forEach((name, value) -> values.put("rtp_llm_" + name, value));
-        reportEvent(values, labels, false);
+        reportEvent(values, labels);
     }
 
     synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels) {
-        reportEvent(metrics, labels, false);
-    }
-
-    synchronized void reportEvent(Map<String, Number> metrics, Map<String, String> labels,
-                                  boolean noFetch) {
         FlexMetricTags tags = new FlexMetricTags.ImmutableFlexMetricTags(labels);
         metrics.forEach((name, value) -> {
             if (!belongsToRole(name, labels)) return;
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
-            if (name.equals("mock_backend_ttft_us")
-                    && "ROLE_TYPE_PREFILL".equals(labels.get("role"))) {
-                String alias = "py_rtp_response_first_token_rt";
-                if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
-                monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
-            }
-            if (noFetch && name.equals("mock_backend_latency_us")
-                    && "ROLE_TYPE_DECODE".equals(labels.get("role"))) {
-                // Schedule-only has no frontend response terminal. This alias
-                // starts at GenerateInputPB.start_time, not frontend ingress.
-                String alias = "py_rtp_framework_rt";
-                if (registered.add(alias)) monitor.register(alias, FlexMetricType.GAUGE);
-                monitor.report(alias, dashboardTags(labels), value.doubleValue() / 1000.0);
-            }
         });
-    }
-
-    // Keep the platform's normal selection tags. The P/D distinction on these
-    // dashboard aliases comes from hippo_role alone, not mock-only source or
-    // logical-engine labels.
-    private static FlexMetricTags dashboardTags(Map<String, String> labels) {
-        Map<String, String> dashboard = new HashMap<>();
-        for (String key : java.util.List.of(
-                "hippo_app", "hippo_group", "hippo_role", "host_ip", "container_ip", "dp_rank")) {
-            String value = labels.get(key);
-            if (value != null) dashboard.put(key, value);
-        }
-        return new FlexMetricTags.ImmutableFlexMetricTags(dashboard);
     }
 
     synchronized void reportScheduler(Map<String, Number> metrics, Map<String, String> labels) {
@@ -132,11 +106,6 @@ final class WhaleMockMonitor implements AutoCloseable {
     }
 
     synchronized void sample(Map<String, Number> metrics, Map<String, String> labels, long now) {
-        sample(metrics, labels, now, false);
-    }
-
-    synchronized void sample(Map<String, Number> metrics, Map<String, String> labels,
-                             long now, boolean noFetch) {
         EngineSample sample = state(labels);
         double seconds = Math.max(1e-9, (now - sample.sampledAt) / 1e9);
         sample.sampledAt = now;
@@ -158,14 +127,6 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             double successQps = deltas.getOrDefault("mock_engine_completed_total", 0L) / seconds;
             monitor.report(name, tags, successQps);
-            if (noFetch) {
-                // Dashboard-compatible alias for successful Decode terminals.
-                // hippo_role separates it from the frontend's response rate.
-                String alias = "py_rtp_success_qps_metric";
-                if (registered.add(alias)) monitor.register(alias, FlexMetricType.QPS);
-                monitor.report(alias, dashboardTags(labels),
-                        deltas.getOrDefault("mock_engine_completed_total", 0L));
-            }
         }
         metrics.forEach((name, value) -> {
             if (!belongsToRole(name, labels)) return;
@@ -182,11 +143,15 @@ final class WhaleMockMonitor implements AutoCloseable {
             if (registered.add(name)) monitor.register(name, FlexMetricType.GAUGE);
             monitor.report(name, tags, value.doubleValue());
             String rate = switch (name) {
-                case "mock_decode_step_tokens_total" -> "rtp_llm_generate_tps";
+                case "mock_decode_step_tokens_total" -> "mock_decode_wall_tps";
                 default -> null;
             };
             if (rate != null && !metrics.containsKey(rate)) {
                 if (registered.add(rate)) monitor.register(rate, FlexMetricType.GAUGE);
+                if (!metrics.containsKey("rtp_llm_generate_tps")) {
+                    if (registered.add("rtp_llm_generate_tps")) monitor.register("rtp_llm_generate_tps", FlexMetricType.GAUGE);
+                    monitor.report("rtp_llm_generate_tps", tags, deltas.getOrDefault(name, 0L));
+                }
                 monitor.report(rate, tags, CounterRateMetrics.rate(deltas.getOrDefault(name, 0L), (long) (seconds * 1e9)));
             }
         });

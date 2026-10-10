@@ -25,7 +25,7 @@ metrics:
   - mock/rtp_llm_context_tps_engine_mean
   - mock/rtp_llm_context_tps_with_cache_per_engine
   - mock/rtp_llm_context_tps_with_cache_engine_mean
-  - mock/rtp_llm_generate_tps_engine_mean
+  - mock/mock_decode_wall_tps_engine_mean
   - mock/context_execution_tps_avg
   - mock/context_execution_tps_with_cache_avg
   - mock/simulated_prefill_ms_avg

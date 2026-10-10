@@ -29,7 +29,7 @@ metrics:
   - mock/rtp_llm_context_tps_per_engine
   - mock/rtp_llm_context_tps_with_cache
   - mock/rtp_llm_context_tps_with_cache_per_engine
-  - mock/rtp_llm_generate_tps
+  - mock/mock_decode_wall_tps
   - mock/rtp_llm_kv_cache_pool_available_blocks
   - mock/rtp_llm_kv_cache_pool_total_blocks
   - mock/running_sum
@@ -71,8 +71,8 @@ charts:
       axis: forward
       color: '#13c2c2'
       hidden: false
-    mock/rtp_llm_generate_tps_engine_mean/D:
-      metric_id: mock/rtp_llm_generate_tps_engine_mean
+    mock/mock_decode_wall_tps_engine_mean/D:
+      metric_id: mock/mock_decode_wall_tps_engine_mean
       labels:
         role: decode
       name: D generate TPS
@@ -236,7 +236,7 @@ charts:
     curve_ids:
     - mock/rtp_llm_context_tps_engine_mean/P
     - mock/rtp_llm_context_tps_with_cache_engine_mean/P
-    - mock/rtp_llm_generate_tps_engine_mean/D
+    - mock/mock_decode_wall_tps_engine_mean/D
     axes:
       forward:
         title: 单引擎平均 tokens/s

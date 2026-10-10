@@ -80,8 +80,8 @@ parameters:
             metric: mock/rtp_llm_context_tps_with_cache
             labels:
               role: prefill
-          rtp_llm_generate_tps:
-            metric: mock/rtp_llm_generate_tps
+          mock_decode_wall_tps:
+            metric: mock/mock_decode_wall_tps
             labels:
               role: decode
     capture:
@@ -190,8 +190,8 @@ parameters:
         expected: 100000
         expected_by_profile:
           single-nonbatch: 90000
-      rtp_llm_generate_tps:
-        metric: performance_gate/rtp_llm_generate_tps_scrape_engine_mean
+      mock_decode_wall_tps:
+        metric: performance_gate/mock_decode_wall_tps_scrape_engine_mean
         windows: [measurement]
         unit: tokens/s
         op: ge
