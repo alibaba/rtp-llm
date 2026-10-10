@@ -814,7 +814,7 @@ class KimiLinearKDADecode(KimiLinearKDABase):
             and not is_target_verify
             and self.linear_conv_kernel_dim == 4
             and self.local_num_k_heads == self.local_num_v_heads
-            and mixed_qkv.is_contiguous()
+            and mixed_qkv.stride(-1) == 1
         ):
             from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_short_conv import (
                 glm53_kda_short_conv_decode,
@@ -945,9 +945,12 @@ class KimiLinearKDA(nn.Module):
 
         self.register_buffer("packed_input_weight", None, persistent=False)
         self.packed_input_widths = None
-        if (
-            gate_lower_bound is not None
-            and parallelism_config.role_type == RoleType.PREFILL
+        self.fuse_input_projection = (
+            os.environ.get("GLM53_KDA_INPUT_PROJECTION_FUSION", "0") == "1"
+        )
+        if gate_lower_bound is not None and (
+            parallelism_config.role_type == RoleType.PREFILL
+            or self.fuse_input_projection
         ):
             from rtp_llm.models_py.distributed.glm53_collective_gemm import (
                 canonical_bf16_weight,
@@ -970,7 +973,16 @@ class KimiLinearKDA(nn.Module):
                     offset += part.shape[1]
                 self.packed_input_weight = packed
 
+        if self.fuse_input_projection and self.packed_input_weight is None:
+            raise ValueError(
+                "GLM53 packed input projection requires BF16 unquantized KDA weights"
+            )
+
         self.head_k_dim = linear_attn_config.linear_key_head_dim
+        if self.fuse_input_projection:
+            logging.info(
+                "[KDA fusion] merged QKV/beta/F_A/G_A input projection enabled"
+            )
         self.head_v_dim = linear_attn_config.linear_value_head_dim
         self.local_num_v_heads = (
             linear_attn_config.linear_num_value_heads
@@ -1014,6 +1026,11 @@ class KimiLinearKDA(nn.Module):
         ), "prefill_conv1d_meta is required for prefill"
 
         # 1. Projections. The SP caller may leave the input rank-local for AG/GEMM.
+        is_context = attention_inputs.is_prefill and not attn_meta.is_target_verify
+        use_packed_projection = self.packed_input_weight is not None and (
+            (self.parallelism_config.role_type == RoleType.PREFILL and is_context)
+            or (self.fuse_input_projection and not is_context)
+        )
         if input_is_sharded:
             from rtp_llm.models_py.distributed.glm53_collective_gemm import (
                 all_gather_kda_projections,
@@ -1027,7 +1044,7 @@ class KimiLinearKDA(nn.Module):
                 >= self.local_low_rank_min_tokens
                 else all_gather_projections
             )
-            if self.packed_input_weight is not None:
+            if use_packed_projection:
                 from rtp_llm.models_py.distributed.glm53_collective_gemm import (
                     all_gather_packed_kda_projections,
                 )
@@ -1050,11 +1067,7 @@ class KimiLinearKDA(nn.Module):
             forget_gate = self.f_b_proj(forget_low)
             g_proj = self.g_b_proj(gate_low)
             del forget_low, gate_low
-        elif (
-            self.packed_input_weight is not None
-            and attention_inputs.is_prefill
-            and not attn_meta.is_target_verify
-        ):
+        elif use_packed_projection:
             # The caller already completed AG when communication/GEMM overlap
             # is unsuitable. Packing the four GEMMs is independent of that
             # choice. Keep combined-role context projection on its original

@@ -13,6 +13,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_replay import (
     commit_kda_replay,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.glm53_short_conv import (
+    glm53_kda_short_conv_decode,
     glm53_kda_short_conv_verify,
 )
 
@@ -284,7 +285,52 @@ class Glm53ReplayTest(unittest.TestCase):
             w.qkv[:, :4, :4], captured_payload[:, :4, :4], rtol=0, atol=0
         )
 
+    def test_merged_input_projection_preserves_all_four_slices(self):
+        # The beta and low-rank slices need not have aligned widths. Padding
+        # belongs only after the final slice; the TP-local head order is fixed.
+        width, heads = 4096, 16
+        weights = [
+            torch.randn(n, width, device="cuda", dtype=torch.bfloat16) * 0.01
+            for n in (3 * heads * 128, heads, 128, 128)
+        ]
+        packed = torch.cat(weights).t().contiguous()
+        for rows in (1, 2, 4, 16, 64):
+            x = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+            outputs = (x @ packed).split([w.shape[0] for w in weights], -1)
+            for actual, weight in zip(outputs, weights):
+                torch.testing.assert_close(
+                    actual,
+                    torch.nn.functional.linear(x, weight),
+                    rtol=1 / 128,
+                    atol=2e-3,
+                )
 
+    def test_decode_accepts_packed_projection_row_stride(self):
+        channels, batch = 3 * 4 * 128, 4
+        packed = torch.randn(batch, channels + 256, device="cuda", dtype=torch.bfloat16)
+        x = packed[:, :channels]
+        self.assertFalse(x.is_contiguous())
+        weight = torch.randn(channels, 4, device="cuda", dtype=torch.float32) * 0.1
+        seed = torch.randn(9, 3, channels, device="cuda", dtype=torch.bfloat16)
+        old, new = seed.clone(), seed.clone()
+        table = torch.tensor(
+            [[1, 2], [3, 4], [5, 6], [7, 8]], device="cuda", dtype=torch.int32
+        )
+        lengths = torch.tensor([128, 129, 128, 129], device="cuda", dtype=torch.int32)
+        expected = causal_conv1d_update(
+            x.unsqueeze(-1),
+            old.transpose(1, 2),
+            weight,
+            activation="silu",
+            block_map=table,
+            sequence_lengths=lengths,
+            seq_size_per_block=128,
+        ).squeeze(-1)
+        actual = torch.cat(
+            glm53_kda_short_conv_decode(x, weight, new, table, lengths, 128), -1
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(new, old, rtol=0, atol=0)
 
     def test_workspace_and_commit_timing(self):
         case = self._case(4, 4)

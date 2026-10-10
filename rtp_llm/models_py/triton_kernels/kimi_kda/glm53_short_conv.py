@@ -62,8 +62,10 @@ def glm_conv_decode_kernel(
 
 
 def glm53_kda_short_conv_decode(x, w, s, bm, lens, page):
-    if x.ndim != 2 or x.shape[1] % 3 or not x.is_contiguous():
-        raise ValueError("GLM KDA convolution requires contiguous [batch, 3*channels]")
+    if x.ndim != 2 or x.shape[1] % 3 or x.stride(1) != 1:
+        raise ValueError(
+            "GLM KDA convolution requires dense channels in [batch, 3*channels]"
+        )
     if (
         x.dtype != torch.bfloat16
         or w.dtype not in (torch.bfloat16, torch.float32)
