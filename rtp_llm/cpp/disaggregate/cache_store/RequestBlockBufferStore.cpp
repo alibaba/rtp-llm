@@ -145,7 +145,7 @@ std::shared_ptr<BlockBuffer> RequestBlockBufferStore::makeValidBlock(const std::
         return nullptr;
     }
 
-    auto tensor = torch::empty({(int64_t)block->len}, torch::TensorOptions().dtype(torch::kUInt8)).pin_memory();
+    auto tensor = torch::empty({(int64_t)block->len}, torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
     if (!tensor.defined()) {
         RTP_LLM_LOG_WARNING("make valid block failed, alloc buffer failed, block %s", block->key.c_str());
         return nullptr;

@@ -51,6 +51,49 @@ TEST_F(RequestBlockBufferStoreTest, testBlocksOps) {
     store->delRequestBlockBuffer("request-2");
 }
 
+TEST_F(RequestBlockBufferStoreTest, testPinnedCopyPayloadAndLifetime) {
+    auto                                      store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    std::vector<std::vector<uint8_t>>         payloads;
+    std::vector<std::shared_ptr<BlockBuffer>> retained;
+    {
+        auto request = std::make_shared<RequestBlockBuffer>("pinned-copy");
+        for (const uint32_t size : {17U, 4097U, 65537U, 1048583U}) {
+            auto& payload = payloads.emplace_back(size);
+            for (uint32_t i = 0; i < size; ++i) {
+                payload[i] = static_cast<uint8_t>((i + payloads.size()) % 251);
+            }
+            auto tensor = torch::from_blob(payload.data(), {(int64_t)size}, torch::kUInt8).to(torch::kCUDA);
+            auto addr   = std::shared_ptr<void>(tensor.data_ptr(), [tensor](void*) {});
+            request->addBlock(std::make_shared<BlockBuffer>(std::to_string(size), addr, size, true, true));
+        }
+        ASSERT_TRUE(store->setRequestBlockBuffer(request));
+        runtimeSyncAndCheck();
+        for (const auto& payload : payloads) {
+            auto block = store->getBlockBuffer("pinned-copy", std::to_string(payload.size()));
+            ASSERT_NE(block, nullptr);
+            ASSERT_FALSE(block->gpu_mem);
+            ASSERT_TRUE(block->adopted);
+            ASSERT_EQ(block->len, payload.size());
+            ASSERT_TRUE(torch::from_blob(block->addr.get(), {(int64_t)block->len}, torch::kUInt8).is_pinned());
+            retained.push_back(block);
+        }
+    }
+    store->delRequestBlockBuffer("pinned-copy");
+    store.reset();
+
+    // Readers retain ownership after both the source tensors and store are gone.
+    for (size_t i = 0; i < retained.size(); ++i) {
+        auto churn =
+            torch::empty({(int64_t)retained[i]->len}, torch::TensorOptions().dtype(torch::kUInt8).pinned_memory(true));
+        churn.fill_(255);
+        auto begin = static_cast<const uint8_t*>(retained[i]->addr.get());
+        EXPECT_EQ(payloads[i], std::vector<uint8_t>(begin, begin + retained[i]->len));
+    }
+    std::weak_ptr<void> last_owner = retained.front()->addr;
+    retained.clear();
+    EXPECT_TRUE(last_owner.expired());
+}
+
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {
     auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
     ASSERT_FALSE(store->debugInfoOnRequest("request-1").empty());
