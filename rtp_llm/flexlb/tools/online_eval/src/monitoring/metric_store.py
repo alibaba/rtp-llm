@@ -114,8 +114,8 @@ class MetricStore:
                 series[key] = [[t - anchor, value] for t, value in row["points"]]
                 sources[key] = dict(row["provenance"], metric_id=row["metric_id"],
                                     unit=self.document["definitions"][row["metric_id"]]["unit"])
-        gaps = {k: [t - anchor for t in v] for k, v in self.document["collection_gaps"].items()}
-        return series, sources, gaps, copy.deepcopy(self.document["errors"])
+        gaps = {k: [t - anchor for t in v] for k, v in self.document.get("collection_gaps", {}).items()}
+        return series, sources, gaps, copy.deepcopy(self.document.get("errors", []))
 
 
 def export_metrics(directory, plan=None, *, archive_directory=None):
@@ -234,10 +234,12 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
         raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)
     try:
         contract = output_contract(metric_id, definition)
-        if any(contract.get(key) != definition.get(key) for key in ('measurement', 'collection')):
-            raise MetricContractError('published measurement does not match its implementation: ' + metric_id)
+    except MetricContractError:
+        raise
     except ValueError as exc:
         raise MetricContractError(str(exc)) from exc
+    if any(contract.get(key) != definition.get(key) for key in ('measurement', 'collection')):
+        raise MetricContractError('published measurement does not match its implementation: ' + metric_id)
     calculation_module = ('analysis.request_metrics' if 'calculation' in definition
                           else definition['measurement']['method'].rsplit('.', 1)[0])
     def module_digest(name):
@@ -246,6 +248,8 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
             if spec is None or spec.origin is None:
                 raise MetricContractError("producer module has no source file: " + name)
             return hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest()
+        except MetricContractError:
+            raise
         except (ImportError, ValueError, OSError) as exc:
             raise MetricContractError("cannot read producer module: " + name) from exc
 

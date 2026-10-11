@@ -115,3 +115,44 @@ def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec)
     definition=store.document["definitions"]["derived/survivor_hit_ratio"]
     with pytest.raises(MetricContractError,match="producer module"):
         publish(store,"derived/survivor_hit_ratio",definition,[],producer="cache_windows",evidence={})
+
+
+@pytest.mark.parametrize("metrics", [{}, {"x": [dict(metric_id="x", epoch="1", source="P",
+    labels={}, points=[[10, 2], [11, None]], provenance={})]}])
+def test_minimal_metric_store_exports_without_optional_diagnostics(metrics):
+    from monitoring.metric_store import MetricStore
+    store=MetricStore(dict(metrics_schema_version=1,definitions={"x":dict(unit="count")},metrics=metrics))
+    series,sources,gaps,errors=store.series(10)
+    assert gaps=={} and errors==[]
+    assert list(series.values())==([[ [0,2], [1,None] ]] if metrics else [])
+    assert len(sources)==len(series)
+
+
+def test_metric_store_preserves_and_copies_recorded_diagnostics():
+    from monitoring.metric_store import MetricStore
+    document=dict(metrics_schema_version=1,definitions={},metrics={},
+        collection_gaps={"P":[10,12]},errors=[dict(reason="scrape failed")])
+    _,_,gaps,errors=MetricStore(document).series(10)
+    assert gaps=={"P":[0,2]} and errors==document["errors"]
+    errors[0]["reason"]="changed"
+    assert document["errors"][0]["reason"]=="scrape failed"
+
+
+@pytest.mark.parametrize("kind", ["mismatch", "value_error", "contract_error"])
+def test_published_contract_errors_keep_the_original_cause(tmp_path,monkeypatch,kind):
+    from metric_fixtures import freeze_metrics
+    from monitoring.metric_store import publish,MetricContractError
+    store=freeze_metrics(tmp_path,"cache_scale_in")
+    definition=store.document["definitions"]["derived/survivor_hit_ratio"]
+    failure=ValueError("bad calculation") if kind=="value_error" else MetricContractError("bad contract")
+    def contract(*args):
+        if kind=="mismatch":return {}
+        raise failure
+    monkeypatch.setattr("monitoring.producers.output_contract",contract)
+    with pytest.raises(MetricContractError) as raised:
+        publish(store,"derived/survivor_hit_ratio",definition,[],producer="cache_windows",evidence={})
+    if kind=="value_error":
+        assert raised.value.__cause__ is failure
+    else:
+        assert raised.value.__cause__ is None
+        if kind=="contract_error":assert raised.value is failure
