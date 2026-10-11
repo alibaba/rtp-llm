@@ -57,7 +57,12 @@ def validity_section(analysis):
 
 def canonical_spec(spec, analysis):
     run = RunPresentation.read(analysis)
-    result = copy.deepcopy(spec)
+    result = dict(spec)
+    # Timeline projection replaces coordinates; own containers, share read-only samples.
+    result["panels"] = [dict(panel, series=[dict(curve) for curve in panel.get("series", [])],
+                             events=copy.deepcopy(panel.get("events", [])))
+                        for panel in spec.get("panels", [])]
+    result["events"] = copy.deepcopy(spec.get("events", []))
     result.update(run_id=run.identity, title=title(run.identity))
     common = {"execution": run.status, "validity": run.validity.runtime_validity}
     result["kpis"] = [dict(id="run." + key, label=KPI_LABELS[key], value=value)

@@ -121,7 +121,7 @@ def render(spec):
 
 
 def _json(value):
-    return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
 
 
 def _atomic(path, content):
@@ -133,12 +133,12 @@ def _atomic(path, content):
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None):
     """Publish one canonical report; manifest is written last as the commit record."""
     validate(spec)
-    spec = copy.deepcopy(spec)
+    spec = dict(spec)
     spec["report_spec_schema_version"] = REPORT_SPEC_SCHEMA_VERSION
-    spec["run_meta"] = meta or spec.get("run_meta") or run_meta(
+    spec["run_meta"] = copy.deepcopy(meta or spec.get("run_meta") or run_meta(
         dict(id=str(identity), kind=kind),
         clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
-    )
+    ))
     from reporting.comparison_model import ComparisonControls
     controls = ComparisonControls(
         spec["run_meta"].get("configuration"), spec["run_meta"].get("workload"),
@@ -155,14 +155,15 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         run_meta=spec["run_meta"],
         result=analysis,
     )
-    outputs = {
-        "analysis.json": _json(result),
-        "report-spec.json": _json(spec),
-        "report.html": render(spec),
-    }
-    # Layout adapters emit links relative to this final bundle directory.
-    for name, content in outputs.items():
+    files = {}
+    # Serialize and release each output before building the next large document.
+    for name, produce in (("analysis.json", lambda: _json(result)),
+                          ("report-spec.json", lambda: _json(spec)),
+                          ("report.html", lambda: render(spec))):
+        content = produce()
         _atomic(directory / name, content)
+        files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
+        del content
     manifest = dict(
         report_manifest_schema_version=1,
         kind=kind,
@@ -170,10 +171,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         producer=producer,
         identity=spec["run_meta"]["identity"],
         entrypoint="report.html",
-        files={
-            name: dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
-            for name, content in outputs.items()
-        },
+        files=files,
     )
     if role is not None:
         manifest["role"] = role

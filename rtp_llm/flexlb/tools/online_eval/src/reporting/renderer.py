@@ -119,6 +119,13 @@ def render_sections(sections):
     return '<div class="report-sections">' + ''.join(out) + '</div>'
 
 
+def _statistics_samples(points):
+    """Lossless column encoding for browser interval statistics, including gaps."""
+    if points is None:
+        return None
+    return dict(times=[point["x"] for point in points], values=[point["y"] for point in points])
+
+
 def render(spec):
     """Return complete HTML for a validated spec."""
     from reporting.spec import validate
@@ -169,7 +176,7 @@ def render(spec):
                 "series": [
                     {
                         "metric_id": s.get("metric_id"),
-                        "statistics_points": s.get("statistics_points"),
+                        "statistics_samples": _statistics_samples(s.get("statistics_points")),
                         "provenance": s.get("provenance"),
                         "name": s.get("name", ""),
                         "points": s["points"],
@@ -203,7 +210,7 @@ def render(spec):
         .replace("__PAGE_TITLE__", page_title)
         .replace(
             "__SPEC_JSON__",
-            json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c"),
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c"),
         )
         .replace("__CHARTJS_JS__", chartjs)
         .replace("__LEGEND_INTERACTION_JS__", interaction)

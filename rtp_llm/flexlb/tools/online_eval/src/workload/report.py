@@ -1,6 +1,5 @@
 """Publish selected case views or the default view of all archived metrics."""
 
-import copy
 
 from cases.registry import view_capabilities
 from artifacts.errors import ArtifactNotProduced
@@ -31,7 +30,7 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW):
 
 
 def write_report(directory, analysis, *, name=DEFAULT_VIEW):
-    payload = copy.deepcopy(analysis)
+    payload = dict(analysis)
     payload["report_view"] = name
     identity = payload["id"]
     return write_bundle(directory, "run", identity, payload,
@@ -41,7 +40,9 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW):
 
 def write_views(directory, analysis, names=None):
     """One canonical selected report, with optional explicit additional views."""
-    analysis = copy.deepcopy(analysis)
+    analysis = dict(analysis)
+    if "unavailable_report_views" in analysis:
+        analysis["unavailable_report_views"] = list(analysis["unavailable_report_views"])
     names = names or [DEFAULT_VIEW]
     paths = {}
     for name in names:

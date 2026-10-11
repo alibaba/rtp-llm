@@ -4,11 +4,12 @@
   function number(value) {
     return Number.isFinite(value) ? value.toLocaleString(undefined,{maximumFractionDigits:2}) : '无数据';
   }
-  function statistics(points) {
-    const rows=points.filter(p=>Number.isFinite(p.x)).slice().sort((a,b)=>a.x-b.x);
-    const sums=[0],counts=[0];
-    rows.forEach(p=>{const valid=Number.isFinite(p.y);sums.push(sums[sums.length-1]+(valid?p.y:0));counts.push(counts[counts.length-1]+(valid?1:0));});
-    function bound(t,inclusive) {let lo=0,hi=rows.length;while(lo<hi){const mid=(lo+hi)>>1;if(rows[mid].x<t||(inclusive&&rows[mid].x===t))lo=mid+1;else hi=mid;}return lo;}
+  function statistics(points, samples) {
+    const source=samples || {times:points.map(p=>p.x),values:points.map(p=>p.y)};
+    const order=source.times.map((_,i)=>i).filter(i=>Number.isFinite(source.times[i])).sort((a,b)=>source.times[a]-source.times[b]);
+    const times=order.map(i=>source.times[i]),sums=[0],counts=[0];
+    order.forEach(i=>{const value=source.values[i],valid=Number.isFinite(value);sums.push(sums[sums.length-1]+(valid?value:0));counts.push(counts[counts.length-1]+(valid?1:0));});
+    function bound(t,inclusive) {let lo=0,hi=times.length;while(lo<hi){const mid=(lo+hi)>>1;if(times[mid]<t||(inclusive&&times[mid]===t))lo=mid+1;else hi=mid;}return lo;}
     return (lo,hi)=>{const a=bound(lo,false),b=bound(hi,true),n=counts[b]-counts[a];return {mean:n?(sums[b]-sums[a])/n:null,count:n,total:b-a};};
   }
   function mount(parent, panel, context) {
@@ -36,7 +37,7 @@
       data:s.points, yAxisID:s.axis || 'y', unit:s.unit || '',
       borderColor:s.color, backgroundColor:s.color, baseColor:s.color, borderDash:s.dash||[], hidden:!!s.hidden, borderWidth:2, pointRadius:0,
       tension:0, spanGaps:false}));
-    datasets.forEach((dataset,i)=>dataset.statistics=statistics(panel.series[i].statistics_points||dataset.data));
+    datasets.forEach((dataset,i)=>dataset.statistics=statistics(dataset.data,panel.series[i].statistics_samples));
     const scales = {x:{type:'linear',min:context.timeAxis.min,max:context.timeAxis.max,title:{display:true,text:'时间 / 秒'}}};
     Object.entries(panel.axes).forEach(([key,axis]) => {
       scales[key] = {type:'linear',position:axis.position || 'left',beginAtZero:true,

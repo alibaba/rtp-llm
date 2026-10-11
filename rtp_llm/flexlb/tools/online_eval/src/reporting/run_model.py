@@ -72,7 +72,11 @@ class RunPresentation:
 
     @classmethod
     def read(cls, analysis):
-        analysis = _object(analysis, 'run analysis')
+        # Copy only presentation fields; archived time series are read elsewhere.
+        if not isinstance(analysis, dict):
+            raise ValueError('run analysis must be an object')
+        fields = set(cls.__dataclass_fields__) | {'id', 'workload'}
+        analysis = copy.deepcopy({key: value for key, value in analysis.items() if key in fields})
         identity = analysis['id']
         if type(identity) is not str or not identity:
             raise ValueError('run identity must be a nonempty string')

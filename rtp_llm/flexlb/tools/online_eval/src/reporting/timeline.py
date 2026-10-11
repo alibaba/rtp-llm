@@ -109,7 +109,9 @@ def apply(spec, analysis):
         if not panel.get('timeX'):
             continue
         for curve in panel['series']:
-            curve['points'] = [dict(point, x=point['x'] + delta) for point in curve['points']]
+            for key in ('points', 'statistics_points'):
+                if curve.get(key) is not None and delta:
+                    curve[key] = [dict(point, x=point['x'] + delta) for point in curve[key]]
         for event in panel.get('events', []):
             event['t'] += delta
     for event in spec.get('events', []):

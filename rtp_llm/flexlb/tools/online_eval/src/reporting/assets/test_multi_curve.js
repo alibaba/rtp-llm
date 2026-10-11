@@ -96,3 +96,10 @@ assert.equal(chart.options.scales.x.min,2);
 assert.deepEqual(FlexMultiCurve.statistics(points)(0,3),{mean:45,count:2,total:3});
 assert.deepEqual(FlexMultiCurve.statistics(points)(1,1),{mean:null,count:0,total:1});
 console.log('multi-curve points, missing samples, interval and legend contracts passed');
+
+// Compact transport keeps exact interval statistics, duplicates and missing samples.
+const raw=[{x:3,y:8},{x:1,y:null},{x:2,y:0},{x:2,y:4},{x:NaN,y:99}];
+const compact={times:raw.map(p=>p.x),values:raw.map(p=>p.y)};
+for(const [lo,hi] of [[0,4],[1,1],[2,2],[1.5,3],[9,10]]) {
+  assert.deepEqual(FlexMultiCurve.statistics([],compact)(lo,hi),FlexMultiCurve.statistics(raw)(lo,hi));
+}
