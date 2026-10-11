@@ -55,4 +55,13 @@ class StrategyErrorTypeTest {
         assertEquals(failure, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED,
                 AdmissionRejectReason.RESOURCE_EXHAUSTED, message));
     }
+
+    @Test
+    void schedulingRejectionsKeepInternalErrorCodesAndDetail() {
+        String detail = "preempted by higher-priority request 62";
+        Response response = Response.buildErrorResponse(StrategyErrorType.PRIORITY_PREEMPTED, detail);
+        assertEquals(8429, response.getCode());
+        assertEquals(detail, response.getErrorMessage());
+        assertEquals(8502, Response.buildErrorResponse(StrategyErrorType.QUEUE_FULL, "queue full").getCode());
+    }
 }

@@ -132,7 +132,7 @@ public final class RequestScheduler {
                         "Too many requests. Your requests are being throttled "
                                 + "due to system capacity limits. Please try again later."));
                 case QUEUE_PRIORITY_THROTTLED -> future.complete(error(
-                        StrategyErrorType.QUEUE_PRIORITY_THROTTLED, "Rate limit reached. Please slow down and retry."));
+                        StrategyErrorType.PRIORITY_PREEMPTED, "Rate limit reached. Please slow down and retry."));
                 case CLOSED -> future.complete(error(StrategyErrorType.DISPATCH_FAILED, "request scheduler is shutting down"));
             }
         } catch (Throwable failure) {

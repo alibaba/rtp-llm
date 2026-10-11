@@ -20,8 +20,7 @@ public enum StrategyErrorType {
     VIT_ROUTE_STALE(8408, false),
 
     // queue error
-    QUEUE_FULL(503, false),
-    QUEUE_PRIORITY_THROTTLED(429, false),
+    QUEUE_FULL(8502, false),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 

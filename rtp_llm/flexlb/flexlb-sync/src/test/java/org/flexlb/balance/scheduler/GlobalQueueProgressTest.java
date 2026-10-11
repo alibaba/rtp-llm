@@ -87,7 +87,7 @@ class GlobalQueueProgressTest {
                 LongStream.rangeClosed(2, 20).parallel().forEach(id -> f.submit(id, "a", 90));
                 awaitCondition(() -> f.requests.get(1L).isDone());
 
-                assertEquals(429, f.requests.get(1L).join().getCode());
+                assertEquals(8429, f.requests.get(1L).join().getCode());
                 assertEquals(1, f.scheduler.getQueuedRequestCount());
                 assertEquals(18, f.requests.values().stream()
                         .filter(CompletableFuture::isDone)
@@ -111,7 +111,7 @@ class GlobalQueueProgressTest {
 
             f.submit(3, "a", 90);
             awaitCondition(() -> f.requests.get(2L).isDone());
-            assertEquals(429, f.requests.get(2L).join().getCode());
+            assertEquals(8429, f.requests.get(2L).join().getCode());
             assertFalse(f.requests.get(1L).isDone());
             awaitCondition(() -> f.admitted.contains(3L));
             assertEquals(1, f.scheduler.getQueuedRequestCount());
@@ -129,7 +129,7 @@ class GlobalQueueProgressTest {
 
             f.submit(2, "a", incomingPriority);
             awaitCondition(() -> f.requests.get(1L).isDone());
-            assertEquals(429, f.requests.get(1L).join().getCode());
+            assertEquals(8429, f.requests.get(1L).join().getCode());
             awaitCondition(() -> f.admitted.contains(2L));
         }
     }
@@ -144,18 +144,18 @@ class GlobalQueueProgressTest {
 
             f.submit(2, "a", 40);
             Response low = f.requests.get(2L).join();
-            assertEquals(429, low.getCode());
+            assertEquals(8429, low.getCode());
             assertEquals("Rate limit reached. Please slow down and retry.", low.getErrorMessage());
 
             f.submit(3, "a", 90);
             Response equal = f.requests.get(3L).join();
-            assertEquals(503, equal.getCode());
+            assertEquals(8502, equal.getCode());
             assertEquals("Too many requests. Your requests are being throttled "
                     + "due to system capacity limits. Please try again later.", equal.getErrorMessage());
 
             f.submit(4, "a", 95);
             Response displaced = f.requests.get(1L).get(5, TimeUnit.SECONDS);
-            assertEquals(429, displaced.getCode());
+            assertEquals(8429, displaced.getCode());
             assertEquals("Rate limit reached. Please slow down and retry.", displaced.getErrorMessage());
             awaitCondition(() -> f.admitted.contains(4L));
         }
@@ -171,7 +171,7 @@ class GlobalQueueProgressTest {
 
             f.submit(2, "a", 40);
             Response rejected = f.requests.get(2L).join();
-            assertEquals(429, rejected.getCode());
+            assertEquals(8429, rejected.getCode());
             assertEquals("Rate limit reached. Please slow down and retry.", rejected.getErrorMessage());
             assertFalse(f.requests.get(1L).isDone());
             assertEquals(1, f.scheduler.getQueuedRequestCount());
@@ -193,11 +193,11 @@ class GlobalQueueProgressTest {
             f.currentConfig.set(updated);
 
             f.submit(2, "a", 60);
-            assertEquals(429, f.requests.get(2L).join().getCode());
+            assertEquals(8429, f.requests.get(2L).join().getCode());
             assertFalse(f.requests.get(1L).isDone());
 
             f.submit(3, "a", 70);
-            assertEquals(429, f.requests.get(1L).get(5, TimeUnit.SECONDS).getCode());
+            assertEquals(8429, f.requests.get(1L).get(5, TimeUnit.SECONDS).getCode());
             awaitCondition(() -> f.admitted.contains(3L));
         }
     }
@@ -238,7 +238,7 @@ class GlobalQueueProgressTest {
 
             f.submit(4, "a", 70);
             Response displaced = f.requests.get(3L).get(5, TimeUnit.SECONDS);
-            assertEquals(429, displaced.getCode());
+            assertEquals(8429, displaced.getCode());
             assertFalse(f.requests.get(1L).isDone());
             assertFalse(f.requests.get(2L).isDone());
             awaitCondition(() -> f.admitted.contains(4L));

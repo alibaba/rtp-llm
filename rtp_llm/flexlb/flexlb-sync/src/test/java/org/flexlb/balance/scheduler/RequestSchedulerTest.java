@@ -196,7 +196,7 @@ class RequestSchedulerTest {
             scheduler.submit(incoming);
 
             Response displaced = queuedFuture.get(5, TimeUnit.SECONDS);
-            assertEquals(429, displaced.getCode());
+            assertEquals(8429, displaced.getCode());
             assertEquals("Rate limit reached. Please slow down and retry.", displaced.getErrorMessage());
             verify(eviction, timeout(1_000)).tryAdmit(incoming, incomingFuture, selectedRoute, selectedEndpoint);
             verify(router).select(incoming, null);
