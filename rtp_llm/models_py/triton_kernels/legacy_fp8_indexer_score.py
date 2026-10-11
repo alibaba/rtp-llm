@@ -12,12 +12,11 @@ import triton.language as tl
 
 
 def is_supported(q, weights):
-    return (
-        q.is_cuda
-        and q.dtype == torch.float8_e4m3fn
-        and q.shape[-1] == 128
-        and weights.dtype == torch.float32
-    )
+    # TEMPORARY DIAGNOSTIC PROBE BRANCH (never merged): force the pure-fp32
+    # einsum reference fallback for both MQA and paged indexer scoring to
+    # isolate the indexer implementation's influence on the real smoke
+    # workload. Everything else in this tree is identical to the PR head.
+    return False
 
 
 @triton.jit
