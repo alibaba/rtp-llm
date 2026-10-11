@@ -75,7 +75,7 @@ class CudaMegaMoeSEStrategy(_CudaFp8Fp4Strategy):
             _mega_moe_se_available,
         )
 
-        if not _mega_moe_se_available():
+        if not _mega_moe_se_available() or True:  # TEMPORARY PROBE: always routed+standalone
             from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe import (
                 MegaMoeExecutor,
             )
