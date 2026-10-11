@@ -1151,6 +1151,18 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
     fusedStridedCopy(strided_d2d_copies);
 }
 
+void CudaGraphRunner::prepareModelInputs(const PyModelInputs& inputs) {
+    if (!prepare_model_inputs_enabled_) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareModelInputs");
+    // The model may refresh host lookup staging and read side-cache state.
+    // Its previous replay must finish before either storage is reused.
+    forward_event_.synchronize();
+    py::gil_scoped_acquire gil;
+    py_instance_.attr("prepare_cuda_graph_model_inputs")(inputs);
+}
+
 PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphState& state) {
     c10::InferenceMode inference_guard(true);
     PyModelOutputs     outputs;
@@ -1169,6 +1181,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     } else {
         prepareInputData(inputs, state);
     }
+    // Even pre-prepared attention inputs refresh token ids only in forward.
+    auto& graph_inputs = graph_instances_[getCurrentRealGraphSize(state)].mem_hold_.py_model_inputs_;
+    prepareModelInputs(graph_inputs);
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
@@ -1948,6 +1963,7 @@ void CudaGraphRunner::initCapture() {
             // eager warmup forward. The flag is scoped so real graph capture
             // and replay never contain that synchronization.
             ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+            prepareModelInputs(capture_mem_hold_.py_model_inputs_);
             initial_outputs = py_forward_method_(capture_mem_hold_.py_model_inputs_, attn_pyobj).cast<PyModelOutputs>();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("initCapture forward for output datatype failed with Python exception: %s", e.what());
@@ -2044,8 +2060,10 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
         clear_target_stage();
+        prepareModelInputs(inputs);
         py_forward_method_(inputs, attn_pyobj);
         clear_target_stage();
+        prepareModelInputs(inputs);
         py_forward_method_(inputs, attn_pyobj);
         clear_target_stage();
     } catch (const py::error_already_set& e) {
@@ -2055,6 +2073,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     RTP_LLM_LOG_INFO("WarmUp for %s %d successfully.", key_type, key);
 
     {
+        prepareModelInputs(inputs);
         // sync before capture
         cuda_graph::graphDeviceSynchronize();
 
