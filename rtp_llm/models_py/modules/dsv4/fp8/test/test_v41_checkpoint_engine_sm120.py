@@ -21,13 +21,15 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as native_ops
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
 from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_block_norm_reference as block_norm_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_expert_projection_reference as expert_projection_provider,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_kv_projection_reference as kv_projection_provider,
@@ -139,6 +141,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_block_norm = os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
     compare_kv = os.environ.get("DSV41_TEST_COMPARE_KV_PROJECTION") == "1"
     compare_router = os.environ.get("DSV41_TEST_COMPARE_ROUTER_EAGER") == "1"
+    compare_projection = os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+    if compare_projection and not compare_router:
+        raise ValueError("Expert projection comparison requires all router controls")
     if compare_router and not compare_kv:
         raise ValueError("Eager router comparison requires both qualified WKV recipes")
     if compare_kv and not (compare_tilelang and compare_block_norm):
@@ -190,6 +195,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_block_norm
         or compare_kv
         or compare_router
+        or compare_projection
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -269,6 +275,23 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         profiles.extend(f"{profile}_g" for profile in profiles[-2:])
         if any(len(profile.encode()) > 255 for profile in profiles):
             raise ValueError("Router trace profile exceeds the filesystem name limit")
+    if compare_projection:
+        # Replacing the eager suffix keeps the longest trace name at 255 bytes.
+        profiles.extend(
+            profile.removesuffix("_g") + ("_j" if profile.endswith("_g") else "_p")
+            for profile in profiles[-4:]
+        )
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError(
+                "Expert projection trace exceeds the filesystem name limit"
+            )
+    expert_projection_source_hash = (
+        hashlib.sha256(
+            Path(expert_projection_provider.__file__).read_bytes()
+        ).hexdigest()
+        if compare_projection
+        else None
+    )
     router_eager_source_hash = (
         hashlib.sha256(Path(router_eager_provider.__file__).read_bytes()).hexdigest()
         if compare_router
@@ -409,8 +432,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                router_eager = profile.endswith("_g")
-                router_base = profile.removesuffix("_g")
+                expert_projection = profile.endswith(("_p", "_j"))
+                projection_base = profile.removesuffix("_p").removesuffix("_j")
+                router_eager = profile.endswith(("_g", "_j"))
+                router_base = projection_base.removesuffix("_g")
                 kv_reference = router_base.endswith("_kv_ref")
                 kv_base = router_base.removesuffix("_kv_ref")
                 block_norm = kv_base.endswith("_block_norm_reference")
@@ -515,6 +540,23 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 else {}
                             ),
                             **({"mhc_collapse_reference": True} if collapse else {}),
+                            **(
+                                {
+                                    "expert_projection_reference": True,
+                                    "expert_projection_reference_scope": "explicit-shared-routed-w13",
+                                    "expert_projection_reference_dim": config.hidden_size,
+                                    "expert_projection_shared_owners": len(
+                                        model.v4.layers
+                                    ),
+                                    "expert_projection_routed_owners": len(
+                                        model.v4.layers
+                                    ),
+                                    "expert_projection_reference_kernel_sha256": reference_hash,
+                                    "expert_projection_provider_sha256": expert_projection_source_hash,
+                                }
+                                if expert_projection
+                                else {}
+                            ),
                             **(
                                 {
                                     "router_eager_reference": True,
@@ -622,6 +664,25 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         if router_eager
                         else ()
                     ),
+                ), expert_projection_provider.expert_projection_reference(
+                    expert_projection,
+                    shared=(
+                        tuple(
+                            layer.ffn.shared_experts.w13._sm120_linear
+                            for layer in model.v4.layers
+                        )
+                        if expert_projection
+                        else ()
+                    ),
+                    routed=(
+                        tuple(
+                            layer.ffn._strategy._local.local.experts
+                            for layer in model.v4.layers
+                        )
+                        if expert_projection
+                        else ()
+                    ),
+                    kernel=reference_kernel,
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -785,7 +846,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_g")
+                                or profile.removesuffix("_p")
+                                .removesuffix("_j")
+                                .removesuffix("_g")
                                 .removesuffix("_kv_ref")
                                 .removesuffix("_block_norm_reference")
                                 .removesuffix("_decode_tilelang_reference")
@@ -800,7 +863,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_g")
+                        or profile.removesuffix("_p")
+                        .removesuffix("_j")
+                        .removesuffix("_g")
                         .removesuffix("_kv_ref")
                         .removesuffix("_block_norm_reference")
                         .removesuffix("_decode_tilelang_reference")

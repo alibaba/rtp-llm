@@ -463,6 +463,7 @@ py_test(
         ":v41_kv_projection_reference_testlib",
         ":v41_sparse_prefill_reference_testlib",
         ":v41_router_eager_reference_testlib",
+        ":v41_expert_projection_reference_testlib",
         "//rtp_llm/tools:dsv41_trace",
     ],
     tags = ["RTX_5000_PRO", "manual"],
