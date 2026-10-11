@@ -7,7 +7,7 @@ from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
 from cases.master_performance.inputs import NUMERIC_PARAMETERS
-from traffic.playback_config import normalize
+from traffic.playback.configuration import normalize
 from cases.master_performance.inputs import validate
 from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks, observation_contract
 from runtime.java_flow import JAVA_FLOW_INPUT_FIELDS

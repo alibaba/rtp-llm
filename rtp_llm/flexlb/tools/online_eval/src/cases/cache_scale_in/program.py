@@ -7,7 +7,7 @@ from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
 from cases.config import output
 from cases.cache_scale_in.inputs import NUMERIC_PARAMETERS
-from traffic.playback_config import normalize
+from traffic.playback.configuration import normalize
 from cases.cache_scale_in.inputs import (
     engine_counters, ENGINE_FIELDS, PROCEDURE_FIELDS, OBSERVATION_FIELDS, RULES, compile_checks, observation_contract,
 )

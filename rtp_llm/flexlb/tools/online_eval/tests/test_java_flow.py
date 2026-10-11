@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 from scenario.runtime import Deadline
 from runtime.java_flow import JavaFlowGroup
-from traffic.realistic import write_trace
+from traffic.synthetic.generator import write_trace
 
 
 class JavaFlowTest(unittest.TestCase):

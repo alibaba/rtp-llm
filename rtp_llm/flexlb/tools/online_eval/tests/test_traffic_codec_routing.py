@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from traffic import datasets, prefix_lineage, prefix_lineage_v3
-from traffic.derive_synthetic_parameters import derive_parameters
+from traffic.synthetic.derivation import derive_parameters
 from traffic.codecs import decode
 from scripts.pipeline.derive_master_templates import derive
 from scripts.pipeline.materialize_traffic import main as materialize_main

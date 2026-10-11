@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from traffic.traffic_source import materialize,validate_plan,SOURCES
 from traffic.prefix_lineage import encode,decode,expand
-from traffic.playback_config import normalize
+from traffic.playback.configuration import normalize
 
 
 class TrafficSourceTest(unittest.TestCase):

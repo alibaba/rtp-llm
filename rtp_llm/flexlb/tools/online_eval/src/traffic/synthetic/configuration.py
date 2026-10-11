@@ -5,16 +5,78 @@ bundled defaults are derived from a pinned empirical model; no held-out
 validation or inference of error-censored output lengths is claimed.
 """
 
-import bisect
+from __future__ import annotations
+
+from dataclasses import dataclass
+from itertools import accumulate
 import json
 import math
-import random
-from itertools import accumulate
-from pathlib import Path
 
 from traffic.contracts import PRIORITY
 
 from traffic.datasets import DEFAULT_PROFILE, profile_path
+
+
+@dataclass(frozen=True)
+class WeightedDistribution:
+    values: tuple[int, ...]
+    cumulative_weights: tuple[float, ...]
+
+    @classmethod
+    def read(cls, value):
+        distribution(value)
+        return cls(tuple(value['values']), tuple(accumulate(value['weights'])))
+
+    def sample(self, rng):
+        return rng.choices(self.values, cum_weights=self.cumulative_weights)[0]
+
+
+@dataclass(frozen=True)
+class IndependentShape:
+    shared_blocks: int
+    prefix_blocks: int
+    suffix_blocks: int
+    session_requests: int
+    session_growth_blocks: int
+    pinned_blocks: tuple[tuple[int, ...], ...]
+    input_distribution: WeightedDistribution | None
+
+
+@dataclass(frozen=True)
+class JointShape:
+    warm_pairs: tuple[tuple[int, int], ...]
+    cold_blocks: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class SyntheticWorkload:
+    seed: int
+    count: int
+    block_size: int
+    priority: int
+    families: int
+    zipf_alpha: float
+    cold_fraction: float
+    output_distribution: WeightedDistribution
+    shape: IndependentShape | JointShape
+
+    @property
+    def sampling(self):
+        return 'joint' if isinstance(self.shape, JointShape) else 'independent'
+
+    @classmethod
+    def from_validated(cls, p):
+        if p['sampling'] == 'joint':
+            joint = p['joint_distribution']
+            shape = JointShape(tuple(tuple(pair) for pair in joint['warm_pairs']), tuple(joint['cold_blocks']))
+        else:
+            shape = IndependentShape(p['shared_blocks'], p['prefix_blocks'], p['suffix_blocks'],
+                p['session_requests'], p['session_growth_blocks'],
+                tuple(tuple(block) for block in p['pinned_blocks']),
+                WeightedDistribution.read(p['input_distribution']) if 'input_distribution' in p else None)
+        return cls(p['seed'], p['count'], p['block_size'], p['priority'], p['families'],
+                   p['zipf_alpha'], p['cold_fraction'], WeightedDistribution.read(p['output_distribution']), shape)
+
 
 FIELDS = {'seed','count','block_size','families','shared_blocks','prefix_blocks','suffix_blocks',
           'zipf_alpha','cold_fraction','session_requests','session_growth_blocks','output_tokens',
@@ -34,7 +96,7 @@ def distribution(spec):
     return spec
 
 
-def resolve(parameters, *, document=None):
+def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict | None]:
     if not isinstance(parameters, dict) or set(parameters)-FIELDS:
         raise ValueError('unknown realistic parameter; arrival controls belong to client')
     if type(parameters.get('seed')) is not int or type(parameters.get('count')) is not int or not 1 <= parameters['count'] <= 1000000:
@@ -44,8 +106,10 @@ def resolve(parameters, *, document=None):
     provenance = None
     if profile:
         document = document if document is not None else json.loads(profile_path(profile).read_text())
-        if document.get('schema_version', 1) not in (1, 2):
+        if not isinstance(document, dict) or type(document.get('schema_version', 1)) is not int or document.get('schema_version', 1) not in (1, 2):
             raise ValueError('unsupported synthetic parameter schema')
+        if not isinstance(document.get('parameters'), dict) or not isinstance(document.get('calibration'), dict):
+            raise ValueError('synthetic profile requires parameters and calibration mappings')
         provenance = document['calibration']
         p = dict(document['parameters'], **p)
         if set(p)-FIELDS:
@@ -60,7 +124,7 @@ def resolve(parameters, *, document=None):
     for k in ('families','prefix_blocks','zipf_alpha','cold_fraction'):
         if k not in p:
             raise ValueError('explicit shape or synthetic parameter profile required: '+k)
-    if p['block_size'] not in (512,1024):
+    if type(p['block_size']) is not int or p['block_size'] not in (512,1024):
         raise ValueError('realistic block_size supports 512 or compatibility 1024')
     for k in ('families','shared_blocks','prefix_blocks','suffix_blocks','session_requests','session_growth_blocks','priority'):
         if type(p[k]) is not int or p[k] < 0:
@@ -89,7 +153,7 @@ def resolve(parameters, *, document=None):
         raise ValueError('unknown sampling method')
     if p['sampling'] == 'joint':
         joint = p.get('joint_distribution')
-        if not isinstance(joint, dict) or joint.get('schema_version') != 1:
+        if not isinstance(joint, dict) or type(joint.get('schema_version')) is not int or joint.get('schema_version') != 1:
             raise ValueError('joint sampling requires a schema 2 derived joint distribution')
         warm, cold = joint.get('warm_pairs'), joint.get('cold_blocks')
         if not isinstance(warm, list) or not isinstance(cold, list):
@@ -105,78 +169,4 @@ def resolve(parameters, *, document=None):
             raise ValueError('joint sampling does not support pinned/global/session overrides')
         if 'input_distribution' in parameters or 'prefix_blocks' in parameters or 'suffix_blocks' in parameters:
             raise ValueError('joint sampling controls lengths and depths; independent shape overrides are invalid')
-    return p, provenance
-
-
-def iter_requests(p, namespace, *, max_requests=None):
-    rng = random.Random(p['seed'])
-    # Separate streams: changing output lengths cannot alter input reuse.
-    output_rng = random.Random(p['seed'] ^ 0x5D47A319)
-    output_cumulative = list(accumulate(p['output_distribution']['weights']))
-    input_cumulative = list(accumulate(p['input_distribution']['weights'])) if 'input_distribution' in p else None
-    weights = [(i+1)**-p['zipf_alpha'] for i in range(p['families'])]
-    cumulative = []
-    for w in weights:
-        cumulative.append(w+(cumulative[-1] if cumulative else 0))
-    next_label = max((t for block in p['pinned_blocks'] for t in block), default=0)+1
-    def fresh(n):
-        nonlocal next_label
-        if n < 0 or next_label+n > 2147483647:
-            raise ValueError('token label budget exceeded')
-        labels = list(range(next_label,next_label+n))
-        next_label += n
-        return labels
-    shared = p['pinned_blocks'] + fresh(p['shared_blocks'])
-    prefixes = ([[] for _ in weights] if p['sampling'] == 'joint' else
-                [shared+fresh(p['prefix_blocks']) for _ in weights])
-    sessions = [[] for _ in weights]
-    rounds = [0 for _ in weights]
-    for i in range(min(p['count'], max_requests) if max_requests is not None else p['count']):
-        cold = rng.random() < p['cold_fraction']
-        family = bisect.bisect_right(cumulative,rng.random()*cumulative[-1])
-        if p['sampling'] == 'joint':
-            pool = p['joint_distribution']
-            if cold:
-                n = rng.choice(pool['cold_blocks'])
-                labels = fresh(n)
-            else:
-                n, depth = rng.choice(pool['warm_pairs'])
-                prefix = prefixes[family]
-                prefix.extend(fresh(max(0, depth-len(prefix))))
-                labels = prefix[:depth] + fresh(n-depth)
-            il = n*p['block_size']
-        elif cold:
-            labels = p['pinned_blocks'] + fresh(p['shared_blocks']+p['prefix_blocks'])
-        else:
-            if rounds[family] % p['session_requests'] == 0:
-                sessions[family] = []
-            labels = prefixes[family]+sessions[family]
-            sessions[family] += fresh(p['session_growth_blocks'])
-            rounds[family] += 1
-        if p['sampling'] == 'joint':
-            pass
-        elif 'input_distribution' in p:
-            d=p['input_distribution'];il=rng.choices(d['values'],cum_weights=input_cumulative)[0]
-            n=(il+p['block_size']-1)//p['block_size']
-            # Retain a private suffix when the shape permits one.
-            keep=max(len(p['pinned_blocks']),n-p['suffix_blocks'])
-            labels=labels[:keep]+fresh(max(0,n-min(len(labels),keep)))
-        else:
-            labels=labels+fresh(p['suffix_blocks']);il=len(labels)*p['block_size']
-        if not 1 <= il <= 2147483647:
-            raise ValueError('invalid generated input length')
-        d=p['output_distribution'];ol=output_rng.choices(d['values'],cum_weights=output_cumulative)[0]
-        yield dict(rid=f'{namespace}:{i}',ts=i,il=il,ol=ol,
-            input_token_blocks=labels,priority=p['priority'],cache_key_block_size=p['block_size'],
-            family='cold' if cold else str(family))
-
-
-def write_trace(path, parameters, namespace, base_dir=None, *, max_requests=None):
-    p, derivation = resolve(parameters)
-    with Path(path).open('w') as out:
-        for row in iter_requests(p, namespace, max_requests=max_requests):
-            out.write(json.dumps(row, separators=(',', ':')) + '\n')
-    return dict(realism='CALIBRATED_STATISTICAL' if derivation else 'NOT_VALIDATED',
-                arrival='ORDINAL_PACED_BY_CLIENT',tail='EXACT_CONFIGURED_LENGTHS',
-                calibration=derivation,held_out_validated=False,sampling=p['sampling'],
-                output_model='INDEPENDENT_EXPLICIT_DISTRIBUTION')
+    return SyntheticWorkload.from_validated(p), provenance

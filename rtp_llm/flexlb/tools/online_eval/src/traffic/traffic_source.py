@@ -6,7 +6,7 @@ from pathlib import Path
 
 from traffic.contracts import PRIORITY, JAVA_LENGTH
 
-from traffic.realistic import write_trace as write_realistic
+from traffic.synthetic.generator import write_trace as write_realistic
 from traffic.prefix_lineage import write_trace as write_lineage
 from traffic.prefix_lineage_v3 import write_trace as write_lineage_v3
 

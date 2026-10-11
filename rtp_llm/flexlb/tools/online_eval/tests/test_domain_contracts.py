@@ -17,7 +17,7 @@ from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.backend import make_env_spec
 from traffic import prefix_lineage, prefix_lineage_v3
 from traffic.lineage_model import LineageExpander, LengthSemantics
-from traffic.playback_intensity import RateCurve, LinearRetentionSchedule, SequenceRetentionSchedule
+from traffic.playback.intensity import RateCurve, LinearRetentionSchedule, SequenceRetentionSchedule
 from test_scenario_runtime import source, Backend, Clock
 
 
@@ -173,7 +173,7 @@ def test_report_adapter_cannot_rewrite_frozen_gate_verdict(tmp_path, fails):
 
 
 def test_explicit_null_seed_is_not_treated_as_an_absent_seed():
-    from traffic.playback_intensity import PlaybackIntensity
+    from traffic.playback.intensity import PlaybackIntensity
     with pytest.raises(ValueError, match="seed"):
         PlaybackIntensity.read({"arrival": "deterministic", "seed": None}, mode="uniform",
                                identity="structural-relabel", scalar_present=False, legacy_pacing=False)

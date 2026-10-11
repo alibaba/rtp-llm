@@ -55,7 +55,7 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 ## 派生数据
 
 `python3 scripts/pipeline/derive_master_templates.py --model /path/to/model.xz --out /path/to/run/model.templates.json`
-在运行目录生成 Java 回归夹具。合成画像由 `traffic.derive_synthetic_parameters` 从固定模型与 fit-report 反推参数；
+在运行目录生成 Java 回归夹具。合成画像由 `traffic.synthetic.derivation` 从固定模型与 fit-report 反推参数；
 它描述统计分布，不等同于原请求回放。`sampling: joint` 的用法和限制见
 [合成保真度](../docs/development/synthetic-fidelity.md)。运行命令的工作目录为 `online_eval`，
 模块入口需要 `PYTHONPATH=src:.`。

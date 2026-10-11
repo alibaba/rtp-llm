@@ -28,7 +28,7 @@ def test_null_nan_and_zero_use_one_empty_panel_rule(values, caption):
 
 def test_materialization_and_projection_keep_labels_scaling_provenance_and_order():
     config = presentation()
-    style = dict(config['charts']['curves']['a'], name='{master} · A', group='{master}', scale=1000)
+    style = dict(config['charts']['curves']['a'], name='{master} · A', group='{master}', scale=1000, source_unit='s')
     provenance = {'source_type': 'prometheus'}
     a = materialize('a', style, [[100, .5], [101, None]], origin=100,
                     labels={'master': 'A'}, provenance=provenance)
