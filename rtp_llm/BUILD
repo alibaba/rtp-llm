@@ -32,8 +32,12 @@ flashinfer_with_cache = [
     "flashinfer-python",
     "flashinfer-cubin",
     "nvidia-cutlass-dsl",
-    "flashinfer-jit-cache"
 ]
+
+# flashinfer-jit-cache is intentionally absent: the precompiled AOT modules
+# (~8.4G, every arch family) are dead weight in per-arch images — flashinfer
+# falls back to runtime nvcc JIT on first use, and the CI bazel workers reuse
+# the JIT cache via /tmp/rtp-llm/.jit_cache plus the REMOTE_JIT_DIR snapshot.
 
 flashmla = [
     "fast-hadamard-transform",
