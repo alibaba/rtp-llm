@@ -6,7 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from rtp_llm.config.dsv41_config import V41Config, dsv41_pp_partition
+from rtp_llm.config.dsv41_config import (
+    V41Config,
+    dsv41_pp_partition,
+    v41_rotary_compute_device,
+)
 from rtp_llm.model_factory_register import ModelDict, get_lazy_model_module_path
 
 
@@ -44,6 +48,22 @@ class V41ConfigTest(unittest.TestCase):
             [b.layer_id for b in bindings if b.owns_index],
             [2, 8, 14, 20, 24, 28, 32, 36],
         )
+
+    def test_explicit_rotary_origin_is_portable_and_validated(self):
+        self.assertIsNone(v41_rotary_compute_device(self.source["text_config"]))
+        for value in (None, "cpu", "cuda"):
+            self.source["text_config"]["rotary_compute_device"] = value
+            config = V41Config.from_dict(self.source)
+            self.assertEqual(v41_rotary_compute_device(config.text), value)
+            self.assertEqual(
+                config.runtime_text_config("/checkpoint")["rotary_compute_device"],
+                value,
+            )
+        for value in (False, True, 0, "cuda:0", "cpu:0", "meta", "", [], {}):
+            self.source["text_config"]["rotary_compute_device"] = value
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "rotary_compute_device"):
+                    V41Config.from_dict(self.source)
 
     def test_invalid_source_schedules(self):
         cases = (

@@ -14,15 +14,9 @@ from bisect import bisect_left
 import torch
 import torch.nn.functional as F
 
+from rtp_llm.config.dsv41_config import v41_rotary_compute_device
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
-from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
-    CSA_KV,
-    CSA_STATE,
-    HCA_KV,
-    INDEXER_KV,
-    SWA_KV,
-)
 from rtp_llm.models_py.modules.dsv4.bounded_replay import (
     enabled as bounded_replay_enabled,
 )
@@ -58,14 +52,21 @@ from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
     FP4_INDEXER_ENTRY_BYTES,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
-    AttentionFP8,
     _FLASH_MLA_SPARSE_Q_CHUNK,
+    AttentionFP8,
     _get_cp_comm_stream,
+)
+from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
+    CSA_KV,
+    CSA_STATE,
+    HCA_KV,
+    INDEXER_KV,
+    SWA_KV,
 )
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb, precompute_freqs_cis
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
-from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.models_py.utils.arch import is_sm120
+from rtp_llm.models_py.utils.memory import dispose_tensor
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 # Bound both CP hidden-state transfers and the subsequent projections.
@@ -593,6 +594,12 @@ class AttentionV41FP8(AttentionFP8):
     def __init__(self, *args, v41_config, shared_attention, **kwargs):
         from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
 
+        rotary_device = v41_rotary_compute_device(v41_config)
+        if (
+            "_rotary_compute_device" in shared_attention
+            and shared_attention["_rotary_compute_device"] != rotary_device
+        ):
+            raise ValueError("V4.1 shared attention rotary origins disagree")
         self._cache_layouts = dsv41_page_layouts(kwargs.pop("gen_num_per_cycle", 1))
         ratio = int(kwargs["compress_ratio"])
         if ratio not in (0, 1, 2):
@@ -606,6 +613,8 @@ class AttentionV41FP8(AttentionFP8):
         self.round_kv_norm_to_input_dtype = is_sm120(self.wo_a_w.device)
         self.swa_single_block_per_request = True
         self.v41_config = v41_config
+        self._rotary_compute_device = rotary_device
+        self._rotary_ready = rotary_device is None
         # Read once: changing this policy in a running cache namespace is unsafe.
         self.swa_bounded_replay = bounded_replay_enabled() and self.layer_id >= 21
         if self.swa_bounded_replay:
@@ -614,6 +623,7 @@ class AttentionV41FP8(AttentionFP8):
             )
         # Store a plain dict: registering source modules would create cycles.
         self._shared_attention = shared_attention
+        shared_attention["_rotary_compute_device"] = rotary_device
         shared_attention.setdefault("layers", {})[self.layer_id] = self
         self.index_topk = int(kwargs["index_topk"])
         self.index_n_heads = int(kwargs["index_n_heads"])
@@ -682,6 +692,44 @@ class AttentionV41FP8(AttentionFP8):
                     self.wo_a_s[begin // scale_block : end // scale_block].contiguous(),
                 )
             )
+
+    def _check_rotary_config(self, *, require_ready=True):
+        if (
+            v41_rotary_compute_device(self.v41_config) != self._rotary_compute_device
+            or self._shared_attention.get("_rotary_compute_device")
+            != self._rotary_compute_device
+        ):
+            raise ValueError("V4.1 rotary origin changed; replace the attention owner")
+        if require_ready and not self._rotary_ready:
+            raise ValueError("Reset V4.1 rotary tables before attention execution")
+
+    def reset_rope_cache(self, device=None, *, compute_device=None):
+        """Apply the immutable opt-in origin after meta construction."""
+        self._check_rotary_config(require_ready=False)
+        policy = self._rotary_compute_device
+        if policy is not None:
+            owned_device = self.attn_sink.device
+            destination = owned_device if device is None else torch.device(device)
+            if destination.type == "cuda" and destination.index is None:
+                destination = owned_device
+            if owned_device.type != "cuda" or destination != owned_device:
+                raise ValueError(
+                    "V4.1 rotary reset requires its materialized CUDA owner"
+                )
+            selected = owned_device if policy == "cuda" else torch.device("cpu")
+            if compute_device is not None:
+                override = torch.device(compute_device)
+                if override.type == "cuda" and override.index is None:
+                    override = torch.device("cuda", torch.cuda.current_device())
+                elif override.type == "cpu":
+                    override = torch.device("cpu")
+                if override != selected:
+                    raise ValueError(
+                        "V4.1 rotary reset conflicts with its selected origin"
+                    )
+            device, compute_device = destination, selected
+        super().reset_rope_cache(device, compute_device=compute_device)
+        self._rotary_ready = True
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
         # Small eager inputs regressed in the standalone wrapper benchmark.
@@ -2372,6 +2420,7 @@ class AttentionV41FP8(AttentionFP8):
         return meta
 
     def _require_qualified_prefill(self, input_lengths, prefix_lengths, *, cp_on):
+        self._check_rotary_config()
         # Widen this admission only with owner-level cache and numerical tests.
         if self.tp_size != 1:
             raise NotImplementedError("V4.1 TP attention execution is not integrated")
@@ -2534,6 +2583,7 @@ class AttentionV41FP8(AttentionFP8):
             return self._forward_decode_body(x, attn_metadata)
 
     def _require_qualified_decode(self, x, metadata):
+        self._check_rotary_config()
         if (
             not x.is_cuda
             or torch.cuda.get_device_capability(x.device) != (12, 0)

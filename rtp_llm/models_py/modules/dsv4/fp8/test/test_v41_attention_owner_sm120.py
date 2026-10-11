@@ -66,7 +66,9 @@ class NativeTaggedCache:
         return 256
 
 
-def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1, *, dim=512):
+def make_layer(
+    layer_id=0, ratio=0, shared=None, source=None, gen=1, *, dim=512, v41_config=None
+):
     shared = {} if shared is None else shared
     source = layer_id if source is None else source
     weights = {}
@@ -94,7 +96,8 @@ def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1, *, dim=512)
         )
         weights[W.v41_indexer_wk] = (
             # The indexer consumes the normalized 512-wide KV latent.
-            torch.randn(128, 512, device="cuda") * 0.025
+            torch.randn(128, 512, device="cuda")
+            * 0.025
         ).bfloat16()
         weights[W.v41_indexer_k_norm] = torch.ones(
             128, device="cuda", dtype=torch.bfloat16
@@ -136,6 +139,7 @@ def make_layer(layer_id=0, ratio=0, shared=None, source=None, gen=1, *, dim=512)
         v41_config={
             "kv_source_layer_ids": [source] if ratio else [],
             "index_source_layer_ids": [source] if ratio else [],
+            **(v41_config or {}),
         },
         shared_attention=shared,
         gen_num_per_cycle=gen,

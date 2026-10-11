@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Mapping, Sequence
 
 import torch
 
+from rtp_llm.config.dsv41_config import v41_rotary_compute_device
 from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ class V41L20Contract:
     config_sha256: str
     tokenizer_sha256: str
     max_sequence_length: int
+    rotary_compute_device: str | None = None
 
     def __post_init__(self):
         for digest in (
@@ -55,6 +57,11 @@ class V41L20Contract:
             ):
                 raise ValueError("V4.1 identities must be canonical SHA256 hex strings")
         _integer(self.max_sequence_length, "max_sequence_length", 1)
+        v41_rotary_compute_device({"rotary_compute_device": self.rotary_compute_device})
+
+    def require_rotary_config(self, text_config) -> None:
+        if v41_rotary_compute_device(text_config) != self.rotary_compute_device:
+            raise ValueError("V4.1 L20 rotary origin disagrees with its contract")
 
     def canonical_bytes(self) -> bytes:
         layouts = dsv41_page_layouts(0)
@@ -89,6 +96,8 @@ class V41L20Contract:
                 for tag in _TAGS
             ],
         }
+        if self.rotary_compute_device is not None:
+            manifest["rotary_compute_device"] = self.rotary_compute_device
         return json.dumps(
             manifest, sort_keys=True, separators=(",", ":"), allow_nan=False
         ).encode("ascii")

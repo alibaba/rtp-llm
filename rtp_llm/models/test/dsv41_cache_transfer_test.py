@@ -112,6 +112,39 @@ class V41L20TransferTest(unittest.TestCase):
                 self.contract.fingerprint,
             )
 
+    def test_rotary_origin_binds_contract_and_rejects_before_writes(self):
+        legacy = self.contract.canonical_bytes()
+        self.assertNotIn("rotary_compute_device", json.loads(legacy))
+        contracts = [
+            dataclasses.replace(self.contract, rotary_compute_device=value)
+            for value in (None, "cpu", "cuda")
+        ]
+        self.assertEqual(contracts[0].canonical_bytes(), legacy)
+        self.assertEqual(len({c.fingerprint for c in contracts}), 3)
+        for contract in contracts:
+            contract.require_rotary_config(
+                {"rotary_compute_device": contract.rotary_compute_device}
+            )
+            for other in contracts:
+                if other == contract:
+                    continue
+                with self.assertRaisesRegex(ValueError, "rotary origin"):
+                    contract.require_rotary_config(
+                        {"rotary_compute_device": other.rotary_compute_device}
+                    )
+        span = Span(self.identity, 0, 0, 3)
+        self.seed(self.producer_blocks, 0, 3)
+        before = self.snapshots()
+        for contract in contracts[1:]:
+            wire = self.export([span], contract=contract)
+            with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+                self.receiver.apply(wire, [span])
+            self.assert_unchanged(before)
+        self.receiver.apply(self.export([span]), [span])
+        for value in (False, "cuda:0", "meta", []):
+            with self.assertRaisesRegex(ValueError, "rotary_compute_device"):
+                dataclasses.replace(self.contract, rotary_compute_device=value)
+
     def test_relocated_two_chunk_roundtrip_and_exact_readiness(self):
         first = Span(self.identity, 0, 0, 257)
         rows = self.seed(self.producer_blocks, 0, first.count)
