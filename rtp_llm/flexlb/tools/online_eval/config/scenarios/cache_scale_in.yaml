@@ -90,6 +90,10 @@ test:
   description: Fixed Java traffic across one-step P withdrawal with cache collapse
     adjudication
   collection: request
+  monitoring:
+    # Cold-start Master diagnostics may miss a short bounded scrape burst.
+    # The cache gate independently enforces max_gap_s=5 on its P evidence.
+    max_sample_gap_s: 10
 reports:
 - workload.yaml
 - cache_scale_in_overview.yaml
