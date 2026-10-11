@@ -491,6 +491,12 @@ class Qwen4ExpModel(Qwen35Model):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.ple_layers = nn.ModuleDict()
+        self.requires_cuda_graph_model_input_preparation = (
+            bool(getattr(self.config, "enable_qwen4_ple", False))
+            and bool(getattr(self.config, "qwen4_ple_cpu_offload", True))
+            and os.environ.get("RTP_LLM_QWEN4_PLE_CPU_GRAPH", "0").lower()
+            in ("1", "true", "yes", "on")
+        )
         self._ple_target_transaction: Optional[_PLETargetTransaction] = None
         self._ple_graph_target_transactions: Dict[int, _PLETargetTransaction] = {}
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
@@ -1218,6 +1224,68 @@ class Qwen4ExpModel(Qwen35Model):
             )
         self._release_ple_target_transaction(transaction)
 
+    def prepare_cuda_graph_model_inputs(self, inputs: PyModelInputs) -> None:
+        """Prepare CPU-resident PLE rows before replay, without committing state."""
+        if not self.requires_cuda_graph_model_input_preparation or not self.ple_layers:
+            return
+        groups = get_attention_inputs_value(inputs)
+        ctx_inputs = select_attention_inputs_for_tag(groups, PLE_NGRAM_CTX_TAG)
+        ids = self._ple_input_ids(inputs).reshape(-1).long()
+        graph_key = inputs.input_ids.data_ptr()
+        for key, ple in self.ple_layers.items():
+            embedding = ple.ple_embedding
+            cache = self.kv_cache.get_layer_cache(int(key), PLE_NGRAM_CTX_TAG)
+            pool = self._fixed_state_pool(
+                cache, torch.int64, embedding.context_len, 1
+            ).squeeze(-1)
+            if ctx_inputs.is_prefill:
+                lengths = ctx_inputs.input_lengths
+                batch = int(lengths.numel())
+                if batch <= 0:
+                    raise RuntimeError("PLE CPU graph requires nonempty query rows")
+                width = int(lengths[0].item())
+                if (
+                    width <= 0
+                    or ids.numel() != batch * width
+                    or bool((lengths != width).any().item())
+                ):
+                    raise RuntimeError(
+                        "PLE CPU graph requires uniform nonempty query rows"
+                    )
+                prefixes = ctx_inputs.prefix_lengths.to(
+                    device=ids.device, dtype=torch.long
+                )
+                pages = torch.div(
+                    prefixes - 1, cache.seq_size_per_block, rounding_mode="floor"
+                )
+            else:
+                batch, width = int(ids.numel()), 1
+                sequence_lengths = ctx_inputs.sequence_lengths_plus_1_device.long() - 1
+                pages = torch.div(
+                    sequence_lengths - 1,
+                    cache.seq_size_per_block,
+                    rounding_mode="floor",
+                )
+            blocks = self._physical_blocks(
+                ctx_inputs,
+                PLE_NGRAM_CTX_TAG,
+                pages,
+                int(pool.shape[0]),
+                pool.device,
+                graph_capture=True,
+            )
+            context = pool.index_select(0, blocks)
+            if ctx_inputs.is_prefill and not ctx_inputs.is_target_verify:
+                context = torch.where(
+                    (prefixes > 0).unsqueeze(1),
+                    context,
+                    torch.full_like(context, embedding.eos_token_id),
+                )
+            history = torch.cat((context, ids.reshape(batch, width)), dim=1)
+            embedding.prepare_cpu_graph_rows(
+                embedding.hashed_ids(history, width), graph_key
+            )
+
     def _apply_ple(
         self,
         layer_idx: int,
@@ -1277,10 +1345,8 @@ class Qwen4ExpModel(Qwen35Model):
             raise RuntimeError("qwen4_exp PLE cache page size must be positive")
 
         graph_capture = bool(state_inputs.is_cuda_graph)
-        if graph_capture:
-            # Warmup initializes the pointer table and Triton specialization
-            # before graphCaptureBegin; eager masked indexing is dynamic.
-            ple.ple_embedding._graph_gather_required = True
+        # Eager fallback must never reuse rows prepared for a captured graph.
+        ple.ple_embedding._graph_gather_required = graph_capture
         if is_target_verify:
             return self._stage_ple_target_verify(
                 layer_idx=layer_idx,

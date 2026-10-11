@@ -24,7 +24,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     Shards can remain on the CPU while hash metadata and activations live on
     CUDA. Host lookup transfers only ids and gathered rows to the execution
-    device before the TP reduction; this path requires eager execution.
+    device before the TP reduction. CUDA Graph uses externally prepared lookup
+    rows; the large table remains on the CPU.
     """
 
     def __init__(
@@ -121,6 +122,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self._triton_shard_ptrs: Optional[torch.Tensor] = None
         self._triton_shard_signature: Optional[tuple[int, ...]] = None
         self._graph_gather_required = False
+        self._cpu_graph_buffers = {}
+        self._cpu_graph_rows: Optional[torch.Tensor] = None
 
     def _shift_right_ignore_eos(
         self, token_ids: torch.Tensor, shift: int
@@ -169,12 +172,49 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             blocks.append(hashed + head_offsets)
         return torch.cat(blocks, dim=-1)[:, -seq_len:]
 
+    def prepare_cpu_graph_rows(self, ngram_ids: torch.Tensor, graph_key: int) -> None:
+        """Refresh selected rows outside capture; keep the large table on CPU."""
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("PLE CPU graph preparation must run outside capture")
+        if self.shards[0].device.type != "cpu" or not ngram_ids.is_cuda:
+            raise RuntimeError(
+                "PLE CPU graph preparation needs CPU tables and CUDA ids"
+            )
+        shape = (*ngram_ids.shape, self.shards[0].shape[-1])
+        key = (graph_key, tuple(shape), ngram_ids.device)
+        if key not in self._cpu_graph_buffers:
+            host = torch.empty(shape, dtype=self.shards[0].dtype, pin_memory=True)
+            device = torch.empty_like(host, device=ngram_ids.device)
+            self._cpu_graph_buffers[key] = (host, device)
+        host, device = self._cpu_graph_buffers[key]
+        # The D2H finishes before CPU indexing. Only selected rows are pinned;
+        # the checkpoint shards remain pageable CPU memory.
+        host.copy_(self._gather_torch(ngram_ids.cpu()))
+        device.copy_(host, non_blocking=True)
+        self._cpu_graph_rows = device
+
+    def _prepared_cpu_graph_rows(
+        self, shape: tuple, device: torch.device
+    ) -> torch.Tensor:
+        rows = self._cpu_graph_rows
+        if rows is None:
+            raise RuntimeError(
+                "qwen4_exp PLE CPU offload requires eager execution or "
+                "graph preparation of lookup rows"
+            )
+        if (
+            rows.shape != shape
+            or rows.device != device
+            or rows.dtype != self.shards[0].dtype
+        ):
+            raise RuntimeError("PLE CPU graph lookup buffer geometry is stale")
+        return rows
+
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         if self.shards[0].device.type == "cpu":
             if self._graph_gather_required:
-                raise RuntimeError(
-                    "qwen4_exp PLE CPU offload requires eager execution; set "
-                    "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD=0 to use CUDA Graph"
+                return self._prepared_cpu_graph_rows(
+                    (*ngram_ids.shape, self.shards[0].shape[-1]), ngram_ids.device
                 )
             # Transfer only lookup ids and selected rows. Auxiliary PLE weights
             # and the TP collective stay on the execution device.
@@ -224,7 +264,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return out
 
     def gather(self, ngram_ids: torch.Tensor) -> torch.Tensor:
-        out = self._gather_local(ngram_ids)
+        return self._reduce_rows(self._gather_local(ngram_ids))
+
+    def _reduce_rows(self, out: torch.Tensor) -> torch.Tensor:
         if self.distributed_reduce:
             # Keep the correctness-only single-rank module importable without
             # loading the distributed runtime; production TP reaches this path.
@@ -234,6 +276,25 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return out.flatten(-2)
 
     def forward(self, token_history: torch.Tensor, seq_len: int) -> torch.Tensor:
+        if self._graph_gather_required and self.shards[0].device.type == "cpu":
+            if (
+                token_history.dim() != 2
+                or seq_len <= 0
+                or token_history.shape[1] != self.context_len + seq_len
+            ):
+                raise RuntimeError("PLE CPU graph history geometry is invalid")
+            # Preparation already hashed the current history. Captured forward
+            # consumes those rows directly instead of rehashing unused ids.
+            rows = self._prepared_cpu_graph_rows(
+                (
+                    token_history.shape[0],
+                    seq_len,
+                    self.ngram_heads,
+                    self.shards[0].shape[-1],
+                ),
+                token_history.device,
+            )
+            return self._reduce_rows(rows)
         return self.gather(self.hashed_ids(token_history.long(), seq_len))
 
 

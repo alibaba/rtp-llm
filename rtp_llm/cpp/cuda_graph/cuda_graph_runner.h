@@ -117,6 +117,9 @@ public:
         }
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr(forward_method_name);
+        prepare_model_inputs_enabled_ =
+            py::hasattr(py_instance_, "prepare_cuda_graph_model_inputs")
+            && py::getattr(py_instance_, "requires_cuda_graph_model_input_preparation", py::bool_(false)).cast<bool>();
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
@@ -187,6 +190,7 @@ public:
 private:
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
+    void prepareModelInputs(const PyModelInputs& inputs);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
 
@@ -236,6 +240,7 @@ private:
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
     py::object              py_attn_pyobj_method_;
+    bool                    prepare_model_inputs_enabled_{false};
     bool                    enable_cuda_graph_{false};
     bool                    exact_batch_only_{false};
     bool                    is_prefill_cuda_graph_mode_{false};

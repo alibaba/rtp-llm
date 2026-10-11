@@ -60,9 +60,10 @@ class Qwen4Exp(Qwen35Moe):
         if getattr(config, "enable_qwen4_ple", False) and getattr(
             config, "qwen4_ple_cpu_offload", True
         ):
-            # Host gather copies runtime ids to the CPU. It must run eagerly;
-            # capturing it would freeze the lookup results or fail at D2H.
-            return False
+            # Host lookup must finish outside capture/replay. The explicit
+            # model-input preparation path stages only the selected rows.
+            if not str_to_bool(os.environ.get("RTP_LLM_QWEN4_PLE_CPU_GRAPH", "false")):
+                return False
         side_cache_or_draft = (
             bool(getattr(config, "enable_qwen4_ple", False))
             or bool(getattr(config, "enable_qwen4_qsa", False))
