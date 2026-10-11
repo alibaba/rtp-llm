@@ -107,7 +107,7 @@ class FlexlbScheduleEngineIndexTest {
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("5001")
+                .setRequestIdStr("5001")
                 .setSeqLen(16)
                 .build(), observer);
 

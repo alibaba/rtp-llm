@@ -12,6 +12,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 
@@ -1378,7 +1379,7 @@ public final class JavaMockEngineCluster {
             // bookkeeping converges from the running tasks plus whatever
             // backlog slice remains inside the window.
             synchronized (completionLock) {
-                runningTasks.values().forEach(task -> visibleActiveTasks.put(task.getRequestId(), task));
+                runningTasks.values().forEach(task -> visibleActiveTasks.put(RequestId.parse(task), task));
                 completingTasks.forEach(visibleActiveTasks::putIfAbsent);
                 latestVersion = completionVersion.get();
                 visibleStatusVersion = statusVersion.incrementAndGet();
@@ -1475,12 +1476,12 @@ public final class JavaMockEngineCluster {
             if (!suppressRids.isEmpty()) {
                 for (long rid : suppressRids) {
                     for (int i = status.getRunningTaskInfoCount() - 1; i >= 0; i--) {
-                        if (status.getRunningTaskInfo(i).getRequestId().equals(Long.toString(rid))) {
+                        if (RequestId.parse(status.getRunningTaskInfo(i)).equals(Long.toString(rid))) {
                             status.removeRunningTaskInfo(i);
                         }
                     }
                     for (int i = status.getFinishedTaskListCount() - 1; i >= 0; i--) {
-                        if (status.getFinishedTaskList(i).getRequestId().equals(Long.toString(rid))) {
+                        if (RequestId.parse(status.getFinishedTaskList(i)).equals(Long.toString(rid))) {
                             status.removeFinishedTaskList(i);
                         }
                     }
@@ -1498,7 +1499,7 @@ public final class JavaMockEngineCluster {
                 if (fake.isFinishedForm()) {
                     EngineRpcService.TaskInfoPB.Builder finished =
                             EngineRpcService.TaskInfoPB.newBuilder()
-                                    .setRequestId(String.valueOf(fake.requestId()))
+                                    .setRequestId(fake.requestId())
                                     .setInputLength(1)
                                     .setPrefixLength(0)
                                     .setBatchId(fake.batchId())
@@ -1517,7 +1518,7 @@ public final class JavaMockEngineCluster {
                 } else {
                     status.addRunningTaskInfo(withLegacyTaskState(
                             EngineRpcService.TaskInfoPB.newBuilder()
-                                    .setRequestId(String.valueOf(fake.requestId()))
+                                    .setRequestId(fake.requestId())
                                     .setInputLength(1)
                                     .setPrefixLength(0)
                                     .setBatchId(fake.batchId())
@@ -1990,7 +1991,7 @@ public final class JavaMockEngineCluster {
             requestStates.put(requestId, "cancelled");
             cancelledCount.incrementAndGet();
             EngineRpcService.TaskInfoPB.Builder taskBuilder = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(requestId))
+                    .setRequestId(requestId)
                     // Pass the ACTUAL phase the request was cancelled in through
                     // to the finished entry (P2-1): a queued opt-in decode
                     // request surfaces KV_ALLOCATED, a queued prefill RECEIVED.
@@ -2387,7 +2388,7 @@ public final class JavaMockEngineCluster {
          */
         private void recordClientGoneCanceled(long requestId, EngineRpcService.TaskPhase phase) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(requestId))
+                    .setRequestId(requestId)
                     .setPhase(phase)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(EngineRpcService.ErrorCodePB.CANCELLED.getNumber())
@@ -2406,7 +2407,7 @@ public final class JavaMockEngineCluster {
         private void recordPriorityPreemptionCanceled(long requestId, EngineRpcService.TaskPhase phase) {
             addPriorityCancelledRequestId(requestId);
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(requestId))
+                    .setRequestId(requestId)
                     .setPhase(phase)
                     .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                             .PRIORITY_PREEMPTION_CANCELED)
@@ -3839,7 +3840,7 @@ public final class JavaMockEngineCluster {
                                             LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> responseQueue,
                                             String stage) {
             EngineRpcService.TaskInfoPB.Builder task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(requestId))
+                    .setRequestId(requestId)
                     .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                     .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                             .setErrorCode(DECODE_LACK_MEM_ERROR_CODE)
@@ -3913,7 +3914,7 @@ public final class JavaMockEngineCluster {
                                                  int dpRank,
                                                  EngineRpcService.TaskPhase phase) {
             return EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(shape.input().getRequestId()))
+                    .setRequestId(shape.input().getRequestId())
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -3936,7 +3937,7 @@ public final class JavaMockEngineCluster {
                                       int dpRank) {
             recordRecentExecutionTime(executionMs);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(shape.input().getRequestId()))
+                    .setRequestId(shape.input().getRequestId())
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -3967,7 +3968,7 @@ public final class JavaMockEngineCluster {
                                       long errorCode) {
             recordRecentExecutionTime(executionMs);
             EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                    .setRequestId(String.valueOf(shape.input().getRequestId()))
+                    .setRequestId(shape.input().getRequestId())
                     .setInputLength(shape.inputLen())
                     .setPrefixLength(shape.hitTokens())
                     .setBatchId(batchId)
@@ -3988,7 +3989,7 @@ public final class JavaMockEngineCluster {
             synchronized (completionLock) {
                 EngineRpcService.TaskInfoPB task = runningTasks.remove(requestId);
                 if (task != null) {
-                    completingTasks.put(task.getRequestId(), task);
+                    completingTasks.put(RequestId.parse(task), task);
                 }
                 return task;
             }
@@ -3996,7 +3997,7 @@ public final class JavaMockEngineCluster {
 
         private void publishCompletion(EngineRpcService.TaskInfoPB task) {
             synchronized (completionLock) {
-                completingTasks.remove(task.getRequestId());
+                completingTasks.remove(RequestId.parse(task));
                 long version = completionVersion.incrementAndGet();
                 completions.add(new VersionedTask(version, task));
                 // status_duplicate_finished: enqueue the SAME completion twice

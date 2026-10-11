@@ -28,20 +28,20 @@ class EngineStatusConverterTest {
                 .setRunningQueryLen(2)
                 .setWaitingQueryLen(4)
                 .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("running").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
+                        .setRequestIdStr("running").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
                 .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("received").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED))
+                        .setRequestIdStr("received").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED))
                 .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("allocated").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED))
+                        .setRequestIdStr("allocated").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED))
                 .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("pending").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_PENDING)
+                        .setRequestIdStr("pending").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_PENDING)
                         .setIsWaiting(true))
                 .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("legacy-waiting").setIsWaiting(true))
+                        .setRequestIdStr("legacy-waiting").setIsWaiting(true))
                 .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("legacy-running"))
+                        .setRequestIdStr("legacy-running"))
                 .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("finished").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
+                        .setRequestIdStr("finished").setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING))
                 .build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
@@ -66,7 +66,7 @@ class EngineStatusConverterTest {
         for (String id : List.of("req-a-p-001", "req-b-p-002", "00123")) {
             var bytes = new ByteArrayOutputStream();
             var wire = CodedOutputStream.newInstance(bytes);
-            wire.writeString(1, id);
+            wire.writeString(34, id);
             wire.writeInt64(3, 3584);
             wire.writeInt64(4, 3912);
             wire.writeBool(16, true);
@@ -129,9 +129,9 @@ class EngineStatusConverterTest {
 
     @Test
     void preservesStringTaskIdsAndBatchId() {
-        var runningTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("123")
+        var runningTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("123")
                 .setBatchId(42).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
-        var finishedTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("456").build();
+        var finishedTask = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("456").build();
         var status = statusBuilder().addRunningTaskInfo(runningTask).addFinishedTaskList(finishedTask).build();
 
         var observation = EngineStatusConverter.convertToStatusObservation(owner, status);
@@ -155,7 +155,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPrefixLengthValidityFromWorkerStatus() {
         var runningTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("1")
+                .setRequestIdStr("1")
                 .setPrefixLength(128)
                 .setPrefixLengthValid(true)
                 .build();
@@ -171,7 +171,7 @@ class EngineStatusConverterTest {
     @Test
     void preservesPrefillTimingAndCacheBreakdownFromWorkerStatus() {
         var finishedTask = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("1")
+                .setRequestIdStr("1")
                 .setInputQueueEnqueueTimeMs(1000)
                 .setInputQueueDrainTimeMs(1100)
                 .setRemoteKvWaitMs(200)
@@ -218,11 +218,11 @@ class EngineStatusConverterTest {
     @Test
     void preservesOptionalPrefillProgressAndDistinguishesMissingFromZero() {
         var status = statusBuilder()
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId("old-engine"))
-                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId("prefilling")
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("old-engine"))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("prefilling")
                         .setCompletedPrefillTokens(128).setRemainingPrefillTokens(256)
                         .setLastCompletedPrefillStepId(7))
-                .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder().setRequestId("finished")
+                .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("finished")
                         .setCompletedPrefillTokens(384).setRemainingPrefillTokens(0)
                         .setLastCompletedPrefillStepId(9))
                 .build();
@@ -243,12 +243,12 @@ class EngineStatusConverterTest {
     }
 
     @Test
-    void rejectsTheWholeObservationWhenAnyTaskHasNoRequestId() {
-        for (String requestId : List.of("", "  ")) {
+    void rejectsTheWholeObservationWhenAnyStringIdIsBlank() {
+        for (String requestId : List.of(" ", "  ")) {
             for (boolean invalidFinishedTask : List.of(false, true)) {
                 var status = statusBuilder().addRunningTaskInfo(
-                        EngineRpcService.TaskInfoPB.newBuilder().setRequestId("valid"));
-                var invalid = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(requestId);
+                        EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("valid"));
+                var invalid = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr(requestId);
                 if (invalidFinishedTask) {
                     status.addFinishedTaskList(invalid);
                 } else {

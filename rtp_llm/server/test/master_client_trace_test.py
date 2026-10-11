@@ -145,7 +145,7 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(self.span.finish_calls))
         self.assertEqual("RpcError", self.span.finish_calls[0]["error_type"])
         self.assertTrue(stub.cancel_metadata)
-        self.assertEqual(["3540218608800727041"], stub.cancel_request_ids)
+        self.assertEqual([3540218608800727041], stub.cancel_request_ids)
         self.assertEqual(stub.received_metadata, stub.cancel_metadata)
 
     async def test_cancellation_is_distinguished_from_an_rpc_error(self):
@@ -212,7 +212,7 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(stub.cancel_reasons))
         self.assertIsNone(stub.cancel_metadata)
 
-    async def test_numeric_request_id_is_sent_as_a_string_to_flexlb(self):
+    async def test_numeric_request_id_is_sent_as_an_integer_to_flexlb(self):
         request_id = 3540218608800727041
         self.client.host_service = mock.Mock()
         self.client.host_service.get_master_addr.return_value = "127.0.0.1:7001"
@@ -237,7 +237,7 @@ class MasterClientScheduleSpanTest(unittest.IsolatedAsyncioTestCase):
             result = await self.client.get_backend_role_addrs([], 0, request, request_id)
 
         self.assertTrue(result.is_ok)
-        self.assertEqual(str(request_id), send.call_args.args[1].request_id)
+        self.assertEqual(request_id, send.call_args.args[1].request_id)
 
 
 if __name__ == "__main__":

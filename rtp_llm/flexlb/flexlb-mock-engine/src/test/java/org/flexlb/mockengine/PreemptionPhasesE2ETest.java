@@ -6,6 +6,7 @@ import org.flexlb.dao.loadbalance.AdmissionRejectReason;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -180,7 +181,7 @@ class PreemptionPhasesE2ETest {
                 AutoTpmE2EHarness.await(() -> {
                     AutoTpmE2EHarness.workerStatus(prefillEngine, 0L).getFinishedTaskListList().stream()
                             // Prefill may also retain the earlier successful P-to-D handoff.
-                            .filter(task -> task.getRequestId().equals("301") && task.hasErrorInfo())
+                            .filter(task -> RequestId.parse(task).equals("301") && task.hasErrorInfo())
                             .findFirst().ifPresent(engineTerminal::set);
                     return engineTerminal.get() != null;
                 }, 2_000L, "Mock Engine must publish the authoritative victim terminal");

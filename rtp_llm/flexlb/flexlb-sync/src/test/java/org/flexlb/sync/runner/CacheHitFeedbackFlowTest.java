@@ -332,7 +332,7 @@ class CacheHitFeedbackFlowTest {
     }
 
     private EngineRpcService.TaskInfoPB task(String id, boolean valid, long hit) {
-        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId(id).setInputLength(1000)
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr(id).setInputLength(1000)
                 .setPrefixLength(hit).setPrefixLengthValid(valid).setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING);
         if (valid) {
             task.setRequestReceivedTimeMs(990).setInputQueueEnqueueTimeMs(1000).setInputQueueDrainTimeMs(1010)

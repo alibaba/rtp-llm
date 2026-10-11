@@ -1055,11 +1055,11 @@ public final class JavaLoadClient {
     }
 
     // Package-visible for priority wire-format assertions in tests.
-    FlexlbScheduleProtocol.FlexlbScheduleRequestPB buildScheduleRequest(
-            TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
+    FlexlbScheduleProtocol.FlexlbScheduleRequestPB buildScheduleRequest(TraceRecord record,
+                                                                        EngineRpcService.GenerateInputPB inputPb) {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(String.valueOf(record.requestId))
+                .setRequestId(record.requestId)
                 .setGenerateInput(inputPb.toByteString())
                 .addAllBlockCacheKeys(record.blockKeys)
                 .setSeqLen(record.inputLen)

@@ -49,7 +49,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
             long requestId = 91_001L;
             var original = createBalanceContext(requestId);
             var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId(Long.toString(requestId)).setSeqLen(128).setMaxNewTokens(8)
+                    .setRequestIdStr(Long.toString(requestId)).setSeqLen(128).setMaxNewTokens(8)
                     .setNumBeams(1).setModel("mock-model")
                     .setGenerateInput(original.getGenerateInputPb()).build();
             ManagedChannel frontend = NettyChannelBuilder.forAddress("127.0.0.1", follower.server.getPort())
@@ -60,7 +60,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                 assertTrue(response.getSuccess(), response.getErrorMessage());
                 assertTrue(response.getEnqueuedByMaster());
                 assertTrue(response.getLifecycle().getBatchId() > 0);
-                assertEquals(Long.toString(requestId), response.getLifecycle().getRequestId());
+                assertEquals(Long.toString(requestId), response.getLifecycle().getRequestIdStr());
                 assertEquals(1, mockPrefillWorker.getEnqueueCount(), "recovery must dispatch exactly once");
                 assertEquals(0, mockDecodeWorker.getEnqueueCount());
                 verify(remoteRoutes, never()).route(any());

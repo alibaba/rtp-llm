@@ -2,7 +2,6 @@ package org.flexlb.httpserver;
 
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
-import com.google.protobuf.UnknownFieldSet;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -124,7 +123,7 @@ class FlexlbServiceCancelTest {
                 mock(StreamObserver.class);
 
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId("103")
+                .setRequestIdStr("103")
                 .build(), observer);
 
         org.mockito.ArgumentCaptor<FlexlbScheduleProtocol.FlexlbCancelResponsePB> response =
@@ -142,10 +141,7 @@ class FlexlbServiceCancelTest {
                 .thenThrow(new IllegalStateException("cancel failed"));
         FlexlbScheduleProtocol.FlexlbCancelRequestPB request =
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                        .setUnknownFields(UnknownFieldSet.newBuilder()
-                                .addField(FlexlbScheduleProtocol.FlexlbCancelRequestPB.REQUEST_ID_FIELD_NUMBER,
-                                        UnknownFieldSet.Field.newBuilder().addVarint(7003).build())
-                                .build())
+                        .setRequestId(7003)
                         .build();
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> observer = mock(StreamObserver.class);
         doThrow(new IllegalStateException("completion failed")).when(observer).onError(any());
@@ -266,7 +262,7 @@ class FlexlbServiceCancelTest {
                 FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
                         .setFound(true)
                         .setLifecycle(FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
-                                .setRequestId("107")
+                                .setRequestIdStr("107")
                                 .setState(FlexlbScheduleProtocol.RequestStatePB
                                         .REQUEST_STATE_CANCEL_REQUESTED))
                         .build();
@@ -294,12 +290,11 @@ class FlexlbServiceCancelTest {
         verify(observer, never()).onError(any());
     }
 
-    private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(
-            String requestId,
-            long batchId,
-            FlexlbScheduleProtocol.CancelReasonPB reason) {
+    private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(String requestId,
+                                                                              long batchId,
+                                                                              FlexlbScheduleProtocol.CancelReasonPB reason) {
         return FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(requestId)
                 .setBatchId(batchId)
                 .setReason(reason)
                 .build();

@@ -2,55 +2,63 @@ package org.flexlb.engine.grpc;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
-import com.google.protobuf.UnknownFieldSet;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 
-import java.util.List;
+import java.util.OptionalLong;
 
 /**
- * 在 Protobuf 边界统一读取请求 ID，业务层始终使用字符串，不生成或映射新的 ID。
- *
- * <p>通过具体 PB 类型生成的 getter 读取字段，不使用描述符或反射。
- * string 与 int64 的编码类型不同，旧编码保留在同编号的 unknown fields 中，兼容读取时不需要第二个 ID 字段。
+ * 在 Protobuf 边界优先读取 request_id_str，否则将 int64 request_id 转为字符串。
+ * 业务层保留解析后的 ID，不生成或映射新的 ID。
  */
 public final class RequestId {
     private RequestId() {
     }
 
     /**
-     * 读取 Worker Status 的字符串 ID，并兼容同编号的整数编码。
+     * 读取 Worker Status 的字符串或整数 ID。
      */
     public static String parse(EngineRpcService.TaskInfoPBOrBuilder message) {
-        return parseString(message.getRequestId(), message.getUnknownFields(),
-                EngineRpcService.TaskInfoPB.REQUEST_ID_FIELD_NUMBER);
+        return parseString(message.getRequestIdStr(), message.getRequestId());
     }
 
-    /** 直接读取字符串 ID；缺失时兼容同编号的旧整数编码。OrBuilder 同时支持消息和 Builder。 */
+    /**
+     * 优先读取字符串 ID，否则读取整数 ID。OrBuilder 同时支持消息和 Builder。
+     */
     public static String parse(FlexlbScheduleProtocol.FlexlbScheduleRequestPBOrBuilder message) {
-        return parseString(message.getRequestId(), message.getUnknownFields(), FlexlbScheduleProtocol.FlexlbScheduleRequestPB.REQUEST_ID_FIELD_NUMBER);
+        return parseString(message.getRequestIdStr(), message.getRequestId());
     }
 
-    /** 直接读取字符串 ID；缺失时兼容同编号的旧整数编码。OrBuilder 同时支持消息和 Builder。 */
+    /**
+     * 优先读取字符串 ID，否则读取整数 ID。OrBuilder 同时支持消息和 Builder。
+     */
     public static String parse(FlexlbScheduleProtocol.FlexlbCancelRequestPBOrBuilder message) {
-        return parseString(message.getRequestId(), message.getUnknownFields(), FlexlbScheduleProtocol.FlexlbCancelRequestPB.REQUEST_ID_FIELD_NUMBER);
+        return parseString(message.getRequestIdStr(), message.getRequestId());
     }
 
-    /** 直接读取字符串 ID；缺失时兼容同编号的旧整数编码。OrBuilder 同时支持消息和 Builder。 */
+    /**
+     * 优先读取字符串 ID，否则读取整数 ID。OrBuilder 同时支持消息和 Builder。
+     */
     public static String parse(FlexlbScheduleProtocol.GetRequestStateRequestPBOrBuilder message) {
-        return parseString(message.getRequestId(), message.getUnknownFields(), FlexlbScheduleProtocol.GetRequestStateRequestPB.REQUEST_ID_FIELD_NUMBER);
+        return parseString(message.getRequestIdStr(), message.getRequestId());
     }
 
-    /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
     public static String parse(EngineRpcService.GenerateInputPBOrBuilder message) {
         return Long.toString(message.getRequestId());
     }
 
-    /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
     public static String parse(EngineRpcService.EnqueueBatchSuccessPBOrBuilder message) {
         return Long.toString(message.getRequestId());
     }
 
-    /** 将引擎消息中的 int64 请求 ID 转为字符串。 */
+    /**
+     * 将引擎消息中的 int64 请求 ID 转为字符串。
+     */
     public static String parse(EngineRpcService.EnqueueBatchErrorPBOrBuilder message) {
         return Long.toString(message.getRequestId());
     }
@@ -86,17 +94,38 @@ public final class RequestId {
         return engineRequestId;
     }
 
-    /** 优先返回非空白字符串 ID，否则兼容同编号的旧整数编码。 */
-    private static String parseString(String value, UnknownFieldSet unknown, int fieldNumber) {
-        if (!value.isBlank()) {
-            return value;
-        }
-        List<Long> integers = unknown.getField(fieldNumber).getVarintList();
-        if (!integers.isEmpty()) {
-            // 同一字段重复编码时取最后一个整数值。
-            return Long.toString(integers.getLast());
-        }
-        throw new IllegalArgumentException("Missing request ID");
+    /**
+     * 字符串 ID 写入独立字段；规范 int64 ID 同时写入整数字段供整数协议客户端读取。
+     */
+    public static void set(FlexlbScheduleProtocol.FlexlbCancelRequestPB.Builder message, String requestId) {
+        message.setRequestIdStr(requestId);
+        canonicalInteger(requestId).ifPresent(message::setRequestId);
     }
 
+    /**
+     * 生命周期响应保留字符串 ID，并为规范 int64 ID 填充整数协议字段。
+     */
+    public static void set(FlexlbScheduleProtocol.RequestLifecyclePB.Builder message, String requestId) {
+        message.setRequestIdStr(requestId);
+        canonicalInteger(requestId).ifPresent(message::setRequestId);
+    }
+
+    private static String parseString(String stringId, long integerId) {
+        if (stringId.isEmpty()) {
+            return Long.toString(integerId);
+        }
+        if (stringId.isBlank()) {
+            throw new IllegalArgumentException("String request ID must not be blank");
+        }
+        return stringId;
+    }
+
+    private static OptionalLong canonicalInteger(String requestId) {
+        try {
+            long integerId = Long.parseLong(requestId);
+            return Long.toString(integerId).equals(requestId) ? OptionalLong.of(integerId) : OptionalLong.empty();
+        } catch (NumberFormatException error) {
+            return OptionalLong.empty();
+        }
+    }
 }

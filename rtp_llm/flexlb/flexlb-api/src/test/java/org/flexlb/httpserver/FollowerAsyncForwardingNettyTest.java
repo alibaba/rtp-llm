@@ -11,6 +11,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.service.RouteService;
@@ -319,7 +320,7 @@ class FollowerAsyncForwardingNettyTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(requestId)
                 .setSeqLen(1024)
                 .setGenerateTimeout(TimeUnit.SECONDS.toMillis(10))
                 .build();
@@ -340,18 +341,16 @@ class FollowerAsyncForwardingNettyTest {
                     .directExecutor()
                     .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                         @Override
-                        public void schedule(
-                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
-                                StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
-                                        responseObserver) {
-                            if (request.getRequestId().equals(Long.toString(WARMUP_REQUEST_ID))) {
+                        public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                                             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
+                            if (RequestId.parse(request).equals(Long.toString(WARMUP_REQUEST_ID))) {
                                 respond(responseObserver);
                                 return;
                             }
                             requestCounts.computeIfAbsent(
-                                    request.getRequestId(), ignored -> new AtomicInteger())
+                                    RequestId.parse(request), ignored -> new AtomicInteger())
                                     .incrementAndGet();
-                            forwardHops.put(request.getRequestId(), request.getForwardHop());
+                            forwardHops.put(RequestId.parse(request), request.getForwardHop());
                             pendingResponses.add(new PendingResponse(responseObserver));
                             slowRequests.countDown();
                             if (responsesReleased.get()) {
@@ -448,16 +447,14 @@ class FollowerAsyncForwardingNettyTest {
                     .directExecutor()
                     .addService(new FlexlbServiceGrpc.FlexlbServiceImplBase() {
                         @Override
-                        public void schedule(
-                                FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
-                                StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
-                                        responseObserver) {
-                            if (request.getRequestId().equals(Long.toString(WARMUP_REQUEST_ID))) {
+                        public void schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
+                                             StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> responseObserver) {
+                            if (RequestId.parse(request).equals(Long.toString(WARMUP_REQUEST_ID))) {
                                 SlowMaster.respond(responseObserver);
                                 return;
                             }
                             int occurrences = requestCounts.computeIfAbsent(
-                                            request.getRequestId(),
+                                            RequestId.parse(request),
                                             ignored -> new AtomicInteger())
                                     .incrementAndGet();
                             receivedRequests.incrementAndGet();

@@ -24,6 +24,7 @@ import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -94,7 +95,7 @@ class FlexlbGrpcForwarderAsyncTest {
                 assertNotNull(response);
                 assertTrue(response.getSuccess());
                 assertEquals(200, response.getCode());
-                assertEquals("transport-schedule", received.get().getRequestId());
+                assertEquals("transport-schedule", RequestId.parse(received.get()));
                 assertEquals(1, received.get().getForwardHop());
             } finally {
                 forwarder.shutdown();
@@ -200,7 +201,7 @@ class FlexlbGrpcForwarderAsyncTest {
             Context.CancellableContext cancelled = Context.current().withCancellation();
             cancelled.cancel(null);
             var result = cancelled.call(() -> Context.ROOT.call(() -> forwarder.forwardCompensatingCancelToMaster(
-                    FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder().setRequestId("903").build(),
+                    FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder().setRequestIdStr("903").build(),
                     MASTER_HTTP_ADDRESS, traceParent()))).toCompletableFuture().get(3, TimeUnit.SECONDS);
             assertTrue(result.response().getFound());
             assertTrue(capture.ended.await(3, TimeUnit.SECONDS));
@@ -421,7 +422,7 @@ class FlexlbGrpcForwarderAsyncTest {
             assertTimeoutPreemptively(Duration.ofSeconds(1), () ->
                     pending.set(forwarder.forwardCancelToMaster(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(String.valueOf(106L))
+                                    .setRequestIdStr(String.valueOf(106L))
                                     .build())));
             assertTrue(masterReceivedRequest.await(2, TimeUnit.SECONDS));
             assertFalse(pending.get().toCompletableFuture().isDone());
@@ -492,10 +493,9 @@ class FlexlbGrpcForwarderAsyncTest {
         }
     }
 
-    private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(
-            long requestId) {
+    private static FlexlbScheduleProtocol.FlexlbCancelRequestPB cancelRequest(long requestId) {
         return FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestIdStr(Long.toString(requestId))
                 .build();
     }
 
@@ -531,7 +531,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(requestId)
+                .setRequestIdStr(requestId)
                 .build();
     }
 

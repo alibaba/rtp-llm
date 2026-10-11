@@ -1,6 +1,7 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -87,7 +88,7 @@ class KvAllocatedReportOptInTest {
             assertEquals(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING, task.getPhase(),
                     "flag OFF: queued decode tasks must keep today's "
                             + "TASK_PHASE_RUNNING reporting (zero behavior change), "
-                            + "request " + task.getRequestId());
+                            + "request " + RequestId.parse(task));
         }
         assertEquals(3, status.getRunningTaskInfoCount(),
                 "all admitted requests keep their runningTasks claim");
@@ -168,7 +169,7 @@ class KvAllocatedReportOptInTest {
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("2")
+                .anyMatch(task -> RequestId.parse(task).equals("2")
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,

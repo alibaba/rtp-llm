@@ -1,6 +1,7 @@
 package org.flexlb.mockengine;
 
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -98,7 +99,7 @@ class CompletionRetainWindowTest {
         var runningField = JavaMockEngineCluster.FastRpcService.class.getDeclaredField("runningTasks");
         runningField.setAccessible(true);
         var running = (Map<Long, EngineRpcService.TaskInfoPB>) runningField.get(prefill);
-        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestId("42")
+        var task = EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr("42")
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
         running.put(42L, task);
         var claim = JavaMockEngineCluster.FastRpcService.class.getDeclaredMethod("claimTaskCompletion", long.class);
@@ -107,8 +108,8 @@ class CompletionRetainWindowTest {
         assertTrue(running.isEmpty(), "execution ownership is already released");
         for (int i = 0; i < 3; i++) {
             var status = workerStatus(prefill, 0);
-            assertEquals(List.of(task.getRequestId()), status.getRunningTaskInfoList().stream()
-                    .map(EngineRpcService.TaskInfoPB::getRequestId).toList());
+            assertEquals(List.of(RequestId.parse(task)), status.getRunningTaskInfoList().stream()
+                    .map(RequestId::parse).toList());
             assertEquals(1, status.getRunningQueryLen());
             assertEquals(0, status.getFinishedTaskListCount());
             assertEquals(0, status.getLatestFinishedVersion());
@@ -313,7 +314,7 @@ class CompletionRetainWindowTest {
 
     private static List<String> finishedRids(EngineRpcService.WorkerStatusPB status) {
         return status.getFinishedTaskListList().stream()
-                .map(EngineRpcService.TaskInfoPB::getRequestId)
+                .map(RequestId::parse)
                 .collect(Collectors.toList());
     }
 }

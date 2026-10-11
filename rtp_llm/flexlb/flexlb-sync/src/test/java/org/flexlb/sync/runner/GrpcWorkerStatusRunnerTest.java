@@ -36,8 +36,9 @@ class GrpcWorkerStatusRunnerTest {
 
     @ParameterizedTest
     @CsvSource({"DECODE,false,false", "PREFILL,true,false", "PDFUSION,true,false", "PREFILL,true,true"})
-    void repeatedStatusCheckFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(
-            RoleType role, boolean needsCacheKeys, boolean malformedTaskId) {
+    void repeatedStatusCheckFailuresRetireWorkerAndOnlyClearDetailedCacheIndexes(RoleType role,
+                                                                                 boolean needsCacheKeys,
+                                                                                 boolean malformedTaskId) {
         ConfigService config = mock(ConfigService.class);
         when(config.loadBalanceConfig()).thenReturn(
                 org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
@@ -55,7 +56,7 @@ class GrpcWorkerStatusRunnerTest {
                         ? CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
                                 .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
                                 .setStatusVersion(1L).setAlive(true)
-                                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(" "))
+                                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestIdStr(" "))
                                 .build())
                         : CompletableFuture.failedFuture(io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
@@ -227,7 +228,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("123")
+                .setRequestIdStr("123")
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
         EngineRpcService.WorkerStatusPB response =

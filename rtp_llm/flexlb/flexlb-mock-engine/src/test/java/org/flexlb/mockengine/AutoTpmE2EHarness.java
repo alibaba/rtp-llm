@@ -349,8 +349,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         return status;
     }
 
-    private static WorkerStatusResponse statusResponse(
-            RoleType role, EngineRpcService.WorkerStatusPB snapshot) {
+    private static WorkerStatusResponse statusResponse(RoleType role, EngineRpcService.WorkerStatusPB snapshot) {
         WorkerStatusResponse response = new WorkerStatusResponse();
         response.setRole(role);
         response.setAlive(snapshot.getAlive());
@@ -362,12 +361,12 @@ final class AutoTpmE2EHarness implements AutoCloseable {
         response.setLatestFinishedVersion(snapshot.getLatestFinishedVersion());
         Map<String, TaskInfo> running = new HashMap<>();
         for (EngineRpcService.TaskInfoPB task : snapshot.getRunningTaskInfoList()) {
-            running.put(String.valueOf(task.getRequestId()), toTaskInfo(task));
+            running.put(RequestId.parse(task), toTaskInfo(task));
         }
         response.setRunningTaskInfo(running);
         Map<String, TaskInfo> finished = new HashMap<>();
         for (EngineRpcService.TaskInfoPB task : snapshot.getFinishedTaskListList()) {
-            finished.put(String.valueOf(task.getRequestId()), toTaskInfo(task));
+            finished.put(RequestId.parse(task), toTaskInfo(task));
         }
         response.setFinishedTaskInfo(finished);
         return response;

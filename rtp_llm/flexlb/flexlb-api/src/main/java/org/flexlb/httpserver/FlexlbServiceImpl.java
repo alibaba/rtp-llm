@@ -160,8 +160,10 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     completionClaimed, routeOrigin);
 
         } catch (Exception e) {
-            Logger.error("FlexlbService.schedule error, request_id={}", request.getRequestId(), e);
-            completeOnce(request.getRequestId(), context, buildErrorResponse(e),
+            String requestId = request.getRequestIdStr().isEmpty()
+                    ? Long.toString(request.getRequestId()) : request.getRequestIdStr();
+            Logger.error("FlexlbService.schedule error, request_id={}", requestId, e);
+            completeOnce(requestId, context, buildErrorResponse(e),
                     responseObserver, errorOrigin, completionClaimed);
         }
     }
@@ -256,19 +258,18 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 && !context.requestExpired(System.currentTimeMillis());
     }
 
-    private void reconcileForwardedRoute(
-            String requestId,
-            RequestPhase phase,
-            String masterHost,
-            FlexlbScheduleProtocol.CancelReasonPB reason,
-            io.opentelemetry.context.Context traceContext) {
+    private void reconcileForwardedRoute(String requestId,
+                                         RequestPhase phase,
+                                         String masterHost,
+                                         FlexlbScheduleProtocol.CancelReasonPB reason,
+                                         io.opentelemetry.context.Context traceContext) {
         if (masterHost == null || masterHost.isBlank()) {
             return;
         }
         FlexlbScheduleProtocol.FlexlbCancelRequestPB.Builder cancelRequest =
                 FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                        .setRequestId(requestId)
                         .setReason(reason);
+        RequestId.set(cancelRequest, requestId);
         if (phase == RequestPhase.ENCODER) {
             cancelRequest.setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER);
         }
@@ -1210,11 +1211,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         ENTRY_ERROR
     }
 
-    private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(
-            RequestState snapshot) {
+    private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(RequestState snapshot) {
         FlexlbScheduleProtocol.RequestLifecyclePB.Builder lifecycle =
                 FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
-                        .setRequestId(snapshot.requestId())
                         .setState(switch (snapshot.state()) {
                             case QUEUED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_QUEUED;
                             case DISPATCHING -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_DISPATCHING;
@@ -1228,6 +1227,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (snapshot.batchId() > 0) {
             lifecycle.setBatchId(snapshot.batchId());
         }
+        RequestId.set(lifecycle, snapshot.requestId());
         return lifecycle.build();
     }
 }

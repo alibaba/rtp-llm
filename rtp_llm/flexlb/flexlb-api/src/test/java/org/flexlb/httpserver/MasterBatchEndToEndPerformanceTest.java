@@ -1231,8 +1231,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         }
     }
 
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleRequest(long requestId,
-                                                                                  int requestIndex) {
+    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB scheduleRequest(long requestId, int requestIndex) {
         RealRequestTemplate template = realRequestTemplates.get(
                 Math.floorMod(requestIndex, realRequestTemplates.size()));
         EngineRpcService.GenerateInputPB generateInput = template.generateInput().toBuilder()
@@ -1243,7 +1242,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         .build())
                 .build();
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestIdStr(Long.toString(requestId))
                 .setGenerateInput(ByteString.copyFrom(generateInput.toByteArray()))
                 .addAllBlockCacheKeys(template.blockCacheKeys())
                 .setSeqLen(template.seqLen())

@@ -94,7 +94,7 @@ class FlexlbGrpcDrainTest {
         var drainer = new Thread(grpc::drain);
         try {
             var pending = FlexlbServiceGrpc.newFutureStub(channel).withDeadlineAfter(8, TimeUnit.SECONDS)
-                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestId("101").build());
+                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestIdStr("101").build());
             assertTrue(accepted.await(3, TimeUnit.SECONDS));
             drainer.start();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
@@ -201,7 +201,7 @@ class FlexlbGrpcDrainTest {
 
         com.google.common.util.concurrent.ListenableFuture<FlexlbScheduleResponsePB> request(long id) {
             return FlexlbServiceGrpc.newFutureStub(channel).withDeadlineAfter(10, TimeUnit.SECONDS)
-                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestId(Long.toString(id)).build());
+                    .schedule(FlexlbScheduleRequestPB.newBuilder().setRequestIdStr(Long.toString(id)).build());
         }
 
         void completeNext() throws Exception {

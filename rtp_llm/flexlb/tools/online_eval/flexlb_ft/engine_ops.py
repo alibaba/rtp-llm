@@ -371,7 +371,7 @@ class EngineOps:
         )
         keys = block_keys or [request_id * 100 + 1]
         return self.schedule_pb2.FlexlbScheduleRequestPB(
-            request_id=str(request_id),
+            request_id=request_id,
             generate_input=input_pb.SerializeToString(),
             block_cache_keys=keys,
             seq_len=input_len,
@@ -483,7 +483,7 @@ class EngineOps:
             self._channel(self.master_target())
         )
         cancel_request = self.schedule_pb2.FlexlbCancelRequestPB(
-            request_id=str(request_id),
+            request_id=request_id,
             reason=self.schedule_pb2.CANCEL_REASON_CLIENT_CANCELLED,
         )
         if response is not None and response.HasField("lifecycle"):

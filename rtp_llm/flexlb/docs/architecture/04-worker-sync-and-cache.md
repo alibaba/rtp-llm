@@ -11,10 +11,12 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 ### 请求 ID 协议
 
-Worker Status 的共享 PB 协议定义为 `string TaskInfoPB.request_id = 1`，
+Worker Status 和 Master 的 Schedule、Cancel、GetRequestState、生命周期消息保留
+`int64 request_id = 1`，并通过独立的 `string request_id_str` 字段传输字符串 ID。
 Java、C++ 和 Python 使用同一字段定义生成代码。
-对 Worker Status 和客户端请求中的字符串 ID，`RequestId.parse` 优先保留原始字符串；
-字符串缺失时，从同字段编号的 unknown fields 中读取旧 int64 编码并转换成字符串；两者都缺失时会报错。
+`RequestId.parse` 优先使用非空的 `request_id_str`，否则将 `request_id` 转为十进制字符串；
+整数默认值 `0` 对应字符串 `"0"`，仅含空白字符的字符串 ID 在协议入口返回参数错误。
+RTP-LLM C++ 引擎和 Python MasterClient 写入整数字段。
 Running 和 Finished 任务表均以解析后的 ID 为键，缓存反馈与调度请求使用同一 ID 关联。
 Master 的请求模型、调度、取消、状态查询、资源预留和 tracing 接口均只接收字符串 ID。
 客户端的 Schedule、Cancel、GetRequestState gRPC 请求使用相同的边界兼容读取；HTTP JSON 的数字 ID 在反序列化请求模型时转换成字符串。
@@ -24,8 +26,9 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 对应的读取重载直接转换该字段；字段未设置时按 PB 默认值返回字符串 `"0"`。
 BATCH Generation 的 Schedule 入口在入队前检查 `generate_input` 是有效的 GenerateInputPB，
 并要求字符串 request_id 与该 PB 的 int64 ID 的规范十进制写法完全一致；`"007"`、非数字、
-越界或不一致的 ID 返回 INVALID_REQUEST。整数兼容读取仍保留，大于 JS 精确整数范围的 ID
-通过字符串与支持 int64 的 protobuf 编码传输，不转换为浮点数。
+越界或不一致的 ID 返回 INVALID_REQUEST。大于 JS 精确整数范围的 ID
+通过字符串字段或支持 int64 的 protobuf 编码传输，不转换为浮点数。
+Master 的生命周期响应和补偿取消请求写入字符串字段；规范 int64 ID 同时写入整数字段。
 NON_BATCH 的仅路由请求和 ENCODER 请求仍保留原始字符串，不需要 Engine 生成 payload。
 对当前 Engine 的取消 RPC 单独要求规范 int64 字符串，拒绝 `"007"` 被归一化后误取消 ID `"7"`。
 

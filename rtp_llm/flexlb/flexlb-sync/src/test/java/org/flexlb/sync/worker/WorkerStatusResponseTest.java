@@ -47,13 +47,13 @@ class WorkerStatusResponseTest {
     @Test
     void converterReadsLegacyWorkerRoleAndTaskState() {
         EngineRpcService.TaskInfoPB oldWaiting = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("1")
+                .setRequestIdStr("1")
                 .setIsWaiting(true)
                 .build();
         // An old proto3 writer omits is_waiting=false from the wire. The new
         // reader must use the running_task_info container as the fallback.
         EngineRpcService.TaskInfoPB oldRunning = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("2")
+                .setRequestIdStr("2")
                 .build();
         EngineRpcService.WorkerStatusPB proto = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setRole("RoleType.PREFILL")
@@ -73,7 +73,7 @@ class WorkerStatusResponseTest {
     @Test
     void converterReadsAndValidatesDualWorkerStatus() {
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("3")
+                .setRequestIdStr("3")
                 .setIsWaiting(true)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                 .build();
@@ -107,13 +107,13 @@ class WorkerStatusResponseTest {
         // the explicit phase carried in field 12.
         EngineRpcService.TaskInfoPB receivedFromE0 = EngineRpcService.TaskInfoPB.parseFrom(
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("4")
+                        .setRequestIdStr("4")
                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED)
                         .build()
                         .toByteArray());
         EngineRpcService.TaskInfoPB kvAllocatedFromE0 = EngineRpcService.TaskInfoPB.parseFrom(
                 EngineRpcService.TaskInfoPB.newBuilder()
-                        .setRequestId("5")
+                        .setRequestIdStr("5")
                         .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED)
                         .build()
                         .toByteArray());
@@ -134,7 +134,7 @@ class WorkerStatusResponseTest {
     @Test
     void converterKeepsExplicitPhaseWhenLegacyFlagDisagrees() {
         EngineRpcService.TaskInfoPB runningButWaiting = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("6")
+                .setRequestIdStr("6")
                 .setIsWaiting(true)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
@@ -152,7 +152,7 @@ class WorkerStatusResponseTest {
     @Test
     void converterPreservesAuthoritativePriorityCanceledTerminal() {
         EngineRpcService.TaskInfoPB canceled = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("8429001")
+                .setRequestIdStr("8429001")
                 .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB
                         .PRIORITY_PREEMPTION_CANCELED)
                 .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()

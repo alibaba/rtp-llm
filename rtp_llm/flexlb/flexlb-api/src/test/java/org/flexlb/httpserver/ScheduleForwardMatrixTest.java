@@ -375,7 +375,7 @@ class ScheduleForwardMatrixTest {
         try (RealForwarderFixture fixture = newRealForwarderFixture(LIVE_MASTER)) {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB alreadyForwardedOnce =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId("90103")
+                            .setRequestIdStr("90103")
                             .setForwardHop(1)
                             .build();
 
@@ -499,7 +499,7 @@ class ScheduleForwardMatrixTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestIdStr(Long.toString(requestId))
                 .setSeqLen(1024)
                 .build();
     }

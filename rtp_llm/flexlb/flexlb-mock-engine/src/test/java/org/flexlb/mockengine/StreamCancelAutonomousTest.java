@@ -11,6 +11,7 @@ import io.grpc.Status;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -471,7 +472,7 @@ class StreamCancelAutonomousTest {
     private static long countCancelTerminals(JavaMockEngineCluster.FastRpcService service, long rid) {
         return MockEngineTestSupport.workerStatus(service, 0)
                 .getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId().equals(Long.toString(rid)))
+                .filter(task -> RequestId.parse(task).equals(Long.toString(rid)))
                 .filter(task -> task.hasErrorInfo()
                         && task.getErrorInfo().getErrorCode()
                                 == EngineRpcService.ErrorCodePB.CANCELLED.getNumber())

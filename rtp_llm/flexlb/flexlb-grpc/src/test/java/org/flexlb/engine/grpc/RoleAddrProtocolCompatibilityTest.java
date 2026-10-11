@@ -106,7 +106,7 @@ class RoleAddrProtocolCompatibilityTest {
     void dualWorkerStatusPayloadIsReadableByDsv4Descriptor() throws Exception {
         Descriptors.Descriptor legacy = legacyWorkerStatusDescriptor();
         EngineRpcService.TaskInfoPB running = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId("42")
+                .setRequestIdStr("42")
                 .setIsWaiting(false)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();

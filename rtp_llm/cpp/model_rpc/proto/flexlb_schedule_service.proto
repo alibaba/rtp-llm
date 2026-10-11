@@ -52,13 +52,15 @@ enum RequestPhasePB {
 }
 
 message RequestLifecyclePB {
-    string request_id = 1;
+    int64 request_id = 1;
     RequestStatePB state = 2;
     int64 batch_id = 3;
+    // Nonempty string IDs take precedence over request_id.
+    string request_id_str = 4;
 }
 
 message FlexlbScheduleRequestPB {
-    string request_id = 1;
+    int64 request_id = 1;
     // Wire-compatible with the historical GenerateInputPB message field:
     // message and bytes are both length-delimited on the wire.
     bytes generate_input = 2;
@@ -96,6 +98,8 @@ message FlexlbScheduleRequestPB {
     oneof encoder_cache_hit_len_presence {
         int64 encoder_cache_hit_len = 20;
     }
+    // Nonempty string IDs take precedence over request_id.
+    string request_id_str = 21;
 }
 
 message FlexlbServerStatusPB {
@@ -140,13 +144,15 @@ message FlexlbScheduleResponsePB {
 }
 
 message FlexlbCancelRequestPB {
-    string request_id = 1;
+    int64 request_id = 1;
     int64 batch_id = 2;
     CancelReasonPB reason = 3;
     // Single-hop guard only. Every receiver checks local lifecycle ownership;
     // only a hop-zero miss on a follower may be forwarded to the current master.
     int32 forward_hop = 4;
     RequestPhasePB phase = 5;
+    // Nonempty string IDs take precedence over request_id.
+    string request_id_str = 6;
 }
 
 message FlexlbCancelResponsePB {
@@ -155,12 +161,14 @@ message FlexlbCancelResponsePB {
 }
 
 message GetRequestStateRequestPB {
-    string request_id = 1;
+    int64 request_id = 1;
     int64 batch_id = 2;
     // Same single-hop guard as Schedule. Clients leave this at zero and a
     // FlexLB follower sets it to one before forwarding.
     uint32 forward_hop = 3;
     RequestPhasePB phase = 4;
+    // Nonempty string IDs take precedence over request_id.
+    string request_id_str = 5;
 }
 
 message GetRequestStateResponsePB {

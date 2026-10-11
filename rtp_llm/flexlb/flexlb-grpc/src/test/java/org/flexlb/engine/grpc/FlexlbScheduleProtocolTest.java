@@ -126,7 +126,7 @@ class FlexlbScheduleProtocolTest {
         assertEquals(3, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_DECODE.getNumber());
         assertEquals(4, FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PDFUSION.getNumber());
         var schedule = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId("request-1")
+                .setRequestIdStr("request-1")
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .addScheduleRoles(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL)
                 .build();

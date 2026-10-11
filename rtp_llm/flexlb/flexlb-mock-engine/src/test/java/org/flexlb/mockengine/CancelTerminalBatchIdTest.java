@@ -2,6 +2,7 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -194,7 +195,7 @@ class CancelTerminalBatchIdTest {
             taskField.setAccessible(true);
             EngineRpcService.TaskInfoPB task =
                     (EngineRpcService.TaskInfoPB) taskField.get(element);
-            if (task.getRequestId().equals(Long.toString(requestId))) {
+            if (RequestId.parse(task).equals(Long.toString(requestId))) {
                 latest = task;
             }
         }

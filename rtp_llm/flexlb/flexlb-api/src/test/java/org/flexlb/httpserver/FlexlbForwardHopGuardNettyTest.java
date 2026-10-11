@@ -241,7 +241,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.GetRequestStateResponsePB state =
                     client.stub.getRequestState(
                             FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                                    .setRequestId(Long.toString(requestId))
+                                    .setRequestIdStr(Long.toString(requestId))
                                     .build());
             assertTrue(state.getFound());
             assertEquals(
@@ -253,7 +253,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(Long.toString(requestId))
+                                    .setRequestIdStr(Long.toString(requestId))
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
                                     .build());
@@ -291,7 +291,7 @@ class FlexlbForwardHopGuardNettyTest {
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
                             FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                                    .setRequestId(Long.toString(requestedId))
+                                    .setRequestIdStr(Long.toString(requestedId))
                                     .setReason(FlexlbScheduleProtocol.CancelReasonPB
                                             .CANCEL_REASON_CLIENT_CANCELLED)
                                     .setForwardHop(1)
@@ -314,7 +314,7 @@ class FlexlbForwardHopGuardNettyTest {
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestIdStr(Long.toString(requestId))
                 .setSeqLen(1024)
                 .build();
     }

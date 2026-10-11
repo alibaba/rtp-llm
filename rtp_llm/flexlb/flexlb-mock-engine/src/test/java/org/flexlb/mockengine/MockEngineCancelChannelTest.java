@@ -9,6 +9,7 @@ import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -117,7 +118,7 @@ class MockEngineCancelChannelTest {
         // The addressed Prefill is the authoritative typed CANCELED producer.
         EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("1")
+                .anyMatch(task -> RequestId.parse(task).equals("1")
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -155,13 +156,13 @@ class MockEngineCancelChannelTest {
         assertFalse(prefill.hasDownstreamOwnership(51L));
         assertFalse(decode.hasUpstreamOwnership(51L));
         boolean cancelledReported = workerStatus(decode, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("51")
+                .anyMatch(task -> RequestId.parse(task).equals("51")
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,
                 "Decode must retain its ordinary CANCELLED terminal");
         boolean typedCanceledReported = workerStatus(prefill, 0).getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId().equals("51")
+                .anyMatch(task -> RequestId.parse(task).equals("51")
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
@@ -217,7 +218,7 @@ class MockEngineCancelChannelTest {
         assertEquals(CancelAck.ACCEPTED, second,
                 "accepted priority-cancel terminal records are idempotent");
         long terminalCount = workerStatus(prefill, -1).getFinishedTaskListList().stream()
-                .filter(task -> task.getRequestId().equals("21")
+                .filter(task -> RequestId.parse(task).equals("21")
                         && task.getErrorInfo().getErrorCode() == 8429L
                         && task.getPriorityPreemptionProgress()
                         == EngineRpcService.PriorityPreemptionProgressPB
