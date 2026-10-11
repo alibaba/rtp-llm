@@ -238,8 +238,9 @@ def test_gate_manifest_checks_exact_frozen_inputs(tmp_path):
     with ExperimentReader(published['experiment']) as reader:
         reader.verify()
     evidence.write_text('{"used":2}')
-    published = publish_run(tmp_path, definition(), execution())
-    with ExperimentReader(published['experiment']) as reader, pytest.raises(ValueError, match='gate evidence'):
+    with pytest.raises(ValueError, match='gate evidence'):
+        publish_run(tmp_path, definition(), execution())
+    with ExperimentReader(published['experiment']) as reader:
         reader.verify()
 
 
@@ -257,3 +258,38 @@ def test_archive_deadline_preserves_gate_and_has_its_own_budget(tmp_path):
     assert result['outcome']['delivery'] == 'TIMEOUT'
     assert result['finalization'][-1]['duration_ms'] == 500
     assert result['finalization'][-1]['status'] == 'TIMEOUT'
+
+
+def test_preferred_view_selects_case_before_default(tmp_path):
+    first = write_bundle(tmp_path, 'run', 'default', {}, frozen_spec())
+    second = write_bundle(tmp_path, 'run', 'selected', {}, frozen_spec())
+    frozen = definition()
+    frozen['plan']['reports'] = ['default.yaml', 'case.yaml']
+    result = execution()
+    result['workload'] = {'reports': {'default.yaml': str(first / 'report.html'),
+                                    'case.yaml': str(second / 'report.html')}}
+    published = publish_run(tmp_path, frozen, result)
+    with ExperimentReader(published['experiment']) as reader:
+        assert reader.preferred_view == 'case.yaml'
+        reader.render(reader.preferred_view, tmp_path / 'selected.html')
+        assert (tmp_path / 'selected.html').read_bytes() == (second / 'report.html').read_bytes()
+
+
+def test_failed_republish_preserves_previous_raw_attachment(tmp_path):
+    from artifacts.experiment import ExperimentWriter
+    (tmp_path / 'engine.log').write_text('previous log')
+    previous = publish_run(tmp_path, definition(), execution())
+    primary = Path(previous['experiment']).read_bytes()
+    (tmp_path / 'engine.log').write_text('new log')
+    original = ExperimentWriter.add_json
+    def fail_commit(self, name, *args, **kwargs):
+        if name == 'raw-attachment.json':
+            raise OSError('primary commit failed')
+        return original(self, name, *args, **kwargs)
+    with patch.object(ExperimentWriter, 'add_json', fail_commit), pytest.raises(OSError):
+        publish_run(tmp_path, definition(), execution())
+    assert Path(previous['experiment']).read_bytes() == primary
+    with ExperimentReader(previous['experiment']) as reader:
+        reader.verify_raw(previous['raw'])
+    with ExperimentReader(previous['raw']) as reader, reader.open('run/engine.log') as stream:
+        assert stream.read() == b'previous log'

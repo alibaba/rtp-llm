@@ -83,6 +83,22 @@ class ViewDescriptor:
         return cls(value['layout'], value['declaration'])
 
 
+def _verify_gate_inputs(entries, read_json):
+    for name in entries:
+        if not name.endswith('-gate-manifest.json'):
+            continue
+        document = read_json(name)
+        if not matches_schema(document, 'gate_result_schema_version', 1):
+            raise ValueError('invalid frozen gate manifest')
+        stem = name[:-len('-manifest.json')]
+        for key in ('evidence', 'result'):
+            target = stem + '-' + key + '.json'
+            reference = document[key]
+            if (reference['file'] != PurePosixPath(target).name or target not in entries
+                    or entries[target].sha256 != reference['sha256']):
+                raise ValueError('frozen gate evidence checksum mismatch')
+
+
 class ExperimentWriter:
     """Atomic ZIP publication, one content-addressed blob per distinct payload."""
     def __init__(self, output, kind='experiment', deadline=None):
@@ -109,6 +125,8 @@ class ExperimentWriter:
                 self.archive = archive
                 yield self
                 self.check()
+                _verify_gate_inputs(self.entries, lambda name: json.loads(
+                    archive.read(self.entries[name].blob)))
                 manifest = dict(experiment_schema_version=1, kind=self.kind,
                     files={name: entry.to_dict() for name, entry in self.entries.items()},
                     views={name: asdict(view) for name, view in self.views.items()}, omitted=self.omitted)
@@ -260,18 +278,7 @@ class ExperimentReader:
                 with self.open(name):
                     pass
                 checked.add(entry.blob)
-        for name in self.entries:
-            if name.endswith('-gate-manifest.json'):
-                document = self.read_json(name)
-                if not matches_schema(document, 'gate_result_schema_version', 1):
-                    raise ValueError('invalid frozen gate manifest')
-                stem = name[:-len('-manifest.json')]
-                for key in ('evidence', 'result'):
-                    target = stem + '-' + key + '.json'
-                    reference = document[key]
-                    if (reference['file'] != PurePosixPath(target).name or target not in self.entries
-                            or self.entries[target].sha256 != reference['sha256']):
-                        raise ValueError('frozen gate evidence checksum mismatch')
+        _verify_gate_inputs(self.entries, self.read_json)
 
     def verify_raw(self, path):
         from reporting.evidence_archive import file_digest
@@ -326,7 +333,7 @@ class ExperimentReader:
         definition = self.read_json('experiment.json')
         names = self.available_views
         for name in definition['plan'].get('reports', []):
-            if name in names:
+            if name != 'default.yaml' and name in names:
                 return name
         if names:
             return names[0]
