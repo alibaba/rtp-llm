@@ -564,25 +564,11 @@ def _find_libs(repository_ctx, check_cuda_libs_script, cuda_config):
             cuda_config.curand_version,
             static = False,
         ),
-        "nccl": _check_cuda_lib_params(
-            "nccl",
-            cpu_value,
-            cuda_config.config["nccl_library_dir"],
-            cuda_config.nccl_version,
-            static = False,
-        ),
         "cufft": _check_cuda_lib_params(
             "cufft",
             cpu_value,
             cuda_config.config["cufft_library_dir"],
             cuda_config.cufft_version,
-            static = False,
-        ),
-        "cudnn": _check_cuda_lib_params(
-            "cudnn",
-            cpu_value,
-            cuda_config.config["cudnn_library_dir"],
-            cuda_config.cudnn_version,
             static = False,
         ),
         "nvml": _check_cuda_lib_params(
@@ -607,6 +593,26 @@ def _find_libs(repository_ctx, check_cuda_libs_script, cuda_config):
             static = False,
         ),
     }
+
+    # cuDNN and NCCL are optional (see find_cuda_config.py): nothing in the
+    # build graph consumes the generated cudnn/nccl targets, so verify and
+    # carry them only when the configure found them.
+    if "nccl_library_dir" in cuda_config.config:
+        check_cuda_libs_params["nccl"] = _check_cuda_lib_params(
+            "nccl",
+            cpu_value,
+            cuda_config.config["nccl_library_dir"],
+            cuda_config.nccl_version,
+            static = False,
+        )
+    if "cudnn_library_dir" in cuda_config.config:
+        check_cuda_libs_params["cudnn"] = _check_cuda_lib_params(
+            "cudnn",
+            cpu_value,
+            cuda_config.config["cudnn_library_dir"],
+            cuda_config.cudnn_version,
+            static = False,
+        )
 
     # Verify that the libs actually exist at their locations.
     _check_cuda_libs(repository_ctx, check_cuda_libs_script, check_cuda_libs_params.values())
@@ -654,8 +660,14 @@ def _get_cuda_config(repository_ctx, find_cuda_config_script):
     cuda_minor = cuda_version[1]
 
     cuda_version = ("64_%s%s" if is_windows else "%s.%s") % (cuda_major, cuda_minor)
-    cudnn_version = ("64_%s" if is_windows else "%s") % config["cudnn_version"]
-    nccl_version = ("64_%s" if is_windows else "%s") % config["nccl_version"]
+    # cuDNN and NCCL are optional (see find_cuda_config.py); the generated
+    # cudnn/nccl targets are unused by the build graph.
+    cudnn_version = ""
+    if "cudnn_version" in config:
+        cudnn_version = ("64_%s" if is_windows else "%s") % config["cudnn_version"]
+    nccl_version = ""
+    if "nccl_version" in config:
+        nccl_version = ("64_%s" if is_windows else "%s") % config["nccl_version"]
 
     if int(cuda_major) >= 11:
         # The libcudart soname in CUDA 11.x is versioned as 11.0 for backward compatability.
@@ -961,7 +973,8 @@ def _create_local_cuda_repository(repository_ctx):
 
     cuda_include_path = cuda_config.config["cuda_include_dir"]
     cublas_include_path = cuda_config.config["cublas_include_dir"]
-    cudnn_header_dir = cuda_config.config["cudnn_include_dir"]
+    # Optional (see find_cuda_config.py).
+    cudnn_header_dir = cuda_config.config.get("cudnn_include_dir", "")
     cupti_header_dir = cuda_config.config["cupti_include_dir"]
     nvvm_libdevice_dir = cuda_config.config["nvvm_library_dir"]
 
@@ -1054,17 +1067,18 @@ def _create_local_cuda_repository(repository_ctx):
         ],
     ))
 
-    nccl_include_path = cuda_config.config["nccl_include_dir"]
-    copy_rules.append(make_copy_files_rule(
-        repository_ctx,
-        name = "nccl-include",
-        srcs = [
-            nccl_include_path + "/nccl.h",
-        ],
-        outs = [
-            "nccl/include/nccl.h",
-        ],
-    ))
+    if "nccl_include_dir" in cuda_config.config:
+        nccl_include_path = cuda_config.config["nccl_include_dir"]
+        copy_rules.append(make_copy_files_rule(
+            repository_ctx,
+            name = "nccl-include",
+            srcs = [
+                nccl_include_path + "/nccl.h",
+            ],
+            outs = [
+                "nccl/include/nccl.h",
+            ],
+        ))
 
     check_cuda_libs_script = repository_ctx.path(Label("//3rdparty/cuda_config:check_cuda_libs.py"))
     cuda_libs = _find_libs(repository_ctx, check_cuda_libs_script, cuda_config)
@@ -1100,31 +1114,33 @@ def _create_local_cuda_repository(repository_ctx):
     ))
 
     # Select the headers based on the cuDNN version (strip '64_' for Windows).
-    cudnn_headers = ["cudnn.h"]
-    if cuda_config.cudnn_version.rsplit("_", 1)[0] >= "8":
-        cudnn_headers += [
-            "cudnn_backend.h",
-            "cudnn_adv_infer.h",
-            "cudnn_adv_train.h",
-            "cudnn_cnn_infer.h",
-            "cudnn_cnn_train.h",
-            "cudnn_ops_infer.h",
-            "cudnn_ops_train.h",
-            "cudnn_version.h",
-        ]
+    # Skipped entirely when cuDNN was not found (see find_cuda_config.py).
+    if cudnn_header_dir:
+        cudnn_headers = ["cudnn.h"]
+        if cuda_config.cudnn_version.rsplit("_", 1)[0] >= "8":
+            cudnn_headers += [
+                "cudnn_backend.h",
+                "cudnn_adv_infer.h",
+                "cudnn_adv_train.h",
+                "cudnn_cnn_infer.h",
+                "cudnn_cnn_train.h",
+                "cudnn_ops_infer.h",
+                "cudnn_ops_train.h",
+                "cudnn_version.h",
+            ]
 
-    cudnn_srcs = []
-    cudnn_outs = []
-    for header in cudnn_headers:
-        cudnn_srcs.append(cudnn_header_dir + "/" + header)
-        cudnn_outs.append("cudnn/include/" + header)
+        cudnn_srcs = []
+        cudnn_outs = []
+        for header in cudnn_headers:
+            cudnn_srcs.append(cudnn_header_dir + "/" + header)
+            cudnn_outs.append("cudnn/include/" + header)
 
-    copy_rules.append(make_copy_files_rule(
-        repository_ctx,
-        name = "cudnn-include",
-        srcs = cudnn_srcs,
-        outs = cudnn_outs,
-    ))
+        copy_rules.append(make_copy_files_rule(
+            repository_ctx,
+            name = "cudnn-include",
+            srcs = cudnn_srcs,
+            outs = cudnn_outs,
+        ))
 
     # Set up BUILD file for cuda/
     repository_ctx.template(
@@ -1153,10 +1169,12 @@ def _create_local_cuda_repository(repository_ctx):
             "%{cublas_lib}": _basename(repository_ctx, cuda_libs["cublas"]),
             "%{cublasLt_lib}": _basename(repository_ctx, cuda_libs["cublasLt"]),
             "%{cusolver_lib}": _basename(repository_ctx, cuda_libs["cusolver"]),
-            "%{cudnn_lib}": _basename(repository_ctx, cuda_libs["cudnn"]),
+            # Placeholder names when cuDNN/NCCL are absent: the generated
+            # cudnn/nccl targets are unused and never analyzed.
+            "%{cudnn_lib}": _basename(repository_ctx, cuda_libs["cudnn"]) if "cudnn" in cuda_libs else "libcudnn.so",
             "%{cufft_lib}": _basename(repository_ctx, cuda_libs["cufft"]),
             "%{curand_lib}": _basename(repository_ctx, cuda_libs["curand"]),
-            "%{nccl_lib}": _basename(repository_ctx, cuda_libs["nccl"]),
+            "%{nccl_lib}": _basename(repository_ctx, cuda_libs["nccl"]) if "nccl" in cuda_libs else "libnccl.so",
             "%{cupti_lib}": _basename(repository_ctx, cuda_libs["cupti"]),
             "%{nvml_lib}": _basename(repository_ctx, cuda_libs["nvml"]),
             "%{cusparse_lib}": _basename(repository_ctx, cuda_libs["cusparse"]),
@@ -1240,7 +1258,7 @@ def _create_local_cuda_repository(repository_ctx):
             host_compiler_includes + _cuda_include_path(
                 repository_ctx,
                 cuda_config,
-            ) + [cupti_header_dir, cudnn_header_dir],
+            ) + [cupti_header_dir] + ([cudnn_header_dir] if cudnn_header_dir else []),
         )
 
         # For gcc, do not canonicalize system header paths; some versions of gcc
