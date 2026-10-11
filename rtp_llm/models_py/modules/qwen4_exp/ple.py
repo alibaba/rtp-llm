@@ -4,9 +4,8 @@ from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from rtp_llm.models_py.modules.qwen4_exp.gated_residual import grouped_rms_norm
+from torch import nn
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -106,6 +105,20 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 f"{total}"
             )
 
+        self._cpu_uva_enabled = (
+            shards[0].device.type == "cpu"
+            and vocab_sizes.is_cuda
+            and os.environ.get("RTP_LLM_QWEN4_PLE_CPU_UVA", "0").lower()
+            in ("1", "true", "yes", "on")
+        )
+        if self._cpu_uva_enabled:
+            from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
+                prepare_cpu_uva_shards,
+            )
+
+            shards, self._cpu_uva_pointers = prepare_cpu_uva_shards(
+                shards, shard_indices, total_shards, vocab_sizes.device
+            )
         self.shards = shards
         self.shard_indices = tuple(shard_indices)
         self.total_shards = total_shards
@@ -183,10 +196,32 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         shape = (*ngram_ids.shape, self.shards[0].shape[-1])
         key = (graph_key, tuple(shape), ngram_ids.device)
         if key not in self._cpu_graph_buffers:
-            host = torch.empty(shape, dtype=self.shards[0].dtype, pin_memory=True)
-            device = torch.empty_like(host, device=ngram_ids.device)
+            host = (
+                None
+                if self._cpu_uva_enabled
+                else torch.empty(shape, dtype=self.shards[0].dtype, pin_memory=True)
+            )
+            device = torch.empty(
+                shape, dtype=self.shards[0].dtype, device=ngram_ids.device
+            )
             self._cpu_graph_buffers[key] = (host, device)
         host, device = self._cpu_graph_buffers[key]
+        if self._cpu_uva_enabled:
+            from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
+                gather_local,
+            )
+
+            gather_local(
+                ngram_ids,
+                self.shards,
+                self.shard_indices,
+                self.total_shards,
+                self._cpu_uva_pointers,
+                out=device,
+            )
+            self._cpu_graph_rows = device
+            return
+        assert host is not None
         # The D2H finishes before CPU indexing. Only selected rows are pinned;
         # the checkpoint shards remain pageable CPU memory.
         host.copy_(self._gather_torch(ngram_ids.cpu()))
@@ -215,6 +250,18 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             if self._graph_gather_required:
                 return self._prepared_cpu_graph_rows(
                     (*ngram_ids.shape, self.shards[0].shape[-1]), ngram_ids.device
+                )
+            if self._cpu_uva_enabled:
+                from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
+                    gather_local,
+                )
+
+                return gather_local(
+                    ngram_ids,
+                    self.shards,
+                    self.shard_indices,
+                    self.total_shards,
+                    self._cpu_uva_pointers,
                 )
             # Transfer only lookup ids and selected rows. Auxiliary PLE weights
             # and the TP collective stay on the execution device.

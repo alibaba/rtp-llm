@@ -1,9 +1,10 @@
 import math
+import os
 import unittest
+from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
-
 from rtp_llm.models_py.modules.qwen4_exp.ple import (
     Qwen4ExpNGramEmbedding,
     Qwen4ExpPLELayer,
@@ -210,6 +211,80 @@ class Qwen4ExpNGramEmbeddingTest(unittest.TestCase):
         local = (ids >= 20) & (ids < 40)
         ref[local] = self.shards[1][ids[local] - 20]
         torch.testing.assert_close(got, ref, rtol=0, atol=0)
+
+    @unittest.skipUnless(
+        torch.cuda.is_available() and torch.version.hip is None,
+        "NVIDIA CUDA is required for CPU UVA",
+    )
+    def test_cpu_uva_gather_matches_host_rows_and_zeroes_remote_shards(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
+            gather_local,
+        )
+
+        for dtype in (torch.float32, torch.bfloat16):
+            with self.subTest(dtype=dtype), patch.dict(
+                os.environ, {"RTP_LLM_QWEN4_PLE_CPU_UVA": "1"}
+            ):
+                full = torch.arange(51 * 160).reshape(51, 160).to(dtype)
+                module = Qwen4ExpNGramEmbedding(
+                    [full[:17].clone(), full[34:].clone()],
+                    torch.tensor([11, 11, 11, 11], device="cuda"),
+                    torch.tensor([0, 11, 22, 33], device="cuda"),
+                    torch.tensor([3, 5, 7], device="cuda"),
+                    ngram_size=3,
+                    eos_token_id=7,
+                    shard_indices=[0, 2],
+                    total_shards=3,
+                    distributed_reduce=True,
+                )
+                self.assertTrue(module._cpu_uva_enabled)
+                self.assertTrue(
+                    all(s.device.type == "cpu" and s.is_pinned() for s in module.shards)
+                )
+                ids = torch.tensor(
+                    [0, 16, 17, 33, 34, 50, -1, 51, 1], device="cuda"
+                ).reshape(3, 3)
+                expected = torch.zeros(3, 3, 160, dtype=dtype)
+                host_ids = ids.cpu()
+                local = ((host_ids >= 0) & (host_ids < 17)) | (
+                    (host_ids >= 34) & (host_ids < 51)
+                )
+                expected[local] = full[host_ids[local]]
+                torch.testing.assert_close(
+                    module._gather_local(ids).cpu(), expected, rtol=0, atol=0
+                )
+                # A reused output is captured; replay reads new ids from CPU tables.
+                output = gather_local(
+                    ids,
+                    module.shards,
+                    module.shard_indices,
+                    3,
+                    module._cpu_uva_pointers,
+                )
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    gather_local(
+                        ids,
+                        module.shards,
+                        module.shard_indices,
+                        3,
+                        module._cpu_uva_pointers,
+                        out=output,
+                    )
+                ids.copy_(
+                    torch.tensor(
+                        [50, 34, 0, 16, 17, 51, -1, 33, 1], device="cuda"
+                    ).reshape(3, 3)
+                )
+                graph.replay()
+                host_ids = ids.cpu()
+                local = ((host_ids >= 0) & (host_ids < 17)) | (
+                    (host_ids >= 34) & (host_ids < 51)
+                )
+                expected.zero_()
+                expected[local] = full[host_ids[local]]
+                torch.testing.assert_close(output.cpu(), expected, rtol=0, atol=0)
 
     def test_cpu_gather_rejects_graph_capture_contract(self):
         module = self._build()
