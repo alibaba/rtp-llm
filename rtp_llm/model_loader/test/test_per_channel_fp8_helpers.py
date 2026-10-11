@@ -165,6 +165,51 @@ class CkptBaseMatchesRegexExcludeTest(unittest.TestCase):
             _ckpt_base_matches_regex_exclude(self.TEMPLATE, excludes)
         )
 
+    def test_bounded_quantifier_against_the_real_instances(self):
+        r"""The whole-template question is answered against the checkpoint.
+
+        `model\.layers\.\d{1,2}\.` covers a 100-layer checkpoint and stops
+        covering a 1000-layer one. Passing the instances the template really
+        expands to is the only way to tell those apart.
+        """
+        pattern = r"re:^model\.layers\.\d{1,2}\.mlp$"
+        hundred = [f"model.layers.{i}.mlp" for i in range(100)]
+        thousand = [f"model.layers.{i}.mlp" for i in range(1000)]
+
+        self.assertTrue(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, {pattern}, hundred)
+        )
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(self.TEMPLATE, {pattern}, thousand)
+        )
+        self.assertFalse(
+            _ckpt_base_matches_regex_exclude(self.TEMPLATE, {pattern}, thousand)
+        )
+
+    def test_substring_pattern_does_not_cover_every_instance(self):
+        r"""`re:model\.layers\.[01]` matches as a substring, so it can hit every
+        probe while naming only two layers. Against the real instances it is
+        correctly read as not covering the template."""
+        concrete = [f"model.layers.{i}.mlp" for i in range(10)]
+
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(
+                self.TEMPLATE, {r"re:model\.layers\.[01]"}, concrete
+            )
+        )
+
+    def test_no_concrete_names_keeps_the_probe_behaviour(self):
+        self.assertTrue(
+            _ckpt_base_matches_quant_exclude(
+                self.TEMPLATE, {r"re:^model\.layers\.\d+\.mlp$"}
+            )
+        )
+        self.assertFalse(
+            _ckpt_base_matches_quant_exclude(
+                self.TEMPLATE, {r"re:^model\.layers\.\d{1,2}\.mlp$"}
+            )
+        )
+
     def test_unbounded_digit_quantifiers_cover_the_template(self):
         for pattern in (
             r"re:^model\.layers\.\d+\.mlp$",
