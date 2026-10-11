@@ -1384,15 +1384,15 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                 if cpu_tables
                 else [shard.to(device) for shard in embedding.shards]
             ),
-            embedding.vocab_sizes,
-            embedding.offsets,
-            embedding.multipliers,
+            embedding.vocab_sizes.to(device),
+            embedding.offsets.to(device),
+            embedding.multipliers.to(device),
             ngram_size=embedding.ngram_size,
             eos_token_id=embedding.eos_token_id,
         )
-        gpu_embedding.vocab_sizes = gpu_embedding.vocab_sizes.to(device)
-        gpu_embedding.offsets = gpu_embedding.offsets.to(device)
-        gpu_embedding.multipliers = gpu_embedding.multipliers.to(device)
+        if cpu_tables and os.environ.get("RTP_LLM_QWEN4_PLE_CPU_UVA", "0") == "1":
+            self.assertTrue(gpu_embedding._cpu_uva_enabled)
+            self.assertTrue(all(shard.is_pinned() for shard in gpu_embedding.shards))
         self.ple = Qwen4ExpPLELayer(
             gpu_embedding,
             self.ple.key_proj.to(device),
