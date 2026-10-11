@@ -12,7 +12,7 @@
 
 ## 源层只生成内容
 
-注册表包含真实流量的 v2/v3 和合成流量入口。功能场景内联 `requests:` 不变。
+真实流量通过统一 `trace/prefix_lineage` 入口加载，codec 由数据内容确定；合成流量的版本指定生成算法。功能场景内联 `requests:` 不变。
 
 | 源 | 数据 | 时间字段 | 口径 |
 |---|---|---|---|
@@ -20,7 +20,11 @@
 | `trace/prefix_lineage/2` | SHA 固定的 XZ 列式模型 | 原始相对毫秒 | 实测前缀结构；token 长度块对齐有损 |
 | `synthetic/realistic/1` | seed、长度分布、族/会话、精确块 | 请求序号 | 参数分布；客户端负责节奏 |
 
-场景通过 YAML 声明的 source specification，使用注册表将匿名模型或参数化源物化到运行目录。
+场景通过 YAML 声明的 source specification 将匿名模型或参数化源物化到运行目录。真实流量只需 `kind`、`model`、`parameters`，不必重复填写数据版本。可选 `version` 是一致性断言：与文件内容不一致即失败，不能强制换解码器。
+
+`traffic.codecs.decode_model` 从 v2 二进制 magic 或 v3 envelope 的版本识别格式，并恢复统一 `LineageModel`。不根据文件名、长度是否恰好对齐或解码异常回退猜测。未知版本、损坏数据和 manifest 冲突均拒绝。物化 manifest 同时保存 `requested_source`、包含实际版本的 `source` 和 `source_codec`，自动加载仍保留可复现的格式证据。
+
+增加采集格式时在 codec 层实现并注册解码器，转换和场景不维护版本名单。未来含输出长度的格式还需在统一事件模型中明确实测输出字段及缺失值语义，并定义实测长度与输出采样策略的选择；自动识别格式不会把当前采样长度解释成实测长度。
 `TRACE_FILE` 只作为生成后的 Java 发送器输入，不能指定原始日志。未知版本直接拒绝。
 
 ### Lineage v3

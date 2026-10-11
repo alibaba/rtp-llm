@@ -28,7 +28,6 @@ parameters:
     source:
       kind: trace
       model: prefix_lineage
-      version: '2'
       parameters:
         path: ../../data/traffic_trace/glm-5.3_20260921_2126_3h.xz
         sha256: 241ac71c5bde834afd9dc656fefae6462c6f99767a203b54bba21059e9948f04

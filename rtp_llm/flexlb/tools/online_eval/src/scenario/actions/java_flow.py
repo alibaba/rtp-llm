@@ -8,7 +8,7 @@ from pathlib import Path
 
 from runtime.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
 from runtime.load_client import client_environment
-from traffic.traffic_source import materialize
+from traffic.traffic_source import materialize, SourceSpecification
 from traffic.contracts import java_client_priority
 
 from runtime.java_client import ClientOps
@@ -38,6 +38,7 @@ def _start_validate(params, plan):
         raise ValueError("invalid flow polling interval")
     if "max_requests" in p and (type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 1000000):
         raise ValueError("max_requests must be a positive bounded request count")
+    SourceSpecification.read(p["source"])
     client, _ = client_environment(java_client_priority(p["source"], p["client"]))
     if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
         raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")

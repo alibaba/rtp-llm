@@ -59,13 +59,8 @@ def _ha_validate(params, plan):
     if "source" in p:
         from traffic.contracts import source_priority
         source_priority(p["source"])
-        source = p["source"]
-        if (
-            not isinstance(source, dict)
-            or set(source) != {"kind", "model", "version", "parameters"}
-            or (source["kind"], source["model"], source["version"])
-            not in {("trace", "prefix_lineage", "2"), ("trace", "prefix_lineage", "3")}
-        ):
+        from traffic.traffic_source import SourceSpecification
+        if not SourceSpecification.read(p["source"]).is_lineage:
             raise ValueError("HA source must be a pinned real prefix lineage trace")
     if "max_requests" in p and (
         "source" not in p
