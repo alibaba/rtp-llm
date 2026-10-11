@@ -274,6 +274,10 @@ def chunk_gated_delta_rule_flydsl_with_cache_store(
         raise ValueError(
             f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
         )
+    # Same combo-buffer contract as chunk_gated_delta_rule: own the storage
+    # before the identity-keyed tensor_cache sees it.
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.clone()
     if cu_seqlens is not None and initial_state is not None:
         expected_states = len(cu_seqlens) - 1
         if initial_state.shape[0] != expected_states:
@@ -515,6 +519,15 @@ def chunk_gated_delta_rule(
     assert (
         len(beta.shape) == 3
     ), "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
+
+    # cu_seqlens may be a view of the C++-owned combo buffer, which the next
+    # request rewrites in place. The tensor_cache decorators inside keyed on
+    # tensor identity would then hand back chunk tables built for a previous
+    # request's lengths, and the Triton kernels index out of bounds (illegal
+    # memory access a few requests later). Own the storage so identity again
+    # implies content.
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.clone()
 
     if head_first:
         raise DeprecationWarning(
