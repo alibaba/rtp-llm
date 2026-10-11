@@ -1,5 +1,7 @@
 """Continuous Java traffic across a concurrent Prefill scale-in."""
 
+from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
+
 import math
 from concurrent.futures import ThreadPoolExecutor
 
@@ -55,11 +57,11 @@ def _affinity_transition(ctx, value, deadline):
         return affinity_request(ctx, deadline, payload)
 
     before = request()
-    if before.get("maxExtraTtftMs") != 1000000000:
+    if before.get("maxExtraTtftMs") != SHARED_WARMUP_AFFINITY_MS:
         raise ValueError("unexpected warmup affinity policy")
-    update = request(dict(expectedMaxExtraTtftMs=1000000000, maxExtraTtftMs=value))
+    update = request(dict(expectedMaxExtraTtftMs=SHARED_WARMUP_AFFINITY_MS, maxExtraTtftMs=value))
     readback = request()
-    if update.get("before") != 1000000000 or update.get("maxExtraTtftMs") != value or readback.get("maxExtraTtftMs") != value:
+    if update.get("before") != SHARED_WARMUP_AFFINITY_MS or update.get("maxExtraTtftMs") != value or readback.get("maxExtraTtftMs") != value:
         raise ValueError("affinity intervention readback mismatch")
     return dict(before=before, update=update, readback=readback)
 

@@ -1,5 +1,7 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
+from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
+
 import math
 from input_contract import finite_number, NumberRule
 from cases.numeric_parameters import (
@@ -206,7 +208,7 @@ def validate_criteria(params, plan):
 
     for profile in plan.profiles:
         resolved = environment(plan.environment, plan.path, profile)["resolved_config"]
-        if resolved["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"] != 1000000000:
+        if resolved["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"] != SHARED_WARMUP_AFFINITY_MS:
             raise ValueError("shared warmup requires cache affinity 1000000000")
         stale_ms = resolved["workerRegistry"]["health"]["statusStaleAfterMs"]
         if p["topology_timeout_s"] * 1000 <= stale_ms:

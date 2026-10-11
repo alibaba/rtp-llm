@@ -1,5 +1,7 @@
 """Cache-collapse decisions from frozen, identity-preserving evidence."""
 
+from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
+
 import math
 from bisect import bisect_right
 
@@ -247,8 +249,8 @@ def analyze(evidence):
     errors = list(evidence.get("errors", []))
     if "post_affinity_ms" in p:
         transition = evidence.get("affinity_transition", {})
-        if (transition.get("before", {}).get("maxExtraTtftMs") != 1000000000
-                or transition.get("update", {}).get("before") != 1000000000
+        if (transition.get("before", {}).get("maxExtraTtftMs") != SHARED_WARMUP_AFFINITY_MS
+                or transition.get("update", {}).get("before") != SHARED_WARMUP_AFFINITY_MS
                 or transition.get("update", {}).get("maxExtraTtftMs") != p["post_affinity_ms"]
                 or transition.get("readback", {}).get("maxExtraTtftMs") != p["post_affinity_ms"]):
             errors.append("affinity intervention evidence missing or mismatched")
