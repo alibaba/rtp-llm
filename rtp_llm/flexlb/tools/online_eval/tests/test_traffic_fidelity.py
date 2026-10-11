@@ -133,3 +133,17 @@ class TrafficFidelityTest(unittest.TestCase):
 
 
 if __name__=='__main__':unittest.main()
+
+
+def test_shape_diagnostics_reject_invalid_observations_and_use_declared_bins():
+    import pytest
+    from analysis.traffic_fidelity import histogram, summarize, correlation, BINS
+    assert correlation([], []) is None
+    for shape in [dict(blocks=[], shared=[], families=[]),
+                  dict(blocks=[0], shared=[0], families=[1])]:
+        with pytest.raises(ValueError, match='positive blocks'):
+            summarize(shape)
+    with patch.dict(BINS, length_bins=8, depth_bins=4):
+        grid = histogram(dict(blocks=[1, 4096], shared=[0, 2000]))
+        assert len(grid) == 8 and all(len(row) == 4 for row in grid)
+        assert sum(map(sum, grid)) == 2

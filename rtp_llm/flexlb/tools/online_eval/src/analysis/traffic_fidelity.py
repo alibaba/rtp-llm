@@ -35,6 +35,10 @@ def ks(a, b):
 
 
 def correlation(x, y):
+    if not x or not y:
+        return None
+    if len(x) != len(y):
+        raise ValueError("correlation requires paired observations")
     mx, my = sum(x)/len(x), sum(y)/len(y)
     vx = sum((v-mx)**2 for v in x)
     vy = sum((v-my)**2 for v in y)
@@ -42,16 +46,23 @@ def correlation(x, y):
 
 
 def histogram(shape):
-    grid = [[0]*16 for _ in range(32)]
+    if (not shape["blocks"] or len(shape["blocks"]) != len(shape["shared"])
+            or any(b <= 0 for b in shape["blocks"])):
+        raise ValueError("shape requires nonempty paired observations with positive blocks")
+    grid = [[0]*BINS["depth_bins"] for _ in range(BINS["length_bins"])]
+    length_span = BINS["length_log2_max"] - BINS["length_log2_min"]
     for b,s in zip(shape['blocks'], shape['shared']):
-        x = min(31,max(0,int((math.log2(b*BLOCK)-9)/12*32)))
-        y = min(15,max(0,int(s/2000*16)))
+        length_bin = int((math.log2(b*BLOCK)-BINS["length_log2_min"]) / length_span * BINS["length_bins"])
+        depth_bin = int(s / BINS["depth_max_blocks"] * BINS["depth_bins"])
+        x = min(BINS["length_bins"]-1, max(0, length_bin))
+        y = min(BINS["depth_bins"]-1, max(0, depth_bin))
         grid[x][y] += 1
     return grid
 
 
 def summarize(shape):
     blocks, shared = shape['blocks'], shape['shared']
+    joint = histogram(shape)
     n = len(blocks)
     return dict(requests=n, input_tokens=distribution([b*BLOCK for b in blocks]),
                 depth_blocks=distribution(shared), cold_fraction=sum(s==0 for s in shared)/n,
@@ -59,7 +70,7 @@ def summarize(shape):
                 families=len(shape['families']), top5=sum(shape['families'][:5])/n,
                 corr_log_length_depth=correlation([math.log2(b*BLOCK) for b in blocks],shared),
                 length_counts=sorted(Counter(b*BLOCK for b in blocks).items()),
-                depth_counts=sorted(Counter(shared).items()), joint_counts=histogram(shape))
+                depth_counts=sorted(Counter(shared).items()), joint_counts=joint)
 
 
 def compare(real, generated):
@@ -98,11 +109,12 @@ def load_capture(path):
                 metadata=metadata,events=events,shape=capture_shape(events))
 
 
-def audit(profile, capture):
+def audit(profile, capture, *, expected=None):
     if capture is None:
         return dict(status='UNAVAILABLE',checks={},note='No capture matches calibration.model_sha256')
     calibration=profile.get('calibration',{})
-    expected=calibrate_capture(capture)
+    if expected is None:
+        expected=calibrate_capture(capture)
     checks={}
     for key,value in expected['parameters'].items():
         if key=='joint_distribution' and profile.get('schema_version',1)==1:
@@ -125,6 +137,7 @@ def calibrate_capture(capture):
 
 
 def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, limits=None, progress=None):
+    """An explicit empty capture_paths disables discovery and fit-source fallback."""
     profile_file=Path(profile_file)
     raw=profile_file.read_bytes(); profile=json.loads(raw)
     resolve(dict(seed=seed,count=1,output_tokens=420),document=profile)
@@ -143,7 +156,7 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
     rows=[]
     for cap in captures:
         selected=calibrate_capture(cap) if refit else profile
-        selected_identity=audit(selected,cap) if refit else identity
+        selected_identity=audit(selected,cap,expected=selected) if refit else identity
         methods={}
         for method in ('independent','joint'):
             if method=='joint' and 'joint_distribution' not in selected['parameters']:

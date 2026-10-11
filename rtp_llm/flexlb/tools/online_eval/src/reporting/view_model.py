@@ -78,7 +78,7 @@ class CurvePresentation:
         if any(type(value[key]) is not str for key in ('source_unit', 'unit', 'color') if key in value):
             raise ValueError('invalid metric unit or color')
         if 'metric_id' in value and type(value['metric_id']) is not str:
-            raise ValueError('curve must bind a declared metric id and labels')
+            raise ValueError('metric_id must be a string')
         if 'hidden' in value and type(value['hidden']) is not bool:
             raise ValueError('invalid metric visibility')
         scale = value.get('scale', 1)

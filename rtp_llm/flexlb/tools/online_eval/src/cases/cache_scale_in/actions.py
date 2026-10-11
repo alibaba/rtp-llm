@@ -200,9 +200,6 @@ def observe(ctx, p, deadline):
         event("observation_end", row)
         flow.stop_sending(deadline)
         event("sending_stopped")
-        evidence["removals"] = [
-            f.result(timeout=max(0.01, deadline.remaining())) for f in futures
-        ]
     except Exception as exc:
         evidence["errors"].append(str(exc))
     finally:

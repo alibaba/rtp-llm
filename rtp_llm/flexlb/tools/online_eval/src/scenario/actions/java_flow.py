@@ -48,7 +48,8 @@ def _start(ctx, p, deadline):
     if ctx.instance["environment"].get("master_test_control", False):
         from runtime.master_control import affinity_request
         initial = affinity_request(ctx, deadline)
-        if initial.get("maxExtraTtftMs") != 1000000000:
+        expected = ctx.instance["environment"]["resolved_config"]["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"]
+        if initial.get("maxExtraTtftMs") != expected:
             raise ValueError("unexpected initial affinity test policy")
         (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
     directory = ctx.artifact_dir / "flows" / p["group_id"]

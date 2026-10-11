@@ -31,7 +31,7 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
         del style['metric_id']
     else:
         style['metric_id'] = metric_id
-    message = 'curve must bind'
+    message = 'metric_id must be a string' if isinstance(metric_id, (list, dict)) else 'curve must bind'
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match=message):
             view(filename)
