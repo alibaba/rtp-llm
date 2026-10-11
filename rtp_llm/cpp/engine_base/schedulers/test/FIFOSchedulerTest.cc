@@ -417,7 +417,7 @@ TEST_F(FIFOSchedulerTest, testCheckInputLengthIgnoresBatchSizeFanOut) {
 }
 
 TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
-    auto schedule_two_prefills = [](bool cp_force_single_prefill) {
+    auto schedule_two_prefills = [](bool cp_force_single_prefill, int tp_size = 2) {
         CacheConfig                     cache_config  = makeMhaCacheConfig(1, 4, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
         std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
         EXPECT_TRUE(cache_manager->init());
@@ -434,6 +434,8 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
         ParallelismConfig   parallelism_config;
         ModelSpecificConfig model_specific_config;
         parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+        parallelism_config.tp_size                  = tp_size;
+        EXPECT_EQ(parallelism_config.local_cp_enabled(), tp_size > 1);
         FIFOScheduler scheduler(
             runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
 
@@ -453,6 +455,7 @@ TEST_F(FIFOSchedulerTest, testCpForceSinglePrefillConfig) {
 
     ASSERT_EQ(schedule_two_prefills(true), 1);
     ASSERT_EQ(schedule_two_prefills(false), 2);
+    ASSERT_EQ(schedule_two_prefills(true, 1), 2);
 }
 
 // ---------------------------------------------------------------------------
