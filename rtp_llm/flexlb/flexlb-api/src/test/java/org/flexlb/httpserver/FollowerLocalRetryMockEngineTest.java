@@ -9,8 +9,8 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
+import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
-import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Timeout;
@@ -19,13 +19,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 /** Real scheduler, dispatcher and Netty engine RPCs; only engine compute and discovery are simulated. */
 class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
@@ -34,7 +30,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
     @Timeout(value = 20, unit = TimeUnit.SECONDS)
     void followerRecoveryDispatchesExactlyOnceToMockEngine(String failure) throws Exception {
         RouteService remoteRoutes = mock(RouteService.class);
-        RouteService localRoutes = new RouteService(scheduler, mock(TheoryCacheHitReporter.class));
+        RouteService localRoutes = new RouteService(scheduler, mock(RecentCacheKeyTraceReporter.class));
         try (Node oldMaster = new Node("10.0.0.1", remoteRoutes);
              Node follower = new Node("10.0.0.2", localRoutes)) {
             when(follower.leadership.getMasterHostIpPort()).thenReturn(oldMaster.httpAddress());
@@ -49,7 +45,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
             long requestId = 91_001L;
             var original = createBalanceContext(requestId);
             var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                    .setRequestId(Long.toString(requestId)).setSeqLen(128).setMaxNewTokens(8)
+                    .setRequestId(requestId).setSeqLen(128).setMaxNewTokens(8)
                     .setNumBeams(1).setModel("mock-model")
                     .setGenerateInput(original.getGenerateInputPb()).build();
             ManagedChannel frontend = NettyChannelBuilder.forAddress("127.0.0.1", follower.server.getPort())
@@ -60,7 +56,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
                 assertTrue(response.getSuccess(), response.getErrorMessage());
                 assertTrue(response.getEnqueuedByMaster());
                 assertTrue(response.getLifecycle().getBatchId() > 0);
-                assertEquals(Long.toString(requestId), response.getLifecycle().getRequestId());
+                assertEquals(requestId, response.getLifecycle().getRequestId());
                 assertEquals(1, mockPrefillWorker.getEnqueueCount(), "recovery must dispatch exactly once");
                 assertEquals(0, mockDecodeWorker.getEnqueueCount());
                 verify(remoteRoutes, never()).route(any());

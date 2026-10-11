@@ -26,8 +26,8 @@ public final class RandomStrategy {
         this.workerDirectory = workerDirectory;
     }
 
-    public SelectedRole select( BalanceContext context, RoleType role, String group) {
-        context.beginRoutingAttempt(role);
+    public SelectedRole select(
+            BalanceContext context, RoleType role, String group) {
         if (role != RoleType.VIT) {
             throw new IllegalArgumentException(
                     "RANDOM endpoint selection is supported only for VIT");
@@ -55,7 +55,6 @@ public final class RandomStrategy {
                 }
                 WorkerStatus.EngineObservation engine =
                         status.committedEngineObservation();
-                context.recordSelectionReason(role, "RANDOM");
                 WorkerEndpoint.GenerationPin selectedPin = pin;
                 pin = null;
                 return selected(
@@ -79,7 +78,7 @@ public final class RandomStrategy {
             WorkerEndpoint.GenerationPin pin,
             WorkerStatus.TopologySnapshot topology,
             WorkerStatus.EngineObservation engine,
-            String requestId) {
+            long requestId) {
         try {
             ServerStatus result = new ServerStatus();
             result.setSuccess(true);
@@ -90,8 +89,6 @@ public final class RandomStrategy {
             result.setHttpPort(topology.port());
             result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
             result.setDpRank(engine.dpRank());
-            result.setSelectedEngineIndex(
-                    topology.engineIndex(), topology.multiEngineNum());
 
             WorkerEndpoint.GenerationPin owned = pin;
             pin = null;

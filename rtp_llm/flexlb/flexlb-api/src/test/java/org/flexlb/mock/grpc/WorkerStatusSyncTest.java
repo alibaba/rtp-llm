@@ -1,9 +1,7 @@
 package org.flexlb.mock.grpc;
 
-import com.google.protobuf.ByteString;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.mock.FlexLBMockTestBase;
@@ -58,13 +56,6 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
 
     private static final long SYNC_TIMEOUT_MS = 5000;
 
-    @Test
-    void nonNumericRoutingIdDoesNotInventAnEngineInputId() {
-        var context = createBalanceContext("request-a");
-        assertEquals("request-a", context.getRequestId());
-        assertEquals(ByteString.EMPTY, context.getGenerateInputPb());
-    }
-
     @Override
     protected MockWorkerBehavior createPrefillBehavior() {
         return MockWorkerBehavior.builder()
@@ -81,8 +72,8 @@ class WorkerStatusSyncTest extends FlexLBMockTestBase {
     @Timeout(20)
     void workerStatusSync_masterPerceivesConcurrencyChange() throws Exception {
         // 1. Submit request — normal operation with concurrency=10
-        CompletableFuture<Response> future = submitRequest("30001");
-        Response ackResponse = future.get(5, TimeUnit.SECONDS);
+        CompletableFuture<org.flexlb.dao.loadbalance.Response> future = submitRequest(30001);
+        org.flexlb.dao.loadbalance.Response ackResponse = future.get(5, TimeUnit.SECONDS);
         assertTrue(ackResponse.isSuccess(), "Request should succeed with concurrency=10");
 
         // 2. Trigger status sync via gRPC — first call (concurrency=10)

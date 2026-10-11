@@ -1,10 +1,9 @@
 package org.flexlb.service.monitor;
 
 import io.netty.channel.EventLoopGroup;
-import org.flexlb.cache.telemetry.CacheMetricsReporter;
-import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -30,8 +29,6 @@ class EngineHealthReporterSelectionMetricTest {
     @Mock
     private CacheMetricsReporter cacheMetricsReporter;
     @Mock
-    private CacheMatchConfiguration cacheMatchConfiguration;
-    @Mock
     private EngineGrpcClient engineGrpcClient;
     @Mock
     private LoopResources loopResources;
@@ -52,8 +49,8 @@ class EngineHealthReporterSelectionMetricTest {
         when(loopResources.onServerSelect(true)).thenReturn(serverSelector);
         when(engineGrpcClient.getEventLoopGroup()).thenReturn(grpcEventLoop);
         reporter = new EngineHealthReporter(
-                monitor, cacheMetricsReporter, engineGrpcClient,
-                loopResources, workerDirectory);
+                monitor, cacheMetricsReporter, engineGrpcClient, loopResources,
+                workerDirectory);
     }
 
     @Test
@@ -69,10 +66,10 @@ class EngineHealthReporterSelectionMetricTest {
     @Test
     void reportsSelectedPrefillEstimatesWithDeliveryMode() {
         reporter.reportPrefillSelectedEstimates(
-                RoleType.PREFILL, "10.0.0.1:8080@0", "NON_BATCH", 1_250L, 400L);
+                RoleType.PREFILL, "10.0.0.1", "NON_BATCH", 1_250L, 400L);
 
         FlexMetricTags tags = FlexMetricTags.of(
-                "engineIp", "10.0.0.1:8080@0",
+                "engineIp", "10.0.0.1",
                 "role", "PREFILL",
                 "delivery_mode", "NON_BATCH");
         verify(monitor).report(PREFILL_SELECTED_ESTIMATED_TTFT_MS, tags, 1_250.0);

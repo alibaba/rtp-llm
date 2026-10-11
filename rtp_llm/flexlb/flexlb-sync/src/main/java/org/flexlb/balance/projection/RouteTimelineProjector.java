@@ -19,7 +19,7 @@ final class RouteTimelineProjector {
     private static final String INVALID_PREDICTION_DETAIL =
             "PREDICTOR_RETURNED_INVALID_VALUE";
     private final PredictionBoundary predictions = new PredictionBoundary();
-    private String requestId;
+    private long requestId;
     private int priority;
     private long enqueuedAtMs;
     private long expiresAtMs;
@@ -32,7 +32,7 @@ final class RouteTimelineProjector {
     }
 
     void reset(
-            String requestId,
+            long requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -165,7 +165,7 @@ final class RouteTimelineProjector {
                 }
                 continue;
             }
-            if (item.requestId().equals(requestId)) {
+            if (item.requestId() == requestId) {
                 return unavailable("INCOMING_ALREADY_ACTIVE");
             }
             eligibleActive.add(item);
@@ -285,14 +285,14 @@ final class RouteTimelineProjector {
     }
 
     private static boolean containsCommittedRequest(
-            WorkSnapshot committed, String requestId) {
+            WorkSnapshot committed, long requestId) {
         return committed.containsRequest(requestId);
     }
 
     private static boolean containsActiveRequest(
-            QueueSnapshot queue, String requestId) {
+            QueueSnapshot queue, long requestId) {
         for (GroupPlanner.Item item : queue.activeItems()) {
-            if (item.requestId().equals(requestId)) {
+            if (item.requestId() == requestId) {
                 return true;
             }
         }

@@ -5,8 +5,8 @@ import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.dao.route.RoleType;
 
 import java.util.List;
-import java.util.OptionalDouble;
 import java.util.OptionalLong;
+import java.util.OptionalDouble;
 
 /** Projects one incoming route against immutable, coherently captured inputs. */
 public final class RouteProjection {
@@ -41,6 +41,7 @@ public final class RouteProjection {
                                      Predictions predictions, GroupPlanning planning) {
             return service(plan, predictions);
         }
+
     }
 
     /**
@@ -67,7 +68,7 @@ public final class RouteProjection {
 
         default long itemDurationMs(long seqLen, long hitCache) {
             return itemDurationMs(new GroupPlanner.Item(
-                    "", 0, 0L, 0L, Long.MAX_VALUE,
+                    0L, 0, 0L, 0L, Long.MAX_VALUE,
                     seqLen, hitCache));
         }
 
@@ -83,9 +84,10 @@ public final class RouteProjection {
         default long singletonBatchDurationMs(
                 long seqLen, long hitCache) {
             return batchDurationMs(List.of(new GroupPlanner.Item(
-                    "", 0, 0L, 0L, Long.MAX_VALUE,
+                    0L, 0, 0L, 0L, Long.MAX_VALUE,
                     seqLen, hitCache)));
         }
+
     }
 
     /** Invocation-local lazy service cursor for one exact planned group. */
@@ -118,7 +120,7 @@ public final class RouteProjection {
 
     /** Virtual request evaluated against one frozen endpoint snapshot. */
     public record Probe(
-            String requestId,
+            long requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -307,7 +309,7 @@ public final class RouteProjection {
      */
     public static CandidateView projectView(
             Inputs inputs,
-            String requestId,
+            long requestId,
             int priority,
             long enqueuedAtMs,
             long expiresAtMs,
@@ -337,7 +339,7 @@ public final class RouteProjection {
 
         public CandidateView projectView(
                 Inputs inputs,
-                String requestId,
+                long requestId,
                 int priority,
                 long enqueuedAtMs,
                 long expiresAtMs,

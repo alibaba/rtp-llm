@@ -222,8 +222,9 @@ def category_case_counts(profile: str) -> dict[str, int]:
         # long name overflows the 40-char column.
         if len(fields) >= 2 and fields[1] in CATEGORY_WEIGHTS:
             counts[fields[1]] = counts.get(fields[1], 0) + 1
-    if not counts:
-        raise RuntimeError(f"runner --list produced no cases for profile {profile!r}")
+    missing = [c for c in CATEGORY_WEIGHTS if c not in counts]
+    if missing:
+        raise RuntimeError(f"runner --list produced no rows for: {missing}")
     return counts
 
 
@@ -234,8 +235,9 @@ def list_case_pairs(profile: str) -> list[tuple[str, str]]:
     for fields in _list_rows(profile):
         if len(fields) >= 2 and fields[1] in CATEGORY_WEIGHTS:
             pairs.append((fields[0], fields[1]))
-    if not pairs:
-        raise RuntimeError(f"runner --list produced no cases for profile {profile!r}")
+    missing = [c for c in CATEGORY_WEIGHTS if c not in {cat for _, cat in pairs}]
+    if missing:
+        raise RuntimeError(f"runner --list produced no rows for: {missing}")
     return pairs
 
 
@@ -321,7 +323,7 @@ def family_weights(profile: str) -> dict[str, float]:
     """Per-category total cost = per-case seconds x live case count."""
     counts = category_case_counts(profile)
     return {
-        cat: CATEGORY_WEIGHTS[cat] * count for cat, count in counts.items()
+        cat: per_case * counts.get(cat, 0) for cat, per_case in CATEGORY_WEIGHTS.items()
     }
 
 

@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.Predicate;
+import java.util.function.LongPredicate;
 
 @Component
 public class EndpointRegistry {
@@ -143,7 +143,6 @@ public class EndpointRegistry {
                 RoleType.PREFILL,
                 RoleType.DECODE,
                 RoleType.PDFUSION,
-                RoleType.ENCODER,
                 RoleType.VIT)) {
             maps.put(role, new ConcurrentHashMap<>());
         }
@@ -735,9 +734,10 @@ public class EndpointRegistry {
         }
     }
 
-    private WorkerEndpoint createEndpoint(WorkerStatus status,
-                                          RoleType role,
-                                          WorkerStatus.EngineObservation engineStatus) {
+    private WorkerEndpoint createEndpoint(
+            WorkerStatus status,
+            RoleType role,
+            WorkerStatus.EngineObservation engineStatus) {
         if (role == RoleType.FRONTEND) {
             throw new IllegalArgumentException("Unsupported role: " + role);
         }
@@ -753,14 +753,13 @@ public class EndpointRegistry {
         return switch (role) {
             case PREFILL, PDFUSION -> new PrefillEndpoint(
                     status,
-                    configService::loadBalanceConfig,
+                    configService.loadBalanceConfig(),
                     deliveryStrategy,
                     endpointEvents,
                     reporter,
                     placementAvailability);
             case DECODE -> new DecodeEndpoint(
                     status, endpointEvents, placementAvailability);
-            case ENCODER -> new EncoderEndpoint(status, endpointEvents);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
@@ -768,10 +767,10 @@ public class EndpointRegistry {
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
         try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getMetricIpPort());
+            reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn("Endpoint metric preparation failed: role={}, engine={}",
-                    roleType, status.getMetricIpPort(), telemetryFailure);
+                    roleType, status.getIp(), telemetryFailure);
         }
     }
 
@@ -980,7 +979,7 @@ public class EndpointRegistry {
      *                                  must not acquire request locks or use a historical snapshot
      */
     public void evictExpiredOrphans(long ttlMs,
-                                    Predicate<String> retainForSchedulerCleanup) {
+                                    LongPredicate retainForSchedulerCleanup) {
         endpoints(RoleType.PREFILL).forEach((endpoint, worker) -> {
             PrefillEndpoint ep = (PrefillEndpoint) worker;
             logEndpointEviction(RoleType.PREFILL, endpoint,

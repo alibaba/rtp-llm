@@ -114,7 +114,7 @@ public final class WorkerBatcher {
             if (decode != null) {
                 details.put("decode", Map.of("endpoint", decode.address(), "version", decode.admissionVersion(),
                         "engineLoad", decode.engineLoad(), "totalLoad", decode.totalLoad(),
-                        "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().availableKvAfterReservations()));
+                        "kvTotal", decode.totalKv(), "kvAvailable", decode.placementUsage().hardKvAvailable()));
             }
             cached = Collections.unmodifiableMap(details);
             diagnostics = cached;
@@ -217,7 +217,7 @@ public final class WorkerBatcher {
                     right.priority(), right.enqueueSeq(), right.requestId());
     private static final Comparator<GroupPlanner.Item> FIFO_PROJECTION_ORDER =
             Comparator.comparingLong(GroupPlanner.Item::enqueueSeq)
-                    .thenComparing(GroupPlanner.Item::requestId);
+                    .thenComparingLong(GroupPlanner.Item::requestId);
     private static final GroupPlanner.ItemAccess<ScheduledRequest>
             PLANNER_ITEM_ACCESS = new GroupPlanner.ItemAccess<>() {
                 @Override
@@ -240,7 +240,6 @@ public final class WorkerBatcher {
     private final PrefillEndpoint prefillEndpoint;
     private final EndpointEventProjector endpointEvents;
     private final FlexlbConfig config;
-    private final Supplier<FlexlbConfig> configSupplier;
     /** Zero disables request counting for BATCH; fixed for this endpoint generation. */
     private final long maxOutstandingRequests;
     private final DecisionPolicyConfig fixedWindowDecision;
@@ -309,18 +308,6 @@ public final class WorkerBatcher {
             FlexlbConfig config,
             DeliveryStrategy deliveryStrategy,
             EndpointEventProjector endpointEvents) {
-        this(key, prefillEp, () -> config, deliveryStrategy, endpointEvents);
-    }
-
-    public WorkerBatcher(
-            String key,
-            PrefillEndpoint prefillEp,
-            Supplier<FlexlbConfig> configSupplier,
-            DeliveryStrategy deliveryStrategy,
-            EndpointEventProjector endpointEvents) {
-        this.configSupplier = Objects.requireNonNull(configSupplier, "configSupplier");
-        FlexlbConfig config = Objects.requireNonNull(
-                configSupplier.get(), "loadBalanceConfig");
         this.key = key;
         this.prefillEndpoint = prefillEp;
         this.config = config;
@@ -911,7 +898,7 @@ public final class WorkerBatcher {
     private long collectionWindowMs() {
         return fixedWindowDecision == null
                 ? 0L : Math.max(0L,
-                configSupplier.get().decisionPolicy().getMaxCollectionWaitMs());
+                fixedWindowDecision.getMaxCollectionWaitMs());
     }
 
     private long predictedExecutionBudgetMs() {
@@ -1050,8 +1037,7 @@ public final class WorkerBatcher {
     private record ProjectionVersion(
             long queue,
             long schedulingInputs,
-            long ownership,
-            long collectionWindowMs) {
+            long ownership) {
     }
 
     /** Captured under queueLock; the shared result is built without that lock. */
@@ -1112,16 +1098,14 @@ public final class WorkerBatcher {
     private boolean isCurrentProjection(ProjectionVersion version) {
         return version.queue() == queueVersion.get()
                 && version.schedulingInputs() == schedulingInputVersion
-                && version.ownership() == prefillState.mutationVersion()
-                && version.collectionWindowMs() == collectionWindowMs();
+                && version.ownership() == prefillState.mutationVersion();
     }
 
     /** Caller holds queueLock. */
     private ProjectionSource captureProjectionSourceUnderLock() {
-        long fixedWaitMs = collectionWindowMs();
         ProjectionVersion version = new ProjectionVersion(
                 queueVersion.get(), schedulingInputVersion,
-                prefillState.mutationVersionUnderLock(), fixedWaitMs);
+                prefillState.mutationVersionUnderLock());
         BatchCapacitySnapshot capacity = batchCapacitySnapshot();
         PrefillState.Snapshot ownership = prefillState.snapshotUnderLock();
         return new ProjectionSource(
@@ -1129,7 +1113,7 @@ public final class WorkerBatcher {
                 new GroupPlanner.Constraints(
                         maxDecisionRequests(), capacity.batchTokenCapacity(),
                         capacity.batchKvCapacity(), predictedExecutionBudgetMs(),
-                        fixedWaitMs),
+                        collectionWindowMs()),
                 ownership.activeItems().isEmpty() ? null : admissionBlockUnderLock());
     }
 
@@ -1144,9 +1128,6 @@ public final class WorkerBatcher {
         long engineCapacity = engineStatus.maxBatchTokensSize();
         if (engineCapacity <= 0) {
             engineCapacity = engineStatus.maxSeqLen();
-        }
-        if (engineCapacity <= 0) {
-            engineCapacity = config.getFallbackBatchTokenCapacity();
         }
         long batchTokenCapacity = positiveOrUnlimited(engineCapacity);
         long total = engineStatus.totalKvCacheTokens();
@@ -1202,20 +1183,6 @@ public final class WorkerBatcher {
             WorkSnapshot precedingWork) {
         Throwable deliveryFailure = null;
         try {
-            String groupId = java.util.UUID.randomUUID().toString();
-            long committedAtMs = System.currentTimeMillis();
-            for (ScheduledRequest item : transaction.items()) {
-                var context = item.ctx();
-                context.setDecisionGroup(new org.flexlb.dao.pv.DecisionGroup(
-                        groupId,
-                        context.getConfig().decisionPolicy().getType().name(),
-                        context.getConfig().getDispatcher().getType().name(),
-                        item.prefillEp().getStatus().getMetricIpPort(),
-                        transaction.items().size(),
-                        decisionReason,
-                        committedAtMs,
-                        Math.max(0L, committedAtMs - item.enqueuedAtMs())));
-            }
             transaction.handoff(decisionReason, remainingQueueDepth, precedingWork);
         } catch (Throwable failure) {
             deliveryFailure = failure;
@@ -1623,6 +1590,7 @@ public final class WorkerBatcher {
         }
 
         nowMs = now();
+        fixedWaitMs = collectionWindowMs();
         capacity = batchCapacitySnapshot();
         batchMaxCount = maxDecisionRequests();
         predictThresholdMs = predictedExecutionBudgetMs();

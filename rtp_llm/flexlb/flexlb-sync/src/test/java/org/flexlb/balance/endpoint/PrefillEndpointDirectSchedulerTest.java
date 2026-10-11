@@ -31,9 +31,8 @@ class PrefillEndpointDirectSchedulerTest {
         var runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(role, "127.0.0.82", 8082, 9082),
-                () -> config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class),
-                new org.flexlb.balance.scheduler.PlacementAvailability());
+                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
+                mock(BatchSchedulerReporter.class));
         endpoint.startGeneration();
         try (var executor = Executors.newFixedThreadPool(8)) {
             List<Future<PrefillState.ReservationResult<PrefillState.RouteReservation>>> futures =
@@ -87,11 +86,10 @@ class PrefillEndpointDirectSchedulerTest {
         PrefillEndpoint endpoint = assertDoesNotThrow(() -> {
             PrefillEndpoint created = new PrefillEndpoint(
                     workerStatus(),
-                    () -> config,
+                    config,
                     EndpointTestSupport.routeStrategy(requestRuntime),
                     requestRuntime.events(),
-                    mock(BatchSchedulerReporter.class),
-                new org.flexlb.balance.scheduler.PlacementAvailability());
+                    mock(BatchSchedulerReporter.class));
             created.startGeneration();
             return created;
         });
@@ -100,7 +98,7 @@ class PrefillEndpointDirectSchedulerTest {
 
     private static org.flexlb.balance.scheduler.ScheduledRequest item(long requestId) {
         var item = mock(org.flexlb.balance.scheduler.ScheduledRequest.class);
-        org.mockito.Mockito.when(item.requestId()).thenReturn(Long.toString(requestId));
+        org.mockito.Mockito.when(item.requestId()).thenReturn(requestId);
         org.mockito.Mockito.when(item.seqLen()).thenReturn(128L);
         return item;
     }

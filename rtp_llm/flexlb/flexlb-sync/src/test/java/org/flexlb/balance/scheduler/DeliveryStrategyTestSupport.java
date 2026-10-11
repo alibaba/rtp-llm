@@ -74,15 +74,6 @@ public final class DeliveryStrategyTestSupport {
             long enqueuedAtMs,
             long seqLen,
             long hitCache) {
-        return item(Long.toString(requestId), priority, enqueuedAtMs, seqLen, hitCache);
-    }
-
-    static ScheduledRequest item(
-            String requestId,
-            int priority,
-            long enqueuedAtMs,
-            long seqLen,
-            long hitCache) {
         ScheduledRequest item = Mockito.mock(ScheduledRequest.class);
         Mockito.when(item.requestId()).thenReturn(requestId);
         Mockito.when(item.priority()).thenReturn(priority);
@@ -160,7 +151,7 @@ public final class DeliveryStrategyTestSupport {
                 routeReservations = new IdentityHashMap<>();
         private final Map<ScheduledRequest, DecodeEndpoint.EngineDispatchPermit>
                 permits = new IdentityHashMap<>();
-        private final Map<String, ScheduledRequest> itemsByRequestId =
+        private final Map<Long, ScheduledRequest> itemsByRequestId =
                 new HashMap<>();
         private final List<PrefillState.CommittedHandoff> handoffs =
                 new ArrayList<>();
@@ -187,7 +178,7 @@ public final class DeliveryStrategyTestSupport {
 
         void bind(ScheduledRequest... items) {
             for (ScheduledRequest item : items) {
-                String requestId = item.requestId();
+                long requestId = item.requestId();
                 itemsByRequestId.put(requestId, item);
                 DecodeEndpoint.ReservationHandle reservation = Mockito.mock(
                         DecodeEndpoint.ReservationHandle.class);
@@ -253,7 +244,7 @@ public final class DeliveryStrategyTestSupport {
         }
 
         private DecodeEndpoint.EngineDispatchPermitAcquisition acquirePermit(
-                String requestId) {
+                long requestId) {
             if (permitAttempt++ == rejectPermitAt) {
                 return new DecodeEndpoint.EngineDispatchPermitAcquisition(
                         DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,

@@ -1,7 +1,6 @@
 package org.flexlb.discovery;
 
 import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.dao.route.Endpoint;
 
 import java.util.List;
 
@@ -13,35 +12,20 @@ import java.util.List;
 public interface ServiceDiscovery {
 
     /**
-     * Validate an endpoint and initialize provider-specific resources.
+     * Synchronously get host list by service address
      *
-     * @param endpoint Endpoint and its discovery configuration
-     */
-    void validate(Endpoint endpoint);
-
-    /**
-     * Synchronously get the host list for an endpoint.
-     *
-     * @param endpoint Endpoint and its discovery configuration
+     * @param address Service address
      * @return Host list
      */
-    List<WorkerHost> getHosts(Endpoint endpoint);
-
-    default List<WorkerHost> getHosts(String address) {
-        throw new UnsupportedOperationException("address-only discovery is not supported");
-    }
+    List<WorkerHost> getHosts(String address);
 
     /**
-     * Listen for host changes for an endpoint.
+     * Listen for host changes at service address
      *
-     * @param endpoint Endpoint and its discovery configuration
+     * @param address  Service address
      * @param listener Host change listener
      */
-    void listen(Endpoint endpoint, ServiceHostListener listener);
-
-    default void listen(String address, ServiceHostListener listener) {
-        throw new UnsupportedOperationException("address-only discovery is not supported");
-    }
+    void listen(String address, ServiceHostListener listener);
 
     /**
      * Stop all listeners

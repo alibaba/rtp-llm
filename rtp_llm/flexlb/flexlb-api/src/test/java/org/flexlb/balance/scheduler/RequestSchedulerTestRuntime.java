@@ -9,7 +9,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -86,7 +85,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 placementAvailability);
         this.router = new BindingRouter(new org.flexlb.sync.status.WorkerDirectory(registry), configService, lifecycle);
         var cancelChannel = org.mockito.Mockito.mock(org.flexlb.balance.eviction.EngineCancelChannel.class);
-        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter);
+        var preemption = new org.flexlb.balance.eviction.DecodePreemptionCoordinator(cancelChannel, lifecycle);
         this.scheduler = new RequestScheduler(
                 configService,
                 router,
@@ -117,20 +116,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
 
     /** Return the canonical request future retained by the exact test slot. */
     public CompletableFuture<Response> requestFuture(long requestId) {
-        return requestFuture(Long.toString(requestId));
-    }
-
-    public CompletableFuture<Response> requestFuture(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         return slot == null ? null : slot.future();
     }
 
     /** Return the exact item currently owned by a fixture request slot. */
     public ScheduledRequest activeItem(long requestId) {
-        return activeItem(Long.toString(requestId));
-    }
-
-    public ScheduledRequest activeItem(String requestId) {
         RequestSlot slot = lifecycle.requestSlot(requestId);
         if (slot == null) {
             return null;
@@ -166,11 +157,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         Objects.requireNonNull(observation, "observation");
         RoleType role = observation.role();
         WorkerEndpoint endpoint = registry.get(
-                role, status.getLogicalIpPort(), status);
+                role, status.getIpPort(), status);
         if (endpoint == null) {
             throw new IllegalStateException(
                     "status generation has no published endpoint: "
-                            + status.getLogicalIpPort() + "#" + status.getGenerationId());
+                            + status.getIpPort() + "#" + status.getGenerationId());
         }
 
         Runnable projection;
@@ -217,7 +208,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 if (status == null) {
                     continue;
                 }
-                String address = status.getLogicalIpPort();
+                String address = status.getServerIp() + ":" + status.getHttpPort();
                 WorkerEndpoint.GenerationPin pin = registry.capture(
                         status.getRole(), address);
                 if (pin == null) {
@@ -244,7 +235,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 case PREFILL, PDFUSION -> SelectedRole.prefill(
                         pin, status, Math.max(0L, status.getPrefillTime()));
                 case DECODE -> SelectedRole.decode(pin, status);
-                case VIT, ENCODER -> SelectedRole.stateless(pin, status);
+                case VIT -> SelectedRole.stateless(pin, status);
                 case FRONTEND -> throw new IllegalArgumentException(
                         "FRONTEND cannot be a worker route");
             };
@@ -266,11 +257,10 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             // Real constructor dependencies keep Mockito instrumentation out of
             // the selector classes exercised by the bound production router.
             super(new CostBasedPrefillStrategy(workers,
-                            org.mockito.Mockito.mock(org.flexlb.cache.match.CacheAwareService.class),
+                            org.mockito.Mockito.mock(org.flexlb.cache.service.CacheAwareService.class),
                             org.mockito.Mockito.mock(org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new DecodeSelector(workers),
                     new RandomStrategy(workers),
-                    org.mockito.Mockito.mock(EncoderStrategy.class),
                     configs,
                     emptyModelMeta());
         }

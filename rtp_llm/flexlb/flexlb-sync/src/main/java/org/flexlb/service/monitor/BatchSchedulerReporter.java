@@ -16,9 +16,11 @@ import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
-import static org.flexlb.constant.MetricConstant.DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS;
-import static org.flexlb.constant.MetricConstant.DECODE_INPUT_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DECODE_TOTAL_LOAD;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_BATCH_SIZE;
@@ -31,7 +33,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
-import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 
 /**
  * Batch scheduling metrics reporter for FlexLB batch dispatch path.
@@ -40,7 +42,7 @@ import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
  * conflicts with the non-batch path:
  * queue (routing.queue.length + routing.queue.wait.time.ms),
  * dispatch reason (engine.balancing.master.dispatch.reason),
- * tracked scheduler requests and unconfirmed worker requests.
+ * inflight (flexlb.scheduler.inflight.size + health.check.running.task.info.size).
  */
 @Slf4j
 @Component
@@ -81,15 +83,17 @@ public class BatchSchedulerReporter {
         // Inflight — batch count and request count per worker (FlexLB scheduler view, tagged by role)
         monitor.register(INFLIGHT_BATCH_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(TRACKED_REQUEST_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        // Scheduler-level inflight size — uses scheduler-level tags (role=PREFILL, engineIp="scheduler")
+        // Note: the former per-engine app.engine.health.check.local.inflight.size has been removed.
+        monitor.register(SCHEDULER_INFLIGHT_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Batcher queue size — per-engine pending batch request count (FlexLB batcher queue depth)
         monitor.register(BATCHER_QUEUE_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Decode total load and inflight KV reserved — per decode worker (FlexLB scheduler view)
         monitor.register(DECODE_TOTAL_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(DECODE_INPUT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_INFLIGHT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        monitor.register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
         // Inflight TTL expired — count of inflight requests cleaned up by the TTL task, QPS tagged by role
@@ -184,8 +188,9 @@ public class BatchSchedulerReporter {
     // ==================== Inflight metrics ====================
 
     /**
-     * Report the dispatched batch's cache-hit ratio.
-     * Cache-hit tokens and request counts are reported when each request selects its worker.
+     * Report batch-aggregated cache hit metrics via reuse of the existing
+     * {@code cache.hit.count} / {@code cache.hit.ratio} / {@code cache.request.total}
+     * keys registered by {@link CacheMetricsReporter}.
      *
      * @param role        prefill / decode
      * @param engineIp    the selected prefill endpoint IP
@@ -199,7 +204,9 @@ public class BatchSchedulerReporter {
         double hitRatio = hitTokens / (double) totalTokens;
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
+        monitor.report(CACHE_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, tags, hitRatio);
+        monitor.report(CACHE_REQUEST_TOTAL, tags, 1.0);
     }
 
     /**
@@ -224,20 +231,19 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report live Generation requests in the scheduler ledger.
+     * Report scheduler inflight size via {@code flexlb.scheduler.inflight.size}.
+     * <p>Uses an independent metric name (not {@code engine.health.check.local.inflight.size})
+     * because this is a scheduler-level metric with tag schema (role=PREFILL, engineIp="scheduler"),
+     * which differs from EngineHealthReporter's per-engine version tagged by
+     * (model, code, engineIp=real-engine-IP, role). Sharing the same metric name would cause
+     * tag schema conflicts in kmonitor grouping.
+     * Uses role=PREFILL + engineIp=scheduler tags to match the Grafana panel filter.
      */
-    public void reportTrackedRequestCount(int size) {
-        reportTrackedRequestCount(RoleType.PREFILL, size);
-    }
-
-    /**
-     * Report separate scheduler inflight series for Generation (PREFILL) and Encoder.
-     */
-    public void reportTrackedRequestCount(RoleType role, int size) {
+    public void reportSchedulerInflightSize(int size) {
         FlexMetricTags tags = FlexMetricTags.of(
-                "role", role.name(),
+                "role", RoleType.PREFILL.name(),
                 "engineIp", "scheduler");
-        monitor.report(TRACKED_REQUEST_COUNT, tags, size);
+        monitor.report(SCHEDULER_INFLIGHT_SIZE, tags, size);
     }
 
     /**
@@ -258,8 +264,9 @@ public class BatchSchedulerReporter {
      * Replaces the former separate reportPrefillInflightRequestCount and reportDecodeInflightCount.
      */
     public void reportInflightRequestCount(String role, String engineIp, int count) {
-        monitor.report(INFLIGHT_REQUEST_COUNT, FlexMetricTags.ofEngine(engineIp,
-                "role", role, "scope", "worker"), count);
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
+                "role", role);
+        monitor.report(INFLIGHT_REQUEST_COUNT, tags, count);
     }
 
     /**
@@ -324,23 +331,23 @@ public class BatchSchedulerReporter {
     }
 
     /**
-     * Report input plus max_new_tokens for unconfirmed Decode reservations, including queued requests.
+     * Report per-decode-worker inflight KV cache reserved tokens (local inflight reservation not yet confirmed by the engine)
      * via {@code flexlb.decode.inflight.kv.reserved.tokens}.
      */
-    public void reportDecodeInputAndMaxOutputKvReserved(String engineIp, long kvReservedTokens) {
+    public void reportDecodeInflightKvReserved(String engineIp, long kvReservedTokens) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", RoleType.DECODE.name());
-        monitor.report(DECODE_INPUT_AND_MAX_OUTPUT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
+        monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
     }
 
     /**
-     * Report input tokens for unconfirmed Decode reservations, including queued requests.
+     * Report per-decode-worker hard KV cache reserved tokens (hard reservation that cannot be reclaimed)
      * via {@code flexlb.decode.inflight.hard.kv.reserved.tokens}.
      */
-    public void reportDecodeInputKvReserved(String engineIp, long kvReservedTokens) {
+    public void reportDecodeInflightHardKvReserved(String engineIp, long kvReservedTokens) {
         FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", RoleType.DECODE.name());
-        monitor.report(DECODE_INPUT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
+        monitor.report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, kvReservedTokens);
     }
 
     // ==================== Prediction accuracy metrics ====================
@@ -424,8 +431,8 @@ public class BatchSchedulerReporter {
     // ==================== ACK-to-response latency metrics ====================
 
     /**
-     * Report delivery-confirmation-to-response latency (Engine ACK for BATCH, route
-     * publication for NON_BATCH) via {@code app.flexlb.ack.to.response.time.ms}.
+     * Report ACK-to-response latency (from engine EnqueueBatch acknowledgment to schedule
+     * response sent to the client) via {@code app.flexlb.ack.to.response.time.ms}.
      *
      * @param role             prefill / decode
      * @param engineIp         the prefill endpoint IP

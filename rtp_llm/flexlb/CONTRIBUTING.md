@@ -42,10 +42,9 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 ### Prerequisites
 
-- Java 21 (matches `java.version` in `pom.xml`; see `.sdkmanrc` for the recommended distribution)
+- Java 8 or higher
+- Maven 3.6+
 - Git
-
-The project includes the Maven Wrapper (`./mvnw`), so no separate Maven installation is required.
 
 ### Setup
 
@@ -57,15 +56,13 @@ cd flexlb
 
 2. Build the project
 ```bash
-./mvnw clean package -DskipTests
+mvn clean package -DskipTests
 ```
 
 3. Run tests
 ```bash
-./mvnw test
+mvn test
 ```
-
-See [AGENTS.md](AGENTS.md) for the full, authoritative list of build and test commands, including module-scoped builds, single-test runs, and code formatting.
 
 ### Project Structure
 

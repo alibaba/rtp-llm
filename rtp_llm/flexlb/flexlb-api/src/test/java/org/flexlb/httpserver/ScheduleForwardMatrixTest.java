@@ -6,9 +6,7 @@ import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
@@ -64,8 +62,8 @@ import static org.mockito.Mockito.when;
  *       MAX_FORWARD_HOPS=1 negative guards.</li>
  * </ol></p>
  *
- * <p>Transport I/O failures permit local routing. RPC failures without a
- * transport cause retain the terminal error (8511).</p>
+ * <p>Unresolved delivery uses the existing terminal error (8511). Proven unsent
+ * requests may route locally; ambiguous delivery is terminal.</p>
  */
 class ScheduleForwardMatrixTest {
 
@@ -90,7 +88,6 @@ class ScheduleForwardMatrixTest {
 
     // ---- shared mocks for the schedule() matrix ----
     private RouteService routeService;
-    private CacheAwareService cacheAwareService;
     private LBStatusConsistencyService consistency;
     private EngineHealthReporter engineHealthReporter;
     private FlexlbGrpcForwarder grpcForwarder;
@@ -110,9 +107,8 @@ class ScheduleForwardMatrixTest {
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(routingConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
 
-        cacheAwareService = mock(CacheAwareService.class);
 
         service = new FlexlbServiceImpl(
                 routeService,
@@ -122,8 +118,7 @@ class ScheduleForwardMatrixTest {
                 configService,
                 mock(BatchSchedulerReporter.class),
                 mock(ServerScheduleLatencyRecorder.class),
-                mock(RequestSchedulerReporter.class),
-                cacheAwareService);
+                mock(RequestSchedulerReporter.class));
 
         pvLogger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("pvLogger");
         pvAppender = new ListAppender<>();
@@ -199,27 +194,6 @@ class ScheduleForwardMatrixTest {
     }
 
     @Test
-    void connectionResetRoutesLocallyWhileLeaderViewIsStale() {
-        when(consistency.isNeedConsistency()).thenReturn(true);
-        when(consistency.isMaster()).thenReturn(false);
-        when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(
-                CompletableFuture.completedFuture(FlexlbGrpcForwarder.MasterForwardResult.failed(
-                        Status.UNKNOWN.withCause(new java.net.SocketException("Connection reset by peer"))
-                                .asRuntimeException(), LIVE_MASTER)));
-        stubSuccessfulLocalRoute();
-        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
-
-        service.schedule(request(90_007L), observer);
-
-        verify(routeService, times(1)).route(any());
-        verify(grpcForwarder, times(1)).forwardScheduleToMaster(any());
-        verify(grpcForwarder, never()).forwardCancelToMaster(any());
-        assertSuccessfulResponse(observer);
-        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
-        assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
-    }
-
-    @Test
     @Timeout(value = 10, unit = TimeUnit.SECONDS)
     @DisplayName("state ③ MASTER_NULL election window: LOCAL_FALLBACK routes locally, no cancel")
     void state3MasterNullFallsBackToLocalRouting() {
@@ -240,7 +214,6 @@ class ScheduleForwardMatrixTest {
                 .forwardCompensatingCancelToMaster(any(), any(), any(io.opentelemetry.context.Context.class));
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
-        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
@@ -269,7 +242,6 @@ class ScheduleForwardMatrixTest {
 
         // The exact master response object is delivered — byte-for-byte
         // passthrough, the client cannot perceive it talked to a follower.
-        verify(cacheAwareService, never()).updateFromRoutedRequest(any(), any());
         verify(observer, times(1)).onNext(masterResponse);
         verify(observer, times(1)).onCompleted();
         verify(observer, never()).onError(any());
@@ -323,7 +295,6 @@ class ScheduleForwardMatrixTest {
         verify(grpcForwarder, never()).forwardCancelToMaster(any());
         verify(routeService, times(1)).route(any());
         assertSuccessfulResponse(observer);
-        verify(cacheAwareService).updateFromRoutedRequest(any(), any());
         assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
     }
 
@@ -375,7 +346,7 @@ class ScheduleForwardMatrixTest {
         try (RealForwarderFixture fixture = newRealForwarderFixture(LIVE_MASTER)) {
             FlexlbScheduleProtocol.FlexlbScheduleRequestPB alreadyForwardedOnce =
                     FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId("90103")
+                            .setRequestId(90_103L)
                             .setForwardHop(1)
                             .build();
 
@@ -416,39 +387,6 @@ class ScheduleForwardMatrixTest {
         }
     }
 
-    @Test
-    @Timeout(value = 15, unit = TimeUnit.SECONDS)
-    void realConnectionResetFallsBackLocallyWithStaleMasterAddress() throws Exception {
-        try (var listener = new java.net.ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress());
-             var resetExecutor = Executors.newSingleThreadExecutor();
-             RealForwarderFixture fixture = newRealForwarderFixture("127.0.0.1:" + (listener.getLocalPort() - 2))) {
-            var reset = resetExecutor.submit(() -> {
-                try (var socket = listener.accept()) {
-                    socket.setSoTimeout(5000);
-                    socket.getInputStream().read();
-                    socket.setSoLinger(true, 0);
-                }
-                return null;
-            });
-            var result = fixture.forwarder.forwardScheduleToMaster(request(90_105L))
-                    .toCompletableFuture().get(5, TimeUnit.SECONDS);
-            reset.get(5, TimeUnit.SECONDS);
-            assertNull(result.response());
-            when(consistency.isNeedConsistency()).thenReturn(true);
-            when(consistency.isMaster()).thenReturn(false);
-            when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(CompletableFuture.completedFuture(result));
-            stubSuccessfulLocalRoute();
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
-
-            service.schedule(request(90_105L), observer);
-
-            verify(routeService, times(1)).route(any());
-            assertSuccessfulResponse(observer);
-            verify(cacheAwareService).updateFromRoutedRequest(any(), any());
-            assertSinglePvContains("\"scheduleOrigin\":\"LOCAL_FALLBACK\"");
-        }
-    }
-
     // ------------------------------------------------------------------
     // fixtures and helpers
     // ------------------------------------------------------------------
@@ -480,7 +418,7 @@ class ScheduleForwardMatrixTest {
         when(consistencyView.getMasterHostIpPort()).thenReturn(masterHostIpPort);
 
         ConfigService configService = mock(ConfigService.class);
-        when(configService.loadBalanceConfig()).thenReturn(routingConfig());
+        when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
         EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
 
         channelEventLoop = new NioEventLoopGroup(1);
@@ -491,15 +429,9 @@ class ScheduleForwardMatrixTest {
         return new RealForwarderFixture(healthReporter, forwarder);
     }
 
-    private static FlexlbConfig routingConfig() {
-        FlexlbConfig config = org.flexlb.mock.TestFlexlbConfigs.create();
-        config.setDispatcher(DispatcherConfig.nonBatch());
-        return config;
-    }
-
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(Long.toString(requestId))
+                .setRequestId(requestId)
                 .setSeqLen(1024)
                 .build();
     }

@@ -1,17 +1,18 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.scheduler.RequestSlot.PublicationKind;
-import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.util.Logger;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.balance.scheduler.RequestSlot.PublicationKind;
 
-import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import java.util.ArrayDeque;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -81,6 +82,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
         }
     }
 
+
     enum ResponseCompletion { RESPONSE, FAILURE, CANCELLATION }
 
     /** Immutable result of Slot arbitration. Execution never re-enters request decisions. */
@@ -95,6 +97,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
             };
         }
     }
+
 
     private static final int DEFAULT_PUBLISHER_WORKERS = 8;
 
@@ -183,9 +186,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
         try {
             if (delivery.batchEnqueueStartedAtMs() > 0L && delivery.item().ctx().getAckAtMs() > 0L) {
                 reporter.reportDispatchAckTimeMs(org.flexlb.dao.route.RoleType.PREFILL.name(),
-                        delivery.item().prefillEp() == null
-                                ? ""
-                                : delivery.item().prefillEp().getStatus().getMetricIpPort(),
+                        delivery.item().prefillEp() == null ? "" : delivery.item().prefillEp().getIp(),
                         Math.max(0L, delivery.item().ctx().getAckAtMs() - delivery.batchEnqueueStartedAtMs()));
             }
         } catch (Throwable failure) {
@@ -434,6 +435,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
         CLOSED
     }
 }
+
 
 /** Stateless public-future adapter bound to one exact canonical slot. */
 final class RequestFuture extends CompletableFuture<Response> {

@@ -1,25 +1,20 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.ScheduledRequest;
-
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Predicate;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
+import java.util.function.LongPredicate;
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /** Package-local admission APIs exercised through real committed requests. */
 public final class PrefillCleanupDeadlockFixture {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state = new PrefillState(lock,
-            PrefillActiveIndex.ordered(4, Comparator.comparing(ScheduledRequest::requestId)),
+            PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
             clock::get, () -> { });
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
     private final ScheduledRequest next;
@@ -48,12 +43,12 @@ public final class PrefillCleanupDeadlockFixture {
         clock.set(200);
     }
 
-    public void sweepBatches(Predicate<String> retain) {
+    public void sweepBatches(LongPredicate retain) {
         assertEquals(0, state.evictExpiredBatches(10L, retain));
         assertEquals(1, state.stats().batchCount());
     }
 
-    public void sweepIndividuals(Predicate<String> retain) {
+    public void sweepIndividuals(LongPredicate retain) {
         assertEquals(0, state.evictExpiredIndividuals(10L, retain));
         assertEquals(1, state.stats().individuallyOwnedRequests());
     }
@@ -72,7 +67,7 @@ public final class PrefillCleanupDeadlockFixture {
 
     private static ScheduledRequest item(long id) {
         ScheduledRequest item = mock(ScheduledRequest.class);
-        when(item.requestId()).thenReturn(Long.toString(id));
+        when(item.requestId()).thenReturn(id);
         when(item.seqLen()).thenReturn(100L);
         return item;
     }

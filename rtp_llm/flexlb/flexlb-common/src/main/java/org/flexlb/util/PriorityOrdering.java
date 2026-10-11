@@ -15,13 +15,10 @@ import java.util.Comparator;
  * </ol>
  *
  * <p>Callers that need a deterministic total order (e.g. the batcher queue
- * comparator) append a final {@code .thenComparing(...::requestId)} to
+ * comparator) append a final {@code .thenComparingLong(...::requestId)} to
  * {@link #strict()}.
  */
 public final class PriorityOrdering {
-
-    private static final Comparator<String> REQUEST_ID_ORDER =
-            Comparator.nullsFirst(Comparator.naturalOrder());
 
     /**
      * Strict priority-then-FIFO comparator for any {@link Prioritized} item.
@@ -52,14 +49,14 @@ public final class PriorityOrdering {
      */
     public static int compareWithRequestId(int leftPriority,
                                            long leftEnqueueSeq,
-                                           String leftRequestId,
+                                           long leftRequestId,
                                            int rightPriority,
                                            long rightEnqueueSeq,
-                                           String rightRequestId) {
+                                           long rightRequestId) {
         int strictOrder = compare(leftPriority, leftEnqueueSeq,
                 rightPriority, rightEnqueueSeq);
         return strictOrder != 0
-                ? strictOrder : REQUEST_ID_ORDER.compare(leftRequestId, rightRequestId);
+                ? strictOrder : Long.compare(leftRequestId, rightRequestId);
     }
 
     /**

@@ -9,11 +9,8 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
-import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.domain.CacheMatchResult;
-import org.flexlb.cache.domain.CacheMatchSource;
-import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -36,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -100,20 +98,18 @@ class PdfusionSchedulingTest {
         status.setMaxBatchTokensSize(10000L);
         worker.lock.lock();
         try {
-            endpoints.publishPreparedEndpoint(worker.getLogicalIpPort(), worker,
+            endpoints.publishPreparedEndpoint(worker.getIpPort(), worker,
                     worker.prepareNewStatus(worker.freezeStatusResponse(status)));
-            worker.recordSuccessfulPoll(true);
         } finally {
             worker.lock.unlock();
         }
         WorkerDirectory directory = new WorkerDirectory(endpoints);
         CacheAwareService cache = mock(CacheAwareService.class);
-        when(cache.findMatchingEngines(any()))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
+        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
         ModelMetaConfig model = mock(ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PDFUSION));
         DefaultRouter router = new DefaultRouter(new CostBasedPrefillStrategy(directory, cache, mock(EngineHealthReporter.class)),
-                new DecodeSelector(directory), new RandomStrategy(directory), mock(EncoderStrategy.class), service, model);
+                new DecodeSelector(directory), new RandomStrategy(directory), service, model);
         RequestScheduler scheduler = new RequestScheduler(service, router, endpoints, reporter,
                 mock(EvictionManager.class), lifecycle, availability);
         SchedulerRuntime runtime = direct
@@ -127,16 +123,14 @@ class PdfusionSchedulingTest {
             assertEquals(List.of(RoleType.PDFUSION), response.getServerStatus().stream()
                     .map(ServerStatus::getRole).toList());
             assertEquals(0, endpoints.getEndpointCount(RoleType.DECODE));
-            assertEquals(1, lifecycle.trackedRequestCount());
-            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(
-                    RoleType.PDFUSION, worker.getLogicalIpPort());
+            assertEquals(1, lifecycle.liveRequestCount());
+            PrefillEndpoint endpoint = (PrefillEndpoint) endpoints.get(RoleType.PDFUSION, worker.getIpPort());
             assertEquals(1, endpoint.observedRequestCount());
             var committedWork = endpoint.captureRouteProjectionInputs().work();
-            assertTrue(committedWork.containsRequest(Long.toString(requestId)));
+            assertTrue(committedWork.containsRequest(requestId));
             TaskInfo finished = new TaskInfo();
-            finished.setRequestId(Long.toString(requestId));
-            finished.setBatchId(direct ? 0L : lifecycle.getRequestState(
-                    Long.toString(requestId), 0L).batchId());
+            finished.setRequestId(requestId);
+            finished.setBatchId(direct ? 0L : lifecycle.getRequestState(requestId, 0L).batchId());
             finished.setPhase(TaskPhase.RUNNING);
             finished.setErrorCode(0L);
             status.setStatusVersion(2L);
@@ -153,15 +147,11 @@ class PdfusionSchedulingTest {
             projection.run();
             assertEquals(0, endpoint.observedRequestCount());
             assertEquals(0, endpoint.getInflightBatchCount());
-            assertTrue(committedWork.containsRequest(Long.toString(requestId)),
-                    "published snapshots stay immutable");
-            assertTrue(!endpoint.captureRouteProjectionInputs().work()
-                    .containsRequest(Long.toString(requestId)));
+            assertTrue(committedWork.containsRequest(requestId), "published snapshots stay immutable");
+            assertTrue(!endpoint.captureRouteProjectionInputs().work().containsRequest(requestId));
             if (!direct) {
-                assertEquals(RequestState.Phase.COMPLETED,
-                        lifecycle.getRequestState(
-                                Long.toString(requestId), 0L).state());
-                assertEquals(0, lifecycle.trackedRequestCount());
+                assertEquals(RequestState.Phase.COMPLETED, lifecycle.getRequestState(requestId, 0L).state());
+                assertEquals(0, lifecycle.liveRequestCount());
             }
         } finally {
             runtime.shutdown();

@@ -44,11 +44,10 @@ class WorkerEndpointTest {
                 EndpointTestSupport.requestRuntime();
         endpoint = new PrefillEndpoint(
                 status,
-                () -> config,
+                config,
                 EndpointTestSupport.routeStrategy(requestRuntime),
                 requestRuntime.events(),
-                Mockito.mock(BatchSchedulerReporter.class),
-                new org.flexlb.balance.scheduler.PlacementAvailability());
+                Mockito.mock(BatchSchedulerReporter.class));
         endpoint.startGeneration();
     }
 
@@ -108,7 +107,7 @@ class WorkerEndpointTest {
         registerBatch(1L, 500,
                 item(100L, 1000));
 
-        TaskInfo finished = task("100", 1000, 0, 1L);
+        TaskInfo finished = task(100L, 1000, 0, 1L);
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
@@ -121,9 +120,9 @@ class WorkerEndpointTest {
         registerBatch(5L, 9999,
                 item(100L, 1000), item(101L, 2000));
 
-        TaskInfo t1 = task("100", 1000, 0, 5L);
+        TaskInfo t1 = task(100L, 1000, 0, 5L);
         t1.setErrorCode(0);
-        TaskInfo t2 = task("101", 2000, 0, 5L);
+        TaskInfo t2 = task(101L, 2000, 0, 5L);
         t2.setErrorCode(0);
         calibrate(Map.of("100", t1, "101", t2), null);
 
@@ -136,10 +135,10 @@ class WorkerEndpointTest {
         registerBatch(5L, 9999,
                 item(100L, 1000), item(101L, 2000));
 
-        TaskInfo failed = task("100", 1000, 0, 5L);
+        TaskInfo failed = task(100L, 1000, 0, 5L);
         failed.setErrorCode(1);
         failed.setErrorMessage("timeout");
-        TaskInfo success = task("101", 2000, 0, 5L);
+        TaskInfo success = task(101L, 2000, 0, 5L);
         success.setErrorCode(0);
         calibrate(Map.of("100", failed, "101", success), null);
 
@@ -154,7 +153,7 @@ class WorkerEndpointTest {
         registerBatch(7L, 2000,
                 item(200L, 1000));
 
-        TaskInfo finished = task("100", 500, 0, 5L);
+        TaskInfo finished = task(100L, 500, 0, 5L);
         finished.setErrorCode(0);
         calibrate(Map.of("100", finished), null);
 
@@ -187,7 +186,7 @@ class WorkerEndpointTest {
 
     @Test
     void ipPort_format() {
-        assertEquals("10.0.0.1:8080@0", endpoint.ipPort());
+        assertEquals("10.0.0.1:8080", endpoint.ipPort());
     }
 
     @Test
@@ -308,7 +307,7 @@ class WorkerEndpointTest {
     @Test
     void onWorkerStatusUpdate_calibrates_prefill() {
         WorkerStatusResponse resp = new WorkerStatusResponse();
-        resp.setFinishedTaskInfo(Map.of("100", task("100", 1000, 0, 1L)));
+        resp.setFinishedTaskInfo(Map.of("100", task(100L, 1000, 0, 1L)));
 
         // PrefillEndpoint calibrates even when runningTaskInfo is null
         EndpointTestSupport.applyStatus(endpoint, resp);
@@ -356,7 +355,7 @@ class WorkerEndpointTest {
 
     private ScheduledRequest item(long requestId, long seqLen) {
         return new ScheduledRequest(
-                ctx(Long.toString(requestId), seqLen),
+                ctx(requestId, seqLen),
                 null,
                 null,
                 null,
@@ -367,7 +366,7 @@ class WorkerEndpointTest {
                 0L);
     }
 
-    private BalanceContext ctx(String requestId, long seqLen) {
+    private BalanceContext ctx(long requestId, long seqLen) {
         Request req = new Request();
         req.setRequestId(requestId);
         req.setSeqLen(seqLen);
@@ -376,7 +375,7 @@ class WorkerEndpointTest {
         return ctx;
     }
 
-    private TaskInfo task(String requestId, long inputLength, long prefixLength, long batchId) {
+    private TaskInfo task(long requestId, long inputLength, long prefixLength, long batchId) {
         TaskInfo task = new TaskInfo();
         task.setRequestId(requestId);
         task.setInputLength(inputLength);

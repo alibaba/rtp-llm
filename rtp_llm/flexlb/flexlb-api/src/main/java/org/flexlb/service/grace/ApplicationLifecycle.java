@@ -3,7 +3,6 @@ package org.flexlb.service.grace;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.httpserver.FlexlbGrpcServer;
-import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
@@ -29,7 +28,6 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     private final FlexlbGrpcServer grpcServer;
     private final GracefulLifecycleReporter reporter;
     private final Environment environment;
-    private final ApplicationWarmupState warmupState;
     private final long warmUpWaitMs;
 
     private ApplicationContext owningContext;
@@ -39,29 +37,29 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         owningContext = context;
     }
 
+    private volatile boolean warmUpFinished;
     private volatile boolean shutdownReceived;
     private volatile boolean shutdownCompletedSuccessfully;
 
     @Autowired
-    public ApplicationLifecycle(LBStatusConsistencyService consistency,
-                                FlexlbGrpcServer grpcServer,
-                                GracefulLifecycleReporter reporter,
-                                Environment environment,
-                                ApplicationWarmupState warmupState) {
-        this(consistency, grpcServer, reporter, environment, warmupState, DEFAULT_WARM_UP_WAIT_MS);
+    public ApplicationLifecycle(
+            LBStatusConsistencyService consistency,
+            FlexlbGrpcServer grpcServer,
+            GracefulLifecycleReporter reporter,
+            Environment environment) {
+        this(consistency, grpcServer, reporter, environment, DEFAULT_WARM_UP_WAIT_MS);
     }
 
-    ApplicationLifecycle(LBStatusConsistencyService consistency,
-                         FlexlbGrpcServer grpcServer,
-                         GracefulLifecycleReporter reporter,
-                         Environment environment,
-                         ApplicationWarmupState warmupState,
-                         long warmUpWaitMs) {
+    ApplicationLifecycle(
+            LBStatusConsistencyService consistency,
+            FlexlbGrpcServer grpcServer,
+            GracefulLifecycleReporter reporter,
+            Environment environment,
+            long warmUpWaitMs) {
         this.consistency = consistency;
         this.grpcServer = grpcServer;
         this.reporter = reporter;
         this.environment = environment;
-        this.warmupState = warmupState;
         this.warmUpWaitMs = warmUpWaitMs;
     }
 
@@ -73,7 +71,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         }
         shutdownReceived = false;
         shutdownCompletedSuccessfully = false;
-        warmupState.setWarmupFinished(false);
+        warmUpFinished = false;
 
         long consistencyStartedAt = System.currentTimeMillis();
         try {
@@ -94,7 +92,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             Thread.currentThread().interrupt();
             log.error("application warm up interrupted", e);
         } finally {
-            warmupState.setWarmupFinished(true);
+            warmUpFinished = true;
         }
     }
 
@@ -136,7 +134,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     }
 
     public boolean isHealthy() {
-        return warmupState.isWarmupFinished() && !shutdownReceived;
+        return warmUpFinished && !shutdownReceived;
     }
 
     public boolean shutdownCompletedSuccessfully() {

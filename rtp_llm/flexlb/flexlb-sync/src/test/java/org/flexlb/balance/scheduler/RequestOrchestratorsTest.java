@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
@@ -95,14 +94,14 @@ class RequestOrchestratorsTest {
         EndpointRegistry registry = mock(EndpointRegistry.class);
         AtomicBoolean exactOwnershipPredicateObserved = new AtomicBoolean();
         doAnswer(invocation -> {
-            java.util.function.Predicate<String> owns = invocation.getArgument(1);
-            exactOwnershipPredicateObserved.set(owns.test("91"));
+            java.util.function.LongPredicate owns = invocation.getArgument(1);
+            exactOwnershipPredicateObserved.set(owns.test(91L));
             return null;
         }).when(registry).evictExpiredOrphans(anyLong(), any());
         doAnswer(invocation -> {
-            java.util.function.BiConsumer<Long, java.util.function.Predicate<String>>
+            java.util.function.BiConsumer<Long, java.util.function.LongPredicate>
                     sweeper = invocation.getArgument(0);
-            sweeper.accept(123L, requestId -> requestId.equals("91"));
+            sweeper.accept(123L, requestId -> requestId == 91L);
             return null;
         }).when(lifecycle).maintainExpiration(any());
 
@@ -126,7 +125,7 @@ class RequestOrchestratorsTest {
         new SchedulerRuntime(
                 lifecycle, registry, reporter, admissionReporter).report();
 
-        verify(lifecycle, never()).trackedRequestStats();
+        verify(lifecycle, never()).liveRequestCount();
         verify(registry, never()).snapshotPrefillEndpoints();
         verify(registry, never()).snapshotDecodeEndpoints();
     }
@@ -145,7 +144,7 @@ class RequestOrchestratorsTest {
         Map<String, PrefillEndpoint> prefill = new LinkedHashMap<>();
         prefill.put("p1", failingPrefill);
         prefill.put("p2", healthyPrefill);
-        when(lifecycle.trackedRequestStats()).thenReturn(new RequestRegistry.TrackedRequestStats(7, 2, 300L));
+        when(lifecycle.liveRequestCount()).thenReturn(7);
         when(registry.snapshotPrefillEndpoints()).thenReturn(prefill);
         when(registry.snapshotDecodeEndpoints()).thenReturn(Map.of("d1", decode));
         doThrow(new RuntimeException("metrics unavailable"))
@@ -154,10 +153,7 @@ class RequestOrchestratorsTest {
         new SchedulerRuntime(
                 lifecycle, registry, reporter, admissionReporter).report();
 
-        verify(lifecycle).trackedRequestStats();
-        verify(reporter).reportSchedulerInflightMaxAgeMs(300L);
-        verify(reporter).reportTrackedRequestCount(7);
-        verify(reporter).reportTrackedRequestCount(RoleType.ENCODER, 2);
+        verify(reporter).reportSchedulerInflightSize(7);
         verify(failingPrefill).reportBatchMetrics(reporter);
         verify(healthyPrefill).reportBatchMetrics(reporter);
         verify(decode).reportBatchMetrics(reporter);

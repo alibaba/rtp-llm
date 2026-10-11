@@ -2,6 +2,9 @@ package org.flexlb.balance.scheduler;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
+import io.micrometer.core.instrument.FunctionCounter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.flexlb.balance.delivery.CapacityBoundary;
 import org.flexlb.balance.delivery.DeliveryResult;
@@ -14,17 +17,12 @@ import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
-import org.flexlb.enums.FlexMetricType;
-import org.flexlb.enums.FlexPriorityType;
-import org.flexlb.metric.FlexMonitor;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -59,6 +57,7 @@ import java.util.function.BiConsumer;
 @Component
 public class DefaultBatchDispatcher {
 
+    private static final String METRIC_PREFIX = "flexlb.";
     private static final long EXECUTOR_KEEP_ALIVE_SECONDS = 60L;
     private static final RouteProjection.AdmissionBlockSemantics
             CAPACITY_BLOCK_SEMANTICS =
@@ -77,7 +76,7 @@ public class DefaultBatchDispatcher {
     // Admission ends at RPC handoff; this separate count keeps the callback
     // executor alive while accepted RPCs are still awaiting completion.
     private final AtomicInteger pendingCompletions = new AtomicInteger();
-    private final FlexMonitor monitor;
+    private final MeterRegistry meterRegistry;
     private final ReentrantReadWriteLock admissionLifecycle =
             new ReentrantReadWriteLock(true);
     private final Lock admissionReadLock = admissionLifecycle.readLock();
@@ -109,22 +108,20 @@ public class DefaultBatchDispatcher {
 
     @Autowired
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                                  FlexMonitor monitor) {
-        this(grpcClient, configService, monitor,
+                                  @Autowired(required = false) MeterRegistry meterRegistry) {
+        this(grpcClient, configService, meterRegistry,
                 configService.loadBalanceConfig().getInternalRuntime()
                         .getBatchDispatchThreads(),
                 configService.loadBalanceConfig().getInternalRuntime()
                         .getBatchDispatchQueueCapacity());
     }
 
-    /**
-     * Package-visible sizing injection keeps integration fixtures bounded and deterministic.
-     */
+    /** Package-visible sizing injection keeps integration fixtures bounded and deterministic. */
     DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                           FlexMonitor monitor, int poolSize, int queueSize) {
+                           MeterRegistry meterRegistry, int poolSize, int queueSize) {
         this.grpcClient = grpcClient;
         this.configService = configService;
-        this.monitor = Objects.requireNonNull(monitor, "monitor");
+        this.meterRegistry = meterRegistry;
         this.admissionCapacity = Math.addExact(poolSize, queueSize);
         this.admissionPermits = new Semaphore(admissionCapacity);
         Logger.info("FlexLB dispatch executor config: poolSize={}, logicalAdmissionCapacity={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
@@ -148,27 +145,48 @@ public class DefaultBatchDispatcher {
                 new NamedThreadFactory("flexlb-dispatch-completion"),
                 new ThreadPoolExecutor.AbortPolicy());
         registerMetrics();
-        reportExecutorMetrics();
     }
 
     /**
-     * Register gauges for the current executor state.
+     * Register Micrometer gauges and function counters for the dispatch executor.
+     *
+     * <p>Metrics exposed:
+     * <ul>
+     *   <li>{@code flexlb_dispatch_executor_active_threads} — gauge: active thread count</li>
+     *   <li>{@code flexlb_dispatch_executor_queue_size} — gauge: pending task queue length</li>
+     *   <li>{@code flexlb_dispatch_executor_pool_size} — gauge: current thread pool size</li>
+     *   <li>{@code flexlb_dispatch_executor_completed_tasks_total} — counter: completed task count</li>
+     * </ul>
+     *
+     * <p>When {@link MeterRegistry} is not available, metric registration is silently skipped.
      */
     private void registerMetrics() {
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS);
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE);
-        registerGauge(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE);
-    }
+        if (meterRegistry == null) {
+            Logger.info("MeterRegistry not available, skipping dispatch executor metrics");
+            return;
+        }
 
-    private void registerGauge(String metricName) {
-        monitor.register(metricName, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-    }
+        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
+                        dispatchExecutor, ThreadPoolExecutor::getActiveCount)
+                .description("Dispatch executor active thread count")
+                .register(meterRegistry);
 
-    @Scheduled(fixedRate = 2000)
-    void reportExecutorMetrics() {
-        monitor.report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, dispatchExecutor.getActiveCount());
-        monitor.report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, dispatchExecutor.getQueue().size());
-        monitor.report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, dispatchExecutor.getPoolSize());
+        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
+                        dispatchExecutor, exec -> exec.getQueue().size())
+                .description("Dispatch executor pending task queue size")
+                .register(meterRegistry);
+
+        Gauge.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE,
+                        dispatchExecutor, ThreadPoolExecutor::getPoolSize)
+                .description("Dispatch executor current pool size")
+                .register(meterRegistry);
+
+        FunctionCounter.builder(METRIC_PREFIX + MetricConstant.DISPATCH_EXECUTOR_COMPLETED_TASKS,
+                        dispatchExecutor, ThreadPoolExecutor::getCompletedTaskCount)
+                .description("Dispatch executor total completed tasks")
+                .register(meterRegistry);
+
+        Logger.info("FlexLB dispatch executor metrics registered with MeterRegistry");
     }
 
     public CapacityBoundary.Attempt<PreparedSubmission>
@@ -533,16 +551,16 @@ public class DefaultBatchDispatcher {
             markUncertain(items, batchId, mismatch, observer);
             return;
         }
-        Set<String> expectedIds = new HashSet<>();
+        Set<Long> expectedIds = new HashSet<>();
         List<String> protocolViolations = new ArrayList<>();
         for (ScheduledRequest item : items) {
             expectedIds.add(item.requestId());
         }
 
-        Map<String, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId =
+        Map<Long, EngineRpcService.EnqueueBatchErrorPB> errorByRequestId =
                 new HashMap<>();
         for (EngineRpcService.EnqueueBatchErrorPB error : response.getErrorsList()) {
-            String requestId = RequestId.parse(error);
+            long requestId = error.getRequestId();
             if (!expectedIds.contains(requestId)) {
                 protocolViolations.add(
                         "error references unknown request_id=" + requestId);
@@ -552,9 +570,9 @@ public class DefaultBatchDispatcher {
                         "duplicate error for request_id=" + requestId);
             }
         }
-        Set<String> successIds = new HashSet<>();
+        Set<Long> successIds = new HashSet<>();
         for (EngineRpcService.EnqueueBatchSuccessPB success : response.getSuccessesList()) {
-            String requestId = RequestId.parse(success);
+            long requestId = success.getRequestId();
             if (!expectedIds.contains(requestId)) {
                 protocolViolations.add(
                         "success references unknown request_id=" + requestId);
@@ -564,14 +582,14 @@ public class DefaultBatchDispatcher {
                         "duplicate success for request_id=" + requestId);
             }
         }
-        for (String requestId : successIds) {
+        for (Long requestId : successIds) {
             if (errorByRequestId.containsKey(requestId)) {
                 protocolViolations.add(
                         "request_id appears in both success and error: "
                                 + requestId);
             }
         }
-        for (String requestId : expectedIds) {
+        for (Long requestId : expectedIds) {
             if (!successIds.contains(requestId)
                     && !errorByRequestId.containsKey(requestId)) {
                 protocolViolations.add(
@@ -700,7 +718,7 @@ public class DefaultBatchDispatcher {
         EngineRpcService.GenerateInputPB.Builder input =
                 EngineRpcService.GenerateInputPB.newBuilder();
         input.mergeFrom(generateInput);
-        if (!Objects.equals(RequestId.parse(input), item.requestId())) {
+        if (input.getRequestId() != item.requestId()) {
             throw new IllegalArgumentException("request_id mismatch between schedule request and GenerateInputPB");
         }
         // This batch RPC carries independent requests. Propagate each Schedule
@@ -746,7 +764,7 @@ public class DefaultBatchDispatcher {
     private static EngineRpcService.RoleAddrPB buildRoleAddr(ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toRoleAddrProto(role))
+                .setRole(RoleTypeProtoConverter.toLegacyProto(role))
                 .setRoleStr(role.getCode())
                 .setIp(serverStatus.getServerIp())
                 .setHttpPort(serverStatus.getHttpPort())
@@ -758,7 +776,7 @@ public class DefaultBatchDispatcher {
             EngineRpcService.RoleAddrPB cached,
             ServerStatus serverStatus) {
         RoleType role = serverStatus.getRole();
-        return cached.getRole() == RoleTypeProtoConverter.toRoleAddrProto(role)
+        return cached.getRole() == RoleTypeProtoConverter.toLegacyProto(role)
                 && cached.getRoleStr().equals(role.getCode())
                 && cached.getIp().equals(serverStatus.getServerIp())
                 && cached.getHttpPort() == serverStatus.getHttpPort()

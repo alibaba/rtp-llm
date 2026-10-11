@@ -116,7 +116,7 @@ class TrafficPolicyConfigTest {
 
     private static Request request(long id, String apiKey, long inputTokens) {
         Request request = new Request();
-        request.setRequestId(Long.toString(id));
+        request.setRequestId(id);
         request.setApiKey(apiKey);
         request.setSeqLen(inputTokens);
         return request;

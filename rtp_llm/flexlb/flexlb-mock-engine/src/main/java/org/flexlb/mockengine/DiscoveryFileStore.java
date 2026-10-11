@@ -14,7 +14,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Writes the domain-to-host mapping used by file-based discovery test fixtures.
+ * Writer-side owner of the file-based service discovery mapping consumed by
+ * {@code org.flexlb.discovery.LocalServiceDiscovery} on the master side.
  *
  * <p>The file is derived wholesale from the live services map on every
  * mutation (add/remove engine), so its content can never drift from the set

@@ -1,20 +1,18 @@
 package org.flexlb.balance.scheduler;
 
-import org.flexlb.balance.delivery.DeliveryResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
+
 import org.flexlb.balance.preemption.VictimTerminal;
-import org.flexlb.service.monitor.RequestSchedulerReporter;
+import org.flexlb.balance.delivery.DeliveryResult;
+
 import org.flexlb.util.Logger;
 
 /** Executes an already-owned terminal action, then commits its terminal record and publishes. */
 final class RequestTerminalCleanup {
-
     private final ExpirationTimer expirationTimer;
-    private final RequestSchedulerReporter reporter;
 
-    RequestTerminalCleanup(ExpirationTimer timer, RequestSchedulerReporter reporter) {
+    RequestTerminalCleanup(ExpirationTimer timer) {
         this.expirationTimer = timer;
-        this.reporter = reporter;
     }
 
     // ── 共同收尾：清理、提交记录、发布结果 ──
@@ -48,7 +46,6 @@ final class RequestTerminalCleanup {
                 ? cleanupFailure
                 : appendFailure(cleanupFailure, result.transitionFailure());
         if (terminalFailure != null) {
-            reporter.reportLifecycleFailure("terminal_cleanup");
             Logger.error("Terminal cleanup isolated after canonical claim: request_id={}",
                     entry.requestId(), terminalFailure);
         }
@@ -153,5 +150,6 @@ final class RequestTerminalCleanup {
                     "request slot cleanup failed", failure);
         }
     }
+
 
 }

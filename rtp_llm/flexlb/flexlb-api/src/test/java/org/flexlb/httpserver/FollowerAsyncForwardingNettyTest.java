@@ -9,7 +9,6 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.DispatcherConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -97,24 +96,6 @@ class FollowerAsyncForwardingNettyTest {
     void restoreTransportLogs() {
         nettyLogger.setLevel(previousNettyLogLevel);
         grpcLogger.setLevel(previousGrpcLogLevel);
-    }
-
-    @Test
-    @Timeout(10)
-    void slowMasterCountsNonNumericRequestId() throws Exception {
-        try (SlowMaster master = SlowMaster.start(1)) {
-            ManagedChannel channel = NettyChannelBuilder.forAddress("127.0.0.1", master.server.getPort())
-                    .usePlaintext().build();
-            try {
-                var response = FlexlbServiceGrpc.newFutureStub(channel).schedule(request("request-a"));
-                assertTrue(master.awaitAllRequests(Duration.ofSeconds(3)));
-                assertEquals(1, master.requestCounts.get("request-a").get());
-                master.releaseResponses();
-                assertTrue(response.get(3, TimeUnit.SECONDS).getSuccess());
-            } finally {
-                channel.shutdownNow();
-            }
-        }
     }
 
     @Test
@@ -314,10 +295,6 @@ class FollowerAsyncForwardingNettyTest {
     }
 
     private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(long requestId) {
-        return request(Long.toString(requestId));
-    }
-
-    private static FlexlbScheduleProtocol.FlexlbScheduleRequestPB request(String requestId) {
         return FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(requestId)
                 .setSeqLen(1024)
@@ -327,8 +304,8 @@ class FollowerAsyncForwardingNettyTest {
 
     private static final class SlowMaster implements AutoCloseable {
         private final CountDownLatch slowRequests;
-        private final Map<String, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
-        private final Map<String, Integer> forwardHops = new ConcurrentHashMap<>();
+        private final Map<Long, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
+        private final Map<Long, Integer> forwardHops = new ConcurrentHashMap<>();
         private final Queue<PendingResponse> pendingResponses = new ConcurrentLinkedQueue<>();
         private final AtomicBoolean responsesReleased = new AtomicBoolean(false);
         private final Server server;
@@ -344,7 +321,7 @@ class FollowerAsyncForwardingNettyTest {
                                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
                                         responseObserver) {
-                            if (request.getRequestId().equals(Long.toString(WARMUP_REQUEST_ID))) {
+                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
                                 respond(responseObserver);
                                 return;
                             }
@@ -387,11 +364,10 @@ class FollowerAsyncForwardingNettyTest {
             for (long requestId = FIRST_REQUEST_ID;
                  requestId < FIRST_REQUEST_ID + REQUEST_COUNT;
                  requestId++) {
-                String expectedId = Long.toString(requestId);
                 assertEquals(1, requestCounts.getOrDefault(
-                                expectedId, new AtomicInteger()).get(),
+                                requestId, new AtomicInteger()).get(),
                         "Master received a missing or duplicate request_id=" + requestId);
-                assertEquals(1, forwardHops.getOrDefault(expectedId, -1),
+                assertEquals(1, forwardHops.getOrDefault(requestId, -1),
                         "forward_hop must be incremented exactly once for request_id="
                                 + requestId);
             }
@@ -433,7 +409,7 @@ class FollowerAsyncForwardingNettyTest {
 
     private static final class DelayedMaster implements AutoCloseable {
         private final long responseDelayMs;
-        private final Map<String, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
+        private final Map<Long, AtomicInteger> requestCounts = new ConcurrentHashMap<>();
         private final AtomicInteger receivedRequests = new AtomicInteger();
         private final AtomicInteger duplicateRequests = new AtomicInteger();
         private final AtomicInteger invalidForwardHops = new AtomicInteger();
@@ -452,13 +428,12 @@ class FollowerAsyncForwardingNettyTest {
                                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB request,
                                 StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB>
                                         responseObserver) {
-                            if (request.getRequestId().equals(Long.toString(WARMUP_REQUEST_ID))) {
+                            if (request.getRequestId() == WARMUP_REQUEST_ID) {
                                 SlowMaster.respond(responseObserver);
                                 return;
                             }
                             int occurrences = requestCounts.computeIfAbsent(
-                                            request.getRequestId(),
-                                            ignored -> new AtomicInteger())
+                                            request.getRequestId(), ignored -> new AtomicInteger())
                                     .incrementAndGet();
                             receivedRequests.incrementAndGet();
                             if (occurrences > 1) {
@@ -526,9 +501,7 @@ class FollowerAsyncForwardingNettyTest {
             when(consistency.getLocalHostIp()).thenReturn("127.0.0.2");
 
             ConfigService configService = mock(ConfigService.class);
-            var routingConfig = org.flexlb.mock.TestFlexlbConfigs.create();
-            routingConfig.setDispatcher(DispatcherConfig.nonBatch());
-            when(configService.loadBalanceConfig()).thenReturn(routingConfig);
+            when(configService.loadBalanceConfig()).thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
             EngineHealthReporter healthReporter = mock(EngineHealthReporter.class);
             channelEventLoop = new NioEventLoopGroup(1);
             // Match the production forwarder callback executor width so this

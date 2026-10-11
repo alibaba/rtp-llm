@@ -1,13 +1,12 @@
 package org.flexlb.balance.preemption;
 
 /** Authoritative terminal proof for one exact preemption victim. */
-public record VictimTerminal(String requestId) {
+public record VictimTerminal(long requestId) {
 
     public VictimTerminal {
-        if (requestId == null || requestId.isBlank()) {
+        if (requestId <= 0) {
             throw new IllegalArgumentException(
-                    "requestId must not be blank");
+                    "requestId must be positive");
         }
     }
-
 }

@@ -107,10 +107,7 @@ final class StrategyTestSupport {
                 source.getIp(),
                 source.getPort(),
                 source.getGrpcPort(),
-                source.getSite(),
-                source.getDeploymentName(),
-                source.getEngineIndex(),
-                source.getMultiEngineNum());
+                source.getSite());
         WorkerStatus.StatusObservation observation =
                 status.bindStatusObservation(
                         source.committedEngineObservation(),
@@ -122,10 +119,8 @@ final class StrategyTestSupport {
         try {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareNewStatus(observation);
-            WorkerEndpoint endpoint = registry.publishPreparedEndpoint(
+            return registry.publishPreparedEndpoint(
                     address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(observation.alive());
-            return endpoint;
         } finally {
             status.lock.unlock();
         }

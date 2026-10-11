@@ -194,7 +194,7 @@ class CancelTerminalBatchIdTest {
             taskField.setAccessible(true);
             EngineRpcService.TaskInfoPB task =
                     (EngineRpcService.TaskInfoPB) taskField.get(element);
-            if (task.getRequestId().equals(Long.toString(requestId))) {
+            if (task.getRequestId() == requestId) {
                 latest = task;
             }
         }

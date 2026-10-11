@@ -2,7 +2,6 @@ package org.flexlb.mock;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.engine.grpc.EngineRpcService;
-import org.flexlb.engine.grpc.RequestId;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -50,7 +49,7 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
                 for (var external : slot.getRequestsList()) {
                     var input = external.getInput();
                     var task = EngineRpcService.TaskInfoPB.newBuilder()
-                            .setRequestId(String.valueOf(input.getRequestId()))
+                            .setRequestId(input.getRequestId())
                             .setInputLength(input.getTokenIdsCount())
                             .setBatchId(batch.getBatchId())
                             .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
@@ -148,8 +147,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         if (beh.isFailOnEnqueue()) {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    String reqId = RequestId.parse(ext.getInput());
-                    responseBuilder.addErrors(RequestIdFixtures.write(EngineRpcService.EnqueueBatchErrorPB.newBuilder(), reqId)
+                    long reqId = ext.getInput().getRequestId();
+                    responseBuilder.addErrors(EngineRpcService.EnqueueBatchErrorPB.newBuilder()
+                            .setRequestId(reqId)
                             .setErrorInfo(EngineRpcService.ErrorDetailsPB.newBuilder()
                                     .setErrorCode(beh.getEnqueueErrorCode())
                                     .setErrorMessage(beh.getEnqueueErrorMessage())
@@ -160,8 +160,9 @@ public class MockRpcService extends RpcServiceGrpc.RpcServiceImplBase {
         } else {
             for (EngineRpcService.EnqueueBatchDpSlotPB slot : request.getDpSlotsList()) {
                 for (EngineRpcService.EnqueueBatchExternalInputPB ext : slot.getRequestsList()) {
-                    String reqId = RequestId.parse(ext.getInput());
-                    responseBuilder.addSuccesses(RequestIdFixtures.write(EngineRpcService.EnqueueBatchSuccessPB.newBuilder(), reqId)
+                    long reqId = ext.getInput().getRequestId();
+                    responseBuilder.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
+                            .setRequestId(reqId)
                             .build());
                 }
             }

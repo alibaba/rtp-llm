@@ -33,27 +33,14 @@ public class Request {
     @JsonProperty("vit_route_only")
     private boolean vitRouteOnly;
 
-    @JsonProperty("block_size")
-    private long blockSize;
-
     @JsonProperty("seq_len")
     private long seqLen;
-
-    /**
-     * Client-estimated Encoder cache hit in MM tokens; null means not provided.
-     */
-    @JsonProperty("encoder_cache_hit_len")
-    private Long encoderCacheHitLen;
 
     @JsonProperty("cache_key_block_size")
     private long cacheKeyBlockSize;
 
     @JsonProperty("request_id")
-    private String requestId;
-
-    public void setRequestId(String requestId) {
-        this.requestId = requestId;
-    }
+    private long requestId;
 
     /** Upstream generation timeout retained for transport compatibility. */
     @JsonProperty("generate_timeout")
@@ -68,7 +55,7 @@ public class Request {
     private String apiKey;
 
     @JsonProperty("max_new_tokens")
-    private int maxNewTokens = 0;
+    private int maxNewTokens = 1;
 
     @JsonProperty("num_beams")
     private int numBeams = 1;
