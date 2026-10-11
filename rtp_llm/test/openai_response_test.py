@@ -176,15 +176,20 @@ async def fake_output_generator_once(
 
 
 async def fake_output_generator_without_aux_info(
-    output_ids: List[int], num_choices: int, input_ids: torch.Tensor
+    output_ids: List[int],
+    num_choices: int,
+    input_ids: torch.Tensor,
+    chunk_size: int = 1,
 ) -> AsyncGenerator[GenerateOutputs, None]:
     """Simulate the engine response when aux_info collection is disabled."""
-    for output_len, token_id in enumerate(output_ids, start=1):
+    for start in range(0, len(output_ids), chunk_size):
+        chunk = output_ids[start : start + chunk_size]
+        output_len = start + len(chunk)
         outputs = GenerateOutputs()
         for _ in range(num_choices):
             outputs.generate_outputs.append(
                 GenerateOutput(
-                    output_ids=torch.tensor([[token_id]], dtype=torch.int),
+                    output_ids=torch.tensor([chunk], dtype=torch.int),
                     finished=output_len == len(output_ids),
                     input_ids=input_ids,
                     aux_info=None,
@@ -524,6 +529,100 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         endpoint.stop_words_id_list = []
         endpoint.stop_words_str_list = []
         return tokenizer, renderer, endpoint
+
+    async def test_fixed_output_budget_ignores_internal_stop_before_maximum(self):
+        tokenizer, renderer, _ = self._create_base_thinking_endpoint("disabled")
+        before = tokenizer.encode("before", add_special_tokens=False)
+        after = tokenizer.encode("after token", add_special_tokens=False)
+        output_ids = before + [renderer.eos_token_id] + after
+        for streaming, chunk_size in ((True, 1), (False, 1), (True, 3), (False, 3)):
+            with self.subTest(streaming=streaming, chunk_size=chunk_size):
+                budget = len(output_ids)
+                config = GenerateConfig(
+                    min_new_tokens=budget,
+                    max_new_tokens=budget,
+                    ignore_eos=True,
+                    is_streaming=streaming,
+                )
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                    stream=streaming,
+                    max_tokens=budget,
+                    extra_configs=config,
+                )
+                generator = fake_output_generator_without_aux_info(
+                    output_ids, 1, torch.tensor([[1] * 7]), chunk_size=chunk_size
+                )
+                responses = [
+                    response
+                    async for response in renderer.render_response_stream(
+                        generator, request, config
+                    )
+                ]
+                content = "".join(
+                    choice.delta.content or ""
+                    for response in responses
+                    for choice in response.choices
+                )
+                self.assertEqual(content, tokenizer.decode(output_ids))
+                self.assertTrue(content.endswith("after token"))
+                self.assertEqual(responses[-1].usage.completion_tokens, budget)
+                self.assertEqual(
+                    responses[-1].choices[0].finish_reason, FinisheReason.length
+                )
+                self.assertGreater(len(responses), 1)
+                # String stops share the same request-local fixed-budget guard.
+                status = custom_renderer.StreamStatus(request)
+                text, buffered = renderer._process_stop_words(
+                    "hello STOP world", ["STOP"], ["ST"], streaming, status
+                )
+                self.assertEqual(text, "hello STOP world")
+                self.assertFalse(buffered)
+
+    async def test_fixed_output_budget_preserves_qwen_buffered_stop_suffix(self):
+        tokenizer, renderer = self._create_adaptive_qwen_renderer()
+        text = "hello tail STOP"
+        output_ids = tokenizer.encode(text, add_special_tokens=False)
+        for streaming in (True, False):
+            with self.subTest(streaming=streaming):
+                budget = len(output_ids)
+                config = GenerateConfig(
+                    min_new_tokens=budget,
+                    max_new_tokens=budget,
+                    ignore_eos=True,
+                    is_streaming=streaming,
+                    stop_words_str=["STOP"],
+                )
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                    stream=streaming,
+                    max_tokens=budget,
+                    extra_configs=config,
+                    functions=[
+                        GPTFunctionDefinition(
+                            name="unused", description="unused", parameters={}
+                        )
+                    ],
+                )
+                generator = fake_output_generator_without_aux_info(
+                    output_ids, 1, torch.tensor([[1] * 7])
+                )
+                responses = [
+                    response
+                    async for response in renderer.render_response_stream(
+                        generator, request, config
+                    )
+                ]
+                content = "".join(
+                    choice.delta.content or ""
+                    for response in responses
+                    for choice in response.choices
+                )
+                self.assertEqual(content, text)
+                self.assertEqual(responses[-1].usage.completion_tokens, budget)
+                self.assertEqual(
+                    responses[-1].choices[0].finish_reason, FinisheReason.length
+                )
 
     async def _run_without_aux_info(
         self, stream: bool, num_choices: int, termination: str = "eos"
