@@ -27,6 +27,23 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_library(
+    name = "v41_expert_projection_reference_testlib",
+    testonly = True,
+    srcs = ["v41_expert_projection_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_expert_precision_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_expert_projection_reference_sm120",
+    srcs = ["test_v41_expert_projection_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_expert_projection_reference_testlib"],
+    tags = ["RTX_5000_PRO", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
     name = "v41_expert_precision_testlib",
     testonly = True,
     srcs = ["v41_expert_precision.py"],

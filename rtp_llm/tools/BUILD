@@ -163,6 +163,16 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_ffn_projection_replay",
+    testonly = True,
+    srcs = ["dsv41_ffn_projection_replay.py"],
+    deps = [
+        ":dsv41_ffn_peer_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_expert_projection_reference_testlib",
+    ],
+)
+
+py_library(
     name = "dsv41_ffn_peer_replay",
     testonly = True,
     srcs = ["dsv41_ffn_peer_replay.py"],
