@@ -2189,11 +2189,13 @@ public class RequestRegistry {
             return;
         }
         Runnable work = null;
+        long failedBatchId;
         try {
             synchronized (entry) {
                 if (!ownsPreparedDelivery(entry, item)) {
                     return;
                 }
+                failedBatchId = entry.snapshot().batchId();
                 work = reduceDeferredTerminalFactLocked(
                         entry,
                         DeferredTerminal.deliveryFailure(
@@ -2201,6 +2203,8 @@ public class RequestRegistry {
                                 "Delivery preparation failed: "
                                         + detailOf(cause)));
             }
+            Logger.error("FlexLB dispatch preparation failed request_id={} batch_id={}",
+                    item.requestId(), failedBatchId, cause);
             runPostLock(work);
         } catch (Throwable reductionFailure) {
             if (cause != null && cause != reductionFailure) {
