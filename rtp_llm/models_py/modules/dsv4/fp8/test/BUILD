@@ -592,6 +592,46 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_short_sparse_engine_sm120",
+    srcs = [
+        "test_v41_short_sparse_engine_sm120.py",
+        "test_v41_checkpoint_engine_sm120.py",
+        "v41_compressor_precision.py",
+        "v41_engram_precision.py",
+        "v41_expert_precision.py",
+        "v41_mhc_precision.py",
+        "v41_output_precision.py",
+        "v41_query_precision.py",
+        "v41_reference_precision.py",
+        "v41_sparse_precision.py",
+        "v41_tp8_projection.py",
+        "test_v41_loader_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    main = "test_v41_short_sparse_engine_sm120.py",
+    data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_decode_tilelang_reference_testlib",
+        ":v41_short_sparse_plan_reference_testlib",
+        ":v41_cuda_frequency_reference_testlib",
+        ":v41_mhc_collapse_reference_testlib",
+        ":v41_block_norm_reference_testlib",
+        ":v41_kv_projection_reference_testlib",
+        ":v41_sparse_prefill_reference_testlib",
+        ":v41_router_eager_reference_testlib",
+        ":v41_expert_projection_reference_testlib",
+        "//rtp_llm/tools:dsv41_trace",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+py_test(
     name = "test_v41_native_prefill_sm120",
     srcs = [
         "test_v41_native_prefill_sm120.py",
@@ -635,6 +675,26 @@ py_test(
         "test_v41_attention_owner_sm120.py",
     ],
     main = "test_v41_rotary_dp_agreement_sm120.py",
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_short_sparse_node_sm120",
+    srcs = [
+        "test_v41_short_sparse_node_sm120.py",
+        "test_v41_dp_decode_sm120.py",
+        "test_v41_rotary_dp_agreement_sm120.py",
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    main = "test_v41_short_sparse_node_sm120.py",
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["RTX_5000_PRO", "manual"],
     env = {"GPU_COUNT": "8"},
