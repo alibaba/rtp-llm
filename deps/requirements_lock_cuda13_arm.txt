@@ -159,7 +159,7 @@ anyio==4.14.2 \
     #   httpx
     #   openai
     #   starlette
-apache-tvm-ffi==0.1.12 \
+apache-tvm-ffi==0.1.10 \
     --hash=sha256:003027a31011a216295ec8e04ac78bb3d80b8dc47a93f6b602cf242a80676366 \
     --hash=sha256:011e372fb9b169c3bd57f63e03fa1383cee6f1ef47a4932c4ff552f29db281c3 \
     --hash=sha256:02508fef806cfb1a5224aaa69fb121558d60fa56c2fa7d4166fb9f354945509b \
@@ -3945,7 +3945,7 @@ tiktoken==0.7.0 \
 tile-kernels @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/arm_pkg/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl \
     --hash=sha256:e6d7f14de5e00829b1605c71fd6ce56f69b6119c3dd0133abd9d99cee8878cd6
     # via -r deps/requirements_cuda13_arm.txt
-tilelang @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261009/tilelang-0.1.15%2Bcuda.gita35f8ddf-cp39-abi3-linux_aarch64.whl \
+tilelang @ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl \
     --hash=sha256:6339b01ef7d2042faaa0b0e5f61fc6d362e6800aeca66fdf49d88c858b8dd3da
     # via
     #   -r deps/requirements_cuda13_arm.txt
