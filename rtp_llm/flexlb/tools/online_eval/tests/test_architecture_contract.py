@@ -67,7 +67,9 @@ def test_delivery_failure_never_changes_gate(gate):
 def test_plan_executes_compiled_values_after_scene_changes_and_rejects_code_drift(tmp_path):
     scene = tmp_path / "scene.yaml"
     scene.write_text("count: 1")
-    compiled = [dict(id="example", stages=[dict(params=dict(count=1))])]
+    from scenario import compile_scenarios
+    from test_scenario_runtime import source
+    compiled = compile_scenarios([("fixture", source())])
     path = tmp_path / "plan.json"
     with patch("scenario.execution_plan.dependency_files", return_value={"src/program.py": "a"}):
         digest = freeze_plan(path, compiled)
@@ -77,7 +79,7 @@ def test_plan_executes_compiled_values_after_scene_changes_and_rejects_code_drif
             with pytest.raises(ScenarioError, match="changed after planning"):
                 load_plan(path, digest)
         payload = json.loads(path.read_text())
-        payload["instances"][0]["stages"][0]["params"]["count"] = 999
+        payload["instances"][0]["stages"][1]["params"]["count"] = 999
         path.write_text(json.dumps(payload))
         with pytest.raises(ScenarioError, match="checksum"):
             load_plan(path, digest)

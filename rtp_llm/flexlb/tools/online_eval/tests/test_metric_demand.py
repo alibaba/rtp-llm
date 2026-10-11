@@ -30,7 +30,8 @@ def test_selection_is_union_and_default_view_does_not_enable_full_catalog():
 
 def test_case_compilation_freezes_variant_gate_chart_and_diagnostic_consumers():
     path = ROOT / 'config/scenarios/master_ha_failover.yaml'
-    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)):
+    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), \
+         patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
         doc = configure_program(load_document(path), str(path))
         instances = compile_scenarios([(str(path), doc)], handlers=handlers())
     assert len(instances) == 4

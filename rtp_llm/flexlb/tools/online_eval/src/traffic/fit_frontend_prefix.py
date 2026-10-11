@@ -37,7 +37,8 @@ def fit(a):
     if a.model_version == "2" and not (a.v2_reason and a.v2_reason.strip()):
         raise ValueError("--model-version 2 requires --v2-reason for historical refitting")
     codec = codec_for_version(int(a.model_version))
-    encode, write_trace = codec.encode, codec.write_trace
+    from traffic.lineage_transforms import LineageProjector
+    encode, write_trace = codec.encode, LineageProjector(codec.decode).write_trace
     a.out.mkdir(parents=True, exist_ok=True)
     rows = []
     sources = {}

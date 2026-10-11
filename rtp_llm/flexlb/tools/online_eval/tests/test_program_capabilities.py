@@ -40,7 +40,8 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             path = root / 'scenario.yaml'
             path.write_text(yaml.safe_dump(config))
             with mock.patch.object(registry, '_snapshot', snapshot(entry('second_cache', __import__('dataclasses').replace(module.CASE, producers=registry.registry().cases['cache_scale_in'].definition.producers), 'second_cache', module_path), include_existing=True)):
-                with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)):
+                with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)), \
+                     mock.patch('runtime.resource_plan.VICTIM_OFFSETS', (700, 701, 702)):
                     first = compile_scenarios([('first', configure_program(original, 'first'))], handlers=handlers())
                     second = compile_scenarios([('second', configure_program(config, 'second'))], handlers=handlers())
                 self.assertEqual([p['stages'] for p in first], [p['stages'] for p in second])

@@ -1,68 +1,81 @@
-"""Durable run checkpoints and independently budgeted evidence/report delivery."""
+"""Durable checkpoints and independently budgeted evidence/report delivery."""
 
-import copy
 from runtime.deadline import Deadline, interruptible
-from runtime.outcome import apply_outcome
+from scenario.run_result import RunResult, FinalizationPhase, FinalizationResult, DeliveryStatus, WorkloadResult
 
 
 class RunFinalizer:
-    def run(self, ctx, result, started, policy):
-        instance = ctx.instance
-        clock, sleeper = ctx.clock, ctx.sleeper
-        enforce_deadlines = ctx.enforce_deadlines
-        _policy = policy
-        from artifacts.json_io import write_json
-        result["execution_status"] = result["status"]
-        result["finalization"] = []
-        apply_outcome(result)
+    def run(self, ctx, result: RunResult, started, policy) -> RunResult:
+        result.finalization_started = True
         result_path = ctx.artifact_dir / "result.json"
-        def checkpoint():
-            apply_outcome(result)
-            # An interrupted finalizer must never leave a terminal-looking PASS.
-            pending = dict(result, status="FINALIZING") if _policy is not None else result
-            write_json(result_path, pending)
+
+        def checkpoint(pending=False):
+            from artifacts.json_io import write_json
+            document = result.to_dict()
+            if pending:
+                document["status"] = "FINALIZING"
+            write_json(result_path, document)
+
+        checkpoint(pending=policy is not None)
+        if policy is not None:
+            budgets = result.plan.execution
+            evidence = self._phase(ctx, result, FinalizationPhase.EVIDENCE,
+                                   budgets.finalize_timeout_s, started, checkpoint,
+                                   lambda document, deadline: policy.finalize(ctx, document, deadline))
+            if result.finalization[-1].status == DeliveryStatus.PASS:
+                self._phase(ctx, result, FinalizationPhase.REPORT, budgets.report_timeout_s,
+                            started, checkpoint,
+                            lambda document, deadline: self._render(policy, ctx, document, evidence, deadline))
+            else:
+                result.finalization.append(FinalizationResult(FinalizationPhase.REPORT,
+                    budgets.report_timeout_s, DeliveryStatus.BLOCKED, "evidence finalization failed"))
+        result.duration_ms = int((ctx.clock()-started)*1000)
         checkpoint()
-        if _policy is not None:
-            analysis = None
-            for phase, budget_key in (("evidence", "finalize_timeout_s"), ("report", "report_timeout_s")):
-                phase_start = clock()
-                budget = instance["execution"][budget_key]
-                deadline = Deadline(phase_start + budget, clock, sleeper)
-                completed_status = result["status"]
-                completed_outcome = copy.deepcopy(result["outcome"])
-                row = dict(phase=phase, status="RUNNING", budget_s=budget, error=None, duration_ms=0)
-                result["finalization"].append(row)
-                checkpoint()
-                try:
-                    with interruptible(deadline, enforce_deadlines):
-                        if phase == "evidence":
-                            analysis = _policy.finalize(ctx, result, deadline)
-                        else:
-                            analysis["status"] = completed_status
-                            analysis["outcome"] = completed_outcome
-                            _policy.render(ctx, result, analysis, deadline)
-                        deadline.check()
-                    row["status"] = "PASS"
-                except Exception as exc:
-                    row["status"] = "TIMEOUT" if isinstance(exc, TimeoutError) else "ERROR"
-                    row["error"] = f"{type(exc).__name__}: {exc}"
-                    result["status"] = row["status"]
-                    result["error"] = result["error"] or f"{phase} finalization failed: {row['error']}"
-                    if phase == "evidence":
-                        result.setdefault("workload", {}).update(runtime_validity="INVALID", report_status="BLOCKED")
-                    else:
-                        result["workload"]["report_status"] = row["status"]
-                row["duration_ms"] = int((clock() - phase_start) * 1000)
-                result["duration_ms"] = int((clock() - started) * 1000)
-                if phase == "report" and row["status"] == "PASS":
-                    result["workload"]["report_status"] = "PASS"
-                checkpoint()
-                if phase == "evidence" and row["status"] != "PASS":
-                    result["finalization"].append(dict(phase="report", status="BLOCKED",
-                        budget_s=instance["execution"]["report_timeout_s"],
-                        error="evidence finalization failed", duration_ms=0))
-                    break
-        result["duration_ms"] = int((clock() - started) * 1000)
-        apply_outcome(result)
-        write_json(result_path, result)
         return result
+
+    @staticmethod
+    def _render(policy, ctx, document, evidence, deadline):
+        if not isinstance(evidence, dict):
+            raise TypeError("evidence finalization must return report analysis")
+        evidence["status"] = document["status"]
+        evidence["outcome"] = document["outcome"]
+        return policy.render(ctx, document, evidence, deadline)
+
+    def _phase(self, ctx, result, phase, budget, started, checkpoint, operation):
+        phase_start = ctx.clock()
+        deadline = Deadline(phase_start + budget, ctx.clock, ctx.sleeper)
+        completed = result.adjudicate()
+        row = FinalizationResult(phase, budget)
+        result.finalization.append(row)
+        checkpoint(pending=True)
+        document = result.to_dict()
+        # The policy receives execution's terminal outcome, not a transient delivery state.
+        document["status"] = completed.status
+        from dataclasses import asdict
+        document["outcome"] = dict(asdict(completed), delivery="PASS")
+        value = None
+        try:
+            with interruptible(deadline, ctx.enforce_deadlines):
+                value = operation(document, deadline)
+                deadline.check()
+            row.status = DeliveryStatus.PASS
+        except Exception as exc:
+            row.status = DeliveryStatus.TIMEOUT if isinstance(exc, TimeoutError) else DeliveryStatus.ERROR
+            row.error = f"{type(exc).__name__}: {exc}"
+            result.error = result.error or f"{phase.value} finalization failed: {row.error}"
+        finally:
+            result.absorb_policy_result(document)
+        if row.status != DeliveryStatus.PASS:
+            if result.workload is None:
+                result.workload = WorkloadResult()
+            if phase == FinalizationPhase.EVIDENCE:
+                result.workload.runtime_validity = "INVALID"
+                result.workload.report_status = "BLOCKED"
+            else:
+                result.workload.report_status = row.status.value
+        elif phase == FinalizationPhase.REPORT and result.workload is not None:
+            result.workload.report_status = "PASS"
+        row.duration_ms = int((ctx.clock()-phase_start)*1000)
+        result.duration_ms = int((ctx.clock()-started)*1000)
+        checkpoint()
+        return value

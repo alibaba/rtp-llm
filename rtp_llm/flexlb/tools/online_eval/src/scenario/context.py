@@ -19,6 +19,13 @@ class RuntimeContext(ResourceScope):
         self.outputs = {}
         self.report_events = []
 
+    @property
+    def environment_plan(self):
+        from scenario.plan import EnvironmentPlan
+        if hasattr(self, "plan"):
+            return self.plan.environment
+        return EnvironmentPlan.read(self.instance["environment"])
+
     def record_event(self, identity, *, timestamp=None):
         """Record the actual case event time; presentation names belong to views."""
         import re

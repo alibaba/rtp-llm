@@ -118,3 +118,17 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 数据型 case YAML 在入口解码为 `CaseDeclaration`、`VariantDeclaration`、`ExecutionPolicy` 和 `MonitoringPolicy`。case 的业务参数由所属程序校验，公共构建层不通过任意模块属性寻找入口。`CaseDefinition` 声明全部能力，注册器按目录发现并校验冲突。
 
 环境覆盖通过统一规则合并：配置字段整体替换，profile 按名称及字段继承，列表与完整模型整体替换。编译阶段将最终 Master JSON、preset 性能数据及运行选项冻结为带 SHA 的 `EnvironmentSnapshot`。运行时使用冻结数据投影进程参数，不重新读取 preset 或应用配置默认值。
+
+## 执行领域对象与序列化边界
+
+`ScenarioCompiler.compile()` 返回不可变的 `CompiledInstance`，其中阶段为 `StagePlan`，公共请求、句柄引用和比较参数分别使用具体参数类型。`ExecutionPlan` 组合实例与依赖摘要，`ExecutionPlanCodec` 负责落盘、完整性验证和领域解码。摘要一致之外，加载时还检查身份、预算、资源范围和环境快照的一致性。`compile_scenarios()`、`freeze_plan()` 和 `load_plan()` 是清单及文件格式的投影入口，不作为运行时状态容器。
+
+`ScenarioRunner.run()` 接收编译实例并返回 `RunResult`。`StageExecutor` 返回 `StageExecutionSummary`，阶段、清理和交付状态具有独立的结果类型。`RunOutcome.evaluate()` 使用 `OutcomeEvidence` 统一判定执行、gate、有效性和交付；报告失败不重写阶段检查。`RunFinalizer` 在证据和报告各自的 deadline 内调用适配器，并在阶段开始、完成或失败时保存检查点。
+
+环境声明、Master patch 和解析结果分别由 `EnvironmentDeclaration`、`MasterPatch` 与 `ResolvedEnvironment` 表达。`EnvironmentResolver` 读取一次 preset，校验所有具名 profile patch，再为选定 profile 渲染。性能与缓存 patch 在编译时合入最终快照；backend 仅绑定租约和进程启动参数，不重新读取 preset 或解释性能 patch。简单字段的类型、默认值和范围声明在领域字段 metadata，环境词汇从字段定义生成。
+
+case action 保留自身参数和输出的所有权。公共 core action 使用具体参数对象；扩展 action 的冻结传输由 `AdapterParameters` 承载，在进入注册适配器时转换为该适配器的参数格式。报告视图、来源信息和扩展证据作为序列化边界数据保存，不通过公共层识别某个 case 的字段名。
+
+流量强度由 `RateCurve`、两种 retention schedule 和 `PlaybackIntensity` 表达，环境变量由 `PlaybackEnvCodec` 解码。时间积分与带 seed 的事件计数保持确定性，发送与循环仍由 Java 客户端控制。
+
+lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，返回 `LineageModel`。`LineageEvent` 明确区分 token 长度、共享完整块和额外标签预留；`LineageExpander` 管理父路径及标签预算，`LineageProjector` 校验固定输入并生成请求文件。过滤作用于展开后的事件，保留原始索引和父路径，不改变请求身份或随机采样索引。压缩格式中的版本号描述数据语义，不表示 Python 类的代次。

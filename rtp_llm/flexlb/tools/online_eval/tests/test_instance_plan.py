@@ -48,7 +48,13 @@ def catalog():
     }
 
     for row in document["instances"]:
-        row["compiled"] = copy.deepcopy(row)
+        from scenario import compile_scenarios
+        from test_scenario_runtime import source
+        declaration = source()
+        declaration.update(id=row["scenario_id"], category=row["category"], description=row["metadata"]["description"])
+        compiled = compile_scenarios([(row["source_path"], declaration)])[0]
+        compiled.update(copy.deepcopy(row))
+        row["compiled"] = compiled
     return document
 
 

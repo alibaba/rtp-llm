@@ -316,7 +316,8 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_shipped_inventory_is_data_only_and_keeps_all_checks(self):
         documents = load_scenarios(ROOT / "config/scenarios")
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(sorted(p["id"] for p in plans), expected)

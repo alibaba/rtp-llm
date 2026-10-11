@@ -85,7 +85,8 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertTrue(any(c["status"] != "PASS" for c in r["cleanup"]))
 
     def test_catalog_is_disjoint_and_complete(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
@@ -107,7 +108,8 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_core_suite_is_request_completion_for_every_master_profile(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )

@@ -8,7 +8,7 @@ from typing import Optional
 from cases.config_data import mapping, data_only
 from cases.variants import VariantAxis
 from scenario.loader import ScenarioError
-from scenario.suites import normalize_metadata, normalize_execution
+from scenario.suites import normalize_metadata, normalize_execution, DEFAULT_MONITORING
 from scenario.validation import names
 from flexlb_cfg import PROFILES
 
@@ -45,8 +45,24 @@ class MonitoringPolicy:
 
     @classmethod
     def read(cls, value):
-        return cls(value['capture_metrics'], value['sample_interval_s'], value['max_sample_gap_s'],
-                   value['collector_shutdown_s'], value.get('query_plan'))
+        from scenario.validation import mapping
+        mapping(value, "execution.monitoring", set(DEFAULT_MONITORING) | {"query_plan"})
+        normalized = {**DEFAULT_MONITORING, **value}
+        return cls(normalized['capture_metrics'], normalized['sample_interval_s'], normalized['max_sample_gap_s'],
+                   normalized['collector_shutdown_s'], normalized.get('query_plan'))
+
+    def __post_init__(self):
+        from scenario.validation import number
+        if type(self.capture_metrics) is not bool:
+            raise ScenarioError("execution.monitoring.capture_metrics must be boolean")
+        for name in ("sample_interval_s", "max_sample_gap_s", "collector_shutdown_s"):
+            value = number(getattr(self, name), "execution.monitoring." + name)
+            if value <= 0:
+                raise ScenarioError("invalid execution.monitoring budget: " + name)
+        if self.max_sample_gap_s < self.sample_interval_s:
+            raise ScenarioError("maximum sample gap is shorter than sampling interval")
+        if self.query_plan is not None and (type(self.query_plan) is not str or not self.query_plan):
+            raise ScenarioError("monitoring query plan must be a nonempty name")
 
     def to_dict(self):
         result = {name: getattr(self, name) for name in self.__dataclass_fields__ if name != 'query_plan'}

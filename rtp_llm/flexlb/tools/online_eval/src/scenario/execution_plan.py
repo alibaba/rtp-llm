@@ -7,6 +7,7 @@ from pathlib import Path
 from artifacts.json_io import write_json
 from scenario.loader import ScenarioError
 from schema_contract import matches_schema
+from scenario.plan import CompiledInstance, ExecutionPlan
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,33 +29,47 @@ def dependency_files():
             for path in sorted(paths)}
 
 
+class ExecutionPlanCodec:
+    """Frozen artifact codec: validate envelope, dependencies and domain contracts."""
+
+    def __init__(self, dependencies=None):
+        self.dependencies = dependency_files if dependencies is None else dependencies
+
+    def write(self, path, plan):
+        if dict(plan.dependencies) != self.dependencies():
+            raise ScenarioError("execution code/config changed after compilation")
+        payload = dict(execution_plan_schema_version=1,
+                       instances=[instance.to_dict() for instance in plan.instances],
+                       dependencies=dict(plan.dependencies))
+        payload["sha256"] = _sha(payload)
+        write_json(path, payload)
+        return payload["sha256"]
+
+    def read(self, path, expected_sha):
+        document = json.loads(Path(path).read_text())
+        if not matches_schema(document, "execution_plan_schema_version", 1):
+            raise ScenarioError("unsupported execution plan schema")
+        if set(document) != {"execution_plan_schema_version", "instances", "dependencies", "sha256"}:
+            raise ScenarioError("invalid execution plan fields")
+        actual = _sha({key: value for key, value in document.items() if key != "sha256"})
+        if document["sha256"] != actual or actual != expected_sha:
+            raise ScenarioError("execution plan checksum mismatch")
+        if document["dependencies"] != self.dependencies():
+            raise ScenarioError("execution code/config changed after planning")
+        instances = document["instances"]
+        if not isinstance(instances, list):
+            raise ScenarioError("execution plan requires compiled instances")
+        return ExecutionPlan(tuple(CompiledInstance.read(instance) for instance in instances),
+                             tuple(sorted(document["dependencies"].items())))
+
+
 def freeze_plan(path, plans, *, dependencies=None):
-    if not plans or any(not isinstance(plan, dict) for plan in plans):
-        raise ScenarioError("execution requires complete compiled instances")
+    """Artifact-facing projection; internal callers can write ExecutionPlan directly."""
     dependencies = dependency_files() if dependencies is None else dependencies
-    if dependencies != dependency_files():
-        raise ScenarioError("execution code/config changed after compilation")
-    payload = dict(execution_plan_schema_version=1, instances=plans, dependencies=dependencies)
-    payload["sha256"] = _sha(payload)
-    write_json(path, payload)
-    return payload["sha256"]
+    plan = ExecutionPlan(tuple(CompiledInstance.read(instance) for instance in plans),
+                         tuple(sorted(dependencies.items())))
+    return ExecutionPlanCodec().write(path, plan)
 
 
 def load_plan(path, expected_sha):
-    document = json.loads(Path(path).read_text())
-    if not matches_schema(document, "execution_plan_schema_version", 1):
-        raise ScenarioError("unsupported execution plan schema")
-    if set(document) != {"execution_plan_schema_version", "instances", "dependencies", "sha256"}:
-        raise ScenarioError("invalid execution plan fields")
-    actual = _sha({key: value for key, value in document.items() if key != "sha256"})
-    if document["sha256"] != actual or actual != expected_sha:
-        raise ScenarioError("execution plan checksum mismatch")
-    if document["dependencies"] != dependency_files():
-        raise ScenarioError("execution code/config changed after planning")
-    plans = document["instances"]
-    if not isinstance(plans, list) or not plans or any(not isinstance(plan, dict) for plan in plans):
-        raise ScenarioError("execution plan requires compiled instances")
-    ids = [plan["id"] for plan in plans]
-    if len(set(ids)) != len(ids):
-        raise ScenarioError("duplicate frozen instance identity")
-    return plans
+    return [instance.to_dict() for instance in ExecutionPlanCodec().read(path, expected_sha).instances]

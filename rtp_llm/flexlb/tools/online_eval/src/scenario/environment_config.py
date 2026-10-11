@@ -1,54 +1,28 @@
 """Validate and resolve profile, preset and case environment settings."""
 
+from __future__ import annotations
+
 import copy
 import json
 import re
+from dataclasses import dataclass, fields, field, asdict
 from flexlb_cfg import (
     OMIT, PROFILE_CAPS, ProfileIdentityError, PROFILES, VICTIM_STAGES,
     ConfigOverride, render_env, validate_profile_identity,
 )
-from runtime.perf_presets import capture_defaults, load_preset, preset_names
+from runtime.perf_presets import load_preset_bundle, preset_names
 from scenario.loader import ScenarioError
 from scenario.validation import fail, mapping, number, names
 
-INTEGER_OVERRIDES = {
-    "cleanup_interval_ms",
-    "status_rpc_ms",
-    "max_requests",
-    "default_priority",
-    "queue_timeout_ms",
-    "decode_max_engine_requests",
-    "decode_max_kv_usage_percent",
-    "max_predicted_execution_ms",
-    "request_timeout_ms",
-    "max_collection_wait_ms",
-    "status_stale_after_ms",
-    "max_inflight_per_prefill_worker",
-}
-
-_SPECIAL_ENVIRONMENT_FIELDS = frozenset({
-    "backend", "n_prefill", "n_decode", "prefill_cache_blocks",
-    "decode_cache_blocks", "config_overrides", "profile_overrides",
-    "discovery", "perf_preset", "model_override", "prefill_perf",
-    "prefill_cache_policy", "master_layout", "master_stable_window_s",
-    "metric_whitelist",
-})
+MASTER_PATCH_FIELDS = {field.name for field in fields(ConfigOverride)} - {"strip_preemption"}
 
 _ABSENT = object()
 
-OPTIONAL_SCALARS = {
-    "debug_enabled": (bool, False, None),
-    "mock_auto_fetch": (bool, _ABSENT, None),
-    "master_debug_log": (bool, _ABSENT, None),
-    "master_sync_log": (bool, False, None),
-    "mock_fetch_attach_timeout_ms": (int, _ABSENT, 1),
-    "prefill_max_waiting_batches": (int, _ABSENT, 0),
-}
 
 
 def environment_fields():
     """One vocabulary for both top-level fields and simple scalar declarations."""
-    return _SPECIAL_ENVIRONMENT_FIELDS | OPTIONAL_SCALARS.keys()
+    return {field.name for field in fields(EnvironmentDeclaration)} | {"config_overrides", "profile_overrides"}
 
 
 def variant_environment_fields():
@@ -103,7 +77,309 @@ def effective_capabilities(config):
     return axes, sorted(caps)
 
 
-def environment(value, path, profile):
+@dataclass(frozen=True)
+class MasterPatch:
+    """Validated configuration operations; absent/None inherits, OMIT removes."""
+
+    configuration: ConfigOverride
+    declared: dict
+
+    @classmethod
+    def read(cls, values, path):
+        values = mapping(values, path, MASTER_PATCH_FIELDS)
+        kwargs = {}
+        for key, val in values.items():
+            field = path + "." + key
+            if val is None:
+                continue
+            if key in {"ordering", "decision", "dispatcher"}:
+                choices = {
+                    "ordering": ("fifo", "priority"),
+                    "decision": ("single", "fixed_window"),
+                    "dispatcher": ("batch", "non_batch"),
+                }[key]
+                if val not in choices:
+                    fail(field, f"expected one of {choices}")
+            elif key == "cache_affinity_max_extra_ttft_ms":
+                number(val, field, minimum=0, integer=True)
+            elif key == "cache_affinity_min_prefix_hit_percent":
+                number(val, field, minimum=0)
+            elif key == "prefill_expression":
+                if not isinstance(val, str) or not val.strip() or len(val) > 4096:
+                    fail(field, "expected a nonempty formula of at most 4096 characters")
+            elif key == "preemption" and val != {"omit": True}:
+                mapping(
+                    val,
+                    field,
+                    {"allowed_victim_stages", "timeout_ms"},
+                    {"allowed_victim_stages"},
+                )
+                victim_stages = names(
+                    val["allowed_victim_stages"],
+                    field + ".allowed_victim_stages",
+                    VICTIM_STAGES,
+                )
+                if not victim_stages:
+                    fail(field, "preemption victim stages cannot be empty")
+                if "timeout_ms" in val:
+                    number(
+                        val["timeout_ms"], field + ".timeout_ms", minimum=1, integer=True
+                    )
+            elif key == "decision_lifetime":
+                number(val, field, minimum=1)
+            elif isinstance(val, dict):
+                if val != {"omit": True} or type(val.get("omit")) is not bool:
+                    fail(field, "expected exact {omit: true}")
+                val = OMIT
+            else:
+                number(val, field, integer=True)
+            kwargs[key] = val
+        return cls(ConfigOverride(**kwargs), copy.deepcopy(values))
+
+    def overlay(self, other):
+        return MasterPatch.read(
+            {**self.declared, **{key: value for key, value in other.declared.items() if value is not None}},
+            "config_overrides",
+        )
+
+
+@dataclass(frozen=True)
+class EnvironmentResolver:
+    """One preset load and one patch parse per environment declaration."""
+
+    performance: dict
+    runtime: dict
+    common: MasterPatch
+    profiles: dict[str, MasterPatch]
+    captured: dict[str, int]
+
+    @classmethod
+    def read(cls, value, path, preset):
+        bundle = load_preset_bundle(preset)
+        performance, runtime = bundle.performance, bundle.runtime
+        common = MasterPatch.read(value.get("config_overrides", {}), path + ".config_overrides")
+        patches = mapping(value.get("profile_overrides", {}), path + ".profile_overrides", PROFILES)
+        profiles = {profile: MasterPatch.read(patch, path + ".profile_overrides." + profile)
+                    for profile, patch in patches.items()}
+        paired = runtime.get("paired_master")
+        # Check excluded profiles too; this never recursively renders an environment.
+        for profile, patch in profiles.items():
+            cls._identity(profile, patch.declared, path)
+            cls._identity(profile, common.declared, path)
+            baseline = MasterPatch.read(paired.for_profile(profile) if paired else {}, path + ".preset")
+            baseline.overlay(common).overlay(patch)
+        return cls(performance, runtime, common, profiles, bundle.captured)
+
+    @staticmethod
+    def _identity(profile, patch, path):
+        try:
+            validate_profile_identity(profile, patch)
+        except ProfileIdentityError as exc:
+            raise ScenarioError(f"{path}: {exc}") from exc
+
+    def master(self, profile, path):
+        paired = self.runtime.get("paired_master")
+        baseline = MasterPatch.read(paired.for_profile(profile) if paired else {}, path + ".preset")
+        patch = self.common.overlay(self.profiles.get(profile, MasterPatch.read({}, path)))
+        for candidate in (baseline, patch):
+            self._identity(profile, candidate.declared, path)
+        resolved = baseline.overlay(patch)
+        try:
+            config = json.loads(render_env(profile, resolved.configuration))
+        except (TypeError, ValueError) as exc:
+            fail(path + ".config_overrides", str(exc))
+        return baseline, patch, resolved, config
+
+    def resolve(self, declaration, path, profile):
+        baseline, declared, resolved, config = self.master(profile, path)
+        paired_master, declared_overrides = baseline.declared, declared.declared
+        captured = self.captured
+        if captured:
+            changed = [field for field, source_field in (
+                ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
+                ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
+                ("decode_cache_blocks", "decode_kv_pool_blocks"),
+            ) if getattr(declaration, field) is not None and getattr(declaration, field) != captured[source_field]]
+            if ("prefill_expression" in declared_overrides and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or declaration.prefill_perf is not None:
+                changed.append("prefill model")
+            changed.extend("master." + key for key, val in declared_overrides.items()
+                           if key in paired_master and val != paired_master[key])
+            if declaration.prefill_cache_policy is not None:
+                performance = self.performance
+                policy = declaration.prefill_cache_policy
+                original = performance.get("prefill", {})
+                memory = original.get("memory_cache", {})
+                if (policy.device_tree != original.get("enable_gpu_prefix_tree")
+                    or policy.memory_tree != memory.get("enable_prefix_tree")
+                    or (policy.memory_blocks is not None and policy.memory_blocks != memory.get("capacity_blocks"))):
+                    changed.append("prefill_cache_policy")
+            if changed and declaration.model_override is None:
+                fail(path + ".model_override", "test deviation requires baseline and reason: " + ", ".join(changed))
+        axes, capabilities = effective_capabilities(config)
+        from scenario.environment_snapshot import EnvironmentSnapshot
+        snapshot = EnvironmentSnapshot.freeze(
+            config, self.effective_performance(declaration),
+            {key: value for key, value in self.runtime.items() if key != "paired_master"},
+        )
+        return ResolvedEnvironment(declaration, resolved, snapshot, axes, tuple(capabilities))
+
+    def effective_performance(self, declaration):
+        return declaration.apply_performance(self.performance)
+
+
+@dataclass(frozen=True)
+class PrefillCachePolicy:
+    device_tree: bool
+    memory_tree: bool
+    memory_blocks: int | None = None
+
+    def __post_init__(self):
+        if type(self.device_tree) is not bool or type(self.memory_tree) is not bool:
+            raise ValueError("cache prefix-tree flags must be booleans")
+        if self.memory_blocks is not None and (type(self.memory_blocks) is not int or self.memory_blocks < 0):
+            raise ValueError("memory cache blocks must be a nonnegative integer")
+
+    def apply(self, prefill):
+        capacity = self.memory_blocks
+        if capacity is None:
+            capacity = prefill.get("memory_cache", {}).get("capacity_blocks")
+        if type(capacity) is not int or capacity < 0:
+            raise ValueError("prefill memory cache policy requires captured capacity or explicit memory_blocks")
+        prefill["enable_gpu_prefix_tree"] = self.device_tree
+        prefill["memory_cache"] = dict(enabled=capacity > 0, capacity_blocks=capacity,
+                                     enable_prefix_tree=self.memory_tree)
+
+
+@dataclass(frozen=True)
+class ModelDeviation:
+    baseline: str
+    reason: str
+
+
+    def __post_init__(self):
+        if (type(self.baseline) is not str or not self.baseline.strip()
+                or type(self.reason) is not str or not self.reason.strip()):
+            raise ValueError("model deviation requires baseline and reason")
+
+
+@dataclass(frozen=True)
+class PrefillPerformance:
+    fixed_ms: float
+    scale: float
+    max_batch_tokens: int
+    max_batch_requests: int
+
+
+    def __post_init__(self):
+        for item in fields(self):
+            number(getattr(self, item.name), "prefill_perf." + item.name,
+                   integer=item.name.startswith("max_batch_"))
+
+
+@dataclass(frozen=True)
+class EnvironmentDeclaration:
+    backend: str
+    n_prefill: int
+    n_decode: int
+    discovery: str
+    perf_preset: str
+    master_layout: str
+    master_stable_window_s: float
+    debug_enabled: bool = field(metadata={"scalar": (bool, False, None)})
+    master_sync_log: bool = field(metadata={"scalar": (bool, False, None)})
+    prefill_cache_blocks: int | None = None
+    decode_cache_blocks: int | None = None
+    mock_auto_fetch: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
+    master_debug_log: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
+    mock_fetch_attach_timeout_ms: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 1)})
+    prefill_max_waiting_batches: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 0)})
+    metric_whitelist: str | None = None
+    model_override: ModelDeviation | None = None
+    prefill_perf: PrefillPerformance | None = None
+    prefill_cache_policy: PrefillCachePolicy | None = None
+
+    def __post_init__(self):
+        if self.backend != "java_mock" or self.discovery not in {"file", "discovery_file"}:
+            raise ValueError("invalid environment backend/discovery")
+        if self.master_layout not in {"single", "dual_standalone"}:
+            raise ValueError("invalid environment master layout")
+        for name in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
+            value = getattr(self, name)
+            if value is not None:
+                number(value, "environment." + name, minimum=1, integer=True)
+        for item in fields(self):
+            rule = item.metadata.get("scalar")
+            value = getattr(self, item.name)
+            if rule is None or value is None:
+                continue
+            kind, _, minimum = rule
+            if kind is bool and type(value) is not bool:
+                raise ValueError("environment." + item.name + " requires a boolean")
+            if kind is int:
+                number(value, "environment." + item.name, minimum=minimum, integer=True)
+        number(self.master_stable_window_s, "environment.master_stable_window_s")
+        if self.master_sync_log and self.master_layout != "single":
+            raise ValueError("isolated sync log requires single master")
+        if self.model_override is not None and self.model_override.baseline != self.perf_preset:
+            raise ValueError("model deviation baseline must name perf_preset")
+
+    @classmethod
+    def read_normalized(cls, value):
+        options = copy.deepcopy(value)
+        policy = options.pop("prefill_cache_policy", None)
+        performance = options.pop("prefill_perf", None)
+        deviation = options.pop("model_override", None)
+        return cls(**options,
+                   prefill_cache_policy=PrefillCachePolicy(**policy) if policy is not None else None,
+                   prefill_perf=PrefillPerformance(**performance) if performance is not None else None,
+                   model_override=ModelDeviation(**deviation) if deviation is not None else None)
+
+
+    def to_dict(self):
+        result = {field.name: copy.deepcopy(getattr(self, field.name)) for field in fields(self)
+                  if getattr(self, field.name) is not None}
+        for name in ("prefill_perf", "model_override"):
+            value = getattr(self, name)
+            if value is not None:
+                result[name] = asdict(value)
+        if self.prefill_cache_policy is not None:
+            result["prefill_cache_policy"] = {
+                field.name: getattr(self.prefill_cache_policy, field.name)
+                for field in fields(self.prefill_cache_policy)
+                if getattr(self.prefill_cache_policy, field.name) is not None}
+        return result
+
+    def apply_performance(self, baseline):
+        performance = copy.deepcopy(baseline)
+        if self.prefill_perf is not None:
+            performance["prefill"] = asdict(self.prefill_perf)
+        if self.prefill_max_waiting_batches is not None:
+            performance.setdefault("prefill", {})["max_waiting_batches"] = self.prefill_max_waiting_batches
+        if self.prefill_cache_policy is not None:
+            self.prefill_cache_policy.apply(performance.setdefault("prefill", {}))
+        return performance
+
+
+# Simple field rules are metadata of their typed declaration, not a second schema.
+OPTIONAL_SCALARS = {item.name: item.metadata["scalar"] for item in fields(EnvironmentDeclaration)
+                    if "scalar" in item.metadata}
+
+
+@dataclass(frozen=True)
+class ResolvedEnvironment:
+    declaration: EnvironmentDeclaration
+    master_patch: MasterPatch
+    snapshot: "EnvironmentSnapshot"
+    effective_axes: dict[str, str]
+    effective_capabilities: tuple[str, ...]
+
+    def to_dict(self):
+        return dict(self.declaration.to_dict(), config_overrides=copy.deepcopy(self.master_patch.declared),
+                    resolved_config=json.loads(self.snapshot.master_json), rendered=self.snapshot.to_dict(),
+                    effective_axes=dict(self.effective_axes), effective_capabilities=list(self.effective_capabilities))
+
+
+def read_environment(value, path):
     value = mapping(
         value,
         path,
@@ -124,7 +400,8 @@ def environment(value, path, profile):
         if val not in allowed:
             fail(path + "." + key, f"invalid value {val!r}; expected one of {allowed}")
         result[key] = val
-    captured = capture_defaults(result["perf_preset"])
+    resolver = EnvironmentResolver.read(value, path, result["perf_preset"])
+    captured = resolver.captured
     for field, capture_field in (
         ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
         ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
@@ -180,126 +457,9 @@ def environment(value, path, profile):
     for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
         if key in value:
             result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
-    preset_performance, preset_runtime = load_preset(result["perf_preset"])
-    paired_settings = preset_runtime.get("paired_master")
-    paired_master = paired_settings.for_profile(profile) if paired_settings else {}
-    profile_overrides = mapping(value.get("profile_overrides", {}),
-                                path + ".profile_overrides", PROFILES)
-    # Validate every keyed entry, including profiles excluded by CLI selection.
-    for target, patch in profile_overrides.items():
-        mapping(patch, path + ".profile_overrides." + target, INTEGER_OVERRIDES | {
-            "ordering", "decision", "dispatcher", "preemption", "decision_lifetime",
-            "prefill_expression", "cache_affinity_max_extra_ttft_ms",
-            "cache_affinity_min_prefix_hit_percent",
-        })
-        if target != profile:
-            environment({**value, "profile_overrides": {target: patch}}, path, target)
-    common = value.get("config_overrides", {})
-    if not isinstance(common, dict):
-        fail(path + ".config_overrides", "expected mapping")
-    for target, patch in [(profile, common), (profile, paired_master), *profile_overrides.items()]:
-        try:
-            validate_profile_identity(target, patch)
-        except ProfileIdentityError as exc:
-            raise ScenarioError(f"{path}: {exc}") from exc
-    overrides = mapping(
-        {**common, **{k: v for k, v in profile_overrides.get(profile, {}).items() if v is not None}},
-        path + ".config_overrides",
-        INTEGER_OVERRIDES
-        | {
-            "ordering",
-            "decision",
-            "dispatcher",
-            "preemption",
-            "decision_lifetime",
-            "prefill_expression",
-            "cache_affinity_max_extra_ttft_ms",
-            "cache_affinity_min_prefix_hit_percent",
-        },
-    )
-    declared_overrides = dict(overrides)
-    overrides = {**paired_master, **{k: v for k, v in declared_overrides.items() if v is not None}}
-    kwargs = {}
-    for key, val in overrides.items():
-        field = path + ".config_overrides." + key
-        if val is None:
-            continue
-        if key in {"ordering", "decision", "dispatcher"}:
-            choices = {
-                "ordering": ("fifo", "priority"),
-                "decision": ("single", "fixed_window"),
-                "dispatcher": ("batch", "non_batch"),
-            }[key]
-            if val not in choices:
-                fail(field, f"expected one of {choices}")
-        elif key == "cache_affinity_max_extra_ttft_ms":
-            number(val, field, minimum=0, integer=True)
-        elif key == "cache_affinity_min_prefix_hit_percent":
-            number(val, field, minimum=0)
-        elif key == "prefill_expression":
-            if not isinstance(val, str) or not val.strip() or len(val) > 4096:
-                fail(field, "expected a nonempty formula of at most 4096 characters")
-        elif key == "preemption" and val != {"omit": True}:
-            mapping(
-                val,
-                field,
-                {"allowed_victim_stages", "timeout_ms"},
-                {"allowed_victim_stages"},
-            )
-            victim_stages = names(
-                val["allowed_victim_stages"],
-                field + ".allowed_victim_stages",
-                VICTIM_STAGES,
-            )
-            if not victim_stages:
-                fail(field, "preemption victim stages cannot be empty")
-            if "timeout_ms" in val:
-                number(
-                    val["timeout_ms"], field + ".timeout_ms", minimum=1, integer=True
-                )
-        elif key == "decision_lifetime":
-            number(val, field, minimum=1)
-        elif isinstance(val, dict):
-            if val != {"omit": True} or type(val.get("omit")) is not bool:
-                fail(field, "expected exact {omit: true}")
-            val = OMIT
-        else:
-            number(val, field, integer=True)
-        kwargs[key] = val
-    try:
-        result["resolved_config"] = json.loads(
-            render_env(profile, ConfigOverride(**kwargs))
-        )
-    except (TypeError, ValueError) as exc:
-        fail(path + ".config_overrides", str(exc))
-    if captured:
-        changed = [field for field, source_field in (
-            ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-            ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-            ("decode_cache_blocks", "decode_kv_pool_blocks"),
-        ) if field in value and value[field] != captured[source_field]]
-        if ("prefill_expression" in declared_overrides and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or "prefill_perf" in value:
-            changed.append("prefill model")
-        changed.extend("master." + key for key, val in declared_overrides.items()
-                       if key in paired_master and val != paired_master[key])
-        if "prefill_cache_policy" in value:
-            performance, _ = load_preset(result["perf_preset"])
-            policy = value["prefill_cache_policy"]
-            original = performance.get("prefill", {})
-            memory = original.get("memory_cache", {})
-            if (policy["device_tree"] != original.get("enable_gpu_prefix_tree")
-                or policy["memory_tree"] != memory.get("enable_prefix_tree")
-                or ("memory_blocks" in policy and policy["memory_blocks"] != memory.get("capacity_blocks"))):
-                changed.append("prefill_cache_policy")
-        if changed and "model_override" not in result:
-            fail(path + ".model_override", "test deviation requires baseline and reason: " + ", ".join(changed))
-    result["config_overrides"] = copy.deepcopy(overrides)
-    result["effective_axes"], result["effective_capabilities"] = effective_capabilities(
-        result["resolved_config"]
-    )
-    from scenario.environment_snapshot import EnvironmentSnapshot
-    result["rendered"] = EnvironmentSnapshot.freeze(
-        result["resolved_config"], preset_performance,
-        {key: value for key, value in preset_runtime.items() if key != "paired_master"},
-    ).to_dict()
-    return result
+    return EnvironmentDeclaration.read_normalized(result), resolver
+
+
+def environment(value, path, profile):
+    declaration, resolver = read_environment(value, path)
+    return resolver.resolve(declaration, path, profile).to_dict()

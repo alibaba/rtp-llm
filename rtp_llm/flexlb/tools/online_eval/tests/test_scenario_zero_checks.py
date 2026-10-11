@@ -16,18 +16,14 @@ class ZeroChecksTest(unittest.TestCase):
         with self.assertRaisesRegex(ScenarioError, "at least one check"):
             compile_scenarios([("zero.yaml", doc)])
 
-    def test_runtime_defends_unchecked_plan_and_still_cleans(self):
+    def test_runtime_rejects_unchecked_plan_before_resource_acquisition(self):
         plan = compile_scenarios([("valid.yaml", source())])[0]
         clock, backend = Clock(), Backend(Clock())
         plan["stages"] = plan["stages"][:1]
         with tempfile.TemporaryDirectory() as tmp:
-            result = execute_instance(
-                plan, backend, artifact_dir=tmp, clock=clock, sleeper=clock.sleep
-            )
-        self.assertEqual(result["status"], "ERROR")
-        self.assertEqual(result["error"], "no checks executed")
-        self.assertIn("teardown", backend.calls)
-        self.assertEqual(result["cleanup"][0]["status"], "PASS")
+            with self.assertRaisesRegex(ScenarioError, "requires declared checks"):
+                execute_instance(plan, backend, artifact_dir=tmp, clock=clock, sleeper=clock.sleep)
+        self.assertEqual(backend.calls, [])
 
     def test_blocked_checks_keep_original_setup_error(self):
         plan = compile_scenarios([("valid.yaml", source())])[0]

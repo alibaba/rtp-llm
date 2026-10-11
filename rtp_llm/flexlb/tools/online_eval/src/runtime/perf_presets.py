@@ -146,21 +146,18 @@ def load_performance_file(path):
     return performance, capture
 
 
+@dataclass(frozen=True)
+class PresetBundle:
+    performance: dict
+    runtime: dict
+    captured: dict[str, int]
+
+
 def capture_defaults(name):
-    """Observed topology and KV pool sizes, if the preset has a capture record."""
-    entries = _registry()
-    if name not in entries:
-        raise ValueError(f"invalid perf_preset {name!r}")
-    _, capture = load_performance_file(ROOT / entries[name]["performance"])
-    if not capture or capture["status"] == "orphan":
-        return {}
-    fields = ("n_prefill", "n_decode", "prefill_kv_pool_blocks", "decode_kv_pool_blocks")
-    if any(type(capture.get(key)) is not int or capture[key] <= 0 for key in fields):
-        raise ValueError(f"perf_preset {name!r} has invalid capture topology or KV pool capacity")
-    return {key: capture[key] for key in fields}
+    return load_preset_bundle(name).captured
 
 
-def load_preset(name):
+def load_preset_bundle(name):
     entries = _registry()
     if not isinstance(name, str) or name not in entries:
         raise ValueError(f"invalid perf_preset {name!r}; expected one of {tuple(entries)}")
@@ -189,4 +186,15 @@ def load_preset(name):
         runtime["mock_extra_args"] = capture["mock_extra_args"]
     if master:
         runtime["paired_master"] = PairedMasterSettings.from_record(master)
-    return performance, runtime
+    captured = {}
+    if capture and capture["status"] != "orphan":
+        for key in ("n_prefill", "n_decode", "prefill_kv_pool_blocks", "decode_kv_pool_blocks"):
+            if type(capture.get(key)) is not int or capture[key] <= 0:
+                raise ValueError(f"perf_preset {name!r} has invalid capture topology or KV pool capacity")
+            captured[key] = capture[key]
+    return PresetBundle(performance, runtime, captured)
+
+
+def load_preset(name):
+    bundle = load_preset_bundle(name)
+    return bundle.performance, bundle.runtime

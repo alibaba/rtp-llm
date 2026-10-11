@@ -226,12 +226,15 @@ def test_identity_rejection_has_one_source(profile, axis, wrong):
 def test_environment_vocabulary_is_shared_with_an_explicit_backend_boundary(monkeypatch):
     from scenario.catalog import handlers
     assert variant_environment_fields() == environment_fields() - {'backend'}
-    monkeypatch.setitem(OPTIONAL_SCALARS, 'new_boolean', (bool, False, None))
-    assert environment({'new_boolean': True}, 'env', 'batch-window')['new_boolean'] is True
+    from dataclasses import fields
+    from scenario.environment_config import EnvironmentDeclaration
+    assert environment_fields() == {field.name for field in fields(EnvironmentDeclaration)} | {
+        'config_overrides', 'profile_overrides'}
+    assert environment({'debug_enabled': True}, 'env', 'batch-window')['debug_enabled'] is True
     document = load_scenarios(ROOT / 'config/scenarios/request_completion.yaml')[0][1]
-    document['variants'][0]['environment_overrides'] = {'new_boolean': True}
+    document['variants'][0]['environment_overrides'] = {'debug_enabled': True}
     plans = compile_scenarios([('case.yaml', document)], handlers=handlers())
-    assert all(plan['environment']['new_boolean'] is True for plan in plans)
+    assert all(plan['environment']['debug_enabled'] is True for plan in plans)
     document['variants'][0]['environment_overrides'] = {'backend': 'java_mock'}
     with pytest.raises(ScenarioError, match='backend'):
         compile_scenarios([('case.yaml', document)], handlers=handlers())

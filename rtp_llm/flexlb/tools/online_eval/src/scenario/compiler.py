@@ -1,15 +1,17 @@
 """Compile explicit instances and typed stage references without process imports."""
 
+from __future__ import annotations
+
 import copy
+from scenario.plan import CompiledInstance
 
 from flexlb_cfg import PROFILES
 
 from runtime.resource_plan import VICTIM_OFFSETS
-from runtime.perf_presets import capture_defaults
 from scenario.validation import fail, mapping, identifier, number, names
 from scenario.stage_compiler import OUTPUTS, stages
 from scenario.suites import EXECUTION_FIELDS, EXECUTION_BUDGETS
-from scenario.environment_config import environment, variant_environment_fields, CAPABILITIES
+from scenario.environment_config import environment, read_environment, variant_environment_fields, CAPABILITIES
 
 CATEGORIES = {
     "cancel",
@@ -34,7 +36,7 @@ def plan_counts(plans):
     }
 
 
-def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
+def _compile_documents(documents, profile=None, handlers=None, grade="normal"):
     """Expand named variants and selected profiles, preserving declaration order."""
     handlers = dict(handlers or {})
     if grade not in ("strict", "normal", "loose"):
@@ -182,14 +184,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             )
             from cases.config_data import merge_environment
             env = merge_environment(env, patch)
-            capture = capture_defaults(env.get("perf_preset", "default"))
-            for field, source_field in (
-                ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-                ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-                ("decode_cache_blocks", "decode_kv_pool_blocks"),
-            ):
-                if field not in env and source_field in capture:
-                    env[field] = capture[source_field]
+            declaration, resolver = read_environment(env, source + f"::{vid}.environment")
+            # Action validation receives the same resolved topology as execution.
+            for field in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
+                value = getattr(declaration, field)
+                if value is not None:
+                    env[field] = value
             if "stages" in variant and "stage_overrides" in variant:
                 fail(
                     loc,
@@ -259,7 +259,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             )
             for p in selected:
                 # Validate all declared variants, even when CLI selects a subset.
-                resolved = environment(env, source + f"::{vid}.environment", p)
+                resolved = resolver.resolve(declaration, source + f"::{vid}.environment", p).to_dict()
                 initial_workers = resolved["n_prefill"] + resolved["n_decode"]
                 max_environment_workers = initial_workers
                 for stage in compiled:
@@ -364,4 +364,19 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "findings": list(findings),
                     }
                 )
-    return instances
+    return [CompiledInstance.read(instance) for instance in instances]
+
+
+class ScenarioCompiler:
+    """Compile Python program declarations into immutable execution objects."""
+
+    def __init__(self, handlers=None):
+        self.handlers = dict(handlers or {})
+
+    def compile(self, documents, profile=None, grade="normal") -> list[CompiledInstance]:
+        return _compile_documents(documents, profile, self.handlers, grade)
+
+
+def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
+    """JSON projection for CLI/catalog consumers; the compiler returns domain objects."""
+    return [instance.to_dict() for instance in ScenarioCompiler(handlers).compile(documents, profile, grade)]

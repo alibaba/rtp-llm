@@ -537,7 +537,8 @@ class PerformanceGateTest(unittest.TestCase):
         c["max_error_rate"] = 0.01
         with self.assertRaises(ValueError):
             validate(c)
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (300, 301, 302)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
                 handlers=handlers(),
