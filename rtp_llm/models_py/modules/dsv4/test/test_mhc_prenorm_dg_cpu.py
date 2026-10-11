@@ -112,6 +112,7 @@ def _load_wrapper():
 
     norm_fn = types.ModuleType(tk + ".mhc.norm_fn_kernel")
     norm_fn._mhc_pre_norm_fn_fwd_mul = None  # replaced by spies per test
+    norm_fn._mhc_pre_norm_fn_sm120_columns = None
     norm_fn.round_to_tf32 = lambda x: (x.view(torch.int32) + 0x1000).view(torch.float32)
     sys.modules[norm_fn.__name__] = norm_fn
 

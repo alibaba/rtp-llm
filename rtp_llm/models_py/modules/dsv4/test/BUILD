@@ -684,3 +684,12 @@ py_test(
     data = [":cpu_test_support"],
     env = {"CUDA_VISIBLE_DEVICES": ""},
 )
+
+py_test(
+    name = "test_sm120_mhc_columns",
+    srcs = ["test_sm120_mhc_columns.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)

@@ -1,10 +1,15 @@
 import functools
+import os
 
 import torch
 
-from rtp_llm.models_py.utils.arch import mhc_pre_gemm_backend
+from rtp_llm.models_py.utils.arch import is_sm120, mhc_pre_gemm_backend
 
-from ....mhc.norm_fn_kernel import _mhc_pre_norm_fn_fwd_mul, round_to_tf32
+from ....mhc.norm_fn_kernel import (
+    _mhc_pre_norm_fn_fwd_mul,
+    _mhc_pre_norm_fn_sm120_columns,
+    round_to_tf32,
+)
 from ....mhc.pre_big_fuse_kernel import _mhc_pre_big_fuse
 
 
@@ -22,6 +27,24 @@ def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
     return max(split_k, 1)
 
 
+def _sm120_column_tiles_supported(
+    residual: torch.Tensor, fn: torch.Tensor, mhc_mult3: int, mhc_hidden_size: int
+) -> bool:
+    return (
+        os.environ.get("DSV4_SM120_MHC_COLUMN_TILES", "0") == "1"
+        and mhc_mult3 == 24
+        and mhc_hidden_size == 16384
+        and 0 < residual.numel() // mhc_hidden_size <= 32
+        and residual.dtype == torch.bfloat16
+        and fn.dtype == torch.float32
+        and tuple(fn.shape) == (24, 16384)
+        and residual.is_contiguous()
+        and fn.is_contiguous()
+        and residual.device == fn.device
+        and is_sm120(residual.device)
+    )
+
+
 def _run_tilelang_single_gemm(
     residual_flat: torch.Tensor,
     fn: torch.Tensor,
@@ -31,7 +54,10 @@ def _run_tilelang_single_gemm(
     mhc_hidden_size: int,
 ) -> int:
     fn = round_to_tf32(fn)
-    fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
+    if _sm120_column_tiles_supported(residual_flat, fn, mhc_mult3, mhc_hidden_size):
+        fwd_mul_kernel = _mhc_pre_norm_fn_sm120_columns()
+    else:
+        fwd_mul_kernel = _mhc_pre_norm_fn_fwd_mul(mhc_mult3, 1, mhc_hidden_size)
     fwd_mul_kernel(
         residual_flat.view(-1, mhc_hidden_size),
         fn,
