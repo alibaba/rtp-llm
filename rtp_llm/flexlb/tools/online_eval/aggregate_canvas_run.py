@@ -1896,7 +1896,7 @@ if proc_entries:
 # Inflight snapshots: scheduler in-flight plus per-engine prefill batch/
 # request counts and decode reserved/running counts summed cluster-wide.
 # G3 prometheus is the sole master-plane source since the G6/G4 collapse:
-# the five fields are rebuilt from the G3 gauges — scheduler_inflight_size
+# the five fields are rebuilt from the G3 gauges — tracked_request_count
 # direct, per-engine prefill batch/request counts and per-endpoint decode
 # reserved/running counts summed across label variants (decode reserved =
 # master 预约未确认，running = 引擎确认运行中). SchedulerRuntime sets
@@ -1906,7 +1906,7 @@ if proc_entries:
 # no-backward-compat: the retired inflight_timeseries snapshots (old runs)
 # are no longer read — those runs cannot be re-aggregated.
 _inflight_gauges = (
-    ("flexlb_app_flexlb_scheduler_inflight_size", 0),
+    ("flexlb_app_flexlb_tracked_request_count", 0),
     ("flexlb_app_flexlb_inflight_batch_count", 1),
     ("flexlb_app_flexlb_inflight_request_count", 2),
     ("flexlb_auto_tpm_decode_reserved_count", 3),

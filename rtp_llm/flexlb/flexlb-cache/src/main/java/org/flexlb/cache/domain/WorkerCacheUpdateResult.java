@@ -15,8 +15,14 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class WorkerCacheUpdateResult {
+
     private boolean success;
-    private String engineIpPort;
+    /**
+     * Logical worker identity in {@code ip:port@engineIndex} format.
+     *
+     * @see org.flexlb.dao.master.WorkerIdentity#getEngineIndex()
+     */
+    private String logicalIpPort;
     private long cacheBlockCount;
     private long availableKvCache;
     private long totalKvCache;

@@ -194,7 +194,7 @@ class MockEngineGrpcTest(unittest.IsolatedAsyncioTestCase):
             self.pb2.StatusVersionPB(latest_finished_version=-1)
         )
         self.assertEqual(1, len(status.finished_task_list))
-        self.assertEqual(123, status.finished_task_list[0].request_id)
+        self.assertEqual("123", status.finished_task_list[0].request_id)
 
         cache = await decode_stub.GetCacheStatus(
             self.pb2.CacheVersionPB(need_cache_keys=True)

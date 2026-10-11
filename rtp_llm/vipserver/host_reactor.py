@@ -7,8 +7,6 @@ from rtp_llm.vipserver.netutil import NetUtils
 from rtp_llm.vipserver.update_thread import UpdateThread
 from rtp_llm.vipserver.vipserver_proxy import VIPServerProxy
 
-DOMAIN_FAILED_CNT_THRESHOLD = 60
-
 
 class HostReactor:
     domain_map = {}
@@ -16,7 +14,6 @@ class HostReactor:
 
     def __init__(self, proxy: VIPServerProxy):
         self.domain_map: dict[str, list[Host]] = {}
-        self.domain_failed_cnt: dict[str, int] = {}
         self.domain_update_lock = threading.Lock()
         self.proxy = proxy
         self.update_domain_thread = UpdateThread(
@@ -48,24 +45,14 @@ class HostReactor:
             self.proxy.close()
 
     def update_domain_map(self, new_map: dict[str, list[Host]]):
-        self.domain_update_lock.acquire()
-        for k, v in new_map.items():
-            if v:
-                self.domain_map[k] = v
-                self.domain_failed_cnt[k] = 0
-            else:
-                self.domain_failed_cnt[k] = self.domain_failed_cnt.get(k, 0) + 1
-                logging.warning(
-                    f"{k} failed to refresh vipserver domain server list: empyt host list - {self.domain_failed_cnt[k]} times"
-                )
-                if self.domain_failed_cnt[k] >= DOMAIN_FAILED_CNT_THRESHOLD:
+        with self.domain_update_lock:
+            for k, v in new_map.items():
+                if v:
+                    self.domain_map[k] = v
+                else:
                     logging.warning(
-                        f"{k} has failed {self.domain_failed_cnt[k]} times, set server list to empty."
+                        "%s returned an empty host list; retaining cached hosts", k
                     )
-                    self.domain_map[k] = []
-                    self.domain_failed_cnt[k] = 0
-
-        self.domain_update_lock.release()
 
     def refresh_domain_srv_lst(self, domain: str):
         """

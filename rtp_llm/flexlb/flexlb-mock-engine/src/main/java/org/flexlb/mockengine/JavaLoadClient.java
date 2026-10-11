@@ -968,7 +968,7 @@ public final class JavaLoadClient {
         }
         RoleType domainRole = RoleTypeProtoConverter.fromProto(roleType);
         return EngineRpcService.RoleAddrPB.newBuilder()
-                .setRole(RoleTypeProtoConverter.toLegacyProto(domainRole))
+                .setRole(RoleTypeProtoConverter.toRoleAddrProto(domainRole))
                 .setRoleStr(domainRole.getCode())
                 .setIp(addr.substring(0, colon))
                 .setHttpPort(0)
@@ -1059,7 +1059,7 @@ public final class JavaLoadClient {
             TraceRecord record, EngineRpcService.GenerateInputPB inputPb) {
         FlexlbScheduleProtocol.FlexlbScheduleRequestPB.Builder builder =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(record.requestId)
+                .setRequestId(String.valueOf(record.requestId))
                 .setGenerateInput(inputPb.toByteString())
                 .addAllBlockCacheKeys(record.blockKeys)
                 .setSeqLen(record.inputLen)
@@ -1090,7 +1090,7 @@ public final class JavaLoadClient {
             };
             modified.getGenerateConfigBuilder().addRoleAddrs(
                     EngineRpcService.RoleAddrPB.newBuilder()
-                            .setRole(RoleTypeProtoConverter.toLegacyProto(
+                            .setRole(RoleTypeProtoConverter.toRoleAddrProto(
                                     RoleTypeProtoConverter.fromProto(roleType)))
                             .setRoleStr(RoleTypeProtoConverter.fromProto(roleType).getCode())
                             .setIp(status.getServerIp())

@@ -27,8 +27,25 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.after;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class DeliverySettlementTest {
     private FlexlbConfig config;
@@ -93,7 +110,7 @@ class DeliverySettlementTest {
                 RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null), new EndpointEventProjector(registry)));
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50);
+            reservation = decode.reserveUnqueued(pin, "2", 1L, 1L, 50);
         }
         assertNotNull(reservation);
         Member member = member(2L, 12L, decode, reservation);
@@ -548,7 +565,7 @@ class DeliverySettlementTest {
         reject(member);
         Response response = member.item().future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
+        RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
         assertSame(response, member.item().future().join());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
         verify(member.item().decodeEp()).release(member.item().decodeReservation(), DecodeEndpoint.ReleaseReason.EXPIRED);
@@ -575,7 +592,7 @@ class DeliverySettlementTest {
     }
 
     private Member member(long id, long batchId) {
-        return member(id, batchId, mock(DecodeEndpoint.class), new DecodeEndpoint.ReservationHandle(1L, id, id));
+        return member(id, batchId, mock(DecodeEndpoint.class), new DecodeEndpoint.ReservationHandle(1L, Long.toString(id), id));
     }
 
     private Member member(long id, long batchId, DecodeEndpoint decode, DecodeEndpoint.ReservationHandle reservation) {
@@ -586,7 +603,7 @@ class DeliverySettlementTest {
         RequestLifecycleTestSupport.bindRoute(registry, new RequestLifecycleTestSupport.Registered(item, future));
         var claim = RequestLifecycleTestSupport.claimBatch(registry, item, batchId, () -> true);
         assertNotNull(claim);
-        return new Member(item, registry.requestSlot(id), claim);
+        return new Member(item, registry.requestSlot(Long.toString(id)), claim);
     }
 
     private void reject(Member member) {

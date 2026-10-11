@@ -46,7 +46,7 @@ public final class GroupPlanner {
      * already been sorted by the queue's production comparator.
      */
     public record Item(
-            long requestId,
+            String requestId,
             int priority,
             long enqueueSeq,
             long enqueuedAtMs,

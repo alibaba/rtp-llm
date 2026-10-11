@@ -353,7 +353,7 @@ class BlockPoolMetricsObservabilityTest {
         assertEquals(1, status.getFinishedTaskListCount(),
                 "exactly one typed terminal must be published");
         EngineRpcService.TaskInfoPB terminal = status.getFinishedTaskList(0);
-        assertEquals(201L, terminal.getRequestId());
+        assertEquals("201", terminal.getRequestId());
         assertTrue(terminal.hasErrorInfo(), "the terminal must carry error info");
         assertEquals(JavaMockEngineCluster.DECODE_LACK_MEM_ERROR_CODE,
                 terminal.getErrorInfo().getErrorCode(),

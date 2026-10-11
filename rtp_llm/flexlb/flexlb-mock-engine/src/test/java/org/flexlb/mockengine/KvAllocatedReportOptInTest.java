@@ -168,7 +168,7 @@ class KvAllocatedReportOptInTest {
         // Iron rule 4: CANCELLED terminal surfaces in the next WorkerStatus.
         EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
         boolean cancelledReported = status.getFinishedTaskListList().stream()
-                .anyMatch(task -> task.getRequestId() == 2L
+                .anyMatch(task -> task.getRequestId().equals("2")
                         && task.getErrorInfo().getErrorCode()
                         == EngineRpcService.ErrorCodePB.CANCELLED.getNumber());
         assertTrue(cancelledReported,

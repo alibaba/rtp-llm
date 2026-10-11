@@ -19,6 +19,22 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
+
+    @Test
+    void localStandbyTtlReductionRatioAllowsEndpoints() {
+        for (double ratio : new double[]{0.0, 1.0}) {
+            String patch = "{\"cacheMatching\":{\"type\":\"KVCM\",\"localStandby\":{\"ttlReductionStartRatio\":"
+                    + ratio + "}}}";
+            assertEquals(ratio, ConfigTestFixtures.parse(patch)
+                    .kvcmCacheMatching().getLocalStandby().getTtlReductionStartRatio());
+        }
+        for (double ratio : new double[]{-0.01, 1.01}) {
+            String patch = "{\"cacheMatching\":{\"type\":\"KVCM\",\"localStandby\":{\"ttlReductionStartRatio\":"
+                    + ratio + "}}}";
+            assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch));
+        }
+    }
+
     @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
         assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
@@ -108,7 +124,7 @@ class ConfigServiceTest {
         var observability = config.getObservability().getCacheHit();
         assertTrue(observability.getRecentKeyWindow().isWriteEnabled());
         assertEquals(1800000L, observability.getRecentKeyWindow().getDurationMs());
-        assertEquals(10000000L, observability.getRecentKeyWindow().getMaxKeyOccurrences());
+        assertEquals(1000000L, observability.getRecentKeyWindow().getMaxKeyOccurrences());
         assertTrue(observability.isMetricsEnabled());
         assertFalse(observability.isRequestTraceLogEnabled());
         assertNull(observability.getTheoryLog());

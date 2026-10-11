@@ -71,6 +71,10 @@ final class PlacementWaitQueue {
         return !ready.isEmpty();
     }
 
+    int size() {
+        return waiting.size();
+    }
+
     void resumeReady(int limit, Consumer<GlobalQueueEntry> resume) {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();

@@ -1,6 +1,8 @@
 package org.flexlb.util;
 
 import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.flexlb.enums.LogLevel;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -85,21 +86,26 @@ class LoggerTest {
     }
 
     @Test
-    @DisplayName("Static block - reads LOG_LEVEL environment variable on class loading")
-    void staticBlock_readsEnvVar() {
-        String currentLogLevel = System.getenv("LOG_LEVEL");
-
-        if (currentLogLevel == null) {
-            assertTrue(true, "No LOG_LEVEL environment variable set");
-        } else {
-            try {
-                LogLevel expectedLevel = LogLevel.valueOf(currentLogLevel.toUpperCase().trim());
-                assertEquals(expectedLevel, Logger.getLevel(),
-                        "Static block should have processed LOG_LEVEL: " + currentLogLevel);
-            } catch (IllegalArgumentException e) {
-                assertNull(Logger.getLevel(),
-                        "Invalid LOG_LEVEL should result in null: " + currentLogLevel);
+    void expandsArrayArgumentsAtEveryLogLevel() {
+        var logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(Logger.LOGGER_NAME);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            Logger.setLevel(LogLevel.TRACE);
+            Object[] arguments = {"first", 2};
+            Logger.trace("{} {}", arguments);
+            Logger.debug("{} {}", arguments);
+            Logger.info("{} {}", arguments);
+            Logger.warn("{} {}", arguments);
+            Logger.error("{} {}", arguments);
+            assertEquals(5, appender.list.size());
+            for (ILoggingEvent event : appender.list) {
+                assertEquals("first 2", event.getFormattedMessage());
             }
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
         }
     }
 
@@ -165,8 +171,8 @@ class LoggerTest {
     }
 
     @Test
-    @DisplayName("Static block logic handles case-insensitive and whitespace correctly")
-    void staticBlock_logicVerification() {
+    @DisplayName("LogLevel accepts normalized case and whitespace")
+    void logLevelAcceptsNormalizedInput() {
         String[] testInputs = {"debug", "DEBUG", "Debug", "  INFO  ", "warn", "ERROR"};
         LogLevel[] expectedOutputs = {LogLevel.DEBUG, LogLevel.DEBUG, LogLevel.DEBUG, LogLevel.INFO, LogLevel.WARN, LogLevel.ERROR};
 
