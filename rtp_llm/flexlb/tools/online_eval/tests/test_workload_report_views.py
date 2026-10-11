@@ -161,12 +161,12 @@ class WorkloadReportViewsTest(unittest.TestCase):
                     self.assertNotIn("reports", variant)
                     continue
                 names = variant["reports"]
-                self.assertEqual(len(names), 1)
-                self.assertNotIn(DEFAULT_VIEW, names)
+                self.assertEqual(len(names), 2)
+                self.assertIn(DEFAULT_VIEW, names)
                 self.assertTrue(all((ROOT / "config/report_views" / name).is_file()
                                     for name in names))
         cache = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
-        self.assertEqual(cache["reports"], ["cache_scale_in.yaml"])
+        self.assertEqual(cache["reports"], ["default.yaml", "cache_scale_in.yaml"])
         series = {
             f'1/mock/qps/{{"engine_name":"p-{i}"}}': [[0, i], [1, i + 1]]
             for i in range(2)

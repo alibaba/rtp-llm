@@ -141,7 +141,7 @@ class InstanceRunnerTest(unittest.TestCase):
 
         source = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         names = load_document(source)["reports"]
-        self.assertEqual(["master_ha_failover.yaml"], names)
+        self.assertEqual(["default.yaml", "master_ha_failover.yaml"], names)
         self.data["instances"][0].update(
             test_kind="workload",
             reports=names,
@@ -150,7 +150,7 @@ class InstanceRunnerTest(unittest.TestCase):
         rc, _, child = self.run_fixture(dry)
         self.assertEqual(0, rc)
         child.assert_not_called()
-        self.assertIn(f"planned reports {identity}: master_ha_failover.yaml", self.stdout)
+        self.assertIn(f"planned reports {identity}: default.yaml, master_ha_failover.yaml", self.stdout)
 
         paths = {
             "default.yaml": "/tmp/run/reports/run/default/report.html",

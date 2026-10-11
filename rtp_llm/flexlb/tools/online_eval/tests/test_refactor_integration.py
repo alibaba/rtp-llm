@@ -51,3 +51,12 @@ def test_performance_fixed_window_patch_applies_only_to_batch_profile():
     assert decisions['single-nonbatch']=={'type':'SINGLE'}
     assert decisions['batch-window']['maxRequests']==64
     assert decisions['batch-window']['maxCollectionWaitMs']==350
+
+
+def test_ci_cases_keep_generic_and_specific_report_views():
+    from pathlib import Path
+    import yaml
+    root = Path(__file__).resolve().parents[1] / "config/scenarios"
+    for name in ("cache_scale_in", "master_ha_failover", "master_performance"):
+        data = yaml.safe_load((root / (name + ".yaml")).read_text())
+        assert data["reports"] == ["default.yaml", name + ".yaml"]

@@ -103,7 +103,7 @@ def validate_flow_environment(environment):
 
 def client_environment(client):
     """Normalize authored settings; framework-owned fields cannot be supplied."""
-    from traffic.playback_config import normalize
+    from traffic.playback.configuration import normalize
 
     if not isinstance(client, dict):
         raise ValueError('Java client configuration must be a mapping')

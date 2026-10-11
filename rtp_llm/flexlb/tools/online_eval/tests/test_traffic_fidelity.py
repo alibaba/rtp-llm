@@ -1,4 +1,6 @@
 """Production sampling and standalone input-fidelity contracts."""
+from dataclasses import replace
+from traffic.synthetic.configuration import WeightedDistribution, JointShape
 import hashlib
 import json
 import random
@@ -9,11 +11,12 @@ from pathlib import Path
 from unittest.mock import patch
 from traffic.prefix_lineage import encode,decode,expand
 from traffic.structure import PrefixIndex,capture_shape,generated_shape
-from traffic.derive_synthetic_parameters import derive_parameters
-from traffic.realistic import resolve,iter_requests
+from traffic.synthetic.derivation import derive_parameters
+from traffic.synthetic.configuration import resolve
+from traffic.synthetic.generator import iter_requests
 from traffic.datasets import profile_path,trace_models
 from analysis.traffic_fidelity import audit,load_capture,run,compare,grade,ks,thresholds
-from traffic.fidelity_report import render,markdown
+from reporting.fidelity import render,markdown
 
 
 def fixture():
@@ -51,20 +54,20 @@ class TrafficFidelityTest(unittest.TestCase):
         args=dict(seed=42,count=1000,output_tokens=5,sampling='joint')
         p,_=resolve(args,document=self.profile)
         a=list(iter_requests(p,'x'));self.assertEqual(a,list(iter_requests(p,'x')))
-        other=dict(p,output_distribution=dict(values=[77],weights=[1]))
+        other=replace(p,output_distribution=WeightedDistribution.read(dict(values=[77],weights=[1])))
         self.assertEqual([r['input_token_blocks'] for r in a],[r['input_token_blocks'] for r in iter_requests(other,'x')])
         legacy=json.loads(json.dumps(self.profile))
         legacy.pop('schema_version');legacy['parameters'].pop('joint_distribution')
         old,_=resolve(dict(args,sampling='independent'),document=legacy)
         upgraded,_=resolve(dict(args,sampling='independent'),document=self.profile)
         self.assertEqual(list(iter_requests(old,'legacy')),list(iter_requests(upgraded,'legacy')))
-        high=dict(p,families=1,cold_fraction=0,joint_distribution=dict(warm_pairs=[[20,20]],cold_blocks=[]))
-        low=dict(high,joint_distribution=dict(warm_pairs=[[20,2]],cold_blocks=[]))
+        high=replace(p,families=1,cold_fraction=0,shape=JointShape(((20,20),),()))
+        low=replace(high,shape=JointShape(((20,2),),()))
         self.assertGreater(sum(generated_shape(iter_requests(high,'x'))['shared']),sum(generated_shape(iter_requests(low,'x'))['shared']))
         with tempfile.TemporaryDirectory() as directory:
             from traffic.traffic_source import materialize
             root=Path(directory);profile=root/'profile.json';profile.write_text(json.dumps(self.profile))
-            with patch('traffic.realistic.profile_path',return_value=profile):
+            with patch('traffic.synthetic.configuration.profile_path',return_value=profile):
                 for name in ('a','b'):
                     materialize(root/(name+'.jsonl'),dict(kind='synthetic',model='realistic',version='1',parameters=args),'x',directory)
                 self.assertEqual((root/'a.jsonl').read_bytes(),(root/'b.jsonl').read_bytes())

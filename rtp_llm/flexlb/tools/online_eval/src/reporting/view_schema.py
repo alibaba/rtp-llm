@@ -1,9 +1,9 @@
 """Field contracts for built-in views; registered case validators own case fields."""
 
 import re
-import string
 
 from schema_contract import matches_schema
+from reporting.view_model import SectionPresentation, SubtitleTemplate, CurvePresentation, PanelPresentation
 
 CURVES = frozenset({"mean", "max", "detail"})
 
@@ -30,16 +30,9 @@ def validate_structure(path, data, fail):
             fail(str(path) + ".sections", "expected nonempty section mapping")
         for key, section in sections.items():
             location = str(path) + ".sections." + str(key)
-            if (type(key) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", key)
-                    or not isinstance(section, dict) or not {"title", "opened"} <= section.keys()
-                    or section.keys() - {"title", "opened", "columns"}
-                    or type(section["title"]) is not str or not section["title"].strip()
-                    or type(section["opened"]) is not bool):
+            if type(key) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
                 fail(location, "invalid section fields")
-            if "columns" in section and (not isinstance(section["columns"], list)
-                    or not section["columns"] or any(type(column) is not str or not column.strip()
-                                                    for column in section["columns"])):
-                fail(location, "invalid section columns")
+            _decode(SectionPresentation, section, location, fail)
 
 
 def validate_default(path, data, fail):
@@ -77,29 +70,22 @@ def validate_default(path, data, fail):
         fail(path, "invalid presets")
 
 
+def _decode(model, value, path, fail):
+    try:
+        return model.read(value)
+    except ValueError as exc:
+        fail(path, str(exc))
+
+
 def validate_curves(path, data, fail):
     metrics = data.get("curves", {})
     if not isinstance(metrics, dict):
         fail(path, "metrics must be a mapping")
     for identity, style in metrics.items():
         if type(identity) is not str or not re.fullmatch(
-            r"[a-z][a-z0-9_]*(/[A-Za-z][A-Za-z0-9_]*)*", identity
-        ) or not isinstance(style, dict) or not {"name", "group", "axis"} <= set(style) or set(style) - {
-            "name", "group", "axis", "source_unit", "unit", "color", "hidden", "scale", "metric_id", "labels"
-        }:
+                r"[a-z][a-z0-9_]*(/[A-Za-z][A-Za-z0-9_]*)*", identity):
             fail(path, "invalid metric presentation " + str(identity))
-        if any(type(style[field]) is not str or not style[field]
-               for field in ("name", "group", "axis")):
-            fail(path, "invalid metric labels " + identity)
-        if any(type(style[field]) is not str for field in ("source_unit", "unit", "color") if field in style):
-            fail(path, "invalid metric unit or color " + identity)
-        if any(type(style[field]) is not bool for field in ("hidden",) if field in style):
-            fail(path, "invalid metric visibility " + identity)
-        if "scale" in style and (type(style["scale"]) not in (int, float)
-                                 or not 0 < style["scale"] < float("inf")):
-            fail(path, "invalid metric scale " + identity)
-        if style.get("scale", 1) != 1 and not {"source_unit", "unit"} <= set(style):
-            fail(path, "scaled metric requires source_unit and unit " + identity)
+        _decode(CurvePresentation, style, str(path)+'.curves.'+identity, fail)
     return metrics
 
 
@@ -107,63 +93,20 @@ def validate_panels(path, data, metrics, fail):
     panels = data.get("panels")
     if not isinstance(panels, list) or not panels:
         fail(path, "invalid panels")
-    ids = set()
-    for panel in panels:
-        if not isinstance(panel, dict) or not {"id", "curve_ids"} <= set(panel):
-            fail(path, "panels require id and curve_ids")
-        if type(panel["id"]) is not str or not panel["id"] or panel["id"] in ids:
+    curves = {identity: CurvePresentation.read(style) for identity, style in metrics.items()}
+    ids, selected = set(), set()
+    for value in panels:
+        panel = _decode(PanelPresentation, value, path, fail)
+        if panel.id in ids:
             fail(path, "invalid panel id")
-        ids.add(panel["id"])
-        validate_panel(path, panel, metrics, fail)
-    selected = {curve_id for panel in panels for curve_id in panel["curve_ids"]}
-    if set(metrics) - selected:
+        ids.add(panel.id)
+        try:
+            panel.validate_bindings(curves)
+        except ValueError as exc:
+            fail(path, str(exc))
+        selected.update(panel.curve_ids)
+    if set(curves)-selected:
         fail(path, "curve declarations must be referenced by a panel")
-
-
-def validate_panel(path, panel, metrics, fail):
-    if (not isinstance(panel, dict) or "title" not in panel or set(panel) - {
-        "title", "caption", "empty_caption", "presets", "axes", "id", "curve_ids", "event_ids",
-    }):
-        fail(path, "invalid panel presentation")
-    for field in ("title", "caption", "empty_caption"):
-        if field in panel and (type(panel[field]) is not str or not panel[field]):
-            fail(path, "invalid panel " + field)
-    presets = panel.get("presets", {})
-    if not isinstance(presets, dict) or any(
-        type(name) is not str or not name or not _valid_preset(selector)
-        for name, selector in presets.items()
-    ):
-        fail(path, "invalid panel presets")
-    if "axes" in panel and (not isinstance(panel["axes"], dict) or any(
-        not isinstance(axis, dict) or not {"title", "position"} <= set(axis)
-        or set(axis) - {"title", "position", "min", "max"}
-        or type(axis["title"]) is not str or axis["position"] not in ("left", "right")
-        for axis in panel["axes"].values()
-    )):
-        fail(path, "invalid panel axes")
-    for axis in panel.get("axes", {}).values():
-        if any(type(axis[field]) not in (int, float) or not -float("inf") < axis[field] < float("inf")
-               for field in ("min", "max") if field in axis):
-            fail(path, "invalid panel axis bounds")
-    if "curve_ids" in panel and (not isinstance(panel["curve_ids"], list)
-            or not panel["curve_ids"] or any(type(name) is not str or name not in metrics
-                                            for name in panel["curve_ids"])):
-        fail(path, "invalid panel metric_ids")
-    if "curve_ids" in panel and any(
-        metrics[metric_id]["axis"] not in panel.get("axes", {})
-        for metric_id in panel["curve_ids"]
-    ):
-        fail(path, "panel metric axis is not declared")
-
-
-def _valid_preset(selector):
-    if not isinstance(selector, dict) or len(selector) != 1:
-        return False
-    key, values = next(iter(selector.items()))
-    if key == "visible":
-        return values is True
-    return (key in {"names", "contains", "groups"} and isinstance(values, list)
-            and bool(values) and all(type(item) is str and item for item in values))
 
 
 def validate_selected(path, data, fail):
@@ -190,7 +133,7 @@ def validate_section_contract(path, data, expected, fail):
     if sections.keys() != expected.keys():
         fail(str(path) + ".sections", "unexpected or missing sections")
     for key, column_count in expected.items():
-        columns = sections[key].get("columns")
+        columns = SectionPresentation.read(sections[key]).columns
         if column_count is None:
             if columns is not None:
                 fail(str(path) + ".sections." + key, "detail section cannot declare columns")
@@ -203,9 +146,8 @@ def validate_bindings(path, data, query_plan, fail):
 
     declared = definitions(query_plan)
     for curve_id, style in data["charts"]["curves"].items():
-        if (type(style.get("metric_id")) is not str or style["metric_id"] not in declared
-                or not isinstance(style.get("labels"), dict)
-                or any(type(k) is not str or type(v) is not str for k, v in style["labels"].items())):
+        binding = CurvePresentation.read(style)
+        if binding.metric_id not in declared or binding.labels is None:
             fail(path, "curve must bind a declared metric id and labels: " + curve_id)
 
 
@@ -238,12 +180,6 @@ def validate_text(path, data, fail):
     if data["kind"] != "selected":
         return
     try:
-        fields = [field for _, field, _, _ in string.Formatter().parse(data["report"]["subtitle"])
-                  if field is not None]
+        SubtitleTemplate(subtitle, cache_behavior=data["report"].get("producer") == "cache-gate")
     except ValueError as exc:
         fail(path, str(exc))
-    allowed = {"verdict", "monitoring_status"}
-    if data["report"].get("producer") == "cache-gate":
-        allowed.update({"expected_behavior", "observed_behavior"})
-    if any(field not in allowed for field in fields):
-        fail(path, "unknown subtitle placeholder")

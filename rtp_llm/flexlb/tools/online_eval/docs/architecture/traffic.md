@@ -66,7 +66,7 @@ session_growth_blocks。生成输入使用紧凑块编码；
 合成参数画像保存经验长度分布、族集中度、冷比例和共享深度。生成方式：
 
 ```sh
-python3 -m traffic.derive_synthetic_parameters --model lineage-model.xz \
+python3 -m traffic.synthetic.derivation --model lineage-model.xz \
   --fit-report fit-report.json --out profile.json
 ```
 
@@ -132,3 +132,11 @@ A/B 检查 codec、realism、tail、arrival 与身份策略，不一致时提示
 发送器验证只证明播放行为，性能与有限缓存效应仍需独立验证。
 
 联合结构采样和独立对比工具见 [合成保真度](../development/synthetic-fidelity.md)。
+
+## 代码职责
+
+`traffic/synthetic/` 负责统计合成源：`configuration.py` 在 JSON/YAML 输入边界合并画像并解析为 `SyntheticWorkload`，`generator.py` 持有随机流、标签分配器和采样器，`derivation.py` 从固定捕获反推画像参数。独立采样与联合采样使用不同的形状对象；联合池控制长度与深度，独立模式控制固定前缀、会话增长和长度分布。输出采样使用独立随机流。
+
+`traffic/playback/` 负责回放配置与强度模型。`PlaybackConfigurationCodec` 将 YAML 或 Java 环境变量解析为同一个 `PlaybackConfiguration`，统一校验数值、枚举、圈数及随机种子；Java 环境与归档描述都是该对象的边界投影。Java 仍负责实际发送、节奏与循环。
+
+捕获、谱系编码及投影模块保留在 `traffic/`，按输入契约、格式版本和转换职责划分；模块大小不决定是否单独拆文件。`analysis/workload_profile.py` 提供离线前缀/LRU 诊断，`reporting/fidelity.py` 负责保真度报告渲染。命令入口和库调用都是有效依赖，不能只根据运行时导入数判断文件是否无用。

@@ -221,4 +221,5 @@ reporting:
         stage: drain
         boundary: end
 reports:
+- default.yaml
 - cache_scale_in.yaml

@@ -4,6 +4,7 @@ import copy
 import math
 
 from reporting.catalog import PALETTE
+from reporting.view_model import CurvePresentation, PanelPresentation, PresetSelection
 
 
 def has_data(curve):
@@ -15,16 +16,17 @@ def has_data(curve):
 def materialize(curve_id, style, points, *, origin=0, labels=None,
                 name=None, unit=None, hidden=None, provenance=None, description=None,
                 color_index=0):
+    style = CurvePresentation.read(style)
     if name is None:
-        name = style["name"] if labels is None else style["name"].format(**labels)
-    group = style["group"] if labels is None else style["group"].format(**labels)
-    scale = style.get('scale', 1)
+        name = style.name if labels is None else style.name.format(**labels)
+    group = style.group if labels is None else style.group.format(**labels)
+    scale = style.scale
     result = dict(
-        curve_id=curve_id, metric_id=style['metric_id'], labels=copy.deepcopy(labels or {}), scale=scale,
-        name=name, group=group, axis=style['axis'],
-        unit=style.get('unit', unit),
-        color=style.get('color') or PALETTE[color_index % len(PALETTE)],
-        hidden=style.get('hidden', False) if hidden is None else hidden,
+        curve_id=curve_id, metric_id=style.metric_id, labels=copy.deepcopy(labels or {}), scale=scale,
+        name=name, group=group, axis=style.axis,
+        unit=style.unit if style.unit is not None else unit,
+        color=style.color or PALETTE[color_index % len(PALETTE)],
+        hidden=style.hidden if hidden is None else hidden,
         points=[dict(x=t-origin, y=value*scale if type(value) in (int, float)
                      and math.isfinite(value) else None) for t, value in points],
     )
@@ -38,20 +40,21 @@ def materialize(curve_id, style, points, *, origin=0, labels=None,
 def project_panels(curves, presentation):
     """Keep missing observations visible; configuration lines are added afterward."""
     panels = []
-    for descriptor in presentation['charts']['panels']:
-        selected = [dict(curve) for curve_id in descriptor['curve_ids']
+    for value in presentation['charts']['panels']:
+        descriptor = PanelPresentation.read(value)
+        selected = [dict(curve) for curve_id in descriptor.curve_ids
                     for curve in curves if curve['curve_id'] == curve_id]
         populated = {curve['curve_id'] for curve in selected if has_data(curve)}
         missing = [presentation['charts']['curves'][curve_id]['name']
-                   for curve_id in descriptor['curve_ids'] if curve_id not in populated]
-        caption = (descriptor.get('caption', '') if populated else
-                   descriptor.get('empty_caption', '没有有效观测数据；缺失值不补零。'))
+                   for curve_id in descriptor.curve_ids if curve_id not in populated]
+        caption = (descriptor.caption if populated else
+                   descriptor.empty_caption)
         if populated and missing:
             caption += ' 缺少有效曲线：' + '、'.join(missing) + '。'
-        panel = dict(id=descriptor['id'], title=descriptor['title'],
-                     timeX=True, axes=copy.deepcopy(descriptor['axes']),
+        panel = dict(id=descriptor.id, title=descriptor.title,
+                     timeX=True, axes={key: axis.to_dict() for key, axis in descriptor.axes},
                      series=selected, caption=caption)
-        apply_panel_presets(panel, descriptor)
+        apply_panel_presets(panel, value)
         panels.append(panel)
     return panels
 
@@ -59,21 +62,9 @@ def project_panels(curves, presentation):
 def apply_panel_presets(panel, descriptor):
     """Resolve against final series, including explicitly added configuration lines."""
     if 'presets' in descriptor:
+        selectors = {name: PresetSelection.read(selector) for name, selector in descriptor['presets'].items()}
         panel['presets'] = {
             name: [curve['name'] for curve in panel['series']
-                   if _preset_matches(curve, selector)]
-            for name, selector in descriptor['presets'].items()
+                   if selector.matches(name=curve['name'], group=curve['group'], hidden=curve['hidden'])]
+            for name, selector in selectors.items()
         }
-
-
-_PRESET_SELECTORS = {
-    'visible': lambda curve, _: not curve['hidden'],
-    'names': lambda curve, names: curve['name'] in names,
-    'contains': lambda curve, fragments: any(text in curve['name'] for text in fragments),
-    'groups': lambda curve, groups: curve['group'] in groups,
-}
-
-
-def _preset_matches(curve, selector):
-    key, value = next(iter(selector.items()))
-    return _PRESET_SELECTORS[key](curve, value)

@@ -223,4 +223,5 @@ reporting:
         stage: drain
         boundary: end
 reports:
+- default.yaml
 - master_performance.yaml

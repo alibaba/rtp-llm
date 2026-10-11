@@ -40,7 +40,7 @@
 
 生产阶段未完成的失败运行生成默认报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
 
-通用 bundle 外的输入保真度诊断由 `traffic/fidelity_report.py` 生成 `fidelity.html`，使用公共渲染器展示冻结阈值、ECDF 与联合密度；它不参与运行门禁或 bundle 发现。
+通用 bundle 外的输入保真度诊断由 `reporting/fidelity.py` 生成 `fidelity.html`，使用公共渲染器展示冻结阈值、ECDF 与联合密度；它不参与运行门禁或 bundle 发现。
 
 ## 展示与交互
 
@@ -95,3 +95,5 @@ HA 的逐阶段检查直接根据已选请求证据产生 `CheckResult`，其输
 ## 数据边界
 
 `RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。`FrozenReport` 与 `ChartPanel` 在归档进入对照时解析报告契约，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
+
+视图映射在 `view_schema.py` 的加载边界校验。`view_model.py` 定义曲线、面板、坐标轴、预设选择、章节和字幕模板对象，渲染组件通过这些对象访问展示字段。坐标轴上下界必须有限且 `min < max`，一个面板不能重复选择同一曲线；字幕只允许 `{verdict}`、`{monitoring_status}` 普通占位符，不接受格式规格或转换。视图文件和报告产物仍采用数据格式，测量值与门禁结论不由展示模型改变。

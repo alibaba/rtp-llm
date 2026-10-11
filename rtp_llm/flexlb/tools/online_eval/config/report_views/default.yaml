@@ -9,14 +9,8 @@ charts:
       source: stage
       stage: setup
       boundary: end
-    teardown_start:
-      label: 环境清理开始
-      source: stage
-      stage: teardown
-      boundary: start
   event_ids:
   - setup_complete
-  - teardown_start
   group_by:
   - epoch
   - source

@@ -95,9 +95,9 @@ class TrafficDatasetsTest(unittest.TestCase):
                 profile.parent.mkdir()
                 profile.write_text(json.dumps(dict(parameters=dict(families=2, prefix_blocks=2,
                     zipf_alpha=1, cold_fraction=0), calibration=dict(origin='unit-test'))))
-                from traffic.realistic import resolve
+                from traffic.synthetic.configuration import resolve
                 params, provenance = resolve(dict(profile='custom_shape', seed=1, count=2, output_tokens=1))
-                self.assertEqual(2, params['families'])
+                self.assertEqual(2, params.families)
                 self.assertEqual('unit-test', provenance['origin'])
 
     def test_existing_scenarios_pin_matching_files(self):
@@ -130,7 +130,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                     self.assertEqual(manifest['count'], params['count'], str(case))
 
     def test_default_profile_preserves_fixed_seed_trace(self):
-        from traffic.realistic import write_trace
+        from traffic.synthetic.generator import write_trace
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'fixed.jsonl'
             semantics = write_trace(path, {'seed': 12345, 'count': 10000,

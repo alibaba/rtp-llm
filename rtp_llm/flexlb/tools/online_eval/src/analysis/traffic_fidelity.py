@@ -12,8 +12,9 @@ from pathlib import Path
 from traffic.datasets import distribution, trace_models
 from traffic.prefix_lineage import BLOCK, decode
 from traffic.structure import capture_shape, generated_shape
-from traffic.derive_synthetic_parameters import derive_parameters
-from traffic.realistic import resolve, iter_requests
+from traffic.synthetic.derivation import derive_parameters
+from traffic.synthetic.configuration import resolve
+from traffic.synthetic.generator import iter_requests
 
 DEFAULT_THRESHOLDS = dict(length_ks=[.03, .10], joint_tv=[.15, .35], depth_ks=[.05, .25])
 BINS = dict(length_log2_min=9, length_log2_max=21, length_bins=32,

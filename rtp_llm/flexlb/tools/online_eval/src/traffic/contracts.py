@@ -26,7 +26,7 @@ def java_client_priority(source, client):
 
 def uniform_gate_flow(flow, *, duration_s, trace_duration_s):
     """Validate the shared Java sender contract; case code declares its coverage budget."""
-    from traffic.playback_config import normalize
+    from traffic.playback.configuration import normalize
     client, _ = normalize(flow["client"])
     if client.get("SEND_MODE") != "uniform" or client.get("LOOP") != "false":
         raise ValueError("gate requires a nonlooping uniform Java workload")

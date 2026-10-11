@@ -280,4 +280,5 @@ reporting:
         stage: finish
         boundary: end
 reports:
+- default.yaml
 - master_ha_failover.yaml
