@@ -51,9 +51,7 @@ try:
     import re as _re
 
     _match = _re.match(r"(\d+)\.(\d+)\.(\d+)", getattr(_deep_gemm, "__version__", ""))
-    _DEEP_GEMM_SM100_LEGACY_OK = bool(_match) and tuple(
-        int(x) for x in _match.groups()
-    ) < (2, 8, 1)
+    _DEEP_GEMM_SM100_LEGACY_OK = False  # TEMPORARY PROBE: force Triton path regardless of wheel version
 except ImportError:
     _deep_gemm = None
     _HAS_DEEP_GEMM = False
