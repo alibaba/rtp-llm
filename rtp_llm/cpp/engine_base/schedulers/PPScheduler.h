@@ -23,6 +23,11 @@ public:
 
     absl::StatusOr<ScheduleOutput> schedule() override;
 
+    static bool supportsChunkedPrefill(const RuntimeConfig&              runtime_config,
+                                       const PDSepConfig&                pd_sep_config,
+                                       const ParallelismConfig&          parallelism_config,
+                                       const SpeculativeExecutionConfig& sp_config);
+
 private:
     /** Per-round scheduling and admission accounting. */
     struct ScheduleRuntime {
@@ -74,6 +79,7 @@ private:
     const bool                       cp_force_single_prefill_;
     const size_t                     prefill_cp_size_;
     const SpeculativeExecutionConfig sp_config_;
+    const bool                       chunked_prefill_enabled_;
     // Maximum outstanding fastgen prefill chunks per stream.
     const int64_t        pp_overlap_cap_ = 1;
     std::vector<int64_t> finished_request_ids_;

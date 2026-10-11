@@ -98,8 +98,9 @@ private:
                                     int64_t                  loss_size,
                                     bool                     intermediate_chunk) const;
 
-    absl::Status dispatchSpeculativeExecutionResult(const StreamGroups&      stream_groups,
-                                                    const PPExecutionResult& result) const;
+    absl::Status dispatchSpeculativeExecutionResult(const StreamGroups&                       stream_groups,
+                                                    const PPExecutionResult&                  result,
+                                                    const std::vector<PPStreamRoundSnapshot>& round_snapshot) const;
 
 private:
     const bool                 sp_enabled_;

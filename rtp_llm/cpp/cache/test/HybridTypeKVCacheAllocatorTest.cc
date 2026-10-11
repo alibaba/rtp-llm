@@ -773,9 +773,9 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAllowsUnevenTargetGroupsWithIndependentPools) {
     CacheConfig main_config;
-    main_config.layer_num                  = 32;
-    main_config.layer_all_num              = 32;
-    main_config.group_layer_num            = 24;
+    main_config.layer_num                   = 32;
+    main_config.layer_all_num               = 32;
+    main_config.group_layer_num             = 24;
     main_config.use_independent_block_pools = true;
 
     std::vector<int> full_layers;
@@ -784,21 +784,19 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAllowsUnevenTargetGroupsWithIndep
         ((layer_id + 1) % 4 == 0 ? full_layers : linear_layers).push_back(layer_id);
     }
     main_config.fromGroupedSpecs(
-        {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
-         makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
+        {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
         {full_layers, linear_layers},
         {CacheGroupType::FULL, CacheGroupType::LINEAR},
         {"full", "linear"});
     main_config.layer_to_block_stride_bytes.assign(34, 1);
 
-    auto propose_config = makeSingleLayerCacheConfig(
-        makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
+    auto propose_config =
+        makeSingleLayerCacheConfig(makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
     propose_config.use_independent_block_pools = true;
 
-    const auto first_sub_config =
-        main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/32);
-    const auto full_gid   = static_cast<size_t>(main_config.groupIdForTag("full"));
-    const auto linear_gid = static_cast<size_t>(main_config.groupIdForTag("linear"));
+    const auto first_sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/32);
+    const auto full_gid         = static_cast<size_t>(main_config.groupIdForTag("full"));
+    const auto linear_gid       = static_cast<size_t>(main_config.groupIdForTag("linear"));
     EXPECT_EQ(main_config.layerIdsForGroup(full_gid).size(), 9u);
     EXPECT_EQ(main_config.layerIdsForGroup(full_gid).back(), 32);
     EXPECT_EQ(main_config.layerIdsForGroup(linear_gid).size(), 24u);
@@ -824,20 +822,18 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPreservesTargetCanonicalIndices) 
     for (bool linear_first : {false, true}) {
         for (bool remap_canonical_indices : {false, true}) {
             for (const std::string draft_tag : {"full", "default"}) {
-                SCOPED_TRACE(::testing::Message() << "linear_first=" << linear_first
-                                                 << " remap=" << remap_canonical_indices
-                                                 << " draft_tag=" << draft_tag);
+                SCOPED_TRACE(::testing::Message() << "linear_first=" << linear_first << " remap="
+                                                  << remap_canonical_indices << " draft_tag=" << draft_tag);
                 CacheConfig main_config;
                 main_config.layer_num                   = 4;
                 main_config.layer_all_num               = 4;
                 main_config.group_layer_num             = 3;
                 main_config.use_independent_block_pools = true;
-                main_config.fromGroupedSpecs(
-                    {makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
-                     makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
-                    {{3}, {0, 1, 2}},
-                    {CacheGroupType::FULL, CacheGroupType::LINEAR},
-                    {"full", "linear"});
+                main_config.fromGroupedSpecs({makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1),
+                                              makeLinearSpec("linear", 4, DataType::TYPE_FP16, 1, 1)},
+                                             {{3}, {0, 1, 2}},
+                                             {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                             {"full", "linear"});
                 auto groups = main_config.topology().groups();
                 if (linear_first) {
                     std::swap(groups[0], groups[1]);
@@ -852,8 +848,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPreservesTargetCanonicalIndices) 
                 const auto full_gid           = main_config.topology().groupIdForTag("full");
                 const auto linear_gid         = main_config.topology().groupIdForTag("linear");
 
-                auto propose_config = makeSingleLayerCacheConfig(
-                    makeMhaSpec(draft_tag, 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
+                auto propose_config = makeSingleLayerCacheConfig(makeMhaSpec(draft_tag, 4, DataType::TYPE_FP16, 1, 1),
+                                                                 CacheGroupType::FULL);
                 propose_config.use_independent_block_pools = true;
                 for (int module_index = 0; module_index < 2; ++module_index) {
                     const auto sub_config =
@@ -1411,6 +1407,64 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertIndexToBufferAndAllLayerCacheBaseS
             EXPECT_TRUE(layout.group(tag).hasLayer(i));
         }
     }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, PrefillChunkMaterializesSparseTailWithoutShorteningFullTable) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 32;
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       resource = makeBatchResource(1, config, CacheKeysType{});
+    auto       tokens   = makeCompleteTokenIds(1, 32, 4);
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = false;
+    info.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto full = resource->blocks(0, 1);
+    ASSERT_EQ(full.size(), 8u);
+    ASSERT_TRUE(isNullBlockIdx(resource->blocks(0, 0)[1]));
+    const auto final_tail  = resource->blocks(0, 0)[7];
+    info.prefill_chunk_end = 8;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto first_tail = resource->blocks(0, 0)[1];
+    ASSERT_FALSE(isNullBlockIdx(first_tail));
+    info.prefill_chunk_end = 16;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    EXPECT_EQ(resource->blocks(0, 0)[1], first_tail);
+    EXPECT_FALSE(isNullBlockIdx(resource->blocks(0, 0)[3]));
+    EXPECT_EQ(resource->blocks(0, 0)[7], final_tail);
+    EXPECT_EQ(resource->blocks(0, 1), full);
+    EXPECT_EQ(tokens->seqLength(), 32);
+    const auto before                 = resource->blocks(0, 0);
+    info.enable_remove_skipped_blocks = true;
+    EXPECT_FALSE(allocator->malloc(info).success);
+    EXPECT_EQ(resource->blocks(0, 0), before);
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, PrefillChunkRollbackRestoresEarlierBackfill) {
+    auto config      = makeTinyHybridConfig();
+    config.block_num = 32;
+    auto allocator   = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       resource = makeBatchResource(1, config, CacheKeysType{});
+    auto       tokens   = makeCompleteTokenIds(1, 32, 4);
+    MallocInfo info{resource, tokens};
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = false;
+    info.enable_remove_skipped_blocks = false;
+    ASSERT_TRUE(allocator->malloc(info).success);
+    const auto sparse = resource->blocks(0, 0);
+    const auto full   = resource->blocks(0, 1);
+    auto       pool   = allocator->getBlockPool();
+    auto       held   = pool->malloc(static_cast<int>(pool->freeBlocksNum() - 1));
+    tokens->setSeqLength(36);
+    info.prefill_chunk_end = 8;
+    EXPECT_FALSE(allocator->malloc(info).success);
+    EXPECT_EQ(resource->blocks(0, 0), sparse);
+    EXPECT_EQ(resource->blocks(0, 1), full);
+    EXPECT_EQ(pool->freeBlocksNum(), 1u);
+    pool->requestFree(held);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocatedBlocks) {

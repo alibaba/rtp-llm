@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <list>
@@ -3232,6 +3233,317 @@ TEST_F(PPBatchStreamProcessorTest, SnapshotOrderValidatedBeforeAnyStreamUpdate) 
     EXPECT_EQ(first->seqLength(), 2);
     EXPECT_TRUE(first->isContextStream());
     EXPECT_EQ(second->seqLength(), 2);
+}
+
+TEST_F(PPBatchStreamProcessorTest, DSparkChunkPolicyKeepsUnsupportedModesOnFullContext) {
+    const char*                      key   = "RTP_LLM_DSPARK_CHUNKED_PREFILL";
+    const auto                       old   = std::getenv(key);
+    const std::optional<std::string> saved = old ? std::make_optional<std::string>(old) : std::nullopt;
+    struct RestoreEnv {
+        const char*                key;
+        std::optional<std::string> value;
+        ~RestoreEnv() {
+            if (value) {
+                setenv(key, value->c_str(), 1);
+            } else {
+                unsetenv(key);
+            }
+        }
+    } restore{key, saved};
+    auto params                                                         = makeMtpParams(3);
+    params.parallelism_config.tp_size                                   = 4;
+    params.parallelism_config.world_size                                = 8;
+    params.parallelism_config.prefill_cp_config.method                  = CPRotateMethod::ALL_GATHER;
+    params.runtime_config.fifo_scheduler_config.cp_force_single_prefill = true;
+    auto supported                                                      = [&]() {
+        return PPScheduler::supportsChunkedPrefill(
+            params.runtime_config, params.pd_sep_config, params.parallelism_config, params.sp_config);
+    };
+    for (const int flag : {0, 1}) {
+        setenv(key, flag ? "1" : "0", 1);
+        for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+            params.sp_config.type = type;
+            for (auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+                params.pd_sep_config.role_type = role;
+                EXPECT_EQ(supported(),
+                          type == SP_TYPE_NONE || (flag == 1 && type == SP_TYPE_DSPARK && role == RoleType::PREFILL));
+            }
+        }
+    }
+    params.sp_config.type                                               = SP_TYPE_DSPARK;
+    params.pd_sep_config.role_type                                      = RoleType::PREFILL;
+    params.runtime_config.fifo_scheduler_config.cp_force_single_prefill = false;
+    EXPECT_FALSE(supported());
+    params.runtime_config.fifo_scheduler_config.cp_force_single_prefill = true;
+    params.parallelism_config.pp_size                                   = 1;
+    EXPECT_FALSE(supported());
+    params.parallelism_config.pp_size                  = 2;
+    params.parallelism_config.prefill_cp_config.method = CPRotateMethod::PREFILL_CP;
+    EXPECT_FALSE(supported());
+
+    params.parallelism_config.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    auto cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+    ASSERT_TRUE(cache->init());
+    PPScheduler     scheduler(params.runtime_config,
+                          params.model_config_,
+                          params.pd_sep_config,
+                          params.parallelism_config,
+                          params.model_specific_config,
+                          params.sp_config,
+                          cache);
+    ResourceContext resources;
+    resources.cache_manager  = cache;
+    auto stream              = makeStream(resources, params.model_config_, 914, {1, 2, 3, 4, 5, 6, 7, 8}, 0);
+    stream->enable_fast_gen_ = true;
+    stream->resetChunkLen(4, 8);
+    stream->ppChunkDispatched();
+    stream->ppChunkDispatched();
+    scheduler.running_streams_.push_back(stream);
+    EXPECT_TRUE(scheduler.evaluateRunningStreams().empty());
+    stream->ppResultReturned();
+    stream->resetChunkLen(8, 8);
+    EXPECT_TRUE(scheduler.evaluateRunningStreams().empty());
+    stream->reportError(ErrorCode::CANCELLED, "cancel while the final chunk is pending");
+    EXPECT_TRUE(scheduler.evaluateRunningStreams().empty());
+    EXPECT_EQ(scheduler.running_streams_.size(), 1u);
+    stream->ppResultReturned();
+    EXPECT_TRUE(scheduler.evaluateRunningStreams().empty());
+    EXPECT_TRUE(scheduler.running_streams_.empty());
+}
+
+TEST_F(PPBatchStreamProcessorTest, ChunkDispatchMaterializesSparseStateAndPreservesInflightTails) {
+    for (const bool exhausted : {false, true}) {
+        auto params                    = makeMtpParams(3);
+        params.sp_config.type          = SP_TYPE_NONE;
+        params.pd_sep_config.role_type = RoleType::PREFILL;
+        auto cache                     = std::make_shared<KVCacheManager>(
+            test::makeSimpleHybridMhaCacheConfig(2, exhausted ? 10 : 32, 4, DataType::TYPE_FP16, 1));
+        ASSERT_TRUE(cache->init());
+        const auto      initial_free = cache->freeBlocksNum();
+        PPScheduler     scheduler(params.runtime_config,
+                              params.model_config_,
+                              params.pd_sep_config,
+                              params.parallelism_config,
+                              params.model_specific_config,
+                              params.sp_config,
+                              cache);
+        ResourceContext resources;
+        resources.cache_manager = cache;
+        resources.role_type     = RoleType::PREFILL;
+        auto stream             = makeStream(resources, params.model_config_, 917, std::vector<int32_t>(32, 1), 0);
+        stream->generateConfig()->reuse_cache = false;
+        stream->enable_fast_gen_              = true;
+        stream->fast_gen_chunk_len_           = 8;
+        stream->resetChunkLen(0, 32);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        const auto full = stream->kvCachePtr()->blocks(0, 1);
+        ASSERT_EQ(full.size(), 8u);
+        ASSERT_TRUE(isNullBlockIdx(stream->kvCachePtr()->blocks(0, 0)[1]));
+        scheduler.running_streams_.push_back(stream);
+        auto first = scheduler.schedule();
+        ASSERT_TRUE(first.ok());
+        if (exhausted) {
+            EXPECT_TRUE(first->streams.empty());
+            EXPECT_TRUE(stream->hasError());
+            EXPECT_FALSE(stream->isPPInflight());
+            EXPECT_EQ(stream->ppOutstandingResults(), 0);
+            auto retired = scheduler.schedule();
+            ASSERT_TRUE(retired.ok());
+            EXPECT_TRUE(retired->streams.empty());
+            EXPECT_TRUE(scheduler.empty());
+        } else {
+            ASSERT_EQ(first->streams.size(), 1u);
+            ASSERT_EQ(stream->currentChunkLen(), 8);
+            const auto first_tail = stream->kvCachePtr()->blocks(0, 0)[1];
+            ASSERT_FALSE(isNullBlockIdx(first_tail));
+            stream->clearPPInflight();
+            auto second = scheduler.schedule();
+            ASSERT_TRUE(second.ok());
+            ASSERT_EQ(second->streams.size(), 1u);
+            EXPECT_EQ(stream->currentChunkLen(), 16);
+            EXPECT_EQ(stream->ppOutstandingResults(), 2);
+            EXPECT_EQ(stream->kvCachePtr()->blocks(0, 0)[1], first_tail);
+            EXPECT_FALSE(isNullBlockIdx(stream->kvCachePtr()->blocks(0, 0)[3]));
+            EXPECT_EQ(stream->kvCachePtr()->blocks(0, 1), full);
+            stream->ppResultReturned();
+            stream->ppResultReturned();
+            stream->clearPPInflight();
+            stream->releaseResource();
+        }
+        EXPECT_EQ(cache->freeBlocksNum(), initial_free);
+    }
+}
+
+TEST_F(PPBatchStreamProcessorTest, CPSingletonLimitAppliesToRescheduledChunks) {
+    for (const auto type : {SP_TYPE_NONE, SP_TYPE_DSPARK}) {
+        auto params                                                         = makeMtpParams(3);
+        params.sp_config.type                                               = type;
+        params.pd_sep_config.role_type                                      = RoleType::PREFILL;
+        params.parallelism_config.tp_size                                   = 4;
+        params.parallelism_config.world_size                                = 8;
+        params.parallelism_config.prefill_cp_config.method                  = CPRotateMethod::ALL_GATHER;
+        params.runtime_config.fifo_scheduler_config.cp_force_single_prefill = true;
+        auto cache = std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(2, 16, 4, DataType::TYPE_FP16));
+        ASSERT_TRUE(cache->init());
+        PPScheduler     scheduler(params.runtime_config,
+                              params.model_config_,
+                              params.pd_sep_config,
+                              params.parallelism_config,
+                              params.model_specific_config,
+                              params.sp_config,
+                              cache);
+        ResourceContext resources;
+        resources.cache_manager = cache;
+        auto first              = makeStream(resources, params.model_config_, 915, {1, 2, 3, 4, 5, 6, 7, 8}, 0);
+        auto second             = makeStream(resources, params.model_config_, 916, {8, 7, 6, 5, 4, 3, 2, 1}, 0);
+        for (const auto& stream : {first, second}) {
+            stream->enable_fast_gen_ = true;
+            stream->resetChunkLen(4, 8);
+            scheduler.running_streams_.push_back(stream);
+        }
+        auto ready = scheduler.evaluateRunningStreams();
+        ASSERT_EQ(ready.size(), 1u);
+        EXPECT_EQ(ready.front(), first);
+        EXPECT_EQ(second->currentChunkLen(), 4);
+        EXPECT_EQ(second->ppOutstandingResults(), 0);
+
+        first->setPPInflight();
+        ready = scheduler.evaluateRunningStreams();
+        ASSERT_EQ(ready.size(), 1u);
+        EXPECT_EQ(ready.front(), second);
+        first->clearPPInflight();
+
+        second->reportError(ErrorCode::CANCELLED, "cancel a deferred ready chunk");
+        ready = scheduler.evaluateRunningStreams();
+        ASSERT_EQ(ready.size(), 1u);
+        EXPECT_EQ(ready.front(), first);
+        ASSERT_EQ(scheduler.running_streams_.size(), 1u);
+        EXPECT_EQ(scheduler.finished_request_ids_, (std::vector<int64_t>{916}));
+    }
+}
+
+TEST_F(PPBatchStreamProcessorTest, DSparkChunkPlanDefersPublicationAndSampling) {
+    auto params                              = makeMtpParams(3);
+    params.sp_config.type                    = SP_TYPE_DSPARK;
+    params.sp_config.sp_dspark_mask_token_id = 63;
+    params.pd_sep_config.role_type           = RoleType::PREFILL;
+    PPExecutor executor(params, nullptr, true);
+    executor.chunked_prefill_enabled_ = true;
+    auto stream              = makeStream(ResourceContext{}, params.model_config_, 910, {1, 2, 3, 4, 5, 6, 7, 8}, 0);
+    stream->enable_fast_gen_ = true;
+    stream->resetChunkLen(4, 8);
+    stream->generate_input_->generate_config->pd_separation = true;
+    auto plan                                               = executor.buildPlan(StreamGroups({stream}), {});
+    ASSERT_TRUE(plan.ok());
+    EXPECT_TRUE(plan->dspark_intermediate_chunk);
+    EXPECT_FALSE(plan->model_input.request_pd_separation.any().item<bool>());
+    auto restored = pp_serialization::deserializePlan(pp_serialization::serializePlan(*plan, false));
+    EXPECT_TRUE(restored.dspark_intermediate_chunk);
+    EXPECT_FALSE(restored.model_input.request_pd_separation.any().item<bool>());
+    PPExecutionResult result;
+    executor.sampleTokens(restored, GptModelOutputs{}, result);
+    EXPECT_TRUE(executor.sampling_states_.empty());
+    EXPECT_EQ(result.new_token_ids.numel(), 0);
+    EXPECT_EQ(tensorToVector<int32_t>(result.new_token_lengths), (std::vector<int32_t>{0}));
+    EXPECT_EQ(tensorToVector<int64_t>(result.request_ids), (std::vector<int64_t>{910}));
+
+    auto  draft           = std::make_unique<RecordingDSparkModel>(3);
+    auto* recorded        = draft.get();
+    executor.draft_model_ = std::move(draft);
+    const auto features = torch::arange(16, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)).reshape({4, 4});
+    const auto proposals = executor.runDraftStep(
+        restored.model_input, {}, features, result.new_token_ids, result.new_token_lengths, false);
+    ASSERT_EQ(recorded->inputs.size(), 1u);
+    EXPECT_EQ(recorded->inputs[0].dspark_call_phase, DSparkCallPhase::COMMIT);
+    EXPECT_TRUE(torch::equal(recorded->inputs[0].last_hidden_states, features));
+    EXPECT_FALSE(recorded->inputs[0].request_pd_separation.any().item<bool>());
+    EXPECT_FALSE(proposals.defined());
+
+    ASSERT_TRUE(stream->acquireCapacity(4).ok());
+    auto final_plan = executor.buildPlan(StreamGroups({stream}), {});
+    ASSERT_TRUE(final_plan.ok());
+    EXPECT_FALSE(final_plan->dspark_intermediate_chunk);
+    EXPECT_TRUE(final_plan->model_input.request_pd_separation.all().item<bool>());
+    EXPECT_EQ(tensorToVector<int32_t>(final_plan->model_input.prefix_lengths), (std::vector<int32_t>{4}));
+    EXPECT_EQ(tensorToVector<int32_t>(final_plan->model_input.input_lengths), (std::vector<int32_t>{4}));
+}
+
+TEST_F(PPBatchStreamProcessorTest, DSparkDelayedChunkResultRetainsContextUntilFinalCommit) {
+    const auto model_config  = makeModelConfig();
+    auto       stream        = makeStream(ResourceContext{}, model_config, 911, {1, 2, 3, 4, 5, 6, 7, 8}, 0);
+    stream->enable_fast_gen_ = true;
+    stream->resetChunkLen(8, 8);
+    stream->ppChunkDispatched();
+    stream->ppChunkDispatched();
+    auto buffer    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    buffer->tokens = torch::zeros({1, 4}, torch::kInt32);
+    stream->setSPOutputBuffer(buffer);
+    PPBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, true, SP_TYPE_DSPARK);
+    PPExecutionResult result;
+    result.request_ids       = torch::tensor({911}, torch::kInt64);
+    result.new_token_lengths = intTensor({0});
+    result.prompt_logits.resize(1);
+    result.request_errors.resize(1);
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 4, true, true}}).ok());
+    EXPECT_EQ(stream->seqLength(), 8);
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_EQ(stream->ppOutstandingResults(), 1);
+    result.new_token_ids     = intTensor({12}).reshape({1, 1});
+    result.new_token_lengths = intTensor({1});
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 4, false, true}}).ok());
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{1, 2, 3, 4, 5, 6, 7, 8, 12}));
+    EXPECT_FALSE(stream->isContextStream());
+    EXPECT_EQ(stream->ppOutstandingResults(), 0);
+    EXPECT_THROW(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 4, false, true}}),
+                 std::runtime_error);
+    EXPECT_EQ(stream->seqLength(), 9);
+}
+
+TEST_F(PPBatchStreamProcessorTest, DSparkCancelledChunksDrainWithoutPublishingTokens) {
+    const auto model_config  = makeModelConfig();
+    auto       stream        = makeStream(ResourceContext{}, model_config, 912, {1, 2, 3, 4}, 0);
+    stream->enable_fast_gen_ = true;
+    stream->ppChunkDispatched();
+    stream->ppChunkDispatched();
+    PPBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, CacheConfig{}, true, SP_TYPE_DSPARK);
+    PPExecutionResult result;
+    result.request_ids       = torch::tensor({912}, torch::kInt64);
+    result.new_token_lengths = intTensor({0});
+    result.prompt_logits.resize(1);
+    result.request_errors.emplace_back(ErrorCode::CANCELLED, "cancel with target and draft chunks pending");
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 2, true, true}}).ok());
+    EXPECT_EQ(stream->ppOutstandingResults(), 1);
+    EXPECT_TRUE(stream->isContextStream());
+    EXPECT_TRUE(stream->hasError());
+    ASSERT_TRUE(processor.dispatchExecutionResult(StreamGroups({stream}), result, {{1, 2, false, true}}).ok());
+    EXPECT_EQ(stream->ppOutstandingResults(), 0);
+    EXPECT_EQ(stream->seqLength(), 4);
+}
+
+TEST_F(PPBatchStreamProcessorTest, DSparkRejectedChunkReturnsOnlyItsOwnReservation) {
+    auto params                              = makeMtpParams(3);
+    params.sp_config.type                    = SP_TYPE_DSPARK;
+    params.sp_config.sp_dspark_mask_token_id = 63;
+    params.pd_sep_config.role_type           = RoleType::PREFILL;
+    PPExecutor executor(params, nullptr, true);
+    executor.chunked_prefill_enabled_ = true;
+    auto stream                       = makeStream(ResourceContext{}, params.model_config_, 913, {1, 2, 3, 4}, 0);
+    stream->enable_fast_gen_          = true;
+    stream->ppChunkDispatched();
+    stream->ppChunkDispatched();
+    stream->setPPInflight();
+    auto processor                            = std::make_shared<RecordingLogitsProcessor>();
+    processor->mtp_supported                  = false;
+    stream->sampling_state_.logits_processors = {processor};
+    std::list<GenerateStreamPtr> streams{stream};
+    executor.prepareStreams(streams);
+    EXPECT_TRUE(streams.empty());
+    EXPECT_TRUE(stream->hasError());
+    EXPECT_FALSE(stream->isPPInflight());
+    EXPECT_EQ(stream->ppOutstandingResults(), 1);
+    EXPECT_TRUE(stream->isContextStream());
 }
 
 }  // namespace rtp_llm

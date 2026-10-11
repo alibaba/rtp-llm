@@ -241,6 +241,14 @@ absl::Status GenerateStream::incrKVBlock() {
     return stream_cache_resource_->incrKVBlock();
 }
 
+absl::Status GenerateStream::prepareChunkKV() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!enableFastGen() || !isContextStream() || currentChunkLen() <= 0) {
+        return absl::InternalError("prefill chunk cursor is not initialized");
+    }
+    return stream_cache_resource_->incrKVBlock(-1, currentChunkLen());
+}
+
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     // Return KV blocks only after all workers that captured this stream finish.

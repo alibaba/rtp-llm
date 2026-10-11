@@ -323,7 +323,9 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
             initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
             keys_initialized_now = true;
         }
-    } else {
+    } else if (malloc_info.prefill_chunk_end < 0) {
+        // Chunk allocation does not append tokens. Preserve the full prompt's
+        // partial-block key for PD transfer; decode updates discard that key.
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);

@@ -798,18 +798,17 @@ absl::Status NormalEngine::trySaveStepError() const {
 std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<GenerateInput>& input) {
     std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
         input, model_config_, runtime_config, resource_context_, metrics_reporter_);
-    // Only non-speculative PPScheduler/PPExecutor rounds advance fast-gen
-    // chunks. Other execution paths need the full context before admission
-    // accounting and model-input gathering.
-    if ((parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE) && stream->isChunkStream()) {
+    // Unsupported execution paths need the full context before admission and gathering.
+    if (!PPScheduler::supportsChunkedPrefill(runtime_config, pd_sep_config, parallelism_config, sp_config)
+        && stream->isChunkStream()) {
         stream->initNonChunkedContext();
     }
     return stream;
 }
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
-    if ((parallelism_config.pp_size == 1 || sp_config.type != SP_TYPE_NONE) && stream->isContextStream()
-        && stream->isChunkStream()) {
+    if (!PPScheduler::supportsChunkedPrefill(runtime_config, pd_sep_config, parallelism_config, sp_config)
+        && stream->isContextStream() && stream->isChunkStream()) {
         stream->initNonChunkedContext();
     }
     stream->setReserveStep(reserve_step_);

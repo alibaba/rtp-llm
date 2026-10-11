@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
+#include "rtp_llm/cpp/engine_base/schedulers/PPScheduler.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
@@ -263,6 +264,8 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     cache_manager_(cache_manager),
     sp_enabled_(params.sp_config.type != SP_TYPE_NONE),
     is_dspark_(params.sp_config.type == SP_TYPE_DSPARK),
+    chunked_prefill_enabled_(PPScheduler::supportsChunkedPrefill(
+        params.runtime_config, params.pd_sep_config, params.parallelism_config, params.sp_config)),
     dspark_mask_token_id_(static_cast<int32_t>(params.sp_config.sp_dspark_mask_token_id)),
     propose_step_(params.sp_config.gen_num_per_cycle),
     position_id_len_factor_(params.model_config_.attn_config.rope_config.index_factor),
@@ -565,7 +568,8 @@ void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
                                           stream->generateConfig()->max_new_tokens)) {
                 stream->reportError(ErrorCode::INVALID_PARAMS,
                                     "DSV4 PP PREFILL_CP compatibility supports one-token prefill requests only");
-                if (!sp_enabled_ && stream->enableFastGen() && stream->isContextStream() && !stream->isFakeStream()) {
+                if (chunked_prefill_enabled_ && stream->enableFastGen() && stream->isContextStream()
+                    && !stream->isFakeStream()) {
                     stream->ppResultReturned();
                 }
                 stream->clearPPInflight();
@@ -586,6 +590,10 @@ void PPExecutor::prepareStreams(std::list<GenerateStreamPtr>& streams) {
         if (error.has_value()) {
             stream->reportError(error->code(), error->ToString());
             // The scheduler marked this request in flight, but no plan will carry it.
+            if (chunked_prefill_enabled_ && stream->enableFastGen() && stream->isContextStream()
+                && !stream->isFakeStream()) {
+                stream->ppResultReturned();
+            }
             stream->clearPPInflight();
             it = streams.erase(it);
             continue;
@@ -633,6 +641,17 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     plan.model_input          = std::move(model_input_status.value());
     plan.model_input.skip_run = stream_groups.empty();
+
+    if (is_dspark_ && chunked_prefill_enabled_ && !plan.is_decode && !stream_groups.empty()
+        && !plan.model_input.is_fake_stream) {
+        RTP_LLM_CHECK_WITH_INFO(streams.size() == 1, "DSpARK chunked prefill requires one request per CP batch");
+        plan.dspark_intermediate_chunk = streams.front()->isChunkStream();
+        if (plan.dspark_intermediate_chunk) {
+            // Ring/state slots can be overwritten by later chunks. Register the
+            // full target and draft cache only in the final chunk's forward.
+            plan.model_input.request_pd_separation = torch::zeros_like(plan.model_input.request_pd_separation);
+        }
+    }
 
     static const bool kLogWindow = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
     if (kLogWindow && !plan.model_input.skip_run) {
@@ -873,6 +892,13 @@ void PPExecutor::sampleTokens(const PPExecutionPlan& plan,
     result.request_ids      = plan.sampling_plan.request_ids.to(torch::kCPU).contiguous();
     result.request_errors.assign(stream_count, ErrorInfo::OkStatus());
     result.prompt_logits.resize(stream_count);
+    if (plan.dspark_intermediate_chunk) {
+        RTP_LLM_CHECK_WITH_INFO(is_dspark_ && chunked_prefill_enabled_ && !plan.is_decode,
+                                "intermediate commit requires DSpARK chunked prefill");
+        result.new_token_ids     = torch::empty({stream_count, 0}, torch::kInt32);
+        result.new_token_lengths = torch::zeros({stream_count}, torch::kInt32);
+        return;
+    }
     if (plan.model_input.is_fake_stream) {
         /** Supply target-result shapes for the draft chain without creating request sampling state. */
         if (sp_enabled_) {
@@ -1265,7 +1291,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             // re-dispatch before its result finishes the stream).
             if (isFirstStage() && isStageRoot()) {
                 for (const auto& stream : inflight.stream_groups.allStreams()) {
-                    if (!sp_enabled_ && stream->enableFastGen() && stream->isContextStream()
+                    if (chunked_prefill_enabled_ && stream->enableFastGen() && stream->isContextStream()
                         && !stream->isFakeStream()) {
                         stream->clearPPInflight();
                     }
@@ -1275,7 +1301,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             PPExecutionResult execution_result;
             if (isStageRoot()) {
                 sampleTokens(plan, model_output, execution_result);
-                if (sp_enabled_) {
+                if (sp_enabled_ && !plan.dspark_intermediate_chunk) {
                     if (!plan.model_input.is_fake_stream) {
                         clipNewTokenLengths(plan.sampling_plan, execution_result);
                     }
@@ -1297,7 +1323,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             }
 
             if (isStageRoot()) {
-                if (!plan.model_input.is_fake_stream) {
+                if (!plan.model_input.is_fake_stream && !plan.dspark_intermediate_chunk) {
                     advanceSamplingStates(plan.sampling_plan, execution_result);
                 }
                 asyncSendExecutionResult(execution_result, inflight.execution_result_sends);

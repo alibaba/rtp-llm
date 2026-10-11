@@ -445,7 +445,7 @@ absl::Status StreamCacheResource::initKVBlock() {
     return absl::OkStatus();
 }
 
-absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
+absl::Status StreamCacheResource::incrKVBlock(int seq_len_override, int prefill_chunk_end) {
     RTP_LLM_PROFILE_FUNCTION();
     // TODO(xinfei.sxf) add reserver_blocks
     if (fake_inited_) {
@@ -459,8 +459,9 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks = true;
+    malloc_info.enable_remove_skipped_blocks = prefill_chunk_end < 0;
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.prefill_chunk_end            = prefill_chunk_end;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

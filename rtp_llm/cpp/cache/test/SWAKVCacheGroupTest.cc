@@ -266,6 +266,49 @@ TEST_F(SWAKVCacheGroupTest, Malloc_DSV4PromptTailKeepsPenultimateBlock) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 2);
 }
 
+TEST_F(SWAKVCacheGroupTest, Malloc_BackfillsChunkTailInFullPromptTable) {
+    auto     group = makeGroup(256);
+    BlockIds ids(1);
+    ASSERT_TRUE(group.malloc(ids, 32000, false, 0));
+    const auto initial = ids.blocks();
+    ASSERT_EQ(initial.size(), 125u);
+    ASSERT_TRUE(isNullBlockIdx(initial[15]));
+    std::vector<size_t> backfilled;
+    ASSERT_TRUE(group.malloc(ids, 4096, false, 0, &backfilled));
+    EXPECT_EQ(backfilled, (std::vector<size_t>{14, 15}));
+    EXPECT_EQ(ids.blocksNum(), initial.size());
+    EXPECT_EQ(ids.blocks()[123], initial[123]);
+    EXPECT_EQ(ids.blocks()[124], initial[124]);
+    const auto first_tail = ids.blocks()[15];
+    ASSERT_FALSE(isNullBlockIdx(first_tail));
+    const auto free_after_first = block_pool_->freeBlocksNum();
+    ASSERT_TRUE(group.malloc(ids, 4096, false, 0, &backfilled));
+    EXPECT_TRUE(backfilled.empty());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), free_after_first);
+    ASSERT_TRUE(group.malloc(ids, 8192, false, 0, &backfilled));
+    EXPECT_EQ(backfilled, (std::vector<size_t>{30, 31}));
+    EXPECT_EQ(ids.blocks()[15], first_tail);
+    EXPECT_EQ(validBlockCount(ids.blocks()), 6u);
+    group.free(ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
+TEST_F(SWAKVCacheGroupTest, Malloc_ChunkBackfillFailureLeavesTableUnchanged) {
+    auto     group = makeGroup(256);
+    BlockIds ids(1);
+    ASSERT_TRUE(group.malloc(ids, 32000, false, 0));
+    const auto          initial = ids.blocks();
+    auto                held    = block_pool_->malloc(static_cast<int>(block_pool_->freeBlocksNum() - 1));
+    std::vector<size_t> backfilled{999};
+    EXPECT_FALSE(group.malloc(ids, 4096, false, 0, &backfilled));
+    EXPECT_EQ(ids.blocks(), initial);
+    EXPECT_TRUE(backfilled.empty());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), 1u);
+    block_pool_->requestFree(held);
+    group.free(ids.blocks());
+    EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_);
+}
+
 TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
     auto     group = makeGroup(4);
     BlockIds block_ids(1);

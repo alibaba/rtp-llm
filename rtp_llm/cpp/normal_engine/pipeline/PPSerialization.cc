@@ -15,7 +15,7 @@ namespace {
 /* Versioned byte stream; readers bounds-check every field. The tensor
    presence flag encodes definedness so defined-but-empty tensors survive;
    host tensors are rebuilt pinned to match gatherModelInput plan tensors. */
-constexpr uint32_t kVersion = 13;
+constexpr uint32_t kVersion = 14;
 
 struct ByteWriter {
     std::vector<uint8_t> buf;
@@ -424,6 +424,7 @@ torch::Tensor serializePlan(const PPExecutionPlan& plan, bool empty_plan) {
         writeSamplingPlan(w, plan.sampling_plan);
         writeOutputConfig(w, plan.output_config);
         w.flag(plan.is_decode);
+        w.flag(plan.dspark_intermediate_chunk);
         w.tensor(plan.draft_next_position_ids);
         w.val<uint64_t>(plan.finished_request_ids.size());
         for (const auto request_id : plan.finished_request_ids) {
@@ -444,6 +445,7 @@ PPExecutionPlan deserializePlan(const torch::Tensor& buffer) {
     readSamplingPlan(r, plan.sampling_plan);
     readOutputConfig(r, plan.output_config);
     plan.is_decode                  = r.flag();
+    plan.dspark_intermediate_chunk  = r.flag();
     plan.draft_next_position_ids    = r.tensor();
     const auto finished_request_num = r.val<uint64_t>();
     plan.finished_request_ids.resize(finished_request_num);

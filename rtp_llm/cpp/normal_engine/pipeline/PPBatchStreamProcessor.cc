@@ -607,7 +607,7 @@ PPBatchStreamProcessor::dispatchExecutionResult(const StreamGroups&             
                             "PP round snapshot count does not match the inflight stream count");
     validateExecutionResult(stream_groups, result);
     if (sp_enabled_) {
-        return dispatchSpeculativeExecutionResult(stream_groups, result);
+        return dispatchSpeculativeExecutionResult(stream_groups, result, round_snapshot);
     }
     return dispatchNormalExecutionResult(stream_groups, result, round_snapshot);
 }
@@ -804,8 +804,10 @@ absl::StatusOr<GptModelInputs> PPBatchStreamProcessor::gatherTargetVerifyModelIn
     return model_input;
 }
 
-absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const StreamGroups&      stream_groups,
-                                                                        const PPExecutionResult& result) const {
+absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(
+    const StreamGroups&                       stream_groups,
+    const PPExecutionResult&                  result,
+    const std::vector<PPStreamRoundSnapshot>& round_snapshot) const {
     const auto all_streams = stream_groups.allStreams();
     const auto batch_size  = static_cast<int64_t>(all_streams.size());
     const bool is_prefill  = all_streams.empty() || all_streams.front()->isContextStream();
@@ -817,8 +819,20 @@ absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const St
 
     const auto* request_ids       = result.request_ids.data_ptr<int64_t>();
     const auto* new_token_lengths = result.new_token_lengths.data_ptr<int32_t>();
-    int64_t     row               = 0;
+    size_t      check_row         = 0;
     for (const auto& stream : all_streams) {
+        const auto& round = round_snapshot[check_row];
+        RTP_LLM_CHECK_WITH_INFO(request_ids[check_row] == stream->streamId(),
+                                "PP execution result request order does not match the inflight stream order");
+        RTP_LLM_CHECK_WITH_INFO(!round.tracks_chunk_result || stream->ppOutstandingResults() > 0,
+                                "PP result has no matching outstanding chunk");
+        RTP_LLM_CHECK_WITH_INFO(!round.intermediate_chunk || round.tracks_chunk_result,
+                                "PP intermediate speculative result must own an outstanding chunk");
+        ++check_row;
+    }
+    int64_t row = 0;
+    for (const auto& stream : all_streams) {
+        const auto& round = round_snapshot[row];
         RTP_LLM_CHECK_WITH_INFO(request_ids[row] == stream->streamId(),
                                 "PP execution result request order does not match the inflight stream order");
         RTP_LLM_CHECK_WITH_INFO(stream->isContextStream() == is_prefill,
@@ -826,6 +840,18 @@ absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const St
         std::optional<ErrorInfo> error_info;
         if (result.request_errors[row].hasError()) {
             error_info = result.request_errors[row];
+        }
+        if (round.intermediate_chunk) {
+            RTP_LLM_CHECK_WITH_INFO(error_info.has_value() || new_token_lengths[row] == 0,
+                                    "PP intermediate speculative result must not publish tokens");
+            StreamUpdateInfo update_info{};
+            update_info.error_info         = std::move(error_info);
+            update_info.intermediate_chunk = true;
+            stream->updateFromPP(update_info);
+            stream->ppResultReturned();
+            stream->clearPPInflight();
+            ++row;
+            continue;
         }
         int           num_new_tokens = 0;
         torch::Tensor draft_tokens;
@@ -850,6 +876,9 @@ absl::Status PPBatchStreamProcessor::dispatchSpeculativeExecutionResult(const St
                             false,
                             std::move(error_info)},
                            false);
+        if (round.tracks_chunk_result) {
+            stream->ppResultReturned();
+        }
         stream->clearPPInflight();
         ++row;
     }

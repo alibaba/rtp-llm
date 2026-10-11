@@ -27,6 +27,23 @@ int64_t resolvePPChunkOverlapCap(int64_t pp_size) {
 
 }  // namespace
 
+bool PPScheduler::supportsChunkedPrefill(const RuntimeConfig&              runtime_config,
+                                         const PDSepConfig&                pd_sep_config,
+                                         const ParallelismConfig&          parallelism_config,
+                                         const SpeculativeExecutionConfig& sp_config) {
+    if (parallelism_config.pp_size <= 1) {
+        return false;
+    }
+    if (sp_config.type == SP_TYPE_NONE) {
+        return true;
+    }
+    // DSpARK commits unshifted target features. Limit the experiment to the
+    // singleton CP prefill schedule so a round has one unambiguous chunk phase.
+    return sp_config.type == SP_TYPE_DSPARK && pd_sep_config.role_type == RoleType::PREFILL
+           && parallelism_config.local_cp_enabled() && runtime_config.fifo_scheduler_config.cp_force_single_prefill
+           && autil::EnvUtil::getEnv<int64_t>("RTP_LLM_DSPARK_CHUNKED_PREFILL", 0) == 1;
+}
+
 PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                          const ModelConfig&                     model_config,
                          const PDSepConfig&                     pd_sep_config,
@@ -50,6 +67,7 @@ PPScheduler::PPScheduler(const RuntimeConfig&                   runtime_config,
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1),
     sp_config_(sp_config),
+    chunked_prefill_enabled_(supportsChunkedPrefill(runtime_config, pd_sep_config, parallelism_config, sp_config)),
     pp_overlap_cap_(resolvePPChunkOverlapCap(parallelism_config.pp_size)) {
     RTP_LLM_LOG_INFO("PPScheduler fastgen chunk overlap cap=%ld (pp_size=%ld)",
                      static_cast<long>(pp_overlap_cap_),
@@ -111,7 +129,7 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
             ++it;
             continue;
         }
-        if (sp_config_.type == SP_TYPE_NONE && stream->enableFastGen() && stream->isContextStream()
+        if (chunked_prefill_enabled_ && stream->enableFastGen() && stream->isContextStream()
             && !stream->isFakeStream()) {
             // Bound outstanding chunks and never redispatch an already-issued final window.
             const auto outstanding = stream->ppOutstandingResults();
@@ -125,7 +143,12 @@ list<GenerateStreamPtr> PPScheduler::evaluateRunningStreams() {
 
         const auto new_state = stream->moveToNext();
         if (new_state == StreamState::RUNNING) {
-            scheduled_streams.push_back(stream);
+            // Overlapped chunks can leave several admitted streams ready again.
+            // Keep the same singleton CP batch contract used for new admission.
+            if (!cp_force_single_prefill_ || pd_sep_config_.role_type == RoleType::DECODE
+                || scheduled_streams.empty()) {
+                scheduled_streams.push_back(stream);
+            }
             ++it;
         } else {
             addStreamToNewState(stream, new_state);
@@ -356,11 +379,12 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
     /** 4. update the running_streams. */
     running_streams_.splice(running_streams_.end(), new_streams_);
 
-    for (const auto& stream : scheduled_streams) {
+    for (auto it = scheduled_streams.begin(); it != scheduled_streams.end();) {
+        const auto& stream = *it;
         // fastgen: advance the three-cursor window once per scheduled round so
         // gatherModelInput presents this round's chunk. The final chunk needs
         // no acquire (cursor already at max; isChunkStream() false).
-        if (sp_config_.type == SP_TYPE_NONE && stream->enableFastGen() && stream->isContextStream()
+        if (chunked_prefill_enabled_ && stream->enableFastGen() && stream->isContextStream()
             && !stream->isFakeStream()) {
             if (stream->isChunkStream()) {
                 const auto acquired = stream->acquireNextChunk();
@@ -369,11 +393,21 @@ absl::StatusOr<ScheduleOutput> PPScheduler::schedule() {
                                       stream->streamId(),
                                       acquired.status().ToString().c_str());
                     stream->reportEvent(StreamEvents::Error, ErrorCode::UNKNOWN_ERROR, "acquireNextChunk failed");
+                    it = scheduled_streams.erase(it);
+                    continue;
                 }
+            }
+            const auto cache_status = stream->prepareChunkKV();
+            if (!cache_status.ok()) {
+                stream->reportEvent(
+                    StreamEvents::Error, ErrorCode::MALLOC_FAILED, "prefill chunk KV allocation failed");
+                it = scheduled_streams.erase(it);
+                continue;
             }
             stream->ppChunkDispatched();
         }
         stream->setPPInflight();
+        ++it;
     }
 
     reportMetrics();

@@ -75,6 +75,10 @@ struct MallocInfo {
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
 
+    // Materialize sparse tail slots at this prefill chunk boundary while keeping
+    // the full prompt's logical tables and all earlier in-flight chunk tails.
+    int prefill_chunk_end = -1;
+
     int incrSeqLen() const;
 };
 

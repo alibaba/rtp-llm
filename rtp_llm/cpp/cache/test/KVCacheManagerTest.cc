@@ -541,6 +541,44 @@ TEST_F(KVCacheManagerTest, BlockBatchCopy) {
     }
 }
 
+TEST_F(KVCacheManagerTest, PrefillChunkAllocationPreservesPartialPromptKeys) {
+    auto config  = makeCompactDSV4ManagerConfig(/*block_num=*/32);
+    auto manager = std::make_shared<KVCacheManager>(config, /*warmup=*/false);
+    ASSERT_TRUE(manager->init());
+    const int spb = static_cast<int>(config.seq_size_per_block);
+    for (const int seq_len : {40, spb - 1, spb, spb + 1, 8 * spb + 17}) {
+        SCOPED_TRACE(seq_len);
+        const auto free_before = manager->freeBlocksNum();
+        auto       resource    = makeDSV4BatchResource(config);
+        auto       tokens      = makeDSV4CompleteTokenIds(seq_len, seq_len + 2 * spb, spb);
+        MallocInfo info{resource, tokens};
+        info.reuse_cache                  = false;
+        info.enable_device_cache          = false;
+        info.enable_remove_skipped_blocks = false;
+        ASSERT_TRUE(manager->malloc(info).success);
+        const auto prompt_keys = resource->cacheKeys(0);
+        ASSERT_EQ(prompt_keys.size(), static_cast<size_t>((seq_len + spb - 1) / spb));
+        ASSERT_NE(prompt_keys.back(), 0);
+        for (const int chunk_end : {std::min(spb, seq_len), std::min(2 * spb, seq_len), seq_len}) {
+            info.prefill_chunk_end = chunk_end;
+            ASSERT_TRUE(manager->malloc(info).success);
+            EXPECT_EQ(resource->cacheKeys(0), prompt_keys);
+            EXPECT_EQ(resource->lastBlockAligned(), seq_len % spb == 0);
+            EXPECT_TRUE(resource->cacheKeysInitialized());
+            EXPECT_EQ(tokens->seqLength(), seq_len);
+        }
+        // Normal decode must still replace partial keys with completed blocks.
+        info.prefill_chunk_end            = -1;
+        info.enable_remove_skipped_blocks = true;
+        tokens->setSeqLength(seq_len + 1);
+        ASSERT_TRUE(manager->malloc(info).success);
+        EXPECT_EQ(resource->cacheKeys(0).size(), static_cast<size_t>((seq_len + 1) / spb));
+        EXPECT_TRUE(resource->lastBlockAligned());
+        manager->free(FreeInfo{resource, tokens});
+        EXPECT_EQ(manager->freeBlocksNum(), free_before);
+    }
+}
+
 TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     auto manager_config = makeCompactDSV4ManagerConfig(/*block_num=*/16);
     auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);

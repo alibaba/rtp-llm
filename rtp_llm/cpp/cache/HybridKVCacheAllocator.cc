@@ -259,19 +259,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         original_sizes[static_cast<size_t>(gid)] = kv_resource->blocksNum(0, gid);
     }
     for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-        auto&     block_ids_0   = kv_resource->mutableBlockIds(0, gid);
-        const int group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
-        const auto& group = kv_cache_groups_[static_cast<size_t>(gid)];
+        auto&       block_ids_0   = kv_resource->mutableBlockIds(0, gid);
+        const int   group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, common_seq_len);
+        const auto& group         = kv_cache_groups_[static_cast<size_t>(gid)];
         // Snapshot the slot count before the call so a failure can report this
         // group's exact physical request in the error_code=602 record.
         const int blocks_before = static_cast<int>(block_ids_0.blocksNum());
         if (!group->malloc(block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
-            logMallocFailure(malloc_info,
-                             "init_group_malloc",
-                             0,
-                             gid,
-                             false,
-                             group->needBlocksNum(group_seq_len, blocks_before, 0));
+            logMallocFailure(
+                malloc_info, "init_group_malloc", 0, gid, false, group->needBlocksNum(group_seq_len, blocks_before, 0));
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
@@ -293,6 +289,12 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     const int   raw_seq_len  = malloc_info.incrSeqLen();
     const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
 
+    if (malloc_info.prefill_chunk_end >= 0
+        && (malloc_info.prefill_chunk_end == 0 || malloc_info.prefill_chunk_end > raw_seq_len
+            || malloc_info.enable_remove_skipped_blocks)) {
+        return {false, 0, 0, MallocStatus::INTERNAL_ERROR};
+    }
+
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
     std::vector<std::vector<std::vector<size_t>>> backfilled_positions(static_cast<size_t>(batch_size));
     for (int b = 0; b < batch_size; ++b) {
@@ -309,19 +311,23 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
     int  failed_need_blocks = -1;
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            auto&     block_ids        = kv_resource->mutableBlockIds(b, gid);
-            const int group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, gid, raw_seq_len);
-            auto&     filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(gid)];
+            auto&       block_ids     = kv_resource->mutableBlockIds(b, gid);
+            const auto& group         = kv_cache_groups_[static_cast<size_t>(gid)];
+            const bool  chunk_tail    = malloc_info.prefill_chunk_end > 0 && group->hasSparseSlots();
+            const int   group_seq_len = cpEffectiveSeqLenForGroup(
+                cp_mapper, config_, gid, chunk_tail ? malloc_info.prefill_chunk_end : raw_seq_len);
+            const int group_reserve_step = chunk_tail ? 0 : reserve_step;
+            auto&     filled_positions   = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(gid)];
             // Snapshot the slot count before the call so a failure can report this
             // group's exact physical request in the error_code=602 record.
             const int blocks_before = static_cast<int>(block_ids.blocksNum());
-            if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions)) {
+            if (!group->malloc(
+                    block_ids, group_seq_len, malloc_info.reuse_cache, group_reserve_step, &filled_positions)) {
                 all_success        = false;
                 failed_batch       = b;
                 failed_group       = gid;
                 failed_need_blocks = kv_cache_groups_[static_cast<size_t>(gid)]->needBlocksNum(
-                    group_seq_len, blocks_before, reserve_step);
+                    group_seq_len, blocks_before, group_reserve_step);
                 break;
             }
         }

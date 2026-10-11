@@ -84,7 +84,8 @@ struct PPExecutionPlan {
     PPOutputConfig       output_config;
     std::vector<int64_t> finished_request_ids;
 
-    bool          is_decode = false;        // Request phase; verify may use a prefill input shape
+    bool          is_decode                 = false;  // Request phase; verify may use a prefill input shape
+    bool          dspark_intermediate_chunk = false;
     torch::Tensor draft_next_position_ids;  // [stream_count * position_id_len_factor], MTP prefill
 };
 

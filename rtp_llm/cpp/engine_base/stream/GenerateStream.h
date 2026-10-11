@@ -175,6 +175,7 @@ public:
     void                 initNonChunkedContext();
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
+    absl::Status         prepareChunkKV();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;

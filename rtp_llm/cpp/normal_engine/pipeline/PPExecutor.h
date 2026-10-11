@@ -202,11 +202,12 @@ private:
     size_t idle_streak_        = 0;
     bool   shutdown_completed_ = false;
 
-    bool    sp_enabled_             = false;
-    bool    is_dspark_              = false;
-    int32_t dspark_mask_token_id_   = -1;
-    size_t  propose_step_           = 0;
-    size_t  position_id_len_factor_ = 1;
+    bool    sp_enabled_              = false;
+    bool    is_dspark_               = false;
+    bool    chunked_prefill_enabled_ = false;
+    int32_t dspark_mask_token_id_    = -1;
+    size_t  propose_step_            = 0;
+    size_t  position_id_len_factor_  = 1;
     /** PP currently publishes host state; keep layout selection on the shared device-state policy. */
     const mtp::DraftInputLayout                      draft_input_layout_ = mtp::selectDraftInputLayout(false);
     mtp::DSparkProposeInputBuffers                   dspark_propose_input_buffers_;
