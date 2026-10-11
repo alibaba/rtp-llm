@@ -8,7 +8,7 @@ cc_test_wrapper(
     # library. Keep it after the test objects so --as-needed does not drop it.
     linkopts = [
         "-Wl,--no-as-needed",
-        "-lrtp_compute_ops",
+        "$(location //:rtp_compute_ops)",
         "-Wl,--as-needed",
     ],
     deps = [
