@@ -71,6 +71,22 @@ class FakeRawRequest(object):
 
 
 class FrontendServerTest(TestCase):
+    def test_invalid_token_budget_is_client_error(self):
+        from rtp_llm.structure.request_constants import request_id_field_name
+
+        config = GenerateConfig(max_new_tokens=-1)
+        with self.assertRaises(FtRuntimeException) as raised:
+            config.validate()
+        with patch("rtp_llm.frontend.frontend_server.kmonitor"):
+            response = self.frontend_server._handle_exception(
+                {request_id_field_name: 1}, raised.exception
+            )
+        self.assertEqual(response.status_code, 400)
+        body = json.loads(response.body)
+        self.assertEqual(body["error_code"], 507)
+        self.assertEqual(body["error_code_str"], "507_ERROR_INPUT_FORMAT_ERROR")
+        self.assertEqual(body["message"], raised.exception.message)
+
     def test_long_prompt_is_client_error_and_internal_error_stays_500(self):
         from rtp_llm.structure.request_constants import request_id_field_name
 
