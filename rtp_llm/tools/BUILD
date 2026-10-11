@@ -163,6 +163,25 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_ffn_peer_replay",
+    testonly = True,
+    srcs = ["dsv41_ffn_peer_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_corrected_history_replay",
+        ":dsv41_ffn_boundary_replay",
+        ":dsv41_query_boundary_replay",
+        ":dsv41_query_owner_replay",
+        ":dsv41_reference_probe",
+        ":dsv41_router_boundary_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_expert_precision_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_router_eager_reference_testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
     name = "dsv41_router_eager_replay",
     testonly = True,
     srcs = ["dsv41_router_eager_replay.py"],
