@@ -32,6 +32,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test import (
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_kv_projection_reference as kv_projection_provider,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_router_eager_reference as router_eager_provider,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import (
     load_configuration,
     make_loader,
@@ -135,6 +138,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_tilelang = os.environ.get("DSV41_TEST_COMPARE_DECODE_TILELANG") == "1"
     compare_block_norm = os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
     compare_kv = os.environ.get("DSV41_TEST_COMPARE_KV_PROJECTION") == "1"
+    compare_router = os.environ.get("DSV41_TEST_COMPARE_ROUTER_EAGER") == "1"
+    if compare_router and not compare_kv:
+        raise ValueError("Eager router comparison requires both qualified WKV recipes")
     if compare_kv and not (compare_tilelang and compare_block_norm):
         raise ValueError("WKV comparison requires both qualified decode recipes")
     if compare_block_norm and not compare_tilelang:
@@ -183,6 +189,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_tilelang
         or compare_block_norm
         or compare_kv
+        or compare_router
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -257,6 +264,16 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         profiles.extend(f"{profile}_kv_ref" for profile in profiles[-2:])
         if any(len(profile.encode()) > 255 for profile in profiles):
             raise ValueError("WKV trace profile exceeds the filesystem name limit")
+    if compare_router:
+        # The longest existing WKV recipe is 253 bytes; keep the suffix compact.
+        profiles.extend(f"{profile}_g" for profile in profiles[-2:])
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError("Router trace profile exceeds the filesystem name limit")
+    router_eager_source_hash = (
+        hashlib.sha256(Path(router_eager_provider.__file__).read_bytes()).hexdigest()
+        if compare_router
+        else None
+    )
     kv_projection_source_hash = (
         hashlib.sha256(Path(kv_projection_provider.__file__).read_bytes()).hexdigest()
         if compare_kv
@@ -392,8 +409,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                kv_reference = profile.endswith("_kv_ref")
-                kv_base = profile.removesuffix("_kv_ref")
+                router_eager = profile.endswith("_g")
+                router_base = profile.removesuffix("_g")
+                kv_reference = router_base.endswith("_kv_ref")
+                kv_base = router_base.removesuffix("_kv_ref")
                 block_norm = kv_base.endswith("_block_norm_reference")
                 block_norm_base = kv_base.removesuffix("_block_norm_reference")
                 tilelang_decode = block_norm_base.endswith("_decode_tilelang_reference")
@@ -498,6 +517,19 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             **({"mhc_collapse_reference": True} if collapse else {}),
                             **(
                                 {
+                                    "router_eager_reference": True,
+                                    "router_eager_reference_scope": "explicit-gates",
+                                    "router_eager_reference_dim": config.hidden_size,
+                                    "router_eager_reference_owners": len(
+                                        model.v4.layers
+                                    ),
+                                    "router_eager_provider_sha256": router_eager_source_hash,
+                                }
+                                if router_eager
+                                else {}
+                            ),
+                            **(
+                                {
                                     "kv_projection_reference": True,
                                     "kv_projection_reference_scope": "explicit-attentions",
                                     "kv_projection_reference_dim": config.hidden_size,
@@ -583,6 +615,13 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         else ()
                     ),
                     kernel=reference_kernel,
+                ), router_eager_provider.router_eager_reference(
+                    router_eager,
+                    gates=(
+                        tuple(layer.ffn.gate for layer in model.v4.layers)
+                        if router_eager
+                        else ()
+                    ),
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -746,7 +785,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_kv_ref")
+                                or profile.removesuffix("_g")
+                                .removesuffix("_kv_ref")
                                 .removesuffix("_block_norm_reference")
                                 .removesuffix("_decode_tilelang_reference")
                                 .removesuffix("_mhc_collapse_reference")
@@ -760,7 +800,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_kv_ref")
+                        or profile.removesuffix("_g")
+                        .removesuffix("_kv_ref")
                         .removesuffix("_block_norm_reference")
                         .removesuffix("_decode_tilelang_reference")
                         .removesuffix("_mhc_collapse_reference")
