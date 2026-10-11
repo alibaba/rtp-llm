@@ -7,13 +7,14 @@ import json
 from pathlib import Path
 
 from reporting.view_config import view
-from reporting import run_meta, write_bundle
+from reporting import run_meta
+from reporting.gate_report import write_gate_report
 from reporting.run_context import KPI_LABELS, title
 from reporting.curves import materialize, project_panels
 from reporting.view_sections import view_details, view_table
 
 
-def prepare_report(directory, evidence):
+def prepare_report(directory, evidence, *, presentation=None):
     from monitoring.session import archived_series
     from reporting.view_config import view
     from statistics import median
@@ -22,7 +23,7 @@ def prepare_report(directory, evidence):
     anchor = evidence_origin(evidence)
     series, sources, gaps, errors = archived_series(directory, anchor)
     archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
-    presentation = view("cache_scale_in.yaml")
+    presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
     from monitoring.metric_store import MetricStore
     from reporting.metric_binding import monitoring_audit
     inventory = monitoring_audit(MetricStore.read(directory), presentation)
@@ -101,8 +102,8 @@ def prepare_report(directory, evidence):
                 monitoring_status=monitoring_status, monitor_warnings=monitor_warnings)
 
 
-def build_spec(directory, evidence, result, prepared):
-    presentation = view("cache_scale_in.yaml")
+def build_spec(directory, evidence, result, prepared, *, presentation=None):
+    presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
@@ -150,12 +151,12 @@ def build_spec(directory, evidence, result, prepared):
     return attach_events(spec, presentation, origin=origin, events=evidence.get("events", []))
 
 
-def write_report(directory, evidence, result, prepared=None, *, run=None):
+def write_report(directory, evidence, result, prepared=None, *, run=None, presentation=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    prepared = prepared if prepared is not None else prepare_report(directory, evidence)
-    presentation = view("cache_scale_in.yaml")
-    spec = build_spec(directory, evidence, result, prepared)
+    presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
+    prepared = prepared if prepared is not None else prepare_report(directory, evidence, presentation=presentation)
+    spec = build_spec(directory, evidence, result, prepared, presentation=presentation)
     provenance = evidence.get("provenance", {})
     meta = run_meta(
         dict(id=provenance["instance"]),
@@ -177,26 +178,8 @@ def write_report(directory, evidence, result, prepared=None, *, run=None):
             )
         ],
     )
-    if run is not None:
-        from reporting.run_context import selected_spec
-        from reporting.run_context import provenance_from
-        spec = selected_spec(spec, run, presentation)
-        meta = provenance_from(run, meta)
-        result = dict(result, run=run)
-    else:
-        from reporting.timeline import archived
-        from runtime.observation import verdict_status
-        spec = archived(spec, directory, presentation, status=verdict_status(result['verdict']))
-    return write_bundle(
-        directory,
-        "run",
-        "cache-scale-in",
-        result,
-        spec,
-        meta=meta,
-        producer="cache-gate",
-        role="gate",
-    )
+    return write_gate_report(directory, result, presentation, spec,
+        identity="cache-scale-in", producer="cache-gate", meta=meta, run=run)
 
 
 def validate_view(path, data, fail):
@@ -206,9 +189,3 @@ def validate_view(path, data, fail):
         "audit": 4, "monitoring": None, "checks": None,
         "measurement": None, "sources": None,
     }, fail)
-
-
-def render_view(directory, run, presentation):
-    from workload.gate_result import load_gate
-    evidence, result = load_gate(directory, "cache")
-    return write_report(directory, evidence, result, run=run) / "report.html"

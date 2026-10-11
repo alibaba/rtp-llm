@@ -9,7 +9,8 @@ from unittest import mock
 
 from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate
-from cases.master_performance.publication import publish_performance
+from cases.master_performance.program import GATE as PERFORMANCE_GATE
+publish_performance = PERFORMANCE_GATE.publish
 from metric_fixtures import freeze_metrics
 
 def report(directory, evidence, result):
@@ -163,7 +164,9 @@ class PerformanceGateTest(unittest.TestCase):
             (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
             ctx = SimpleNamespace(artifact_dir=Path(d), monitor=monitor,
                 resource=lambda name, kind: flow if kind == "java_flow" else e)
-            with mock.patch("cases.master_performance.actions.analyze", side_effect=RuntimeError("analysis interrupted")):
+            from dataclasses import replace
+            interrupted = replace(PERFORMANCE_GATE, analyze=mock.Mock(side_effect=RuntimeError("analysis interrupted")))
+            with mock.patch("cases.master_performance.program.GATE", interrupted):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
                     finish(ctx, dict(flow="flow", evidence="evidence"), mock.Mock())
             archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())

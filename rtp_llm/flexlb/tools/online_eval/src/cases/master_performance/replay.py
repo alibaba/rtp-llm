@@ -5,8 +5,7 @@ import json
 from pathlib import Path
 
 from cases.master_performance import analysis as performance_analysis
-from cases.master_performance.analysis import analyze as analyze_performance
-from cases.master_performance.publication import publish_performance
+from cases.master_performance.program import GATE
 
 
 def performance_main():
@@ -20,7 +19,7 @@ def performance_main():
     from workload.reinterpretation import load_reinterpretation, import_metrics
     from artifacts.json_io import write_json
     e = load_reinterpretation(parser, args, performance_analysis.__file__)
-    r = analyze_performance(e)
+    r = GATE.evaluate(e)
     if args.json_only:
         args.output.mkdir(parents=True, exist_ok=True)
         from workload.gate_result import freeze_gate
@@ -28,6 +27,6 @@ def performance_main():
         write_json(args.output / "analysis.json", r)
     else:
         import_metrics(args.output, args.evidence.parent)
-        publish_performance(args.output, e, r)
+        GATE.publish(args.output, e, r)
     print(json.dumps(r, allow_nan=False))
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[r["verdict"]]

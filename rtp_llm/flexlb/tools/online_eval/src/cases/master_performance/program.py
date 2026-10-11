@@ -1,7 +1,7 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
 from cases.registry import ReportView
-from cases.master_performance.report import validate_view, render_view
+from cases.master_performance.report import validate_view, write_report
 
 from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
@@ -69,18 +69,12 @@ def default(case):
     case.step("teardown", "teardown")
 
 
-REPORT_VIEWS = {
-    "master_performance.yaml": ReportView(validate_view, render_view),
-}
+from cases.gate_plugin import GatePlugin
+from cases.master_performance.analysis import analyze
+from cases.master_performance.metrics import produce
 
-
-def produce_gate_metrics(directory):
-    from workload.gate_result import load_gate
-    from cases.master_performance.metrics import produce
-    from pathlib import Path
-    if (Path(directory) / "performance-gate-manifest.json").is_file():
-        evidence, result = load_gate(directory, "performance")
-        produce(directory, evidence, result)
+GATE = GatePlugin('performance', analyze, produce, write_report)
+REPORT_VIEWS = {'master_performance.yaml': ReportView(validate_view, GATE.render)}
 
 
 from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
@@ -92,6 +86,6 @@ CASE = CaseDefinition(
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     producers={
-        "performance_requests": MetricProducer(metric_contract, produce_gate_metrics, ProducerPhase.GATE),
+        "performance_requests": MetricProducer(metric_contract, GATE.project, ProducerPhase.GATE),
     },
 )

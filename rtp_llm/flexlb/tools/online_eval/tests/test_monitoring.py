@@ -77,7 +77,7 @@ class ContractTest(unittest.TestCase):
                 'sum by (result) (rate(flexlb_auto_tpm_schedule_latency_ms_seconds_count{job="master"}[10000ms]))')
 
     def test_gate_snapshot_uses_declared_tsdb_metrics(self):
-        from cases.cache_scale_in.inputs import engine_metric_snapshot
+        from cases.cache_scale_in.observation import engine_metric_snapshot
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
                                     query_plan="cache_scale_in.yaml")
@@ -97,7 +97,7 @@ class ContractTest(unittest.TestCase):
             engine_metric_snapshot(monitor, fields)
 
     def test_gate_rejects_undeclared_id_and_missing_samples(self):
-        from cases.cache_scale_in.inputs import engine_metric_snapshot
+        from cases.cache_scale_in.observation import engine_metric_snapshot
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
                                     query_plan="cache_scale_in.yaml")

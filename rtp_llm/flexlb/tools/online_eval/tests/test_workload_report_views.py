@@ -202,8 +202,19 @@ class WorkloadReportViewsTest(unittest.TestCase):
             freeze_gate(d, "cache", e, decision)
             freeze_metrics(d, "cache_scale_in")
             before = (Path(d) / "cache-gate-result.json").read_bytes()
-            from cases.cache_scale_in import report
-            with mock.patch.object(report, "write_report", wraps=report.write_report) as render:
+            from dataclasses import replace
+            from cases import registry
+            from cases.cache_scale_in.program import GATE
+            from case_registry_fixtures import entry, snapshot
+            render = mock.Mock(wraps=GATE.write_report)
+            gate = replace(GATE, write_report=render)
+            registered = registry.registry().cases['cache_scale_in']
+            definition = replace(registered.definition, report_views={
+                'cache_scale_in.yaml': registry.ReportView(
+                    registered.definition.report_views['cache_scale_in.yaml'].validator, gate.render),
+            })
+            with mock.patch.object(registry, '_snapshot', snapshot(
+                entry(registered.name, definition, registered.module, registered.path), include_existing=True)):
                 links = write_views(d, payload(), ["default.yaml", "cache_scale_in.yaml"])
             self.assertEqual(render.call_count, 1)
             frozen = load_analysis(links["cache_scale_in.yaml"].parent)

@@ -1,5 +1,6 @@
 """Extension contracts: new programs and report identities need no generic branches."""
 import copy
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -39,7 +40,9 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             config['case'] = 'second_cache'
             path = root / 'scenario.yaml'
             path.write_text(yaml.safe_dump(config))
-            with mock.patch.object(registry, '_snapshot', snapshot(entry('second_cache', __import__('dataclasses').replace(module.CASE, producers=registry.registry().cases['cache_scale_in'].definition.producers), 'second_cache', module_path), include_existing=True)):
+            shared = registry.registry().cases['cache_scale_in'].definition
+            definition = replace(module.CASE, producers=shared.producers, report_views=shared.report_views)
+            with mock.patch.object(registry, '_snapshot', snapshot(entry('second_cache', definition, 'second_cache', module_path), include_existing=True)):
                 with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)), \
                      mock.patch('runtime.resource_plan.VICTIM_OFFSETS', (700, 701, 702)):
                     first = compile_scenarios([('first', configure_program(original, 'first'))], handlers=handlers())

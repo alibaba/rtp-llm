@@ -2,15 +2,16 @@
 
 from pathlib import Path
 
-from reporting import write_bundle, run_meta
+from reporting import run_meta
+from reporting.gate_report import write_gate_report
 from reporting.run_context import title
 from reporting.view_sections import view_details, view_table
 
 
-def write_report(directory, evidence, result, *, run=None):
+def write_report(directory, evidence, result, *, run=None, presentation=None):
     from reporting.view_config import view
 
-    presentation = view("master_performance.yaml")
+    presentation = presentation if presentation is not None else view("master_performance.yaml")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     p = evidence.get("provenance", {})
@@ -45,32 +46,13 @@ def write_report(directory, evidence, result, *, run=None):
     from reporting.events import attach_events
     attach_events(spec, presentation, origin=evidence["window"]["start_epoch_ms"] / 1000,
                   phases=evidence.get("phases", []), events=evidence.get("events", []))
-    if run is not None:
-        from reporting.run_context import selected_spec
-        spec = selected_spec(spec, run, presentation)
-        result = dict(result, run=run)
-    else:
-        from reporting.timeline import archived
-        from runtime.observation import verdict_status
-        spec = archived(spec, directory, presentation, status=verdict_status(result['verdict']))
     meta = run_meta(
         dict(id=p["instance"], verdict=result["verdict"]),
         implementation=p.get("master_artifact"), workload=p.get("trace"), configuration=p,
         evidence=dict(file="performance-gate-evidence.json"),
     )
-    if run is not None:
-        from reporting.run_context import provenance_from
-        meta = provenance_from(run, meta)
-    return write_bundle(
-        directory,
-        "run",
-        "master-performance",
-        result,
-        spec,
-        meta=meta,
-        producer="performance-gate",
-        role="gate",
-    )
+    return write_gate_report(directory, result, presentation, spec,
+        identity="master-performance", producer="performance-gate", meta=meta, run=run)
 
 
 def validate_view(path, data, fail):
@@ -79,9 +61,3 @@ def validate_view(path, data, fail):
     validate_section_contract(path, data, {
         "checks": 4, "monitoring": None, "validity": None, "metrics": None,
     }, fail)
-
-
-def render_view(directory, run, presentation):
-    from workload.gate_result import load_gate
-    evidence, result = load_gate(directory, "performance")
-    return write_report(directory, evidence, result, run=run) / "report.html"

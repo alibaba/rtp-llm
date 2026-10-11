@@ -6,9 +6,9 @@ import json
 from pathlib import Path
 
 from cases.cache_scale_in import analysis as cache_analysis
-from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, align_send_counters, analyze, attribute_client
+from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, align_send_counters, attribute_client
 from cases.cache_scale_in.report import prepare_report
-from cases.cache_scale_in.publication import publish_cache
+from cases.cache_scale_in.program import GATE
 
 
 def cache_main():
@@ -40,9 +40,9 @@ def cache_main():
             ["historical admission timing cannot be reconstructed; detach-based windows retained"],
     )
     args.output.mkdir(parents=True, exist_ok=True)
-    result = analyze(evidence)
+    result = GATE.evaluate(evidence)
     import_metrics(args.output, args.evidence.parent)
-    publish_cache(args.output, evidence, result,
-                 prepared=prepare_report(args.output, evidence))
+    GATE.publish(args.output, evidence, result,
+                 report_options={"prepared": prepare_report(args.output, evidence)})
     print(result["verdict"])
     return {"PASS": 0, "FAIL": 1, "INVALID": 2}[result["verdict"]]
