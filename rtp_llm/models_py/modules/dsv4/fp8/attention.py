@@ -3515,6 +3515,12 @@ class AttentionFP8(nn.Module):
                 cmp_pool_3d=cmp_pool_3d,
             )
 
+        preserve_packed_prefix = (
+            common.any_cont
+            and is_sm120(qkv.q.device)
+            and not swa_byte_sliced
+            and os.environ.get("DSV4_SM120_PRESERVE_PREFIX_BYTES", "0") == "1"
+        )
         async_workspace_reads = self._should_async_workspace_reads_for_prefill(common)
         with record_function_range("dsv4.fp8.attn.workspace.alloc"):
             # E5b: combined indices only address rows written by compressed-K
@@ -3585,7 +3591,7 @@ class AttentionFP8(nn.Module):
             # SWA dequant only reads the cached prefix tail. The fresh new-K rows
             # are already available as BF16 and are overlaid below; cold prefill
             # does not need to read the SWA pool at all.
-            if common.any_cont:
+            if common.any_cont and not preserve_packed_prefix:
                 with record_function_range("dsv4.fp8.attn.workspace.gather_swa_prefix"):
                     assert wm.swa_cache_slot_mapping is not None
                     if swa_byte_sliced:
@@ -3839,6 +3845,13 @@ class AttentionFP8(nn.Module):
                 profile_name="dsv4.fp8.attn.workspace.flash_mla_sparse_fwd",
                 out=projected_out,
                 sm120_swa_kv=sm120_swa_kv,
+                sm120_prefix_cache=swa_pool_3d if preserve_packed_prefix else None,
+                sm120_prefix_slots=(
+                    wm.swa_cache_slot_mapping if preserve_packed_prefix else None
+                ),
+                sm120_prefix_lens=(
+                    wm.swa_cache_gather_lens if preserve_packed_prefix else None
+                ),
                 sm120_extra_kv=sm120_extra_kv,
                 sm120_swa_indices=sm120_swa_indices,
                 sm120_swa_lens=sm120_swa_lens,
@@ -6132,6 +6145,9 @@ class AttentionFP8(nn.Module):
         sm120_swa_kv=None,
         sm120_extra_kv=None,
         sm120_swa_cache=None,
+        sm120_prefix_cache=None,
+        sm120_prefix_slots=None,
+        sm120_prefix_lens=None,
         sm120_extra_cache=None,
         sm120_swa_indices=None,
         sm120_swa_lens=None,
@@ -6224,6 +6240,9 @@ class AttentionFP8(nn.Module):
                     logical_kv,
                     sm120_cache,
                     prefill_workspace.sm120_linear_slots("swa", token_count),
+                    prefix_cache=sm120_prefix_cache,
+                    prefix_slot_mapping=sm120_prefix_slots,
+                    prefix_gather_lens=sm120_prefix_lens,
                 )
             if sm120_extra_cache is None and sm120_extra_kv is not None:
                 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
@@ -6574,8 +6593,15 @@ class AttentionFP8(nn.Module):
             device=qkv.q.device,
         )
 
-        # 1. Prefix tail dequant through precomputed global SWA slots.
-        if meta.prefix_len_max > 0:
+        preserve_packed_prefix = (
+            meta.prefix_len_max > 0
+            and is_sm120(qkv.q.device)
+            and not cp_byte_sliced
+            and os.environ.get("DSV4_SM120_PRESERVE_PREFIX_BYTES", "0") == "1"
+        )
+        # SM120 can copy the packed prefix during workspace packing, avoiding
+        # an encoding-changing dequant/requant round trip and its gather launch.
+        if meta.prefix_len_max > 0 and not preserve_packed_prefix:
             with record_function_range("dsv4.fp8.attn.swa_concat.gather_prefix"):
                 assert meta.cache_slot_mapping is not None
                 if cp_byte_sliced:
@@ -6628,6 +6654,13 @@ class AttentionFP8(nn.Module):
             freqs_cis=common.freqs_cis,
             prefill_workspace=common.workspace,
             profile_name="dsv4.fp8.attn.swa_concat.flash_mla",
+            sm120_prefix_cache=packed_3d if preserve_packed_prefix else None,
+            sm120_prefix_slots=(
+                meta.cache_slot_mapping if preserve_packed_prefix else None
+            ),
+            sm120_prefix_lens=(
+                meta.cache_gather_lens if preserve_packed_prefix else None
+            ),
         )
 
     # ------------------------------------------------------------------

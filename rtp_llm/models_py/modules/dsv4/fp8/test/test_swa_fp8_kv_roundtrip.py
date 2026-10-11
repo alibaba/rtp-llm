@@ -40,8 +40,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_dequant_triton import (
     dequantize_and_gather_k_cache_slots_cp_byte_sliced,
     dequantize_packed_k_cache_flat,
     gather_k_cache_packed,
+    gather_k_cache_slots_packed,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._swa_kv_insert_triton import (
+    insert_packed_k_cache_flat,
     quantize_and_insert_k_cache,
     quantize_and_insert_k_cache_cp_byte_sliced,
 )
@@ -636,6 +638,104 @@ class SwaFp8KvRoundtripTest(unittest.TestCase):
                 cp_rank=0,
                 cp_size=cp_size,
                 compaction=None,
+            )
+
+
+class PackedPrefixWorkspaceTest(unittest.TestCase):
+    def setUp(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA not available")
+        torch.manual_seed(37)
+
+    @staticmethod
+    def _cache(count, page):
+        stride = ((page * HEAD_BYTES + 575) // 576) * 576
+        blocks = (count + page - 1) // page
+        storage = torch.full((blocks * stride,), 173, dtype=torch.uint8, device="cuda")
+        return (
+            storage.as_strided((blocks, page, HEAD_BYTES), (stride, HEAD_BYTES, 1)),
+            storage,
+        )
+
+    def test_packed_prefix_and_fresh_rows(self):
+        for batch in (1, 3):
+            for width in (257, 4223):
+                for source_page in (64, 256):
+                    for destination_page in (64, 256):
+                        with self.subTest(
+                            batch=batch,
+                            width=width,
+                            source_page=source_page,
+                            destination_page=destination_page,
+                        ):
+                            self._check(batch, width, source_page, destination_page)
+
+    def _check(self, batch, width, source_page, destination_page):
+        count = batch * width
+        source, source_storage = self._cache(2048, source_page)
+        quantize_and_insert_k_cache(
+            torch.randn(2048, HEAD_DIM, device="cuda", dtype=torch.bfloat16),
+            source,
+            torch.arange(2048, device="cuda"),
+        )
+        original_source = source_storage.clone()
+        slots = torch.randint(0, 2048, (batch, 127), device="cuda")
+        slots[:, 3] = -1
+        lens = torch.tensor(
+            [127] if batch == 1 else [0, 63, 127], device="cuda", dtype=torch.int32
+        )
+        values = torch.randn(count, HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+        expected, expected_storage = self._cache(count, destination_page)
+        actual, actual_storage = self._cache(count, destination_page)
+        destination = torch.arange(count, device="cuda")
+        quantize_and_insert_k_cache(values, expected, destination)
+        packed = gather_k_cache_slots_packed(source, slots)
+        prefix_slots = (
+            torch.arange(127, device="cuda")[None, :]
+            + torch.arange(batch, device="cuda")[:, None] * width
+        )
+        valid = torch.arange(127, device="cuda")[None, :] < lens[:, None]
+        insert_packed_k_cache_flat(
+            packed[valid.reshape(-1)].contiguous(),
+            expected,
+            prefix_slots[valid].contiguous(),
+        )
+        # Prefix BF16 workspace rows are intentionally uninitialized in serving.
+        values[prefix_slots[valid]] = float("nan")
+
+        def launch():
+            quantize_and_insert_k_cache(
+                values,
+                actual,
+                destination,
+                prefix_cache=source,
+                prefix_slot_mapping=slots,
+                prefix_gather_lens=lens,
+            )
+
+        for _ in range(3):
+            launch()
+        self.assertTrue(torch.equal(actual_storage, expected_storage))
+        self.assertTrue(torch.equal(source_storage, original_source))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            launch()
+        actual_storage.fill_(173)
+        graph.replay()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.equal(actual_storage, expected_storage))
+        self.assertTrue(torch.equal(source_storage, original_source))
+
+    def test_prefix_source_must_not_alias_destination(self):
+        cache, _ = self._cache(256, 64)
+        with self.assertRaises(AssertionError):
+            quantize_and_insert_k_cache(
+                torch.zeros(256, HEAD_DIM, device="cuda", dtype=torch.bfloat16),
+                cache,
+                torch.arange(256, device="cuda"),
+                prefix_cache=cache,
+                prefix_slot_mapping=torch.arange(127, device="cuda")[None, :],
+                prefix_gather_lens=torch.tensor([127], device="cuda"),
             )
 
 
