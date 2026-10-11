@@ -10,18 +10,17 @@ Two RoPE bases per model:
 """
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import torch
 
-# Process-local memoization keyed by (params, device). All DSV4 compressor
+# Process-local memoization keyed by (params, destination, optional computation).
+# All DSV4 compressor
 # layers compute identical freqs_cis (they share rope params), so a single
 # shared tensor replaces what was 61 distinct CPU + 61 distinct GPU copies
 # during model init. Cascade: identical id(freqs_cis) → `_ensure_cos_sin_cache`
 # in compressor.py dedupes the derived 256 MiB cos_sin_cache (91× → 1×).
-_FREQS_CIS_CACHE: Dict[
-    Tuple[int, int, int, float, float, int, int, Optional[str]], torch.Tensor
-] = {}
+_FREQS_CIS_CACHE: Dict[Tuple[object, ...], torch.Tensor] = {}
 
 
 def precompute_freqs_cis(
@@ -33,12 +32,17 @@ def precompute_freqs_cis(
     beta_fast: int,
     beta_slow: int,
     device: Optional[torch.device] = None,
+    *,
+    compute_device: Optional[Union[torch.device, str]] = None,
 ) -> torch.Tensor:
     """Returns complex cis tensor `[seqlen, dim/2]`.
     When `original_seq_len > 0`, applies YaRN frequency interpolation.
     When `device` is given, returns the tensor on that device and shares
-    it across all callers with the same params+device tuple."""
-    key = (
+    it across all callers with the same params+device tuple.
+    ``compute_device`` selects where the frequency arithmetic runs; CPU and
+    CUDA arithmetic can differ even when the destination is identical. Omit
+    it to retain the ambient construction device and existing memo keys."""
+    key: Tuple[object, ...] = (
         dim,
         seqlen,
         original_seq_len,
@@ -48,9 +52,23 @@ def precompute_freqs_cis(
         beta_slow,
         str(device) if device is not None else None,
     )
+    if compute_device is not None:
+        compute_device = torch.device(compute_device)
+        if compute_device.type == "cuda":
+            if compute_device.index is None:
+                compute_device = torch.device("cuda", torch.cuda.current_device())
+        elif compute_device.type == "cpu":
+            compute_device = torch.device("cpu")
+        else:
+            raise ValueError("Rotary computation requires a CPU or CUDA device")
+        key += (str(compute_device),)
     cached = _FREQS_CIS_CACHE.get(key)
     if cached is not None:
         return cached
+    if compute_device is not None and compute_device.type == "cuda":
+        with torch.cuda.device(compute_device):
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError("Build rotary tables before graph capture")
 
     def find_correction_dim(num_rotations, dim_, base_, max_seq_len_):
         return (
@@ -67,10 +85,15 @@ def precompute_freqs_cis(
     def linear_ramp_factor(min_, max_, dim_):
         if min_ == max_:
             max_ = max_ + 0.001
-        linear_func = (torch.arange(dim_, dtype=torch.float32) - min_) / (max_ - min_)
+        linear_func = (
+            torch.arange(dim_, dtype=torch.float32, device=compute_device) - min_
+        ) / (max_ - min_)
         return torch.clamp(linear_func, 0, 1)
 
-    freqs = 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    freqs = 1.0 / (
+        base
+        ** (torch.arange(0, dim, 2, dtype=torch.float32, device=compute_device) / dim)
+    )
     if original_seq_len > 0:
         low, high = find_correction_range(
             beta_fast, beta_slow, dim, base, original_seq_len
@@ -78,7 +101,7 @@ def precompute_freqs_cis(
         smooth = 1 - linear_ramp_factor(low, high, dim // 2)
         freqs = freqs / factor * (1 - smooth) + freqs * smooth
 
-    t = torch.arange(seqlen)
+    t = torch.arange(seqlen, device=compute_device)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
     if device is not None and freqs_cis.device != torch.device(device):

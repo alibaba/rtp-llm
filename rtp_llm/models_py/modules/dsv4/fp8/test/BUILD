@@ -48,6 +48,23 @@ py_test(
     timeout = "long",
 )
 
+py_test(
+    name = "test_v41_rotary_compute_device_sm120",
+    srcs = [
+        "test_v41_rotary_compute_device_sm120.py",
+        "test_v41_cuda_frequency_reference_sm120.py",
+    ],
+    main = "test_v41_rotary_compute_device_sm120.py",
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_cuda_frequency_reference_testlib",
+        ":v41_deep_history_testlib",
+        "//rtp_llm/tools:dsv41_output_projection_replay",
+    ],
+    tags = ["RTX_5000_PRO", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
 py_library(
     name = "v41_short_sparse_plan_reference_testlib",
     testonly = True,
