@@ -9,8 +9,8 @@ from reporting.view_config import DEFAULT_VIEW, view
 from workload.report_panels import build_panels
 
 
-def build_spec(payload, directory, *, name=DEFAULT_VIEW):
-    presentation = view(name)
+def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None):
+    presentation = view(name) if presentation is None else presentation
     series = payload["series"]
     spec = dict(
         subtitle=presentation["report"]["subtitle"],

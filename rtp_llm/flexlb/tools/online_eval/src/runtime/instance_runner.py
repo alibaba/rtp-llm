@@ -381,7 +381,8 @@ def _run_lane(index, lane, lease, args, out, children):
         execution = [instance.metadata["execution"] for instance in group]
         timeout = (
             sum((item["timeout_s"] + item["cleanup_timeout_s"]
-                 + item["finalize_timeout_s"] + item["report_timeout_s"] for item in execution))
+                 + item["finalize_timeout_s"] + item["report_timeout_s"]
+                 + item["archive_timeout_s"] for item in execution))
             + 30
             if execution
             else None
@@ -465,6 +466,9 @@ def _print_planned_reports(instances):
 
 def _print_generated_reports(rows):
     for row in rows:
+        if row.get('artifacts'):
+            print('experiment artifacts: ' + json.dumps(dict(instance=row['id'],
+                artifacts=row['artifacts']), ensure_ascii=False))
         if row.get("test_kind") != "workload":
             continue
         workload = row.get("workload")

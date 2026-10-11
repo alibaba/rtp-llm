@@ -80,13 +80,14 @@ class ExecutionPolicy:
     cleanup_timeout_s: Optional[float]
     finalize_timeout_s: Optional[float]
     report_timeout_s: Optional[float]
+    archive_timeout_s: Optional[float]
 
     @classmethod
     def read(cls, value, kind):
         normalized = normalize_execution(value, kind=kind)
         return cls(normalized['collection'], MonitoringPolicy.read(normalized['monitoring']),
                    *(normalized.get(name) for name in ('timeout_s', 'stage_timeout_s', 'cleanup_timeout_s',
-                                                      'finalize_timeout_s', 'report_timeout_s')))
+                                                      'finalize_timeout_s', 'report_timeout_s', 'archive_timeout_s')))
 
     def to_dict(self):
         return {'collection': self.collection, 'monitoring': self.monitoring.to_dict(),

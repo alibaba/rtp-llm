@@ -121,6 +121,7 @@ def _compile_documents(documents, profile=None, handlers=None, grade="normal"):
                 ("cleanup_timeout_s", 120),
                 ("finalize_timeout_s", 120),
                 ("report_timeout_s", 60),
+                ("archive_timeout_s", 120),
             )
         }
         variants = doc.get("variants", [{"id": "default"}])

@@ -17,6 +17,7 @@ class RunFinalizer:
             write_json(result_path, document)
 
         checkpoint(pending=policy is not None)
+        evidence = None
         if policy is not None:
             budgets = result.plan.execution
             evidence = self._phase(ctx, result, FinalizationPhase.EVIDENCE,
@@ -29,9 +30,23 @@ class RunFinalizer:
             else:
                 result.finalization.append(FinalizationResult(FinalizationPhase.REPORT,
                     budgets.report_timeout_s, DeliveryStatus.BLOCKED, "evidence finalization failed"))
+        self._phase(ctx, result, FinalizationPhase.ARCHIVE,
+                    result.plan.execution.archive_timeout_s, started, checkpoint,
+                    lambda document, deadline: self._archive(ctx, result, document, evidence, deadline))
         result.duration_ms = int((ctx.clock()-started)*1000)
         checkpoint()
         return result
+
+    @staticmethod
+    def _archive(ctx, result, document, analysis, deadline):
+        from artifacts.experiment import publish_run
+        # Archiving is delivery, not an experimental stage. The container records
+        # settled execution/report results; its own successful commit is the index.
+        document = dict(document)
+        document['finalization'] = [row for row in document.get('finalization', [])
+                                    if row['phase'] != FinalizationPhase.ARCHIVE.value]
+        result.artifacts = publish_run(ctx.artifact_dir, ctx.experiment_definition, document,
+                                      analysis=analysis, deadline=deadline)
 
     @staticmethod
     def _render(policy, ctx, document, evidence, deadline):
@@ -52,7 +67,7 @@ class RunFinalizer:
         # The policy receives execution's terminal outcome, not a transient delivery state.
         document["status"] = completed.status
         from dataclasses import asdict
-        document["outcome"] = dict(asdict(completed), delivery="PASS")
+        document["outcome"] = dict(asdict(completed))
         value = None
         try:
             with interruptible(deadline, ctx.enforce_deadlines):
@@ -65,13 +80,13 @@ class RunFinalizer:
             result.error = result.error or f"{phase.value} finalization failed: {row.error}"
         finally:
             result.absorb_policy_result(document)
-        if row.status != DeliveryStatus.PASS:
+        if row.status != DeliveryStatus.PASS and phase != FinalizationPhase.ARCHIVE:
             if result.workload is None:
                 result.workload = WorkloadResult()
             if phase == FinalizationPhase.EVIDENCE:
                 result.workload.runtime_validity = "INVALID"
                 result.workload.report_status = "BLOCKED"
-            else:
+            elif phase == FinalizationPhase.REPORT:
                 result.workload.report_status = row.status.value
         elif phase == FinalizationPhase.REPORT and result.workload is not None:
             result.workload.report_status = "PASS"

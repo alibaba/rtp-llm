@@ -21,6 +21,7 @@ class StageStatus(str, Enum):
 class FinalizationPhase(str, Enum):
     EVIDENCE = "evidence"
     REPORT = "report"
+    ARCHIVE = "archive"
 
 
 class DeliveryStatus(str, Enum):
@@ -121,6 +122,7 @@ class RunResult:
     finalization: list[FinalizationResult] = field(default_factory=list)
     outcome: RunOutcome | None = None
     finalization_started: bool = False
+    artifacts: dict = field(default_factory=dict)
 
     def adjudicate(self):
         stages, cleanup = self.execution.stages, self.execution.cleanup
@@ -164,6 +166,8 @@ class RunResult:
             resource_budget=plan.resource_budget.to_metadata(),
             resolved_config=json.loads(plan.environment.snapshot.master_json), clock_domain="monotonic",
             test_kind=attachments.get("test_kind", "functional"), outcome=asdict(outcome))
+        if self.artifacts:
+            result['artifacts'] = dict(self.artifacts)
         if "implementation" in attachments:
             result["implementation"] = attachments["implementation"]
         if self.finalization_started:

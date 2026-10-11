@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """One portable, compressed artifact for a local case/scenario run.
 
-The manifest records exact source hashes and any size-limited raw evidence.
-Structured results are never silently truncated. Whale may use KMonitor only.
+The manifest records exact source hashes. Evidence is never truncated.
 """
 
 from __future__ import annotations
@@ -16,9 +15,7 @@ import tempfile
 import zipfile
 
 ARCHIVE_MANIFEST_SCHEMA_VERSION = 1
-STRUCTURED = {".json", ".yaml", ".yml", ".html", ".csv"}
-RAW_LIMIT = 2 * 1024 * 1024
-HEAD_TAIL = 256 * 1024
+PRECOMPRESSED = {".gz", ".zip", ".jar", ".zst", ".xz", ".bz2", ".png", ".jpg"}
 SECRET_WORDS = ("api_token", "auth_token", "access_token", "refresh_token",
                 "api_key", "access_key", "secret", "credential", "password",
                 "private_key")
@@ -53,7 +50,7 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
     os.close(fd)
     try:
         with zipfile.ZipFile(temp_name, "w", compression=zipfile.ZIP_DEFLATED,
-                             compresslevel=6, allowZip64=True) as archive:
+                             compresslevel=3, allowZip64=True) as archive:
             for label, root in sources.items():
                 if not label or "/" in label or label in (".", ".."):
                     raise ValueError(f"invalid source label: {label!r}")
@@ -72,18 +69,9 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
                         continue
                     size = path.stat().st_size
                     record = {"path": name, "size": size, "sha256": _sha256(path)}
-                    if path.suffix.lower() in STRUCTURED or size <= RAW_LIMIT:
-                        archive.write(path, name)
-                        record["completeness"] = "full"
-                    else:
-                        with path.open("rb") as fh:
-                            first = fh.read(HEAD_TAIL)
-                            fh.seek(max(0, size - HEAD_TAIL))
-                            last = fh.read(HEAD_TAIL)
-                        archive.writestr(name + ".head", first)
-                        archive.writestr(name + ".tail", last)
-                        record["completeness"] = "head_tail"
-                        record["included_bytes"] = len(first) + len(last)
+                    archive.write(path, name, compress_type=zipfile.ZIP_STORED
+                                  if path.suffix.lower() in PRECOMPRESSED else zipfile.ZIP_DEFLATED)
+                    record["completeness"] = "full"
                     manifest["files"].append(record)
             archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False,
                                                           indent=2).encode("utf-8"))
