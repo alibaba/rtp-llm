@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "autil/EnvUtil.h"
 
 #include <algorithm>
 #include <chrono>
@@ -565,7 +566,11 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
 absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
     unique_lock<mutex> lock(lock_);
     if (need_fill_fake_stream_) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        // Empty DP ranks still participate in the next shared model round.
+        // Preserve the default while allowing a bounded startup-time latency probe.
+        static const int64_t fake_stream_wait_ms =
+            std::clamp<int64_t>(autil::EnvUtil::getEnv<int64_t>("RTP_LLM_DP_FAKE_STREAM_WAIT_MS", 10), 1, 10);
+        cond_.wait_for(lock, std::chrono::milliseconds(fake_stream_wait_ms), [this] { return waitPredicate(); });
     } else {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
