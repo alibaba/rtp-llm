@@ -481,6 +481,15 @@ def maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, device) ->
             return
         if not _recipe_domain_ok(cp_ctx):
             return
+        predicted_prefix = int(cp_ctx.prefix_lengths_full_host[0]) + int(
+            cp_ctx.padded_seq_len
+        )
+        # A full final chunk can predict positions beyond the RoPE table.
+        # Decline before the worker submits any out-of-range CUDA indexing.
+        if predicted_prefix + int(cp_ctx.padded_seq_len) > int(
+            getattr(v4, "max_seq_len", 0)
+        ):
+            return
         if kv_cache is None or not block_tables_by_type:
             return
         if not bool(getattr(v4, "fp8_kv_cache", False)):
@@ -502,8 +511,7 @@ def maybe_kick_async_head(v4, kv_cache, block_tables_by_type, cp_ctx, device) ->
             device=device,
             cp_size=int(cp_ctx.cp_size),
             cp_rank=int(cp_ctx.cp_rank),
-            predicted_prefix=int(cp_ctx.prefix_lengths_full_host[0])
-            + int(cp_ctx.padded_seq_len),
+            predicted_prefix=predicted_prefix,
             shared={} if _meta_shared_build_enabled() else None,
         )
         # Capture the serving grad mode HERE (main thread, inside the

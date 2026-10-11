@@ -566,6 +566,7 @@ class _StubV4:
     def __init__(self, attns):
         self.layers = [_StubLayer(a) for a in attns]
         self.fp8_kv_cache = True
+        self.max_seq_len = 32832
 
 
 # ---------------------------------------------------------------------------
@@ -1127,6 +1128,43 @@ class PrebuiltValidation(unittest.TestCase):
             kv_cache_sharded=False,
         )
         self.assertFalse(head_prebuild._recipe_domain_ok(ctx_partial))
+
+    def test_kick_requires_the_full_prediction_to_fit_the_model(self):
+        for rank in RECIPE_RANKS:
+            for prefix, limit, expected in (
+                (24576, 32768, True),
+                (24576, 32767, False),
+                (24576, 32832, True),
+                (28672, 32832, False),
+                (28672, 36864, True),
+                (0, 0, False),
+                (0, None, False),
+            ):
+                with self.subTest(rank=rank, prefix=prefix, limit=limit):
+                    ctx = _build_ctx(rank, prefix)
+                    v4 = _StubV4([])
+                    if limit is None:
+                        del v4.max_seq_len
+                    else:
+                        v4.max_seq_len = limit
+                    with patch.dict(os.environ, {"DSV4_PREFILL_ASYNC_HEAD": "1"}):
+                        with patch.object(head_prebuild, "_builder") as builder:
+                            head_prebuild.maybe_kick_async_head(
+                                v4,
+                                _KV_CACHE,
+                                _make_tables(max(1, prefix // 256), variant=0),
+                                ctx,
+                                torch.device("cpu"),
+                            )
+                    self.assertEqual(builder.called, expected)
+                    if expected:
+                        builder.return_value.kick.assert_called_once()
+                        self.assertEqual(
+                            builder.return_value.kick.call_args[0][0],
+                            head_prebuild.predicted_continuation_key(
+                                ctx, torch.device("cpu")
+                            ),
+                        )
 
 
 class PrebuiltThreadDiscipline(unittest.TestCase):
