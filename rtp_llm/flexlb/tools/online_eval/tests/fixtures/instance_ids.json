@@ -1,4 +1,6 @@
 [
+  "cache_scale_in::affinity_disabled::batch-window",
+  "cache_scale_in::affinity_disabled::single-nonbatch",
   "cache_scale_in::default::batch-window",
   "cache_scale_in::default::single-nonbatch",
   "master_ha_failover::non_rolling::batch-window",

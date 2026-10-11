@@ -10,6 +10,7 @@ ANALYSIS_POLICY_VALIDATOR = validate_policy
 def step(case):
     flow = case.value("flow")
     gate = case.value("gate")
+    startup_timeout = case.number("traffic_startup_timeout_s")
     client, playback = normalize(flow["client"])
     if (
         client.get("LOOP") != "false"
@@ -25,11 +26,11 @@ def step(case):
         raise ValueError("step requires one graceful scale-in; different fault sequences require a separate case")
     if (
         int(client["DURATION_S"]) < budget
-        or flow["source"]["parameters"]["count"] < budget * gate["qps"]
+        or min(flow["source"]["parameters"]["count"], flow.get("max_requests", flow["source"]["parameters"]["count"])) < budget * gate["qps"]
     ):
         raise ValueError("traffic plan must cover worst-case observation duration")
     case.step("setup", "setup", timeout_s=180)
-    case.step("traffic", "java_flow_start", params=flow, timeout_s=300)
+    case.step("traffic", "java_flow_start", params=flow, timeout_s=startup_timeout)
     case.step(
         "scale_in",
         "cache_scale_in_observe",

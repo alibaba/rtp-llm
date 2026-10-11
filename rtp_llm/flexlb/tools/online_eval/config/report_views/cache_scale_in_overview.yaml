@@ -2,7 +2,7 @@ kind: produced
 report: cache-scale-in
 producer: cache-gate
 title: P scale-in cache-collapse gate
-subtitle: '{verdict} · monitoring {monitoring_status}'
+subtitle: '{verdict} · expected {expected_behavior} / observed {observed_behavior} · monitoring {monitoring_status}'
 time_origin: Seconds since observation began
 meta:
   sampling: Archived Prometheus curves and frozen gate windows

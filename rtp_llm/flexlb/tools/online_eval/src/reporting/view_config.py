@@ -150,7 +150,10 @@ def view(name):
                       if field is not None]
         except ValueError as exc:
             _fail(path, str(exc))
-        if any(field not in {"verdict", "monitoring_status"} for field in fields):
+        allowed_fields = {"verdict", "monitoring_status"}
+        if data["producer"] == "cache-gate":
+            allowed_fields.update({"expected_behavior", "observed_behavior"})
+        if any(field not in allowed_fields for field in fields):
             _fail(path, "unknown subtitle placeholder")
     return data
 

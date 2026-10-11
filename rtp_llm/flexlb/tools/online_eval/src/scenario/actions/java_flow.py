@@ -26,8 +26,9 @@ def _start_validate(params, plan):
         "client",
         "jvm_xms",
         "jvm_xmx",
+        "max_requests",
     }
-    p = _validate(params, plan, fields, fields - {"source", "trace"})
+    p = _validate(params, plan, fields, fields - {"source", "trace", "max_requests"})
     if ("source" in p) == ("trace" in p):
         raise ValueError("specify exactly one traffic source")
     if "trace" in p:
@@ -45,6 +46,8 @@ def _start_validate(params, plan):
         or p["poll_s"] <= 0
     ):
         raise ValueError("invalid flow polling interval")
+    if "max_requests" in p and (type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 1000000):
+        raise ValueError("max_requests must be a positive bounded request count")
     client, _ = normalize(p["client"])
     if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
         raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")
@@ -81,6 +84,10 @@ def _start_validate(params, plan):
 
 
 def _start(ctx, p, deadline):
+    if getattr(ctx.env.spec, "master_env", {}).get("FLEXLB_TEST_CONTROL_TOKEN"):
+        from scenario.actions.master_control import affinity_request
+        initial = affinity_request(ctx, deadline)
+        (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
     directory = ctx.artifact_dir / "flows" / p["group_id"]
     directory.parent.mkdir(exist_ok=True)
     trace = materialize(
@@ -88,6 +95,7 @@ def _start(ctx, p, deadline):
         p["source"],
         ctx.instance["id"] + ":" + p["group_id"],
         Path(ctx.instance["source_path"]).parent,
+        max_requests=p.get("max_requests"),
     )
     environment, playback = normalize(p["client"])
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])

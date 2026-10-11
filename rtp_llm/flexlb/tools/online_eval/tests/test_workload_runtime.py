@@ -102,7 +102,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 "request_completion::default",
             },
         )
-        self.assertEqual(len(plans), 12)
+        self.assertEqual(len(plans), 14)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_core_suite_is_request_completion_for_every_master_profile(self):

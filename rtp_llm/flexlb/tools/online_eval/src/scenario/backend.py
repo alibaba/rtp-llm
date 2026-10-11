@@ -504,6 +504,10 @@ def make_env_spec(plan, profile, lease):
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
         master_debug_log=plan.get("master_debug_log", False),
     )
+    if plan.get("master_test_control", False):
+        # A per-environment token opts the isolated Master into test controls.
+        import secrets
+        spec.master_env["FLEXLB_TEST_CONTROL_TOKEN"] = secrets.token_hex(32)
     if "mock_heap" in preset_runtime:
         spec.mock_heap = preset_runtime["mock_heap"]
     spec.mock_extra_args.extend(preset_runtime.get("mock_extra_args", []))

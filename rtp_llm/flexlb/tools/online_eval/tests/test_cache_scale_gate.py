@@ -138,6 +138,31 @@ class CacheGateTest(unittest.TestCase):
         align_send_counters(evidence, issued[:300] + issued[380:])
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
+    def test_negative_control_requires_collapse_and_valid_evidence(self):
+        collapsed = self.evidence(hit=0.3)
+        collapsed["criteria"]["expected_behavior"] = "collapse"
+        result = analyze(collapsed)
+        self.assertEqual(result["verdict"], "PASS")
+        self.assertEqual(result["observed_behavior"], "collapse")
+        healthy = self.evidence()
+        healthy["criteria"]["expected_behavior"] = "collapse"
+        self.assertEqual(analyze(healthy)["verdict"], "FAIL")
+        collapsed["errors"] = ["stable warm baseline not reached"]
+        self.assertEqual(analyze(collapsed)["verdict"], "INVALID")
+
+    def test_negative_control_requires_verified_policy_intervention(self):
+        evidence = self.evidence(hit=0.3)
+        evidence["criteria"].update(expected_behavior="collapse", post_affinity_ms=0)
+        self.assertEqual(analyze(evidence)["verdict"], "INVALID")
+        evidence["affinity_transition"] = dict(
+            before=dict(maxExtraTtftMs=1000000000),
+            update=dict(before=1000000000, maxExtraTtftMs=0),
+            readback=dict(maxExtraTtftMs=0),
+        )
+        self.assertEqual(analyze(evidence)["verdict"], "PASS")
+        evidence["affinity_transition"]["readback"]["maxExtraTtftMs"] = 1000000000
+        self.assertEqual(analyze(evidence)["verdict"], "INVALID")
+
     def test_persistent_collapse_fails(self):
         result = analyze(self.evidence(0.1))
         self.assertEqual(result["verdict"], "FAIL")
@@ -278,11 +303,36 @@ class CacheGateTest(unittest.TestCase):
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
             )
-        self.assertEqual(len(plans), 2)
+        self.assertEqual(len(plans), 4)
         self.assertEqual(
             plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False
         )
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
+
+    def test_controls_share_workload_and_reject_insufficient_projection(self):
+        import yaml
+        from cases.config import configure_program
+        source = ROOT / "config/scenarios/cache_scale_in.yaml"
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            plans = compile_scenarios(load_scenarios(source), handlers=handlers())
+        for profile in ("batch-window", "single-nonbatch"):
+            positive, negative = [p for p in plans if p["profile"] == profile]
+            self.assertEqual(positive["environment"], negative["environment"])
+            self.assertEqual(positive["stages"][1]["params"], negative["stages"][1]["params"])
+            a, b = [copy.deepcopy(p["stages"][2]["params"]) for p in (positive, negative)]
+            self.assertEqual(a.pop("post_affinity_ms"), 1000000000)
+            self.assertEqual(b.pop("post_affinity_ms"), 0)
+            self.assertEqual(a.pop("expected_behavior"), "stable")
+            self.assertEqual(b.pop("expected_behavior"), "collapse")
+            self.assertEqual(a, b)
+        case = yaml.safe_load(source.read_text())
+        case["parameters"]["flow"]["max_requests"] = 141113
+        with self.assertRaisesRegex(Exception, "traffic plan must cover"):
+            configure_program(case, "test")
+        case = yaml.safe_load(source.read_text())
+        case["environment"]["master_test_control"] = False
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), self.assertRaisesRegex(Exception, "master_test_control"):
+            compile_scenarios([("test", configure_program(case, "test"))], handlers=handlers())
 
     def test_topology_budget_is_independent_of_drain(self):
         import yaml
@@ -293,7 +343,7 @@ class CacheGateTest(unittest.TestCase):
             changed["parameters"]["gate"].update(topology_timeout_s=31, removal_mode=mode)
             with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
-            self.assertEqual(len(plans), 2)
+            self.assertEqual(len(plans), 4)
         changed["parameters"]["gate"]["removal_mode"] = "silent"
         with self.assertRaisesRegex(Exception, "separate case"):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())

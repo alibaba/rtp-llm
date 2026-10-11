@@ -33,13 +33,28 @@ FIELDS = {
     "topology_timeout_s",
 }
 INTERMEDIATE_FIELDS = {"intermediate_p", "intermediate_hold_s"}
-OPTIONAL_FIELDS = INTERMEDIATE_FIELDS | {"removal_mode"}
+OPTIONAL_FIELDS = INTERMEDIATE_FIELDS | {"removal_mode", "warmup_min_s",
+                                         "post_affinity_ms", "expected_behavior"}
 
 
 def validate(params, plan):
     p = _validate(params, plan, FIELDS | OPTIONAL_FIELDS, FIELDS)
     if p.get("removal_mode", "graceful") not in ("graceful", "abrupt"):
         raise ValueError("removal_mode must be graceful or abrupt")
+    if p.get("expected_behavior", "stable") not in ("stable", "collapse"):
+        raise ValueError("expected_behavior must be stable or collapse")
+    minimum = p.get("warmup_min_s", 0)
+    if type(minimum) not in (int, float) or not math.isfinite(minimum) or not 0 <= minimum <= p["warmup_timeout_s"]:
+        raise ValueError("warmup_min_s must fit the warmup budget")
+    if "post_affinity_ms" in p:
+        if type(p["post_affinity_ms"]) is not int or not 0 <= p["post_affinity_ms"] <= 9223372036854775807:
+            raise ValueError("post_affinity_ms must be a nonnegative signed long")
+        if plan.environment.get("master_layout", "single") != "single":
+            raise ValueError("affinity intervention requires a single Master")
+        if not plan.environment.get("master_test_control", False):
+            raise ValueError("affinity intervention requires master_test_control")
+    if p.get("expected_behavior") == "collapse" and p.get("post_affinity_ms") != 0:
+        raise ValueError("collapse control requires post_affinity_ms=0")
     plan.reference(p["flow"], "java_flow")
     if plan.environment.get("discovery") != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
@@ -96,6 +111,8 @@ def validate(params, plan):
 
     for profile in plan.profiles:
         resolved = environment(plan.environment, plan.path, profile)["resolved_config"]
+        if "post_affinity_ms" in p and resolved["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"] != 1000000000:
+            raise ValueError("affinity controls require the shared 1e9 ms warmup policy")
         stale_ms = resolved["workerRegistry"]["health"]["statusStaleAfterMs"]
         if p["topology_timeout_s"] * 1000 <= stale_ms:
             raise ValueError(
@@ -116,6 +133,23 @@ def _master_count(ctx, deadline):
     if type(value) is not int:
         raise ValueError("master topology missing")
     return value
+
+
+def _affinity_transition(ctx, value, deadline):
+    """Change only after a healthy baseline and independently verify the result."""
+    from scenario.actions.master_control import affinity_request
+
+    def request(payload=None):
+        return affinity_request(ctx, deadline, payload)
+
+    before = request()
+    if before.get("maxExtraTtftMs") != 1000000000:
+        raise ValueError("unexpected warmup affinity policy")
+    update = request(dict(expectedMaxExtraTtftMs=1000000000, maxExtraTtftMs=value))
+    readback = request()
+    if update.get("before") != 1000000000 or update.get("maxExtraTtftMs") != value or readback.get("maxExtraTtftMs") != value:
+        raise ValueError("affinity intervention readback mismatch")
+    return dict(before=before, update=update, readback=readback)
 
 
 def observe(ctx, p, deadline):
@@ -238,7 +272,8 @@ def observe(ctx, p, deadline):
                     for w in (left, right)
                 )
                 if (
-                    ready
+                    t >= p.get("warmup_min_s", 0)
+                    and ready
                     and abs(left["hit"] - right["hit"]) <= p["baseline_max_spread"]
                 ):
                     evidence.update(baseline_start=t - p["baseline_s"], baseline_end=t)
@@ -246,6 +281,9 @@ def observe(ctx, p, deadline):
                     break
             if t >= p["warmup_timeout_s"]:
                 raise ValueError("stable warm baseline not reached")
+        if "post_affinity_ms" in p:
+            evidence["affinity_transition"] = _affinity_transition(ctx, p["post_affinity_ms"], deadline)
+            event("cache_affinity_updated")
         intermediate_removals = []
         if "intermediate_p" in p:
             intermediate = p["intermediate_p"]
@@ -406,7 +444,7 @@ def check(ctx, p, deadline):
                 "cache_stability",
                 status,
                 actual=result,
-                expected="valid survivor cache measurement without sustained hit collapse",
+                expected="valid survivor cache measurement with " + result["expected_behavior"] + " behavior",
             )
         ],
         artifacts=[

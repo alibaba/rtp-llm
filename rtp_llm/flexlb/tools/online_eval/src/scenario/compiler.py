@@ -83,6 +83,7 @@ _ABSENT = object()
 # (type, default when omitted, minimum). _ABSENT preserves an omitted key.
 OPTIONAL_SCALARS = {
     "debug_enabled": (bool, False, None),
+    "master_test_control": (bool, False, None),
     "mock_auto_fetch": (bool, _ABSENT, None),
     "master_debug_log": (bool, _ABSENT, None),
     "master_sync_log": (bool, False, None),

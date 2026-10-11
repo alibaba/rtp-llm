@@ -265,6 +265,13 @@ def window(rows, start, end, names, max_gap_s):
 def analyze(evidence):
     p, rows = evidence["criteria"], evidence["samples"]
     errors = [e for e in evidence.get("errors", []) if e not in DRAIN_DIAGNOSTICS]
+    if "post_affinity_ms" in p:
+        transition = evidence.get("affinity_transition", {})
+        if (transition.get("before", {}).get("maxExtraTtftMs") != 1000000000
+                or transition.get("update", {}).get("before") != 1000000000
+                or transition.get("update", {}).get("maxExtraTtftMs") != p["post_affinity_ms"]
+                or transition.get("readback", {}).get("maxExtraTtftMs") != p["post_affinity_ms"]):
+            errors.append("affinity intervention evidence missing or mismatched")
     scoped = evidence.get("measurement_policy") == MEASUREMENT_POLICY
     if any(b["t"] <= a["t"] for a, b in zip(rows, rows[1:])):
         errors.append("sample clock must increase")
@@ -323,15 +330,20 @@ def analyze(evidence):
             if first_collapse is not None and w["valid"] and recovery is None:
                 recovery = w["end"]
             run, previous_end = 0, None
-    verdict = (
-        "INVALID" if errors else ("FAIL" if first_collapse is not None else "PASS")
-    )
+    expected = p.get("expected_behavior", "stable")
+    if expected not in ("stable", "collapse"):
+        errors.append("unknown expected cache behavior")
+    observed = ("unknown" if not windows or any(not w["valid"] for w in windows)
+                else "collapse" if first_collapse is not None else "stable")
+    verdict = "INVALID" if errors else ("PASS" if observed == expected else "FAIL")
     return dict(
         schema_version=1,
         measurement_scope=scope_contract(evidence) if scoped else {
             "policy": "historical-detach-window", "drain": "diagnostic only"},
         excluded_drain_diagnostics=[e for e in evidence.get("errors", []) if e in DRAIN_DIAGNOSTICS],
         verdict=verdict,
+        expected_behavior=expected,
+        observed_behavior=observed,
         errors=sorted(set(errors)),
         threshold=threshold,
         baseline=baseline,
@@ -468,7 +480,8 @@ def build_spec(directory, evidence, result, prepared):
         run_id="cache-scale-in",
         title=presentation["title"],
         subtitle=presentation["subtitle"].format(
-            verdict=result["verdict"], monitoring_status=monitoring_status),
+            verdict=result["verdict"], monitoring_status=monitoring_status,
+            expected_behavior=result["expected_behavior"], observed_behavior=result["observed_behavior"]),
         meta=dict(
             params=evidence["criteria"],
             sampling=presentation["meta"]["sampling"],
