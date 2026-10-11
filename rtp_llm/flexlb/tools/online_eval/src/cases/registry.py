@@ -1,12 +1,19 @@
 """Discover trusted case directories and validate their explicit capabilities."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from enum import Enum
 from importlib import import_module
 from pathlib import Path
 import re
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Mapping
+
+from cases.extension_contracts import (
+    ProgramBuilder, ViewValidator, ViewRenderer, ProducerDescription,
+    GateProducer, FinalizeProducer, SourceFactory, validate_call,
+)
 
 
 class ProducerPhase(str, Enum):
@@ -16,14 +23,14 @@ class ProducerPhase(str, Enum):
 
 @dataclass(frozen=True)
 class ReportView:
-    validator: Callable
-    renderer: Callable
+    validator: ViewValidator
+    renderer: ViewRenderer
 
 
 @dataclass(frozen=True)
 class MetricProducer:
-    describe: Callable
-    execute: Callable
+    describe: ProducerDescription
+    execute: GateProducer | FinalizeProducer
     phase: ProducerPhase
 
     @property
@@ -33,7 +40,7 @@ class MetricProducer:
 
 @dataclass(frozen=True)
 class EvidenceSource:
-    factory: Callable
+    factory: SourceFactory
     fields: frozenset[str]
     label: str
     required_fields: frozenset[str] = frozenset()
@@ -41,7 +48,7 @@ class EvidenceSource:
 
 @dataclass(frozen=True)
 class CaseDefinition:
-    builders: Mapping[str, Callable]
+    builders: Mapping[str, ProgramBuilder]
     numeric_parameters: Mapping = field(default_factory=dict)
     actions: tuple = ()
     report_views: Mapping[str, ReportView] = field(default_factory=dict)
@@ -74,6 +81,8 @@ class CaseRegistry:
 
     @classmethod
     def build(cls, cases):
+        from scenario.contracts import StageHandler
+
         entries, views, producers, sources = {}, {}, {}, {}
         def add(target, name, capability, kind):
             if name in target and target[name] != capability:
@@ -90,12 +99,21 @@ class CaseRegistry:
                 for name, build in definition.builders.items()
             ):
                 raise ValueError(case.module + ': invalid case builders')
+            for name, builder in definition.builders.items():
+                validate_call(builder, 1, case.module + '.builders.' + name)
+            for action in definition.actions:
+                if not isinstance(action, StageHandler):
+                    raise ValueError(case.module + ': actions must contain StageHandler capabilities')
+                validate_call(action.validate, 2, case.module + '.actions.' + action.name + '.validate')
+                validate_call(action.execute, 3, case.module + '.actions.' + action.name + '.execute')
             entries[case.name] = case
             for name, capability in definition.report_views.items():
                 if (not re.fullmatch(r'[a-z][a-z0-9_]*\.yaml', name) or name == 'default.yaml'
                         or not isinstance(capability, ReportView)
                         or not callable(capability.validator) or not callable(capability.renderer)):
                     raise ValueError('invalid registered view capability: ' + name)
+                validate_call(capability.validator, 3, case.module + '.views.' + name + '.validator')
+                validate_call(capability.renderer, 3, case.module + '.views.' + name + '.renderer')
                 add(views, name, capability, 'view')
             for name, capability in definition.producers.items():
                 if (not re.fullmatch(r'[a-z][a-z0-9_]*', name)
@@ -103,12 +121,16 @@ class CaseRegistry:
                         or not isinstance(capability.phase, ProducerPhase)
                         or not callable(capability.describe) or not callable(capability.execute)):
                     raise ValueError('invalid registered producer capability: ' + name)
+                validate_call(capability.describe, 3, case.module + '.producers.' + name + '.describe')
+                count = 1 if capability.phase is ProducerPhase.GATE else 2
+                validate_call(capability.execute, count, case.module + '.producers.' + name + '.execute')
                 add(producers, name, capability, 'producer')
             for name, capability in definition.sources.items():
                 if (not re.fullmatch(r'[a-z][a-z0-9_]*', name)
                         or not isinstance(capability, EvidenceSource) or not callable(capability.factory)
                         or not capability.required_fields <= capability.fields):
                     raise ValueError('invalid registered source capability: ' + name)
+                validate_call(capability.factory, 2, case.module + '.sources.' + name + '.factory')
                 add(sources, name, capability, 'source')
         return cls(*(MappingProxyType(v) for v in (entries, views, producers, sources)))
 
@@ -122,7 +144,10 @@ def discover(root=None, *, package='cases'):
             if not re.fullmatch(r'[a-z][a-z0-9_]*', path.name):
                 raise ValueError('invalid case directory: ' + path.name)
             module_name = package + '.' + path.name + '.program'
-            module = import_module(module_name)
+            try:
+                module = import_module(module_name)
+            except Exception as exc:
+                raise ValueError(f'{module_name}: case import failed: {exc}') from exc
             entries.append(RegisteredCase(path.name, module_name, Path(module.__file__),
                                           getattr(module, 'CASE', None)))
     return CaseRegistry.build(entries)

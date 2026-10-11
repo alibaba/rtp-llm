@@ -7,6 +7,7 @@
 | 日常 | `scripts/commands/run_cases.py` | 运行功能与场景 case |
 | 日常 | `scripts/commands/list_cases.py` | 列出可运行 case |
 | 日常 | `scripts/commands/compare_runs.py` | 并排展示两份或多份冻结 run bundle |
+| 开发 | `scripts/commands/validate_case.py --source <场景路径> --json` | 静态编译并展开输入、检查、指标、报告与预算；不代替现场验收 |
 | 开发 | `scripts/commands/format_configs.py --check` | 检查手写 YAML 的字段阅读顺序 |
 | 管线 | `scripts/pipeline/execute_cases.py` | 按 lane 并行执行 case |
 | 管线 | `scripts/pipeline/materialize_traffic.py` | 将流量源物化为请求计划 |

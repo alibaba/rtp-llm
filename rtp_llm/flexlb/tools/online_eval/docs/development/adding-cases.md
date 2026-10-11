@@ -2,6 +2,104 @@
 
 YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、阈值或流量时修改现有 YAML；改变业务步骤时修改所属 case 的 Python。所有 YAML 平铺在 `config/scenarios/`，文件位置不决定测试分类或 CI 选例。
 
+## 从最小 case 开始
+
+先判断需要哪种扩展，避免照抄大型 workload 的全部文件：
+
+| 需求 | 必需内容 | 可复用能力 |
+|---|---|---|
+| 请求、操作与协议断言 | 场景 YAML、`program.py` | 基础 action 与默认报告 |
+| 标准指标时窗比较 | 增加指标集合、窗口与输入绑定 | 公共采集、`analysis.checks.check_metric` 与通用图表 |
+| 特殊业务测量或数据源 | 按需增加专属 handler、producer 或 adapter | 注册、deadline、证据冻结和报告骨架 |
+
+下面的最小例子验证请求终态。创建 `src/cases/protocol_terminal/`，加入空的 `__init__.py` 和下列 `program.py`，再创建 `config/scenarios/protocol_terminal.yaml`。名称仅用于演示新增目录的接入方式；所有取值由示例 YAML 明确给出，预算和阈值不是框架默认值。小型 case 不需要专属采集器、producer、报告或重判入口。
+
+```python
+from cases.config import output
+from cases.inputs import fields
+from cases.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
+from cases.registry import CaseDefinition
+from traffic.contracts import driver
+
+
+def default(case):
+    data = case.inputs(
+        traffic={"kind", "input_len", "output_len", "count"},
+        procedure={"setup_timeout_s"}, checks={"no_errors"},
+    )
+    criterion = data.checks["no_errors"]
+    fields(criterion, {"output", "unit", "windows", "op", "expected"},
+           "parameters.checks.no_errors")
+    if (criterion["output"] != "error_count" or criterion["unit"] != "errors"
+            or criterion["windows"] != ["terminal"] or criterion["op"] != "eq"):
+        raise ValueError("no_errors requires the terminal error_count equality check")
+    request = {key: case.number("traffic." + key) for key in driver(data.traffic, "request_batch")}
+    case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
+    case.step("submit", "request", params=request)
+    case.step("terminal", "wait", params={"requests": output("submit", "requests")})
+    case.step("no_errors", "check", params={
+        "actual": output("terminal", criterion["output"]),
+        "op": criterion["op"], "expected": criterion["expected"],
+    })
+    case.step("cleanup", "teardown")
+
+
+CASE = CaseDefinition(
+    builders={"default": default},
+    numeric_parameters={
+        "traffic.input_len": JAVA_LENGTH, "traffic.output_len": JAVA_LENGTH,
+        "traffic.count": POSITIVE_COUNT, "procedure.setup_timeout_s": NONNEGATIVE,
+        "checks.no_errors.expected": COUNT,
+    },
+)
+```
+
+```yaml
+case_schema_version: 2
+case: protocol_terminal
+program: default
+metadata:
+  kind: functional
+  description: 验证提交的请求终态没有流错误
+  category: status
+  tags: []
+profiles: [single-nonbatch]
+environment:
+  backend: java_mock
+  n_prefill: 1
+  n_decode: 1
+execution:
+  timeout_s: 300
+  stage_timeout_s: 60
+  cleanup_timeout_s: 120
+  collection: diagnostic
+parameters:
+  traffic:
+    kind: request_batch
+    input_len: 16
+    output_len: 2
+    count: 1
+  procedure:
+    setup_timeout_s: 180
+  checks:
+    no_errors:
+      output: error_count
+      unit: errors
+      windows: [terminal]
+      op: eq
+      expected: 0
+```
+
+从 `rtp_llm/flexlb` 执行：
+
+```bash
+python3 tools/online_eval/scripts/commands/format_configs.py
+python3 tools/online_eval/scripts/commands/validate_case.py \
+  --source tools/online_eval/config/scenarios/protocol_terminal.yaml --json
+```
+
+然后添加输入错误、证据不足和清理失败测试，按[运行测试](running.md)完成现场验证。新增目录会被自动发现；是否纳入 CI 必跑集合由 `config/suites.yaml` 显式决定。标准指标检查读取冻结的 `MetricStore`，需要明确传入标签、时窗、归约、最少样本和缺采预算；尚未冻结的数据不能通过这个分析函数冒充现场观测。
+
 ## YAML 的阅读顺序
 
 场景字段按下表排列。顺序是编辑规范，不改变合并优先级或执行顺序。
@@ -13,7 +111,7 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 | 3 | `environment`、`execution` | 模型/拓扑、采集策略与时间预算 |
 | 4 | `parameters`、`parameter_schema` | 流量输入、指标绑定、门槛及约束 |
 | 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
-| 6 | `reports` | 交付视图 |
+| 6 | `reporting`、`reports` | 时间轴与交付视图 |
 
 `parameters` 按 `traffic` → `procedure` → `observation` → `analysis` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
 
@@ -108,9 +206,22 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 `cases.registry` 自动发现 `cases` 下包含 `program.py` 的直接子目录。program 导出 `CASE: CaseDefinition`，明确声明构建器、参数约束、动作、报告、指标生产者和采集源。目录名就是稳定 case 名；新增 case 不修改公共名单。注册快照校验能力冲突并保持不可变，YAML 只能选择已发现入口，不能导入代码。通用构建接口是 `cases.config.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
-program 的 `ACTION_HANDLERS` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `monitoring/producers.py`，定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
+`CASE.actions` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `CASE.producers`，`monitoring/producers.py` 负责调用这些能力；定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
-program 可声明 `produce_gate_metrics(directory)`，在最终遥测导出后投影已冻结的门禁数值。报告通过 `REPORT_VIEWS` 注册 `ReportView(validator, renderer)`；renderer 接收目录、运行分析和视图定义，读取校验后的冻结判定，在统一报告阶段生成 bundle，返回 HTML 路径，不重判或重新发布指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
+`CASE.producers` 注册 `MetricProducer(describe, execute, phase)`。GATE 的 `execute(directory)` 在最终遥测导出后投影已冻结的门禁数值，FINALIZE 的 `execute(directory, context)` 发布收尾证据；函数名没有自动注册含义。报告通过 `CASE.report_views` 注册 `ReportView(validator, renderer)`；renderer 接收目录、运行分析和视图定义，读取校验后的冻结判定，在统一报告阶段生成 bundle，返回 HTML 路径，不重判或重新发布指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
+
+
+注册接口的参数契约定义在 `cases.extension_contracts`，发现阶段检查可调用参数，不执行能力函数：
+
+| 能力 | 调用约定 |
+|---|---|
+| builder | `(case)` |
+| action | `validate(params, plan)`、`execute(ctx, params, deadline)` |
+| report | `validator(path, data, fail)`、`renderer(directory, analysis, presentation)` |
+| producer | `describe(producer, metric_id, calculation)`；GATE `execute(directory)`，FINALIZE `execute(directory, context)` |
+| source | `factory(environment, fields)` |
+
+所有模块导入只定义能力，不能启动进程、访问网络或创建运行产物。导入失败会定位到所属 case 并阻止执行，不忽略坏 case。签名检查不能证明返回结构正确或 deadline 得到遵守；新增能力须测试合法结果、错误结果和资源收尾。
 
 ## Action 的边界
 
@@ -141,11 +252,22 @@ handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知�
 
 ## 验证
 
-先用 `list_cases.py` 与 `run_cases.py --dry-run` 检查编译实例、预算和视图，再执行必要的真实 case。运行入口见[运行测试](running.md)。本地回归从 `tools/online_eval` 执行：
+先用 `validate_case.py --source <场景路径>` 校验所有变体和 profile；`--json` 输出合并后的参数、数值约束、阶段检查、窗口、指标消费者、报告与资源预算；`collector_health` 标明采集器用于完整性判断的 `up` 指标，不把它们当作业务检查或图表。命令复用正式编译器，不启动服务、不发请求、不创建产物；退出码 0 表示静态通过，2 表示配置或能力错误。静态通过不代表 exporter、采样覆盖、门禁实际值或清理已经验证。再用 `run_cases.py --dry-run` 检查执行计划并执行必要的真实 case。运行入口见[运行测试](running.md)。本地回归从 `tools/online_eval` 执行：
 
 ```bash
 PYTHONPATH=src:. python3 -m pytest -q tests
 ```
+
+新增 case 的最小测试矩阵如下；公共注册、输入错误和文档示例的可执行测试见 `tests/test_case_authoring.py`，业务测试按自己的合同构造证据。
+
+| 边界 | 应验证的结果 |
+|---|---|
+| 合法输入与变体 | 全部声明的 variant/profile 可编译，检查、窗口和指标依赖完整 |
+| 未知字段、越界与非法引用 | 启动前拒绝，错误定位到输入路径或能力名称 |
+| 缺指标、采样不足或损坏证据 | ERROR/INVALID，不补零、不换数据来源、不降成通过 |
+| 阈值越界 | 有效证据产生 FAIL，实际值和期望值可追溯 |
+| 超时、取消与操作异常 | 释放已登记资源，清理失败明确留在结果中 |
+| 专属报告 | 消费冻结判定，缺曲线按公共规则展示，不能重新计算门禁 |
 
 新增判定须保存实际值、期望值和来源；调整规模或负载后重新验证门槛。删除能力时同时检查 registry、program、CLI、文档和测试，保留公共工具及现役失败边界。编译、假传输和单测不代替真实服务运行验收。
 
