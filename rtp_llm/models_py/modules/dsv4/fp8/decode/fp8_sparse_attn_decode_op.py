@@ -30,12 +30,10 @@ try:
     if torch.version.cuda:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
         if (major, minor) >= (12, 9):
-            from rtp_llm.models_py.utils.flash_mla_legacy import (
+            from flash_mla import (
                 flash_mla_with_kvcache,  # type: ignore[import-not-found]
             )
-            from rtp_llm.models_py.utils.flash_mla_legacy import (
-                get_mla_metadata,  # type: ignore[import-not-found]
-            )
+            from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
 
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:
@@ -137,9 +135,7 @@ class SparseAttnV4DecodeFp8Op:
         extra_topk_idxs: Optional[torch.Tensor] = None,
         extra_topk_length: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        from rtp_llm.models_py.utils.flash_mla_legacy import (
-            flash_mla_with_kvcache,  # type: ignore[import-not-found]
-        )
+        from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
 
         B, q_len, H, D = q.shape
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
