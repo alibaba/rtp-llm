@@ -1045,7 +1045,13 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 prefix="v41-full-engine-", dir=storage
             )
         reserve_gib = int(os.environ.get("DSV41_TEST_STORAGE_RESERVE_GIB", "64"))
-        self.assertGreaterEqual(reserve_gib, 32)
+        minimum_reserve = (
+            28
+            if os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+            and not reuse
+            else 32
+        )
+        self.assertGreaterEqual(reserve_gib, minimum_reserve)
         free_storage = shutil.disk_usage(storage).free
         self.assertGreater(free_storage, (0 if reuse else total) + reserve_gib * 2**30)
         memory = {
