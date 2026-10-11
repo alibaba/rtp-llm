@@ -44,6 +44,7 @@ os.environ.setdefault("HOME", "/tmp")
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
+    gather_indexer_k_fp32,
 )
 from rtp_llm.models_py.utils.arch import is_sm120
 
@@ -94,6 +95,14 @@ _num_sms_cache: int = 0
 # tensors: a fully vectorized [rows, heads, max_ctx] intermediate is several
 # gigabytes for the long-context decode grids.
 _SM120_SCORE_TOKEN_CHUNK = 1024
+
+
+def _sm120_fused_gather_enabled(pool: torch.Tensor) -> bool:
+    return (
+        os.environ.get("DSV4_SM120_INDEXER_FUSED_GATHER", "0") == "1"
+        and pool.is_cuda
+        and pool.is_contiguous()
+    )
 
 
 def _get_num_sms(device: torch.device) -> int:
@@ -248,41 +257,45 @@ def _fp8_paged_indexer_score_sm120(
     out = torch.full(
         (rows, max_ctx_len), float("-inf"), dtype=torch.float32, device=device
     )
-    head_offsets = torch.arange(D, device=device).view(1, 1, D)
-    scale_offsets_4 = torch.arange(4, device=device).view(1, 1, 4)
+    fused_gather = _sm120_fused_gather_enabled(kv_pool_uint8)
+    if not fused_gather:
+        head_offsets = torch.arange(D, device=device).view(1, 1, D)
+        scale_offsets_4 = torch.arange(4, device=device).view(1, 1, 4)
     for start in range(0, max_ctx_len, _SM120_SCORE_TOKEN_CHUNK):
         end = min(start + _SM120_SCORE_TOKEN_CHUNK, max_ctx_len)
         positions = torch.arange(start, end, device=device, dtype=torch.long)
-        logical_block = positions // block_size
-        block_ids = block_table_rows.gather(
-            1, logical_block.unsqueeze(0).expand(rows, -1)
-        )
-        # Padded positions may carry -1 in the table; route those accesses to
-        # a harmless slot and mask them out below.  Positive out-of-range ids
-        # are treated the same way instead of silently reading a neighboring
-        # allocation.  Keep the validity mask separate from the clamped index
-        # so a malformed table cannot turn into a real score.
-        table_valid = (block_ids >= 0) & (block_ids < num_blocks)
-        block_ids = block_ids.clamp(min=0, max=max(0, num_blocks - 1))
-        block_stride_offsets = block_ids * block_stride
-        token_offset = positions.remainder(block_size)
-        block_base = block_stride_offsets
-        k_byte_offsets = (block_base + token_offset.unsqueeze(0) * D).unsqueeze(-1)
-        k_byte_offsets = k_byte_offsets + head_offsets
-        k_bytes = flat_pool.index_select(0, k_byte_offsets.reshape(-1)).view(
-            rows, end - start, D
-        )
-        k_fp8 = k_bytes.contiguous().view(torch.float8_e4m3fn).float()
-        scale_offsets = block_base + block_size * D + token_offset.unsqueeze(0) * 4
-        scale_offsets = scale_offsets.unsqueeze(-1) + scale_offsets_4
-        scale_bytes = flat_pool.index_select(0, scale_offsets.reshape(-1)).view(
-            rows, end - start, 4
-        )
-        k_scale = scale_bytes.contiguous().view(torch.float32).view(rows, end - start)
+        if fused_gather:
+            k_dequant, table_valid = gather_indexer_k_fp32(
+                flat_pool, block_table_rows, start, end - start, block_size
+            )
+        else:
+            logical_block = positions // block_size
+            block_ids = block_table_rows.gather(
+                1, logical_block.unsqueeze(0).expand(rows, -1)
+            )
+            # Clamp invalid pages for safe reads; retain their separate mask.
+            table_valid = (block_ids >= 0) & (block_ids < num_blocks)
+            block_ids = block_ids.clamp(min=0, max=max(0, num_blocks - 1))
+            block_stride_offsets = block_ids * block_stride
+            token_offset = positions.remainder(block_size)
+            block_base = block_stride_offsets
+            k_byte_offsets = (block_base + token_offset.unsqueeze(0) * D).unsqueeze(-1)
+            k_byte_offsets = k_byte_offsets + head_offsets
+            k_bytes = flat_pool.index_select(0, k_byte_offsets.reshape(-1)).view(
+                rows, end - start, D
+            )
+            k_fp8 = k_bytes.contiguous().view(torch.float8_e4m3fn).float()
+            scale_offsets = block_base + block_size * D + token_offset.unsqueeze(0) * 4
+            scale_offsets = scale_offsets.unsqueeze(-1) + scale_offsets_4
+            scale_bytes = flat_pool.index_select(0, scale_offsets.reshape(-1)).view(
+                rows, end - start, 4
+            )
+            k_scale = (
+                scale_bytes.contiguous().view(torch.float32).view(rows, end - start)
+            )
+            k_dequant = k_fp8 * k_scale.unsqueeze(-1)
 
-        per_head = torch.einsum(
-            "rhd,rtd->rht", q, k_fp8 * k_scale.unsqueeze(-1)
-        ).relu_()
+        per_head = torch.einsum("rhd,rtd->rht", q, k_dequant).relu_()
         score = torch.einsum("rh,rht->rt", weights, per_head)
         valid = (positions.unsqueeze(0) < lengths.unsqueeze(1)) & table_valid
         out[:, start:end].copy_(score)

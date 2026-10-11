@@ -143,6 +143,15 @@ py_test(
 )
 
 py_test(
+    name = "test_sm120_fused_indexer_gather",
+    srcs = ["test_sm120_fused_indexer_gather.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["RTX_5000_PRO"],
+    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_sm120_prefill_indices_producer_matrix",
     srcs = ["test_sm120_prefill_indices_producer_matrix.py"],
     deps = _DSV4_FP8_TEST_DEPS,
