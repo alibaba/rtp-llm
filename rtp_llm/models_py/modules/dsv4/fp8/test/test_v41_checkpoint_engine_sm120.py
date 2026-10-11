@@ -21,12 +21,16 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as native_ops
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
 from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_block_norm_reference as block_norm_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_cuda_frequency_reference as cuda_frequency_provider,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_expert_projection_reference as expert_projection_provider,
@@ -36,6 +40,9 @@ from rtp_llm.models_py.modules.dsv4.fp8.test import (
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_router_eager_reference as router_eager_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_short_sparse_plan_reference as short_sparse_provider,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import (
     load_configuration,
@@ -91,6 +98,11 @@ from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 from rtp_llm.utils.model_weight import W
 
 
+def canonical_attention_profile(profile):
+    # Compact aliases keep the longest checkpoint trace name within 255 bytes.
+    return profile[:-2] + "_j" if profile.endswith(("_s", "_f", "_c")) else profile
+
+
 def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, context=256):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
@@ -142,6 +154,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_kv = os.environ.get("DSV41_TEST_COMPARE_KV_PROJECTION") == "1"
     compare_router = os.environ.get("DSV41_TEST_COMPARE_ROUTER_EAGER") == "1"
     compare_projection = os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+    compare_attention = os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+    if compare_attention and not (compare_projection and compare_block_norm):
+        raise ValueError("Attention comparison requires the qualified W13 composition")
     if compare_projection and not compare_router:
         raise ValueError("Expert projection comparison requires all router controls")
     if compare_router and not compare_kv:
@@ -196,6 +211,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_kv
         or compare_router
         or compare_projection
+        or compare_attention
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -290,6 +306,25 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             Path(expert_projection_provider.__file__).read_bytes()
         ).hexdigest()
         if compare_projection
+        else None
+    )
+    if compare_attention:
+        base = profiles[-1]
+        if not base.endswith("_j"):
+            raise ValueError("Attention recipes require the final eager W13 profile")
+        profiles.extend(base[:-2] + suffix for suffix in ("_s", "_f", "_c"))
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError(
+                "Attention trace profile exceeds the filesystem name limit"
+            )
+    short_sparse_source_hash = (
+        hashlib.sha256(Path(short_sparse_provider.__file__).read_bytes()).hexdigest()
+        if compare_attention
+        else None
+    )
+    cuda_frequency_source_hash = (
+        hashlib.sha256(Path(cuda_frequency_provider.__file__).read_bytes()).hexdigest()
+        if compare_attention
         else None
     )
     router_eager_source_hash = (
@@ -432,9 +467,12 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                expert_projection = profile.endswith(("_p", "_j"))
-                projection_base = profile.removesuffix("_p").removesuffix("_j")
-                router_eager = profile.endswith(("_g", "_j"))
+                canonical = canonical_attention_profile(profile)
+                short_sparse = profile.endswith(("_s", "_c"))
+                cuda_frequency = profile.endswith(("_f", "_c"))
+                expert_projection = canonical.endswith(("_p", "_j"))
+                projection_base = canonical.removesuffix("_p").removesuffix("_j")
+                router_eager = canonical.endswith(("_g", "_j"))
                 router_base = projection_base.removesuffix("_g")
                 kv_reference = router_base.endswith("_kv_ref")
                 kv_base = router_base.removesuffix("_kv_ref")
@@ -540,6 +578,26 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 else {}
                             ),
                             **({"mhc_collapse_reference": True} if collapse else {}),
+                            **(
+                                {
+                                    "short_sparse_plan_reference": True,
+                                    "short_sparse_plan_scope": "explicit-short-attentions",
+                                    "short_sparse_plan_owners": len(model.v4.layers),
+                                    "short_sparse_plan_provider_sha256": short_sparse_source_hash,
+                                }
+                                if short_sparse
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "cuda_frequency_reference": True,
+                                    "cuda_frequency_scope": "explicit-attentions",
+                                    "cuda_frequency_owners": len(model.v4.layers),
+                                    "cuda_frequency_provider_sha256": cuda_frequency_source_hash,
+                                }
+                                if cuda_frequency
+                                else {}
+                            ),
                             **(
                                 {
                                     "expert_projection_reference": True,
@@ -683,6 +741,20 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         else ()
                     ),
                     kernel=reference_kernel,
+                ), short_sparse_provider.short_sparse_plan_reference(
+                    short_sparse,
+                    attentions=(
+                        tuple(layer.attn for layer in model.v4.layers)
+                        if short_sparse
+                        else ()
+                    ),
+                ), cuda_frequency_provider.cuda_frequency_reference(
+                    cuda_frequency,
+                    attentions=(
+                        tuple(layer.attn for layer in model.v4.layers)
+                        if cuda_frequency
+                        else ()
+                    ),
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -846,7 +918,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             (
                                 4
                                 if shared_eos_trace
-                                or profile.removesuffix("_p")
+                                or canonical_attention_profile(profile)
+                                .removesuffix("_p")
                                 .removesuffix("_j")
                                 .removesuffix("_g")
                                 .removesuffix("_kv_ref")
@@ -863,7 +936,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         )
                         for profile in profiles
                         if shared_eos_trace
-                        or profile.removesuffix("_p")
+                        or canonical_attention_profile(profile)
+                        .removesuffix("_p")
                         .removesuffix("_j")
                         .removesuffix("_g")
                         .removesuffix("_kv_ref")
@@ -1045,15 +1119,29 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 prefix="v41-full-engine-", dir=storage
             )
         reserve_gib = int(os.environ.get("DSV41_TEST_STORAGE_RESERVE_GIB", "64"))
-        minimum_reserve = (
-            28
-            if os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+        fresh_attention_experiment = (
+            os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+            and os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+            and os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
             and not reuse
-            else 32
+        )
+        minimum_reserve = (
+            24
+            if fresh_attention_experiment
+            else (
+                28
+                if os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+                and not reuse
+                else 32
+            )
         )
         self.assertGreaterEqual(reserve_gib, minimum_reserve)
+        output_budget = 2**30 if fresh_attention_experiment else 0
         free_storage = shutil.disk_usage(storage).free
-        self.assertGreater(free_storage, (0 if reuse else total) + reserve_gib * 2**30)
+        self.assertGreater(
+            free_storage,
+            (0 if reuse else total) + reserve_gib * 2**30 + output_budget,
+        )
         memory = {
             key: int(value.split()[0]) * 1024
             for key, value in (
@@ -1080,7 +1168,8 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         print(
             f"full-engine admission bytes={total} available_ram={memory['MemAvailable']} "
             f"free_storage={free_storage} reserve_gib={reserve_gib} "
-            f"reuse_tables={bool(reuse)} prompts={prompts}",
+            f"reuse_tables={bool(reuse)} prompts={prompts}"
+            + (f" output_budget_bytes={output_budget}" if output_budget else ""),
             flush=True,
         )
         with directory_context as directory:

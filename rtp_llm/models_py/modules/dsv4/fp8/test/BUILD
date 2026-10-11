@@ -502,6 +502,8 @@ py_test(
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
     deps = _DSV4_FP8_TEST_DEPS + [
         ":v41_decode_tilelang_reference_testlib",
+        ":v41_short_sparse_plan_reference_testlib",
+        ":v41_cuda_frequency_reference_testlib",
         ":v41_mhc_collapse_reference_testlib",
         ":v41_block_norm_reference_testlib",
         ":v41_kv_projection_reference_testlib",
