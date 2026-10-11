@@ -15,6 +15,14 @@ def v41_rotary_compute_device(text: Mapping[str, Any]) -> Optional[str]:
     return value
 
 
+def v41_sparse_attention_mode(text: Mapping[str, Any]) -> Optional[str]:
+    """Read the explicit, bounded short sparse attention choice."""
+    value = text.get("sparse_attention_mode")
+    if value is not None and (type(value) is not str or value != "short_preserved"):
+        raise ValueError("V4.1 sparse_attention_mode must be short_preserved or None")
+    return value
+
+
 @dataclass(frozen=True)
 class V41LayerSources:
     layer_id: int
@@ -88,6 +96,7 @@ class V41Config:
     def validate(self) -> None:
         text = self.text
         v41_rotary_compute_device(text)
+        v41_sparse_attention_mode(text)
         for key in (
             "num_hidden_layers",
             "hidden_size",

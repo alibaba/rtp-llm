@@ -83,7 +83,7 @@ def export_native_l20_delta(
     backend: str = "triton",
 ) -> dict[str, torch.Tensor]:
     """Export completed native L20 producer rows through the existing protocol."""
-    contract.require_rotary_config(text_config)
+    contract.require_attention_config(text_config)
     views = native_l20_cache_views(text_config, kv_cache, 0)
     tables = {
         identity: _native_tables(blocks) for identity, blocks in block_tables.items()
@@ -105,7 +105,7 @@ class NativeL20ReplicaReceiver(V41L20ReplicaReceiver):
         *,
         backend: str = "triton",
     ) -> None:
-        contract.require_rotary_config(text_config)
+        contract.require_attention_config(text_config)
         views = native_l20_cache_views(text_config, kv_cache, 1)
         super().__init__(contract, cp_rank, views, backend=backend)
         self._native_cache = kv_cache

@@ -14,7 +14,10 @@ from bisect import bisect_left
 import torch
 import torch.nn.functional as F
 
-from rtp_llm.config.dsv41_config import v41_rotary_compute_device
+from rtp_llm.config.dsv41_config import (
+    v41_rotary_compute_device,
+    v41_sparse_attention_mode,
+)
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.bounded_replay import (
@@ -595,12 +598,19 @@ class AttentionV41FP8(AttentionFP8):
         from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
 
         rotary_device = v41_rotary_compute_device(v41_config)
+        sparse_mode = v41_sparse_attention_mode(v41_config)
         if (
             "_rotary_compute_device" in shared_attention
             and shared_attention["_rotary_compute_device"] != rotary_device
         ):
             raise ValueError("V4.1 shared attention rotary origins disagree")
-        self._cache_layouts = dsv41_page_layouts(kwargs.pop("gen_num_per_cycle", 1))
+        if (
+            "_sparse_attention_mode" in shared_attention
+            and shared_attention["_sparse_attention_mode"] != sparse_mode
+        ):
+            raise ValueError("V4.1 shared sparse attention modes disagree")
+        self._cache_generation = kwargs.pop("gen_num_per_cycle", 1)
+        self._cache_layouts = dsv41_page_layouts(self._cache_generation)
         ratio = int(kwargs["compress_ratio"])
         if ratio not in (0, 1, 2):
             raise ValueError(f"V4.1 compression ratio must be 0, 1 or 2, got {ratio}")
@@ -615,6 +625,12 @@ class AttentionV41FP8(AttentionFP8):
         self.v41_config = v41_config
         self._rotary_compute_device = rotary_device
         self._rotary_ready = rotary_device is None
+        self._sparse_attention_mode = sparse_mode
+        self._short_sparse_decode = None
+        if sparse_mode is not None:
+            from ._v41_short_sparse_sm120 import ShortSparseDecodeAttention
+
+            self._short_sparse_decode = ShortSparseDecodeAttention()
         # Read once: changing this policy in a running cache namespace is unsafe.
         self.swa_bounded_replay = bounded_replay_enabled() and self.layer_id >= 21
         if self.swa_bounded_replay:
@@ -624,6 +640,7 @@ class AttentionV41FP8(AttentionFP8):
         # Store a plain dict: registering source modules would create cycles.
         self._shared_attention = shared_attention
         shared_attention["_rotary_compute_device"] = rotary_device
+        shared_attention["_sparse_attention_mode"] = sparse_mode
         shared_attention.setdefault("layers", {})[self.layer_id] = self
         self.index_topk = int(kwargs["index_topk"])
         self.index_n_heads = int(kwargs["index_n_heads"])
@@ -730,6 +747,30 @@ class AttentionV41FP8(AttentionFP8):
             device, compute_device = destination, selected
         super().reset_rope_cache(device, compute_device=compute_device)
         self._rotary_ready = True
+
+    def _check_sparse_config(self):
+        if (
+            v41_sparse_attention_mode(self.v41_config) != self._sparse_attention_mode
+            or self._shared_attention.get("_sparse_attention_mode")
+            != self._sparse_attention_mode
+        ):
+            raise ValueError("V4.1 sparse attention mode changed; replace the owner")
+        if self._sparse_attention_mode is not None and (
+            not is_sm120(self.attn_sink.device)
+            or (self.head_dim, self.rope_head_dim, self.window_size) != (512, 64, 128)
+            or not 1 <= self.n_heads <= 64
+            or self.attn_sink.shape != (self.n_heads,)
+            or self.attn_sink.dtype != torch.float32
+            or not self.attn_sink.is_contiguous()
+            or self._cache_generation not in (0, 1)
+        ):
+            raise NotImplementedError(
+                "V4.1 short sparse mode requires admitted SM120 geometry"
+            )
+
+    def _check_execution_config(self):
+        self._check_rotary_config()
+        self._check_sparse_config()
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
         # Small eager inputs regressed in the standalone wrapper benchmark.
@@ -1022,11 +1063,28 @@ class AttentionV41FP8(AttentionFP8):
         self, qkv, common, *, kv, indices, topk_length, profile_name
     ):
         """Project Q into reusable chunk storage immediately before its MLA call."""
+        self._check_execution_config()
         rows = qkv.qr.shape[0]
         if rows == 0:
             out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
+        short_rows = None
+        if self._sparse_attention_mode is not None:
+            prefixes = common.prefix_lengths
+            short_rows = rows // self.compress_ratio if self.compress_ratio else 0
+            if (
+                common.cp_on
+                or common.batch_size != 1
+                or rows > 128
+                or prefixes is None
+                or prefixes.numel() != 1
+                or bool((prefixes != 0).any())
+                or kv.shape[0] != rows + short_rows
+            ):
+                raise NotImplementedError(
+                    "V4.1 short sparse mode requires one initial CP1 prefill"
+                )
         if is_sm120(qkv.qr.device):
             from ._v41_prefill_attention_sm120 import sparse_prefill_attention
         else:
@@ -1039,13 +1097,25 @@ class AttentionV41FP8(AttentionFP8):
             q = self._project_prefill_q(qkv.qr[start:end], freqs, common.workspace)
             with record_function_range(profile_name):
                 if is_sm120(q.device):
-                    o = sparse_prefill_attention(
-                        q,
-                        kv,
-                        indices[start:end],
-                        topk_length[start:end],
-                        self.attn_sink,
-                    )
+                    if short_rows is not None:
+                        from ._v41_short_sparse_sm120 import prefill_attention
+
+                        o = prefill_attention(
+                            q,
+                            kv,
+                            indices[start:end],
+                            topk_length[start:end],
+                            self.attn_sink,
+                            global_rows=short_rows,
+                        )
+                    else:
+                        o = sparse_prefill_attention(
+                            q,
+                            kv,
+                            indices[start:end],
+                            topk_length[start:end],
+                            self.attn_sink,
+                        )
                 else:
                     o, _, _ = flash_mla_sparse_fwd(
                         q=q,
@@ -2419,8 +2489,10 @@ class AttentionV41FP8(AttentionFP8):
         shared["prefill_chunk_meta"] = meta
         return meta
 
-    def _require_qualified_prefill(self, input_lengths, prefix_lengths, *, cp_on):
-        self._check_rotary_config()
+    def _require_qualified_prefill(
+        self, input_lengths, prefix_lengths, *, cp_on, is_decode=False
+    ):
+        self._check_execution_config()
         # Widen this admission only with owner-level cache and numerical tests.
         if self.tp_size != 1:
             raise NotImplementedError("V4.1 TP attention execution is not integrated")
@@ -2440,6 +2512,24 @@ class AttentionV41FP8(AttentionFP8):
         if bool(((input_lengths <= 0) | (prefix_lengths < 0)).any()):
             raise ValueError(
                 "V4.1 prefill requires nonempty requests and valid prefixes"
+            )
+        if self._sparse_attention_mode is not None and (
+            cp_on
+            or input_lengths.numel() != 1
+            or (
+                bool(
+                    (
+                        (input_lengths != 1)
+                        | (prefix_lengths < 1)
+                        | (prefix_lengths >= 128)
+                    ).any()
+                )
+                if is_decode
+                else bool(((input_lengths > 128) | (prefix_lengths != 0)).any())
+            )
+        ):
+            raise NotImplementedError(
+                "V4.1 short sparse mode requires one initial prefill or first-ring decode"
             )
         lengths = (
             self._require_qualified_cp_prefill(input_lengths, prefix_lengths)
@@ -2583,7 +2673,7 @@ class AttentionV41FP8(AttentionFP8):
             return self._forward_decode_body(x, attn_metadata)
 
     def _require_qualified_decode(self, x, metadata):
-        self._check_rotary_config()
+        self._check_execution_config()
         if (
             not x.is_cuda
             or torch.cuda.get_device_capability(x.device) != (12, 0)
@@ -2634,6 +2724,7 @@ class AttentionV41FP8(AttentionFP8):
             torch.ones_like(starts),
             starts,
             cp_on=self._cp_ctx is not None and self._cp_ctx.cp_size > 1,
+            is_decode=True,
         )
         regions = [SWA_KV]
         if self.compress_ratio:
@@ -3268,6 +3359,33 @@ class AttentionV41FP8(AttentionFP8):
         slots.masked_fill_(selected < 0, -1)
         return slots.int()
 
+    def _short_decode_attention(self, query, metadata, swa_slots, global_slots=None):
+        from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache
+
+        batch, _, heads, dim = query.shape
+        swa = V41PagedCache(
+            self._source_layer_cache(SWA_KV).kv_cache_base,
+            SWA_KV,
+            self._cache_generation,
+        )
+        global_cache = None
+        if global_slots is not None:
+            tag = self._global_region()
+            global_cache = V41PagedCache(
+                self._source_layer_cache(tag).kv_cache_base, tag, self._cache_generation
+            )
+        output = self._short_sparse_decode(
+            query.view(batch, heads, dim),
+            self.attn_sink,
+            swa,
+            swa_slots.view(batch, -1),
+            start_positions=metadata.start_pos,
+            valid_rows=torch.ones(batch, device=query.device, dtype=torch.bool),
+            global_cache=global_cache,
+            global_slots=global_slots,
+        )
+        return output.view_as(query)
+
     def _forward_decode_body(self, x, metadata):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
             decode_compute_qkv,
@@ -3281,11 +3399,14 @@ class AttentionV41FP8(AttentionFP8):
         self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
         swa_slots = metadata.swa_global_slots.view(B, S, self.window_size)
         if not self.compress_ratio:
-            from ._v41_decode_attention_sm120 import sparse_decode_attention
+            if self._sparse_attention_mode is not None:
+                o = self._short_decode_attention(qkv.q, metadata, swa_slots)
+            else:
+                from ._v41_decode_attention_sm120 import sparse_decode_attention
 
-            o = sparse_decode_attention(
-                qkv.q, self._pool_view_3d_fp8(SWA_KV), swa_slots, self.attn_sink
-            )
+                o = sparse_decode_attention(
+                    qkv.q, self._pool_view_3d_fp8(SWA_KV), swa_slots, self.attn_sink
+                )
         else:
             if self.is_kv_source:
                 self._produce_global_decode(
@@ -3300,17 +3421,22 @@ class AttentionV41FP8(AttentionFP8):
             )
 
             slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
-            o = fp4_dual_decode_attention(
-                q=qkv.q,
-                swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
-                global_pool_3d=self._source_pool(self._global_region()),
-                attn_sink=self.attn_sink,
-                swa_topk_3d=swa_slots,
-                global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
-                swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
-                sched_meta=None,
-                fp8_op=None,
-            )
+            if self._sparse_attention_mode is not None:
+                o = self._short_decode_attention(
+                    qkv.q, metadata, swa_slots, slots.int().contiguous()
+                )
+            else:
+                o = fp4_dual_decode_attention(
+                    q=qkv.q,
+                    swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
+                    global_pool_3d=self._source_pool(self._global_region()),
+                    attn_sink=self.attn_sink,
+                    swa_topk_3d=swa_slots,
+                    global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
+                    swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
+                    sched_meta=None,
+                    fp8_op=None,
+                )
         out = self._project_output(o, qkv.freqs_cis)
         self._prefill_output_all_reduce(out)
         return out.view(B, S, self.dim)

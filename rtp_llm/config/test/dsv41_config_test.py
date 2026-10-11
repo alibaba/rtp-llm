@@ -10,6 +10,7 @@ from rtp_llm.config.dsv41_config import (
     V41Config,
     dsv41_pp_partition,
     v41_rotary_compute_device,
+    v41_sparse_attention_mode,
 )
 from rtp_llm.model_factory_register import ModelDict, get_lazy_model_module_path
 
@@ -63,6 +64,22 @@ class V41ConfigTest(unittest.TestCase):
             self.source["text_config"]["rotary_compute_device"] = value
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "rotary_compute_device"):
+                    V41Config.from_dict(self.source)
+
+    def test_explicit_short_sparse_mode_is_validated(self):
+        self.assertIsNone(v41_sparse_attention_mode(self.source["text_config"]))
+        for value in (None, "short_preserved"):
+            self.source["text_config"]["sparse_attention_mode"] = value
+            config = V41Config.from_dict(self.source)
+            self.assertEqual(v41_sparse_attention_mode(config.text), value)
+            self.assertEqual(
+                config.runtime_text_config("/checkpoint")["sparse_attention_mode"],
+                value,
+            )
+        for value in (False, True, 0, "", "short", "native", [], {}):
+            self.source["text_config"]["sparse_attention_mode"] = value
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "sparse_attention_mode"):
                     V41Config.from_dict(self.source)
 
     def test_invalid_source_schedules(self):
