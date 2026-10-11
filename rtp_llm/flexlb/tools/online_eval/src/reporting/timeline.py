@@ -84,6 +84,12 @@ def freeze(data, *, events, phases):
 
 def apply(spec, analysis):
     """Project every temporal coordinate once using the frozen display clock."""
+    # Own the containers mutated by projection; full sample arrays stay read-only.
+    spec = dict(spec)
+    spec['panels'] = [dict(panel, series=[dict(curve) for curve in panel.get('series', [])],
+                          events=copy.deepcopy(panel.get('events', [])))
+                      for panel in spec.get('panels', [])]
+    spec['events'] = copy.deepcopy(spec.get('events', []))
     timeline = analysis.get('report_timeline')
     if timeline is None:
         return spec

@@ -173,11 +173,14 @@ class PrometheusSession:
         """A registered on-demand adapter shares this run's scheduler and TSDB."""
         if not self.url or self.closed or probe.job in self.probes:
             raise ValueError("probe requires a live Prometheus and a unique source")
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("probe requires an HTTP(S) URL without credentials")
         self.probes[probe.job] = probe
         path = self.directory / "prometheus.json"
         config = json.loads(path.read_text())
-        config["scrape_configs"].append(dict(job_name=probe.job, sample_limit=100000,
-            body_size_limit="32MB", static_configs=[dict(targets=[url.removeprefix("http://").split("/", 1)[0]])],
+        config["scrape_configs"].append(dict(job_name=probe.job, scheme=parsed.scheme, metrics_path=parsed.path or "/metrics", sample_limit=100000,
+            body_size_limit="32MB", static_configs=[dict(targets=[parsed.netloc])],
             metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",
                 regex="(" + "|".join(probe.names.values()) + ")")]))
         path.write_text(json.dumps(config))

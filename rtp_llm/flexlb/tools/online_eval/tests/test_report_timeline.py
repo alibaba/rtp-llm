@@ -139,7 +139,11 @@ def test_offline_publication_uses_frozen_clock_and_event_records(tmp_path):
     MetricStore(dict(metrics_schema_version=1, definitions={}, metrics={}, run=context)).save(tmp_path)
     presentation = dict(charts=dict(events={'fault': dict(label='Fault', source='case', event='fault_injected')},
                                     event_ids=['fault']))
-    result = archived(spec(), tmp_path, presentation, status='PASS')
+    source = spec()
+    original = copy.deepcopy(source)
+    result = archived(source, tmp_path, presentation, status='PASS')
+    assert source == original
+    assert archived(source, tmp_path, presentation, status='PASS') == result
     assert result['timeOriginEpochS'] == 100
     assert result['events'][0]['t'] == 10
     assert result['timeAxis'] == {'min': 0, 'max': 30}

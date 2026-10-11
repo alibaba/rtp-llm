@@ -91,10 +91,12 @@
       legend.appendChild(item);plottedLabels.push(item);});
     function filterChoices() {const query=search.value.trim().toLocaleLowerCase();legendLabels.forEach((label,i)=>{label.hidden=!!query&&!datasets[i].label.toLocaleLowerCase().includes(query);});groups.forEach(group=>{group.element.hidden=group.indices.every(i=>legendLabels[i].hidden);});}
     search.oninput=filterChoices;
-    function setPickerOpen(open) {dropdown.hidden=!open;pickerButton.setAttribute('aria-expanded',String(open));if(open) search.focus();}
+    function closePicker(event) {if(!picker.contains(event.target)) setPickerOpen(false);}
+    function setPickerOpen(open) {dropdown.hidden=!open;pickerButton.setAttribute('aria-expanded',String(open));
+      document.removeEventListener('click',closePicker);
+      if(open) {document.addEventListener('click',closePicker);search.focus();}}
     pickerButton.onclick=()=>setPickerOpen(dropdown.hidden);
     picker.onkeydown=event=>{if(event.key==='Escape') {setPickerOpen(false);pickerButton.focus();}};
-    document.addEventListener('click',event=>{if(!picker.contains(event.target)) setPickerOpen(false);});
     function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor+'33';});[legendLabels,plottedLabels].forEach(labels=>labels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';}));chart.update('none');}
     function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);plottedLabels[i].hidden=!input.checked;});legend.hidden=!inputs.some(input=>input.checked);pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';if(focused!==null) focus(focused);else chart.update('none');fillHover(lastHover);}
     function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}

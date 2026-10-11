@@ -36,7 +36,8 @@ def produce(directory, evidence, result):
                              for w in result["windows"]], epoch=epoch, source="cache_gate", labels={})], producer="cache_windows",
                 evidence=dict(path=str(directory) + "/cache-gate-evidence.json",
                               calculation="survivor hit/context counter delta; timestamp is window end",
-                              survivors=evidence.get("survivors", [])))
+                              survivors=evidence.get("survivors", []),
+                              measurement_validity="INVALID" if result["verdict"] == "INVALID" else "VALID"))
 
     for metric, value in result["gate_metrics"].items():
         identity = "cache_gate/" + metric

@@ -21,6 +21,8 @@ class CheckNode:
     @classmethod
     def read(cls, data, prefix):
         data = _object(data, 'check')
+        if type(data.get('id')) is not str or not data['id']:
+            raise ValueError('check identity must be a nonempty string')
         identity = prefix + '/' + data['id']
         evidence = _object(data.get('evidence', {}), 'check.evidence')
         children = evidence.get('checks', [])
@@ -77,15 +79,20 @@ class RunPresentation:
             raise ValueError('run analysis must be an object')
         fields = set(cls.__dataclass_fields__) | {'id', 'workload'}
         analysis = copy.deepcopy({key: value for key, value in analysis.items() if key in fields})
-        identity = analysis['id']
+        identity = analysis.get('id')
         if type(identity) is not str or not identity:
             raise ValueError('run identity must be a nonempty string')
         workload = _object(analysis.get('workload', {}), 'run.workload')
         checks = analysis.get('checks', [])
         if not isinstance(checks, list):
             raise ValueError('run checks must be an array')
+        nodes = []
+        for check in checks:
+            if not isinstance(check, dict) or type(check.get('stage')) is not str or not check['stage']:
+                raise ValueError('run check requires a nonempty stage')
+            nodes.append(CheckNode.read(check, check['stage']))
         return cls(identity, analysis.get('status'), RunValidity.read(workload),
-            tuple(CheckNode.read(check, check['stage']) for check in checks),
+            tuple(nodes),
             analysis.get('configuration'), analysis.get('configuration_sha256'),
             workload.get('runtime_configuration'), _object(analysis.get('implementation', {}), 'run.implementation'),
             analysis.get('traffic_manifests'), analysis.get('runtime_provenance'),

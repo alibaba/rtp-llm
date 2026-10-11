@@ -1,3 +1,4 @@
+// 手动运行入口：node tests/js/test_multi_curve.js
 const assert = require('node:assert/strict');
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; this.classList={toggle:(name,on)=>{this.toggled={name,on};}}; }
@@ -13,7 +14,10 @@ class Element {
   releasePointerCapture(id) {this.pointer=null;}
   contains(child) { return this===child||this.children.some(c=>c instanceof Element&&c.contains(child)); }
 }
-global.document = {createElement:tag=>new Element(tag),createTextNode:text=>text,addEventListener:()=>{}};
+const documentClicks=new Set();
+global.document = {createElement:tag=>new Element(tag),createTextNode:text=>text,
+  addEventListener:(name,handler)=>{if(name==='click')documentClicks.add(handler);},
+  removeEventListener:(name,handler)=>{if(name==='click')documentClicks.delete(handler);}};
 global.Chart = class {
   constructor(canvas,spec) {this.data=spec.data;this.options=spec.options;this.visible=spec.data.datasets.map(d=>!d.hidden);
     this.width=1000;this.height=600;this.chartArea={left:100,right:900,top:20,bottom:550};
@@ -23,7 +27,7 @@ global.Chart = class {
   update() {}
   draw() {}
 };
-require('./multi_curve');
+require('../../src/reporting/assets/multi_curve');
 const root=new Element('root');
 const points=[{x:0,y:70},{x:1,y:null},{x:3,y:20}];
 const chart=FlexMultiCurve.mount(root,{title:'test',caption:'test',axes:{pct:{title:'%'},queue:{title:'requests'}},
@@ -47,7 +51,14 @@ assert.match(hover.children[1].children.join(''), /avg 45.*2\/3/);
 const toolbar=root.children[0].children[2];
 const picker=toolbar.children[0],pickerButton=picker.children[0],dropdown=picker.children[1];
 assert.equal(dropdown.hidden,true);
+assert.equal(documentClicks.size,0);
 pickerButton.onclick();assert.equal(dropdown.hidden,false);
+assert.equal(documentClicks.size,1);
+pickerButton.onclick();assert.equal(documentClicks.size,0);
+pickerButton.onclick();assert.equal(documentClicks.size,1);
+for(const listener of [...documentClicks])listener({target:new Element('outside')});
+assert.equal(dropdown.hidden,true);assert.equal(documentClicks.size,0);
+pickerButton.onclick();
 assert.equal(pickerButton.attributes['aria-expanded'],'true');
 const search=dropdown.children[0],choices=dropdown.children[1];
 search.value='queue';search.oninput();

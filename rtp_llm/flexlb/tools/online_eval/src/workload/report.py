@@ -46,9 +46,9 @@ def write_views(directory, analysis, names=None):
     names = names or [DEFAULT_VIEW]
     paths = {}
     for name in names:
-        presentation = view(name)
         if name == DEFAULT_VIEW:
             continue
+        presentation = view(name)
         capability = view_capabilities().get(name)
         if capability is None or capability.renderer is None:
             raise ValueError("selected view has no registered renderer: " + name)

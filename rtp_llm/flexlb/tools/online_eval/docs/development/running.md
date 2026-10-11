@@ -39,3 +39,14 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
 保留独立的基线、过渡和恢复窗口。确认成员及路由收敛后取得恢复请求证据；故障前晚完成的请求不能代替恢复流量。停止发新请求后等待在途请求有界排空，核对已发与终态账目，不用杀进程代替排空。取消失败、丢记录、线程未退出和资源未收敛都必须保留为失败。
 
 校准标准来自独立有效的基线，不用干预结果回调门槛。原始请求、监控序列和采集错误保留在运行目录，具体窗口及合同以 YAML 和 program 为准。
+
+## 报告交互测试
+
+Python 回归不执行 Node 测试。修改报告浏览器交互时，需在安装 Node.js 的环境中从 `online_eval` 目录手动执行：
+
+```bash
+node tests/js/test_multi_curve.js
+node tests/js/test_legend_interaction.js
+```
+
+这些测试覆盖选区统计、缺失样本、刷选和图例交互，不需要启动服务或运行 workload。

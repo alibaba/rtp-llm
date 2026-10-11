@@ -1,5 +1,6 @@
+// 手动运行入口：node tests/js/test_legend_interaction.js
 const assert = require('node:assert/strict');
-const {nextVisibility, controller} = require('./legend_interaction');
+const {nextVisibility, controller} = require('../../src/reporting/assets/legend_interaction');
 
 assert.deepEqual(nextVisibility([true, true, true], 1, 'single'), [true, false, true]);
 assert.deepEqual(nextVisibility([true, true, true], 1, 'double'), [false, true, false]);

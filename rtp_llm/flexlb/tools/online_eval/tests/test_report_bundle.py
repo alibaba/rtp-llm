@@ -54,8 +54,8 @@ class ReportBundleTest(unittest.TestCase):
 
     def test_freeform_subtitle_and_scrollable_evidence(self):
         page = render({"title": "实验 A", "subtitle": {"流量": "240 QPS", "结论": "PASS"}})
-        self.assertIn('"流量": "240 QPS"', page)
-        self.assertIn('"结论": "PASS"', page)
+        payload = json.JSONDecoder().raw_decode(page.split('const SPEC = ', 1)[1])[0]
+        self.assertEqual(payload['summary']['subtitle'], {'流量': '240 QPS', '结论': 'PASS'})
         self.assertNotIn('id="hint"', page)
         self.assertNotIn('id="meta"', page)
         self.assertIn('class="report-block attachment"', render_sections([details("证据", {"a": 1})]))
@@ -73,8 +73,8 @@ class ReportBundleTest(unittest.TestCase):
                 ],
             }],
         })
-        self.assertIn('"dash": [6, 4]', html)
-        self.assertIn('"dash": []', html)
+        payload = json.JSONDecoder().raw_decode(html.split('const SPEC = ', 1)[1])[0]
+        self.assertEqual([s['dash'] for s in payload['panels'][0]['series']], [[6, 4], []])
 
     def test_relocated_bundle_renders_without_evidence_or_mutation(self):
         with tempfile.TemporaryDirectory() as d:

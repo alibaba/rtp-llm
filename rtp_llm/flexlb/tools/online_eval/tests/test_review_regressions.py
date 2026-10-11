@@ -31,3 +31,87 @@ def test_invalid_decision_lifetime_rejected_before_rendering(value):
     (list(range(1, 101)), .95, 95), ([], .99, None)])
 def test_percentiles_agree_at_rank_boundaries(values, p, expected):
     assert report_percentile(values, p) == expected
+
+
+@pytest.mark.parametrize("data", [{}, {"id": "a", "checks": [{}]},
+    {"id": "a", "checks": [{"stage": "gate", "status": "PASS"}]}])
+def test_presentation_missing_identity_or_stage_is_a_contract_error(data):
+    from reporting.run_model import RunPresentation
+    with pytest.raises(ValueError):
+        RunPresentation.read(data)
+
+
+def test_report_rejects_nonfinite_axis_metadata():
+    from reporting import render
+    with pytest.raises(ValueError):
+        render(dict(timeAxis=dict(min=0,max=1),panels=[dict(id="a",timeX=True,
+            axes={"y":dict(min=float("nan"))},series=[])]))
+
+
+def test_long_report_identity_is_bounded_and_collision_resistant(tmp_path):
+    from reporting import write_bundle
+    a=write_bundle(tmp_path,"run","a"*300,{},dict(panels=[]))
+    b=write_bundle(tmp_path,"run","a"*299+"b",{},dict(panels=[]))
+    assert len(a.name)<=105 and a!=b
+
+
+def test_directory_analysis_verifies_bundle_once(tmp_path,monkeypatch):
+    import reporting.core as core
+    from unittest.mock import Mock
+    bundle=core.write_bundle(tmp_path,"run","a",{"value":1},dict(panels=[]))
+    read=Mock(wraps=core.read_bundle);monkeypatch.setattr(core,"read_bundle",read)
+    assert core.load_analysis(bundle)=={"value":1}
+    assert read.call_count==1
+
+
+def test_uncalibrated_fidelity_profile_retains_unavailable_identity(tmp_path):
+    import json
+    from test_traffic_fidelity import fixture
+    from analysis.traffic_fidelity import run
+    raw,profile=fixture();profile["calibration"]={}
+    source=tmp_path/"source.xz";source.write_bytes(raw)
+    path=tmp_path/"profile.json";path.write_text(json.dumps(profile))
+    result=run(path,[source],count=20)
+    assert result["identity"]["status"]=="UNAVAILABLE"
+    assert result["rows"][0]["fit_sha256"] is None
+
+
+def test_https_probe_keeps_scheme_host_port_and_path(tmp_path,monkeypatch):
+    import json
+    from unittest.mock import Mock,MagicMock
+    from types import SimpleNamespace
+    from monitoring.session import PrometheusSession
+    session=object.__new__(PrometheusSession)
+    session.url="http://prometheus";session.closed=False;session.probes={};session.directory=tmp_path
+    session.query=Mock(return_value=[{"value":[1,"1"]}]);session._write_session=Mock()
+    (tmp_path/"prometheus.json").write_text(json.dumps({"scrape_configs":[]}))
+    monkeypatch.setattr("urllib.request.urlopen",Mock(return_value=MagicMock()))
+    probe=SimpleNamespace(job="probe",names={"up":"probe_up"},error=None)
+    session.add_probe(probe,"https://[::1]:8443/custom-metrics")
+    config=json.loads((tmp_path/"prometheus.json").read_text())["scrape_configs"][0]
+    assert config["scheme"]=="https" and config["metrics_path"]=="/custom-metrics"
+    assert config["static_configs"][0]["targets"]==["[::1]:8443"]
+
+
+def test_invalid_survivor_measurement_cannot_be_selected(tmp_path):
+    from metric_fixtures import freeze_metrics
+    from cases.cache_scale_in.metrics import produce
+    from monitoring.metric_store import MetricStore,MetricUnavailable
+    freeze_metrics(tmp_path,"cache_scale_in")
+    evidence=dict(provenance=dict(env_epoch=1),clock=dict(origin_epoch_s=100),survivors=["p"])
+    result=dict(verdict="INVALID",windows=[dict(end=10,hit=.9,errors=[])],gate_metrics={})
+    produce(tmp_path,evidence,result)
+    with pytest.raises(MetricUnavailable):
+        MetricStore.read(tmp_path).select("derived/survivor_hit_ratio")
+
+
+@pytest.mark.parametrize("spec", [None, {"origin":None}])
+def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec):
+    from types import SimpleNamespace
+    from metric_fixtures import freeze_metrics
+    from monitoring.metric_store import publish,MetricContractError
+    store=freeze_metrics(tmp_path,"cache_scale_in")
+    monkeypatch.setattr("importlib.util.find_spec",lambda name: None if spec is None else SimpleNamespace(**spec))
+    definition=store.document["definitions"]["derived/survivor_hit_ratio"]
+    with pytest.raises(MetricContractError,match="producer module"):
+        publish(store,"derived/survivor_hit_ratio",definition,[],producer="cache_windows",evidence={})

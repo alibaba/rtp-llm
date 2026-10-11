@@ -104,7 +104,7 @@ def _slug(identity):
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", text).strip(".-") or "report"
     return (
         safe
-        if safe == text
+        if safe == text and len(safe) <= 96
         else safe[:96] + "-" + hashlib.sha256(text.encode()).hexdigest()[:8]
     )
 
@@ -237,7 +237,7 @@ def load_analysis(path):
     path = Path(path)
     if path.is_dir():
         path = read_bundle(path) / "analysis.json"
-    if path.name == "analysis.json" and (path.parent / "manifest.json").exists():
+    elif path.name == "analysis.json" and (path.parent / "manifest.json").exists():
         read_bundle(path.parent)
     value = json.loads(path.read_text())
     if not matches_schema(value, "report_analysis_schema_version", 1):

@@ -172,7 +172,7 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
                                  grades=grade(metrics,limits,selected_identity['status']=='OK'),
                                  parameters=parameters)
         rows.append(dict(capture=cap['name'],capture_path=cap['path'],capture_sha256=cap['sha256'],
-                         fit_sha256=selected['calibration']['model_sha256'],
+                         fit_sha256=selected.get('calibration', {}).get('model_sha256'),
                          fit_parameters=selected['parameters'],
                          fit_profile_sha256=hashlib.sha256(json.dumps(selected,sort_keys=True).encode()).hexdigest(),
                          role='fit_source' if refit or cap is fit else 'other_window',

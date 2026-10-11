@@ -110,7 +110,9 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
     bundle = write_bundle(tmp_path, 'run', 'selected-presets', {},
         dict(title='Test', timeAxis={'min': 0, 'max': 1}, panels=panels))
     html = (bundle / 'report.html').read_text()
-    assert '"Visible": ["A"]' in html and '"Named": ["B"]' in html
+    import json
+    payload = json.JSONDecoder().raw_decode(html.split('const SPEC = ', 1)[1])[0]
+    assert payload['panels'][0]['presets'] == panels[0]['presets']
 
 
 @pytest.mark.parametrize('name', ['cache_scale_in', 'master_performance', 'master_ha_failover'])

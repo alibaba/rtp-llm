@@ -240,9 +240,18 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
         raise MetricContractError(str(exc)) from exc
     calculation_module = ('analysis.request_metrics' if 'calculation' in definition
                           else definition['measurement']['method'].rsplit('.', 1)[0])
-    calculation_sha256 = hashlib.sha256(Path(find_spec(calculation_module).origin).read_bytes()).hexdigest()
+    def module_digest(name):
+        try:
+            spec = find_spec(name)
+            if spec is None or spec.origin is None:
+                raise MetricContractError("producer module has no source file: " + name)
+            return hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest()
+        except (ImportError, ValueError, OSError) as exc:
+            raise MetricContractError("cannot read producer module: " + name) from exc
+
+    calculation_sha256 = module_digest(calculation_module)
     module = registry().producers[producer].module
-    producer_sha256 = hashlib.sha256(Path(find_spec(module).origin).read_bytes()).hexdigest()
+    producer_sha256 = module_digest(module)
     result, identities = [], set()
     for row in rows:
         key = (str(row["epoch"]), row["source"], json.dumps(row["labels"], sort_keys=True))

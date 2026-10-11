@@ -210,7 +210,7 @@ def render(spec):
         .replace("__PAGE_TITLE__", page_title)
         .replace(
             "__SPEC_JSON__",
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c"),
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c"),
         )
         .replace("__CHARTJS_JS__", chartjs)
         .replace("__LEGEND_INTERACTION_JS__", interaction)
