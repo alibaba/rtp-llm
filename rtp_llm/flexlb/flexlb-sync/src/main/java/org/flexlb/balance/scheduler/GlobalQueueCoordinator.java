@@ -189,7 +189,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         }
         if (victim != null) {
             completeDecisionResponse(victim, error(StrategyErrorType.QUEUE_PRIORITY_THROTTLED,
-                    "低优先级限流"));
+                    "Rate limit reached. Please slow down and retry."));
         }
         return OfferResult.ENQUEUED;
     }
