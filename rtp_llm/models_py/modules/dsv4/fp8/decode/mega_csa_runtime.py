@@ -250,7 +250,7 @@ class MegaCSARuntime:
         after CUDA graph capture requires recapturing the graph.
         """
         if freqs_cis.dtype != torch.complex64 or freqs_cis.dim() != 2:
-            raise TypeError("DSV4 mega requires contiguous complex64 freqs_cis [S,32]")
+            raise TypeError("DSV4 mega requires 2D complex64 freqs_cis")
         key = id(freqs_cis)
         version = None if freqs_cis.is_inference() else freqs_cis._version
         cached = self._rope_cache.get(key)

@@ -188,7 +188,13 @@ def _runtime_unavailable_reason(
             # signature; do not reject a runtime solely for that limitation.
             continue
         absent = [name for name in parameters if name not in signature.parameters]
-        if absent:
+        # Keyword-forwarding wrappers need not expose each parameter name.
+        # *args alone cannot accept the adapters' keyword arguments.
+        accepts_keywords = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if absent and not accepts_keywords:
             incompatible.append(f"{function_name} missing {','.join(absent)}")
     if incompatible:
         return (

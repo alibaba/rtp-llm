@@ -37,6 +37,8 @@ class TaggedKVCache:
         return self.layers[tag].seq_size_per_block
 
     def get_kernel_seq_size_per_block(self, tag: str) -> int:
+        # These fixtures use equal physical and kernel token spans (256).
+        # Compressed entries per block are tracked separately by the pools.
         return self.get_seq_size_per_block(tag)
 
 
@@ -49,6 +51,7 @@ def slots_from_block_table(block_table: torch.Tensor, entries: int) -> torch.Ten
 def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
     attn = test.block.attn
     ratio = int(attn.compress_ratio)
+    test.assertIn(ratio, (COMPRESS_RATIO, HCA_COMPRESS_RATIO))
     buckets = []
     for batch_size, q_len in ((1, 1), (2, 3)):
         pools = make_pools(test.device, batch_size=batch_size)
@@ -94,6 +97,8 @@ def check_dynamic_graph_replays(test, make_pools, fill_context) -> None:
         torch.cuda.synchronize(test.device)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
+            # Invalidate the Python cache so the MQA schedule-building CUDA
+            # kernel is captured and recomputes the schedule on every replay.
             test.runtime.begin_decode(metadata)
             graph_work.copy_(graph_input)
             output = test._forward_mega(graph_work, metadata, pools)

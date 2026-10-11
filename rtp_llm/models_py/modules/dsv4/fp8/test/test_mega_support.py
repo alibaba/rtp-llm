@@ -222,18 +222,40 @@ class MegaSupportTest(unittest.TestCase):
             self.assertIn(f"expected {expected}", reason or "")
 
     def test_incompatible_attention_signature_is_reported_at_startup(self) -> None:
-        extension = _supported_extension()
-        extension.hc_reduce_fuse_out = lambda: None
-        fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
-        with patch.object(
-            torch.cuda, "get_device_capability", return_value=(10, 0)
-        ), patch.dict(sys.modules, {"rtp_kernel": fake_rtp_kernel}):
-            reason = mega_decode_unavailable_reason(
-                V4Args(ep_size=8), torch.device("cuda:0")
-            )
+        for function in (lambda: None, lambda *args: None):
+            with self.subTest(signature=str(inspect.signature(function))):
+                extension = _supported_extension()
+                extension.hc_reduce_fuse_out = function
+                fake_rtp_kernel = SimpleNamespace(dsv4_mega=extension)
+                with patch.object(
+                    torch.cuda, "get_device_capability", return_value=(10, 0)
+                ), patch.dict(sys.modules, {"rtp_kernel": fake_rtp_kernel}):
+                    reason = mega_decode_unavailable_reason(
+                        V4Args(ep_size=8), torch.device("cuda:0")
+                    )
 
-        self.assertIn("ABI is incompatible", reason or "")
-        self.assertIn("hc_reduce_fuse_out missing", reason or "")
+                self.assertIn("ABI is incompatible", reason or "")
+                self.assertIn("hc_reduce_fuse_out missing", reason or "")
+
+    def test_keyword_forwarding_attention_signatures_are_accepted(self) -> None:
+        for function in (lambda **kwargs: None, lambda *args, **kwargs: None):
+            with self.subTest(signature=str(inspect.signature(function))):
+                extension = _supported_extension()
+                extension.hc_reduce_fuse_out = function
+                with patch.object(
+                    torch.cuda, "get_device_capability", return_value=(10, 0)
+                ), patch.dict(
+                    sys.modules,
+                    {
+                        "rtp_kernel": SimpleNamespace(dsv4_mega=extension),
+                        "deep_gemm": _module_with_symbols(_REQUIRED_DEEP_GEMM_SYMBOLS),
+                    },
+                ):
+                    reason = mega_decode_unavailable_reason(
+                        V4Args(ep_size=8), torch.device("cuda:0")
+                    )
+
+                self.assertIsNone(reason)
 
     def test_compiled_geometry_mismatch_is_reported_at_startup(self) -> None:
         extension = _supported_extension()
