@@ -562,7 +562,9 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
     const auto& layout_cfg = config_.memory_layouts[layout_idx];
 
     // 创建 KV 缓存张量
-    torch::Tensor kv_cache_tensor = createTensor(full_tensor,
+    torch::Tensor kv_cache_tensor = layout_cfg.shared_block_stride_bytes > 0 ?
+                                        full_tensor :
+                                        createTensor(full_tensor,
                                                  static_cast<int64_t>(layout_cfg.kv_cache_offset_bytes),
                                                  static_cast<int64_t>(layout_cfg.kv_block_pool_size_bytes),
                                                  layout_idx,
@@ -579,7 +581,9 @@ void BlockPool::processMemoryLayout(size_t layout_idx, const torch::Tensor& full
                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
             layout_indexer_buffers_[layout_idx] = kv_scale_tensor;
         } else {
-            kv_scale_tensor = createTensor(full_tensor,
+            kv_scale_tensor = layout_cfg.shared_block_stride_bytes > 0 ?
+                                  full_tensor :
+                                  createTensor(full_tensor,
                                            static_cast<int64_t>(layout_cfg.kv_scale_offset_bytes),
                                            static_cast<int64_t>(layout_cfg.kv_scale_pool_size_bytes),
                                            layout_idx,
@@ -685,7 +689,11 @@ void BlockPool::processLayerTensors(size_t                    layout_idx,
 
 bool BlockPool::init() {
     validateConfig();
+    if (shared_arena_) {
+        cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
+    } else {
     initializeCacheBuffer();
+    }
     initializeLayerMappings();
     initializeLayoutStrategies();
     initFreeBlocks();
@@ -720,14 +728,14 @@ void BlockPool::initFreeBlocks() {
         free_hbm_blocks_ = mla_hbm_blocks_ > 0 ? mla_hbm_blocks_ - 1 : 0;
     }
     // block 0 is reserved
-    for (BlockIdxType i = 1; i < static_cast<BlockIdxType>(config_.block_num); ++i) {
+    for (BlockIdxType i = 1; !shared_arena_ && i < static_cast<BlockIdxType>(config_.block_num); ++i) {
         free_block_ids_.insert(i);
     }
-    request_ref_counter_.init(config_.block_num);
-    connector_ref_counter_.init(config_.block_num);
-    req_con_ref_counter_.init(config_.block_num);
-    block_cache_ref_counter_.init(config_.block_num);
-    req_cache_ref_counter_.init(config_.block_num);
+    request_ref_counter_.init(config_.block_num, shared_arena_ != nullptr);
+    connector_ref_counter_.init(config_.block_num, shared_arena_ != nullptr);
+    req_con_ref_counter_.init(config_.block_num, shared_arena_ != nullptr);
+    block_cache_ref_counter_.init(config_.block_num, shared_arena_ != nullptr);
+    req_cache_ref_counter_.init(config_.block_num, shared_arena_ != nullptr);
     block_cache_ = std::make_shared<BlockCache>();
 }
 
@@ -749,9 +757,16 @@ BlockIndicesType BlockPool::malloc(int num_blocks, int seq_len, BlockIdxType las
 
     {
         std::scoped_lock lock(ref_mu_, free_mu_);
+        if (shared_arena_) {
+            block_ids = shared_arena_->malloc(arena_group_, num_blocks);
+            if (block_ids.empty()) {
+                return {};
+            }
+        } else {
         if (free_block_ids_.size() < static_cast<size_t>(num_blocks)) {
-            RTP_LLM_LOG_WARNING(
-                "Block pool only has %zu free blocks, cannot allocate %d blocks", free_block_ids_.size(), num_blocks);
+                RTP_LLM_LOG_WARNING("Block pool only has %zu free blocks, cannot allocate %d blocks",
+                                    free_block_ids_.size(),
+                                    num_blocks);
             return {};
         }
         auto first = free_block_ids_.begin();
@@ -773,6 +788,7 @@ BlockIndicesType BlockPool::malloc(int num_blocks, int seq_len, BlockIdxType las
             block_ids.push_back(*first);
             free_hbm_blocks_ -= *first < mla_hbm_blocks_;
             first = free_block_ids_.erase(first);
+            }
         }
         if (block_generations_.defined()) {
             auto* generations = block_generations_.data_ptr<int64_t>();
@@ -834,8 +850,24 @@ void BlockPool::tryFreeBlocks(const BlockIndicesType& block_ids) {
     for (const auto& block_id : block_ids) {
         if (req_con_ref_counter_.getRefCounter(block_id) == 0
             && block_cache_ref_counter_.getRefCounter(block_id) == 0) {
+            if (shared_arena_) {
+                shared_arena_->release(arena_group_, block_id);
+                continue;
+            }
             const bool inserted = free_block_ids_.insert(block_id).second;
             free_hbm_blocks_ += inserted && block_id < mla_hbm_blocks_;
+        }
+    }
+    updateSharedReferences(block_ids);
+}
+
+void BlockPool::updateSharedReferences(const BlockIndicesType& blocks) {
+    if (!shared_arena_) {
+        return;
+    }
+    for (auto id : blocks) {
+        if (req_con_ref_counter_.getRefCounter(id) > 0 || block_cache_ref_counter_.getRefCounter(id) > 0) {
+            shared_arena_->setReclaimable(arena_group_, id, req_con_ref_counter_.getRefCounter(id) == 0);
         }
     }
 }
@@ -852,9 +884,13 @@ void BlockPool::requestReference(const BlockIndicesType& block_ids) {
     req_con_ref_counter_.incrementRefCounter(block_ids);
     req_cache_ref_counter_.incrementRefCounter(block_ids);
     for (const auto& block_id : block_ids) {
+        if (shared_arena_) {
+            continue;
+        }
         const bool erased = free_block_ids_.erase(block_id) != 0;
         free_hbm_blocks_ -= erased && block_id < mla_hbm_blocks_;
     }
+    updateSharedReferences(block_ids);
 }
 
 void BlockPool::connectorReference(BlockIdxType block_idx) {
@@ -868,9 +904,13 @@ void BlockPool::connectorReference(const BlockIndicesType& block_indices) {
     connector_ref_counter_.incrementRefCounter(block_indices);
     req_con_ref_counter_.incrementRefCounter(block_indices);
     for (const auto& block_id : block_indices) {
+        if (shared_arena_) {
+            continue;
+        }
         const bool erased = free_block_ids_.erase(block_id) != 0;
         free_hbm_blocks_ -= erased && block_id < mla_hbm_blocks_;
     }
+    updateSharedReferences(block_indices);
 }
 
 void BlockPool::blockCacheReference(BlockIdxType block_idx) {
@@ -884,9 +924,13 @@ void BlockPool::blockCacheReference(const BlockIndicesType& block_ids) {
     block_cache_ref_counter_.incrementRefCounter(block_ids);
     req_cache_ref_counter_.incrementRefCounter(block_ids);
     for (const auto& block_id : block_ids) {
+        if (shared_arena_) {
+            continue;
+        }
         const bool erased = free_block_ids_.erase(block_id) != 0;
         free_hbm_blocks_ -= erased && block_id < mla_hbm_blocks_;
     }
+    updateSharedReferences(block_ids);
 }
 
 void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
@@ -906,7 +950,7 @@ void BlockPool::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_sto
                                     layout_idx,
                                     layout_cfg.kv_cache_offset_bytes,
                                     layout_cfg.kv_block_pool_size_bytes,
-                                    layout_cfg.kv_block_stride_bytes,
+                                    config_.block_num == 1 ? 0 : layout_cfg.kv_block_stride_bytes,
                                     gpu,
                                     "kv");
 
@@ -1050,12 +1094,12 @@ std::vector<KVCachePoolMetricsSnapshot> BlockPool::tierMetricsSnapshots() const 
 
 size_t BlockPool::freeBlocksNum() const {
     std::lock_guard<std::mutex> free_lock(free_mu_);
-    return free_block_ids_.size();
+    return shared_arena_ ? shared_arena_->freeSlots(arena_group_) : free_block_ids_.size();
 }
 
 size_t BlockPool::totalBlocksNum() const {
     // reserve block 0 for internal use
-    return config_.block_num - 1;
+    return shared_arena_ ? shared_arena_->totalSlots(arena_group_) : config_.block_num - 1;
 }
 
 // Available blocks need to satisfy two conditions:
@@ -1063,7 +1107,7 @@ size_t BlockPool::totalBlocksNum() const {
 // 2. not referenced by connector(read or write)
 size_t BlockPool::availableBlocksNum() const {
     std::lock_guard<std::mutex> lock(ref_mu_);
-    return req_con_ref_counter_.freeBlockNum();
+    return shared_arena_ ? shared_arena_->availableSlots(arena_group_) : req_con_ref_counter_.freeBlockNum();
 }
 
 size_t BlockPool::requestRefBlocksNum() const {
@@ -1083,7 +1127,7 @@ size_t BlockPool::blockCacheRefBlocksNum() const {
 
 size_t BlockPool::notInUseBlocksNum() const {
     std::lock_guard<std::mutex> lock(ref_mu_);
-    return req_cache_ref_counter_.freeBlockNum();
+    return shared_arena_ ? shared_arena_->freeSlots(arena_group_) : req_cache_ref_counter_.freeBlockNum();
 }
 
 // MTP support: Map global_layer_id to (model_index, local_layer_id).

@@ -25,6 +25,7 @@
 namespace rtp_llm {
 
 class BlockPool;
+class SharedCacheArena;
 class BroadcastManager;
 class KVCacheAllocator;
 class MemoryAsyncContext;
@@ -179,8 +180,7 @@ private:
                                                      const std::vector<LayerRegionSlot>& slots,
                                                      size_t                              key_index,
                                                      CacheBlockKind                      kind) const;
-    size_t                       prefixKindBlockSize(CacheBlockKind kind,
-                                                     const std::vector<LayerRegionSlot>& slots) const;
+    size_t                    prefixKindBlockSize(CacheBlockKind kind, const std::vector<LayerRegionSlot>& slots) const;
     std::shared_ptr<CopyPlan>    buildPrefixCopyPlanForRead(const CacheKeysType&                cache_keys,
                                                              const BlockDependenciesType&        dependencies,
                                                              const LayerAttnBlockIds&            layer_attn_block_ids,
@@ -256,8 +256,7 @@ private:
     size_t                     memoryCacheBlockSizeBytes() const;
     void                       putToCache(const MemoryBlockCache::CacheItem& item);
     void                       putToCache(CopyInfoPerKey& copy_info);
-    bool                       putToCache(const MemoryDiskBlockCache::CacheItem& item,
-                                          bool                                   already_has_cache_ref = false);
+    bool putToCache(const MemoryDiskBlockCache::CacheItem& item, bool already_has_cache_ref = false);
 
     void reportMatchMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t matched_block_num);
     void reportReadMetrics(bool success, int64_t latency_us, int64_t input_block_num, int64_t read_block_num);
@@ -299,6 +298,8 @@ private:
     std::shared_ptr<BlockPool> state_swa_pool_;
     size_t                     compressed_block_size_{0};
     size_t                     state_swa_block_size_{0};
+    std::shared_ptr<SharedCacheArena> shared_memory_arena_;
+    std::shared_ptr<BlockPool>        shared_memory_backing_;
     bool                       use_prefix_tree_memory_cache_{false};
 
     // metrics reporter

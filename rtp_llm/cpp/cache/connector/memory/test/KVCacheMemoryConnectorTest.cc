@@ -1070,6 +1070,29 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_CompactRequestPoolsScaleFromDev
     EXPECT_EQ(conn->state_swa_pool_->totalBlocksNum(), 1259u);
 }
 
+TEST_F(KVCacheMemoryConnectorTest, SharedMemoryUsesOneBudgetRegardlessOfCapacityHints) {
+    auto cfg                                   = createCompactRequestConnectorConfig();
+    cfg.use_shared_block_pool                  = true;
+    cfg.linear_request_cache_avg_query_length  = 100000;
+    auto kv                                    = kv_cache_config_;
+    kv.memory_cache_size_mb                    = 1;
+    kv.enable_memory_cache_disk                = false;
+    kv.prefix_tree_memory_state_swa_pool_ratio = 99;
+    auto conn = std::make_shared<KVCacheMemoryConnector>(cfg, kv, allocator_, server_addrs_);
+    ASSERT_NO_THROW(conn->initBlockPool());
+    ASSERT_NE(conn->shared_memory_arena_, nullptr);
+    EXPECT_EQ(conn->compressed_pool_->getBaseAddress(), conn->state_swa_pool_->getBaseAddress());
+    auto pages = conn->compressed_pool_->malloc(conn->compressed_pool_->freeBlocksNum());
+    ASSERT_FALSE(pages.empty());
+    EXPECT_TRUE(conn->state_swa_pool_->malloc(1).empty());
+    conn->compressed_pool_->requestFree(pages);
+    auto states = conn->state_swa_pool_->malloc(conn->state_swa_pool_->freeBlocksNum());
+    EXPECT_EQ(states.size(), pages.size());
+    EXPECT_TRUE(conn->compressed_pool_->malloc(1).empty());
+    conn->state_swa_pool_->requestFree(states);
+    EXPECT_EQ(conn->shared_memory_arena_->freeBytes(), conn->shared_memory_arena_->usableBytes());
+}
+
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_AverageLengthSizesHostPoolsIndependentlyOfDevice) {
     for (uint32_t average : {128u, 2049u, 100000u}) {
         for (uint32_t alignment : {1u, 4u}) {
@@ -1311,8 +1334,8 @@ TEST_F(KVCacheMemoryConnectorTest, mergePrefixExistingSlots_SupportsMixedMemoryA
     auto slots = conn->layerRegionSlots();
 
     auto run_case = [&](bool dst_disk, bool src_disk) {
-        SCOPED_TRACE(std::string("dst_disk=") + (dst_disk ? "true" : "false") + " src_disk="
-                     + (src_disk ? "true" : "false"));
+        SCOPED_TRACE(std::string("dst_disk=") + (dst_disk ? "true" : "false")
+                     + " src_disk=" + (src_disk ? "true" : "false"));
         constexpr auto kind = CacheBlockKind::COMPRESSED_KV;
         auto memory_pool = conn->memoryPoolFor(kind);
         auto disk_pool   = conn->diskPoolFor(kind);
@@ -1591,8 +1614,8 @@ TEST_F(KVCacheMemoryConnectorTest, buildPrefixCopyPlanForRead_HandlesDiskPartial
             res->cacheKeys(), res->blockDependencies(), layer_blocks, slots, /*start_index=*/0, /*read_num=*/1);
         EXPECT_EQ(plan, nullptr);
 
-        auto evicted = conn->prefix_block_cache_->popOldestEvictable(CacheBlockKind::COMPRESSED_KV,
-                                                                     CacheBackingType::DISK);
+        auto evicted =
+            conn->prefix_block_cache_->popOldestEvictable(CacheBlockKind::COMPRESSED_KV, CacheBackingType::DISK);
         ASSERT_TRUE(evicted.has_value());
         EXPECT_EQ(evicted->cache_key, 81005);
         EXPECT_EQ(evicted->disk_slot, item.disk_slot);

@@ -70,6 +70,29 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
     layer_kv_tensors_.clear();
     layer_kv_tensors_.reserve(config_.layer_num);
 
+    if (config_.shared_block_stride_bytes > 0) {
+        const int64_t slot_stride = config_.shared_block_stride_bytes / kv_elem_size;
+        for (uint32_t layer = 0; layer < config_.layer_num; ++layer) {
+            const int64_t offset = layer * kv_block_stride_elems;
+            torch::Tensor view;
+            if (config_.use_mla && config_.seq_size_per_block > 0) {
+                const int64_t rows  = config_.seq_size_per_block;
+                const int64_t width = kv_block_stride_elems / rows;
+                view = kv_cache_typed.as_strided({config_.block_num, rows, width}, {slot_stride, width, 1}, offset);
+            } else {
+                const int64_t bpk = std::max<size_t>(1, config_.kernel_blocks_per_kv_block);
+                RTP_LLM_CHECK_WITH_INFO(slot_stride % bpk == 0 && kv_block_stride_elems % bpk == 0,
+                                        "shared kernel-page strides must divide the physical block");
+                const int64_t kernel_width = kv_block_stride_elems / bpk;
+                view = kv_cache_typed.as_strided({static_cast<int64_t>(config_.block_num) * bpk, kernel_width},
+                                                 {slot_stride / bpk, 1},
+                                                 layer * kernel_width);
+            }
+            layer_kv_tensors_.push_back(view);
+        }
+        return;
+    }
+
     if (config_.use_mla && config_.seq_size_per_block > 0) {
         // MLA: concat_and_cache_mla expects [num_blocks, block_size, stride] per layer
         RTP_LLM_CHECK_WITH_INFO(kv_block_stride_elems % config_.seq_size_per_block == 0,
@@ -121,6 +144,31 @@ void MemoryLayoutStrategy::processKVTensor(torch::Tensor& kv_cache_tensor) {
 
 bool MemoryLayoutStrategy::processScaleTensor(torch::Tensor& kv_scale_tensor) {
     if (!config_.hasScale()) {
+        return true;
+    }
+
+    if (config_.shared_block_stride_bytes > 0) {
+        const size_t elem = config_.is_mla ? 1 : sizeof(float);
+        auto         typed =
+            torch::from_blob(kv_scale_tensor.data_ptr(),
+                             {static_cast<int64_t>(kv_scale_tensor.nbytes() / elem)},
+                             kv_scale_tensor.options().dtype(config_.is_mla ? torch::kUInt8 : torch::kFloat32));
+        const size_t  bpk    = config_.use_mla ? 1 : std::max<size_t>(1, config_.kernel_blocks_per_kv_block);
+        const int64_t stride = config_.shared_block_stride_bytes / elem / bpk;
+        for (uint32_t layer = 0; layer < config_.layer_num; ++layer) {
+            const int64_t offset =
+                (config_.layer_num * config_.kv_block_stride_bytes + layer * config_.kv_scale_stride_bytes) / elem
+                / bpk;
+            const int64_t width  = config_.kv_scale_stride_bytes / elem / bpk;
+            const int64_t blocks = config_.block_num * bpk;
+            if (config_.is_mla) {
+                const int64_t rows = config_.seq_size_per_block;
+                layer_kv_scale_tensors_.push_back(
+                    typed.as_strided({blocks, rows, width / rows}, {stride, width / rows, 1}, offset));
+            } else {
+                layer_kv_scale_tensors_.push_back(typed.as_strided({blocks, width}, {stride, 1}, offset));
+            }
+        }
         return true;
     }
 
@@ -204,7 +252,10 @@ BlockAddrInfo MemoryLayoutStrategy::convertIndexToAddr(int layer_id, int block_i
     void* kv_scale_addr = nullptr;
 
     if (config_.hasScale() && blocks.size() > 1) {
-        kv_scale_addr = blocks[1].addr;
+        const size_t scale_begin = config_.shared_block_stride_bytes > 0 && !config_.use_mla ?
+                                       std::max<size_t>(1, config_.kernel_blocks_per_kv_block) :
+                                       1;
+        kv_scale_addr            = blocks[scale_begin].addr;
     }
 
     return {kv_addr, kv_scale_addr};
@@ -248,11 +299,28 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     checkLayerIdValidity(layer_id);
     RTP_LLM_CHECK_WITH_INFO(
         block_id >= 0 && static_cast<uint32_t>(block_id) < config_.block_num, "block ID %d out of range", block_id);
+    if (config_.shared_block_stride_bytes > 0 && !config_.use_mla && config_.kernel_blocks_per_kv_block > 1) {
+        const size_t           bpk = config_.kernel_blocks_per_kv_block;
+        const auto&            kv  = layer_kv_tensors_[layer_id];
+        std::vector<BlockInfo> buffers;
+        for (size_t page = 0; page < bpk; ++page) {
+            buffers.push_back(
+                makeBlockInfo(kv, getBlockPtr(kv, block_id * bpk + page), config_.kv_block_stride_bytes / bpk));
+        }
+        if (config_.hasScale()) {
+            const auto& scale = layer_kv_scale_tensors_[layer_id];
+            for (size_t page = 0; page < bpk; ++page) {
+                buffers.push_back(makeBlockInfo(
+                    scale, getBlockPtr(scale, block_id * bpk + page), config_.kv_scale_stride_bytes / bpk));
+            }
+        }
+        return buffers;
+    }
     const bool  in_hbm        = static_cast<uint32_t>(block_id) < config_.mla_hbm_blocks;
     const auto& layer_tensor  = in_hbm ? layer_hbm_tensors_[layer_id] : layer_kv_tensors_[layer_id];
     const int   storage_block = in_hbm ? block_id : block_id - config_.mla_hbm_blocks;
     void* kv_addr      = nullptr;
-    if (config_.kernel_blocks_per_kv_block > 1) {
+    if (config_.kernel_blocks_per_kv_block > 1 && config_.shared_block_stride_bytes == 0) {
         RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && static_cast<size_t>(block_id) < config_.block_num,
                                 "Physical block ID %d out of range (max: %zu)",
                                 block_id,
@@ -267,7 +335,7 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createBasicBlockInfo(int layer_id, 
     if (config_.hasScale()) {
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* kv_scale_addr      = nullptr;
-        if (config_.kernel_blocks_per_kv_block > 1) {
+        if (config_.kernel_blocks_per_kv_block > 1 && config_.shared_block_stride_bytes == 0) {
             kv_scale_addr = static_cast<char*>(layer_scale_tensor.data_ptr())
                             + static_cast<size_t>(block_id) * config_.kv_scale_stride_bytes;
         } else {

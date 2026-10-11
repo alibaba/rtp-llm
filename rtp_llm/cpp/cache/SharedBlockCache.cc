@@ -387,7 +387,8 @@ size_t SharedBlockCache::evictAndFree(size_t min_blocks) {
 size_t SharedBlockCache::evictAndFreeForGroup(int group_id, size_t min_blocks, EvictResult* evict_result_out) {
     RTP_LLM_PROFILE_FUNCTION();
 
-    auto evict_result = selectAndEvictForGroup(group_id, min_blocks);
+    const bool shared_capacity = group_pools_[group_id]->sharesCapacity();
+    auto       evict_result    = shared_capacity ? selectAndEvict(1) : selectAndEvictForGroup(group_id, min_blocks);
     if (evict_result.evicted_keys.empty()) {
         if (evict_result_out) {
             *evict_result_out = std::move(evict_result);
@@ -403,7 +404,7 @@ size_t SharedBlockCache::evictAndFreeForGroup(int group_id, size_t min_blocks, E
         for (int gid = 0; gid < static_cast<int>(slots.size()) && gid < group_num_; ++gid) {
             if (!isNullBlockIdx(slots[gid])) {
                 group_pools_[gid]->blockCacheFree(slots[gid]);
-                if (gid == group_id) {
+                if (gid == group_id || shared_capacity) {
                     freed++;
                 }
             }
@@ -843,8 +844,7 @@ void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int grou
     if (item.has_dependency) {
         result.evicted_dependencies[cache_key] = item.dependency;
     }
-    const int64_t created_time_us =
-        static_cast<size_t>(group_id) < item.slot_created_time_us.size() ?
+    const int64_t created_time_us              = static_cast<size_t>(group_id) < item.slot_created_time_us.size() ?
             item.slot_created_time_us[static_cast<size_t>(group_id)] :
             item.created_time_us;
     result.evicted_lifetime_ms[cache_key] = std::max<int64_t>(0, (currentTimeUs() - created_time_us) / 1000);
@@ -858,9 +858,8 @@ void SharedBlockCache::removeSlotFromItemLocked(CacheKeyType cache_key, int grou
         item.slot_created_time_us[static_cast<size_t>(group_id)] = 0;
     }
 
-    const bool has_any_slot = std::any_of(item.slots.begin(), item.slots.end(), [](BlockIdxType slot) {
-        return !isNullBlockIdx(slot);
-    });
+    const bool has_any_slot =
+        std::any_of(item.slots.begin(), item.slots.end(), [](BlockIdxType slot) { return !isNullBlockIdx(slot); });
     if (has_any_slot) {
         lru_cache_.put(cache_key, item);
         refreshAllTreeAliasesLocked(cache_key);

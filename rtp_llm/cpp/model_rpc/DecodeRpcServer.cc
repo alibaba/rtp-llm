@@ -967,6 +967,22 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         }
         return cache_key_index < cache_key_count;
     };
+    auto indexerKernelParts = [](std::vector<BlockInfo> parts, size_t pages) {
+        if (parts.size() == 1 && pages > 1) {
+            const auto block = parts[0];
+            RTP_LLM_CHECK_WITH_INFO(block.size_bytes % pages == 0, "indexer block cannot split into kernel pages");
+            parts.clear();
+            for (size_t page = 0; page < pages; ++page) {
+                auto piece       = block;
+                piece.size_bytes = block.size_bytes / pages;
+                piece.addr       = static_cast<int8_t*>(block.addr) + page * piece.size_bytes;
+                parts.push_back(piece);
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            parts.size() == pages, "indexer kernel page count mismatch: %zu vs %zu", parts.size(), pages);
+        return parts;
+    };
     for (int i = 0; i < load_context.peer_addrs.size(); i++) {
         auto&                                            peer_addr = load_context.peer_addrs[i];
         std::vector<std::shared_ptr<RequestBlockBuffer>> layer_caches;
@@ -1064,6 +1080,12 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                         RTP_LLM_CHECK_WITH_INFO(!parts.empty(), "segmented linear cache produced no destination parts");
                         for (size_t segment_id = 0; segment_id < parts.size(); ++segment_id) {
                             addBufBlock(makeLinearCacheSegmentKey(segment_id, cache_key), parts[segment_id]);
+                        }
+                    } else if (region_name == KVCacheRegionName::INDEXER_KV
+                               && cache_config.kernelBlocksPerKvBlock() > 1) {
+                        parts = indexerKernelParts(std::move(parts), cache_config.kernelBlocksPerKvBlock());
+                        for (size_t part = 0; part < parts.size(); ++part) {
+                            addBufBlock(makeLinearCacheSegmentKey(part, cache_key), parts[part]);
                         }
                     } else if (use_mla || use_opaque_kv_store) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
@@ -1222,7 +1244,14 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
                                 };
 
-                                if (mtp_use_mla || mtp_use_opaque_kv_store) {
+                                if (region_name == KVCacheRegionName::INDEXER_KV
+                                    && mtp_cache_cfg.kernelBlocksPerKvBlock() > 1) {
+                                    parts =
+                                        indexerKernelParts(std::move(parts), mtp_cache_cfg.kernelBlocksPerKvBlock());
+                                    for (size_t part = 0; part < parts.size(); ++part) {
+                                        addBufBlock(makeLinearCacheSegmentKey(part, cache_key), parts[part]);
+                                    }
+                                } else if (mtp_use_mla || mtp_use_opaque_kv_store) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                             "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                             parts.size());
@@ -1390,7 +1419,7 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
             // scheduler releases its inflight entry without waiting for TTL eviction.
             auto& stream     = decode_context.getStream();
             auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
-                                                                                   ErrorCode::MALLOC_FAILED);
+                                                                                  ErrorCode::MALLOC_FAILED);
             reportEarlyFinishTask(decode_context,
                                   error_code,
                                   "decode allocate resource failed: " + decode_context.error_status.error_message());

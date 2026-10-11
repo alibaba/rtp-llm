@@ -157,5 +157,38 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps(),
-    exec_properties = {"gpu": "H20"},
+    exec_properties = select({
+        "@//:using_cuda13_arm": {"gpu": "L20A_DEV", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "H20"},
+    }),
+)
+
+cc_test(
+    name = "shared_memory_connector_test",
+    srcs = [
+        "KVCacheMemoryConnectorTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+        "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
+        "//rtp_llm/cpp/cache/connector/memory/test/mock:test_rpc_service_lib",
+    ],
+    env = {"GTEST_FILTER": "*SharedMemory*"},
+    exec_properties = {"gpu": "L20A_DEV"},
+)
+
+cc_test(
+    name = "shared_memory_eviction_test",
+    srcs = [
+        "PrefixTreeMemoryBlockCacheTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/memory:memory_connector",
+    ],
+    env = {"GTEST_FILTER": "*SharedMemory*"},
+    exec_properties = {"gpu": "L20A_DEV"},
 )

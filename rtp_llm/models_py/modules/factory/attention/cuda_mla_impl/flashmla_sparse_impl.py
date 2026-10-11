@@ -49,6 +49,9 @@ from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.cache_view import (
+    flat_sparse_cache_view,
+)
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
 )
@@ -230,8 +233,8 @@ class SparseMlaOp(object):
         self.block_table: Optional[torch.Tensor] = None
         self.mla_params: Optional[rtp_llm_ops.FlashInferMlaAttnParams] = None
 
-    # Sub-classes that consume KV in paged layout override this to True.
-    expects_paged_kv: bool = False
+    # BF16 and FP8 accept paged KV; BF16 flattens a view and remaps the stride.
+    expects_paged_kv: bool = True
 
     def plan(
         self,
@@ -243,7 +246,10 @@ class SparseMlaOp(object):
         self.mla_params = mla_params
 
     def _convert_topk_indices_to_global(
-        self, topk_indices: torch.Tensor
+        self,
+        topk_indices: torch.Tensor,
+        physical_entries_per_block: Optional[int] = None,
+        blocks_per_physical_block: int = 1,
     ) -> torch.Tensor:
         """Request-local topk → physical positions in the flat paged cache.
 
@@ -272,6 +278,8 @@ class SparseMlaOp(object):
             token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
+            PHYSICAL_ENTRIES_PER_BLOCK=physical_entries_per_block,
+            BLOCKS_PER_PHYSICAL_BLOCK=blocks_per_physical_block,
             NUM_TOPK_TOKENS=topk,
             BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
@@ -334,8 +342,17 @@ class SparseMlaOp(object):
 
         Returns [T, H, kv_lora_rank].
         """
+        physical_entries = None
+        blocks_per_physical_block = 1
+        if kv.ndim == 3 and kv.shape[1] >= self.token_per_block:
+            if kv.shape[1] % self.token_per_block:
+                raise ValueError("physical cache rows must divide into kernel pages")
+            blocks_per_physical_block = kv.shape[1] // self.token_per_block
+            kv, physical_entries = flat_sparse_cache_view(kv)
         global_indices = (
-            self._convert_topk_indices_to_global(topk_indices)
+            self._convert_topk_indices_to_global(
+                topk_indices, physical_entries, blocks_per_physical_block
+            )
             if physical_indices is None
             else physical_indices
         )

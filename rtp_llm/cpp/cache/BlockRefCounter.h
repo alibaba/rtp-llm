@@ -13,17 +13,19 @@ public:
         init(block_nums);
     }
 
-    void init(int block_nums) {
+    void init(int block_nums, bool sparse = false) {
+        sparse_ = sparse;
         ref_counter.clear();
         total_block_nums_ = block_nums - 1;
-        for (int i = 1; i < block_nums; ++i) {
+        for (int i = 1; !sparse_ && i < block_nums; ++i) {
             ref_counter[i] = 0;
         }
         busy_block_num_ = 0;
     }
 
     int getRefCounter(int block_index) const {
-        return ref_counter.at(block_index);
+        auto it = ref_counter.find(block_index);
+        return it == ref_counter.end() ? 0 : it->second;
     }
 
     void incrementRefCounter(const std::vector<int>& block_indices) {
@@ -44,6 +46,9 @@ public:
                 ref_counter[index]--;
                 if (ref_counter[index] == 0) {
                     busy_block_num_--;
+                    if (sparse_) {
+                        ref_counter.erase(index);
+                    }
                 }
             }
         }
@@ -58,6 +63,7 @@ public:
     }
 
 private:
+    bool                         sparse_ = false;
     std::unordered_map<int, int> ref_counter;
     uint32_t                     busy_block_num_ = 0;
     uint32_t                     total_block_nums_;

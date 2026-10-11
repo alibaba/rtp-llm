@@ -301,6 +301,31 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     }
     const bool kv_scale_gpu_mem = has_kv_scale && kv_cache.kv_scale_buffer.is_cuda();
 
+    struct StoreRowLayout {
+        size_t stride;
+        size_t payload;
+        size_t rows;
+    };
+    auto storeRowLayout = [](const torch::Tensor& tensor, size_t payload) {
+        if (tensor.dim() < 2) {
+            return StoreRowLayout{payload, payload, 1};
+        }
+        size_t row_payload = tensor.element_size();
+        for (int dim = 1; dim < tensor.dim(); ++dim) {
+            row_payload *= static_cast<size_t>(tensor.size(dim));
+        }
+        RTP_LLM_CHECK_WITH_INFO(row_payload > 0, "cache-store row payload is empty");
+        const size_t rows = payload <= row_payload ? 1 : payload / row_payload;
+        RTP_LLM_CHECK_WITH_INFO(payload <= row_payload || payload % row_payload == 0,
+                                "cache-store payload %zu does not cover whole rows of %zu bytes",
+                                payload,
+                                row_payload);
+        return StoreRowLayout{static_cast<size_t>(tensor.stride(0)) * tensor.element_size(), row_payload, rows};
+    };
+    const auto kv_rows = storeRowLayout(kv_cache.kv_cache_buffer, param.kv_block_stride_bytes);
+    const auto scale_rows =
+        has_kv_scale ? storeRowLayout(kv_cache.kv_scale_buffer, param.kv_scale_stride_bytes) : StoreRowLayout{0, 0, 1};
+
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_pd_separation.numel()),
                             "size not same");
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_id.numel()),
@@ -376,7 +401,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                 param.cache_keys[batch_id * cache_keys_per_batch + key_index], param.cp_size, param.region_name);
             std::string cache_key = makeCacheKey(param.model_id, token_key, param.layer_id, param.region_name);
 
-            void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * param.kv_block_stride_bytes);
+            void*                 kv_addr = (void*)((int8_t*)kv_cache_data + block_id * kv_rows.stride * kv_rows.rows);
             std::shared_ptr<void> kv_block_addr(kv_cache_owner, kv_addr);
 
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
@@ -388,7 +413,17 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
             // its FP8 physical block is striped as DATA then SCALES, so CP
             // slices must store those two regions independently.
-            if (!kv_cache.linear_cache_segment_sizes.empty()) {
+            if (param.region_name == KVCacheRegionName::INDEXER_KV && kv_rows.rows > 1) {
+                // Canonical per-kernel keys work for both contiguous private
+                // pools and strided shared pools. Never publish row padding.
+                RTP_LLM_CHECK_WITH_INFO(!has_kv_scale, "indexer KV scales must be packed in each row");
+                for (size_t part = 0; part < kv_rows.rows; ++part) {
+                    void*                 addr = static_cast<int8_t*>(kv_addr) + part * kv_rows.stride;
+                    std::shared_ptr<void> owner(kv_cache_owner, addr);
+                    request_blocks->addBlock(
+                        makeLinearCacheSegmentKey(part, cache_key), owner, kv_rows.payload, kv_gpu_mem, true);
+                }
+            } else if (!kv_cache.linear_cache_segment_sizes.empty()) {
                 RTP_LLM_CHECK_WITH_INFO(!has_kv_scale, "segmented linear cache-store does not support a scale buffer");
                 size_t segment_offset = 0;
                 for (size_t segment_id = 0; segment_id < kv_cache.linear_cache_segment_sizes.size(); ++segment_id) {
@@ -442,7 +477,7 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
 
             if (kv_scale_data) {
-                void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * param.kv_scale_stride_bytes);
+                void* kv_scale_addr = (void*)((int8_t*)kv_scale_data + block_id * scale_rows.stride * scale_rows.rows);
                 std::shared_ptr<void> kv_scale_block_addr(kv_scale_owner, kv_scale_addr);
                 if (param.use_opaque_kv_cache_store || mla_kvcache) {
                     request_blocks->addBlock("kv_scale_" + cache_key,

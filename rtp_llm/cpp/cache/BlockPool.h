@@ -9,6 +9,7 @@
 
 #include <torch/torch.h>
 
+#include "rtp_llm/cpp/cache/SharedCacheArena.h"
 #include "rtp_llm/cpp/cache/BlockRefCounter.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
@@ -30,6 +31,24 @@ public:
     ~BlockPool();
 
     bool init();
+    void attachSharedArena(std::shared_ptr<SharedCacheArena> arena,
+                           size_t                            group,
+                           const torch::Tensor&              backing,
+                           bool                              registered_host) {
+        shared_arena_                 = std::move(arena);
+        arena_group_                  = group;
+        cache_aligned_buffer_         = backing;
+        cache_buffer_registered_host_ = registered_host;
+    }
+    const torch::Tensor& backingTensor() const {
+        return cache_aligned_buffer_;
+    }
+    bool registeredHost() const {
+        return cache_buffer_registered_host_;
+    }
+    bool sharesCapacity() const {
+        return shared_arena_ != nullptr;
+    }
 
     // REBASE CONFLICT CONTEXT(2413e8e03): source branch exposed the per-pool BlockCache
     // while the new base routes prefix reuse through SharedBlockCache at allocator scope.
@@ -91,6 +110,7 @@ public:
 private:
     void initFreeBlocks();
     void tryFreeBlocks(const BlockIndicesType& block_indices);
+    void updateSharedReferences(const BlockIndicesType& block_indices);
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
     void                checkLayoutValidity(int layout_id) const;
@@ -132,6 +152,8 @@ private:
 
 private:
     BlockPoolConfig config_;
+    std::shared_ptr<SharedCacheArena> shared_arena_;
+    size_t                            arena_group_               = 0;
     size_t          mla_hbm_share_denominator_ = 0;
     BlockIdxType    mla_hbm_blocks_            = 0;
     size_t          free_hbm_blocks_           = 0;  // Protected by free_mu_.

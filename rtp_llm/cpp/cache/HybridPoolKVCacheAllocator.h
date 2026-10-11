@@ -67,8 +67,11 @@ private:
 
     int    groupIdForLayerRegion(int layer_id, KVCacheRegionName region_name) const;
     int    defaultGroupIdForLayer(int layer_id) const;
+    size_t sharedPagedBlockBytes() const;
     size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
 
+    std::shared_ptr<SharedCacheArena> shared_arena_;
+    BlockPoolPtr                      arena_backing_;
     std::vector<BlockPoolPtr> group_block_pools_;
     RoleType                  role_type_{RoleType::PDFUSION};
 };

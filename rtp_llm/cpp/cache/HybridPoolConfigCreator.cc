@@ -391,6 +391,11 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
     setupIndependentPoolSizes(config, is_mtp);
+    const char* shared_env       = std::getenv("RTP_LLM_SHARED_HYBRID_CACHE");
+    config.use_shared_block_pool = model_config.model_type == "glm5_3_flash"
+                                   && config.enable_linear_attention_request_cache
+                                   && (shared_env == nullptr || std::string(shared_env) != "0");
+
     if (!model_config.attn_config.layer_compress_ratios.empty()
         || model_config.attn_config.indexer_compress_ratio > 1) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;

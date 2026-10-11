@@ -37,6 +37,8 @@ struct CacheConfig {
     std::vector<uint32_t>          group_block_nums;
     uint32_t                       dsv4_fixed_pool_blocks                   = 0;
     uint32_t                       dsv4_hca_state_pool_blocks               = 0;
+    size_t                         shared_cache_bytes                       = 0;
+    bool                           use_shared_block_pool                    = false;
     bool                           use_independent_block_pools              = false;
     bool                           use_typed_cache_regions                  = false;
     bool                           use_opaque_kv_cache_store                = false;
@@ -162,6 +164,16 @@ struct CacheConfig {
     void finalizeBlockNums(uint32_t             global_block_num,
                            const RuntimeConfig& runtime_config,
                            bool                 preserve_linear_capacity = false) {
+        if (use_shared_block_pool) {
+            fixed_pool_reserve_bytes = 0;
+            for (size_t gid = 0; gid < group_block_nums.size(); ++gid) {
+                const size_t stride = (group_block_size_bytes[gid] + 255) / 256 * 256;
+                if (shared_cache_bytes > 0) {
+                    group_block_nums[gid] = static_cast<uint32_t>(shared_cache_bytes / stride);
+                }
+            }
+            return;
+        }
         if (!use_independent_block_pools || group_block_nums.empty()) {
             fixed_pool_reserve_bytes = 0;
             return;
@@ -257,6 +269,8 @@ struct CacheConfig {
         // Block configuration section
         os << indent1 << "# Block Configuration:\n";
         OUTPUT_FIELD(block_num);
+        OUTPUT_FIELD(use_shared_block_pool);
+        OUTPUT_FIELD(shared_cache_bytes);
         OUTPUT_FIELD(seq_size_per_block);
         OUTPUT_FIELD(kernel_seq_size_per_block);
         os << "\n";

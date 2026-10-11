@@ -17,6 +17,8 @@ def _convert_req_index_to_global_index_kernel(
     max_num_blocks_per_req: tl.constexpr,
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE: tl.constexpr,
     ENTRIES_PER_BLOCK: tl.constexpr,
+    PHYSICAL_ENTRIES_PER_BLOCK: tl.constexpr,
+    BLOCKS_PER_PHYSICAL_BLOCK: tl.constexpr,
     NUM_TOPK_TOKENS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
@@ -60,7 +62,17 @@ def _convert_req_index_to_global_index_kernel(
     is_invalid_tok |= ~valid_block
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
     is_invalid_tok |= (base <= 0) & ~is_prefill
-    out_val = base * ENTRIES_PER_BLOCK + inblock_off
+    if BLOCKS_PER_PHYSICAL_BLOCK == 1:
+        out_val = base * PHYSICAL_ENTRIES_PER_BLOCK + inblock_off
+    else:
+        parent = base // BLOCKS_PER_PHYSICAL_BLOCK
+        child = base % BLOCKS_PER_PHYSICAL_BLOCK
+        is_invalid_tok |= (parent <= 0) & ~is_prefill
+        out_val = (
+            parent * PHYSICAL_ENTRIES_PER_BLOCK
+            + child * ENTRIES_PER_BLOCK
+            + inblock_off
+        )
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -87,13 +99,20 @@ def triton_convert_req_index_to_global_index(
     HAS_PREFILL_WORKSPACE: bool = False,
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
+    PHYSICAL_ENTRIES_PER_BLOCK: int | None = None,
+    BLOCKS_PER_PHYSICAL_BLOCK: int = 1,
 ):
     """
     out[token_id, indice_id] =
         block_table[req_id[token_id],
             token_indices[token_id, indice_id] // TOKENS_PER_BLOCK_FOR_BLOCK_TABLE]
-            * ENTRIES_PER_BLOCK
+            * PHYSICAL_ENTRIES_PER_BLOCK
         + token_indices[token_id, indice_id] % ENTRIES_PER_BLOCK
+
+    When BLOCKS_PER_PHYSICAL_BLOCK > 1, table ids name kernel pages inside
+    physical cache blocks. Split each id into its parent and child before
+    applying PHYSICAL_ENTRIES_PER_BLOCK; token offsets still use the logical
+    ENTRIES_PER_BLOCK, not the gap between physical blocks.
 
     Negative token_indices propagate as -1. For safety, we also output -1
         if the derived block_id would be out-of-bounds, or if the block-table
@@ -115,6 +134,14 @@ def triton_convert_req_index_to_global_index(
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     ENTRIES_PER_BLOCK = int(ENTRIES_PER_BLOCK)
     TOKENS_PER_BLOCK_FOR_BLOCK_TABLE = int(TOKENS_PER_BLOCK_FOR_BLOCK_TABLE)
+    BLOCKS_PER_PHYSICAL_BLOCK = int(BLOCKS_PER_PHYSICAL_BLOCK)
+    assert BLOCKS_PER_PHYSICAL_BLOCK > 0
+    PHYSICAL_ENTRIES_PER_BLOCK = (
+        ENTRIES_PER_BLOCK * BLOCKS_PER_PHYSICAL_BLOCK
+        if PHYSICAL_ENTRIES_PER_BLOCK is None
+        else int(PHYSICAL_ENTRIES_PER_BLOCK)
+    )
+    assert PHYSICAL_ENTRIES_PER_BLOCK >= ENTRIES_PER_BLOCK * BLOCKS_PER_PHYSICAL_BLOCK
     assert ENTRIES_PER_BLOCK > 0
     assert TOKENS_PER_BLOCK_FOR_BLOCK_TABLE > 0
 
@@ -160,6 +187,8 @@ def triton_convert_req_index_to_global_index(
         max_num_blocks_per_req,
         TOKENS_PER_BLOCK_FOR_BLOCK_TABLE,
         ENTRIES_PER_BLOCK,
+        PHYSICAL_ENTRIES_PER_BLOCK,
+        BLOCKS_PER_PHYSICAL_BLOCK,
         NUM_TOPK_TOKENS,
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,

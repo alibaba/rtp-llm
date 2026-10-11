@@ -222,7 +222,8 @@ makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION
 
 class RecordingMemoryUtil: public MemoryUtil {
 public:
-    bool regUserMr(void*, uint64_t, bool gpu, uint64_t) override {
+    bool regUserMr(void*, uint64_t, bool gpu, uint64_t alignment) override {
+        reg_alignments.push_back(alignment);
         reg_gpu_flags.push_back(gpu);
         return true;
     }
@@ -244,6 +245,7 @@ public:
         return true;
     }
 
+    std::vector<uint64_t> reg_alignments;
     std::vector<bool> reg_gpu_flags;
     std::vector<bool> dereg_gpu_flags;
 };
@@ -1205,8 +1207,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CP8LinearReuseStoresOnlyThe1024StateForA1
     // whole-request Linear checkpoint. It must not force reuse to zero.
     auto full_only = allocator->groupBlockPools()[1]->malloc(1);
     ASSERT_EQ(full_only.size(), 1u);
-    allocator->sharedBlockCache()->put(
-        keys[8], {NULL_BLOCK_IDX, full_only[0]}, /*is_resident=*/false);
+    allocator->sharedBlockCache()->put(keys[8], {NULL_BLOCK_IDX, full_only[0]}, /*is_resident=*/false);
     allocator->groupBlockPools()[1]->requestFree(full_only);
     EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(keys[8], /*gid=*/1)));
 
@@ -1791,6 +1792,99 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionMarksCanonicalResour
             EXPECT_EQ(dependencies[i].parent_key, expected_canonical[i - 1]);
         }
     }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SharedCapacityViewsKeepDataAndReferencesIsolated) {
+    auto config                   = makeTinyMultiPoolHybridConfig();
+    config.use_shared_block_pool  = true;
+    config.shared_cache_bytes     = 256 * 32;
+    config.group_block_size_bytes = {2 * config.cache_specs[0]->block_size_bytes(),
+                                     2 * config.cache_specs[1]->block_size_bytes()};
+    auto allocator                = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const auto& pools = allocator->groupBlockPools();
+    ASSERT_EQ(pools.size(), 2u);
+    EXPECT_EQ(pools[0]->getBaseAddress(), pools[1]->getBaseAddress());
+    auto linear = pools[0]->malloc(1);
+    auto full   = pools[1]->malloc(1);
+    ASSERT_EQ(linear.size(), 1u);
+    ASSERT_EQ(full.size(), 1u);
+    const auto linear_tensor = pools[0]->allLayerCacheBase()[0];
+    const auto full_tensor   = pools[1]->allLayerCacheBase()[0];
+    linear_tensor[linear[0]].fill_(7);
+    full_tensor[full[0]].fill_(11);
+    EXPECT_TRUE(linear_tensor[linear[0]].eq(7).all().item<bool>());
+    EXPECT_TRUE(full_tensor[full[0]].eq(11).all().item<bool>());
+    EXPECT_EQ(pools[0]->convertIndexToAddr(0, linear[0]).kv_addr, linear_tensor[linear[0]].data_ptr());
+    pools[0]->blockCacheReference(linear);
+    pools[0]->connectorReference(linear);
+    pools[0]->requestFree(linear);
+    pools[0]->blockCacheFree(linear);
+    EXPECT_EQ(pools[1]->freeBlocksNum(), pools[1]->totalBlocksNum() - 2);
+    pools[0]->connectorFree(linear);
+    EXPECT_EQ(pools[1]->freeBlocksNum(), pools[1]->totalBlocksNum() - 1);
+    pools[1]->requestFree(full);
+    auto reused = pools[1]->malloc(1);
+    ASSERT_EQ(reused.size(), 1u);
+    EXPECT_EQ(reused[0], linear[0]);
+    pools[1]->requestFree(reused);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), pools[0]->totalBlocksNum());
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SharedPhysicalBlocksExposeKernelPagesAndCopySegments) {
+    auto config                        = makeTinyMultiPoolHybridConfig();
+    config.seq_size_per_block          = 16;
+    config.kernel_seq_size_per_block   = 4;
+    config.use_shared_block_pool       = true;
+    config.shared_cache_bytes          = 256 * 32;
+    const size_t state_bytes           = config.cache_specs[0]->block_size_bytes();
+    const size_t kernel_bytes          = config.cache_specs[1]->block_size_bytes();
+    config.group_kv_block_stride_bytes = {state_bytes, kernel_bytes * 4};
+    config.group_kv_scale_stride_bytes = {0, 0};
+    config.group_block_size_bytes      = {state_bytes * 2, kernel_bytes * 8};
+    auto allocator                     = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const auto& pool = allocator->groupBlockPools()[1];
+    auto        ids  = pool->malloc(1);
+    ASSERT_EQ(ids.size(), 1u);
+    auto tensors = pool->allLayerCacheBase();
+    EXPECT_EQ(tensors[0].size(0), config.shared_cache_bytes / 256 * 4);
+    auto segments = pool->convertIndexToBuffer(0, ids[0]);
+    ASSERT_EQ(segments.size(), 4u);
+    for (size_t page = 0; page < segments.size(); ++page) {
+        EXPECT_EQ(segments[page].addr, tensors[0][ids[0] * 4 + page].data_ptr());
+        EXPECT_EQ(segments[page].size_bytes, kernel_bytes);
+    }
+    pool->requestFree(ids);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SharedCapacityUsesCpLogicalTokens) {
+    auto config = makeTinyMultiPoolHybridConfig();
+    config.use_shared_block_pool = true;
+    config.shared_cache_bytes = 256 * 32;
+    config.group_block_size_bytes = {2 * config.cache_specs[0]->block_size_bytes(),
+                                     2 * config.cache_specs[1]->block_size_bytes()};
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    const auto unsharded = allocator->availableTokensNum();
+    allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, 4));
+    EXPECT_EQ(allocator->availableTokensNum(), unsharded * 2);
+    EXPECT_EQ(allocator->maxAvailableTokensNum(), unsharded * 2);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SharedArenaRegistersOneOwnerWithTransportAlignment) {
+    auto cfg = makeTinyMultiPoolHybridConfig();
+    cfg.use_shared_block_pool = true;
+    cfg.shared_cache_bytes = 256 * 32;
+    cfg.group_block_size_bytes = {2 * cfg.cache_specs[0]->block_size_bytes(), 2 * cfg.cache_specs[1]->block_size_bytes()};
+    auto allocator = makeAllocator(cfg);
+    ASSERT_TRUE(allocator->init());
+    auto memory = std::make_shared<RecordingMemoryUtil>();
+    auto store = std::make_shared<RecordingCacheStore>(memory);
+    allocator->regUserMr(0, store);
+    ASSERT_EQ(memory->reg_gpu_flags.size(), 1u);
+    EXPECT_TRUE(memory->reg_gpu_flags[0]);
+    EXPECT_EQ(memory->reg_alignments[0], 0u);
 }
 
 }  // namespace test

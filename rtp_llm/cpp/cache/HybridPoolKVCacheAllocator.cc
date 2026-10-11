@@ -60,6 +60,20 @@ bool HybridPoolKVCacheAllocator::doInit() {
     size_t                  dsv4_fixed_pool_total_bytes = 0;
     bool                    has_dsv4_fixed_pool         = false;
 
+    if (config_.use_shared_block_pool) {
+        shared_arena_ = std::make_shared<SharedCacheArena>(config_.shared_cache_bytes, config_.group_block_size_bytes);
+        auto backing_config      = BlockPoolConfigHelper::createConfig(1, 1, shared_arena_->bytes(), TYPE_UINT8);
+        backing_config.pool_name = "shared_hybrid_arena";
+        arena_backing_ =
+            std::make_shared<BlockPool>(backing_config, allocation_type_, false, use_cuda_malloc_block_pool_);
+        RTP_LLM_CHECK_WITH_INFO(arena_backing_->init(), "shared hybrid arena allocation failed");
+        RTP_LLM_LOG_INFO(
+            "shared hybrid cache: bytes=%zu usable_bytes=%zu groups=%d; KDA/MLA capacity allocated on demand",
+            shared_arena_->bytes(),
+            shared_arena_->usableBytes(),
+            group_nums);
+    }
+
     std::vector<BlockPoolConfig> group_pool_configs;
     group_pool_configs.reserve(static_cast<size_t>(group_nums));
     for (int gid = 0; gid < group_nums; ++gid) {
@@ -87,7 +101,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
         group_pool_configs.push_back(std::move(pool_config));
     }
 
-    if (has_dsv4_paged_pool) {
+    if (has_dsv4_paged_pool && !shared_arena_) {
         RTP_LLM_LOG_INFO("DSV4 paged pool summary: group_0=%zu bytes(%.2f MB, blocks=%u), "
                          "group_1=%zu bytes(%.2f MB, blocks=%u), group_2=%zu bytes(%.2f MB, blocks=%u), "
                          "total_size=%zu bytes total_size_mb=%.2f",
@@ -104,7 +118,7 @@ bool HybridPoolKVCacheAllocator::doInit() {
                          static_cast<double>(dsv4_paged_pool_total_bytes) / kBytesPerMB);
     }
 
-    if (has_dsv4_fixed_pool) {
+    if (has_dsv4_fixed_pool && !shared_arena_) {
         RTP_LLM_LOG_INFO("DSV4 fixed pool summary: group_3=%zu bytes(%.2f MB, blocks=%u), "
                          "group_4=%zu bytes(%.2f MB, blocks=%u), group_5=%zu bytes(%.2f MB, blocks=%u), "
                          "group_6=%zu bytes(%.2f MB, blocks=%u), total_size=%zu bytes total_size_mb=%.2f",
@@ -142,6 +156,17 @@ bool HybridPoolKVCacheAllocator::doInit() {
                                                       allocation_type_,
                                                       use_pinned_cpu_backing,
                                                       use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+        if (shared_arena_) {
+            auto shared_config               = pool_config;
+            shared_config.total_size_bytes   = shared_arena_->bytes();
+            shared_config.block_num          = shared_arena_->slotCount(gid);
+            auto& layout                     = shared_config.memory_layouts[0];
+            layout.block_num                 = shared_config.block_num;
+            layout.shared_block_stride_bytes = shared_arena_->stride(gid);
+            group_pool                       = std::make_shared<BlockPool>(shared_config, allocation_type_);
+            group_pool->attachSharedArena(
+                shared_arena_, gid, arena_backing_->backingTensor(), arena_backing_->registeredHost());
+        }
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(), "Failed to initialize block pool for group %d", gid);
 
         const auto& ids  = config_.global_layer_ids[static_cast<size_t>(gid)];
@@ -407,6 +432,15 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
                                                group_block_pools_[static_cast<size_t>(gid)]->where());
 
             for (int layer_id : config_.global_layer_ids[static_cast<size_t>(gid)]) {
+                if (shared_arena_) {
+                    const auto source      = kv_cache_groups_[gid]->convertIndexToBuffer(layer_id, src_block_index);
+                    const auto destination = kv_cache_groups_[gid]->convertIndexToBuffer(layer_id, dest_block_index);
+                    RTP_LLM_CHECK_WITH_INFO(source.size() == destination.size(), "shared copy layout mismatch");
+                    for (size_t part = 0; part < source.size(); ++part) {
+                        copy_params.add(destination[part].addr, source[part].addr, source[part].size_bytes, copy_type);
+                    }
+                    continue;
+                }
                 auto src_addr_info =
                     kv_cache_groups_[static_cast<size_t>(gid)]->convertIndexToAddr(layer_id, src_block_index);
                 auto dst_addr_info =
@@ -434,7 +468,20 @@ void HybridPoolKVCacheAllocator::blockBatchCopy(const BlockIdPair* begin_ptr, co
     execBatchCopy(copy_params);
 }
 
+size_t HybridPoolKVCacheAllocator::sharedPagedBlockBytes() const {
+    size_t bytes = 0;
+    for (size_t gid = 0; gid < config_.group_types.size(); ++gid) {
+        if (config_.group_types[gid] == CacheGroupType::FULL) {
+            bytes += shared_arena_->stride(gid);
+        }
+    }
+    return std::max<size_t>(1, bytes);
+}
+
 size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->freeBytes() / sharedPagedBlockBytes();
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->freeBlocksNum();
@@ -443,6 +490,9 @@ size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->availableBytes() / sharedPagedBlockBytes();
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->availableBlocksNum();
@@ -451,6 +501,9 @@ size_t HybridPoolKVCacheAllocator::availableBlocksNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::reserveBaseBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->availableBytes() / sharedPagedBlockBytes();
+    }
     size_t total = 0;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
         const auto region =
@@ -556,29 +609,32 @@ void HybridPoolKVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& b
 
 size_t HybridPoolKVCacheAllocator::requestRefBlocksNum() const {
     size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->requestRefBlocksNum();
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        total += group_block_pools_[gid]->requestRefBlocksNum() * (shared_arena_ ? shared_arena_->stride(gid) : 1);
     }
-    return total;
+    return shared_arena_ ? total / sharedPagedBlockBytes() : total;
 }
 
 size_t HybridPoolKVCacheAllocator::connectorRefBlocksNum() const {
     size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->connectorRefBlocksNum();
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        total += group_block_pools_[gid]->connectorRefBlocksNum() * (shared_arena_ ? shared_arena_->stride(gid) : 1);
     }
-    return total;
+    return shared_arena_ ? total / sharedPagedBlockBytes() : total;
 }
 
 size_t HybridPoolKVCacheAllocator::blockCacheRefBlocksNum() const {
     size_t total = 0;
-    for (const auto& pool : group_block_pools_) {
-        total += pool->blockCacheRefBlocksNum();
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        total += group_block_pools_[gid]->blockCacheRefBlocksNum() * (shared_arena_ ? shared_arena_->stride(gid) : 1);
     }
-    return total;
+    return shared_arena_ ? total / sharedPagedBlockBytes() : total;
 }
 
 size_t HybridPoolKVCacheAllocator::notInUseBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->freeBytes() / sharedPagedBlockBytes();
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->notInUseBlocksNum();
@@ -587,6 +643,16 @@ size_t HybridPoolKVCacheAllocator::notInUseBlocksNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::minTokenCapacity(bool use_available_blocks, bool full_groups_only) const {
+    if (shared_arena_) {
+        const size_t bytes = use_available_blocks ? shared_arena_->availableBytes() : shared_arena_->usableBytes();
+        for (size_t gid = 0; gid < config_.group_types.size(); ++gid) {
+            if (config_.group_types[gid] == CacheGroupType::FULL) {
+                return bytes / sharedPagedBlockBytes() * logicalSeqSizePerBlockForCapacity(gid);
+            }
+        }
+        return bytes / sharedPagedBlockBytes() * config_.seq_size_per_block;
+    }
+
     if (group_block_pools_.empty()) {
         return 0;
     }
@@ -630,6 +696,9 @@ size_t HybridPoolKVCacheAllocator::totalTokensNum() const {
 }
 
 size_t HybridPoolKVCacheAllocator::totalBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->usableBytes() / sharedPagedBlockBytes();
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->totalBlocksNum();
@@ -642,6 +711,14 @@ size_t HybridPoolKVCacheAllocator::maxAvailableTokensNum() const {
 }
 
 KVCacheTokenCapacity HybridPoolKVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
+    if (shared_arena_) {
+        KVCacheTokenCapacity capacity;
+        capacity.total_tokens = shared_arena_->usableBytes() / sharedPagedBlockBytes() * default_seq_size_per_block;
+        capacity.available_tokens =
+            shared_arena_->availableBytes() / sharedPagedBlockBytes() * default_seq_size_per_block;
+        return capacity;
+    }
+
     if (group_block_pools_.empty()) {
         return {};
     }
@@ -702,12 +779,19 @@ std::vector<KVCachePoolMetricsSnapshot> HybridPoolKVCacheAllocator::poolMetricsS
 }
 
 void HybridPoolKVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
+    if (arena_backing_) {
+        arena_backing_->regUserMr(model_id, std::move(cache_store));
+        return;
+    }
     for (auto& pool : group_block_pools_) {
         pool->regUserMr(model_id, cache_store);
     }
 }
 
 int64_t HybridPoolKVCacheAllocator::getMrCostTimeMs() const {
+    if (arena_backing_) {
+        return arena_backing_->getMrCostTimeMs();
+    }
     int64_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->getMrCostTimeMs();
@@ -728,6 +812,35 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
     const int   reserve_step       = malloc_info.complete_token_ids->getReserveStep();
     const bool  reuse_enabled      = malloc_info.reuse_cache;
+
+    if (shared_arena_) {
+        std::vector<size_t> demand(kv_cache_groups_.size(), 0);
+        for (size_t gid = 0; gid < kv_cache_groups_.size(); ++gid) {
+            const auto type = config_.group_types[gid];
+            const auto need = kv_cache_groups_[gid]->getNeedBlocks(
+                cpEffectiveSeqLenForReserve(cp_mapper, type, raw_common_seq_len),
+                cpEffectiveSeqLenForReserve(cp_mapper, type, raw_seq_len),
+                reserve_step,
+                reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0,
+                reuse_enabled);
+            demand[gid] = std::max(0, need.common_blocks + batch_size * need.extra_blocks);
+        }
+        // Preserve scheduler headroom in paged block units, charging it once.
+        for (size_t gid = 0; gid < demand.size(); ++gid) {
+            if (config_.group_types[gid] == CacheGroupType::FULL) {
+                demand[gid] += reserve_blocks;
+                break;
+            }
+        }
+        if (!shared_arena_->canAllocate(demand, SharedCacheArena::Capacity::TOTAL)) {
+            return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
+        }
+        if (mode == InitCapacityMode::TOTAL_AND_AVAILABLE
+            && !shared_arena_->canAllocate(demand, SharedCacheArena::Capacity::AVAILABLE)) {
+            return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
+        }
+        return MallocStatus::NONE;
+    }
 
     size_t total_reservable_blocks = 0;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {

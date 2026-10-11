@@ -162,6 +162,9 @@ void configurePinnedMla(CacheConfig& config, const RuntimeConfig& runtime, size_
     if (!host_mb) {
         return;
     }
+    RTP_LLM_CHECK_WITH_INFO(!config.use_shared_block_pool,
+                            "separate pinned MLA overflow is incompatible with shared hybrid capacity; "
+                            "use memory cache for shared host storage");
     RTP_LLM_CHECK_WITH_INFO(config.use_mla && config.is_sparse && topk > 0, "pinned MLA working set requires DSA MLA");
     RTP_LLM_CHECK_WITH_INFO(host_mb <= std::numeric_limits<size_t>::max() / (1024 * 1024),
                             "pinned MLA host budget overflows size_t");
@@ -301,7 +304,16 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     // finalizeBlockNums so CPU-backed STATE/SWA_KV bytes are excluded from HBM.
     config.fixed_pool_uses_pinned_cpu = kv_cache_config.dsv4_fixed_pool_use_memory && hasDsv4FixedPoolBytes(config);
 
-    if (kv_cache_config.test_block_num > 0) {
+    if (config.use_shared_block_pool) {
+        RTP_LLM_CHECK_WITH_INFO(config.dsa_mla_resident_tokens == 0,
+                                "shared hybrid cache cannot use separately pinned MLA overflow");
+        config.shared_cache_bytes =
+            kv_cache_config.test_block_num > 0 ?
+                static_cast<size_t>(kv_cache_config.test_block_num) * config.block_size_bytes :
+                MemoryEvaluationHelper::getKVCacheMemorySize(
+                    runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+        block_num = config.shared_cache_bytes / config.block_size_bytes;
+    } else if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
         block_num = kv_cache_config.test_block_num;
         config.finalizeBlockNums(block_num, runtime_config);
@@ -450,7 +462,14 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                            + propose_config.fixed_pool_reserve_bytes * static_cast<size_t>(num_mtp_modules);
 
     size_t block_num = 0;
-    if (kv_cache_config.test_block_num > 0) {
+    if (score_config.use_shared_block_pool) {
+        score_config.shared_cache_bytes =
+            kv_cache_config.test_block_num > 0 ?
+                static_cast<size_t>(kv_cache_config.test_block_num) * total_block_size_bytes :
+                MemoryEvaluationHelper::getKVCacheMemorySize(
+                    runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+        block_num = score_config.shared_cache_bytes / total_block_size_bytes;
+    } else if (kv_cache_config.test_block_num > 0) {
         block_num = kv_cache_config.test_block_num;
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
@@ -508,7 +527,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.block_size_bytes = total_block_size_bytes;
     // config.block_size       = config.block_size_bytes / rtp_llm::getTypeSize(config.dtype);
     config.block_num                = block_num;
-    config.fixed_pool_reserve_bytes = fixed_reserve;
+    config.fixed_pool_reserve_bytes = config.use_shared_block_pool ? 0 : fixed_reserve;
 
     const uint32_t main_layer_num = score_config.layer_num;
     const uint32_t mtp_layer_num  = propose_config.layer_num;
@@ -526,23 +545,21 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
             config.global_layer_ids.emplace_back();
             config.layer_ids.emplace_back();
             config.group_types.push_back(propose_config.group_types[g]);
-            config.group_region_names.push_back(
-                g < propose_config.group_region_names.size() ? propose_config.group_region_names[g]
-                                                             : KVCacheRegionName::DEFAULT);
-            config.group_seq_size_per_block.push_back(
-                g < propose_config.group_seq_size_per_block.size() ? propose_config.group_seq_size_per_block[g]
-                                                                   : propose_config.seq_size_per_block);
-            config.group_kv_block_stride_bytes.push_back(
-                g < propose_config.group_kv_block_stride_bytes.size()
-                    ? propose_config.group_kv_block_stride_bytes[g]
-                    : propose_config.kv_block_stride_bytes);
-            config.group_kv_scale_stride_bytes.push_back(
-                g < propose_config.group_kv_scale_stride_bytes.size()
-                    ? propose_config.group_kv_scale_stride_bytes[g]
-                    : propose_config.kv_scale_stride_bytes);
-            config.group_block_size_bytes.push_back(
-                g < propose_config.group_block_size_bytes.size() ? propose_config.group_block_size_bytes[g]
-                                                                 : propose_config.block_size_bytes);
+            config.group_region_names.push_back(g < propose_config.group_region_names.size() ?
+                                                    propose_config.group_region_names[g] :
+                                                    KVCacheRegionName::DEFAULT);
+            config.group_seq_size_per_block.push_back(g < propose_config.group_seq_size_per_block.size() ?
+                                                          propose_config.group_seq_size_per_block[g] :
+                                                          propose_config.seq_size_per_block);
+            config.group_kv_block_stride_bytes.push_back(g < propose_config.group_kv_block_stride_bytes.size() ?
+                                                             propose_config.group_kv_block_stride_bytes[g] :
+                                                             propose_config.kv_block_stride_bytes);
+            config.group_kv_scale_stride_bytes.push_back(g < propose_config.group_kv_scale_stride_bytes.size() ?
+                                                             propose_config.group_kv_scale_stride_bytes[g] :
+                                                             propose_config.kv_scale_stride_bytes);
+            config.group_block_size_bytes.push_back(g < propose_config.group_block_size_bytes.size() ?
+                                                        propose_config.group_block_size_bytes[g] :
+                                                        propose_config.block_size_bytes);
             config.group_block_nums.push_back(0);
             if (propose_config.group_types[g] == CacheGroupType::FULL) {
                 ++config.full_group_num;
@@ -620,12 +637,11 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 // Keep the propose model's group placement. DSV4 MTP is
                 // SWA-only and lives in the SWA typed pool, not the first FULL
                 // pool. Non-typed hybrid configs fall back to the full group.
-                const int target_gid = independent_eagle_pool
-                                           ? static_cast<int>(propose_group_offset + g)
-                                           : ((g < config.global_layer_ids.size()) ? static_cast<int>(g)
-                                                                                  : static_cast<int>(full_gid));
-                RTP_LLM_CHECK_WITH_INFO(
-                    static_cast<size_t>(local_lid) < propose_config.layer_to_group_id.size(),
+                const int target_gid =
+                    independent_eagle_pool ?
+                        static_cast<int>(propose_group_offset + g) :
+                        ((g < config.global_layer_ids.size()) ? static_cast<int>(g) : static_cast<int>(full_gid));
+                RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_lid) < propose_config.layer_to_group_id.size(),
                     "propose layer_to_group_id missing local layer %d (size=%zu)",
                     local_lid,
                     propose_config.layer_to_group_id.size());
@@ -686,7 +702,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     }
 
     config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
-    config.fixed_pool_reserve_bytes = fixed_reserve;
+    config.fixed_pool_reserve_bytes = config.use_shared_block_pool ? 0 : fixed_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "

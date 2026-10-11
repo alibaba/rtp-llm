@@ -10,6 +10,8 @@ struct MemoryLayoutConfig {
     size_t   mla_resident_tokens = 0;
     size_t   mla_hbm_size_bytes  = 0;
 
+    // Nonzero: block-major views into a shared arena, not private layer planes.
+    size_t   shared_block_stride_bytes = 0;
     uint32_t layer_num = 0;
     uint32_t block_num = 0;
 

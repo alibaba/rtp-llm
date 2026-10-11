@@ -129,7 +129,7 @@ public:
                          cache_config.block_num);
 
         if (group_id < cache_config.group_types.size() && cache_config.group_types[group_id] == CacheGroupType::LINEAR
-            && cache_config.enable_linear_attention_request_cache) {
+            && cache_config.enable_linear_attention_request_cache && !cache_config.use_shared_block_pool) {
             RTP_LLM_LOG_INFO("Linear request cache pool: gid=%zu block_num=%u avg_query_length=%u "
                              "pages_per_query=%zu block_bytes=%zu",
                              group_id,
@@ -267,8 +267,7 @@ private:
         // LINEAR and typed DSV4 paged groups must never be reshaped as generic
         // MLA. Shared HybridCache still builds its single physical layout from
         // the leading FULL spec, so this remains true for the common pool.
-        cfg.is_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv
-                     && (cache_config.use_mla || cache_config.is_sparse);
+        cfg.is_mla  = !cfg.is_linear_attention && !is_dsv4_paged_kv && (cache_config.use_mla || cache_config.is_sparse);
         cfg.use_mla = !cfg.is_linear_attention && !is_dsv4_paged_kv && cache_config.use_mla;
         cfg.enable_kv_cache_partition = !is_dsv4_paged_kv && !is_dsv4_state;
         cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);

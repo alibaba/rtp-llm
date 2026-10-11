@@ -65,9 +65,8 @@ public:
     MatchResult match(CacheKeyType cache_key, CacheBlockKind kind);
     MatchResult match(CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask);
     MatchResult matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind);
-    MatchResult matchAndMarkInFlight(CacheKeyType                 cache_key,
-                                     CacheBlockKind               kind,
-                                     const std::vector<uint8_t>& required_slot_mask);
+    MatchResult
+    matchAndMarkInFlight(CacheKeyType cache_key, CacheBlockKind kind, const std::vector<uint8_t>& required_slot_mask);
 
     std::pair<bool, std::optional<CacheItem>>
     putCommitted(CacheKeyType cache_key, const BlockDependency& dependency, const CacheItem& item);
@@ -85,6 +84,7 @@ public:
                                              uint64_t         generation);
 
     // Complete Linear snapshots can be evicted without removing their descendants.
+    std::optional<CacheItem>  popOldestSharedMemoryBacking();
     std::optional<CacheItem>  popOldestIndependentState(CacheBackingType backing_type);
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind);
     std::optional<CacheItem> popOldestEvictable(CacheBlockKind kind, CacheBackingType backing_type);
@@ -151,6 +151,7 @@ private:
     std::unordered_map<CacheKeyType, Node> nodes_;
     std::unordered_map<CacheKeyType, std::unordered_set<CacheKeyType>> pending_children_by_parent_;
     std::array<std::set<EvictKey>, kKindCount> leaf_lru_;
+    std::set<EvictKey>                                                 independent_memory_state_lru_;
     uint64_t access_seq_{0};
     uint64_t generation_seq_{0};
 };

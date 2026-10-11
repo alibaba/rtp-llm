@@ -84,6 +84,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":cache_types",
+        ":shared_cache_arena",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:lru_cache",
@@ -276,4 +277,10 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps(),
+)
+
+cc_library(
+    name = "shared_cache_arena",
+    hdrs = ["SharedCacheArena.h"],
+    visibility = ["//visibility:public"],
 )

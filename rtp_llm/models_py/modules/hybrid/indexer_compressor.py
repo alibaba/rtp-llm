@@ -16,11 +16,16 @@ def raw_pool_block_rows(base: torch.Tensor, pool_name: str) -> torch.Tensor:
             f"{pool_name} must have block and storage dimensions, "
             f"got shape={tuple(base.shape)} dtype={base.dtype}"
         )
-    if not base.is_contiguous():
-        raise RuntimeError(
-            f"{pool_name} must be contiguous, got shape={tuple(base.shape)} "
-            f"stride={tuple(base.stride())} dtype={base.dtype}"
-        )
+    # Shared arenas pad the distance between blocks; every block's payload
+    # remains contiguous. Preserve that stride instead of copying the pool.
+    expected = 1
+    for dim in range(base.dim() - 1, 0, -1):
+        if base.stride(dim) != expected:
+            raise RuntimeError(
+                f"{pool_name} must be contiguous within each block, "
+                f"got shape={tuple(base.shape)} stride={tuple(base.stride())}"
+            )
+        expected *= base.shape[dim]
     return base.view(torch.uint8).view(int(base.shape[0]), -1)
 
 
@@ -60,7 +65,13 @@ def fp32_state_pool_view(
             f"of one entry: stride_bytes={stride_bytes} entry_bytes={entry_bytes}"
         )
     entries_per_block = stride_bytes // entry_bytes
-    return raw.view(torch.float32).view(-1, state_width), entries_per_block
+    typed = raw.view(torch.float32)
+    if raw.is_contiguous():
+        return typed.view(-1, state_width), entries_per_block
+    return (
+        typed.view(int(raw.shape[0]), entries_per_block, state_width),
+        entries_per_block,
+    )
 
 
 def _hadamard_rotate_reference(x: torch.Tensor) -> torch.Tensor:

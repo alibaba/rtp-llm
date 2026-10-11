@@ -202,8 +202,7 @@ class Glm53IndexerCacheLayoutTest(unittest.TestCase):
             get_raw_pool_tensor=get_raw_pool_tensor,
         )
         by_group = [
-            torch.full((2, 1), group_id, dtype=torch.int32)
-            for group_id in range(7)
+            torch.full((2, 1), group_id, dtype=torch.int32) for group_id in range(7)
         ]
         attention_inputs = SimpleNamespace(
             kv_cache_kernel_block_id_device_by_group=by_group
@@ -271,6 +270,26 @@ class Glm53IndexerCacheLayoutTest(unittest.TestCase):
         self.assertEqual(entries, 4)
         self.assertEqual(tuple(view.shape), (8, 256))
         self.assertEqual(view.data_ptr(), base.data_ptr())
+
+    def test_shared_pool_views_preserve_stride_and_write_original_storage(self) -> None:
+        backing = torch.zeros(8192, dtype=torch.uint8)
+        kv = backing.as_strided((3, 2 * 132), (1024, 1), 512)
+        view, entries = fp8_pool_view(kv, 132)
+        self.assertEqual(entries, 2)
+        self.assertEqual(view.stride(0), 1024)
+        view[1].fill_(19)
+        self.assertTrue(torch.all(backing[1536:1800] == 19))
+        self.assertEqual(backing[1800].item(), 0)
+        # Use independent backing for a large per-block FP32 state.
+        state_backing = torch.zeros(3 * 8192, dtype=torch.uint8)
+        state = state_backing.as_strided((3, 4 * 256 * 4), (8192, 1))
+        state_view, state_entries = fp32_state_pool_view(state, 256)
+        self.assertEqual(state_entries, 4)
+        self.assertEqual(tuple(state_view.shape), (3, 4, 256))
+        self.assertEqual(state_view.stride(0), 2048)
+        state_view[2, 1].fill_(7)
+        self.assertTrue(torch.all(state_backing[17408:18432].view(torch.float32) == 7))
+        self.assertEqual(state_backing[18432].item(), 0)
 
     def test_layout_dimensions_cover_mtp_slack(self) -> None:
         layout = IndexerCompressorCacheLayout(gen_num_per_cycle=3)

@@ -232,10 +232,9 @@ bool KVCacheMemoryConnector::init() {
                             "init failed, disk sync timeout is invalid, sync timeout: %ld ms",
                             kv_cache_config_.memory_cache_disk_sync_timeout_ms);
 
-    RTP_LLM_CHECK_WITH_INFO(kv_cache_config_.linear_cache_dtype == "auto"
-                                || kv_cache_config_.linear_cache_dtype == "int8"
-                                || kv_cache_config_.linear_cache_dtype == "int16"
-                                || kv_cache_config_.linear_cache_dtype == "bf16",
+    RTP_LLM_CHECK_WITH_INFO(
+        kv_cache_config_.linear_cache_dtype == "auto" || kv_cache_config_.linear_cache_dtype == "int8"
+            || kv_cache_config_.linear_cache_dtype == "int16" || kv_cache_config_.linear_cache_dtype == "bf16",
                             "linear_cache_dtype must be auto, bf16, int8 or int16");
     if (kv_cache_config_.linear_cache_dtype != "auto") {
         RTP_LLM_CHECK_WITH_INFO(wholeStateRequestCache(), "quantized checkpoints require Linear request cache");
@@ -340,6 +339,36 @@ void KVCacheMemoryConnector::initBlockPool() {
                                 "prefix_tree_memory_state_swa_pool_ratio must be non-negative, got %ld",
                                 kv_cache_config_.prefix_tree_memory_state_swa_pool_ratio);
         const size_t total_bytes         = static_cast<size_t>(memory_cache_size_mb) * 1024ULL * 1024ULL;
+        if (whole_request_cache && cache_config_.use_shared_block_pool) {
+            shared_memory_arena_ = std::make_shared<SharedCacheArena>(
+                total_bytes, std::vector<size_t>{compressed_block_size_, state_swa_block_size_});
+            auto backing_config      = BlockPoolConfigHelper::createConfig(1, 1, total_bytes, TYPE_UINT8);
+            backing_config.pool_name = "shared_memory_arena";
+            shared_memory_backing_   = std::make_shared<BlockPool>(backing_config, AllocationType::HOST);
+            RTP_LLM_CHECK_WITH_INFO(shared_memory_backing_->init(), "shared memory arena init failed");
+            auto make_view = [&](size_t gid, size_t payload) {
+                auto cfg =
+                    BlockPoolConfigHelper::createConfig(1, shared_memory_arena_->slotCount(gid), payload, TYPE_UINT8);
+                cfg.total_size_bytes                            = total_bytes;
+                cfg.memory_layouts[0].shared_block_stride_bytes = shared_memory_arena_->stride(gid);
+                auto pool = std::make_shared<BlockPool>(cfg, AllocationType::HOST);
+                pool->attachSharedArena(shared_memory_arena_,
+                                        gid,
+                                        shared_memory_backing_->backingTensor(),
+                                        shared_memory_backing_->registeredHost());
+                RTP_LLM_CHECK_WITH_INFO(pool->init(), "shared memory typed view init failed");
+                return pool;
+            };
+            compressed_pool_ = make_view(0, compressed_block_size_);
+            state_swa_pool_  = make_view(1, state_swa_block_size_);
+            RTP_LLM_LOG_INFO(
+                "shared memory cache: bytes=%zu usable_bytes=%zu MLA_bytes=%zu KDA_bytes=%zu; no capacity split",
+                total_bytes,
+                shared_memory_arena_->usableBytes(),
+                compressed_block_size_,
+                state_swa_block_size_);
+            return;
+        }
         size_t       compressed_capacity = 0;
         size_t       state_swa_capacity  = 0;
         bool         device_scaled       = false;
@@ -379,8 +408,8 @@ void KVCacheMemoryConnector::initBlockPool() {
         } else if (whole_request_cache) {
             size_t device_total_bytes = 0;
             size_t device_state_bytes = 0;
-            const size_t group_count = std::min(cache_config_.group_block_nums.size(),
-                                                cache_config_.group_block_size_bytes.size());
+            const size_t group_count =
+                std::min(cache_config_.group_block_nums.size(), cache_config_.group_block_size_bytes.size());
             for (size_t gid = 0; gid < group_count; ++gid) {
                 const size_t bytes = static_cast<size_t>(cache_config_.group_block_nums[gid])
                                      * cache_config_.group_block_size_bytes[gid];
@@ -391,8 +420,8 @@ void KVCacheMemoryConnector::initBlockPool() {
                 }
             }
             if (device_state_bytes > 0 && device_state_bytes < device_total_bytes) {
-                const long double state_fraction = static_cast<long double>(device_state_bytes)
-                                                   / static_cast<long double>(device_total_bytes);
+                const long double state_fraction =
+                    static_cast<long double>(device_state_bytes) / static_cast<long double>(device_total_bytes);
                 const size_t state_bytes = static_cast<size_t>(static_cast<long double>(total_bytes) * state_fraction);
                 const size_t compressed_bytes = total_bytes - state_bytes;
                 compressed_capacity = compressed_bytes / compressed_block_size_;
@@ -1059,8 +1088,7 @@ CacheBlockKind KVCacheMemoryConnector::kindForSlot(const LayerRegionSlot& slot) 
     return isFullOnlySlot(slot) ? CacheBlockKind::COMPRESSED_KV : CacheBlockKind::STATE_SWA_KV;
 }
 
-std::vector<uint8_t>
-KVCacheMemoryConnector::wholeStateSlotMask(const std::vector<LayerRegionSlot>& slots) const {
+std::vector<uint8_t> KVCacheMemoryConnector::wholeStateSlotMask(const std::vector<LayerRegionSlot>& slots) const {
     std::vector<uint8_t> mask(slots.size(), 0);
     for (size_t i = 0; i < slots.size(); ++i) {
         const int group_id = slots[i].group_id;
@@ -1090,10 +1118,9 @@ size_t KVCacheMemoryConnector::matchWholeRequest(const KVCacheResource& resource
     }
     size_t     matched     = resource.reuseBlockNum();
     for (size_t i = 0; i < key_size; ++i) {
-        const auto compressed_mask =
-            prefixSlotValidMask(layer_blocks, slots, i, CacheBlockKind::COMPRESSED_KV);
-        const bool compressed_required = std::any_of(
-            compressed_mask.begin(), compressed_mask.end(), [](uint8_t valid) { return valid != 0; });
+        const auto compressed_mask = prefixSlotValidMask(layer_blocks, slots, i, CacheBlockKind::COMPRESSED_KV);
+        const bool compressed_required =
+            std::any_of(compressed_mask.begin(), compressed_mask.end(), [](uint8_t valid) { return valid != 0; });
         if (!compressed_required
             || !prefix_block_cache_->match(keys[i], CacheBlockKind::COMPRESSED_KV, compressed_mask).found) {
             break;
@@ -3032,7 +3059,12 @@ bool KVCacheMemoryConnector::allocateOnePrefixBacking(CopyInfoPerKey& copy_info)
 
     while (true) {
         std::vector<PrefixTreeMemoryBlockCache::CacheItem> evicted_items;
-        if (linear_state) {
+        if (shared_memory_arena_ && !disk_only) {
+            auto evicted = prefix_block_cache_->popOldestSharedMemoryBacking();
+            if (evicted.has_value()) {
+                evicted_items.push_back(*evicted);
+            }
+        } else if (linear_state) {
             // Linear states are complete snapshots. Evict within the target
             // tier even when a newer state references the same MLA prefix.
             auto evicted = prefix_block_cache_->popOldestIndependentState(disk_only ? CacheBackingType::DISK :
@@ -3290,6 +3322,12 @@ std::shared_ptr<BlockPool> KVCacheMemoryConnector::createBlockPool(size_t block_
 
 std::string KVCacheMemoryConnector::blockPoolDebugString() const {
     std::stringstream oss;
+    if (shared_memory_arena_) {
+        oss << "shared memory arena: bytes=" << shared_memory_arena_->bytes()
+            << " free_bytes=" << shared_memory_arena_->freeBytes()
+            << " available_bytes=" << shared_memory_arena_->availableBytes();
+        return oss.str();
+    }
     if (usePrefixTreeMemoryCache()) {
         oss << "compressed pool: total=" << compressed_pool_->totalBlocksNum()
             << " free=" << compressed_pool_->freeBlocksNum() << " available=" << compressed_pool_->availableBlocksNum()
@@ -3866,9 +3904,15 @@ void KVCacheMemoryConnector::reportMetricsLoop() {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                     continue;
                 }
-                const auto total = compressed_pool_->totalBlocksNum() + state_swa_pool_->totalBlocksNum();
-                const auto free  = compressed_pool_->freeBlocksNum() + state_swa_pool_->freeBlocksNum();
-                const auto avail = compressed_pool_->availableBlocksNum() + state_swa_pool_->availableBlocksNum();
+                const auto total = shared_memory_arena_ ?
+                                       shared_memory_arena_->usableBytes() / 256 :
+                                       compressed_pool_->totalBlocksNum() + state_swa_pool_->totalBlocksNum();
+                const auto free  = shared_memory_arena_ ?
+                                       shared_memory_arena_->freeBytes() / 256 :
+                                       compressed_pool_->freeBlocksNum() + state_swa_pool_->freeBlocksNum();
+                const auto avail = shared_memory_arena_ ?
+                                       shared_memory_arena_->availableBytes() / 256 :
+                                       compressed_pool_->availableBlocksNum() + state_swa_pool_->availableBlocksNum();
 
                 RtpLLMMemoryCacheStatusMetricsCollector collector;
                 collector.item_num            = static_cast<int64_t>(item_num);

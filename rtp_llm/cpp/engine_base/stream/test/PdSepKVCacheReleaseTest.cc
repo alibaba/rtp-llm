@@ -5,6 +5,7 @@
 #define protected public
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/DSV4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
@@ -886,7 +887,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegions)
     ASSERT_TRUE(status.ok()) << status.ToString();
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), 10u);
-    EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
+    // These small regions fit one bounded TCP batch; all 10 destination buffers remain checked.
+    EXPECT_EQ(cache_store->load_request_keys_.size(), 1u);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
@@ -1035,6 +1037,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4DecoupledCacheStoreTransfersPhysicalBloc
             torch_ext::LayerKVCache layer_cache;
             layer_cache.kv_cache_base      = layout.layers_to_kv_buffer_ptrs_by_attn[layer_id][region_idx];
             layer_cache.seq_size_per_block = config.group_types[gid] == CacheGroupType::FULL ? kernel_spb : spb;
+            layer_cache.cache_store_tensor_is_kernel_block_view =
+                config.group_types[gid] == CacheGroupType::FULL && config.kernelBlocksPerKvBlock() > 1;
             layer_cache.layer_id           = layer_id;
             layer_cache.group_id           = gid;
             layer_cache.region_name        = region_name;
@@ -1260,7 +1264,8 @@ TEST_F(PdSepKVCacheReleaseTest, testDsv4CacheStorePDSepTransfersAllLayerRegionsW
     ASSERT_TRUE(status.ok()) << status.ToString();
 
     EXPECT_EQ(cache_store->load_buffer_requests_.size(), 10u);
-    EXPECT_EQ(cache_store->load_request_keys_.size(), 10u);
+    // These small regions fit one bounded TCP batch; all 10 destination buffers remain checked.
+    EXPECT_EQ(cache_store->load_request_keys_.size(), 1u);
     for (int layer_id = 0; layer_id < 4; ++layer_id) {
         for (int gid : config.layer_to_group_ids[layer_id]) {
             auto region_name = config.group_region_names[gid];
@@ -1516,6 +1521,131 @@ TEST_F(PdSepKVCacheReleaseTest, testWriteCacheStoreUsesTensorDeviceForCpuKvScale
     auto scale_block = cache_store->store_buffer_requests_.front()->getBlock(scale_key);
     ASSERT_NE(scale_block, nullptr);
     EXPECT_FALSE(scale_block->gpu_mem);
+}
+
+
+TEST_F(PdSepKVCacheReleaseTest, testSharedCacheWriterUsesPayloadAndAddressStrideSeparately) {
+    constexpr int payload = 4224;
+    constexpr int stride = 4352;
+    auto backing = torch::full({3 * stride}, 204, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
+    auto view = backing.as_strided({3, payload}, {stride, 1});
+    view[1].fill_(17);
+    view[2].fill_(29);
+    auto store = std::make_shared<MemoryBackedCacheStore>();
+    for (int id : {1, 2}) {
+        torch_ext::PyCacheStoreInputs inputs;
+        inputs.context_batch_size = 1;
+        inputs.decoder_batch_size = 0;
+        inputs.input_lengths_host = torch::tensor({128}, torch::kInt32);
+        inputs.prefix_lengths_host = torch::tensor({0}, torch::kInt32);
+        inputs.request_id = torch::tensor({int64_t(4300 + id)}, torch::kInt64);
+        inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+        inputs.cache_keys = {std::to_string(10000 + id)};
+        inputs.tokens_per_block = 128;
+        inputs.kv_block_stride_bytes = 131072;  // Other groups may have a larger fallback.
+        inputs.kv_scale_stride_bytes = 0;
+        inputs.pd_separation = true;
+        inputs.model_id = 1;
+        inputs.decode_entrance = false;
+        inputs.warmup = false;
+        inputs.use_opaque_kv_cache_store = true;
+        inputs.mla_kvcache = true;
+        inputs.cache_store = store;
+        torch_ext::LayerKVCache layer;
+        layer.kv_cache_base = view;
+        layer.seq_size_per_block = 128;
+        layer.layer_id = 0;
+        layer.group_id = 0;
+        layer.region_name = KVCacheRegionName::INDEXER_KV;
+        layer.cache_store_tensor_is_kernel_block_view = true;
+        WriteCacheStoreOp(inputs.input_lengths_host, inputs.prefix_lengths_host,
+                           torch::tensor({{id}}, torch::kInt32), inputs, layer);
+        const auto key = "kv_" + makeCacheKey(1, inputs.cache_keys[0], 0, layer.region_name);
+        ASSERT_EQ(store->stored_blocks_.at(key).size(), payload);
+        for (auto value : store->stored_blocks_.at(key)) { EXPECT_EQ(value, id == 1 ? 17 : 29); }
+        EXPECT_EQ(store->store_buffer_requests_.back()->getBlock(key)->addr.get(), view[id].data_ptr());
+    }
+    EXPECT_EQ(backing[stride + payload].item<uint8_t>(), 204);
+}
+
+TEST_F(PdSepKVCacheReleaseTest, testSharedIndexerKernelPagesTransferAcrossPoolLayouts) {
+    for (bool source_shared : {false, true}) {
+        for (bool destination_shared : {false, true}) {
+            CacheConfig cfg;
+            cfg.dtype = TYPE_UINT8;
+            cfg.layer_num = cfg.layer_all_num = 1;
+            cfg.block_num = 4;
+            cfg.seq_size_per_block = 16;
+            cfg.kernel_seq_size_per_block = 8;
+            cfg.use_independent_block_pools = true;
+            cfg.use_shared_block_pool = destination_shared;
+            cfg.shared_cache_bytes = 2048;
+            cfg.use_typed_cache_regions = true;
+            cfg.use_opaque_kv_cache_store = true;
+            cfg.full_group_num = cfg.group_layer_num = 1;
+            cfg.cache_specs = {std::make_shared<DSV4KVSpec>(KVCacheRegionName::INDEXER_KV, 1, 4, 8, TYPE_UINT8, 16)};
+            cfg.global_layer_ids = cfg.layer_ids = {{0}};
+            cfg.group_types = {CacheGroupType::FULL};
+            cfg.group_region_names = {KVCacheRegionName::INDEXER_KV};
+            cfg.group_block_nums = {4};
+            cfg.group_seq_size_per_block = {16};
+            cfg.group_kv_block_stride_bytes = {64};
+            cfg.group_kv_scale_stride_bytes = {0};
+            cfg.group_block_size_bytes = {64};
+            cfg.layer_to_group_id = {0};
+            cfg.layer_to_group_ids = {{0}};
+            cfg.layer_group_types = {CacheGroupType::FULL};
+            cfg.layer_to_block_stride_bytes = {64};
+            cfg.layer_region_to_group_id = {std::vector<int>(static_cast<size_t>(KVCacheRegionName::REGION_COUNT), -1)};
+            cfg.layer_region_to_group_id[0][static_cast<size_t>(KVCacheRegionName::INDEXER_KV)] = 0;
+            cfg.kv_block_stride_bytes = cfg.kv_block_size_bytes = cfg.block_size_bytes = 64;
+            auto manager = std::make_shared<KVCacheManager>(cfg, false, nullptr);
+            ASSERT_TRUE(manager->init());
+            auto pool = manager->allocator_->getBlockPool();
+            auto destination = pool->malloc(1);
+            ASSERT_EQ(destination.size(), 1u);
+
+            const int row_stride = source_shared ? 128 : 32;
+            auto backing = torch::zeros({4 * row_stride}, torch::TensorOptions(torch::kUInt8).pinned_memory(true));
+            auto view = backing.as_strided({4, 32}, {row_stride, 1});
+            view[2].fill_(17);
+            view[3].fill_(29);
+            auto inputs = makeSingleBlockWriteInputs("777", 4400, 16, 64, 0, true, KVCacheRegionName::INDEXER_KV);
+            KvCacheInfo source;
+            source.kv_cache_buffer = view;
+            auto store = std::make_shared<MemoryBackedCacheStore>();
+            runtimeWriteCacheStore(inputs, source, false, store);
+            ASSERT_EQ(store->stored_blocks_.size(), 2u);
+
+            EngineInitParams params;
+            params.model_id = 0;
+            params.model_config_.num_layers = 1;
+            DecodeRpcServer server;
+            server.engine_ = std::make_shared<MinimalEngine>(params, manager);
+            server.maga_init_params_ = params;
+            server.propose_maga_init_params_ = nullptr;
+            server.resource_.cache_store = store;
+            auto ids = std::make_shared<BlockIds>();
+            ids->assign(destination);
+            GroupBlockIds groups{ids};
+            std::vector<CacheKeyType> keys{777};
+            std::vector<std::string> peers{"127.0.0.1:12345:12346"};
+            grpc::ServerContext context;
+            DecodeRpcServer::LoadKVCacheContext load(4400, "shared-indexer", peers, keys, groups, 0, 5000, 1, 0, &context);
+            auto result = server.loadCache(load);
+            ASSERT_TRUE(result.ok()) << result.ToString();
+            auto parts = manager->convertIndexToBuffer(destination[0], 0, KVCacheRegionName::INDEXER_KV);
+            std::vector<uint8_t> data;
+            for (const auto& part : parts) {
+                auto host = torch::from_blob(part.addr, {int64_t(part.size_bytes)},
+                                              torch::TensorOptions(torch::kUInt8).device(torch::kCUDA)).cpu().contiguous();
+                data.insert(data.end(), host.data_ptr<uint8_t>(), host.data_ptr<uint8_t>() + part.size_bytes);
+            }
+            ASSERT_EQ(data.size(), 64u);
+            for (int i = 0; i < 64; ++i) { EXPECT_EQ(data[i], i < 32 ? 17 : 29); }
+            pool->requestFree(destination);
+        }
+    }
 }
 
 }  // namespace rtp_llm

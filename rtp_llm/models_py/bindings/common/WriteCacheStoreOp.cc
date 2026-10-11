@@ -18,10 +18,9 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     const PyCacheStoreInputs& cache_store_inputs = cache_store_member.value();
 
     auto host_i32 = [](const torch::Tensor& tensor, const char* name) {
-        TORCH_CHECK(tensor.defined() && tensor.numel() > 0,
-                    "cache-store ", name, " must be a non-empty tensor");
-        TORCH_CHECK(tensor.scalar_type() == torch::kInt32,
-                    "cache-store ", name, " must be int32, got ", tensor.scalar_type());
+        TORCH_CHECK(tensor.defined() && tensor.numel() > 0, "cache-store ", name, " must be a non-empty tensor");
+        TORCH_CHECK(
+            tensor.scalar_type() == torch::kInt32, "cache-store ", name, " must be int32, got ", tensor.scalar_type());
         return tensor.device().is_cpu() ? tensor.contiguous() : tensor.cpu().contiguous();
     };
 
@@ -31,16 +30,16 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
     // CP implementations may pass their device-side prefix tensor directly.
     // Prefer the request-scoped pinned mirror prepared in C++ when available,
     // then normalize on the calling thread before any background work starts.
-    const auto& prefix_source = cache_store_inputs.prefix_lengths_host.defined()
-                                    && cache_store_inputs.prefix_lengths_host.numel() > 0 ?
-                                    cache_store_inputs.prefix_lengths_host :
-                                    prefix_lengths;
-    auto captured_prefix_lengths         = host_i32(prefix_source, "prefix_lengths");
-    auto captured_kv_cache_block_id_host = kv_cache_block_id_host;
-    auto captured_cache_store            = cache_store_inputs;
+    const auto& prefix_source =
+        cache_store_inputs.prefix_lengths_host.defined() && cache_store_inputs.prefix_lengths_host.numel() > 0 ?
+            cache_store_inputs.prefix_lengths_host :
+            prefix_lengths;
+    auto captured_prefix_lengths             = host_i32(prefix_source, "prefix_lengths");
+    auto captured_kv_cache_block_id_host     = kv_cache_block_id_host;
+    auto captured_cache_store                = cache_store_inputs;
     captured_cache_store.input_lengths_host  = captured_input_lengths;
     captured_cache_store.prefix_lengths_host = captured_prefix_lengths;
-    auto captured_kv_cache               = kv_cache.value();
+    auto captured_kv_cache                   = kv_cache.value();
 
     // Create event in main thread to avoid cudaEventRecord contention on background threads.
     auto event = runtimeCreateEvent();
@@ -51,13 +50,16 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                 captured_cache_store,
                 captured_kv_cache,
                 event = std::move(event)]() mutable {
-        auto resolve_store_stride = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
+        auto resolve_store_payload = [&](const torch::Tensor& tensor, size_t fallback_stride, const char* name) {
             size_t stride_bytes = fallback_stride;
             if (!tensor.defined() || tensor.dim() < 2) {
                 return stride_bytes;
             }
-            const size_t row_stride_bytes       = static_cast<size_t>(tensor.stride(0)) * tensor.element_size();
-            const int    layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
+            size_t row_payload_bytes = tensor.element_size();
+            for (int dim = 1; dim < tensor.dim(); ++dim) {
+                row_payload_bytes *= static_cast<size_t>(tensor.size(dim));
+            }
+            const int layer_tokens_per_block = captured_kv_cache.seq_size_per_block;
             RTP_LLM_CHECK_WITH_INFO(layer_tokens_per_block > 0,
                                     "LayerKVCache.seq_size_per_block must be positive for cache-store %s write",
                                     name);
@@ -73,13 +75,13 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                     store_tokens,
                     layer_tokens,
                     name);
-                return row_stride_bytes * (store_tokens / layer_tokens);
+                return row_payload_bytes * (store_tokens / layer_tokens);
             }
 
             if (store_tokens >= layer_tokens) {
                 // Raw Linear/KDA and independent-pool tensors already expose
                 // one physical cache block per row.
-                return row_stride_bytes;
+                return row_payload_bytes;
             }
 
             // CP compact STATE/SWA rows can cover cp_size canonical cache-key
@@ -91,17 +93,17 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
                                     layer_tokens,
                                     store_tokens,
                                     name);
-            return row_stride_bytes;
+            return row_payload_bytes;
         };
 
         size_t kv_block_stride_bytes = captured_cache_store.kv_block_stride_bytes;
         if (captured_kv_cache.kv_cache_base.defined() && captured_kv_cache.kv_cache_base.dim() >= 2) {
-            kv_block_stride_bytes = resolve_store_stride(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
+            kv_block_stride_bytes = resolve_store_payload(captured_kv_cache.kv_cache_base, kv_block_stride_bytes, "kv");
         }
         size_t kv_scale_stride_bytes = captured_cache_store.kv_scale_stride_bytes;
         if (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.dim() >= 2) {
             kv_scale_stride_bytes =
-                resolve_store_stride(captured_kv_cache.kv_scale_base, kv_scale_stride_bytes, "scale");
+                resolve_store_payload(captured_kv_cache.kv_scale_base, kv_scale_stride_bytes, "scale");
         }
 
         const size_t store_tokens_per_block = captured_cache_store.tokens_per_block;

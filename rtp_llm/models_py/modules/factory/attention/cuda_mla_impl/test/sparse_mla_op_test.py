@@ -775,6 +775,89 @@ class SparseMlaOpTest(TestCase):
             0.99,
         )
 
+    def test_nope_shared_cache_stride_preserves_exact_attention(self):
+        page, width, blocks = 64, 512, 4
+        for pages_per_block in (1, 2):
+            physical_rows = page * pages_per_block
+            tokens = physical_rows * 2
+            data = torch.randn(tokens, width, dtype=torch.bfloat16, device="cuda")
+            ordinary = torch.zeros(
+                blocks, physical_rows, width, dtype=data.dtype, device="cuda"
+            )
+            backing = torch.full(
+                (blocks * 11 * physical_rows * width,),
+                37.0,
+                dtype=data.dtype,
+                device="cuda",
+            )
+            shared = backing.as_strided(
+                (blocks, physical_rows, width),
+                (11 * physical_rows * width, width, 1),
+                5 * physical_rows * width,
+            )
+            slots = torch.cat(
+                (
+                    torch.arange(physical_rows, 2 * physical_rows),
+                    torch.arange(3 * physical_rows, 4 * physical_rows),
+                )
+            ).to("cuda", torch.int64)
+            for base in (ordinary, shared):
+                cache = LayerKVCache()
+                cache.kv_cache_base = base
+                MlaKVCacheWriteOp(KvCacheDataType.BASE).forward(
+                    data,
+                    data.new_empty(tokens, 0),
+                    cache,
+                    SimpleNamespace(slot_mapping=slots),
+                )
+                torch.testing.assert_close(
+                    base[1], data[:physical_rows], rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    base[3], data[physical_rows:], rtol=0, atol=0
+                )
+            self.assertTrue(bool((backing[: physical_rows * width] == 37).all()))
+            table = torch.tensor(
+                [
+                    [
+                        parent * pages_per_block + child
+                        for parent in (1, 3)
+                        for child in range(pages_per_block)
+                    ]
+                ],
+                dtype=torch.int32,
+                device="cuda",
+            )
+            for query_tokens in (1, 17):
+                for heads in (8, 64):
+                    params = generate_testcase(
+                        TestParam(
+                            num_tokens=query_tokens,
+                            total_cache_len=tokens,
+                            num_heads=heads,
+                            kv_lora_rank=width,
+                            qk_rope_head_dim=0,
+                            qk_nope_head_dim=256,
+                            page_size=page,
+                            top_k=tokens,
+                        )
+                    ).mla_params
+                    q = torch.randn(
+                        query_tokens, heads, width, dtype=data.dtype, device="cuda"
+                    )
+                    indices = (
+                        torch.arange(tokens, dtype=torch.int32, device="cuda")
+                        .view(1, 1, tokens)
+                        .expand(query_tokens, 1, tokens)
+                        .contiguous()
+                    )
+                    outputs = []
+                    for base in (ordinary, shared):
+                        op = SparseMlaOp(heads, width, 0, 256, page, 1.0, tokens)
+                        op.plan(params, table)
+                        outputs.append(op.forward(q, base, indices))
+                    torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
+
     def test_nope_fp8_sparse_attention_caches_chunk_rows_at_init(self):
         """Selected-KV chunking is bounded by the startup configuration."""
         num_tokens = 5

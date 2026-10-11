@@ -417,3 +417,13 @@ cc_test(
     env = {},
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "shared_cache_arena_test",
+    srcs = ["SharedCacheArenaTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:shared_cache_arena",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
