@@ -1376,10 +1376,14 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         torch.testing.assert_close(ctx_pool[2], ids_seed[0, 1:] + 100)
         torch.testing.assert_close(ctx_pool[4], ids_seed[1, :2] + 100)
 
-    def _move_ple_to_cuda(self, device):
+    def _move_ple_to_cuda(self, device, cpu_tables=False):
         embedding = self.ple.ple_embedding
         gpu_embedding = Qwen4ExpNGramEmbedding(
-            [shard.to(device) for shard in embedding.shards],
+            (
+                embedding.shards
+                if cpu_tables
+                else [shard.to(device) for shard in embedding.shards]
+            ),
             embedding.vocab_sizes,
             embedding.offsets,
             embedding.multipliers,
@@ -1456,6 +1460,103 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         )
         torch.testing.assert_close(got.view(2, 3, -1), hyper.view(2, 3, -1) + baseline)
 
+    def test_cpu_graph_preparation_masks_nontext_tokens_without_state_writes(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for CPU lookup staging")
+        device = torch.device("cuda")
+        embedding = self._move_ple_to_cuda(device, cpu_tables=True)
+        self.model.requires_cuda_graph_model_input_preparation = True
+        prefixes = (self._PAGE - 1, self._PAGE)
+        _, context = self._seed_target_history(prefixes)
+        ids = torch.tensor([4, 5, 6, 3, 4, 5], device=device)
+        text_mask = torch.tensor([True, False, True, False, True, True], device=device)
+        inputs = self._target_inputs(prefixes, 3)
+        for value in inputs.values():
+            value.is_cuda_graph = True
+        state_before, context_before = self.state_base.clone(), self.ctx_base.clone()
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(
+                input_ids=ids,
+                attention_inputs=inputs,
+                embedding_inputs=SimpleNamespace(text_tokens_mask=text_mask),
+            )
+        )
+        masked_ids = torch.where(text_mask, ids, embedding.eos_token_id).view(2, 3)
+        hashed = embedding.hashed_ids(
+            torch.cat((context.to(device), masked_ids), dim=1), 3
+        )
+        expected = embedding._gather_torch(hashed.cpu()).to(device)
+        torch.testing.assert_close(embedding._cpu_graph_rows, expected, rtol=0, atol=0)
+        torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
+        torch.testing.assert_close(self.ctx_base, context_before, rtol=0, atol=0)
+        self.assertTrue(all(shard.device.type == "cpu" for shard in embedding.shards))
+
+    def test_target_cpu_ple_forward_captures_and_replays_exact_batch(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for Graph replay")
+        device = torch.device("cuda")
+        gpu_embedding = self._move_ple_to_cuda(device, cpu_tables=True)
+
+        self.model.requires_cuda_graph_model_input_preparation = True
+        prefixes = (self._PAGE - 1, self._PAGE)
+        initial_state, initial_context = self._seed_target_history(prefixes)
+        initial_state = initial_state.to(device)
+        initial_context = initial_context.to(device)
+        ids = torch.tensor([[4, 5, 6], [3, 4, 5]], dtype=torch.long, device=device)
+        hyper = torch.randn(6, _HC * _HIDDEN, dtype=torch.bfloat16, device=device)
+        inputs = self._target_inputs(prefixes, 3)
+        for value in inputs.values():
+            value.prefix_lengths = value.prefix_lengths.pin_memory()
+            value.input_lengths = value.input_lengths.pin_memory()
+            value.is_cuda_graph = True
+            value.is_s_padded = True
+
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+        self.assertTrue(
+            all(shard.device.type == "cpu" for shard in gpu_embedding.shards)
+        )
+        self.model.clear_speculative_target_graph_capture()
+        graph = torch.cuda.CUDAGraph()
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        with torch.cuda.graph(graph):
+            got = self.model._apply_ple(1, hyper, ids.flatten(), inputs)
+        self.model.save_speculative_target_graph_capture(2)
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        graph.replay()
+
+        self.ple.ple_embedding._graph_gather_required = False
+        baseline, _ = self.ple.decode_chunk(
+            hyper.view(2, 3, -1),
+            torch.cat([initial_context, ids], dim=1),
+            initial_state,
+        )
+        torch.testing.assert_close(got.view(2, 3, -1), hyper.view(2, 3, -1) + baseline)
+
+        ids.add_(1)
+        hyper.add_(0.125)
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        graph.replay()
+        self.ple.ple_embedding._graph_gather_required = False
+        baseline, _ = self.ple.decode_chunk(
+            hyper.view(2, 3, -1),
+            torch.cat([initial_context, ids], dim=1),
+            initial_state,
+        )
+        torch.testing.assert_close(got.view(2, 3, -1), hyper.view(2, 3, -1) + baseline)
+
+        self.assertTrue(
+            all(shard.device.type == "cpu" for shard in self.ple.ple_embedding.shards)
+        )
+
     def test_decode_ple_forward_captures_and_replays_exact_batch(self):
         if not torch.cuda.is_available():
             self.skipTest("CUDA is required for Graph replay")
@@ -1531,6 +1632,103 @@ class Qwen4ExpPLERuntimeTest(TestCase):
         initial_context = self.ctx_base[[3, 2]].clone()
         graph.replay()
         check_replay(state_rows=(7, 4), context_rows=(9, 2))
+
+    def test_decode_cpu_ple_forward_captures_and_replays_exact_batch(self):
+        if not torch.cuda.is_available():
+            self.skipTest("CUDA is required for Graph replay")
+        device = torch.device("cuda")
+        self._move_ple_to_cuda(device, cpu_tables=True)
+        self.model.requires_cuda_graph_model_input_preparation = True
+        state_pool = self.model._fixed_state_pool(
+            self.model.kv_cache.get_layer_cache(1, PLE_STATE_TAG),
+            torch.bfloat16,
+            self.ple.short_conv_state_len,
+            self.ple.hc_hidden_size,
+        )
+        state_pool[1].copy_(torch.randn_like(state_pool[1]))
+        state_pool[2].copy_(torch.randn_like(state_pool[2]))
+        state_pool[4].copy_(torch.randn_like(state_pool[4]))
+        self.ctx_base[3].fill_(2)
+        self.ctx_base[4].fill_(3)
+        self.ctx_base[2].fill_(4)
+        initial_state = state_pool[[1, 2]].clone()
+        initial_context = self.ctx_base[[3, 4]].clone()
+        initial_state_pool = self.state_base.clone()
+        initial_context_pool = self.ctx_base.clone()
+
+        ids = torch.tensor([5, 6], dtype=torch.long, device=device)
+        hyper = torch.randn(2, _HC * _HIDDEN, dtype=torch.bfloat16, device=device)
+        inputs = self._inputs_by_tag(
+            is_prefill=False,
+            input_lengths=torch.tensor([3, 8], dtype=torch.int32).pin_memory(),
+            prefix_lengths=torch.empty(0, dtype=torch.int32).pin_memory(),
+            sequence_lengths=torch.tensor([3, 8], dtype=torch.int32).pin_memory(),
+        )
+        sequence_plus_one = torch.tensor([4, 9], dtype=torch.int32, device=device)
+        for value in inputs.values():
+            value.is_cuda_graph = True
+            value.is_s_padded = True
+            value.sequence_lengths_plus_1_device = sequence_plus_one
+
+        def check_replay(state_rows=(1, 4), context_rows=(3, 2)):
+            self.ple.ple_embedding._graph_gather_required = False
+            baseline, next_state = self.ple.decode_step(
+                hyper.view(2, 1, -1),
+                torch.cat([initial_context, ids.view(2, 1)], dim=1),
+                initial_state,
+            )
+            torch.testing.assert_close(got, hyper + baseline.squeeze(1))
+            for row, expected in zip(state_rows, next_state):
+                torch.testing.assert_close(state_pool[row], expected)
+            for row, expected in zip(context_rows, ids):
+                torch.testing.assert_close(self.ctx_base[row], expected.view(1))
+
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        self.model._apply_ple(1, hyper, ids, inputs)
+        self.state_base.copy_(initial_state_pool)
+        self.ctx_base.copy_(initial_context_pool)
+        graph = torch.cuda.CUDAGraph()
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        with torch.cuda.graph(graph):
+            got = self.model._apply_ple(1, hyper, ids, inputs)
+        self.state_base.copy_(initial_state_pool)
+        self.ctx_base.copy_(initial_context_pool)
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        graph.replay()
+        check_replay()
+
+        self.state_base.copy_(initial_state_pool)
+        self.ctx_base.copy_(initial_context_pool)
+        ids.add_(1)
+        hyper.add_(0.125)
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        graph.replay()
+        check_replay()
+
+        self.state_base.copy_(initial_state_pool)
+        self.ctx_base.copy_(initial_context_pool)
+        sequence_plus_one.copy_(torch.tensor([9, 10], dtype=torch.int32, device=device))
+        self.state_blocks[0, 1] = 7
+        self.ctx_blocks[0, 1] = 9
+        initial_state = state_pool[[1, 4]].clone()
+        initial_context = self.ctx_base[[3, 2]].clone()
+        self.model.prepare_cuda_graph_model_inputs(
+            SimpleNamespace(input_ids=ids.flatten(), attention_inputs=inputs)
+        )
+        graph.replay()
+        check_replay(state_rows=(7, 4), context_rows=(9, 2))
+
+        self.assertTrue(
+            all(shard.device.type == "cpu" for shard in self.ple.ple_embedding.shards)
+        )
 
     def test_target_verify_commit_finalize_and_next_decode_match_baseline(self):
         prefixes = (self._PAGE - 1, self._PAGE)

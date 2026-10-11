@@ -476,9 +476,12 @@ class Qwen4ExpTest(unittest.TestCase):
             {
                 "RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "1",
                 "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL": "1",
+                "RTP_LLM_QWEN4_PLE_CPU_GRAPH": "0",
             },
         ):
             self.assertFalse(model.support_cuda_graph())
+            with mock.patch.dict(os.environ, {"RTP_LLM_QWEN4_PLE_CPU_GRAPH": "1"}):
+                self.assertTrue(model.support_cuda_graph())
             model.model_config.qwen4_ple_cpu_offload = False
             self.assertTrue(model.support_cuda_graph())
 
