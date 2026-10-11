@@ -148,14 +148,16 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     _validate_run_meta(spec["run_meta"])
     directory = bundle_path(root, kind, identity)
     directory.mkdir(parents=True, exist_ok=True)
+    from reporting.evidence_archive import project
+    files = {}
+    archived_analysis = project(root, directory, analysis, files)
     result = dict(
         report_analysis_schema_version=1,
         kind=kind,
         producer=producer,
         run_meta=spec["run_meta"],
-        result=analysis,
+        result=archived_analysis,
     )
-    files = {}
     # Serialize and release each output before building the next large document.
     for name, produce in (("analysis.json", lambda: _json(result)),
                           ("report-spec.json", lambda: _json(spec)),
@@ -207,11 +209,12 @@ def read_bundle(path):
     if (not isinstance(files, dict) or not required <= files.keys()
             or any(files[name].get("path") != name for name in required)):
         raise ValueError("report manifest lacks required bundle files")
+    from reporting.evidence_archive import file_digest, verify_references
     for entry in files.values():
         target = directory / entry["path"]
         if target.resolve().parent != directory.resolve():
             raise ValueError("report file escapes bundle")
-        if hashlib.sha256(target.read_bytes()).hexdigest() != entry["sha256"]:
+        if file_digest(target) != entry["sha256"]:
             raise ValueError("report checksum mismatch: " + entry["path"])
     spec = json.loads((directory / "report-spec.json").read_text())
     validate(spec, versioned=True)
@@ -220,6 +223,7 @@ def read_bundle(path):
     if not matches_schema(analysis, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(analysis.get("run_meta"))
+    verify_references(analysis["result"], files)
     return directory
 
 
@@ -243,4 +247,5 @@ def load_analysis(path):
     if not matches_schema(value, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(value.get("run_meta"))
-    return value["result"]
+    from reporting.evidence_archive import restore
+    return restore(path.parent, value["result"])

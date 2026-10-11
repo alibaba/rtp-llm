@@ -1,11 +1,27 @@
 """Frozen numeric observations shared by gates and report projections."""
 
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 import copy
 import json
 import math
 from pathlib import Path
 
 from schema_contract import matches_schema
+
+
+_READ_SESSION = ContextVar('frozen_metric_reads', default=None)
+
+
+@contextmanager
+def frozen_metric_reads():
+    """Reuse only unchanged artifacts within a report publication, never across runs."""
+    token = _READ_SESSION.set({})
+    try:
+        yield
+    finally:
+        _READ_SESSION.reset(token)
 
 
 class MetricContractError(ValueError):
@@ -39,7 +55,17 @@ class MetricStore:
 
     @classmethod
     def read(cls, directory):
-        return cls(json.loads((Path(directory) / "metrics.json").read_text()))
+        path = (Path(directory) / "metrics.json").resolve()
+        stat = path.stat()
+        signature = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        cache = _READ_SESSION.get()
+        if cache is not None and path in cache and cache[path][0] == signature:
+            return cache[path][1]
+        with path.open(encoding='utf-8') as stream:
+            store = cls(json.load(stream))
+        if cache is not None:
+            cache[path] = (signature, store)
+        return store
 
     def save(self, directory):
         atomic_json(Path(directory) / "metrics.json", self.document)

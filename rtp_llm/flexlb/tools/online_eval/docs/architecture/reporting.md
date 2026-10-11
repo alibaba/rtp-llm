@@ -94,6 +94,12 @@ HA 的逐阶段检查直接根据已选请求证据产生 `CheckResult`，其输
 
 ## 数据边界
 
+报告发布将分析结果中的 `series`、`statistic_sources` 无损存为 gzip 证据工件，`analysis.json` 通过 `series_evidence` 引用工件摘要与字段清单。证据按序列编码，不额外构建完整序列 JSON 字符串；压缩不删除采样点，也不改变缺采、时间戳、单位或来源。发布阶段复用相同序列对象的压缩结果，复用范围只覆盖一次视图发布，不跨运行缓存可变分析结果。
+
+压缩证据在 `reports/evidence/` 按内容摘要存储，并硬链接到各 bundle；不支持硬链接的文件系统使用复制。每份 bundle 的 manifest 校验其本地证据文件，单独复制 bundle 后仍可离线读取，不依赖原目录的共享池。`load_analysis` 校验引用并还原完整分析结构；直接读取 `analysis.json` 得到的是归档结构。HTML 和报告 spec 各自保留交互统计所需的数据，可独立打开和重绘。冻结对照通过公共读取接口取得完整结果，不把压缩方式解释为测量口径差异。
+
+一次多视图发布通过 `frozen_metric_reads` 复用已解析的 `metrics.json`。缓存使用绝对路径与文件设备、inode、大小和修改时间识别工件，原子替换后重新读取；发布结束或异常退出时释放缓存。该范围从报告生成开始，不覆盖采集、指标生产或门禁阶段。视图只读冻结指标，不修改共享的 `MetricStore`；原始归档与门禁判定保持独立。
+
 `RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。`FrozenReport` 与 `ChartPanel` 在归档进入对照时解析报告契约，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
 
 视图映射在 `view_schema.py` 的加载边界校验。`view_model.py` 定义曲线、面板、坐标轴、预设选择、章节和字幕模板对象，渲染组件通过这些对象访问展示字段。坐标轴上下界必须有限且 `min < max`，一个面板不能重复选择同一曲线；字幕只允许 `{verdict}`、`{monitoring_status}` 普通占位符，不接受格式规格或转换。视图文件和报告产物仍采用数据格式，测量值与门禁结论不由展示模型改变。

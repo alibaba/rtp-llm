@@ -38,7 +38,7 @@ def write_report(directory, analysis, *, name=DEFAULT_VIEW):
                         meta=provenance_from(payload), producer="workload")
 
 
-def write_views(directory, analysis, names=None):
+def _write_views(directory, analysis, names=None):
     """One canonical selected report, with optional explicit additional views."""
     analysis = dict(analysis)
     if "unavailable_report_views" in analysis:
@@ -71,3 +71,10 @@ def write_views(directory, analysis, names=None):
     if DEFAULT_VIEW in paths:
         ordered.append(DEFAULT_VIEW)
     return {name: paths[name] for name in ordered}
+
+
+def write_views(directory, analysis, names=None):
+    from monitoring.metric_store import frozen_metric_reads
+    from reporting.evidence_archive import archive_session
+    with frozen_metric_reads(), archive_session():
+        return _write_views(directory, analysis, names)
