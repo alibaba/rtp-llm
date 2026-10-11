@@ -26,6 +26,7 @@ from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as nativ
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
 from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+from rtp_llm.models_py.modules.dsv4.fp8 import _v41_short_sparse_sm120
 from rtp_llm.models_py.modules.dsv4.fp8.test import (
     v41_block_norm_reference as block_norm_provider,
 )
@@ -97,13 +98,30 @@ from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 from rtp_llm.utils.model_weight import W
 
+MAINTAINED_ATTENTION_CHOICES = {
+    "rotary_compute_device": "cuda",
+    "sparse_attention_mode": "short_preserved",
+}
+
 
 def canonical_attention_profile(profile):
     # Compact aliases keep the longest checkpoint trace name within 255 bytes.
-    return profile[:-2] + "_j" if profile.endswith(("_s", "_f", "_c")) else profile
+    return (
+        profile[:-2] + "_j" if profile.endswith(("_s", "_f", "_c", "_m")) else profile
+    )
 
 
-def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, context=256):
+def run_rank(
+    rank,
+    port,
+    checkpoint,
+    directory,
+    prompts,
+    full,
+    new_tokens,
+    context=256,
+    maintained_attention=False,
+):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
     os.environ.update(
@@ -155,6 +173,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_router = os.environ.get("DSV41_TEST_COMPARE_ROUTER_EAGER") == "1"
     compare_projection = os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
     compare_attention = os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+    if type(maintained_attention) is not bool or (
+        maintained_attention and not compare_attention
+    ):
+        raise ValueError("Maintained attention comparison requires qualified controls")
     if compare_attention and not (compare_projection and compare_block_norm):
         raise ValueError("Attention comparison requires the qualified W13 composition")
     if compare_projection and not compare_router:
@@ -313,6 +335,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         if not base.endswith("_j"):
             raise ValueError("Attention recipes require the final eager W13 profile")
         profiles.extend(base[:-2] + suffix for suffix in ("_s", "_f", "_c"))
+        if maintained_attention:
+            profiles = [base[:-2] + "_m"]
         if any(len(profile.encode()) > 255 for profile in profiles):
             raise ValueError(
                 "Attention trace profile exceeds the filesystem name limit"
@@ -325,6 +349,11 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     cuda_frequency_source_hash = (
         hashlib.sha256(Path(cuda_frequency_provider.__file__).read_bytes()).hexdigest()
         if compare_attention
+        else None
+    )
+    maintained_short_sparse_source_hash = (
+        hashlib.sha256(Path(_v41_short_sparse_sm120.__file__).read_bytes()).hexdigest()
+        if maintained_attention
         else None
     )
     router_eager_source_hash = (
@@ -398,6 +427,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             config, kv_config = load_configuration(
                 Path(checkpoint), max_seq_len=context
             )
+            if maintained_attention:
+                config.deepseek_v41_config.update(MAINTAINED_ATTENTION_CHOICES)
             parallelism, loader = make_loader(config, kv_config, 8, rank)
             started = time.monotonic()
             weights = loader.load_weights(f"cuda:{rank}")
@@ -452,6 +483,30 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                 calls["initialize"] += 1
                 began = time.monotonic()
                 result = initialize(resource)
+                if maintained_attention:
+                    assert result and model._materialized
+                    assert model._rotary_compute_device == "cuda"
+                    assert model._sparse_attention_mode == "short_preserved"
+                    assert len(model.v4.layers) == 40
+                    for layer in model.v4.layers:
+                        assert layer.attn._rotary_compute_device == "cuda"
+                        assert layer.attn._sparse_attention_mode == "short_preserved"
+                        assert layer.attn.freqs_cis.device == torch.device("cuda", rank)
+                        layer.attn._check_execution_config()
+                    print(
+                        "DSV41_MAINTAINED_ATTENTION_OWNER "
+                        + json.dumps(
+                            dict(
+                                rank=rank,
+                                layers=40,
+                                full_nas=full,
+                                device=rank,
+                                component_sha256=maintained_short_sparse_source_hash,
+                                **MAINTAINED_ATTENTION_CHOICES,
+                            )
+                        ),
+                        flush=True,
+                    )
                 print(
                     f"rank={rank} native initialization seconds={time.monotonic() - began:.2f} "
                     f"allocated={torch.cuda.memory_allocated()} precision={precision}",
@@ -533,6 +588,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             "prompt_index": prompt_index,
                             "prompt_token_ids": prompts[prompt_index],
                             "consumed_token_ids": consumed,
+                            **(
+                                {
+                                    **MAINTAINED_ATTENTION_CHOICES,
+                                    "maintained_attention_owners": len(model.v4.layers),
+                                    "maintained_short_sparse_component_sha256": maintained_short_sparse_source_hash,
+                                }
+                                if maintained_attention
+                                else {}
+                            ),
                             **(
                                 {
                                     "shared_eos_diagnostic": True,
@@ -995,7 +1059,15 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
 
 class V41CheckpointEngineSM120Test(unittest.TestCase):
     def run_checkpoint(
-        self, checkpoint, directory, prompts, *, full, new_tokens=1, context=256
+        self,
+        checkpoint,
+        directory,
+        prompts,
+        *,
+        full,
+        new_tokens=1,
+        context=256,
+        maintained_attention=False,
     ):
         self.assertEqual(torch.cuda.device_count(), 8)
         with socket.socket() as sock:
@@ -1011,12 +1083,15 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 full,
                 new_tokens,
                 context,
+                maintained_attention,
             ),
             nprocs=8,
             join=True,
         )
 
-    def run_bounded_checkpoint(self, new_tokens, context=256):
+    def run_bounded_checkpoint(
+        self, new_tokens, context=256, *, maintained_attention=False
+    ):
         torch.manual_seed(41990)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1046,6 +1121,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 full=False,
                 new_tokens=new_tokens,
                 context=context,
+                maintained_attention=maintained_attention,
             )
 
     def test_bounded_checkpoint_cold_engine(self):
@@ -1053,6 +1129,13 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
 
     def test_bounded_checkpoint_cold_decode(self):
         self.run_bounded_checkpoint(9)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1",
+        "maintained attention comparison requires the qualified composed controls",
+    )
+    def test_bounded_checkpoint_maintained_attention(self):
+        self.run_bounded_checkpoint(9, maintained_attention=True)
 
     def test_two_page_bounded_checkpoint_cold_decode(self):
         self.run_bounded_checkpoint(9, context=512)
@@ -1073,13 +1156,21 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
 
     @unittest.skipUnless(
         os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1",
+        "full maintained comparison requires admission and qualified controls",
+    )
+    def test_full_nas_checkpoint_maintained_attention(self):
+        self.run_full_checkpoint(9, maintained_attention=True)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
         and os.environ.get("DSV41_TEST_TRACE_DIR"),
         "full checkpoint trace requires explicit admission and a trace directory",
     )
     def test_full_nas_checkpoint_accuracy_trace(self):
         self.run_full_checkpoint(3)
 
-    def run_full_checkpoint(self, new_tokens):
+    def run_full_checkpoint(self, new_tokens, *, maintained_attention=False):
         from transformers import AutoTokenizer
 
         root = Path(os.environ["DSV41_TEST_CHECKPOINT"]).resolve()
@@ -1178,7 +1269,12 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 flush=True,
             )
             self.run_checkpoint(
-                root, directory, prompts, full=True, new_tokens=new_tokens
+                root,
+                directory,
+                prompts,
+                full=True,
+                new_tokens=new_tokens,
+                maintained_attention=maintained_attention,
             )
 
 
