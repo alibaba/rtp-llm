@@ -122,6 +122,8 @@ py_library(
         "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_deep_history_testlib",
         "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_decode_tilelang_reference_testlib",
         "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_block_norm_reference_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_kv_projection_reference_testlib",
         "//rtp_llm:torch",
         "//rtp_llm:transformers",
     ],
@@ -227,6 +229,16 @@ py_library(
         ":dsv41_deep_attention_history_replay",
         "//rtp_llm:torch",
         "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
+    name = "dsv41_projection_history_replay",
+    testonly = True,
+    srcs = ["dsv41_projection_history_replay.py"],
+    deps = [
+        ":dsv41_corrected_history_replay",
+        "//rtp_llm:torch",
     ],
 )
 

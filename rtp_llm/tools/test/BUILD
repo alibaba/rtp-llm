@@ -52,3 +52,13 @@ py_test(
     data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
     deps = ["//rtp_llm/tools:checkpoint_inventory_lib"],
 )
+
+py_test(
+    name = "dsv41_projection_history_replay_test",
+    srcs = ["dsv41_projection_history_replay_test.py"],
+    deps = ["//rtp_llm/tools:dsv41_projection_history_replay"],
+    target_compatible_with = select({
+        "@//:using_cuda13_sm120": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)

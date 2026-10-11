@@ -132,13 +132,24 @@ def validate_schedule(args, layout):
 
 
 @torch.inference_mode()
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(
+    *,
+    layers=NUM_LAYERS,
+    step_counts=(NUM_STEPS, NUM_STEPS),
+    profile=PROFILE,
+    full_sha256=FULL_SHA256,
+    trace_admission=admit_traces,
+    schedule_admission=validate_schedule,
+    control_marker="DSV41_CORRECTED_HISTORY_CONTROLS",
+    description=__doc__,
+):
+    parser = argparse.ArgumentParser(description=description)
     for name in ("checkpoint", "qualification", "admission_manifest", "report"):
         parser.add_argument(name, type=Path)
     parser.add_argument("--input-artifact", type=Path, required=True)
     parser.add_argument("--prompt-index", type=int, choices=(0, 1), required=True)
     cli = parser.parse_args()
+    count = step_counts[cli.prompt_index]
     if cli.report.exists() or cli.input_artifact.exists():
         raise ValueError("Corrected history artifacts must be fresh")
     if torch.cuda.get_device_capability() != (12, 0):
@@ -147,7 +158,7 @@ def main():
     torch.set_default_dtype(torch.bfloat16)
     torch.set_float32_matmul_precision("highest")
     repo, root = Path(__file__).resolve().parents[2], cli.checkpoint.resolve()
-    if sha256(cli.qualification) != FULL_SHA256:
+    if sha256(cli.qualification) != full_sha256:
         raise ValueError("Corrected history full qualification changed")
     qualification = json.loads(cli.qualification.read_text())
     if not (
@@ -176,19 +187,19 @@ def main():
     provider = repo / "rtp_llm/models_py/modules/dsv4/tilelang_kernels.py"
     if sha256(provider) != PROVIDER_SHA256:
         raise ValueError("Corrected history maintained provider changed")
-    if full["mode"] != "full" or full["profiles"][-1] != PROFILE:
+    if full["mode"] != "full" or full["profiles"][-1] != profile:
         raise ValueError("Corrected history qualified profile differs")
     reference_paths = [
         art
         / "reference-shared-eos-trace-2"
         / f"reference-prompt{cli.prompt_index}-step{step}.pt"
-        for step in range(NUM_STEPS)
+        for step in range(count)
     ]
     native_paths = [
         Path(full["trace_dir"])
-        / PROFILE
+        / profile
         / f"native-prompt{cli.prompt_index}-step{step}.pt"
-        for step in range(NUM_STEPS)
+        for step in range(count)
     ]
     for path in reference_paths + native_paths:
         expected = admission["asset_sha256"][str(path)]
@@ -205,9 +216,11 @@ def main():
     comparisons = [
         row
         for row in analysis["new_profile_comparisons"]
-        if row["profile"] == PROFILE and row["prompt_index"] == cli.prompt_index
+        if row["profile"] == profile and row["prompt_index"] == cli.prompt_index
     ]
-    identities, recipe = admit_traces(reference, native, comparisons, cli.prompt_index)
+    identities, recipe = trace_admission(
+        reference, native, comparisons[:count], cli.prompt_index
+    )
     sys.path.insert(0, str(root / "inference"))
     official, converter, kernel = [
         importlib.import_module(name) for name in ("model", "convert", "kernel")
@@ -221,7 +234,7 @@ def main():
         raise ValueError("Corrected history released kernel differs")
     args = model_args(official, root, 256)
     layout = official.EngramLayout.from_args(args)
-    validate_schedule(args, layout)
+    schedule_admission(args, layout)
     reader = NASReader(root)
     tokenizer = AutoTokenizer.from_pretrained(
         root, trust_remote_code=False, local_files_only=True
@@ -244,7 +257,7 @@ def main():
         reference,
         identities,
         hashes,
-        layers=NUM_LAYERS,
+        layers=layers,
     )
     before = {
         f"{step}.{layer}": tensor_digest(value)
@@ -266,7 +279,7 @@ def main():
         hash_state.token_map.tolist(),
         recipe,
         kernel,
-        layers=NUM_LAYERS,
+        layers=layers,
     )
     after = {
         f"{step}.{layer}": tensor_digest(value)
@@ -278,15 +291,13 @@ def main():
         raise AssertionError(
             "Corrected history prepared rows or cached weights changed"
         )
-    if len(controls) != NUM_STEPS * NUM_LAYERS or len(official_controls) != len(
-        controls
-    ):
+    if len(controls) != count * layers or len(official_controls) != len(controls):
         raise AssertionError("Corrected history reconstruction coverage differs")
     raw = cpu_tree(
         {
             "identities": identities,
             "native_recipe": recipe,
-            "layers": NUM_LAYERS,
+            "layers": layers,
             "official_inputs": [step["inputs"] for step in steps],
             "official_attention": [step["reference"] for step in steps],
             "official_mhc": [step["mhc"] for step in steps],
@@ -301,7 +312,7 @@ def main():
         torch.save(raw, stream)
     report = {
         "prompt_index": cli.prompt_index,
-        "layers": NUM_LAYERS,
+        "layers": layers,
         "identities": identities,
         "native_recipe": recipe,
         "official_reconstruction": official_controls,
@@ -322,7 +333,7 @@ def main():
             text=True,
         ).strip(),
         "source_sha256": admission["source_sha256"],
-        "full_qualification_sha256": FULL_SHA256,
+        "full_qualification_sha256": full_sha256,
         "input_artifact_sha256": sha256(cli.input_artifact),
         "trace_sha256": {
             str(path): sha256(path) for path in reference_paths + native_paths
@@ -331,7 +342,7 @@ def main():
         "prepared_row_sha256": {"before": before, "after": after},
         "cached_weight_sha256": cached,
         "limitations": [
-            "Ten matching-prefix layers; saved own-stream FFN outputs substitute experts.",
+            f"{layers} matching-prefix layers; saved own-stream FFN outputs substitute experts.",
             "No serving, CP, graph, performance or full-model accuracy promotion.",
         ],
     }
@@ -339,11 +350,12 @@ def main():
         json.dump(report, stream, indent=2, allow_nan=False)
         stream.write("\n")
     print(
-        "DSV41_CORRECTED_HISTORY_CONTROLS "
+        control_marker
+        + " "
         + json.dumps(
             {
-                "layers": NUM_LAYERS,
-                "steps": NUM_STEPS,
+                "layers": layers,
+                "steps": count,
                 "ffn_inputs_exact": 2 * len(controls),
                 "weights": len(reader.hashes),
                 "selected_row_reads": len(reader.selected_row_reads),

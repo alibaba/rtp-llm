@@ -179,6 +179,9 @@ def reconstruct_native(
         NgramHashState,
         make_token_windows,
     )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_block_norm_reference import (
+        block_norm_reference,
+    )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
         compressor_bf16,
     )
@@ -188,6 +191,9 @@ def reconstruct_native(
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
         engram_gate_reference,
         engram_projection_reference,
+    )
+    from rtp_llm.models_py.modules.dsv4.fp8.test.v41_kv_projection_reference import (
+        kv_projection_reference,
     )
     from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_collapse_reference import (
         mhc_collapse_reference,
@@ -302,6 +308,12 @@ def reconstruct_native(
         recipe.get("mhc_collapse_reference", False)
     ), decode_tilelang_reference(
         recipe.get("decode_tilelang_reference", False)
+    ), block_norm_reference(
+        recipe.get("block_norm_reference", False),
+        norms=tuple(norm for layer_norms in norms for norm in layer_norms),
+        dim=args.dim,
+    ), kv_projection_reference(
+        recipe.get("kv_projection_reference", False), attentions=owners, kernel=kernel
     ), patch.object(
         v41_prenorm, "prenorm", record_prenorm
     ):
