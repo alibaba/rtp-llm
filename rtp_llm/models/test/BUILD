@@ -41,3 +41,33 @@ py_test(
         "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
     }),
 )
+
+py_test(
+    name = "decision_module_test",
+    srcs = ["decision_module_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "convert_decision_head_jev_vl_test",
+    srcs = ["convert_decision_head_jev_vl_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "clef_decision_module_test",
+    srcs = ["clef_decision_module_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen35_dense_config_test",
+    srcs = ["qwen35_dense_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen35_moe_flat_config_test",
+    srcs = ["qwen35_moe_flat_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

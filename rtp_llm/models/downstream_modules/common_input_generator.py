@@ -17,6 +17,7 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
 from rtp_llm.models.downstream_modules.openai_render import (
     OpenAIRenderBasicInfo,
 )
+from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.time_util import current_time_ms
 
 
@@ -36,6 +37,7 @@ class CommonInputGenerator(object):
             str,
             List[str],
             List[Tuple[str, str]],
+            List[Tuple[str, List[MultimodalInput]]],
             List[ChatMessage],
             List[List[ChatMessage]],
         ],
@@ -54,7 +56,34 @@ class CommonInputGenerator(object):
                     self.config_.special_tokens.pad_token_id + 1
                 )
             multimodal_inputs = []
+            # (text, images) pairs must be matched before the plain-string
+            # branch: their tuples also satisfy its isinstance check.
             if (
+                isinstance(prompt, list)
+                and isinstance(prompt[0], Tuple)
+                and len(prompt[0]) == 2
+                and isinstance(prompt[0][1], list)
+            ):
+                encoded = self.tokenizer_(
+                    [text for text, _ in prompt],
+                    max_length=truncate_length,
+                    return_attention_mask=False,
+                    padding=False,
+                    return_length=True,
+                    truncation=truncate,
+                    return_tensors="np",
+                    **tokenizer_config,
+                )
+                combo_tokens = torch.from_numpy(
+                    np.concatenate(encoded["input_ids"])
+                ).to(torch.int32)
+                input_lengths = torch.from_numpy(encoded["length"]).to(torch.int32)
+                # The C++ processor pairs images with prompts by order, so the
+                # per-prompt lists are flattened in prompt order.
+                multimodal_inputs = [
+                    mm for _, images in prompt for mm in images
+                ]
+            elif (
                 isinstance(prompt, str)
                 or (isinstance(prompt, list) and isinstance(prompt[0], str))
                 or (isinstance(prompt, list) and isinstance(prompt[0], Tuple))

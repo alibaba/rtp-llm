@@ -152,3 +152,21 @@ def cuda13_suites():
         ],
         tags = ["manual"],
     )
+
+    # Decision models: the JEV-27B-VL case exercises the /v1/classifier
+    # decision schema (document + typed questions -> per-question
+    # probabilities) through the unified decision module; its serving copy
+    # lives on the shared 3fs models volume (converted by
+    # rtp_llm/tools/convert_decision_head.py).
+    native.test_suite(
+        name = "smoke_sm120_qwen35_decision_models",
+        tests = [
+            smoke_test(
+                name = "jev_27b_vl_decision",
+                task_info = "data/model/qwen35/jev_27b_vl_decision.json",
+                smoke_args = "--task_type SEQ_CLASSIFICATION --act_type BF16 --max_seq_len 8192 --warm_up 0",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+        ],
+    )
+

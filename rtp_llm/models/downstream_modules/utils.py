@@ -65,6 +65,15 @@ def create_custom_module(
 
         return ColBertEmbeddingModule(config, tokenizer)
     elif task_type == TaskType.SEQ_CLASSIFICATION:
+        # checkpoints with a "decision" block get the unified decision head;
+        # anything else falls through to ClassifierModule
+        from rtp_llm.models.downstream_modules.decision_module import (
+            create_decision_module,
+        )
+
+        decision_module = create_decision_module(config, tokenizer)
+        if decision_module is not None:
+            return decision_module
         from rtp_llm.models.downstream_modules.classifier.classifier import (
             ClassifierModule,
         )

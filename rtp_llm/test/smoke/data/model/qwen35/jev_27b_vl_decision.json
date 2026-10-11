@@ -1,0 +1,202 @@
+{
+  "_comment": "JEV-27B-VL decision smoke: 264-row verbalizer head, bare-v1 prompt, LoRA-merged serving copy. Golden from the reference System-1 math on the merged checkpoint.",
+  "model_type": "qwen35_dense",
+  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/jev-27b-vl-rtp",
+  "query_result": [
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "SKU AX-330 stock at 8% of safety level; supplier late twice this quarter; demand steady.",
+        "questions": [
+          {
+            "id": "q1",
+            "type": "choice",
+            "prompt": "Supplier response for this scenario.",
+            "options": [
+              "issue_warning",
+              "renegotiate",
+              "dual_source",
+              "maintain"
+            ]
+          },
+          {
+            "id": "q2",
+            "type": "noul",
+            "prompt": "Is escalation required?"
+          },
+          {
+            "id": "q3",
+            "type": "score",
+            "prompt": "Supply risk level."
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "q1",
+            "probs": {
+              "issue_warning": 0.258872,
+              "renegotiate": 0.12762,
+              "dual_source": 0.612473,
+              "maintain": 0.001034
+            }
+          },
+          {
+            "question_id": "q2",
+            "probs": {
+              "false": 0.080355,
+              "true": 0.919645
+            }
+          },
+          {
+            "question_id": "q3",
+            "probs": {
+              "0": 5e-06,
+              "1": 1e-05,
+              "2": 0.00012,
+              "3": 0.021697,
+              "4": 0.708951,
+              "5": 0.269218
+            }
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "Quarterly review: revenue up 12% but churn rose from 3% to 5.2%; two enterprise accounts did not renew; NPS fell 9 points.",
+        "questions": [
+          {
+            "id": "growth",
+            "type": "choice",
+            "prompt": "Best next step.",
+            "options": [
+              "retention_program",
+              "pricing_review",
+              "support_hiring",
+              "product_roadmap",
+              "sales_enablement",
+              "churn_analysis",
+              "exec_briefing",
+              "customer_advisory",
+              "onboarding_redesign",
+              "success_metrics",
+              "winback_campaign",
+              "pricing_test",
+              "csat_survey",
+              "renewal_forecast",
+              "feature_priorities",
+              "market_scan",
+              "exec_sponsorship",
+              "nothing"
+            ]
+          },
+          {
+            "id": "alarm",
+            "type": "noul",
+            "prompt": "Does churn require immediate board attention?"
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "growth",
+            "probs": {
+              "retention_program": 0.027407,
+              "pricing_review": 9e-05,
+              "support_hiring": 7.6e-05,
+              "product_roadmap": 3.2e-05,
+              "sales_enablement": 8.1e-05,
+              "churn_analysis": 0.971103,
+              "exec_briefing": 4.4e-05,
+              "customer_advisory": 2e-05,
+              "onboarding_redesign": 5e-06,
+              "success_metrics": 5.8e-05,
+              "winback_campaign": 0.000458,
+              "pricing_test": 2e-05,
+              "csat_survey": 8.4e-05,
+              "renewal_forecast": 0.000297,
+              "feature_priorities": 1.7e-05,
+              "market_scan": 3.5e-05,
+              "exec_sponsorship": 0.000113,
+              "nothing": 6e-05
+            }
+          },
+          {
+            "question_id": "alarm",
+            "probs": {
+              "false": 0.336806,
+              "true": 0.663194
+            }
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "The capital of Australia is Canberra, not Sydney, which is the largest city. The parliament sits in Canberra since 1927.",
+        "questions": [
+          {
+            "id": "cap",
+            "type": "choice",
+            "prompt": "Which city is the capital?",
+            "options": [
+              "Sydney",
+              "Canberra",
+              "Melbourne",
+              "Perth"
+            ]
+          },
+          {
+            "id": "largest",
+            "type": "noul",
+            "prompt": "Is Sydney the largest city?"
+          },
+          {
+            "id": "conf",
+            "type": "score",
+            "prompt": "Statement confidence."
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "cap",
+            "probs": {
+              "Sydney": 4.9e-05,
+              "Canberra": 0.999943,
+              "Melbourne": 6e-06,
+              "Perth": 2e-06
+            }
+          },
+          {
+            "question_id": "largest",
+            "probs": {
+              "false": 0.059683,
+              "true": 0.940317
+            }
+          },
+          {
+            "question_id": "conf",
+            "probs": {
+              "0": 0.334316,
+              "1": 0.478705,
+              "2": 0.025966,
+              "3": 0.073528,
+              "4": 0.034868,
+              "5": 0.052618
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
