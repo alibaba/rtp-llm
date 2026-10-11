@@ -5,6 +5,7 @@ import torch
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.base_rotary_embedding_op import (
     BaseRotaryEmbeddingOp,
 )
+from rtp_llm.models_py.modules.factory.attention.rope_applier import RopeApplier
 from rtp_llm.ops import AttentionConfigs
 
 
@@ -87,3 +88,20 @@ class MhaRotaryEmbeddingOp(BaseRotaryEmbeddingOp):
         self._apply_rope(query, key, self.params)
 
         return query, key, value
+
+
+class FlashinferRopeApplier(MhaRotaryEmbeddingOp, RopeApplier):
+    """FlashInfer rope module used by the py-flashinfer prefill cores.
+
+    It only applies RoPE and returns the split ``(query, key, value)``; the KV
+    write stays with the caller (``KVCacheWriteOp``). Positions come from the
+    shared FMHA params handed over through ``set_params``.
+    """
+
+    def apply(
+        self,
+        qkv: torch.Tensor,
+        kv_cache: Any = None,
+        params: Any = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return self.forward(qkv)

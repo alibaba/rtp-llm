@@ -102,4 +102,42 @@ TEST_F(PositionIdsGeneratorTest, testMrope) {
     EXPECT_EQ(27, now_pos[0]);
 }
 
+TEST_F(PositionIdsGeneratorTest, testWriteComboPositionIds) {
+    auto arange = torch::arange(5, torch::kInt32);
+
+    // factor 1: flat copy
+    auto flat = torch::full({5}, -1, torch::kInt32);
+    PositionIdsGenerator::writeComboPositionIds(flat.data_ptr<int32_t>(),
+                                                arange.data_ptr<int32_t>(),
+                                                5,
+                                                1);
+    EXPECT_TRUE(torch::equal(flat, arange));
+
+    // factor 3 (interleaved MRoPE): every position repeated on all axes
+    auto combo = torch::full({5 * 3}, -1, torch::kInt32);
+    PositionIdsGenerator::writeComboPositionIds(combo.data_ptr<int32_t>(),
+                                                arange.data_ptr<int32_t>(),
+                                                5,
+                                                3);
+    auto expect = torch::arange(5, torch::kInt32).repeat_interleave(3);
+    EXPECT_TRUE(torch::equal(combo, expect));
+
+    // non-zero arange offset (position_bias path) is preserved verbatim
+    auto biased = torch::arange(7, 12, torch::kInt32);
+    auto combo2 = torch::full({5 * 3}, -1, torch::kInt32);
+    PositionIdsGenerator::writeComboPositionIds(combo2.data_ptr<int32_t>(),
+                                                biased.data_ptr<int32_t>(),
+                                                5,
+                                                3);
+    auto expect2 = biased.repeat_interleave(3);
+    EXPECT_TRUE(torch::equal(combo2, expect2));
+
+    // zero tokens is a no-op, never touching dst
+    PositionIdsGenerator::writeComboPositionIds(combo2.data_ptr<int32_t>(),
+                                                arange.data_ptr<int32_t>(),
+                                                0,
+                                                3);
+    EXPECT_TRUE(torch::equal(combo2, expect2));
+}
+
 }  // namespace rtp_llm

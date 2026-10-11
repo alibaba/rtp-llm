@@ -151,6 +151,20 @@ class CPFlashInferImpl(FMHAImplBase):
     def support(cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs):
         return True
 
+    @classmethod
+    def support_parallelism_config(
+        cls, parallelism_config: Optional[ParallelismConfig]
+    ) -> bool:
+        if parallelism_config is None:
+            return True
+        prefill_cp_config = parallelism_config.prefill_cp_config
+        if not prefill_cp_config.is_enabled():
+            return True
+        # Only rotation methods with a dedicated implementation can run. When
+        # none is configured, report the miss so the factory raises its usual
+        # "no implementation" error instead of failing on the impl_map lookup.
+        return prefill_cp_config.method in impl_map
+
     def fmha_type(self) -> FMHAType:
         return FMHAType.CP_FLASH_INFER
 

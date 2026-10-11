@@ -28,6 +28,20 @@ public:
                                        int32_t          now_len,
                                        PositionIdsStyle style           = PositionIdsStyle::DEFAULT,
                                        torch::Tensor    context_pos_ids = torch::Tensor());
+
+    // Write `token_num * position_id_len_factor` int32 entries into `combo_dst`,
+    // the flat combo position-ids buffer consumed by the model input gatherers.
+    // Multi-axis rope styles (interleaved MRoPE) read position ids with a
+    // stride of `position_id_len_factor` per token, so the buffer must carry
+    // that many entries per token: factor 1 copies the arange slice directly,
+    // higher factors repeat each position on every axis (the text-only MRoPE
+    // (t, t, t) layout; image positions arrive through the multimodal path).
+    // Both engines' gatherers must go through this single layout so the
+    // buffer geometry cannot drift apart again.
+    static void writeComboPositionIds(int32_t*       combo_dst,
+                                      const int32_t* position_arange,
+                                      int32_t        token_num,
+                                      int            position_id_len_factor);
 };
 
 }  // namespace rtp_llm

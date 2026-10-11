@@ -79,12 +79,16 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
-        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
-        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
-        # passes sm_120 erroneously — short-circuit here so dispatch falls
-        # through to PyFlashinferPaged. See blockers.md R-4.
+        # The C++ XQAAttnOp kernels are compiled for sm_90a only
+        # (3rdparty/xqa/BUILD hardcodes --cuda-gpu-arch=sm_90a); sm_120a
+        # (Blackwell consumer, e.g. RTX 5000 Pro) and sm_103 (L20D / B300)
+        # have no kernel image and fail at first forward. The C++
+        # XQAAttnOp.support gate is `>= kSM_90` and passes them erroneously —
+        # short-circuit here so dispatch falls through to the decode
+        # implementations that do carry a backend for those archs.
         if is_sm12x():
+            return False
+        if get_sm() not in [(9, 0), (10, 0)]:
             return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
@@ -183,14 +187,15 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_inputs.is_prefill:
             return False
-        # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
-        # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
-        # sm_120a binding anyway. Gate it off so decode dispatch falls through
-        # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
-        # XQAImpl.support gate.
+        # The pinned flashinfer xqa JIT carries Hopper kernels only; on
+        # sm_103 the module builds but fails to load with an undefined
+        # `launchHopperF8MHAFlashInfer` symbol (measured on L20D), and
+        # sm_120a consumer Blackwell rejects the nb_sub_seq_per_seq kwarg
+        # used in forward(). Gate both off so decode dispatch falls through
+        # to PyFlashinferDecodeImpl, mirroring the XQAImpl.support gate.
         if is_sm12x():
             return False
-        if get_sm()[0] not in [9, 10]:
+        if get_sm() not in [(9, 0), (10, 0)]:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
         return (

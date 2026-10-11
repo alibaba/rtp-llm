@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
 #include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
@@ -675,11 +676,17 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
 
             if (ctx.need_cal_position_id) {
+                // The stream position ids are already laid out per-token with
+                // the axis factor; route the copy through the shared combo
+                // writer so this gatherer and the embedding gatherer share one
+                // buffer-geometry contract.
                 auto context_pos_ids = stream->generateContextPositionIds();
                 int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
-                memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
-                       context_pos_ids.data_ptr<int>() + reuse_offset,
-                       (context_pos_ids.numel() - reuse_offset) * sizeof(int));
+                PositionIdsGenerator::writeComboPositionIds(
+                    ctx.combo_position_ids + (size_t)ctx.token_idx * config_.position_id_len_factor,
+                    context_pos_ids.data_ptr<int>() + reuse_offset,
+                    (int32_t)(context_pos_ids.numel() - reuse_offset),
+                    (int)config_.position_id_len_factor);
             }
 
             copyKvCacheBlocksToModelInput(model_input, stream, i, ctx.batch_idx);

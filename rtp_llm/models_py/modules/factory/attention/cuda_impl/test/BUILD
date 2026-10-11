@@ -161,6 +161,28 @@ py_test(
     target_compatible_with = CUDA13_X86_ONLY,
 )
 
+# Pins the trtllm-gen / XQA decode arch gates to the truth table measured on
+# real hardware (sm_90 H20, sm_100 B200, sm_103 L20D, sm_120 RTX 5000 Pro):
+# trtllm-gen supports sm_100/sm_103 (cubins shipped), the C++ XQA kernels are
+# sm_90a-only, and the flashinfer.xqa JIT carries Hopper kernels only.
+py_test(
+    name = "test_arch_dispatch_truth_table",
+    srcs = ["test_arch_dispatch_truth_table.py"],
+    main = "test_arch_dispatch_truth_table.py",
+    deps = [
+        ":atten_test_util",
+        "//rtp_llm:testlib",
+    ],
+    tags = [
+        "SM103_CU13",
+        "cuda13",
+    ],
+    exec_properties = {
+        "gpu": "SM103_CU13",
+    },
+    target_compatible_with = CUDA13_X86_ONLY,
+)
+
 # FlashInfer TRT-LLM FMHA v2 tests
 py_test(
     name = "test_trtllm_fmha_v2_paged_prefill_sm90",

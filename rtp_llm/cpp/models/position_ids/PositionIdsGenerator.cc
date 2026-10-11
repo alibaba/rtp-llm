@@ -87,6 +87,23 @@ torch::Tensor PositionIdsGenerator::generatePositionIds(int32_t                 
     return res;
 }
 
+void PositionIdsGenerator::writeComboPositionIds(int32_t*       combo_dst,
+                                                 const int32_t* position_arange,
+                                                 int32_t        token_num,
+                                                 int            position_id_len_factor) {
+    if (position_id_len_factor <= 1) {
+        memcpy(combo_dst, position_arange, (size_t)token_num * sizeof(int32_t));
+        return;
+    }
+    for (int32_t t = 0; t < token_num; ++t) {
+        const int32_t pos = position_arange[t];
+        int32_t*      dst = combo_dst + (size_t)t * position_id_len_factor;
+        for (int axis = 0; axis < position_id_len_factor; ++axis) {
+            dst[axis] = pos;
+        }
+    }
+}
+
 void PositionIdsGenerator::generateNextPositionId(int32_t*         now_pos,
                                                   int32_t          now_len,
                                                   PositionIdsStyle style,

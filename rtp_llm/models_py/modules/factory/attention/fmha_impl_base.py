@@ -108,6 +108,17 @@ class FMHAImplBase(ABC):
 
     accepts_fmha_config = False
 
+    @classmethod
+    def rope_is_composed(cls, attn_configs: AttentionConfigs) -> bool:
+        """Whether this impl serves the config only by swapping its rope module.
+
+        The factory prefers implementations whose attention kernels handle the
+        configured rope natively (for example TRT-LLM cubins that implement
+        MRoPE) and defers impls that answer True here to a second selection
+        pass. Default: the rope is part of the kernel.
+        """
+        return False
+
     @abstractmethod
     def forward(
         self,

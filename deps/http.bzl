@@ -30,7 +30,7 @@ def http_deps():
 
     http_archive(
         name = "torch_2.1_py310_cpu",
-        sha256 = "bf3ca897f8c7c218dd6c4b1cc5eec57b4f4e71106b0b8120e92f5fdaf4acf6cd",
+        sha256 = "35a9e78b7e4096968b54c1a198687b981569c50ae93e661aa430f9fd208da102",
         urls = [
             "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.6.0%2Bcpu-cp310-cp310-linux_x86_64.whl",
         ],

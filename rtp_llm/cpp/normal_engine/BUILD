@@ -14,6 +14,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/config:role_types",
         "//rtp_llm/cpp/models:models",
+        "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/engine_base:engine_base",
         "//rtp_llm/cpp/utils:device_pin",

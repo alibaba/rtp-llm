@@ -5,6 +5,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <ATen/TensorIndexing.h>
@@ -118,7 +119,11 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
 
     model_input.combo_tokens          = torch::empty({token_num}, i32_options);
     model_input.combo_tokens_type_ids = torch::empty({token_num}, i32_options);
-    model_input.combo_position_ids    = torch::empty({token_num}, i32_options);
+    // The shared writer owns the multi-axis layout: see
+    // PositionIdsGenerator::writeComboPositionIds.
+    const int position_id_len_factor = model_config_.attn_config.rope_config.index_factor;
+    model_input.combo_position_ids =
+        torch::empty({token_num * position_id_len_factor}, i32_options);
     model_input.input_lengths         = torch::empty({batch_size}, i32_options);
     model_input.sequence_lengths      = torch::empty({0}, i32_options);
     model_input.prefix_lengths        = torch::zeros({batch_size}, i32_options);
@@ -178,9 +183,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
                                     int(seqLen),
                                     int(position_bias),
                                     (int)max_position_ids_tensor_.size(0));
-            memcpy(merged_positon_ids + token_idx + length_idx,
-                   max_position_ids_tensor_.data_ptr<int32_t>() + position_bias,
-                   seqLen * sizeof(int32_t));
+            int* dst = merged_positon_ids + (token_idx + length_idx) * position_id_len_factor;
+            PositionIdsGenerator::writeComboPositionIds(
+                dst,
+                max_position_ids_tensor_.data_ptr<int32_t>() + position_bias,
+                seqLen,
+                position_id_len_factor);
             length_idx += seqLen;
         }
 
