@@ -80,38 +80,3 @@ def normalize(client):
     if 'retain_schedule' in advanced:
         env.pop('LAP_RETAIN_PROBABILITY')
     return env,dict(p,mode=mode,max_laps=laps,identity=identity,retain_probability=probability,seed=p.get('seed',0))
-
-
-def comparison_notice(a,b):
-    fields=('realism','tail','arrival')
-    differences=[k for k in fields if a.get(k)!=b.get(k)]
-    if a.get('source',{}).get('kind')!=b.get('source',{}).get('kind'):
-        differences.append('source kind')
-    left, right = a.get('source', {}), b.get('source', {})
-    if (left.get('kind') == 'trace' or right.get('kind') == 'trace') and (
-            (left.get('model'), left.get('version')) != (right.get('model'), right.get('version'))):
-        differences.append('trace codec version')
-    for k in ('identity','retain_probability','seed','rate_curve','arrival','retain_schedule'):
-        if a.get('playback',{}).get(k)!=b.get('playback',{}).get(k):differences.append(k)
-    for k in ('output_distribution','output_semantics','output_cap'):
-        if a.get(k)!=b.get(k): differences.append(k)
-    if a.get('source',{}).get('parameters',{}).get('output_distribution') != b.get('source',{}).get('parameters',{}).get('output_distribution'):
-        differences.append('source.output_distribution')
-    return ('DIFFERENT / 不可直比命中率/TPS 绝对值 / cache-hit/TPS absolute values are not directly comparable: '+', '.join(differences)) if differences else None
-
-
-def iteration_windows(rows):
-    """Actual client send windows per lap; missing iteration remains unknown."""
-    groups={}
-    for row in rows:
-        lap=row.get('iteration')
-        timestamp=row.get('send_start_epoch_ms')
-        if type(lap) is not int or type(timestamp) not in (int,float):
-            continue
-        group=groups.setdefault(lap,dict(iteration=lap,requests=0,input_tokens=0,
-            start_epoch_ms=timestamp,end_epoch_ms=timestamp))
-        group['requests']+=1
-        group['input_tokens']+=row.get('input_len',row.get('il',0)) or 0
-        group['start_epoch_ms']=min(group['start_epoch_ms'],timestamp)
-        group['end_epoch_ms']=max(group['end_epoch_ms'],timestamp)
-    return [groups[k] for k in sorted(groups)]

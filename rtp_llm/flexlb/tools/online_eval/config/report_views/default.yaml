@@ -1,0 +1,39 @@
+report_view_schema_version: 1
+kind: default
+report:
+  subtitle: 门禁判定、证据有效性与已归档指标
+charts:
+  events:
+    setup_complete:
+      label: 环境准备结束
+      source: stage
+      stage: setup
+      boundary: end
+    teardown_start:
+      label: 环境清理开始
+      source: stage
+      stage: teardown
+      boundary: start
+  event_ids:
+  - setup_complete
+  - teardown_start
+  group_by:
+  - epoch
+  - source
+  - metric
+  detail_labels:
+  - engine_name
+  - pod
+  summaries:
+  - mean
+  - max
+  default_visible:
+  - mean
+  - max
+  max_points_per_series: 256
+  presets:
+    概览:
+    - mean
+    - max
+    明细:
+    - detail

@@ -1,0 +1,266 @@
+metric_plan_schema_version: 5
+include:
+- default.yaml
+sources:
+  mock:
+    running:
+      promql: rtp_llm_running_stream_size${selector}
+      mode: scrape
+      unit: requests
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_running_stream_size
+    waiting:
+      promql: rtp_llm_wait_stream_size${selector}
+      mode: scrape
+      unit: requests
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - rtp_llm_wait_stream_size
+    hit_tokens_total:
+      promql: mock_hit_tokens_total${selector}
+      mode: scrape
+      unit: tokens
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_hit_tokens_total
+    context_tokens_total:
+      promql: mock_context_tokens_total${selector}
+      mode: scrape
+      unit: tokens
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_context_tokens_total
+    context_requests_total:
+      promql: mock_context_requests_total${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_context_requests_total
+    cache_evictions:
+      promql: mock_engine_cache_evictions_total${selector}
+      mode: scrape
+      unit: events
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_evictions_total
+    prefill_ms_avg:
+      promql: mock_engine_prefill_ms_avg${selector}
+      mode: scrape
+      unit: ms
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_prefill_ms_avg
+    prefill_batches:
+      promql: mock_prefill_batch_size_count${selector}
+      mode: scrape
+      unit: batches
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_prefill_batch_size_count
+    prefill_batch_requests:
+      promql: mock_prefill_batch_size_sum${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_prefill_batch_size_sum
+    cache_key_hits:
+      promql: mock_engine_cache_key_hits_total${selector}
+      mode: scrape
+      unit: keys
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_key_hits_total
+    cache_keys_requested:
+      promql: mock_engine_cache_keys_requested_total${selector}
+      mode: scrape
+      unit: keys
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_keys_requested_total
+    admission_open:
+      promql: mock_engine_admission_open${selector}
+      mode: scrape
+      unit: boolean
+      value_kind: gauge
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_admission_open
+    admitted_rpcs_total:
+      promql: mock_engine_admitted_rpcs_total${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_admitted_rpcs_total
+    rejected_rpcs_total:
+      promql: mock_engine_rejected_rpcs_total${selector}
+      mode: scrape
+      unit: requests
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_rejected_rpcs_total
+produced:
+  derived/survivor_hit_ratio:
+    producer: cache_windows
+    source_type: prometheus
+    unit: ratio
+    value_kind: gauge
+    labels: []
+  cache_gate/offered_qps_deviation:
+    producer: cache_windows
+    source_type: client_journal
+    unit: ratio
+    value_kind: scalar
+    labels: []
+  cache_gate/baseline_min_half_hit:
+    producer: cache_windows
+    source_type: prometheus
+    unit: ratio
+    value_kind: scalar
+    labels: []
+  cache_gate/baseline_half_spread:
+    producer: cache_windows
+    source_type: prometheus
+    unit: ratio
+    value_kind: scalar
+    labels: []
+  cache_gate/min_window_completed:
+    producer: cache_windows
+    source_type: prometheus
+    unit: requests
+    value_kind: scalar
+    labels: []
+  cache_gate/collapse_detected:
+    producer: cache_windows
+    source_type: prometheus
+    unit: boolean
+    value_kind: scalar
+    labels: []

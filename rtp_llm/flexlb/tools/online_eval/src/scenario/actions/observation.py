@@ -6,12 +6,15 @@ import json
 import math
 import threading
 import time
+
+from schema_contract import matches_schema
 import urllib.request
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
 from runtime.debug_client import DebugClient, DebugUnavailable
+from runtime.observation import SampleBudget
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 
 SOURCES = frozenset(
@@ -246,7 +249,7 @@ class Sources:
                     records = self.records.snapshot_records()
                     if not isinstance(records, list) or any(
                         not isinstance(r, dict)
-                        or r.get("schema_version") != 1
+                        or not matches_schema(r, "client_record_schema_version", 1)
                         or r.get("env_epoch") != self.epoch
                         or type(r.get("wire_request_id")) is not int
                         or type(r.get("attempt")) is not int
@@ -301,7 +304,7 @@ class Sources:
             )
             sources[name] = sample
         payload = dict(
-            schema_version=1,
+            observation_snapshot_schema_version=1,
             env_epoch=self.epoch,
             started_mono=started,
             finished_mono=self.ctx.clock(),
@@ -378,6 +381,7 @@ class Observer:
         self.thread = None
         self.samples = []
         self.bytes = 0
+        self.budget = SampleBudget({key: params[key] for key in ("max_samples", "max_bytes")})
         self.error = None
         self.frozen = None
         self.stopped_at = None
@@ -386,16 +390,14 @@ class Observer:
         self.artifact = None
 
     def append(self, sample):
-        size = len(sample.encoded.encode())
-        if (
-            len(self.samples) >= self.params["max_samples"]
-            or self.bytes + size > self.params["max_bytes"]
-        ):
+        try:
+            self.budget.append_encoded(sample.encoded)
+        except ValueError:
             self.error = "observation sample/byte budget exhausted"
             self.stop_event.set()
             return False
         self.samples.append(sample.encoded)
-        self.bytes += size
+        self.bytes = self.budget.bytes
         return True
 
     def start(self, deadline):
@@ -472,7 +474,7 @@ class Observer:
                     records = self.sources.records.snapshot_records()
                     if not isinstance(records, list) or any(
                         not isinstance(r, dict)
-                        or r.get("schema_version") != 1
+                        or not matches_schema(r, "client_record_schema_version", 1)
                         or r.get("env_epoch") != self.sources.epoch
                         or type(r.get("wire_request_id")) is not int
                         or type(r.get("attempt")) is not int
@@ -493,7 +495,7 @@ class Observer:
             if key(r) is not None and self.started <= key(r) < self.stopped_at
         ]
         data = dict(
-            schema_version=1,
+            observation_window_schema_version=1,
             phase="frozen",
             env_epoch=self.sources.epoch,
             window=[self.started, self.stopped_at],

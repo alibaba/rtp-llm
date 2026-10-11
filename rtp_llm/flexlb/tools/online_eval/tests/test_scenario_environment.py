@@ -10,7 +10,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 
 from environment_expectations import configuration
-from runtime.harness import render_env
+from flexlb_cfg import render_env
 from scenario import compile_scenarios
 from scenario.actions.environment import (
     _validate,
@@ -25,8 +25,8 @@ from scenario.contracts import PlanContext
 from scenario.runtime import (
     Deadline,
     RuntimeContext,
-    _core_action,
 )
+from scenario.stage_execution import _core_action
 from test_scenario_backend import lease_manifest
 from test_scenario_runtime import source
 
@@ -230,7 +230,7 @@ class EnvironmentTest(unittest.TestCase):
             mock_http_port=54999,
         )
         with patch(
-            "runtime.harness.EnvManager.ensure", return_value=env
+            "runtime.environment.EnvManager.ensure", return_value=env
         ) as ensure, patch("runtime.engine_ops.EngineOps"):
             self.ctx.env_epoch = 1
             first = environment(self.raw_env, "test", PROFILE)
@@ -299,7 +299,8 @@ class EnvironmentTest(unittest.TestCase):
                 backend.probe_startup(self.ctx, {}, "{}", self.deadline)
 
     def test_real_harness_startup_failure_tail_uses_isolated_log(self):
-        from runtime.harness import EnvManager, EnvSpec
+        from runtime.environment import EnvManager
+        from runtime.environment_config import EnvSpec
 
         directory = Path(self.tmp.name)
         log_root = directory / "private"
@@ -327,14 +328,14 @@ class EnvironmentTest(unittest.TestCase):
                 stream.write("ConfigValidationException from owned start\n")
             return NS(pid=123, alive=lambda: False, tail_log=lambda: "owned stdout")
 
-        with patch("runtime.harness.API_JAR", jar), patch(
-            "runtime.harness.resolve_java21", return_value="unused-java"
+        with patch("runtime.master_lifecycle.API_JAR", jar), patch(
+            "runtime.master_lifecycle.resolve_java21", return_value="unused-java"
         ), patch(
-            "runtime.harness.port_in_use", return_value=False
+            "runtime.master_lifecycle.port_accepting", return_value=False
         ), patch.object(
-            manager, "_master_env", return_value={}
+            manager.master_lifecycle, "_master_env", return_value={}
         ), patch(
-            "runtime.harness.ProcessOps.start", side_effect=launch
+            "runtime.master_lifecycle.ProcessOps.start", side_effect=launch
         ):
             with self.assertRaises(RuntimeError) as error:
                 manager.start_master(env)

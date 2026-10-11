@@ -3,10 +3,8 @@
 No raw text is stored. Token lengths are block aligned; arrival timestamps are
 never paced here. The allocation bitmap preserves v1 complete-block labels.
 """
-import hashlib
 import json
 import lzma
-from pathlib import Path
 
 MAGIC = b'PFL2\0'
 from traffic.capture_contract import BLOCK_SIZE as BLOCK
@@ -84,7 +82,7 @@ def encode(events, provenance=None):
     return lzma.compress(bytes(payload), preset=9)
 
 
-def decode(raw):
+def _decode_payload(raw):
     decoder = lzma.LZMADecompressor(memlimit=128 * 1024 * 1024)
     data = decoder.decompress(raw, max_length=128 * 1024 * 1024)
     if not decoder.eof or decoder.unused_data or not data.startswith(MAGIC):
@@ -136,8 +134,22 @@ def expand(events):
         yield ts, labels
 
 
+class BlockAlignedLineageCodec:
+    """Decode the persisted format into the common, unit-safe domain model."""
+
+    def decode(self, raw):
+        from traffic.lineage_model import LineageModel
+        return LineageModel.from_wire(*_decode_payload(raw))
+
+    def encode(self, events, provenance=None):
+        return encode(events, provenance)
+
+
+def decode(raw):
+    return BlockAlignedLineageCodec().decode(raw).to_wire()
+
+
 def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
-    """Compatibility entrypoint; content projection lives in lineage_transforms."""
     from traffic.lineage_transforms import write_trace as project
-    return project(path, parameters, namespace, base_dir, decode=decode,
+    return project(path, parameters, namespace, base_dir, decode=BlockAlignedLineageCodec().decode,
                    max_requests=max_requests)

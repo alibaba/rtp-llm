@@ -22,6 +22,40 @@ from scenario.loader import load_document
 
 
 class CaseConfigTest(unittest.TestCase):
+    def test_cache_analysis_budget_is_explicit_and_independent_of_gate_thresholds(self):
+        config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
+        original = copy.deepcopy(config["parameters"]["checks"])
+        config["parameters"]["procedure"]["analysis_timeout_s"] = 400
+        plan = configure_program(config, "cache_scale_in.yaml")
+        stages = plan["variants"][0]["stages"]
+        gate = next(stage for stage in stages if stage["id"] == "gate")
+        self.assertEqual(gate["timeout_s"], 400)
+        self.assertEqual(config["parameters"]["checks"], original)
+        del config["parameters"]["procedure"]["analysis_timeout_s"]
+        with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
+            configure_program(config, "cache_scale_in.yaml")
+
+    def test_gate_input_bindings_are_compiled_from_case_yaml(self):
+        for name, stage, input_name in (
+            ("cache_scale_in", "cache_scale_in_observe", "engine_counters"),
+            ("master_performance", "performance_observe", "engine_tps"),
+        ):
+            config = load_document(ROOT / f"config/scenarios/{name}.yaml")
+            expected = config["parameters"]["observation"]["inputs"][input_name]
+            plan = configure_program(config, name + ".yaml")
+            action = next(s for s in plan["variants"][0]["stages"] if s["action"] == stage)
+            self.assertEqual(action["params"]["gate_input"], expected)
+
+        config = load_document(ROOT / "config/scenarios/cache_scale_in.yaml")
+        del config["parameters"]["observation"]["inputs"]["engine_counters"]["fields"]["hit_tokens_total"]
+        with self.assertRaisesRegex(ValueError, "missing or invalid metric bindings"):
+            configure_program(config, "cache_scale_in.yaml")
+
+        config = load_document(ROOT / "config/scenarios/master_performance.yaml")
+        del config["parameters"]["observation"]["inputs"]["engine_tps"]["fields"]["mock_decode_wall_tps"]
+        with self.assertRaisesRegex(ValueError, "match YAML metric fields"):
+            configure_program(config, "master_performance.yaml")
+
     def test_core_contract_keeps_production_master_configuration(self):
         from flexlb_cfg import ConfigOverride, render_env
 
@@ -44,7 +78,7 @@ class CaseConfigTest(unittest.TestCase):
 
     def config(self):
         config = load_document(ROOT / "config/scenarios/request_completion.yaml")
-        config["variant_axis"] = {"kind": "data", "fields": ["parameters.count", "parameters.input_len", "parameters.output_len", "parameters.completion"]}
+        config["variant_axis"] = {"kind": "data", "fields": ["parameters.traffic", "parameters.procedure", "parameters.checks"]}
         config["variants"] = [{"id": "immediate"}]
         return config
 
@@ -67,14 +101,16 @@ class CaseConfigTest(unittest.TestCase):
         config = self.config()
         config["variant_axis"] = {"kind": "scale", "fields": ["environment.n_prefill", "environment.n_decode"]}
         config["profiles"] = ["single-nonbatch"]
-        config["parameters"].update(input_len=8192, output_len=16, count=3)
+        config["parameters"]["traffic"].update(input_len=8192, output_len=16, count=3)
         config["variants"] = [
             {
                 "id": "large_pd",
                 "environment": {"n_prefill": 4, "n_decode": 8},
             }
         ]
-        (plan,) = self.compile(config)
+        default, plan = self.compile(config)
+        self.assertEqual(default["variant_id"], "default")
+        self.assertEqual(default["environment"]["n_decode"], 2)
         self.assertEqual(plan["id"], "request_completion::large_pd::single-nonbatch")
         self.assertEqual(plan["environment"]["n_decode"], 8)
         self.assertEqual(plan["stages"][1]["params"]["input_len"], 8192)
@@ -83,8 +119,8 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_parameters_are_scoped_to_their_configuration(self):
         config = self.config()
-        config["parameters"]["count"] = 2
-        config["variants"][0]["parameters"] = {"count": 4}
+        config["parameters"]["traffic"]["count"] = 2
+        config["variants"][0]["parameters"] = {"traffic": {"count": 4}}
         config["variants"].append(
             {
                 "id": "default_count",
@@ -123,7 +159,7 @@ class CaseConfigTest(unittest.TestCase):
             ):
                 (Path(directory) / name).write_text(json.dumps(data))
             plans = compile_scenarios(load_scenarios(directory), handlers=handlers())
-        self.assertEqual(len(plans), 8)
+        self.assertEqual(len(plans), 16)
         self.assertEqual(
             {p["scenario_id"] for p in plans},
             {"request_completion", "another_pd_scale"},
@@ -155,7 +191,7 @@ class CaseConfigTest(unittest.TestCase):
         ):
             with self.subTest(parameters=parameters):
                 config = self.config()
-                config["parameters"] = parameters
+                config["parameters"]["traffic"].update(parameters)
                 with self.assertRaises(ScenarioError):
                     self.compile(config)
 
@@ -193,27 +229,60 @@ class CaseConfigTest(unittest.TestCase):
     def test_yaml_controls_timeouts_expectations_and_metadata(self):
         config = self.config()
         config["metadata"]["description"] = "Configured in YAML"
-        config["parameters"]["completion"]["setup_timeout_s"] = 211
-        config["parameters"]["completion"]["expected"]["no_errors"] = 7
+        config["parameters"]["procedure"]["setup_timeout_s"] = 211
+        config["parameters"]["checks"]["no_errors"]["expected"] = 7
         for plan in self.compile(config):
             self.assertEqual(plan["description"], "Configured in YAML")
             self.assertEqual(plan["stages"][0]["timeout_s"], 211)
             self.assertEqual(plan["stages"][4]["params"]["expected"], 7)
 
+    def test_classification_and_collection_have_one_explicit_owner(self):
+        config = self.config()
+        for path in (("metadata", "kind"), ("metadata", "description"), ("execution", "collection")):
+            invalid = copy.deepcopy(config)
+            del invalid[path[0]][path[1]]
+            with self.subTest(path=path), self.assertRaises(ScenarioError):
+                self.compile(invalid)
+        for group, patch in (
+            ("metadata", {"monitoring": {}}),
+            ("execution", {"description": "duplicate"}),
+            ("execution", {"collection": "unknown"}),
+            ("execution", {"monitoring": {"query_plan": "master_ha_failover.yaml"}}),
+        ):
+            invalid = copy.deepcopy(config)
+            invalid[group].update(patch)
+            with self.subTest(group=group, patch=patch), self.assertRaises(ScenarioError):
+                self.compile(invalid)
+        invalid = copy.deepcopy(config)
+        invalid["test"] = dict(kind="functional", description="legacy", collection="diagnostic")
+        with self.assertRaisesRegex(ScenarioError, "unknown configuration fields"):
+            self.compile(invalid)
+        for plan in self.compile(config):
+            self.assertNotIn("test", plan)
+            self.assertEqual(plan["metadata"], config["metadata"])
+            self.assertEqual(plan["execution"]["collection"], "diagnostic")
+
     def test_missing_yaml_data_has_no_python_fallback(self):
         config = self.config()
-        del config["parameters"]["completion"]["setup_timeout_s"]
+        del config["parameters"]["procedure"]["setup_timeout_s"]
         with self.assertRaisesRegex(ScenarioError, "missing YAML parameter"):
             self.compile(config)
 
-    def test_numeric_constraints_and_profiles_are_yaml_owned(self):
+    def test_program_numeric_budget_and_yaml_profiles(self):
         config = self.config()
         config["variants"] = [{"id": "custom"}]
         config["profiles"] = ["single-nonbatch"]
-        config["parameters"]["count"] = 10001
-        config["parameter_schema"]["count"]["maximum"] = 10001
-        (plan,) = self.compile(config)
-        self.assertEqual(plan["stages"][1]["params"]["count"], 10001)
+        config["parameters"]["traffic"]["count"] = 10001
+        with self.assertRaisesRegex(ScenarioError, "traffic.count"):
+            self.compile(config)
+        config["parameter_schema"] = {"traffic.count": {"maximum": 10001}}
+        with self.assertRaisesRegex(ScenarioError, "cannot weaken"):
+            self.compile(config)
+        config["parameters"]["traffic"]["count"] = 10000
+        del config["parameter_schema"]
+        plans = self.compile(config)
+        self.assertEqual([p["variant_id"] for p in plans], ["default", "custom"])
+        self.assertTrue(all(p["stages"][1]["params"]["count"] == 10000 for p in plans))
         del config["profiles"]
         with self.assertRaisesRegex(ScenarioError, "profiles must"):
             self.compile(config)
@@ -221,7 +290,7 @@ class CaseConfigTest(unittest.TestCase):
     def test_nested_variant_data_is_isolated(self):
         config = self.config()
         config["variants"][0]["parameters"] = {
-            "completion": {"expected": {"no_errors": 3}}
+            "checks": {"no_errors": {"expected": 3}}
         }
         for plan in self.compile(config):
             expected = 3 if plan["variant_id"] == "immediate" else 0
@@ -229,7 +298,7 @@ class CaseConfigTest(unittest.TestCase):
             self.assertTrue(plan["stages"][3]["params"]["expected"])
 
     def test_programs_do_not_declare_configuration_tables_or_defaults(self):
-        for path in (ROOT / "src/cases/programs").glob("*.py"):
+        for path in (ROOT / "src/cases").glob("*/program.py"):
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.Assign):
@@ -247,14 +316,17 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_shipped_inventory_is_data_only_and_keeps_all_checks(self):
         documents = load_scenarios(ROOT / "config/scenarios")
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(documents, handlers=handlers())
         expected = json.loads((ROOT / "tests/fixtures/instance_ids.json").read_text())
         self.assertEqual(sorted(p["id"] for p in plans), expected)
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for source, _ in documents:
             config = load_document(source)
-            self.assertEqual(config["schema_version"], 2)
+            self.assertEqual(config["case_schema_version"], 2)
+            self.assertEqual(config["program"], "default")
+            self.assertNotIn("default", [v["id"] for v in config.get("variants", [])])
             self.assertNotIn('"$ref"', json.dumps(config))
             self.assertNotIn('"stages"', json.dumps(config))
 

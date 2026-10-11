@@ -4,12 +4,15 @@ An explicit shape is an experimental workload, not a production claim. The
 bundled defaults are derived from a pinned empirical model; no held-out
 validation or inference of error-censored output lengths is claimed.
 """
+
 import bisect
 import json
 import math
 import random
 from itertools import accumulate
 from pathlib import Path
+
+from traffic.contracts import PRIORITY
 
 from traffic.datasets import DEFAULT_PROFILE, profile_path
 
@@ -62,7 +65,7 @@ def resolve(parameters, *, document=None):
     for k in ('families','shared_blocks','prefix_blocks','suffix_blocks','session_requests','session_growth_blocks','priority'):
         if type(p[k]) is not int or p[k] < 0:
             raise ValueError('invalid '+k)
-    if not 1 <= p['families'] <= 100000 or p['session_requests'] < 1 or not 1 <= p['priority'] <= 100:
+    if not 1 <= p['families'] <= 100000 or p['session_requests'] < 1 or not PRIORITY.minimum <= p['priority'] <= PRIORITY.maximum:
         raise ValueError('invalid family/session/priority')
     for k, hi in (('zipf_alpha',4),('cold_fraction',1)):
         if type(p[k]) not in (int,float) or not math.isfinite(p[k]) or not 0 <= p[k] <= hi:

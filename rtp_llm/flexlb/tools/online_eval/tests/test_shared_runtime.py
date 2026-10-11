@@ -9,9 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from runtime.load_client import LOAD_CLIENT_ENV_VARS
-from monitoring.metrics import parse_prometheus_samples
 from runtime.requests import ClientRecords, request_success
-from runtime.harness import ClientOps, _parse_per_engine_lines
+from runtime.java_client import ClientOps
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -60,15 +59,6 @@ class SharedRuntimeTests(unittest.TestCase):
         for name in ("FORCE_PRIORITY", "RAMP_UP_SECONDS", "REPLAY_UNIQUE_PREFIX"):
             self.assertEqual(env[name], "")
 
-    def test_case_and_stress_clients_share_environment_isolation(self):
-        from runtime.stress import _client_base, parse_args
-        args = parse_args(["--dry-run"])
-        values = _client_base(args, ROOT / "traffic-plan.jsonl", 123)
-        env = ClientOps(None)._base_env(values)
-        self.assertEqual(env["START_AT_EPOCH_MS"], "123")
-        self.assertEqual(env["SKIP_SERVER_LATENCY"], "true")
-        self.assertEqual(env["PRIORITY"], "")
-        self.assertTrue(set(values) - {"CLIENT_PACING_LAG_P99_LIMIT_MS"} <= set(LOAD_CLIENT_ENV_VARS))
 
     def test_java_environment_reads_are_all_isolated(self):
         source = (
@@ -83,22 +73,8 @@ class SharedRuntimeTests(unittest.TestCase):
         self.assertTrue(names)
         self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
+        self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
 
-    def test_balance_filter_retains_parser_skip_and_timestamp_semantics(self):
-        body = "\n".join(
-            [
-                "# HELP rtp_llm_running_stream_size running",
-                'rtp_llm_running_stream_size{engine_name="P0",role="PREFILL",} 3 12345',
-                'rtp_llm_running_stream_size{engine_name="P1"} invalid',
-                "unrelated 4",
-            ]
-        )
-        sample = ("rtp_llm_running_stream_size", {"engine_name": "P0", "role": "PREFILL"}, 3.0)
-        self.assertEqual(
-            parse_prometheus_samples(body, "rtp_llm_", {"role": "PREFILL"}),
-            [sample],
-        )
-        self.assertEqual(_parse_per_engine_lines(body), [sample])
 
 
 if __name__ == "__main__":

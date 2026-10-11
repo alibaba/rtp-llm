@@ -31,7 +31,7 @@ def main(argv=None):
     print(
         json.dumps(
             {
-                "schema_version": 1,
+                "instance_catalog_schema_version": 1,
                 "mode": "compile",
                 "counts": plan_counts(plans),
                 "instances": plans,

@@ -1,110 +1,75 @@
-"""Runtime generation and loading for FlexLB protobuf modules.
-
-Also hosts ``encode_unique_key``, the canonical encoding used by load
-clients and smoke tests to attach eval metadata to requests.
-"""
+"""Generate and cache RPC modules and encode request metadata."""
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from types import ModuleType
-from typing import Tuple
 
-REPO_ROOT = Path(__file__).resolve().parents[6]
+from runtime.paths import REPO_ROOT
+
+
 PROTO_DIR = REPO_ROOT / "rtp_llm" / "cpp" / "model_rpc" / "proto"
-PROTO_FILE = PROTO_DIR / "model_rpc_service.proto"
-SCHEDULE_PROTO_FILE = PROTO_DIR / "flexlb_schedule_service.proto"
-DEFAULT_OUT_DIR = Path(
-    os.environ.get(
-        "FLEXLB_EVAL_PROTO_OUT",
-        str(Path(tempfile.gettempdir()) / "flexlb_eval_proto"),
-    )
-)
 
-UNIQUE_KEY_PREFIX = "flexlb_eval:"
+_PROTO_CACHE: dict = {}
+
+
+def _proto_out_dir() -> Path:
+    out = os.environ.get("FLEXLB_EVAL_PROTO_OUT")
+    if out:
+        return Path(out)
+    tmp = os.environ.get("TMPDIR") or tempfile.gettempdir()
+    return Path(tmp) / "flexlb_eval_proto"
+
+
+def _generate_proto(proto_name: str) -> tuple:
+    out_dir = _proto_out_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    src = PROTO_DIR / proto_name
+    if not src.is_file():
+        raise FileNotFoundError(f"proto source not found: {src}")
+    py_name = proto_name.replace(".proto", "_pb2.py")
+    grpc_name = proto_name.replace(".proto", "_pb2_grpc.py")
+    need_regen = True
+    if (out_dir / py_name).is_file() and (out_dir / grpc_name).is_file():
+        need_regen = src.stat().st_mtime > (out_dir / py_name).stat().st_mtime
+    if need_regen:
+        cmd = [
+            sys.executable,
+            "-m",
+            "grpc_tools.protoc",
+            f"-I{PROTO_DIR}",
+            f"--python_out={out_dir}",
+            f"--grpc_python_out={out_dir}",
+            proto_name,
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+    if str(out_dir) not in sys.path:
+        sys.path.insert(0, str(out_dir))
+    import importlib
+
+    base = proto_name.replace(".proto", "")
+    pb2 = importlib.import_module(f"{base}_pb2")
+    pb2_grpc = importlib.import_module(f"{base}_pb2_grpc")
+    return pb2, pb2_grpc
+
+
+def ensure_proto_modules() -> tuple:
+    """Engine-side protos (rpc_service.proto)."""
+    if "rpc" not in _PROTO_CACHE:
+        _PROTO_CACHE["rpc"] = _generate_proto("model_rpc_service.proto")
+    return _PROTO_CACHE["rpc"]
+
+
+def ensure_schedule_proto_modules() -> tuple:
+    """Master-side protos (flexlb_service.proto)."""
+    if "schedule" not in _PROTO_CACHE:
+        _PROTO_CACHE["schedule"] = _generate_proto("flexlb_schedule_service.proto")
+    return _PROTO_CACHE["schedule"]
 
 
 def encode_unique_key(meta: dict) -> str:
-    """Encode eval metadata into the unique_key carried on requests."""
-
-    return UNIQUE_KEY_PREFIX + json.dumps(meta, separators=(",", ":"))
-
-
-def ensure_proto_modules(out_dir: Path | None = None) -> Tuple[ModuleType, ModuleType]:
-    """Generate and import model_rpc_service_pb2/_grpc modules.
-
-    The repo intentionally does not check in generated Python protobuf files.
-    Online evaluation tools generate them into a temporary directory at runtime.
-    """
-
-    return _ensure_proto_modules(PROTO_FILE, "model_rpc_service", out_dir)
-
-
-def ensure_schedule_proto_modules(
-    out_dir: Path | None = None,
-) -> Tuple[ModuleType, ModuleType]:
-    """Generate and import the standalone FlexLB schedule protocol."""
-
-    return _ensure_proto_modules(
-        SCHEDULE_PROTO_FILE, "flexlb_schedule_service", out_dir
-    )
-
-
-def _ensure_proto_modules(
-    proto_file: Path,
-    module_name: str,
-    out_dir: Path | None,
-) -> Tuple[ModuleType, ModuleType]:
-    """Generate and import one protobuf module pair."""
-
-    out = Path(out_dir or DEFAULT_OUT_DIR)
-    out.mkdir(parents=True, exist_ok=True)
-    pb2_path = out / f"{module_name}_pb2.py"
-    grpc_path = out / f"{module_name}_pb2_grpc.py"
-    if _needs_regen(proto_file, pb2_path, grpc_path):
-        _generate(out, proto_file)
-
-    out_str = str(out)
-    if out_str not in sys.path:
-        sys.path.insert(0, out_str)
-    return (
-        importlib.import_module(f"{module_name}_pb2"),
-        importlib.import_module(f"{module_name}_pb2_grpc"),
-    )
-
-
-def _needs_regen(proto_file: Path, pb2_path: Path, grpc_path: Path) -> bool:
-    if not pb2_path.exists() or not grpc_path.exists():
-        return True
-    proto_mtime = proto_file.stat().st_mtime
-    return (
-        pb2_path.stat().st_mtime < proto_mtime
-        or grpc_path.stat().st_mtime < proto_mtime
-    )
-
-
-def _generate(out: Path, proto_file: Path) -> None:
-    try:
-        import grpc_tools.protoc  # noqa: F401
-    except ImportError as exc:
-        raise RuntimeError(
-            "grpc_tools is required for FlexLB online evaluation. "
-            "Install with: pip install grpcio grpcio-tools protobuf"
-        ) from exc
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "grpc_tools.protoc",
-        f"-I{PROTO_DIR}",
-        f"--python_out={out}",
-        f"--grpc_python_out={out}",
-        str(proto_file),
-    ]
-    subprocess.run(cmd, check=True)
+    return "flexlb_eval:" + json.dumps(meta, separators=(",", ":"))

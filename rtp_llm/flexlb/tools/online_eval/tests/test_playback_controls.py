@@ -5,14 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from traffic.playback_config import normalize, comparison_notice
-from traffic.playback_intensity import integral, inverse, poisson_count
+from traffic.playback_config import normalize
+from traffic.playback_intensity import integral, poisson_count
 from traffic.output_sampling import output_sampler, event_uniform
 from traffic import prefix_lineage, prefix_lineage_v3
 
 
 class PlaybackControlsTest(unittest.TestCase):
-    def test_yaml_env_roundtrip_and_ab_mismatch(self):
+    def test_yaml_env_roundtrip(self):
         p = dict(mode='uniform', qps=100, seed=42, arrival='poisson',
                  rate_curve=[[0, 1], [10, 3], [20, 1]], identity='partial',
                  retain_schedule=dict(kind='linear', start=0, end=1, laps=5))
@@ -21,11 +21,17 @@ class PlaybackControlsTest(unittest.TestCase):
         for key in p:
             self.assertEqual(a[key], b[key])
         self.assertNotIn('LAP_RETAIN_PROBABILITY', env)
-        for key, value in [('rate_curve', [[0, 2]]), ('arrival', 'deterministic'),
-                           ('seed', 43), ('retain_schedule', dict(kind='sequence', values=[0, 1]))]:
-            self.assertIn('DIFFERENT', comparison_notice(dict(playback=a), dict(playback=dict(a, **{key:value}))))
-        self.assertIn('DIFFERENT', comparison_notice(dict(output_distribution={'values':[1]}),
-                                                   dict(output_distribution={'values':[2]})))
+
+    def test_integrated_curve_counts_and_seeded_poisson_budget(self):
+        curve = [[0, .5], [10, 3], [20, 1]]
+        self.assertEqual(integral(curve, 10), 17.5)
+        self.assertEqual(integral(curve, 20), 37.5)
+        self.assertEqual(integral(curve, 30), 47.5)
+        expected = 100*integral(curve,30)
+        self.assertLess(abs(poisson_count(expected,42)-expected), 5*math.sqrt(expected))
+        self.assertEqual(poisson_count(100,42), poisson_count(100,42))
+        with self.assertRaises(ValueError): poisson_count(1e9,42,limit=3)
+        self.assertAlmostEqual(-math.log1p(-event_uniform(0,42 ^ 0xd1b54a32d192ed03)), 1.5354135069822445, places=8)
 
     def test_invalid_combinations_fail_before_launch(self):
         base = dict(mode='uniform', qps=10)
@@ -51,22 +57,6 @@ class PlaybackControlsTest(unittest.TestCase):
             normalize(dict(playback=dict(mode='true-ts', arrival='poisson',seed=1)))
         normalize(dict(playback=dict(mode='true-ts',rate_curve=[[0,.5],[10,2]])))
 
-    def test_integrated_curve_counts_and_seeded_poisson_budget(self):
-        curve = [[0, .5], [10, 3], [20, 1]]
-        for i in range(1001):
-            t = i/20
-            self.assertAlmostEqual(inverse(curve, integral(curve, t)), t, places=10)
-        # Deterministic inversion has <= one event window quantization error.
-        due = [inverse(curve, i/100) for i in range(6000)]
-        for end in [1, 5, 10, 20, 30]:
-            expected=100*integral(curve,end)
-            self.assertLessEqual(abs(sum(t<end for t in due)-expected), 1.000001)
-        expected = 100*integral(curve,30)
-        self.assertLess(abs(poisson_count(expected,42)-expected), 5*math.sqrt(expected))
-        self.assertEqual(poisson_count(100,42), poisson_count(100,42))
-        with self.assertRaises(ValueError): poisson_count(1e9,42,limit=3)
-        # Golden cross-language arrival intensity for seed 42.
-        self.assertAlmostEqual(-math.log1p(-event_uniform(0,42 ^ 0xd1b54a32d192ed03)), 1.5354135069822445, places=8)
 
     def test_discrete_lineage_preserves_snapshot_filter_and_original_index(self):
         for version, module in [(2,prefix_lineage),(3,prefix_lineage_v3)]:

@@ -95,6 +95,16 @@ class JavaMockBudget:
             "victim_offsets": list(VICTIM_OFFSETS),
         }
 
+    def to_metadata(self) -> dict:
+        """Compiler/frozen-plan projection of the same resource bound."""
+        return dict(backend="java_mock", bounded=True, initial_workers=self.initial_workers,
+                    max_dynamic_additions=self.dynamic_additions,
+                    **({"max_environment_workers": self.max_environment_workers}
+                       if self.max_environment_workers is not None else {}),
+                    mock_control_offset=MOCK_CONTROL_OFFSET,
+                    victim_control_offset=VICTIM_OFFSETS[0], victim_grpc_offset=VICTIM_OFFSETS[1],
+                    reserved_tail_offset=VICTIM_OFFSETS[2])
+
     @classmethod
     def from_metadata(cls, raw: dict) -> JavaMockBudget:
         """Validate compiler resource_budget v1 before opening any lease."""

@@ -5,9 +5,9 @@ import json
 import uuid
 
 from scenario.contracts import StageHandler, StageOutput
-from scenario.actions.engine_control import ENGINE_NAME, _engines, _http
+from runtime.mock_control import ENGINE_NAME, control_json, select_engines
 
-# Deliberately excludes status-report mutations owned by status_protocol.
+# Fault controls do not alter status-report payloads.
 FAULT_OPTIONS = {
     **{
         name: {}
@@ -90,7 +90,7 @@ class EngineFault:
         row = dict(engine=name, enabled=enabled, started_s=self.ctx.clock())
         self.evidence["injection" if enabled else "clearing"].append(row)
         try:
-            response = _http(
+            response = control_json(
                 self.ops,
                 "inject",
                 deadline,
@@ -138,7 +138,7 @@ def inject(ctx, params, deadline):
         not isinstance(name, str) or not ENGINE_NAME.fullmatch(name) for name in targets
     ) or len(set(targets)) != len(targets):
         raise ValueError("resolved fault targets must be distinct engine names")
-    before = _engines(_http(ctx.ops, "snapshot", deadline), targets)
+    before = select_engines(control_json(ctx.ops, "snapshot", deadline), targets)
     ports = {}
     for name, entry in before.items():
         try:

@@ -1,14 +1,17 @@
 """Data-only case configuration. All control flow comes from registered Python programs."""
 
 import copy
+from dataclasses import asdict
 import hashlib
-import importlib
 import json
-import math
-import re
+from monitoring.identity import METRIC_ID, NAME
 from pathlib import Path
 
 from scenario.loader import ScenarioError
+from cases.config_data import (
+    merge_data, leaf_paths, merge_environment, path_in_scope,
+)
+from cases.declarations import CaseDeclaration, VariantDeclaration
 
 
 class ProgramDocument(dict):
@@ -23,12 +26,13 @@ def output(stage, field):
 class CaseBuilder:
     """Python owns ordering, branches and checks; YAML supplies declared parameters."""
 
-    def __init__(self, environment, parameters, parameter_schema=None):
+    def __init__(self, environment, parameters, *, number_rules):
         self.environment = copy.deepcopy(environment)
         self.parameters = copy.deepcopy(parameters)
-        self.parameter_schema = copy.deepcopy(parameter_schema or {})
+        self.number_rules = dict(number_rules)
         self.steps = []
         self.read_parameters = set()
+        self.metric_dependencies = {}
 
     def value(self, path):
         """Read required YAML data; programs provide no hidden fallback values."""
@@ -40,25 +44,43 @@ class CaseBuilder:
             value = value[part]
         return copy.deepcopy(value)
 
+    def inputs(self, **contract):
+        from cases.inputs import ProgramInputs
+
+        return ProgramInputs.read(self, **contract)
+
+    def metric(self, identity, *, unit=None, labels=(), mode=None):
+        """Declare a numeric dependency; compilation binds it to the selected plan."""
+        if type(identity) is not str or not METRIC_ID.fullmatch(identity):
+            raise ScenarioError("invalid metric id: " + str(identity))
+        requirement = dict(unit=unit, labels=tuple(labels), mode=mode)
+        if identity in self.metric_dependencies and self.metric_dependencies[identity] != requirement:
+            raise ScenarioError("conflicting metric dependency: " + identity)
+        self.metric_dependencies[identity] = requirement
+        return identity
+
     def params(self, path, dynamic):
         values = self.value(path)
         if not isinstance(values, dict):
             raise ScenarioError(f"YAML parameter {path!r} must be a mapping")
-        return _merge_data(values, dynamic)
+        return merge_data(values, dynamic)
 
     def number(self, name):
-        value = self.value(name)
-        rule = self.parameter_schema.get(name, {})
-        integer = rule.get("integer", True)
-        minimum, maximum = rule.get("minimum"), rule.get("maximum")
-        if (
-            type(value) not in ((int,) if integer else (int, float))
-            or (isinstance(value, float) and not math.isfinite(value))
-            or (minimum is not None and value < minimum)
-            or (maximum is not None and value > maximum)
-        ):
-            raise ScenarioError(f"parameter {name!r}: invalid value {value!r}")
-        return value
+        if name not in self.number_rules:
+            raise ScenarioError("undeclared numeric parameter: " + name)
+        try:
+            return self.number_rules[name].validate(self.value(name), name)
+        except ValueError as exc:
+            raise ScenarioError(str(exc)) from exc
+
+    def validate_numbers(self):
+        """Apply program types and YAML narrowing without consuming business inputs."""
+        reads = set(self.read_parameters)
+        try:
+            for name in self.number_rules:
+                self.number(name)
+        finally:
+            self.read_parameters = reads
 
     def step(self, name, action, *, params=None, timeout_s=None):
         step = {"id": name, "action": action}
@@ -81,271 +103,199 @@ class CaseBuilder:
         return copy.deepcopy(self.steps)
 
 
-def _merge_data(base, patch):
-    """Mappings inherit recursively; lists and scalars are replaced by YAML."""
-    result = copy.deepcopy(base)
-    for key, value in patch.items():
-        if isinstance(result.get(key), dict) and isinstance(value, dict):
-            result[key] = _merge_data(result[key], value)
-        else:
-            result[key] = copy.deepcopy(value)
-    return result
-
-
-def _mapping(value, allowed, path):
-    if not isinstance(value, dict):
-        raise ScenarioError(f"{path}: expected mapping")
-    extra = set(value) - set(allowed)
-    if extra:
-        raise ScenarioError(f"{path}: unknown configuration fields {sorted(extra)}")
-    return value
-
-
-def _data_only(value, path):
-    if isinstance(value, dict):
-        forbidden = set(value) & {
-            "stages",
-            "stage_overrides",
-            "steps",
-            "action",
-            "$ref",
-            "needs",
-            "when",
-        }
-        if forbidden:
-            raise ScenarioError(
-                f"{path}: YAML cannot orchestrate steps ({sorted(forbidden)}); edit the Python case"
-            )
-        for key, child in value.items():
-            _data_only(child, f"{path}.{key}")
-    elif isinstance(value, list):
-        for index, child in enumerate(value):
-            _data_only(child, f"{path}[{index}]")
-
-
-def _leaf_paths(value, prefix=""):
-    for key, child in value.items():
-        path = f"{prefix}.{key}" if prefix else key
-        if isinstance(child, dict) and child:
-            yield from _leaf_paths(child, path)
-        else:
-            yield path
-
-
-def _merge_environment(base, patch):
-    if not isinstance(base, dict) or not isinstance(patch, dict):
-        raise ScenarioError("environment must be a mapping")
-    result = {**copy.deepcopy(base), **copy.deepcopy(patch)}
-    if "config_overrides" in patch:
-        if not isinstance(base.get("config_overrides", {}), dict) or not isinstance(
-            patch["config_overrides"], dict
-        ):
-            raise ScenarioError("config_overrides must be a mapping")
-        result["config_overrides"] = {
-            **copy.deepcopy(base.get("config_overrides", {})),
-            **copy.deepcopy(patch["config_overrides"]),
-        }
-    return result
-
-
 def program_module(name, source):
-    from cases.programs import PROGRAMS
-
-    if not isinstance(name, str) or name not in PROGRAMS:
+    from cases.registry import registry
+    if not isinstance(name, str) or name not in registry().cases:
         raise ScenarioError(f"{source}: unknown registered Python case {name!r}")
-    return importlib.import_module(PROGRAMS[name])
-
-
-def validate_analysis(config, source, *, module=None):
-    """Resolve analysis capability from registered Python code, never YAML flags."""
-    _data_only(config, source)
-    if type(config.get("schema_version")) is not int or config["schema_version"] != 2:
-        raise ScenarioError(f"{source}: analysis requires schema_version 2")
-    module = module or program_module(config.get("case"), source)
-    validator = getattr(module, "ANALYSIS_POLICY_VALIDATOR", None)
-    if not callable(validator):
-        raise ScenarioError(f"{source}: Python program does not support analysis")
-    try:
-        return validator(config["analysis"])
-    except ValueError as exc:
-        raise ScenarioError(f"{source}.analysis: {exc}") from exc
+    return registry().cases[name]
 
 
 def configure_program(config, source):
     """Build an internal plan using an allowlisted Python entry point, without I/O."""
-    _data_only(config, source)
-    _mapping(
-        config,
-        {
-            "schema_version",
-            "case",
-            "program",
-            "variant_axis",
-            "id",
-            "profiles",
-            "environment",
-            "execution",
-            "parameters",
-            "variants",
-            "metadata",
-            "parameter_schema",
-            "analysis",
-            "test",
-            "reports",
-        },
-        source,
-    )
-    if type(config.get("schema_version")) is not int or config["schema_version"] != 2:
-        raise ScenarioError(
-            f"{source}: only data-only schema_version 2 is accepted; move orchestration into Python"
-        )
-    name = config.get("case")
+    config = CaseDeclaration.read(config, source)
+    name = config.case
     module = program_module(name, source)
-    if "analysis" in config:
-        validate_analysis(config, source, module=module)
-    environment = config.get("environment", {})
-    parameters = config.get("parameters", {})
-    if not isinstance(parameters, dict):
-        raise ScenarioError(f"{source}.parameters: expected mapping")
-    variants = config.get("variants", [{"id": "default"}])
-    if not isinstance(variants, list) or not variants:
-        raise ScenarioError(f"{source}.variants: expected a nonempty list")
-    axis = config.get("variant_axis")
-    if "variants" in config:
-        _mapping(axis, {"kind", "fields"}, source + ".variant_axis")
-        if axis.get("kind") not in {"data", "scale", "flow"}:
-            raise ScenarioError(f"{source}: variant_axis.kind must be data, scale or flow")
-        axis_fields = axis.get("fields", [])
-        if (not isinstance(axis_fields, list) or not axis_fields
-                or any(not isinstance(f, str) for f in axis_fields)
-                or len(set(axis_fields)) != len(axis_fields)):
-            raise ScenarioError(f"{source}: variant_axis.fields must be unique nonempty paths")
-        for field in axis_fields:
-            if not re.fullmatch(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*", field):
-                raise ScenarioError(f"{source}: invalid variant field path {field!r}")
-            if any(other != field and field.startswith(other + ".") for other in axis_fields):
-                raise ScenarioError(f"{source}: overlapping variant field paths")
-            valid = (field == "program" if axis["kind"] == "flow" else
-                     field.startswith("parameters.") if axis["kind"] == "data" else
-                     field in {"environment.n_prefill", "environment.n_decode",
-                               "environment.prefill_cache_blocks", "environment.decode_cache_blocks"})
-            if not valid:
-                raise ScenarioError(f"{source}: field {field!r} does not belong to declared variant dimension")
-    elif axis is not None:
-        raise ScenarioError(f"{source}: variant_axis requires variants")
-    if getattr(module, "FLOW_PROGRAMS", ()) and (axis is None or axis["kind"] != "flow" or "program" in config):
-        raise ScenarioError(f"{source}: flow programs require explicit flow variants")
-    metadata = config.get("metadata", {})
+    if config.program != "default":
+        raise ScenarioError(f"{source}: every case must declare program: default")
+    axis = config.variant_axis
+    document = _program_document(config, name, source)
+    seen = set()
+    numeric_contracts = {}
+    default = VariantDeclaration.read({"id": "default"}, source)
+    for index, row in enumerate((default, *config.variants)):
+        if index and axis is not None:
+            axis.validate_patch(row.declaration, source)
+        identity = row.identity
+        if not isinstance(identity, str) or not NAME.fullmatch(identity) or identity in seen:
+            raise ScenarioError(f"{source}: missing or duplicate configuration id {identity!r}")
+        seen.add(identity)
+        document["variants"].append(_build_variant(
+            config, row, identity, module, axis if index else None, config.profiles, source, numeric_contracts,
+        ))
+    document.implementation = _implementation(config, module, name)
+    document.implementation["numeric_parameters"] = numeric_contracts
+    return document
+
+
+def _program_document(config, name, source):
+    environment = config.environment
+    metadata = config.metadata
     if not isinstance(metadata, dict):
         raise ScenarioError(f"{source}.metadata: expected mapping")
-    document = ProgramDocument(copy.deepcopy(metadata))
+    document = ProgramDocument({
+        key: copy.deepcopy(value) for key, value in metadata.items() if key != "kind"
+    })
     document.update(
-        schema_version=1, environment=copy.deepcopy(environment), variants=[]
+        program_schema_version=1, environment=copy.deepcopy(environment), variants=[]
     )
-    document["id"] = config.get("id", name)
-    for key in ("profiles", "execution"):
-        if key in config:
-            document[key] = copy.deepcopy(config[key])
+    document["id"] = config.identity
+    from scenario.suites import EXECUTION_BUDGETS
+
+    document["profiles"] = list(config.profiles)
+    document["execution"] = {
+        key: copy.deepcopy(value) for key, value in config.execution.to_dict().items()
+        if key in EXECUTION_BUDGETS
+    }
     selected_profiles = document.get("profiles")
-    from scenario.compiler import identifier, environment as validate_environment, names
+    from scenario.validation import identifier, names
+    from scenario.environment_config import environment as validate_environment
     from flexlb_cfg import PROFILES
     identifier(document["id"], source + ".id")
     if isinstance(selected_profiles, list):
         names(selected_profiles, source + ".profiles", PROFILES)
         for profile in selected_profiles:
             validate_environment(environment, source + ".environment", profile)
-    seen = set()
-    for row in variants:
-        _mapping(
-            row,
-            {
-                "id",
-                "program",
-                "profiles",
-                "environment",
-                "execution",
-                "parameters",
-                "metadata",
-                "parameter_schema",
-                "test",
-                "reports",
-            },
-            source + ".variants",
+    return document
+
+
+def _select_program(module, program, source):
+    build = module.definition.builders.get(program) if isinstance(program, str) else None
+    if build is None:
+        raise ScenarioError(f"{source}: unknown Python case program {program!r}")
+    return build
+
+
+def _build_variant(config, row, identity, module, axis, selected_profiles, source, numeric_contracts):
+    environment = config.environment
+    parameters = config.parameters
+    program = row.program if row.program is not None else config.program
+    if axis is not None:
+        axis.validate_flow(program, identity, module, source)
+    build = _select_program(module, program, source)
+    profiles = list(selected_profiles)
+    if (
+        not isinstance(profiles, list)
+        or not profiles
+        or any(not isinstance(p, str) for p in profiles)
+    ):
+        raise ScenarioError(
+            f"{source}: profiles must be a nonempty string list in YAML"
         )
-        if axis is not None:
-            for field in _leaf_paths({k: v for k, v in row.items() if k != "id"}):
-                if not any(field == f or field.startswith(f + ".") for f in axis_fields):
-                    raise ScenarioError(f"{source}: variant field {field!r} outside declared dimension")
-        identity = row.get("id")
-        if not isinstance(identity, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", identity) or identity in seen:
-            raise ScenarioError(
-                f"{source}: missing or duplicate configuration id {identity!r}"
-            )
-        seen.add(identity)
-        program = row.get("program", config.get("program"))
-        if axis is not None and axis["kind"] == "flow":
-            if program != identity or program not in getattr(module, "FLOW_PROGRAMS", ()):
-                raise ScenarioError(f"{source}: flow identity must equal a registered flow program")
-        build = vars(module).get(program) if isinstance(program, str) else None
-        if (
-            not isinstance(program, str)
-            or program.startswith("_")
-            or not callable(build)
-            or getattr(build, "__module__", None) != module.__name__
-        ):
-            raise ScenarioError(f"{source}: unknown Python case program {program!r}")
-        profiles = selected_profiles
-        if (
-            not isinstance(profiles, list)
-            or not profiles
-            or any(not isinstance(p, str) for p in profiles)
-        ):
-            raise ScenarioError(
-                f"{source}: profiles must be a nonempty string list in YAML"
-            )
-        variant_parameters = row.get("parameters", {})
-        if not isinstance(variant_parameters, dict):
-            raise ScenarioError(f"{source}: variant parameters must be a mapping")
-        patch = row.get("environment", {})
-        builder = CaseBuilder(
-            _merge_environment(environment, patch),
-            _merge_data(parameters, variant_parameters),
-            config.get("parameter_schema", {}),
-        )
+    variant_parameters = row.parameters
+    patch = row.environment
+    from cases.numeric_parameters import parameter_rules, narrow_parameters
+    defaults = parameter_rules(module.definition.numeric_parameters)
+    base_rules = narrow_parameters(defaults, config.parameter_schema)
+    builder = CaseBuilder(
+        merge_environment(environment, patch),
+        merge_data(parameters, variant_parameters),
+        number_rules=narrow_parameters(base_rules, row.parameter_schema),
+    )
+    builder.validate_numbers()
+    numeric_contracts[identity] = {path: asdict(rule) for path, rule in builder.number_rules.items()}
+    try:
         build(builder)
-        for field in _leaf_paths(variant_parameters):
-            if not any(field == used or field.startswith(used + ".") for used in builder.read_parameters):
-                raise ScenarioError(f"{source}: unused variant parameter {field!r}")
-        variant = {}
-        from scenario.suites import normalize_test
+    except ValueError as exc:
+        raise ScenarioError(f"{source}.parameters: {exc}") from exc
+    for field in leaf_paths(builder.parameters):
+        if not path_in_scope(field, builder.read_parameters):
+            raise ScenarioError(f"{source}: unused YAML parameter {field!r}")
+    variant = _variant_contract(config, builder, source)
+    variant.update(
+        id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
+    )
+    if patch:
+        variant["environment_overrides"] = copy.deepcopy(patch)
+    return variant
 
-        if not isinstance(config.get("test", {}), dict):
-            raise ScenarioError(f"{source}.test: expected mapping")
-        variant["test"] = normalize_test(copy.deepcopy(config.get("test", {})))
-        from reporting.view_config import declaration
 
-        reports = config.get("reports") if variant["test"]["kind"] == "workload" else None
-        if reports is not None:
-            variant["test"]["reports"] = declaration(
-                reports, kind=variant["test"]["kind"], path=source + ".reports"
-            )
-        variant.update(
-            id=identity, profiles=copy.deepcopy(profiles), stages=builder.finish()
+def _variant_contract(config, builder, source):
+    metadata = config.metadata
+    execution = config.execution.to_dict()
+    if (builder.metric_dependencies or "metric_whitelist" in builder.environment
+            or any("metric_whitelist" in patch for patch in builder.environment.get("profile_overrides", {}).values())):
+        _bind_metric_dependencies(builder.metric_dependencies, execution)
+    variant = dict(metadata=metadata, execution=execution)
+    _bind_reports(config, variant, source, builder.steps)
+    if config.reporting is not None:
+        if metadata["kind"] != "workload":
+            raise ScenarioError("reporting.time_axis requires a workload case")
+        from reporting.timeline import validate_configuration
+        try:
+            variant["reporting"] = validate_configuration(config.reporting, {stage["id"] for stage in builder.steps})
+        except ValueError as exc:
+            raise ScenarioError(f"{source}.reporting: {exc}") from exc
+    if metadata["kind"] == "workload":
+        from monitoring.query_plan import load_plan, DEFAULT_PLAN, validate_export_filter
+        from monitoring.collection_plan import select_plan, frozen_plan
+        from reporting.view_config import view
+        name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
+        selected = select_plan(load_plan(name), builder.metric_dependencies,
+                               [view(report) for report in variant.get("reports", [])])
+        validate_export_filter(selected, builder.environment)
+        variant["monitoring_query_plan"] = frozen_plan(name, selected)
+    return variant
+
+
+def _bind_metric_dependencies(requirements, execution):
+    from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions
+    plan = load_plan(execution["monitoring"].get("query_plan", DEFAULT_PLAN))
+    declared = definitions(plan)
+    missing = set(requirements) - set(declared)
+    if missing:
+        raise ScenarioError("undeclared metric ids: " + ", ".join(sorted(missing)))
+    for metric_id, requirement in requirements.items():
+        definition = declared[metric_id]
+        if ((requirement["unit"] is not None and definition["unit"] != requirement["unit"])
+                or (requirement["mode"] is not None and definition.get("mode") != requirement["mode"])
+                or not set(requirement["labels"]) <= set(definition["labels"])):
+            raise ScenarioError("metric dependency unit, mode or identity labels mismatch: " + metric_id)
+
+
+def _bind_reports(config, variant, source, stages):
+    from reporting.view_config import declaration
+
+    reports = list(config.reports) if config.reports is not None else None
+    kind = variant["metadata"]["kind"]
+    if reports is not None:
+        variant["reports"] = declaration(
+            reports, kind=kind, path=source + ".reports"
         )
-        if patch:
-            variant["environment_overrides"] = copy.deepcopy(patch)
-        document["variants"].append(variant)
-    program_path = Path(module.__file__).resolve()
-    document.implementation = {
-        "configuration": copy.deepcopy(config),
+        from reporting.view_config import view
+
+        for report_name in reports:
+            presentation = view(report_name)
+            from reporting.events import validate_stage_sources
+            validate_stage_sources(presentation, {stage["id"] for stage in stages}, source + ".reports")
+            required_plan = presentation.get("metrics", {}).get("query_plan")
+            if required_plan and required_plan != variant["execution"]["monitoring"].get("query_plan"):
+                raise ScenarioError(
+                    f"{source}.reports: {report_name} requires monitoring query plan {required_plan}"
+                )
+
+
+def _implementation(config, module, name):
+    program_path = module.path.resolve()
+    implementation = {
+        "configuration": copy.deepcopy(config.declaration),
         "language": "python",
         "program": name,
         "path": str(program_path),
         "sha256": hashlib.sha256(program_path.read_bytes()).hexdigest(),
         "configuration_sha256": hashlib.sha256(
             json.dumps(
-                config, sort_keys=True, separators=(",", ":"), allow_nan=False
+                config.declaration, sort_keys=True, separators=(",", ":"), allow_nan=False
             ).encode()
         ).hexdigest(),
     }
-    return document
+    return implementation

@@ -4,13 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from runtime.debug_client import (
-    Capture,
-    DebugClient,
-    DebugUnavailable,
-    check_scheduler_tombstone,
-    validate_snapshot,
-)
+from runtime.debug_client import Capture, DebugClient, DebugUnavailable, validate_snapshot
 
 
 def snapshot():
@@ -98,29 +92,6 @@ class DebugClientTest(unittest.TestCase):
         data["components"]["scheduler"]["rows"] = [{"request_id": 9007199254740993}]
         with self.assertRaises(DebugUnavailable):
             validate_snapshot(data)
-
-    def test_tombstone_is_not_equivalent_to_no_resource_ownership(self):
-        row = dict(
-            storage_phase="TOMBSTONE",
-            lifecycle_phase="COMPLETED",
-            admission_open=False,
-            has_item=False,
-            has_engine_fence=False,
-            has_preemption=False,
-            has_admission_mutation=False,
-            has_request_deadline=False,
-            has_decision_deadline=False,
-            has_inactivity_deadline=False,
-            has_cancel_reason=False,
-            has_pending_admission_cancel=False,
-        )
-        self.assertTrue(check_scheduler_tombstone(row)[0])
-        retained = copy.deepcopy(row)
-        retained["has_engine_fence"] = True
-        self.assertFalse(check_scheduler_tombstone(retained)[0])
-        del row["has_item"]
-        with self.assertRaises(DebugUnavailable):
-            check_scheduler_tombstone(row)
 
 
 if __name__ == "__main__":

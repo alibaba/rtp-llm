@@ -7,15 +7,14 @@ every FLEXLB_CONFIG document this repo produces:
   * ``render_process_config(profile, overrides, jvm_heap)`` — the
     zone_process_setting envelope (FLEXLB_CONFIG + FLEXLB_JVM_HEAP_SIZE
     envs) consumed by the Java mock engine's ``--master-config`` and by
-    run_stress.py.  The env string inside the envelope is derived
+    deployment tooling. The env string inside the envelope is derived
     from the same render call, so the file and the env cannot drift
     apart (single render, two projections).
 
 Profiles:
 
   * four functional case-test profiles (``PROFILES``) — the schema-v3
-    decision x dispatcher axes (scheduler QUEUE + FIFO ordering), values
-    unchanged from the former harness.flexlb_config_for_profile;
+    decision x dispatcher axes (scheduler QUEUE + FIFO ordering);
   * ``stress-na130`` — the stress workload rendered using schema-v3.
     Removed capacity, selector and acknowledgement settings are not emitted.
 
@@ -78,14 +77,6 @@ def validate_profile_identity(profile: str, overrides: Mapping[str, object]) -> 
             raise ProfileIdentityError(f"{axis} is a profile identity field for {profile}")
 
 
-def profile_dispatches_batch(profile: str) -> bool:
-    """True when *profile*'s dispatcher axis is BATCH (master sends via
-    EnqueueBatch; clients consume FetchResponse)."""
-    if profile == STRESS_PROFILE:
-        return STRESS_BASE["dispatcher"]["type"] == "BATCH"
-    return PROFILE_SPECS[profile]["dispatcher"] == "batch"
-
-
 # ===========================================================================
 # Override spec
 # ===========================================================================
@@ -118,6 +109,7 @@ _OMITTABLE = frozenset({"queue_timeout_ms", "preemption"})
 
 
 def _validate_affinity(extra_ms, percent):
+    import math
     if extra_ms is not None and (type(extra_ms) is not int or not 0 <= extra_ms <= 9223372036854775807):
         raise ValueError("cache_affinity_max_extra_ttft_ms must be a nonnegative Java long")
     if percent is not None and (type(percent) not in (int, float) or not math.isfinite(percent) or not 0 <= percent <= 100):
@@ -322,10 +314,8 @@ def _ordering_policy(ordering, default_priority, preemption):
 # ===========================================================================
 #
 # Unified strict schema-v3 generator for the four functional profiles
-# (formerly harness.build_flexlb_config, extended with the
-# decode_max_engine_requests knob so the JSON-splice call sites could
-# migrate onto generator parameters).  The router always gets the FORMULA
-# estimator with the profile data fit injected explicitly.
+# with explicit decode_max_engine_requests. The router always gets the
+# FORMULA estimator with the profile data fit injected explicitly.
 
 
 def build_flexlb_config(
@@ -353,7 +343,6 @@ def build_flexlb_config(
     decode_max_kv_usage_percent: int = GENERATOR_DEFAULTS["decode_max_kv_usage_percent"],
 ) -> str:
     """Generate schema-v3 JSON from scheduling policy and workload budgets."""
-    _validate_decode_availability(decode_max_engine_requests, decode_max_kv_usage_percent)
     _validate_affinity(cache_affinity_max_extra_ttft_ms, cache_affinity_min_prefix_hit_percent)
     if decision not in ("single", "fixed_window") or dispatcher not in (
         "batch", "non_batch"
@@ -368,6 +357,7 @@ def build_flexlb_config(
             continue
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError(f"{name} must be a positive integer")
+    import math
 
     if max_inflight_per_prefill_worker > 2_147_483_647:
         raise ValueError(
@@ -579,7 +569,7 @@ def _retype_dispatcher(doc: dict, overrides: ConfigOverride) -> None:
     if cap is None or cap is OMIT:
         cap = doc["dispatcher"]["maxInflightPerPrefillWorker"]
     doc["dispatcher"] = DispatcherPolicy(
-        (overrides.dispatcher or doc["dispatcher"]["type"]).lower(), cap,
+        overrides.dispatcher or doc["dispatcher"]["type"].lower(), cap,
     ).to_json()
 
 
@@ -623,10 +613,6 @@ def render_env(profile: str, overrides: Optional[ConfigOverride] = None) -> str:
         validate_profile_identity(profile, {
             axis: getattr(overrides, axis) for axis in PROFILE_SPECS[profile]
         })
-        if kwargs["decision"] == "single":
-            for field in ("max_requests", "max_collection_wait_ms", "max_predicted_execution_ms"):
-                if getattr(overrides, field) is not None:
-                    raise ValueError(f"ConfigOverride.{field} applies only to decision='fixed_window'")
         for f in fields(ConfigOverride):
             value = getattr(overrides, f.name)
             if value is None:
@@ -676,7 +662,7 @@ def render_process_config(
     *raw_config* bypasses the generator entirely (the EnvSpec
     negative-test channel — the atpm strict-reject variants inject
     deliberately-illegal documents).  The raw string is projected into
-    the envelope verbatim; harness._master_env injects the SAME string
+    the envelope verbatim; EnvManager._master_env injects the SAME string
     into the master env, preserving the single-source/two-projections
     invariant on the bypass path too.
     """
@@ -707,81 +693,3 @@ def render_process_config(
     # Trailing newline mirrors the retired master_fixed_window.json byte
     # layout (POSIX text file, golden-diff parity).
     return json.dumps(envelope, indent=2) + "\n"
-
-
-# ===========================================================================
-# CLI override parsing (run_stress.py FLEXLB_CONFIG_OVERRIDE)
-# ===========================================================================
-
-_INT_FIELDS = frozenset(
-    {
-        "cache_affinity_max_extra_ttft_ms",
-        "cleanup_interval_ms",
-        "status_rpc_ms",
-        "max_requests",
-        "default_priority",
-        "queue_timeout_ms",
-        "decode_max_engine_requests",
-        "decode_max_kv_usage_percent",
-        "max_predicted_execution_ms",
-        "request_timeout_ms",
-        "max_collection_wait_ms",
-        "status_stale_after_ms",
-        "max_inflight_per_prefill_worker",
-    }
-)
-_FLOAT_FIELDS = frozenset({"decision_lifetime", "cache_affinity_min_prefix_hit_percent"})
-_STR_FIELDS = frozenset({"ordering", "decision", "dispatcher", "prefill_expression"})
-_BOOL_FIELDS = frozenset({"strip_preemption"})
-
-
-def parse_overrides(spec: Optional[str]) -> Optional[ConfigOverride]:
-    """Parse a ``"k=v,k=v"`` override string (FLEXLB_CONFIG_OVERRIDE).
-
-    Bare ``k`` (no ``=``) is allowed only for boolean flags (``k=1``).
-    Other fields require an explicit value. Unknown keys raise
-    ValueError — the SSOT vocabulary is closed.  Returns None for an
-    empty/blank input.
-    """
-    if spec is None or not spec.strip():
-        return None
-    known = _INT_FIELDS | _FLOAT_FIELDS | _STR_FIELDS | _BOOL_FIELDS
-    kwargs: dict = {}
-    for item in spec.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        if "=" in item:
-            key, _, raw = item.partition("=")
-            key = key.strip()
-            raw = raw.strip()
-        else:
-            key, raw = item, "1"
-        if key not in known:
-            raise ValueError(
-                f"FLEXLB_CONFIG_OVERRIDE: unknown key {key!r}; valid keys: "
-                f"{sorted(known)}"
-            )
-        if "=" not in item and key not in _BOOL_FIELDS:
-            raise ValueError(f"FLEXLB_CONFIG_OVERRIDE: {key} requires an explicit value (key=value)")
-        if key in _INT_FIELDS:
-            try:
-                kwargs[key] = int(raw)
-            except ValueError:
-                raise ValueError(
-                    f"FLEXLB_CONFIG_OVERRIDE: {key} expects an integer, got {raw!r}"
-                ) from None
-        elif key in _FLOAT_FIELDS:
-            try:
-                kwargs[key] = float(raw)
-            except ValueError:
-                raise ValueError(
-                    f"FLEXLB_CONFIG_OVERRIDE: {key} expects a number, got {raw!r}"
-                ) from None
-        elif key in _BOOL_FIELDS:
-            kwargs[key] = raw.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            kwargs[key] = raw
-    if not kwargs:
-        return None
-    return ConfigOverride(**kwargs)

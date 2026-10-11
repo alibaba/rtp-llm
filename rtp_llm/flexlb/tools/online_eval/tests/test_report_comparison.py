@@ -9,8 +9,10 @@ from unittest import mock
 
 from reporting import load_analysis, read_bundle, run_meta, write_bundle
 from reporting.comparison import compare, main
-from workload.performance_gate import report
-from workload.cache_gate import analyze as analyze_cache, write_report
+from test_performance_gate import report
+from cases.master_performance.analysis import analyze as analyze_performance
+from cases.cache_scale_in.analysis import analyze as analyze_cache
+from test_cache_scale_gate import write_report
 from test_performance_gate import evidence
 import test_cache_scale_gate as cache_fixtures
 
@@ -26,15 +28,15 @@ class ReportComparisonTest(unittest.TestCase):
         result = dict(verdict=verdict, metrics=dict(latency=value), criteria=dict(limit=20))
         spec = dict(title=name, subtitle=verdict, timeOriginLabel='run start',
                     timeAxis=dict(min=0, max=30),
-                    events=[] if event is None else [dict(name='checkpoint', t=event)],
+                    events=[] if event is None else [dict(id='checkpoint', name='checkpoint', epoch_s=1000+event, t=event)],
                     kpis=[dict(label='run verdict', value=verdict)],
                     sections=[dict(type='details', title='missing samples', value=['latency gap'])],
                     panels=[dict(id='latency', title='Latency', type='line', unit=unit, timeX=True,
-                                 x=['5', '10', '25'], xNums=[5, 10, 25],
-                                 series=[dict(name='latency', data=[value, None, value], color='#1677ff')])])
+                                 axes={'y': dict(title=unit)},
+                                 series=[dict(name='latency', metric_id='latency', points=[dict(x=t, y=v) for t,v in zip([5, 10, 25], [value, None, value])], color='#1677ff')])])
         if second_panel:
-            spec['panels'].append(dict(id='other', title='Other', type='bar', x=['x'],
-                                       series=[dict(name='bar', data=[2])]))
+            spec['panels'].append(dict(id='other', title='Other', type='bar', axes={'y': dict(title='count')},
+                                       series=[dict(name='bar', points=[dict(x='x', y=2)])]))
         return write_bundle(self.root/name, 'run', 'fixture', result, spec,
                             meta=run_meta(dict(id=name), configuration=configuration or dict(scheduler='same'),
                                           workload=dict(sha256='same'), environment=dict(fetch=True)),
@@ -50,8 +52,8 @@ class ReportComparisonTest(unittest.TestCase):
         paths = [self.bundle('a'), self.bundle('b', verdict='FAIL', value=30),
                  self.bundle('c', verdict='INVALID', value=None)]
         before = [{p.name: p.read_bytes() for p in d.iterdir()} for d in paths]
-        with mock.patch('workload.performance_gate.analyze', side_effect=AssertionError('reanalysis')), \
-             mock.patch('workload.cache_gate.analyze', side_effect=AssertionError('reanalysis')):
+        with mock.patch('cases.master_performance.analysis.analyze', side_effect=AssertionError('reanalysis')), \
+             mock.patch('cases.cache_scale_in.analysis.analyze', side_effect=AssertionError('reanalysis')):
             result = compare(paths, self.output())
         self.assertEqual({k: v['verdict'] for k, v in result['runs'].items()},
                          dict(A='PASS', B='FAIL', C='INVALID'))
@@ -62,7 +64,7 @@ class ReportComparisonTest(unittest.TestCase):
         for token in ('Tier', 'noise_floor', 'rank_score', 'regression', 'gate passed'):
             self.assertNotIn(token, json.dumps(result))
         self.assertEqual(len(self.spec()['panels']), 4)
-        self.assertEqual(self.spec()['panels'][0]['representation'], 'multi')
+        self.assertEqual(self.spec()['panels'][0]['timeX'], True)
         styles = [s['dash'] for s in self.spec()['panels'][0]['series']]
         self.assertEqual(len({tuple(style) for style in styles}), 3)
         read_bundle(self.output()/'reports/comparison/runs')
@@ -119,8 +121,8 @@ class ReportComparisonTest(unittest.TestCase):
         paths = []
         for name, times in [('a', [1, 2, 12]), ('b', [1.2, 2.2, 12.2])]:
             spec = dict(title=name, timeOriginLabel='run start', panels=[dict(
-                id='metric', title='metric', timeX=True, xNums=times, x=list(map(str, times)),
-                series=[dict(name='metric', data=[3, None, 4])],
+                id='metric', title='metric', timeX=True, axes={'y': dict(title='count')},
+                series=[dict(name='metric', metric_id='metric', points=[dict(x=t,y=v) for t,v in zip(times,[3,None,4])])],
             )])
             paths.append(write_bundle(self.root/name, 'run', name, {}, spec))
         compare(paths, self.output())
@@ -134,8 +136,8 @@ class ReportComparisonTest(unittest.TestCase):
         for name in ('a', 'b'):
             paths.append(write_bundle(self.root/name, 'run', name, {}, dict(
                 title=name, timeOriginLabel=name, panels=[dict(
-                    id='metric', timeX=True, xNums=[1], x=['1'],
-                    series=[dict(name='metric', data=[1])],
+                    id='metric', timeX=True, axes={'y': dict(title='count')},
+                    series=[dict(name='metric', metric_id='metric', points=[dict(x=1,y=1)])],
                 )],
             )))
         result = compare(paths, self.output())
@@ -161,11 +163,11 @@ class ReportComparisonTest(unittest.TestCase):
         a, b = evidence(), evidence()
         b['criteria']['min_output_tps'] = 10000
         b['provenance']['actual_master_config']['dispatcher']['type'] = 'NON_BATCH'
-        paths = [report(self.root/name, e) for name, e in (('a', a), ('b', b))]
+        paths = [report(self.root/name, e, analyze_performance(e)) for name, e in (('a', a), ('b', b))]
         expected = [load_analysis(p) for p in paths]
         a['criteria']['min_output_tps'] = 10000
-        with mock.patch('workload.performance_gate.analyze', side_effect=AssertionError('reanalysis')), \
-             mock.patch('workload.performance_gate.report', side_effect=AssertionError('rebuild')):
+        with mock.patch('cases.master_performance.analysis.analyze', side_effect=AssertionError('reanalysis')), \
+             mock.patch('cases.master_performance.report.write_report', side_effect=AssertionError('rebuild')):
             result = compare(paths, self.output())
         self.assertEqual(list(result['runs'].values()), expected)
         self.assertEqual([v['verdict'] for v in result['runs'].values()], ['PASS', 'FAIL'])
@@ -181,14 +183,14 @@ class ReportComparisonTest(unittest.TestCase):
         paths, expected = [], []
         for name, hit in (('a', .1), ('b', .8)):
             e = cache_fixtures.CacheGateTest().evidence(hit)
-            e['events'] = [dict(name='checkpoint', t=20)]
+            e['events'] = [dict(id='checkpoint', name='checkpoint', epoch_s=1020, t=20)]
             result = analyze_cache(e)
             expected.append(result)
             root = self.root/name
             write_report(root, e, result)
             paths.append(root/'reports/run/cache-scale-in')
-        with mock.patch('workload.cache_gate.analyze', side_effect=AssertionError('reanalysis')), \
-             mock.patch('workload.cache_gate.prepare_report', side_effect=AssertionError('rebuild')):
+        with mock.patch('cases.cache_scale_in.analysis.analyze', side_effect=AssertionError('reanalysis')), \
+             mock.patch('cases.cache_scale_in.report.prepare_report', side_effect=AssertionError('rebuild')):
             result = compare(paths, self.output(), alignment_event='checkpoint')
         self.assertEqual(list(result['runs'].values()), expected)
         self.assertEqual([v['verdict'] for v in result['runs'].values()], ['FAIL', 'PASS'])

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime.harness import default_perf
+from runtime.environment_config import default_perf
 from runtime.perf_presets import ROOT, capture_defaults, load_performance_file, load_preset, preset_names
 from scenario import compile_scenarios
 from scenario.backend import make_env_spec
@@ -44,6 +44,26 @@ class StartupOptionsTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "checksum mismatch"):
                 load_performance_file(changed)
 
+    def test_preset_rejects_shadowed_and_unsupported_performance_fields(self):
+        source = ROOT / "data/performance/glm_5_3_l20d.json"
+        for section, field, value, message in (
+            ("prefill", "direct_batch_size_max", 1, "legacy prefill batch limits"),
+            ("prefill", "max_batch_requests", 1, "legacy prefill batch limits"),
+            ("prefill", "max_batch_tokens", 1024, "legacy prefill batch limits"),
+            ("memory_cache", "read_ms_per_block", 0, "unsupported prefill.memory_cache"),
+            ("memory_cache", "write_ms_per_block", 0, "unsupported prefill.memory_cache"),
+            ("memory_cache", "copy_lifecycle", True, "unsupported prefill.memory_cache"),
+        ):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                document = json.loads(source.read_text())
+                target = (document["prefill"] if section == "prefill"
+                          else document["prefill"]["memory_cache"])
+                target[field] = value
+                changed = Path(directory) / "performance.json"
+                changed.write_text(json.dumps(document))
+                with self.assertRaisesRegex(ValueError, message):
+                    load_performance_file(changed)
+
     def test_capture_deviations_require_explicit_baseline_and_reason(self):
         with self.assertRaisesRegex(Exception, "model_override"):
             environment({"perf_preset": "glm_5_3_l20d", "n_prefill": 64},
@@ -55,7 +75,6 @@ class StartupOptionsTest(unittest.TestCase):
 
     def test_paired_master_baseline_is_rendered_and_explicit_deviations_are_audited(self):
         from flexlb_cfg import render_env, render_process_config, ConfigOverride
-        from runtime import stress
         expected_caps = {
             "single-nonbatch": 1024,
             "batch-window": 2,
@@ -79,12 +98,6 @@ class StartupOptionsTest(unittest.TestCase):
             environment(raw, "test", "single-nonbatch")
         raw["model_override"] = {"baseline": "glm_5_3_l20d", "reason": "亲和策略对照"}
         self.assertEqual(environment(raw, "test", "single-nonbatch")["config_overrides"]["cache_affinity_max_extra_ttft_ms"], 20)
-        args = stress.parse_args(["--performance", str(ROOT / "data/performance/glm_5_3_l20d.json"), "--dry-run"])
-        self.assertEqual(json.loads(stress._config(args))["router"]["roles"]["prefill"]["cacheAffinity"], affinity)
-        for mode, cap in (("sn", 1024), ("wb", 2), ("sb", 2), ("wn", 64)):
-            args = stress.parse_args(["--performance", str(ROOT / "data/performance/glm_5_3_l20d.json"),
-                                      "--master-mode", mode, "--dry-run"])
-            self.assertEqual(json.loads(stress._config(args))["dispatcher"]["maxInflightPerPrefillWorker"], cap)
         batch_override = environment({"perf_preset": "glm_5_3_l20d",
                                       "config_overrides": {"max_inflight_per_prefill_worker": 3}},
                                      "test", "batch-window")

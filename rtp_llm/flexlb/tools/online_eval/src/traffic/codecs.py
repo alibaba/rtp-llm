@@ -7,7 +7,8 @@ from traffic import prefix_lineage, prefix_lineage_v3
 def codec_for_version(version):
     if type(version) is not int or version not in (2, 3):
         raise ValueError(f"unknown prefix_lineage codec version: {version!r}")
-    return {2: prefix_lineage, 3: prefix_lineage_v3}[version]
+    return {2: prefix_lineage.BlockAlignedLineageCodec,
+            3: prefix_lineage_v3.ExactLengthLineageCodec}[version]()
 
 
 def decode(raw, manifest=None):
@@ -30,7 +31,8 @@ def decode(raw, manifest=None):
             except (ValueError, KeyError, TypeError):
                 raise ValueError("missing lineage codec version") from None
             module = codec_for_version(version)
-    metadata, events = module.decode(raw)
+    model = module.decode(raw)
+    metadata, events = model.to_wire()
     if manifest is not None:
         for field in ("version", "block_size"):
             if manifest.get(field) != metadata[field]:

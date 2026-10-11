@@ -1,8 +1,7 @@
-"""Both stress inputs materialize through the same registered source contract."""
+"""Case traffic inputs materialize through the registered source contract."""
 
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -17,20 +16,6 @@ from traffic.datasets import build_manifest
 
 
 class TrafficEntrypointTest(unittest.TestCase):
-    def test_stress_rejects_raw_trace_and_synthetic_replay(self):
-        script = ROOT / "scripts/commands/run_stress.py"
-        raw = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
-                             env=dict(os.environ, TRACE_FILE="/tmp/raw.jsonl"))
-        self.assertEqual(2, raw.returncode)
-        self.assertIn("TRACE_FILE is generated", raw.stderr)
-        with tempfile.TemporaryDirectory() as tmp:
-            spec = Path(tmp) / "source.json"
-            spec.write_text(json.dumps(dict(kind="synthetic", model="realistic", version="1",
-                parameters=dict(seed=1, count=2))))
-            replay = subprocess.run([sys.executable, str(script), "--traffic-source-spec", str(spec),
-                                     "--send-mode", "replay", "--dry-run"], capture_output=True, text=True)
-            self.assertEqual(2, replay.returncode)
-            self.assertIn("synthetic traffic has ordinal timestamps", replay.stderr)
 
     def test_pinned_dag_and_synthetic_spec(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,7 +62,7 @@ class TrafficEntrypointTest(unittest.TestCase):
         core = {key: value for key, value in generated.items() if key != "transformations"}
         legacy_bytes = (json.dumps(core, separators=(",", ":")) + "\n").encode()
         self.assertEqual(hashlib.sha256(legacy_bytes).hexdigest(),
-                         "8b5a033c707489c598dd6d2d1c77690ebb7251b96e5f65027313221d9969df24")
+                         "44b68a7c6912281b7059aaa77ac2c45b2134ad1c7040efbc466e32e6285a298f")
         transformations = generated["transformations"]
         self.assertEqual(transformations["source_sha256"], generated["source_sha256"])
         self.assertEqual(transformations["selected_requests"], len(generated["templates"]))

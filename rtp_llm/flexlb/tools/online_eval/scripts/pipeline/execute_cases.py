@@ -13,7 +13,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from typing import IO
 
-from runtime.harness import PROBE_BIND_HOST, port_in_use
+from runtime.network import PROBE_BIND_HOST, port_in_use
 from scenario.suites import default_suite, suite_names
 from runtime.resource_plan import (
     MOCK_WINDOW_LAST,
@@ -27,14 +27,10 @@ MOCK_BASE_GRPC_PORT = 55151
 MOCK_PORT_STRIDE = 500
 MOCK_PORT_WINDOW_LAST = MOCK_WINDOW_LAST  # lane footprint [base-1 .. base+151]
 
-# Stress/lease port band on the shared dev container: online_eval
-# (run_stress.py MOCK_BASE_GRPC_PORT:-61000) and the flexlb lease
-# ledger (port_base=61000) both allocate from here upward, so FT port
-# matrices must stay strictly below it.  Hard bound for auto-shift
-# candidates; an EXPLICIT base crossing it only warns — a leased-but-
-# not-yet-listening port is invisible to bind probing, so refusing
-# would false-positive (the explicit pair is a contract, not a hint).
-STRESS_BAND_FLOOR = 61000
+# The FlexLB lease ledger allocates from 61000 upward. Auto-shift candidates
+# stay below it; an explicit leased window only warns because a reserved port
+# may not yet be listening. Keep allocation behavior independent of bind probes.
+LEASE_BAND_FLOOR = 61000
 
 # Machine-level port-window lock dir.  Deliberately NOT env-overridable:
 # the lock only means mutual exclusion if every user on the host shares
@@ -81,7 +77,7 @@ def _mock_base() -> int:
 def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE) -> dict[str, str]:
     """Port-partition env overlay for lane *lane_idx* (0-based).
 
-    Every key below is process-global in harness.py (read at import), so a
+    Every key below is process-global in runtime.environment_config (read at import), so a
     per-runner-subprocess value fully owns that lane's sockets.  Values NOT
     listed here (e.g. FLEXLB_FT_HA_DUAL_MASTER) pass through unchanged from
     the orchestrator's environment.
@@ -135,7 +131,7 @@ def _lane_ports(
 def _busy_ports(ports: list[int]) -> list[int]:
     """Ports from *ports* already bound by someone (0.0.0.0 probe).
 
-    Must probe the WILDCARD address, never loopback: harness.py records
+    Must probe the WILDCARD address, never loopback: runtime.network records
     the real lesson — a 127.0.0.1 probe PASSED while a foreign process
     (invisible to ps/ss in the shared network namespace, unreachable by
     kill) held 0.0.0.0:55252, and the JVM died at startup.  Serial on
@@ -301,21 +297,21 @@ def _resolve_port_bases(args: argparse.Namespace) -> None:
     Busy or locked → fail fast with a per-lane diagnosis: the run must
     die BEFORE burning 120s-per-case timeouts, not after (a pinned-but-
     occupied port once took the whole lane matrix down this way).  A
-    matrix tail crossing STRESS_BAND_FLOOR only WARNS — a leased-but-
-    not-yet-listening stress-band port is invisible to bind probing, so
+    matrix tail crossing LEASE_BAND_FLOOR only WARNS — a leased-but-
+    not-yet-listening lease-band port is invisible to bind probing, so
     refusing would false-positive.  --dry-run never exits here: it
     shows the per-lane status and warns that a real run fails fast.
 
     DEFAULT mode — candidate k shifts the whole matrix DOWN by P
     strides (master and mock together, uniform direction: shifting
     master UP would walk into the harness auto-hunt band 18080..18580,
-    shifting mock UP would creep toward the 61000 stress band / 65535
+    shifting mock UP would creep toward the 61000 lease band / 65535
     ceiling):  m_k = m0 - MASTER_PORT_STRIDE*P*k,  b_k = b0 - stride*P*k.
     Shifted candidates never overlap each other: master side
     10*P > 10*(P-1)+5 holds for every P >= 1; mock side
     stride*P > stride*(P-1)+153  <=>  stride >= 153 (the CLI floor).
     Gates per candidate, cheapest first: (a) unprivileged range;
-    (b) matrix tail < STRESS_BAND_FLOOR (hard — the online-eval/lease
+    (b) matrix tail < LEASE_BAND_FLOOR (hard — the online-eval/lease
     band starts there); (c) the machine-level window locks; (d) every
     lane's full 159-port window free under a 0.0.0.0 bind probe.
     First survivor wins; k > 0 injects the shifted bases into
@@ -409,10 +405,10 @@ def _resolve_port_bases(args: argparse.Namespace) -> None:
     if explicit:
         args.port_provenance = f"explicit {m0}/{b0}"
         tail = _matrix_tail(b0, stride, n_lanes)
-        if tail >= STRESS_BAND_FLOOR:
+        if tail >= LEASE_BAND_FLOOR:
             print(
-                f"warning: explicit mock matrix tail {tail} >= stress "
-                f"band floor {STRESS_BAND_FLOOR} (mock base {b0}, stride "
+                f"warning: explicit mock matrix tail {tail} >= lease "
+                f"band floor {LEASE_BAND_FLOOR} (mock base {b0}, stride "
                 f"{stride}, {n_lanes} lanes) — crossing the online-eval "
                 "/ lease port band; continuing because a leased-but-not-"
                 "yet-listening port is invisible to bind probing "
@@ -486,10 +482,10 @@ def _resolve_port_bases(args: argparse.Namespace) -> None:
         detail: str | None
         if not (b_k - 1 >= 1024 and m_k >= 1024):
             detail = "below the privileged floor 1024"
-        elif _matrix_tail(b_k, stride, n_lanes) >= STRESS_BAND_FLOOR:
+        elif _matrix_tail(b_k, stride, n_lanes) >= LEASE_BAND_FLOOR:
             detail = (
                 f"matrix tail {_matrix_tail(b_k, stride, n_lanes)} "
-                f"enters the stress band >= {STRESS_BAND_FLOOR}"
+                f"enters the lease band >= {LEASE_BAND_FLOOR}"
             )
         else:
             holders = _try_window_lock(m_k, b_k, stride, n_lanes)
@@ -649,7 +645,7 @@ def main() -> int:
         help=(
             "mock-port stride between lanes (default 500). VERIFIED "
             "per-lane mock window: [base-1 .. base+151] = 153 ports "
-            "(harness _pick_base_grpc_port / start_victim; JavaMockEngine-"
+            "(EnvManager._pick_base_grpc_port / start_victim; JavaMockEngine-"
             "Cluster http=base-1, engines=base..base+n-1, victim zone "
             "base+149..151), so 500 keeps ~3x headroom and a lane cap "
             "of 21 (the dev container sustains 4-8)"

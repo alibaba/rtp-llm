@@ -22,7 +22,7 @@ from scenario.loader import load_document
 
 def scenario():
     return {
-        "schema_version": 1,
+        "program_schema_version": 1,
         "id": "completion",
         "description": "A submitted request reaches terminal state",
         "category": "status",
@@ -64,7 +64,7 @@ class CompileTest(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; from scenario import compile_scenarios; assert not any(x in sys.modules for x in ['runtime.harness','runtime.engine_ops','grpc'])",
+                "import sys; from scenario import compile_scenarios; assert not any(x in sys.modules for x in ['runtime.environment','runtime.java_runtime','runtime.process','runtime.engine_ops','grpc'])",
             ],
             cwd=TOOLS,
             capture_output=True,
@@ -110,8 +110,8 @@ class CompileTest(unittest.TestCase):
 
     def test_unknown_field_and_version_are_errors_with_source(self):
         for patch in (
-            {"schema_version": True},
-            {"schema_version": 2},
+            {"program_schema_version": True},
+            {"program_schema_version": 2},
             {"python": "exec()"},
             {1: "bad"},
         ):

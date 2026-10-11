@@ -2,12 +2,21 @@
 
 import json
 import time
-import uuid
 from pathlib import Path
 
-from runtime.ha import LiveClientEvents
+from runtime.client_journal import LiveClientEvents
 from traffic.traffic_source import sha256_file
-from traffic.playback_config import normalize
+from runtime.load_client import client_environment, collection_environment, bind_environment
+
+JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
+
+RUN_LOCAL_ENVIRONMENT = frozenset({"TRACE_FILE", "FLOW_CONTROL_DIR", "FLOW_RUN_ID",
+    "GRPC_TARGET", "GRPC_TARGETS", "MASTER_DISCOVERY_FILE", "OUTPUT_DIR"})
+
+
+def evidence_environment(environment):
+    """Launch producer owns the omission of run-local paths, targets and identities."""
+    return {key: value for key, value in environment.items() if key not in RUN_LOCAL_ENVIRONMENT}
 
 
 class JavaFlowGroup:
@@ -31,7 +40,7 @@ class JavaFlowGroup:
         if collection_profile not in {"aggregate", "request", "diagnostic"}:
             raise ValueError("unknown collection profile")
         self.collection_profile = collection_profile
-        self.monitor = monitor
+        self.monitor = monitor if monitor is None or monitor.collects("client") else None
         self.monitor_target = "client-" + group_id
         self.client = client
         self.directory = Path(directory)
@@ -45,32 +54,28 @@ class JavaFlowGroup:
         self.stop_command = None
         self.trace_manifest = None
 
-    def start(self, trace, environment, deadline):
+    def start(self, trace, environment, deadline, *, target):
         if self.proc is not None or self.directory.exists():
             raise ValueError("flow output directory must be fresh")
+        env, playback = client_environment(environment)
         trace = Path(trace).resolve()
         self.trace_manifest = dict(path=str(trace), sha256=sha256_file(trace))
         self.directory.mkdir(parents=True)
         self.control.mkdir()
-        env, playback = normalize(environment)
         source_manifest = trace.with_suffix(".manifest.json")
         semantics = (
             json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
         )
         self.trace_manifest.update(semantics)
         self.trace_manifest["playback"] = playback
-        env.update(
-            TRACE_FILE=str(trace),
+        env = bind_environment(env, dict(
+            TRACE_FILE=str(trace), GRPC_TARGET=target,
             FLOW_CONTROL_DIR=str(self.control),
             FLOW_RUN_ID=self.identity["run_id"],
             FLOW_GROUP_ID=self.identity["group_id"],
             FLOW_PHASE_ID=self.identity["phase_id"],
-            LIVE_CLIENT_EVENTS=str(self.collection_profile != "aggregate").lower(),
-            COLLECTION_PROFILE=self.collection_profile,
-            CLIENT_MONITORING=str(self.monitor is not None).lower(),
-        )
-        if self.collection_profile != "diagnostic":
-            env["SKIP_SERVER_LATENCY"] = "true"
+            **collection_environment(self.collection_profile, monitoring=self.monitor is not None),
+        ))
         (self.directory / "flow-input.json").write_text(
             json.dumps(
                 dict(**self.identity, trace=self.trace_manifest, environment=env),
@@ -102,10 +107,8 @@ class JavaFlowGroup:
 
     def control_status(self):
         """Cheap process/control observation; request accounting remains in status()."""
-        path = self.control / "status.json"
-        state = json.loads(path.read_text()) if path.exists() else {}
-        if state and any(state.get(k) != v for k, v in self.identity.items()):
-            raise ValueError("flow control identity mismatch")
+        from runtime.flow_control import read_status
+        state = read_status(self.control, self.identity)
         state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
         return state
 
@@ -146,17 +149,8 @@ class JavaFlowGroup:
         state = self.status()
         if state.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"}:
             return state
-        if self.stop_command is None:
-            self.stop_command = uuid.uuid4().hex
-            command = dict(
-                run_id=self.identity["run_id"],
-                group_id=self.identity["group_id"],
-                operation="stop_sending",
-                command_id=self.stop_command,
-            )
-            temporary = self.control / "stop.json.tmp"
-            temporary.write_text(json.dumps(command))
-            temporary.replace(self.control / "stop.json")
+        from runtime.flow_control import stop_sending
+        self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
         return self._wait(
             lambda s: s.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"},
             deadline,
@@ -181,6 +175,9 @@ class JavaFlowGroup:
             raise RuntimeError(
                 "flow drain journal does not account for every submission"
             )
+        from runtime.flow_control import validate_drain
+        validate_drain(state, self.identity, terminal_count=state["observed_terminal"],
+                       command_id=self.stop_command)
         return state
 
     def checkpoint(self, label, deadline, predicate):
@@ -191,6 +188,7 @@ class JavaFlowGroup:
         return record
 
     def evidence_snapshot(self):
+        from runtime.client_journal import request_timing
         errors = []
         try:
             state = self.status()
@@ -222,6 +220,9 @@ class JavaFlowGroup:
             and state.get("submitted") == len(self.journal.terminal)
             and len(self.journal.issued) == len(self.journal.terminal)
         )
+        timing = request_timing(self.journal.issued.values())
+        errors.extend(timing["errors"])
+        complete = complete and not errors
         if not complete:
             errors.append(
                 "flow has not proven complete submission and terminal accounting"
@@ -238,6 +239,7 @@ class JavaFlowGroup:
                 for rid, row in self.journal.issued.items()
             ],
             issued=list(self.journal.issued.values()),
+            traffic_start=timing["traffic_start"],
             unfinished=[
                 r
                 for rid, r in self.journal.issued.items()

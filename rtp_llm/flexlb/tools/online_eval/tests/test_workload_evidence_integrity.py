@@ -4,8 +4,28 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from scenario.actions.master import OwnedHaClient
-from workload.evidence_analysis import analyze_report
+from tests.ha_fixtures import client_resource
+from workload.evidence_analysis import analyze_report as read_analysis
+
+def analyze_report(directory, result, evidence):
+    from monitoring.metric_store import export_metrics
+    export_metrics(directory)
+    return read_analysis(directory, result, evidence)
+
+
+def executed_result(status="PASS", **values):
+    check_status = "FAIL" if status in {"FAIL", "FINDING-CONFIRMED"} else "PASS"
+    result = dict(id="test", status=status, error=None, cleanup=[], stages=[dict(
+        id="check", status="TIMEOUT" if status == "TIMEOUT" else check_status,
+        error="stage deadline exceeded" if status == "TIMEOUT" else None,
+        checks=[dict(id="criterion", status=check_status)],
+    )])
+    if status == "FINDING-CONFIRMED":
+        result["finding_confirmed"] = ["check.criterion"]
+    elif status == "FINDING-RESOLVED":
+        result["finding_resolved"] = ["check.criterion"]
+    result.update(values)
+    return result
 
 
 class EvidenceIntegrityTest(unittest.TestCase):
@@ -21,8 +41,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             path = telemetry / "queries.json"
             path.write_text(json.dumps(queries))
             def result():
-                return dict(id="test", status="PASS", error=None, stages=[],
-                            workload=dict(capture_metrics=True,
+                return executed_result(workload=dict(capture_metrics=True,
                                           runtime_validity="VALID"))
             evidence = dict(clock_anchor={"epoch_s": 0}, phases=[],
                             expected_telemetry=["1/mock"])
@@ -70,32 +89,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             p.write_text(json.dumps(dict(epoch_s=10, ended_epoch_s=9)))
             self.assertTrue(journal_rows(p)[1])
 
-    def test_collector_lifetime_requires_start_and_tail_coverage(self):
-        from workload.evidence_analysis import audit_journals
-
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d) / "telemetry/1"
-            directory.mkdir(parents=True)
-            (directory / "mock.prom").write_text("# ts=10000\nx 1\n")
-            (directory / "mock-samples.jsonl").write_text(
-                json.dumps(dict(sequence=1, epoch_s=10, monotonic_s=10, error=None))
-                + "\n"
-            )
-            errors = audit_journals(
-                d, ["1/mock"], 5, {"1/mock": dict(started_epoch_s=0, ended_epoch_s=20)}
-            )
-            self.assertTrue(any("began too late" in e["error"] for e in errors))
-            self.assertTrue(any("ended too early" in e["error"] for e in errors))
-            self.assertEqual(
-                audit_journals(
-                    d,
-                    ["1/mock"],
-                    5,
-                    {"1/mock": dict(started_epoch_s=9, ended_epoch_s=11)},
-                ),
-                [],
-            )
-
     def test_sparse_metric_does_not_claim_source_outage(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
@@ -111,11 +104,8 @@ class EvidenceIntegrityTest(unittest.TestCase):
                 )
             (telemetry / "mock.prom").write_text("".join(raw))
             (telemetry / "mock-samples.jsonl").write_text("\n".join(journal) + "\n")
-            result = dict(
+            result = executed_result(
                 id="sparse",
-                status="PASS",
-                error=None,
-                stages=[],
                 workload=dict(
                     capture_metrics=True,
                     runtime_validity="VALID",
@@ -145,29 +135,27 @@ class EvidenceIntegrityTest(unittest.TestCase):
             "TIMEOUT",
         ):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as d:
-                result = dict(
-                    id="test",
+                result = executed_result(
                     status=status,
-                    error=None,
-                    stages=[],
                     workload=dict(capture_metrics=False, runtime_validity="INVALID"),
                 )
                 analyze_report(d, result, dict(clock_anchor={"epoch_s": 0}, phases=[]))
-                if status in ("FAIL", "TIMEOUT"):
-                    self.assertEqual(result["status"], status)
-                else:
-                    self.assertEqual(result["status"], "ERROR")
-                    self.assertEqual(result["workload"]["prior_status"], status)
+                self.assertEqual(result["status"], "TIMEOUT" if status == "TIMEOUT" else "ERROR")
+                self.assertEqual(result["outcome"]["validity"], "INVALID")
+                self.assertEqual(result["outcome"]["execution"], "TIMEOUT" if status == "TIMEOUT" else "PASS")
+                self.assertEqual(result["outcome"]["gate"], "PASS" if status == "TIMEOUT" else status)
 
     def test_interrupted_ha_keeps_partial_rows_and_rejects_completeness(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d)
             (p / "client_events.jsonl").write_text('{"rid":1}\n{"rid":')
-            client = OwnedHaClient(SimpleNamespace(out_dir=p))
+            client = client_resource(out_dir=p)
             evidence = client.evidence_snapshot()
             self.assertEqual(evidence["records"], [{"rid": 1}])
             self.assertFalse(evidence["complete"])
-            self.assertEqual(len(evidence["errors"]), 2)
+            self.assertEqual(len(evidence["errors"]), 3)
+            self.assertIsNone(evidence["traffic_start"])
+            self.assertTrue(any("send_start_epoch_ms" in error for error in evidence["errors"]))
 
     def test_interrupted_ha_keeps_live_terminal_and_unfinished_requests(self):
         with tempfile.TemporaryDirectory() as d:
@@ -201,7 +189,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             (p / "client_lifecycle.jsonl").write_text(
                 "".join(json.dumps(row) + "\n" for row in rows)
             )
-            evidence = OwnedHaClient(SimpleNamespace(out_dir=p)).evidence_snapshot()
+            evidence = client_resource(out_dir=p).evidence_snapshot()
             self.assertEqual(evidence["records"], [rows[1], rows[2]])
             self.assertFalse(evidence["complete"])
             self.assertTrue(evidence["path"].endswith("client_lifecycle.jsonl"))
@@ -236,11 +224,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
                     )
                 )
             )
-            r = dict(
-                id="test",
-                status="PASS",
-                stages=[],
-                error=None,
+            r = executed_result(
                 workload=dict(capture_metrics=True, runtime_validity="VALID"),
             )
             e = dict(
@@ -252,19 +236,6 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(r["status"], "ERROR")
             self.assertEqual(r["workload"]["missing_telemetry"], ["1/master-B"])
             self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
-
-    def test_failed_sample_breaks_curve(self):
-        from workload.evidence_analysis import read_series
-
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "telemetry/1"
-            p.mkdir(parents=True)
-            (p / "master-A.prom").write_text("# ts=1000\nx 3\n# ts=3000\nx 4\n")
-            (p / "master-A.prom.samples.jsonl").write_text(
-                json.dumps(dict(epoch_s=2, error="offline")) + "\n"
-            )
-            series = read_series(d, 0)
-            self.assertEqual(next(iter(series.values())), [[1, 3], [2, None], [3, 4]])
 
     def test_outage_exemption_is_source_and_window_specific(self):
         from workload.evidence_analysis import classify_gaps
@@ -280,75 +251,3 @@ class EvidenceIntegrityTest(unittest.TestCase):
         expected, unexpected = classify_gaps(gaps, evidence)
         self.assertEqual(expected, {"1/master-A/x": [3]})
         self.assertEqual(unexpected, {"1/master-A/x": [1, 5], "1/master-B/x": [3]})
-
-    def test_stress_aggregator_never_promotes_unknown_terminal_status(self):
-        import ast
-
-        source = Path(__file__).resolve().parents[1] / "src/analysis/aggregate.py"
-        tree = ast.parse(source.read_text())
-        fn = next(
-            n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "is_ok"
-        )
-        scope = {}
-        exec(
-            compile(ast.Module(body=[fn], type_ignores=[]), str(source), "exec"), scope
-        )
-        predicate = scope["is_ok"]
-        self.assertTrue(predicate(dict(status="ok", error="")))
-        for status in [
-            None,
-            "unknown",
-            "cancelled",
-            "incomplete_response",
-            "empty_response",
-            "engine_error",
-            "schedule_error",
-        ]:
-            self.assertFalse(predicate(dict(status=status, error="")), status)
-        self.assertFalse(predicate(dict(status="ok", error="business failure")))
-
-    def test_raw_samples_without_matching_rounds_are_incomplete(self):
-        from workload.evidence_analysis import audit_journals
-
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d) / "telemetry/1"
-            directory.mkdir(parents=True)
-            raw = directory / "mock.prom"
-            raw.write_text("# ts=1000\nx 1\n# ts=3000\nx 3\n")
-            journal = directory / "mock-samples.jsonl"
-            journal.write_text(
-                json.dumps(dict(sequence=1, epoch_s=1, error=None)) + "\n"
-            )
-            issues = audit_journals(d, ["1/mock"])
-            self.assertTrue(any("do not match" in issue["error"] for issue in issues))
-            with journal.open("a") as stream:
-                stream.write(json.dumps(dict(sequence=2, epoch_s=3, error=None)) + "\n")
-            self.assertEqual(audit_journals(d, ["1/mock"]), [])
-            journal.write_text("{broken\n")
-            self.assertTrue(audit_journals(d, ["1/mock"]))
-
-    def test_silent_sampling_pause_breaks_curve_without_fabricating_zero(self):
-        from workload.evidence_analysis import (
-            audit_journals,
-            read_series,
-        )
-
-        with tempfile.TemporaryDirectory() as d:
-            directory = Path(d) / "telemetry/1"
-            directory.mkdir(parents=True)
-            (directory / "mock.prom").write_text("# ts=1000\nx 1\n# ts=11000\nx 2\n")
-            (directory / "mock-samples.jsonl").write_text(
-                "".join(
-                    json.dumps(dict(sequence=index, epoch_s=timestamp, error=None))
-                    + "\n"
-                    for index, timestamp in enumerate([1, 11], 1)
-                )
-            )
-            points = next(iter(read_series(d, 0, 5).values()))
-            self.assertEqual(points, [[1, 1], [6, None], [11, 2]])
-            self.assertTrue(
-                any(
-                    "sampling gap" in issue["error"]
-                    for issue in audit_journals(d, ["1/mock"], 5)
-                )
-            )

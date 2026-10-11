@@ -1,4 +1,5 @@
 import json
+import urllib.request
 import sys
 import tempfile
 import unittest
@@ -101,7 +102,7 @@ class EngineControlTests(unittest.TestCase):
     def test_stop_and_start_require_observed_state(self):
         for operation in ("stop", "start"):
             ctx, stored, params, responses = self.run_control(operation)
-            with patch.object(ec, "_http", side_effect=responses):
+            with patch.object(ec, "control_json", side_effect=responses):
                 output = ec.execute(ctx, params, self.deadline())
             self.assertTrue(stored["evidence"]["complete"])
             self.assertTrue(stored["evidence"]["effect_verified"])
@@ -112,7 +113,7 @@ class EngineControlTests(unittest.TestCase):
 
     def test_perf_ack_does_not_claim_measured_latency(self):
         ctx, stored, params, responses = self.run_control("set_perf")
-        with patch.object(ec, "_http", side_effect=responses):
+        with patch.object(ec, "control_json", side_effect=responses):
             ec.execute(ctx, params, self.deadline())
         self.assertFalse(stored["evidence"]["effect_verified"])
         self.assertEqual(
@@ -125,7 +126,7 @@ class EngineControlTests(unittest.TestCase):
             {"status": "ok", "engine": "other", "port": 1},
         ):
             ctx, stored, params, responses = self.run_control("stop", response=response)
-            with patch.object(ec, "_http", side_effect=responses), self.assertRaises(
+            with patch.object(ec, "control_json", side_effect=responses), self.assertRaises(
                 ValueError
             ):
                 ec.execute(ctx, params, self.deadline())
@@ -136,7 +137,7 @@ class EngineControlTests(unittest.TestCase):
 
     def test_ack_without_effect_is_error(self):
         ctx, _, params, responses = self.run_control("stop", after_stopped=False)
-        with patch.object(ec, "_http", side_effect=responses), self.assertRaisesRegex(
+        with patch.object(ec, "control_json", side_effect=responses), self.assertRaisesRegex(
             ValueError, "without matching"
         ):
             ec.execute(ctx, params, self.deadline())
@@ -144,7 +145,7 @@ class EngineControlTests(unittest.TestCase):
     def test_missing_engine_blocks_all_mutations(self):
         ctx, _, params, _ = self.run_control("stop")
         with patch.object(
-            ec, "_http", return_value={"engines": []}
+            ec, "control_json", return_value={"engines": []}
         ) as http, self.assertRaises(ValueError):
             ec.execute(ctx, params, self.deadline())
         self.assertEqual(http.call_count, 1)
@@ -153,7 +154,7 @@ class EngineControlTests(unittest.TestCase):
         ctx, stored, params, responses = self.run_control("stop")
         params["targets"] = [{"$ref": "stages.add.output.engine"}]
         ctx.resolve = lambda value: "p0" if isinstance(value, dict) else value
-        with patch.object(ec, "_http", side_effect=responses):
+        with patch.object(ec, "control_json", side_effect=responses):
             ec.execute(ctx, params, self.deadline())
         self.assertEqual(stored["evidence"]["targets"], ["p0"])
 
@@ -161,9 +162,9 @@ class EngineControlTests(unittest.TestCase):
         response = MagicMock()
         response.__enter__.return_value.read.return_value = b'{"status":"ok"}'
         with patch.object(
-            ec.urllib.request, "urlopen", return_value=response
+            urllib.request, "urlopen", return_value=response
         ) as open_url:
-            ec._http(
+            ec.control_json(
                 NS(mock_http_port=1), "set_perf", self.deadline(), {"engine": "p0"}
             )
         self.assertEqual(open_url.call_args.kwargs["timeout"], 0.25)

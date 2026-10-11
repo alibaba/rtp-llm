@@ -1,11 +1,8 @@
 """Exact-length empirical lineage; filter only when projecting a replay plan."""
-import hashlib
 import json
 import lzma
-from pathlib import Path
 
 from traffic.prefix_lineage import BLOCK, MAX_EVENTS
-from traffic.output_sampling import output_sampler, output_semantics
 
 
 def validate(events):
@@ -34,7 +31,7 @@ def encode(events, provenance=None):
                                    separators=(',', ':'), allow_nan=False).encode(), preset=6)
 
 
-def decode(raw):
+def _decode_payload(raw):
     decoder = lzma.LZMADecompressor(memlimit=128*1024*1024)
     data = decoder.decompress(raw, max_length=128*1024*1024)
     if not decoder.eof or decoder.unused_data:
@@ -47,8 +44,22 @@ def decode(raw):
     return metadata, events
 
 
+class ExactLengthLineageCodec:
+    """Decode the persisted format into the common, unit-safe domain model."""
+
+    def decode(self, raw):
+        from traffic.lineage_model import LineageModel
+        return LineageModel.from_wire(*_decode_payload(raw))
+
+    def encode(self, events, provenance=None):
+        return encode(events, provenance)
+
+
+def decode(raw):
+    return ExactLengthLineageCodec().decode(raw).to_wire()
+
+
 def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
-    """Compatibility entrypoint; content projection lives in lineage_transforms."""
     from traffic.lineage_transforms import write_trace as project
-    return project(path, parameters, namespace, base_dir, decode=decode,
+    return project(path, parameters, namespace, base_dir, decode=ExactLengthLineageCodec().decode,
                    max_requests=max_requests)

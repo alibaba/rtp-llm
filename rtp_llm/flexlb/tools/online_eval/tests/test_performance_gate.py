@@ -7,17 +7,34 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from workload.performance_gate import analyze, report, validate, trace_workload_sha
+from cases.master_performance.analysis import analyze
+from cases.master_performance.inputs import validate
+from cases.master_performance.publication import publish_performance
+from metric_fixtures import freeze_metrics
+
+def report(directory, evidence, result):
+    freeze_metrics(directory, "master_performance")
+    return publish_performance(directory, evidence, result)
+from workload.gate_evidence import trace_workload_sha
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+
+def metric_curves(directory, evidence, result, presentation=None):
+    from cases.master_performance.metrics import produce
+    from cases.master_performance.panels import prepare_curves
+    freeze_metrics(directory, "master_performance")
+    produce(directory, evidence, result)
+    from reporting.view_config import view
+    return prepare_curves(directory, evidence, presentation or view("master_performance.yaml"))
+
+
 def evidence():
     # Small arithmetic fixture only; never a runnable benchmark.
     c = {
-        "benchmark_id": "synthetic-100ms-10qps-v1",
         "warmup_s": 5,
         "measure_s": 30,
         "sample_s": 1,
@@ -55,14 +72,16 @@ def evidence():
             dict(r, status="ok", total_ms=100, ttft_ms=50, observed_output_tokens=8)
         )
     return dict(
-        schema_version=1,
+        performance_evidence_schema_version=2,
         criteria=c,
         errors=[],
         window=dict(start_epoch_ms=100000, end_epoch_ms=110000),
         samples=[dict(epoch_ms=100000 + i * 1000) for i in range(11)],
         flow=dict(complete=True, errors=[], issued=issued, records=records),
         provenance=dict(
-            benchmark_id=c["benchmark_id"],
+            env_epoch=1,
+            instance="master_performance::default::batch-window",
+            configuration_sha256="f" * 64,
             master_artifact=dict(jar_sha256="a" * 64),
             mock_jar_sha256="b" * 64,
             actual_master_config=dict(dispatcher=dict(type="BATCH")),
@@ -77,8 +96,24 @@ def evidence():
 
 
 class PerformanceGateTest(unittest.TestCase):
+    def test_yaml_metric_binding_controls_raw_query_and_gate_validation(self):
+        from cases.master_performance.inputs import engine_tps
+        e = self.engine_evidence()
+        renamed = copy.deepcopy(e["gate_input"])
+        renamed["fields"]["rtp_llm_context_tps"]["metric"] = "mock/replacement_context_tps"
+        with self.assertRaisesRegex(ValueError, "match YAML metric fields"):
+            validate(e["criteria"], renamed)
+        e["criteria"]["engine_tps"]["mock/replacement_context_tps"] = e["criteria"]["engine_tps"].pop(
+            "mock/rtp_llm_context_tps")
+        e["gate_input"] = renamed
+        for row in e["engine_tps_samples"]:
+            if row["metric_id"] == "mock/rtp_llm_context_tps":
+                row["metric_id"] = "mock/replacement_context_tps"
+        engine_tps(renamed, e["criteria"]["engine_tps"])
+        self.assertEqual(analyze(e)["verdict"], "PASS")
+
     def test_completion_buckets_do_not_depend_on_journal_order(self):
-        from workload.performance_gate import compact_flow
+        from workload.gate_evidence import compact_flow
         original = evidence()
         expected = analyze(original)
         shuffled = copy.deepcopy(original)
@@ -90,76 +125,114 @@ class PerformanceGateTest(unittest.TestCase):
         shuffled["flow"] = compact_flow(shuffled["flow"])
         self.assertEqual(analyze(shuffled), actual)
 
+    def test_observe_freezes_run_identity_even_when_provenance_collection_fails(self):
+        from types import SimpleNamespace
+        from cases.master_performance.actions import observe
+
+        identity = "master_performance::default::single-nonbatch"
+        with tempfile.TemporaryDirectory() as d:
+            ctx = SimpleNamespace(
+                artifact_dir=Path(d), env_epoch=2, instance=dict(id=identity, profile="single-nonbatch"),
+                clock=lambda: 1, wall_clock=lambda: 100,
+                record_event=lambda identity: dict(id=identity, epoch_s=100, monotonic_s=1),
+                resource=lambda name, kind: mock.Mock(),
+                register_resource=lambda kind, value, **kwargs: value,
+            )
+            with mock.patch("cases.master_performance.actions.provenance",
+                            side_effect=ValueError("artifact missing")):
+                observe(ctx, dict(flow="flow", criteria=evidence()["criteria"], gate_input=None), mock.Mock())
+            frozen = json.loads((Path(d) / "performance-gate-evidence.json").read_text())
+            self.assertEqual(frozen["performance_evidence_schema_version"], 2)
+            self.assertEqual(frozen["provenance"]["instance"], identity)
+            self.assertEqual(frozen["provenance"]["env_epoch"], 2)
+            self.assertEqual(frozen["errors"], ["artifact missing"])
+            self.assertEqual(analyze(frozen)["verdict"], "INVALID")
+
     def test_finish_archives_scoped_raw_evidence_before_analysis(self):
         from types import SimpleNamespace
-        from scenario.actions.performance import finish
+        from cases.master_performance.actions import finish
         e = self.engine_evidence()
         snapshot = e.pop("flow")
         raw = e.pop("engine_tps_samples")
         flow = mock.Mock()
         flow.evidence_snapshot.return_value = snapshot
         monitor = mock.Mock()
-        monitor.query.return_value = raw
+        monitor.metric_rows.side_effect = lambda identity, **kw: [row for row in raw if row["metric_id"] == identity]
         with tempfile.TemporaryDirectory() as d:
             flow.directory = Path(d)
             (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
             ctx = SimpleNamespace(artifact_dir=Path(d), monitor=monitor,
                 resource=lambda name, kind: flow if kind == "java_flow" else e)
-            with mock.patch("scenario.actions.performance.analyze", side_effect=RuntimeError("analysis interrupted")):
+            with mock.patch("cases.master_performance.actions.analyze", side_effect=RuntimeError("analysis interrupted")):
                 with self.assertRaisesRegex(RuntimeError, "analysis interrupted"):
                     finish(ctx, dict(flow="flow", evidence="evidence"), mock.Mock())
             archived = json.loads((Path(d)/"performance-gate-evidence.json").read_text())
             self.assertEqual(analyze(archived)["metrics"], analyze(dict(e, flow=snapshot))["metrics"])
             self.assertEqual(len(archived["flow"]["journal"]["sha256"]), 64)
             self.assertEqual(archived["engine_tps_samples"], raw)
-            self.assertIn('__name__=~"rtp_llm_context_tps|', monitor.query.call_args.args[0])
+            self.assertEqual([call.args[0] for call in monitor.metric_rows.call_args_list], [b["metric"] for b in e["gate_input"]["fields"].values()])
+            monitor.query.assert_not_called()
             monitor.raw.assert_not_called()
 
     def engine_evidence(self):
-        from workload.performance_gate import ENGINE_TPS
+        import yaml
+        gate_input = yaml.safe_load((ROOT / "config/scenarios/master_performance.yaml").read_text())[
+            "parameters"]["observation"]["inputs"]["engine_tps"]
+        roles = {b["metric"]: b["labels"]["role"] for b in gate_input["fields"].values()}
         e = evidence()
-        e["criteria"]["engine_tps"] = {name: 100 for name in ENGINE_TPS}
+        e["gate_input"] = gate_input
+        e["criteria"]["engine_tps"] = {name: 100 for name in roles}
         e["engine_tps_samples"] = [
-            dict(metric=dict(__name__=name, role=role, engine_name=f"{role}-{i}", priority=str(priority)),
+            dict(metric_id=name, metric=dict(__name__=name.split("/")[1], role=role, engine_name=f"{role}-{i}", priority=str(priority)),
                  values=[[t, "60"] for t in range(100, 111)])
-            for name, role in ENGINE_TPS.items()
+            for name, role in roles.items()
             for i in range(e["provenance"]["topology"][role])
             for priority in (0, 50)
         ]
         return e
 
     def test_html_engine_curves_use_monitor_archive(self):
-        from workload.performance_views import panel
+        prepare = metric_curves
         e = self.engine_evidence()
         with tempfile.TemporaryDirectory() as d:
             archive = Path(d) / "telemetry/1/queries.json"
             archive.parent.mkdir(parents=True)
             archive.write_text(json.dumps(dict(
                 start=100, end=110, step=1, targets={}, queries={
-                    "mock/rtp_llm_generate_tps_engine_mean": dict(
-                        promql="avg by (role) (rtp_llm_generate_tps{job=\"mock\"})",
+                    "mock/mock_decode_wall_tps_engine_mean": dict(
+                        promql="avg by (role) (mock_decode_wall_tps{job=\"mock\"})",
                         result=[dict(metric=dict(role="decode"),
                                      values=[[100, "120"], [110, "130"]])],
                     ),
                 },
             )))
-            chart, audit = panel(d, e, analyze(e))
+            curves, audit = prepare(d, e, analyze(e))
             self.assertTrue(audit["available"])
-            self.assertEqual(len(chart["presets"]["Decode TPS"]), 1)
-            self.assertTrue(set(chart["presets"]["Decode TPS"]) <= set(chart["presets"]["核心"]))
-            self.assertEqual(next(curve for curve in chart["series"]
+            from cases.master_performance.panels import report_panels
+            from reporting.view_config import view
+            panels = report_panels(curves, e["criteria"], view("master_performance.yaml"))
+            engine = next(p for p in panels if p["id"] == "engine-tps")
+            measured = [c for c in engine["series"] if c.get("source_type") != "configuration"]
+            self.assertEqual([c["name"] for c in measured], ["D generate TPS"])
+            self.assertTrue(all(not c["hidden"] for c in measured))
+            self.assertEqual(next(curve for curve in curves
                                   if curve["name"] == "D generate TPS")["points"],
                              [dict(x=0, y=120), dict(x=10, y=130)])
-            self.assertIn("成功 QPS", chart["presets"]["流量"])
+            self.assertNotIn("成功 QPS", [c["name"] for p in panels for c in p["series"]])
             archive.unlink()
-            chart, _ = panel(d, evidence(), analyze(evidence()))
-            self.assertIn("完成输入 TPS", chart["presets"]["核心"])
+            # A new artifact with neither query evidence nor frozen metrics.
+            (Path(d) / "metrics.json").unlink()
+            curves, _ = prepare(d, evidence(), analyze(evidence()))
+            panels = report_panels(curves, evidence()["criteria"], view("master_performance.yaml"))
+            self.assertNotIn("发送 QPS", [c["name"] for p in panels for c in p["series"]])
+            self.assertTrue(any(p['caption'] for p in panels if not p['series']))
             # HTML must still exist for INVALID runs, with embedded plotting code.
-            bundle = report(d, e)
+            bundle = report(d, e, analyze(e))
             self.assertTrue((bundle / "report.html").is_file())
 
     def test_archived_actual_hit_ratio_is_shown_as_percent(self):
-        from workload.performance_views import panel, report_panels
+        from cases.master_performance.panels import report_panels
+        prepare = metric_curves
         from reporting.view_config import view
 
         e = evidence()
@@ -174,8 +247,8 @@ class PerformanceGateTest(unittest.TestCase):
                                  values=[[100, "0.42"], [101, "NaN"]])],
                 )},
             )))
-            chart, _ = panel(d, e, analyze(e))
-            panels = report_panels(chart["series"], e["criteria"],
+            curves, _ = prepare(d, e, analyze(e))
+            panels = report_panels(curves, e["criteria"],
                                    view("master_performance.yaml"))
             hit = panels[3]
             self.assertEqual(hit["id"], "cache-hit")
@@ -185,7 +258,8 @@ class PerformanceGateTest(unittest.TestCase):
                              [dict(x=0, y=42), dict(x=1, y=None)])
 
     def test_archived_prefill_batch_and_state_panels(self):
-        from workload.performance_views import panel, report_panels
+        from cases.master_performance.panels import report_panels
+        prepare = metric_curves
         from reporting.view_config import view
 
         e = evidence()
@@ -210,8 +284,8 @@ class PerformanceGateTest(unittest.TestCase):
                                  values=[[100, str(value)]])],
                 ) for name, value in metrics.items()},
             )))
-            chart, _ = panel(d, e, analyze(e))
-            panels = report_panels(chart["series"], e["criteria"],
+            curves, _ = prepare(d, e, analyze(e))
+            panels = report_panels(curves, e["criteria"],
                                    view("master_performance.yaml"))
             batch, state = panels[4:]
             self.assertEqual([series["name"] for series in batch["series"]],
@@ -231,13 +305,13 @@ class PerformanceGateTest(unittest.TestCase):
         self.assertEqual(result["verdict"], "INVALID")
         self.assertIn("observer coverage gap", result["errors"])
         self.assertEqual(result["metrics"]["error_rate"], 0)
-        self.assertEqual(result["metrics"]["rtp_llm_generate_tps"], 120)
+        self.assertEqual(result["metrics"]["mock/mock_decode_wall_tps"], 120)
         self.assertEqual(len(result["windows"]), 10)
 
     def test_engine_tps_floors_are_independent_of_client_tps(self):
         e = self.engine_evidence()
         self.assertEqual(analyze(e)["verdict"], "PASS")
-        self.assertEqual(analyze(e)["metrics"]["rtp_llm_context_tps"], 120)
+        self.assertEqual(analyze(e)["metrics"]["mock/rtp_llm_context_tps"], 120)
         for row in e["engine_tps_samples"]:
             row["values"] = [[t, "0"] for t in range(100, 111)]
         self.assertEqual(analyze(e)["verdict"], "FAIL")
@@ -256,20 +330,44 @@ class PerformanceGateTest(unittest.TestCase):
         e["engine_tps_samples"].append(extra)
         self.assertEqual(analyze(e)["verdict"], "INVALID")
 
+    def test_request_curve_label_comes_from_yaml_presentation(self):
+        from reporting.view_config import view
+        from cases.master_performance.panels import report_panels
+        prepare = metric_curves
+
+        presentation = copy.deepcopy(view("master_performance.yaml"))
+        presentation["charts"]["curves"]["client/actual_send_qps"]["name"] = "YAML sent rate"
+        style = presentation["charts"]["curves"].pop("client/actual_send_qps")
+        presentation["charts"]["curves"]["sent_curve"] = style
+        presentation["charts"]["panels"][1]["curve_ids"][0] = "sent_curve"
+        e = evidence()
+        with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(json.dumps(dict(start=100, end=110, step=1, targets={}, queries={
+                "client-flow/actual_send_qps": dict(promql="sum(rate(flexlb_client_actual_send_total[10s]))",
+                    result=[dict(metric={}, values=[[100, 7.5], [101, 8.5]])])})))
+            curves, _ = prepare(d, e, analyze(e), presentation)
+        selected = report_panels(curves, e["criteria"], presentation)
+        self.assertEqual(selected[1]["series"][0]["name"], "YAML sent rate")
+        self.assertEqual(selected[1]["series"][0]["metric_id"], "client/actual_send_qps")
+        self.assertEqual(selected[1]["series"][0]["curve_id"], "sent_curve")
+        self.assertTrue(selected[1]["series"][0]["points"])
+
     def test_absolute_success_and_renderer(self):
         e = evidence()
         r = analyze(e)
         self.assertEqual(r["verdict"], "PASS", r)
         self.assertEqual(r["metrics"]["goodput_rps"], 10)
         with tempfile.TemporaryDirectory() as d:
-            path = report(d, e)
+            path = report(d, e, analyze(e))
             self.assertTrue((path / "report.html").is_file())
             spec = json.loads((path / "report-spec.json").read_text())
             self.assertEqual([p["id"] for p in spec["panels"]],
                 ["engine-tps", "client-qps", "latency", "cache-hit",
                  "prefill-batch", "prefill-state"])
             for panel in spec["panels"]:
-                self.assertTrue(panel["overlay"])
+                self.assertTrue(panel["timeX"])
                 for series in panel["series"]:
                     self.assertTrue(series["points"])
                     self.assertIn(series["axis"], panel["axes"])
@@ -281,7 +379,7 @@ class PerformanceGateTest(unittest.TestCase):
             )
 
     def test_multiview_ab_preserves_decode_monitoring_and_request_buckets(self):
-        from workload.performance_views import panel
+        prepare = metric_curves
 
         e = evidence()
         with tempfile.TemporaryDirectory() as d:
@@ -318,23 +416,23 @@ class PerformanceGateTest(unittest.TestCase):
                     )
                 )
             )
-            chart, audit = panel(root, e, analyze(e))
+            curves, audit = prepare(root, e, analyze(e))
             self.assertTrue(audit["available"])
-            self.assertEqual(len(chart["presets"]["规模"]), 2)
-            self.assertEqual(len(chart["presets"]["Prefill TPS"]), 1)
-            self.assertEqual(len(chart["presets"]["Prefill 逐引擎 TPS"]), 1)
-            self.assertTrue(set(chart["presets"]["Prefill TPS"]) <= set(chart["presets"]["核心"]))
-            self.assertNotIn("完成输入 TPS", chart["presets"]["核心"])
-            self.assertIn("完成输入 TPS", chart["presets"]["客户端吞吐"])
-            by_name = {c["name"]: c for c in chart["series"]}
-            self.assertEqual(
-                by_name["mock · D engine count"]["points"][0], dict(x=0, y=4)
-            )
+            from cases.master_performance.panels import report_panels
+            from reporting.view_config import view
+            panels = report_panels(curves, e["criteria"], view("master_performance.yaml"))
+            self.assertTrue(all(not c["hidden"] for p in panels for c in p["series"]))
+            self.assertTrue(all("presets" not in p for p in panels))
+            by_name = {c["name"]: c for c in curves}
+            self.assertNotIn("mock · D engine count", by_name)
+            from monitoring.metric_store import MetricStore
+            store = MetricStore.read(root)
+            self.assertEqual(store.select("mock/engine_count", labels={"role": "decode"})[0]["points"][0], [100, 4])
+            self.assertEqual(store.select("mock/rtp_llm_context_tps_per_engine", labels={"role": "prefill"})[0]["points"][0], [100, 60000])
             self.assertEqual(by_name["TTFT p99"]["points"][0]["y"], 50)
-            self.assertEqual(by_name["到达 cohort 成功率"]["points"][0]["y"], 1)
-            self.assertEqual(
-                sum(p["y"] for p in by_name["完成输出 TPS"]["points"]), 792
-            )
+            self.assertNotIn("request/arrival_success_ratio", store.document["definitions"])
+            self.assertEqual(set(k for k in store.document["metrics"] if k.startswith("request/")),
+                             {"request/ttft_p99_ms"})
 
     def test_tail_cohort_and_actual_tokens_not_requested_budget(self):
         e = evidence()
@@ -368,9 +466,20 @@ class PerformanceGateTest(unittest.TestCase):
             r["status"] = "engine_error"
         self.assertEqual(analyze(e)["verdict"], "FAIL")
 
+    def test_unsupported_evidence_contract_is_rejected_explicitly(self):
+        e = evidence()
+        e["performance_evidence_schema_version"] = 1
+        result = analyze(e)
+        self.assertEqual(result["verdict"], "INVALID")
+        self.assertIn("unsupported evidence version", result["errors"])
+
     def test_missing_or_corrupt_evidence_never_passes(self):
         mutations = [
             lambda e: e["flow"]["records"][0].pop("observed_output_tokens"),
+            lambda e: e["provenance"].pop("instance"),
+            lambda e: e["provenance"].update(instance=[]),
+            lambda e: e["provenance"].pop("configuration_sha256"),
+            lambda e: e["provenance"].update(configuration_sha256="invalid"),
             lambda e: e["provenance"].pop("mock_jar_sha256"),
             lambda e: e["provenance"].pop("analyzer_sha256"),
             lambda e: e.update(provenance=[]),
@@ -409,8 +518,8 @@ class PerformanceGateTest(unittest.TestCase):
         r = analyze(e)
         self.assertEqual(r["verdict"], "PASS")
         self.assertEqual(
-            next(x for x in r["checks"] if x["metric"] == "tpot_p99_ms")["status"],
-            "NOT_APPLICABLE",
+            next(x for x in r["checks"] if x["id"] == "tpot_p99_ms")["status"],
+            "SKIP",
         )
 
     def test_workload_checksum_preserves_everything_except_rid(self):
@@ -428,7 +537,8 @@ class PerformanceGateTest(unittest.TestCase):
         c["max_error_rate"] = 0.01
         with self.assertRaises(ValueError):
             validate(c)
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (300, 301, 302)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
                 handlers=handlers(),

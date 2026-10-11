@@ -5,14 +5,23 @@ class Element {
   append(...children) { this.children.push(...children); }
   setAttribute(key,value) { this.attributes[key]=value; }
   focus() { this.focused=true; }
+  replaceChildren(...children) {this.children=children;}
+  addEventListener(name, callback) { (this.events ||= {})[name]=callback; }
+  getBoundingClientRect() { return {left:0,top:0,width:1000,height:600}; }
+  setPointerCapture(id) {this.pointer=id;}
+  hasPointerCapture(id) {return this.pointer===id;}
+  releasePointerCapture(id) {this.pointer=null;}
   contains(child) { return this===child||this.children.some(c=>c instanceof Element&&c.contains(child)); }
 }
 global.document = {createElement:tag=>new Element(tag),createTextNode:text=>text,addEventListener:()=>{}};
 global.Chart = class {
-  constructor(canvas,spec) {this.data=spec.data;this.options=spec.options;this.visible=spec.data.datasets.map(d=>!d.hidden);}
+  constructor(canvas,spec) {this.data=spec.data;this.options=spec.options;this.visible=spec.data.datasets.map(d=>!d.hidden);
+    this.width=1000;this.height=600;this.chartArea={left:100,right:900,top:20,bottom:550};
+    this.scales={x:{getValueForPixel:p=>this.options.scales.x.min+(p-100)/800*(this.options.scales.x.max-this.options.scales.x.min)}};}
   setDatasetVisibility(i,v) {this.visible[i]=v;}
   isDatasetVisible(i) {return this.visible[i];}
   update() {}
+  draw() {}
 };
 require('./multi_curve');
 const root=new Element('root');
@@ -31,9 +40,10 @@ assert.equal(legend.children[0].children[0].style.borderTopStyle,'dashed');
 assert.equal(legend.children[1].children[0].style.borderTopStyle,'solid');
 assert.equal(legend.children[0].hidden,false);
 assert.equal(legend.children[1].hidden,true);
-assert.equal(hover.textContent,'将鼠标移到曲线上查看样本点详情');
+assert.match(hover.children[0].textContent,/avg/);
 chart.options.onHover({},[{datasetIndex:0,index:0}]);
-assert.equal(hover.children[0].textContent,'t = 0.0 s');
+assert.match(hover.children[0].textContent,/t = 0.0 s/);
+assert.match(hover.children[1].children.join(''), /avg 45.*2\/3/);
 const toolbar=root.children[0].children[2];
 const picker=toolbar.children[0],pickerButton=picker.children[0],dropdown=picker.children[1];
 assert.equal(dropdown.hidden,true);
@@ -64,4 +74,25 @@ const [from,to]=range.children.filter(c=>c.tag==='input');
 from.value='3';to.value='7';from.onchange();
 assert.equal(chart.options.scales.x.min,3);assert.equal(chart.options.scales.x.max,7);
 to.value='2';to.onchange();assert.equal(chart.options.scales.x.max,7);
-console.log('multi-curve interaction contract passed');
+const reset=toolbar.children.find(c=>c.textContent==='还原区间');
+reset.onclick();
+assert.equal(chart.options.scales.x.min,0);assert.equal(chart.options.scales.x.max,10);
+const sibling=FlexMultiCurve.mount(root,{title:'sibling',caption:'',axes:{y:{title:'count'}},series:[]},{timeAxis:{min:0,max:10},events:[]});
+const canvas=panel.children[3].children[0];
+const pointer=(x,y=100,id=1)=>({button:0,clientX:x,clientY:y,pointerId:id});
+canvas.events.pointerdown(pointer(260));canvas.events.pointermove(pointer(740));canvas.events.pointerup(pointer(740));
+assert.equal(chart.options.scales.x.min,2);assert.equal(chart.options.scales.x.max,8);
+assert.equal(sibling.options.scales.x.min,2);assert.equal(sibling.options.scales.x.max,8);
+assert.equal(canvas.hasPointerCapture(1),false);
+reset.onclick();
+canvas.events.pointerdown(pointer(500));canvas.events.pointerup(pointer(503));
+assert.equal(chart.options.scales.x.max,10); // click is not an interval
+canvas.events.pointerdown(pointer(500,590));
+assert.equal(canvas.hasPointerCapture(1),false); // outside plot
+canvas.events.pointerdown(pointer(740));canvas.events.pointerup(pointer(260));
+assert.equal(chart.options.scales.x.min,2);assert.equal(chart.options.scales.x.max,8); // reverse brush
+canvas.events.pointerdown(pointer(300));canvas.events.pointercancel();
+assert.equal(chart.options.scales.x.min,2);
+assert.deepEqual(FlexMultiCurve.statistics(points)(0,3),{mean:45,count:2,total:3});
+assert.deepEqual(FlexMultiCurve.statistics(points)(1,1),{mean:null,count:0,total:1});
+console.log('multi-curve points, missing samples, interval and legend contracts passed');

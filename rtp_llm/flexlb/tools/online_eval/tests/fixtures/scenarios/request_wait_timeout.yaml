@@ -1,4 +1,4 @@
-schema_version: 1
+program_schema_version: 1
 id: request_wait_timeout
 description: Intentional timeout fixture; a real pending stream must be cancelled and owned processes reaped.
 category: status

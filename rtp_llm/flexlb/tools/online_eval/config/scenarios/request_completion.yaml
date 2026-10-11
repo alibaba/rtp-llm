@@ -1,5 +1,13 @@
-schema_version: 2
+case_schema_version: 2
 case: request_completion
+program: default
+metadata:
+  kind: functional
+  description: Submitted requests reach a business terminal without stream errors.
+  category: status
+  tags:
+  - smoke
+  - lifecycle
 profiles:
 - batch-window
 - single-nonbatch
@@ -13,38 +21,25 @@ execution:
   timeout_s: 300
   stage_timeout_s: 60
   cleanup_timeout_s: 120
-program: immediate
-metadata:
-  description: Submitted requests reach a business terminal without stream errors.
-  category: status
-  tags:
-  - smoke
-  - lifecycle
-parameters:
-  completion:
-    setup_timeout_s: 180
-    step_5:
-      op: eq
-    expected:
-      completed: true
-      no_errors: 0
-  input_len: 2048
-  output_len: 2
-  count: 1
-parameter_schema:
-  input_len:
-    minimum: 1
-    maximum: 2147483647
-    integer: true
-  output_len:
-    minimum: 1
-    maximum: 2147483647
-    integer: true
-  count:
-    minimum: 1
-    maximum: 10000
-    integer: true
-test:
-  kind: functional
-  description: Bounded protocol, state or admission contract
   collection: diagnostic
+parameters:
+  traffic:
+    kind: request_batch
+    input_len: 2048
+    output_len: 2
+    count: 1
+  procedure:
+    setup_timeout_s: 180
+  checks:
+    completed:
+      op: eq
+      expected: true
+      windows: [terminal]
+      output: completed
+      unit: boolean
+    no_errors:
+      op: eq
+      expected: 0
+      windows: [terminal]
+      output: error_count
+      unit: errors

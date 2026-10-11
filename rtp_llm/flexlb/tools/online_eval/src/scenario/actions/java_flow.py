@@ -6,29 +6,19 @@ import re
 import time
 from pathlib import Path
 
-from runtime.java_flow import JavaFlowGroup
-from runtime.load_client import LOAD_CLIENT_ENV_VARS
+from runtime.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
+from runtime.load_client import client_environment
 from traffic.traffic_source import materialize
-from traffic.playback_config import normalize
+from traffic.contracts import java_client_priority
 
-from runtime.harness import ClientOps
+from runtime.java_client import ClientOps
 from scenario.contracts import CheckResult, StageHandler, StageOutput
-from scenario.actions.elastic import _snapshot, _validate
-
+from scenario.parameters import validate_fields
+from runtime.mock_control import engine_snapshot
 
 def _start_validate(params, plan):
-    fields = {
-        "group_id",
-        "phase_id",
-        "poll_s",
-        "source",
-        "trace",
-        "client",
-        "jvm_xms",
-        "jvm_xmx",
-        "max_requests",
-    }
-    p = _validate(params, plan, fields, fields - {"source", "trace", "max_requests"})
+    fields = JAVA_FLOW_INPUT_FIELDS | {"trace", "max_requests"}
+    p = validate_fields(params, plan, fields, fields - {"source", "trace", "max_requests"})
     if ("source" in p) == ("trace" in p):
         raise ValueError("specify exactly one traffic source")
     if "trace" in p:
@@ -48,45 +38,18 @@ def _start_validate(params, plan):
         raise ValueError("invalid flow polling interval")
     if "max_requests" in p and (type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 1000000):
         raise ValueError("max_requests must be a positive bounded request count")
-    client, _ = normalize(p["client"])
+    client, _ = client_environment(java_client_priority(p["source"], p["client"]))
     if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
         raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")
-    if (
-        not isinstance(client, dict)
-        or client.get("REPLAY_UNIQUE_PREFIX") != "false"
-        or client.get("FETCH_OUTPUT_STREAM") != "true"
-    ):
-        raise ValueError(
-            "scenario flow requires faithful prefix replay and response consumption"
-        )
-    if set(client) - set(LOAD_CLIENT_ENV_VARS):
-        raise ValueError("unknown Java client configuration names")
-    if (
-        int(client.get("DURATION_S", 0)) <= 0
-        or int(client.get("MAX_CONCURRENCY", 0)) <= 0
-    ):
-        raise ValueError("scenario flow requires bounded duration and concurrency")
-    if set(client) & {
-        "FLOW_CONTROL_DIR",
-        "FLOW_RUN_ID",
-        "FLOW_GROUP_ID",
-        "FLOW_PHASE_ID",
-        "TRACE_FILE",
-        "OUTPUT_DIR",
-        "GRPC_TARGET",
-        "GRPC_TARGETS",
-        "MASTER_DISCOVERY_FILE",
-    }:
-        raise ValueError(
-            "client endpoint and runtime identities are resolved by framework"
-        )
     return p
 
 
 def _start(ctx, p, deadline):
-    if getattr(ctx.env.spec, "master_env", {}).get("FLEXLB_TEST_CONTROL_TOKEN"):
-        from scenario.actions.master_control import affinity_request
+    if ctx.instance["environment"].get("master_test_control", False):
+        from runtime.master_control import affinity_request
         initial = affinity_request(ctx, deadline)
+        if initial.get("maxExtraTtftMs") != 1000000000:
+            raise ValueError("unexpected initial affinity test policy")
         (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
     directory = ctx.artifact_dir / "flows" / p["group_id"]
     directory.parent.mkdir(exist_ok=True)
@@ -97,7 +60,7 @@ def _start(ctx, p, deadline):
         Path(ctx.instance["source_path"]).parent,
         max_requests=p.get("max_requests"),
     )
-    environment, playback = normalize(p["client"])
+    environment, playback = client_environment(java_client_priority(p["source"], p["client"]))
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']
     laps = int(environment.get('MAX_LAPS', 0 if environment.get('LOOP')=='true' else 1))
@@ -140,16 +103,15 @@ def _start(ctx, p, deadline):
             flow.stop_sending(d)
             flow.drain(d)
 
-    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup)
-    environment = dict(
-        environment, GRPC_TARGET=f"127.0.0.1:{ctx.env.master_http_port + 2}"
-    )
-    flow.start(trace, environment, deadline)
+    from runtime.resource_evidence import flow_evidence
+    handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence)
+    flow.start(trace, environment, deadline,
+               target=f"127.0.0.1:{ctx.env.master_http_port + 2}")
     return StageOutput({"flow": handle}, artifacts=[str(directory / "flow-input.json")])
 
 
 def _flow_validate(params, plan):
-    p = _validate(params, plan, {"flow"}, {"flow"})
+    p = validate_fields(params, plan, {"flow"}, {"flow"})
     plan.reference(p["flow"], "java_flow")
     return p
 
@@ -172,7 +134,7 @@ def _drain(ctx, p, deadline):
 
 def _checkpoint_validate(params, plan):
     fields = {"flow", "min_started", "min_terminal", "min_decode_inflight", "engine"}
-    p = _validate(params, plan, fields, fields - {"engine"})
+    p = validate_fields(params, plan, fields, fields - {"engine"})
     plan.reference(p["flow"], "java_flow")
     for k in fields - {"flow", "engine"}:
         if type(p[k]) is not int or p[k] < 0:
@@ -190,7 +152,7 @@ def _checkpoint(ctx, p, deadline):
         while True:
             deadline.check()
             state = flow.status()
-            engines = _snapshot(ctx, deadline)
+            engines = engine_snapshot(ctx, deadline)
             inflight = sum(
                 e["running"] + e["waiting"]
                 for e in engines.values()
@@ -227,7 +189,7 @@ def _checkpoint(ctx, p, deadline):
 
 
 def _check_validate(params, plan):
-    p = _validate(
+    p = validate_fields(
         params, plan, {"flow", "min_success_rate"}, {"flow", "min_success_rate"}
     )
     plan.reference(p["flow"], "java_flow")

@@ -2,9 +2,14 @@ package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.*;
 
 class MockPrefillBatchPolicyTest {
+    @TempDir Path dir;
+
     private MockPrefillBatchPolicy policy(long kv, int cp) {
         return new MockPrefillBatchPolicy(4, 100, kv, 1000, cp, false, 0, 20, 0, false, cp > 1);
     }
@@ -66,6 +71,19 @@ class MockPrefillBatchPolicyTest {
         budget.add(1, 0, 1); assertFalse(budget.fits(1, 0, 1));
         var node = new ObjectMapper().readTree("{}");
         assertThrows(IllegalArgumentException.class, () -> MockPrefillBatchPolicy.load(node));
+    }
+
+    @Test void fifoRejectsShadowedLegacyBatchLimits() throws Exception {
+        Path performance = dir.resolve("performance.json"), master = dir.resolve("master.json");
+        MockMasterConfig.writeWithPrefillExpression(master, "1 + sum(computeTokens)");
+        String fifo = "\"fifo\":{\"max_requests\":4,\"max_batch_tokens\":100,\"max_seq_len\":1000}";
+        Files.writeString(performance, "{\"prefill\":{" + fifo + "}}");
+        assertNotNull(MockPerformanceModel.load(performance.toString(), master.toString()).prefillBatchPolicy());
+        for (String obsolete : new String[] {"direct_batch_size_max", "max_batch_requests", "max_batch_tokens"}) {
+            Files.writeString(performance, "{\"prefill\":{" + fifo + ",\"" + obsolete + "\":1}}");
+            assertThrows(IllegalStateException.class,
+                    () -> MockPerformanceModel.load(performance.toString(), master.toString()));
+        }
     }
 
     @Test void sequenceWidthAffectsTokenAndRectangleCosts() {

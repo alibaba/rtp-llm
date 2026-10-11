@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from traffic.prefix_lineage_v3 import encode, decode, output_sampler, write_trace
+from traffic.prefix_lineage_v3 import encode, decode, write_trace
+from traffic.output_sampling import output_sampler
 from traffic.traffic_source import materialize
 
 

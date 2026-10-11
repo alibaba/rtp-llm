@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from scenario import ScenarioError, load_scenarios
-from scenario.suites import classify, default_suite, normalize_test, preselect_documents, suite_names
+from scenario.suites import classify, default_suite, normalize_metadata, normalize_execution, preselect_documents, suite_names
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -26,10 +26,11 @@ class SuiteOwnershipTest(unittest.TestCase):
     def test_ci_can_select_one_workload_independent_of_directory_or_kind(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'suites.yaml'
-            path.write_text(yaml.safe_dump(dict(schema_version=2, default_suite='smoke',
+            path.write_text(yaml.safe_dump(dict(suite_schema_version=2, default_suite='smoke',
                                                ci_suites={'smoke': ['custom::load']})))
-            test = dict(kind='workload', description='Load under restart', collection='request')
-            plan = dict(scenario_id='custom', variant_id='load', source_path='/any/core/place.yaml', test=test)
+            metadata = dict(kind='workload', description='Load under restart')
+            execution = dict(collection='request')
+            plan = dict(scenario_id='custom', variant_id='load', source_path='/any/core/place.yaml', metadata=metadata, execution=execution)
             self.assertEqual('smoke', default_suite(path))
             self.assertEqual(('smoke', 'functional', 'workload', 'all'), suite_names(path))
             self.assertEqual('workload', classify([plan], 'smoke', path)[0]['test_kind'])
@@ -38,16 +39,19 @@ class SuiteOwnershipTest(unittest.TestCase):
             self.assertEqual('workload', classify([plan], 'smoke', path)[0]['test_kind'])
             with self.assertRaisesRegex(ScenarioError, 'missing: custom::load'):
                 classify([], 'smoke', path)
-            path.write_text(yaml.safe_dump(dict(schema_version=2, default_suite='smoke',
+            path.write_text(yaml.safe_dump(dict(suite_schema_version=2, default_suite='smoke',
                                                ci_suites={'smoke': ['custom::load', 'custom::load']})))
             with self.assertRaisesRegex(ScenarioError, 'unique'):
                 suite_names(path)
 
     def test_missing_metadata_and_invalid_monitoring_fail_loud(self):
-        base = dict(kind='workload', description='Scale in', collection='request')
+        base = dict(kind='workload', description='Scale in')
         for key in base:
             invalid = {k: v for k, v in base.items() if k != key}
             with self.subTest(key=key), self.assertRaises(ScenarioError):
-                normalize_test(invalid)
+                normalize_metadata(invalid)
+        with self.assertRaisesRegex(ScenarioError, 'collection'):
+            normalize_execution({}, kind='workload')
         with self.assertRaisesRegex(ScenarioError, 'shorter'):
-            normalize_test(dict(base, monitoring={'sample_interval_s': 10, 'max_sample_gap_s': 5}))
+            normalize_execution(dict(collection='request', monitoring={
+                'sample_interval_s': 10, 'max_sample_gap_s': 5}), kind='workload')

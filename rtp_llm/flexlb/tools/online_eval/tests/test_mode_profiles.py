@@ -7,7 +7,6 @@ sys.path.insert(0, str(ROOT))
 
 from mode_profiles import (load_mode_tables, master_mode_for_profile,
                            resolve_address_plan, resolve_mode)
-from flexlb_cfg import render_env
 
 
 class ModeProfilesTest(unittest.TestCase):
@@ -24,13 +23,13 @@ class ModeProfilesTest(unittest.TestCase):
                              (decision, dispatcher))
         self.assertEqual(resolve_mode("scenario", "sn")["observation"]["jsonl"], "bounded")
         self.assertEqual(resolve_mode("scenario", "sn")["features"]["orchestration"], "scenario")
-        self.assertEqual(resolve_mode("stress", "wb")["master_profile"], "stress-na130")
-        self.assertEqual(render_env(resolve_mode("stress", "wb")["master_profile"]),
-                         render_env("stress-na130"))
-        self.assertEqual(resolve_mode("stress", "sn")["master_profile"], "single-nonbatch")
         self.assertEqual(master_mode_for_profile("stress-na130"), "wb")
         self.assertFalse(resolve_mode("whale_embedded", "sb", pod_ip="10.0.0.1")
                          ["observation"]["jsonl"])
+
+    def test_retired_runtime_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown runtime/master mode: stress/wb"):
+            resolve_mode("stress", "wb")
 
     def test_reachability_is_independent_of_master_mode(self):
         self.assertTrue(resolve_address_plan("whale_embedded", pod_ip="10.0.0.1")
@@ -39,7 +38,7 @@ class ModeProfilesTest(unittest.TestCase):
             "whale_embedded", external_engine_clients=True, pod_ip="10.0.0.1"
         )["unique_engine_ips"])
         with self.assertRaisesRegex(ValueError, "external engine clients"):
-            resolve_address_plan("stress", external_engine_clients=True)
+            resolve_address_plan("scenario", external_engine_clients=True)
         with self.assertRaisesRegex(ValueError, "routable Pod IP"):
             resolve_address_plan("whale_independent", pod_ip="127.1.0.1")
 

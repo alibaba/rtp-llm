@@ -148,7 +148,7 @@ def join_evidence(payload, environments):
                 resources=[resource["resource"]],
             )
     return dict(
-        schema_version=1,
+        request_engine_evidence_schema_version=1,
         requests=list(requests.values()),
         issues=issues,
         identity_contract="Request identity is scoped by environment; attempts retain transport evidence; mock process incarnations are distinct from master endpoint generation, which remains null when unobserved.",

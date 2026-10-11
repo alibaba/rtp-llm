@@ -167,7 +167,7 @@ class ObservationTest(unittest.TestCase):
         observer = self.ctx.resource(result.output["observation"], "observation")
         self.ctx.records.records.append(
             dict(
-                schema_version=1,
+                client_record_schema_version=1,
                 wire_request_id=9007199254740993,
                 attempt=0,
                 env_epoch=1,
@@ -277,7 +277,7 @@ class ObservationTest(unittest.TestCase):
         handlers = {h.name: h for h in HANDLERS}
         for required in (True, False):
             doc = dict(
-                schema_version=1,
+                program_schema_version=1,
                 id="coverage",
                 description="Source availability",
                 category="status",

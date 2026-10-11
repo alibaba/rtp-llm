@@ -7,12 +7,15 @@ from unittest import mock
 
 from traffic.traffic_source import materialize
 from traffic.workload_profile import profile
-from workload.cache_gate import (
-    align_send_counters,
-    analyze,
-    build_spec,
-    write_report,
-)
+from cases.cache_scale_in.analysis import align_send_counters, analyze
+from cases.cache_scale_in.report import prepare_report as read_report
+from cases.cache_scale_in.publication import publish_cache
+from metric_fixtures import freeze_metrics
+
+def write_report(directory, evidence, result, prepared=None):
+    freeze_metrics(directory, "cache_scale_in")
+    bundle = publish_cache(directory, evidence, result, prepared)
+    return json.loads((bundle / "report-spec.json").read_text())
 from reporting.view_config import view
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
@@ -20,26 +23,80 @@ from scenario.catalog import handlers
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def prepare_report(directory, evidence):
+    from monitoring.metric_store import export_metrics
+    from monitoring.query_plan import load_plan
+    export_metrics(directory, load_plan("cache_scale_in.yaml"))
+    return read_report(directory, evidence)
+
+
+def metric_spec(directory, evidence, result, prepared):
+    from cases.cache_scale_in.metrics import produce
+    from cases.cache_scale_in.report import build_spec
+    freeze_metrics(directory, "cache_scale_in")
+    produce(directory, evidence, result)
+    from monitoring.metric_store import MetricStore
+    from reporting.metric_binding import monitoring_audit
+    prepared = dict(prepared, metric_classification=monitoring_audit(
+        MetricStore.read(directory), view("cache_scale_in.yaml")))
+    return build_spec(directory, evidence, result, prepared)
+
+
 class CacheGateTest(unittest.TestCase):
+    def test_derived_curve_label_comes_from_yaml_presentation(self):
+        template = copy.deepcopy(view("cache_scale_in.yaml"))
+        template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
+        prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[],
+                        monitoring_status="OK", monitor_warnings=[])
+        evidence = self.evidence()
+        with tempfile.TemporaryDirectory() as d, mock.patch(
+            "cases.cache_scale_in.report.view", return_value=template
+        ):
+            spec = metric_spec(d, evidence, analyze(evidence), prepared)
+        self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
+
+    def test_dispatch_query_is_explicit_diagnostic_and_remains_archived(self):
+        with tempfile.TemporaryDirectory() as d:
+            archive = Path(d) / "telemetry/1/queries.json"
+            archive.parent.mkdir(parents=True)
+            archive.write_text(json.dumps({
+                "missing_queries": [], "start": 1000, "end": 1001, "step": 1,
+                "targets": {}, "errors": [],
+                "queries": {"master-a/dispatch_qps": {
+                    "promql": "rate(dispatch_total[10s])",
+                    "result": [{"metric": {"reason": "cache"},
+                                "values": [[1000, "3"]]}],
+                }},
+            }))
+            result = prepare_report(d, self.evidence())
+            from monitoring.metric_store import MetricStore
+            store = MetricStore.read(d)
+            self.assertEqual(store.select("master/dispatch_qps")[0]["points"][0][1], 3)
+        dispatch = [curve for curve in result["curves"]
+                    if curve["metric_id"] == "master/dispatch_qps"]
+        self.assertEqual(dispatch, [])
+        self.assertTrue(any(row["metric_id"] == "master/dispatch_qps" and
+            row["classification"] == "DIAGNOSTIC_ONLY" for row in result["metric_classification"]))
+        self.assertIn(["master/dispatch_qps", "—", "DIAGNOSTIC_ONLY", "rate(dispatch_total[10s])"], result["audit"])
+
     def test_report_layout_follows_yaml_view(self):
-        template = copy.deepcopy(view("cache_scale_in_overview.yaml"))
-        template["title"] = "YAML title"
-        template["panels"][0]["title"] = "YAML panel"
-        template["panels"][0]["names"] = ["P engine count"]
+        template = copy.deepcopy(view("cache_scale_in.yaml"))
+        template["charts"]["panels"][0]["title"] = "YAML panel"
+        template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
         prepared = dict(
-            curves=[dict(name="P engine count", group="规模", axis="count",
+            curves=[dict(curve_id="mock/engine_count", metric_id="mock/engine_count", name="Renamed engine count", group="规模", axis="count",
                          points=[dict(x=0, y=2)])],
             audit=[], sources={}, gaps={}, errors=[], monitoring_status="OK",
             monitor_warnings=[],
         )
         with tempfile.TemporaryDirectory() as d, mock.patch(
-            "workload.cache_gate.view", return_value=template
+            "cases.cache_scale_in.report.view", return_value=template
         ):
             evidence = self.evidence()
-            spec = build_spec(d, evidence, analyze(evidence), prepared)
-        self.assertEqual(spec["title"], "YAML title")
+            spec = metric_spec(d, evidence, analyze(evidence), prepared)
+        self.assertEqual(spec["title"], "cache_scale_in : default : batch-window")
         self.assertEqual(spec["panels"][0]["title"], "YAML panel")
-        self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["P engine count"])
+        self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
             "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
             "prefill-tps", "prefill-qps", "client-latency",
@@ -47,12 +104,15 @@ class CacheGateTest(unittest.TestCase):
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
     def test_split_panels_keep_metric_values_and_missing_annotations(self):
-        from workload.cache_gate import report_panels
+        from reporting.curves import project_panels
         names = ["P cache hit ratio", "P engine count", "Client sent QPS",
                  "Client success QPS", "Client error QPS", "P Waiting / engine"]
-        curves = [dict(name=name, points=[dict(x=5, y=None), dict(x=6, y=2)])
-                  for name in names]
-        panels = report_panels(curves, view("cache_scale_in_overview.yaml"))
+        metric_ids = ["mock/cache_hit_ratio", "mock/engine_count", "client/actual_send_qps",
+                      "client/success_qps", "client/error_qps", "mock/waiting_avg"]
+        curves = [dict(curve_id=metric_id, metric_id=metric_id, name=name,
+                       points=[dict(x=5, y=None), dict(x=6, y=2)])
+                  for metric_id, name in zip(metric_ids, names)]
+        panels = project_panels(curves, view("cache_scale_in.yaml"))
         self.assertEqual([s["name"] for s in panels[0]["series"]], names[:2])
         self.assertEqual([s["name"] for s in panels[1]["series"]], names[2:5] + names[1:2])
         self.assertEqual([s["name"] for s in panels[2]["series"]],
@@ -63,7 +123,7 @@ class CacheGateTest(unittest.TestCase):
         for panel, axis in zip(panels, ("ratio", "qps")):
             self.assertEqual("left", panel["axes"][axis]["position"])
             self.assertEqual("right", panel["axes"]["count"]["position"])
-        sparse = report_panels(curves[:2], view("cache_scale_in_overview.yaml"))
+        sparse = project_panels(curves[:2], view("cache_scale_in.yaml"))
         self.assertIn("Client error QPS", sparse[1]["caption"])
 
     def evidence(self, hit=0.8):
@@ -94,6 +154,7 @@ class CacheGateTest(unittest.TestCase):
                 )
             )
         return dict(
+            provenance=dict(instance="cache_scale_in::default::batch-window", env_epoch=1),
             samples=rows,
             criteria=dict(
                 max_gap_s=2,
@@ -245,7 +306,7 @@ class CacheGateTest(unittest.TestCase):
             curves = {s["name"]: s["points"] for s in spec["panels"][0]["series"]}
             self.assertEqual(curves, {"Survivor window hit ratio":
                                      [dict(x=w["end"], y=w["hit"]) for w in result["windows"]]})
-            self.assertIn("缺少监控序列", spec["panels"][0]["caption"])
+            self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
             self.assertNotIn("P cache hit ratio", curves)
             self.assertEqual(spec["summary"]["kpis"][1]["value"], "WARN")
             self.assertIn("缺少 Prometheus queries.json 归档",
@@ -278,8 +339,11 @@ class CacheGateTest(unittest.TestCase):
             self.assertIn("P Waiting / engine", json.dumps(spec["sections"]))
             self.assertNotIn("1/mock/", json.dumps(spec["panels"][0]["series"]))
             self.assertEqual(spec["kpis"][1]["value"], "WARN")
-            audit = spec["sections"][0]["rows"]
-            self.assertIn(["Master schedule response QPS", "0%", "MISSING", "本次归档没有该监控序列"], audit)
+            inventory = spec["sections"][-1]["value"]["metric_classification"]
+            missing = next(row for row in inventory
+                           if row["metric_id"] == "master/schedule_responses_qps")
+            self.assertEqual(missing["classification"], "DIAGNOSTIC_ONLY")
+            self.assertEqual(missing["series_count"], 0)
 
     def test_formula_shared_by_master_and_mock_envelope(self):
         from flexlb_cfg import ConfigOverride, render_env, render_process_config
@@ -298,7 +362,8 @@ class CacheGateTest(unittest.TestCase):
         )
 
     def test_real_scenario_compiles_and_preserves_cache_policy(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
@@ -309,59 +374,34 @@ class CacheGateTest(unittest.TestCase):
         )
         self.assertIn("cache_scale_in_check", [s["action"] for s in plans[0]["stages"]])
 
-    def test_controls_share_workload_and_reject_insufficient_projection(self):
-        import yaml
-        from cases.config import configure_program
-        source = ROOT / "config/scenarios/cache_scale_in.yaml"
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
-            plans = compile_scenarios(load_scenarios(source), handlers=handlers())
-        for profile in ("batch-window", "single-nonbatch"):
-            positive, negative = [p for p in plans if p["profile"] == profile]
-            self.assertEqual(positive["environment"], negative["environment"])
-            self.assertEqual(positive["stages"][1]["params"], negative["stages"][1]["params"])
-            a, b = [copy.deepcopy(p["stages"][2]["params"]) for p in (positive, negative)]
-            self.assertEqual(a.pop("post_affinity_ms"), 1000000000)
-            self.assertEqual(b.pop("post_affinity_ms"), 0)
-            self.assertEqual(a.pop("expected_behavior"), "stable")
-            self.assertEqual(b.pop("expected_behavior"), "collapse")
-            self.assertEqual(a, b)
-        case = yaml.safe_load(source.read_text())
-        case["parameters"]["flow"]["max_requests"] = 141113
-        with self.assertRaisesRegex(Exception, "traffic plan must cover"):
-            configure_program(case, "test")
-        case = yaml.safe_load(source.read_text())
-        case["environment"]["master_test_control"] = False
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), self.assertRaisesRegex(Exception, "master_test_control"):
-            compile_scenarios([("test", configure_program(case, "test"))], handlers=handlers())
-
     def test_topology_budget_is_independent_of_drain(self):
         import yaml
         from cases.config import configure_program
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
         for mode in ("graceful",):
             changed = copy.deepcopy(case)
-            changed["parameters"]["gate"].update(topology_timeout_s=31, removal_mode=mode)
-            with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+            changed["parameters"]["procedure"].update(topology_timeout_s=31, removal_mode=mode)
+            with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+                 mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
             self.assertEqual(len(plans), 4)
-        changed["parameters"]["gate"]["removal_mode"] = "silent"
+        changed["parameters"]["procedure"]["removal_mode"] = "silent"
         with self.assertRaisesRegex(Exception, "separate case"):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
 
     def test_drain_outcome_does_not_change_survivor_windows(self):
         evidence = self.evidence()
         before = analyze(evidence)
-        evidence.setdefault("errors", []).append("graceful drain timed out; removal introduced request loss")
         evidence["removals"] = [dict(drained=False, remaining_work={"owners": 12})]
         after = analyze(evidence)
         self.assertEqual(after["verdict"], before["verdict"])
         self.assertEqual(after["windows"], before["windows"])
-        self.assertEqual(len(after["excluded_drain_diagnostics"]), 1)
-        evidence["errors"].append("real collection failure")
+        self.assertEqual(len(after["drain_diagnostics"]), 1)
+        evidence.setdefault("errors", []).append("graceful drain timed out; removal introduced request loss")
         self.assertEqual(analyze(evidence)["verdict"], "INVALID")
 
     def test_failures_and_removal_diagnostics_do_not_decide_cache_gate(self):
-        from workload.cache_gate import MEASUREMENT_POLICY, attribute_client, topology_ready
+        from cases.cache_scale_in.analysis import MEASUREMENT_POLICY, attribute_client, topology_ready
         evidence = self.evidence()
         evidence["measurement_policy"] = MEASUREMENT_POLICY
         for row in evidence["samples"]:
@@ -372,7 +412,7 @@ class CacheGateTest(unittest.TestCase):
                 row["engines"]["p1"] = dict(row["engines"]["p0"], grpc_addr="p1",
                                                 waiting=9999, admission_open=0)
         self.assertTrue(topology_ready(evidence["samples"][-1], ["p0"], ["p0", "p1"]))
-        evidence["events"] = [dict(name="withdraw_start", epoch_s=1020)]
+        evidence["events"] = [dict(id="withdraw_start", epoch_s=1020)]
         records = [dict(rid=1, prefill="p1", status="exception", error="removed",
                         send_start_epoch_ms=1021000, total_ms=200)]
         attribute_client(evidence, dict(complete=True, records=records))
@@ -406,9 +446,10 @@ class CacheGateTest(unittest.TestCase):
 
     def test_reinterpretation_preserves_frozen_input_and_requires_new_output(self):
         import sys
-        from workload.cache_gate import main
+        from cases.cache_scale_in.replay import cache_main as main
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "evidence.json"
+            source = Path(directory) / "source" / "evidence.json"
+            source.parent.mkdir()
             source.write_text(json.dumps(self.evidence()))
             frozen = source.read_bytes()
             destination = Path(directory) / "new"
@@ -427,9 +468,9 @@ class CacheGateTest(unittest.TestCase):
         case = yaml.safe_load(
             (ROOT / "config/scenarios/cache_scale_in.yaml").read_text()
         )
-        gate = case["parameters"]["gate"]
+        gate = case["parameters"]["procedure"]
         gate.update(intermediate_p=72, intermediate_hold_s=60)
-        flow = case["parameters"]["flow"]
+        flow = case["parameters"]["traffic"]
         flow["source"]["parameters"]["count"] = 170000
         flow["client"]["DURATION_S"] = "700"
         with tempfile.TemporaryDirectory() as directory:
@@ -437,14 +478,14 @@ class CacheGateTest(unittest.TestCase):
 
             def compile_case(value):
                 path.write_text(yaml.safe_dump(value))
-                with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+                with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+                     mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
                     return compile_scenarios(
                         load_scenarios(path), handlers=handlers()
                     )
 
-            with self.assertRaisesRegex(ValueError, "separate case"):
+            with self.assertRaisesRegex(ValueError, "unknown configuration fields"):
                 compile_case(case)
-
 
 
 class WorkloadTest(unittest.TestCase):

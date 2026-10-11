@@ -27,7 +27,12 @@ TABLE_PATH = (
 
 def load_mode_tables(path: Path = TABLE_PATH) -> dict:
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(doc, dict) or doc.get("schema_version") != 1:
+    if (not isinstance(doc, dict)
+            or {key for key in doc if isinstance(key, str)
+                and (key == "schema_version" or key.endswith("_schema_version"))}
+               != {"mode_profiles_schema_version"}
+            or type(doc.get("mode_profiles_schema_version")) is not int
+            or doc["mode_profiles_schema_version"] != 1):
         raise ValueError("unsupported mode table schema")
     runtime = doc.get("runtime_modes")
     master = doc.get("master_modes")

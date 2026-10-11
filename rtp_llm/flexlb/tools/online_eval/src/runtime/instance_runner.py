@@ -14,12 +14,14 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from artifacts.json_io import write_json
 from pathlib import Path
+
+from schema_contract import matches_schema
 
 from reporting.view_config import DEFAULT_VIEW
 from runtime.instance_plan import (
@@ -31,7 +33,7 @@ from runtime.instance_plan import (
 from runtime.resource_plan import ResourcePlanError, plan_lane_leases
 
 SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
-STATUSES = {"PASS", "FAIL", "ERROR", "TIMEOUT", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
+from runtime.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
 
 
 class ChildProcesses:
@@ -145,7 +147,7 @@ def _read_timings(path):
         return {}
     try:
         data = json.loads(path.read_text())
-        if data.get("schema_version") != 1 or not isinstance(
+        if not matches_schema(data, "timings_schema_version", 1) or not isinstance(
             data.get("instances"), list
         ):
             raise ValueError("expected versioned instance timings")
@@ -183,25 +185,13 @@ def _write_timings(rows):
             ):
                 merged[row["id"]] = row["duration_ms"] / 1000
         doc = {
-            "schema_version": 1,
+            "timings_schema_version": 1,
             "instances": [
                 {"id": key, "duration_ms": value * 1000}
                 for (key, value) in sorted(merged.items())
             ],
         }
-        _write_json(path, doc)
-
-
-def _write_json(path, payload):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
-        temporary = Path(stream.name)
-        json.dump(payload, stream, indent=2)
-        stream.write("\n")
-    try:
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+        write_json(path, doc)
 
 
 def _error(instance, message):
@@ -228,6 +218,9 @@ def _execution_issues(row):
             or item.get("error")
         ):
             issues.append("cleanup did not complete successfully")
+    for phase in row.get("finalization", []):
+        if not isinstance(phase, dict) or phase.get("status") != "PASS" or phase.get("error"):
+            issues.append("finalization did not complete successfully")
     failed_checks = set()
     green = row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
     for stage in stages:
@@ -272,6 +265,14 @@ def _execution_issues(row):
             issues.append(
                 "finding classification does not match explicit failed checks"
             )
+    if "outcome" in row:
+        from dataclasses import asdict
+        try:
+            outcome = RunOutcome.from_result(row)
+            if row["outcome"] != asdict(outcome) or row["status"] != outcome.status:
+                issues.append("result outcome disagrees with execution evidence")
+        except (ValueError, TypeError, KeyError) as exc:
+            issues.append("invalid result outcome: " + str(exc))
     return issues
 
 
@@ -281,8 +282,7 @@ def _read_results(path, group):
     try:
         data = json.loads(path.read_text())
         if (
-            type(data.get("schema_version")) is not int
-            or data["schema_version"] != 1
+            not matches_schema(data, "scenario_results_schema_version", 1)
             or (not isinstance(data.get("instances"), list))
         ):
             raise ValueError("unsupported scenario result schema")
@@ -355,27 +355,33 @@ def _run_lane(index, lane, lease, args, out, children):
     segment.mkdir(parents=True, exist_ok=True)
     result_path = segment / "scenarios.json"
     lease_path = segment / "lease.json"
-    _write_json(lease_path, {"schema_version": 1, **lease.to_manifest()})
-    command = [
-        sys.executable,
-        str(SCENARIO_RUNNER),
-        "--source",
-        str(Path(args.case_dir).resolve()),
-        "--profile",
-        args.profile,
-        "--grade",
-        args.grade,
-        "--instances",
-        ",".join((instance.id for instance in group)),
-        "--out-dir",
-        str(segment),
-        "--lease-json",
-        str(lease_path),
-    ]
+    write_json(lease_path, {"lease_schema_version": 1, **lease.to_manifest()})
     try:
+        from scenario.execution_plan import freeze_plan
+        plan_path = segment / "execution-plan.json"
+        plan_sha = freeze_plan(plan_path, [instance.compiled for instance in group],
+                               dependencies=group[0].dependencies)
+        command = [
+            sys.executable,
+            str(SCENARIO_RUNNER),
+            "--plan", str(plan_path), "--plan-sha256", plan_sha,
+            "--source",
+            str(Path(args.case_dir).resolve()),
+            "--profile",
+            args.profile,
+            "--grade",
+            args.grade,
+            "--instances",
+            ",".join((instance.id for instance in group)),
+            "--out-dir",
+            str(segment),
+            "--lease-json",
+            str(lease_path),
+        ]
         execution = [instance.metadata["execution"] for instance in group]
         timeout = (
-            sum((item["timeout_s"] + item["cleanup_timeout_s"] for item in execution))
+            sum((item["timeout_s"] + item["cleanup_timeout_s"]
+                 + item["finalize_timeout_s"] + item["report_timeout_s"] for item in execution))
             + 30
             if execution
             else None
@@ -423,7 +429,7 @@ def _aggregate(lanes, instances, args, elapsed):
         )
     )
     return {
-        "schema_version": 1,
+        "run_summary_schema_version": 1,
         "source": args.source,
         "summary": {
             "total": len(rows),
@@ -451,8 +457,7 @@ def _aggregate(lanes, instances, args, elapsed):
 def _print_planned_reports(instances):
     for instance in instances:
         if instance.metadata.get("test_kind") == "workload":
-            test = instance.metadata.get("test")
-            names = test.get("reports") if isinstance(test, dict) else None
+            names = instance.metadata.get("reports")
             if not isinstance(names, list) or not names or not all(isinstance(name, str) for name in names):
                 names = [DEFAULT_VIEW]
             print(f"  planned reports {instance.id}: {', '.join(names)}")
@@ -508,7 +513,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         from mode_profiles import master_mode_for_profile, resolve_mode
         runtime_plan = resolve_mode("scenario", master_mode_for_profile(args.profile))
         manifest = {
-            "schema_version": 1,
+            "runner_plan_schema_version": 1,
             "source": args.source,
             "profile": args.profile,
             "runtime_plan": runtime_plan,
@@ -535,7 +540,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     print(json.dumps(manifest, indent=2))
     if args.dry_run:
         return 0
-    _write_json(out / "manifest.json", manifest)
+    write_json(out / "manifest.json", manifest)
     started = time.monotonic()
     children = ChildProcesses()
     pool = ThreadPoolExecutor(max_workers=len(lanes))
@@ -558,7 +563,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         payload["summary"]["exit_code"] = 130
         payload["summary"]["interrupted"] = True
     target = Path(args.json).resolve() if args.json else out / "aggregate.json"
-    _write_json(target, payload)
+    write_json(target, payload)
     _print_generated_reports(payload["instances"])
     if getattr(args, "archive", None):
         from artifacts.archive import create_archive

@@ -2,6 +2,8 @@
 
 import os
 
+from schema_contract import matches_schema
+
 from runtime.resource_plan import MOCK_WINDOW_LAST, WORKER_PORT_CAPACITY
 from scenario.loader import ScenarioError, load_document
 
@@ -10,7 +12,7 @@ def validate_lease(path, budget, environ=None):
     env = os.environ if environ is None else environ
     data = load_document(path)
     required = {
-        "schema_version",
+        "lease_schema_version",
         "lane",
         "backend",
         "master_base",
@@ -22,7 +24,7 @@ def validate_lease(path, budget, environ=None):
     }
     if (
         set(data) != required
-        or data["schema_version"] != 1
+        or not matches_schema(data, "lease_schema_version", 1)
         or data["backend"] != "java_mock"
     ):
         raise ScenarioError("invalid Java mock lease manifest fields or version")

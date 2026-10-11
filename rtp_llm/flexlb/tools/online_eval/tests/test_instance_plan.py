@@ -14,8 +14,8 @@ from runtime.resource_plan import ResourcePlanError
 
 
 def catalog():
-    return {
-        "schema_version": 1,
+    document = {
+        "instance_catalog_schema_version": 1,
         "instances": [
             {
                 "id": f"scenario{i}::default::batch-window",
@@ -28,7 +28,10 @@ def catalog():
                 "tags": [],
                 "requires": [],
                 "estimated_duration_s": i + 1,
-                "execution": {"timeout_s": 60, "cleanup_timeout_s": 10},
+                "metadata": {"kind": "functional", "description": "Fixture"},
+                "execution": {"timeout_s": 60, "stage_timeout_s": 30,
+                              "cleanup_timeout_s": 10, "finalize_timeout_s": 20,
+                              "report_timeout_s": 10, "collection": "diagnostic"},
                 "resource_budget": {
                     "backend": "java_mock",
                     "initial_workers": 6,
@@ -43,6 +46,16 @@ def catalog():
             for i in range(7)
         ],
     }
+
+    for row in document["instances"]:
+        from scenario import compile_scenarios
+        from test_scenario_runtime import source
+        declaration = source()
+        declaration.update(id=row["scenario_id"], category=row["category"], description=row["metadata"]["description"])
+        compiled = compile_scenarios([(row["source_path"], declaration)])[0]
+        compiled.update(copy.deepcopy(row))
+        row["compiled"] = compiled
+    return document
 
 
 def parse(payload=None):
@@ -117,7 +130,7 @@ class InstancePlanTest(unittest.TestCase):
 
     def test_wrong_schema_profile_and_invalid_time_rejected(self):
         data = catalog()
-        data["schema_version"] = True
+        data["instance_catalog_schema_version"] = True
         with self.assertRaises(InstancePlanError):
             parse(data)
         for key, value in [

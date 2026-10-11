@@ -1,25 +1,17 @@
 """Compile explicit instances and typed stage references without process imports."""
 
-import copy
-import json
-import math
-import re
+from __future__ import annotations
 
-from flexlb_cfg import (
-    OMIT,
-    PROFILE_CAPS,
-    ProfileIdentityError,
-    PROFILES,
-    VICTIM_STAGES,
-    ConfigOverride,
-    render_env,
-    validate_profile_identity,
-)
+import copy
+from scenario.plan import CompiledInstance
+
+from flexlb_cfg import PROFILES
 
 from runtime.resource_plan import VICTIM_OFFSETS
-from runtime.perf_presets import capture_defaults, load_preset, preset_names
-from scenario.contracts import PlanContext
-from scenario.loader import ScenarioError
+from scenario.validation import fail, mapping, identifier, number, names
+from scenario.stage_compiler import OUTPUTS, stages
+from scenario.suites import EXECUTION_FIELDS, EXECUTION_BUDGETS
+from scenario.environment_config import environment, read_environment, variant_environment_fields, CAPABILITIES
 
 CATEGORIES = {
     "cancel",
@@ -44,517 +36,7 @@ def plan_counts(plans):
     }
 
 
-ID = re.compile(r"[a-z][a-z0-9_]*\Z")
-# A deliberately bounded first compilation vocabulary. Other actions require an
-# adapter and result contract before their names can be accepted by compilation.
-OUTPUTS = {
-    "setup": {"environment": "environment"},
-    "request": {"requests": "requests", "count": "integer"},
-    "wait": {"completed": "boolean", "error_count": "integer"},
-    "cancel": {"issued": "integer"},
-    "check": {"passed": "boolean"},
-    "teardown": {"clean": "boolean"},
-}
-INTEGER_OVERRIDES = {
-    "cleanup_interval_ms",
-    "status_rpc_ms",
-    "max_requests",
-    "default_priority",
-    "queue_timeout_ms",
-    "decode_max_engine_requests",
-    "decode_max_kv_usage_percent",
-    "max_predicted_execution_ms",
-    "request_timeout_ms",
-    "max_collection_wait_ms",
-    "status_stale_after_ms",
-    "max_inflight_per_prefill_worker",
-}
-
-# Specialized fields are validated by their dedicated branches below.
-_SPECIAL_ENVIRONMENT_FIELDS = frozenset({
-    "backend", "n_prefill", "n_decode", "prefill_cache_blocks",
-    "decode_cache_blocks", "config_overrides", "profile_overrides",
-    "discovery", "perf_preset", "model_override", "prefill_perf",
-    "prefill_cache_policy", "master_layout", "master_stable_window_s",
-    "metric_whitelist",
-})
-
-_ABSENT = object()
-# (type, default when omitted, minimum). _ABSENT preserves an omitted key.
-OPTIONAL_SCALARS = {
-    "debug_enabled": (bool, False, None),
-    "master_test_control": (bool, False, None),
-    "mock_auto_fetch": (bool, _ABSENT, None),
-    "master_debug_log": (bool, _ABSENT, None),
-    "master_sync_log": (bool, False, None),
-    "mock_fetch_attach_timeout_ms": (int, _ABSENT, 1),
-    "prefill_max_waiting_batches": (int, _ABSENT, 0),
-}
-
-
-def environment_fields():
-    """One vocabulary for both top-level fields and simple scalar declarations."""
-    return _SPECIAL_ENVIRONMENT_FIELDS | OPTIONAL_SCALARS.keys()
-
-
-def variant_environment_fields():
-    # A variant may change declared data, but never switch its case's backend.
-    return environment_fields() - {"backend"}
-
-
-def optional_scalars(value, path, result, declarations=None):
-    """Apply simple scalar rules; retain each field's old omission semantics."""
-    if declarations is None:
-        declarations = OPTIONAL_SCALARS
-    for key, (kind, default, minimum) in declarations.items():
-        if key not in value and default is _ABSENT:
-            continue
-        val = value.get(key, default)
-        if kind is bool:
-            if type(val) is not bool:
-                fail(path + "." + key, "expected boolean")
-            result[key] = val
-        else:
-            result[key] = number(val, path + "." + key, minimum=minimum, integer=True)
-
-CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
-    "priority",
-    "preemption",
-    "engine_cancellation",
-}
-
-
-def effective_capabilities(config):
-    scheduler, dispatcher = config["scheduler"], config["dispatcher"]
-    axes = dict(
-        scheduler=scheduler["type"],
-        ordering=scheduler["ordering"]["type"],
-        decision=scheduler["decision"]["type"],
-        dispatcher=dispatcher["type"],
-    )
-    caps = {"queue", axes["ordering"].lower(), axes["decision"].lower()}
-    if dispatcher["type"] == "BATCH":
-        caps.update({"batch_dispatch", "enqueue_batch", "fetch_response"})
-    elif dispatcher["type"] == "NON_BATCH":
-        caps.update({"non_batch_dispatch", "frontend_send", "generate_stream"})
-    else:
-        raise ValueError("unrecognized effective dispatcher")
-    preemption = scheduler["ordering"].get("preemption")
-    if preemption is None and scheduler["ordering"]["type"] == "PRIORITY":
-        preemption = {"allowedVictimStages": list(VICTIM_STAGES)}
-    if preemption:
-        caps.add("preemption")
-        if "DECODE_ENGINE_OWNED" in preemption.get("allowedVictimStages", []):
-            caps.add("engine_cancellation")
-    return axes, sorted(caps)
-
-
-def fail(path, message):
-    raise ScenarioError(f"{path}: {message}")
-
-
-def mapping(value, path, allowed, required=()):
-    if not isinstance(value, dict):
-        fail(path, "expected mapping")
-    if any(not isinstance(key, str) for key in value):
-        fail(path, "mapping keys must be strings")
-    extra, missing = set(value) - set(allowed), set(required) - set(value)
-    if extra or missing:
-        fail(path, f"unknown fields {sorted(extra)}, missing fields {sorted(missing)}")
-    return value
-
-
-def identifier(value, path):
-    if not isinstance(value, str) or not ID.fullmatch(value):
-        fail(path, "expected lower-case identifier")
-    return value
-
-
-def number(value, path, minimum=0, integer=False):
-    if (
-        type(value) not in ((int,) if integer else (int, float))
-        or value < minimum
-        or (isinstance(value, float) and not math.isfinite(value))
-    ):
-        fail(path, f"expected {'integer' if integer else 'number'} >= {minimum}")
-    return value
-
-
-def names(value, path, vocabulary):
-    if not isinstance(value, list) or any(not isinstance(x, str) for x in value):
-        fail(path, "expected string list")
-    if len(set(value)) != len(value) or set(value) - set(vocabulary):
-        fail(path, f"duplicate or unknown values: {value}")
-    return value
-
-
-def environment(value, path, profile):
-    value = mapping(
-        value,
-        path,
-        environment_fields(),
-    )
-    if value.get("backend", "java_mock") != "java_mock":
-        fail(
-            path + ".backend",
-            "only java_mock is implemented; GPU/multi-host/TP/DP layouts need separate capabilities",
-        )
-    result = {"backend": "java_mock", "n_prefill": 2, "n_decode": 4}
-    for key, default, allowed in (
-        ("discovery", "file", ("file", "discovery_file")),
-        ("perf_preset", "default", preset_names()),
-        ("master_layout", "single", ("single", "dual_standalone")),
-    ):
-        val = value.get(key, default)
-        if val not in allowed:
-            fail(path + "." + key, f"invalid value {val!r}; expected one of {allowed}")
-        result[key] = val
-    captured = capture_defaults(result["perf_preset"])
-    for field, capture_field in (
-        ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-        ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-        ("decode_cache_blocks", "decode_kv_pool_blocks"),
-    ):
-        if field not in value and capture_field in captured:
-            result[field] = captured[capture_field]
-    if "model_override" in value:
-        override = mapping(value["model_override"], path + ".model_override",
-            {"baseline", "reason"}, {"baseline", "reason"})
-        if override["baseline"] != result["perf_preset"] or not isinstance(override["reason"], str) or not override["reason"].strip():
-            fail(path + ".model_override", "baseline must name perf_preset and reason must be nonempty")
-        result["model_override"] = dict(override)
-    optional_scalars(value, path, result)
-    if "metric_whitelist" in value:
-        whitelist = value["metric_whitelist"]
-        if not isinstance(whitelist, str) or not re.fullmatch(
-            r"[A-Za-z_][A-Za-z0-9_]*(,[A-Za-z_][A-Za-z0-9_]*){0,15}", whitelist
-        ):
-            fail(
-                path + ".metric_whitelist",
-                "expected 1..16 comma-separated metric identifiers",
-            )
-        if len(whitelist) > 1024:
-            fail(path + ".metric_whitelist", "metric whitelist exceeds byte budget")
-        result["metric_whitelist"] = whitelist
-    if result["master_sync_log"] and result["master_layout"] != "single":
-        fail(
-            path + ".master_sync_log",
-            "isolated sync log currently requires single master",
-        )
-    result["master_stable_window_s"] = number(
-        value.get("master_stable_window_s", 3), path + ".master_stable_window_s"
-    )
-    if "prefill_cache_policy" in value:
-        field = path + ".prefill_cache_policy"
-        keys = {"device_tree", "memory_tree", "memory_blocks"}
-        cache = mapping(value["prefill_cache_policy"], field, keys, {"device_tree", "memory_tree"})
-        for key in ("device_tree", "memory_tree"):
-            if type(cache[key]) is not bool:
-                fail(field + "." + key, "expected boolean")
-        if "memory_blocks" in cache:
-            number(cache["memory_blocks"], field + ".memory_blocks", integer=True)
-        result["prefill_cache_policy"] = dict(cache)
-    if "prefill_perf" in value:
-        field = path + ".prefill_perf"
-        required = {"fixed_ms", "scale", "max_batch_tokens", "max_batch_requests"}
-        perf = mapping(value["prefill_perf"], field, required, required)
-        result["prefill_perf"] = {
-            key: number(val, field + "." + key, integer=key.startswith("max_batch_"))
-            for key, val in perf.items()
-        }
-    for key in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
-        if key in value:
-            result[key] = number(value[key], path + "." + key, minimum=1, integer=True)
-    _, preset_runtime = load_preset(result["perf_preset"])
-    paired_settings = preset_runtime.get("paired_master")
-    paired_master = paired_settings.for_profile(profile) if paired_settings else {}
-    profile_overrides = mapping(value.get("profile_overrides", {}),
-                                path + ".profile_overrides", PROFILES)
-    # Validate every keyed entry, including profiles excluded by CLI selection.
-    for target, patch in profile_overrides.items():
-        mapping(patch, path + ".profile_overrides." + target, INTEGER_OVERRIDES | {
-            "ordering", "decision", "dispatcher", "preemption", "decision_lifetime",
-            "prefill_expression", "cache_affinity_max_extra_ttft_ms",
-            "cache_affinity_min_prefix_hit_percent",
-        })
-        if target != profile:
-            environment({**value, "profile_overrides": {target: patch}}, path, target)
-    common = value.get("config_overrides", {})
-    if not isinstance(common, dict):
-        fail(path + ".config_overrides", "expected mapping")
-    for target, patch in [(profile, common), (profile, paired_master), *profile_overrides.items()]:
-        try:
-            validate_profile_identity(target, patch)
-        except ProfileIdentityError as exc:
-            raise ScenarioError(f"{path}: {exc}") from exc
-    overrides = mapping(
-        {**common, **{k: v for k, v in profile_overrides.get(profile, {}).items() if v is not None}},
-        path + ".config_overrides",
-        INTEGER_OVERRIDES
-        | {
-            "ordering",
-            "decision",
-            "dispatcher",
-            "preemption",
-            "decision_lifetime",
-            "prefill_expression",
-            "cache_affinity_max_extra_ttft_ms",
-            "cache_affinity_min_prefix_hit_percent",
-        },
-    )
-    declared_overrides = dict(overrides)
-    overrides = {**paired_master, **{k: v for k, v in declared_overrides.items() if v is not None}}
-    kwargs = {}
-    for key, val in overrides.items():
-        field = path + ".config_overrides." + key
-        if val is None:
-            continue
-        if key in {"ordering", "decision", "dispatcher"}:
-            choices = {
-                "ordering": ("fifo", "priority"),
-                "decision": ("single", "fixed_window"),
-                "dispatcher": ("batch", "non_batch"),
-            }[key]
-            if val not in choices:
-                fail(field, f"expected one of {choices}")
-        elif key == "cache_affinity_max_extra_ttft_ms":
-            number(val, field, minimum=0, integer=True)
-        elif key == "cache_affinity_min_prefix_hit_percent":
-            number(val, field, minimum=0)
-        elif key == "prefill_expression":
-            if not isinstance(val, str) or not val.strip() or len(val) > 4096:
-                fail(field, "expected a nonempty formula of at most 4096 characters")
-        elif key == "preemption":
-            mapping(
-                val,
-                field,
-                {"allowed_victim_stages", "timeout_ms"},
-                {"allowed_victim_stages"},
-            )
-            victim_stages = names(
-                val["allowed_victim_stages"],
-                field + ".allowed_victim_stages",
-                VICTIM_STAGES,
-            )
-            if not victim_stages:
-                fail(field, "preemption victim stages cannot be empty")
-            if "timeout_ms" in val:
-                number(
-                    val["timeout_ms"], field + ".timeout_ms", minimum=1, integer=True
-                )
-        elif key == "decision_lifetime":
-            number(val, field, minimum=1)
-        elif isinstance(val, dict):
-            if val != {"omit": True} or type(val.get("omit")) is not bool:
-                fail(field, "expected exact {omit: true}")
-            val = OMIT
-        else:
-            number(val, field, integer=True)
-        kwargs[key] = val
-    try:
-        result["resolved_config"] = json.loads(
-            render_env(profile, ConfigOverride(**kwargs))
-        )
-    except (TypeError, ValueError) as exc:
-        fail(path + ".config_overrides", str(exc))
-    if captured:
-        changed = [field for field, source_field in (
-            ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-            ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-            ("decode_cache_blocks", "decode_kv_pool_blocks"),
-        ) if field in value and value[field] != captured[source_field]]
-        if ("prefill_expression" in declared_overrides and declared_overrides["prefill_expression"] != paired_master.get("prefill_expression")) or "prefill_perf" in value:
-            changed.append("prefill model")
-        changed.extend("master." + key for key, val in declared_overrides.items()
-                       if key in paired_master and val != paired_master[key])
-        if "prefill_cache_policy" in value:
-            performance, _ = load_preset(result["perf_preset"])
-            policy = value["prefill_cache_policy"]
-            original = performance.get("prefill", {})
-            memory = original.get("memory_cache", {})
-            if (policy["device_tree"] != original.get("enable_gpu_prefix_tree")
-                or policy["memory_tree"] != memory.get("enable_prefix_tree")
-                or ("memory_blocks" in policy and policy["memory_blocks"] != memory.get("capacity_blocks"))):
-                changed.append("prefill_cache_policy")
-        if changed and "model_override" not in result:
-            fail(path + ".model_override", "test deviation requires baseline and reason: " + ", ".join(changed))
-    result["config_overrides"] = copy.deepcopy(overrides)
-    result["effective_axes"], result["effective_capabilities"] = effective_capabilities(
-        result["resolved_config"]
-    )
-    return result
-
-
-def reference(value, path, outputs, expected=None):
-    mapping(value, path, {"$ref"}, {"$ref"})
-    ref = value["$ref"]
-    if not isinstance(ref, str):
-        fail(path, "$ref must be a string")
-    parts = ref.split(".")
-    if len(parts) != 4 or parts[0] != "stages" or parts[2] != "output":
-        fail(path, "expected stages.<earlier_stage>.output.<field>")
-    kind = outputs.get(parts[1], {}).get(parts[3])
-    if kind is None:
-        fail(path, f"unknown or forward reference {ref!r}")
-    if expected is not None and kind != expected:
-        fail(path, f"reference is {kind}, expected {expected}")
-    return kind
-
-
-def stages(values, path, default_timeout, handlers, env=None, profiles=()):
-    if not isinstance(values, list) or not values:
-        fail(path, "expected nonempty stage list")
-    outputs, compiled = {}, []
-    setup_seen, torn_down = False, False
-    active_environment = copy.deepcopy(env or {})
-    for i, value in enumerate(values):
-        loc = f"{path}[{i}]"
-        mapping(
-            value,
-            loc,
-            {"id", "action", "timeout_s", "params", "purpose"},
-            {"id", "action"},
-        )
-        if value.get("purpose", "operation") not in {"operation", "observation"}:
-            fail(loc + ".purpose", "expected operation or observation")
-        sid = identifier(value["id"], loc + ".id")
-        if sid in outputs:
-            fail(loc, f"duplicate stage id {sid}")
-        action = value["action"]
-        if not isinstance(action, str) or action not in (set(OUTPUTS) | set(handlers)):
-            fail(loc + ".action", f"unsupported action {action!r}")
-        if torn_down:
-            fail(loc, "no stage may follow teardown")
-        if action == "setup":
-            if setup_seen or i != 0:
-                fail(loc, "setup must occur exactly once as the first stage")
-            setup_seen = True
-        elif not setup_seen:
-            fail(loc, "setup must precede actions")
-        timeout = number(
-            value.get("timeout_s", default_timeout), loc + ".timeout_s", minimum=0.001
-        )
-        params = copy.deepcopy(value.get("params", {}))
-        if action in handlers:
-            descriptor = handlers[action]
-            params = descriptor.validate(
-                params,
-                PlanContext(
-                    loc + ".params",
-                    dict(outputs),
-                    copy.deepcopy(active_environment),
-                    tuple(profiles),
-                ),
-            )
-            if not isinstance(params, dict):
-                fail(loc, "adapter validate must return a mapping")
-        elif action in ("setup", "teardown"):
-            mapping(params, loc + ".params", set())
-            torn_down = action == "teardown"
-        elif action == "request":
-            mapping(
-                params,
-                loc + ".params",
-                {
-                    "input_len",
-                    "output_len",
-                    "count",
-                    "consume",
-                    "block_keys",
-                    "priority",
-                    "qos_level",
-                    "schedule_timeout_s",
-                    "stream_timeout_s",
-                    "post_issue_delay_s",
-                },
-            )
-            for key, default in (("input_len", 2048), ("output_len", 10), ("count", 1)):
-                params[key] = number(
-                    params.get(key, default),
-                    loc + ".params." + key,
-                    minimum=1,
-                    integer=True,
-                )
-            params.setdefault("consume", "immediate")
-            if params["consume"] not in ("immediate", "deferred"):
-                fail(loc, "consume must be immediate or deferred")
-            if "post_issue_delay_s" in params:
-                pause = number(
-                    params["post_issue_delay_s"], loc + ".params.post_issue_delay_s"
-                )
-                if pause > 2:
-                    fail(loc, "post_issue_delay_s cannot exceed two seconds")
-            if "block_keys" in params:
-                keys = params["block_keys"]
-                if (
-                    not isinstance(keys, list)
-                    or not 1 <= len(keys) <= 4096
-                    or any(
-                        type(k) is not int or not -(2**63) <= k < 2**63 for k in keys
-                    )
-                ):
-                    fail(loc, "block_keys must be 1..4096 explicit int64 keys")
-            for key in ("priority", "qos_level"):
-                if key in params and (
-                    type(params[key]) is not int or not -(2**31) <= params[key] < 2**31
-                ):
-                    fail(loc, f"{key} must be an explicit int32 protocol value")
-            for key in ("schedule_timeout_s", "stream_timeout_s"):
-                if key in params:
-                    params[key] = number(
-                        params[key], loc + ".params." + key, minimum=0.001
-                    )
-                    if params[key] > 60:
-                        fail(loc, f"{key} cannot exceed 60 seconds")
-        elif action in ("wait", "cancel"):
-            mapping(params, loc + ".params", {"requests"}, {"requests"})
-            reference(params["requests"], loc + ".params.requests", outputs, "requests")
-        elif action == "check":
-            mapping(
-                params,
-                loc + ".params",
-                {"actual", "op", "expected"},
-                {"actual", "op", "expected"},
-            )
-            kind = reference(params["actual"], loc + ".params.actual", outputs)
-            expected_types = {
-                "boolean": (bool,),
-                "integer": (int,),
-                "number": (int, float),
-                "string": (str,),
-            }.get(kind, ())
-            if type(params["expected"]) not in expected_types or (
-                type(params["expected"]) is float
-                and not math.isfinite(params["expected"])
-            ):
-                fail(
-                    loc,
-                    "checks compare scalar values with matching types, not live handles",
-                )
-            if params["op"] not in ("eq", "le", "ge") or (
-                kind in ("boolean", "string") and params["op"] != "eq"
-            ):
-                fail(loc, "invalid comparison for output type")
-        compiled.append(
-            {
-                "id": sid,
-                "action": action,
-                "timeout_s": timeout,
-                "params": params,
-                **({"purpose": value["purpose"]} if "purpose" in value else {}),
-            }
-        )
-        outputs[sid] = (
-            handlers[action].outputs if action in handlers else OUTPUTS[action]
-        )
-        if action in handlers and handlers[action].next_environment is not None:
-            active_environment = copy.deepcopy(
-                handlers[action].next_environment(params)
-            )
-    return compiled
-
-
-def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
+def _compile_documents(documents, profile=None, handlers=None, grade="normal"):
     """Expand named variants and selected profiles, preserving declaration order."""
     handlers = dict(handlers or {})
     if grade not in ("strict", "normal", "loose"):
@@ -569,7 +51,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             doc,
             source,
             {
-                "schema_version",
+                "program_schema_version",
                 "id",
                 "description",
                 "category",
@@ -584,15 +66,15 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 "estimated_duration_s",
             },
             {
-                "schema_version",
+                "program_schema_version",
                 "id",
                 "description",
                 "category",
                 "environment",
             },
         )
-        if type(doc["schema_version"]) is not int or doc["schema_version"] != 1:
-            fail(source + ".schema_version", "only schema_version 1 is supported")
+        if type(doc["program_schema_version"]) is not int or doc["program_schema_version"] != 1:
+            fail(source + ".program_schema_version", "only program_schema_version 1 is supported")
         sid = identifier(doc["id"], source + ".id")
         if sid in seen:
             fail(source, f"duplicate scenario id {sid}")
@@ -627,7 +109,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
         execution = mapping(
             doc.get("execution", {}),
             source + ".execution",
-            {"timeout_s", "stage_timeout_s", "cleanup_timeout_s"},
+            EXECUTION_BUDGETS,
         )
         budgets = {
             key: number(
@@ -637,6 +119,8 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 ("timeout_s", 600),
                 ("stage_timeout_s", 60),
                 ("cleanup_timeout_s", 120),
+                ("finalize_timeout_s", 120),
+                ("report_timeout_s", 60),
             )
         }
         variants = doc.get("variants", [{"id": "default"}])
@@ -657,7 +141,10 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                     "execution",
                     "requires",
                     "findings",
-                    "test",
+                    "metadata",
+                    "reports",
+                    "reporting",
+                    "monitoring_query_plan",
                 },
                 {"id"},
             )
@@ -671,9 +158,12 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             if not selected:
                 fail(loc + ".profiles", "must not be empty")
             variant_budgets = dict(budgets)
-            for key, value in mapping(
-                variant.get("execution", {}), loc + ".execution", set(budgets)
-            ).items():
+            variant_execution = mapping(
+                variant.get("execution", {}), loc + ".execution", EXECUTION_FIELDS
+            )
+            for key, value in variant_execution.items():
+                if key not in budgets:
+                    continue
                 variant_budgets[key] = number(
                     value, loc + ".execution." + key, minimum=0.001
                 )
@@ -692,23 +182,14 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 loc + ".environment_overrides",
                 variant_environment_fields(),
             )
-            for key, value in patch.items():
-                if key == "config_overrides":
-                    if not isinstance(value, dict) or not isinstance(
-                        env.get(key, {}), dict
-                    ):
-                        fail(loc, "config_overrides must be mapping")
-                    env[key] = {**env.get(key, {}), **copy.deepcopy(value)}
-                else:
-                    env[key] = copy.deepcopy(value)
-            capture = capture_defaults(env.get("perf_preset", "default"))
-            for field, source_field in (
-                ("n_prefill", "n_prefill"), ("n_decode", "n_decode"),
-                ("prefill_cache_blocks", "prefill_kv_pool_blocks"),
-                ("decode_cache_blocks", "decode_kv_pool_blocks"),
-            ):
-                if field not in env and source_field in capture:
-                    env[field] = capture[source_field]
+            from cases.config_data import merge_environment
+            env = merge_environment(env, patch)
+            declaration, resolver = read_environment(env, source + f"::{vid}.environment")
+            # Action validation receives the same resolved topology as execution.
+            for field in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
+                value = getattr(declaration, field)
+                if value is not None:
+                    env[field] = value
             if "stages" in variant and "stage_overrides" in variant:
                 fail(
                     loc,
@@ -745,6 +226,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                 handlers,
                 env,
                 selected,
+                getattr(doc, "implementation", {}).get("program"),
             )
             check_ids = set()
             action_requires = set(variant_requires)
@@ -777,7 +259,7 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
             )
             for p in selected:
                 # Validate all declared variants, even when CLI selects a subset.
-                resolved = environment(env, source + f"::{vid}.environment", p)
+                resolved = resolver.resolve(declaration, source + f"::{vid}.environment", p).to_dict()
                 initial_workers = resolved["n_prefill"] + resolved["n_decode"]
                 max_environment_workers = initial_workers
                 for stage in compiled:
@@ -836,7 +318,9 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "variant": vid,
                         "variant_id": vid,
                         "profile": p,
-                        **({"test": copy.deepcopy(variant["test"])} if "test" in variant else {}),
+                        **({"metadata": copy.deepcopy(variant["metadata"])} if "metadata" in variant else {}),
+                        **({"reports": copy.deepcopy(variant["reports"])} if "reports" in variant else {}),
+                        **({"reporting": copy.deepcopy(variant["reporting"])} if "reporting" in variant else {}),
                         "effective_axes": resolved["effective_axes"],
                         "effective_capabilities": resolved["effective_capabilities"],
                         "grade": grade,
@@ -846,7 +330,9 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                         "source": "yaml",
                         "source_path": source,
                         **(
-                            {"implementation": copy.deepcopy(doc.implementation)}
+                            {"implementation": dict(copy.deepcopy(doc.implementation),
+                                **({"monitoring_query_plan": copy.deepcopy(variant["monitoring_query_plan"])}
+                                   if "monitoring_query_plan" in variant else {}))}
                             if hasattr(doc, "implementation")
                             else {}
                         ),
@@ -868,9 +354,29 @@ def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
                             "reserved_tail_offset": VICTIM_OFFSETS[2],
                         },
                         "environment": resolved,
-                        "execution": dict(variant_budgets),
+                        "execution": {
+                            **variant_budgets,
+                            **{key: copy.deepcopy(value)
+                               for key, value in variant_execution.items()
+                               if key not in budgets},
+                        },
                         "stages": copy.deepcopy(compiled),
                         "findings": list(findings),
                     }
                 )
-    return instances
+    return [CompiledInstance.read(instance) for instance in instances]
+
+
+class ScenarioCompiler:
+    """Compile Python program declarations into immutable execution objects."""
+
+    def __init__(self, handlers=None):
+        self.handlers = dict(handlers or {})
+
+    def compile(self, documents, profile=None, grade="normal") -> list[CompiledInstance]:
+        return _compile_documents(documents, profile, self.handlers, grade)
+
+
+def compile_scenarios(documents, profile=None, handlers=None, grade="normal"):
+    """JSON projection for CLI/catalog consumers; the compiler returns domain objects."""
+    return [instance.to_dict() for instance in ScenarioCompiler(handlers).compile(documents, profile, grade)]

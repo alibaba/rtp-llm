@@ -1,33 +1,97 @@
-# 报告装配契约
+# 报告契约
 
-报告装配用于把分析结果组织成可离线阅读的图表和审计信息。门禁、阈值、统计值由分析层决定；装配层只决定名称、分组、轴、颜色、显示顺序和说明文字。新增报告时先复用 `reporting/` 的词汇表、配对函数和 bundle 写入入口，不从 HTML 或已写出的报告反向提取数据。
+报告展示已确定的结果，不负责取证或决定门槛。case 专属报告位于 `cases/<case>/report.py`，公共 `reporting/` 提供曲线绑定、物化与面板投影、配对、spec 校验、renderer 与 bundle 校验。曲线统一处理单位缩放、时间原点和来源；选中面板保留曲线的 `hidden`，不再用生产者另算全局可见性。面板只有有限实测值才算有效，零值有效，null/NaN 不补零，缺测使用 `empty_caption`，部分缺测列出缺少的曲线。配置门禁线由 case 在投影后添加，不算实测数据。case 程序在 `REPORT_VIEWS` 中按文件名声明 `ReportView` 校验与渲染能力；`cases.registry` 自动汇集已注册程序的声明，同一视图可以复用相同能力；能力冲突或声明非法直接报错；YAML 只能引用视图文件，不能指定 Python 模块。
 
-流程为「读取并校验既有分析产物 → 分析层给出结果与有效性 → 装配 spec → `write_bundle`」。`reporting/catalog.py` 管理曲线展示名称、分组、轴、颜色和默认可见性。`reporting/pairing.py` 接收已分析的序列，按阶段边界、事件时间或相对秒平移，配对时保留缺采样的 `null`；差值仅在同一时刻两侧都有数值时产生。累计计数的差分在 `reporting/statistics.py` 定义。新增曲线先补 catalog，再让报告装配器按数据身份取定义；不得以展示名作为统计或门禁依据。
+## 输入与装配
 
-`reporting/assembly.py` 是 panel 适配入口。历史的 `x`/`xNums` + `series.data` 和 `series.points` 均可读取；时间曲线在写入时派生 `points`，保留原字段和空值。overlay 与普通图表可混排，`representation` 指定交互组件；bar/scatter 仍保留其类目或二维坐标。旧归档不改写，`read_bundle` 继续校验原 manifest 和 SHA，`load_analysis` 读取旧 `analysis.json`。新 bundle 仍写自包含 HTML、`analysis.json`、`report-spec.json`、`manifest.json`，由 `write_bundle` 最后写 manifest。
+视图 YAML 在 `config/report_views/` 使用 `report_view_schema_version: 1`。顶层顺序固定为版本、`kind`、`report`、`metrics`、`charts`、`sections`，只出现当前视图需要的块；不允许把文案、曲线策略、表头或 case 私有字段追加到顶层。
 
-`kind` 表示制品关系：`run` 是单次运行，`comparison` 是两个或多个运行的对照（含时间线），`sweep` 是参数扫描。`discover_reports(root, kind=..., role=...)` 在所选 kind 下读取并校验 bundle；`role` 可选，由生产者声明，不从目录名猜测。默认 kind 为 `run`，兼容现有门禁发现调用。
+| 块 | 职责 |
+|---|---|
+| `kind` | `default` 展示全部已归档指标，`selected` 展示 YAML 选择的指标；不能在 YAML 指定 Python 模块 |
+| `report` | `subtitle`；已生产报告另声明 `id`、`producer`，声明最终 bundle 身份和生产者 |
+| `metrics` | `query_plan` 选择指标集合；`diagnostic_only` 明确哪些已采指标不绘图 |
+| `charts` | `curves`、`panels`、事件显示名和时间轴文案；全量视图在这里声明分组、采样和曲线可见性 |
+| `sections` | 按稳定 section ID 声明附录标题、表头和默认开合状态 |
 
-workload case 在 YAML 的 `reports` 中列出视图文件，例如 `reports: [workload.yaml, cache_scale_in_overview.yaml]`。文件位于 `config/report_views/`，每个文件产出一份独立 HTML。`workload.yaml` 是默认视图：每个监控指标族一张图，按 `engine_name`、`pod` 展开的原始线放在同一图，可在图例和预设中切换均值、最大值及逐引擎明细。HTML 为控制体积保留分桶极值和缺采点；`analysis.json` 保留原始序列全集，派生线标明来源与计算方式。未声明的旧 workload case 仍产出默认视图；functional variant 不继承顶层报告配置。
+`sections.<id>` 只包含 `title`、`opened` 和表格的 `columns`。`checks` 表示专属门禁说明，`monitoring`、`validity`、`metrics`、`sources` 表示相应诊断；case 专属附录由注册的 Python 校验器声明。每个 case 校验附录 ID 集合及表格列数，不能依赖生产时的 KeyError。表格和详情使用相同开合组件，Python 决定内容和顺序，YAML 只控制展示。公共骨架使用稳定的 `run.checks`、`run.validity` 区块 ID 和 `run.execution`、`run.validity` KPI ID；视图附录使用 `case.<id>`。结构去重只比较 ID，不比较标题或展示文字。公共组件生成标准 KPI 与检查表，case 提供专属面板和附录；运行报告不重复展示 case 的另一份检查表。
 
-`cache_scale_in` 同时声明默认视图和 `cache_scale_in_overview.yaml`：后者定义专属报告的标题、副标题、轴、曲线预设及审计栏目，`cache_gate.py` 提供已分析的曲线、有效性和判定并据此发布报告。`master_performance.yaml` 同样定义性能报告的静态布局。case 列出的专属报告以 producer 和 bundle 身份校验后直接链接，不重复生成一份缩水的图。每份单次报告都保留运行身份、检查和门禁详细结果；默认视图与专属视图保留各自的时间原点。YAML 不计算统计值或改变判定。
+曲线通过 `charts.curves.<curve_id>.metric_id` 与 `labels` 选择冻结指标，面板通过 `charts.panels[].curve_ids` 选择曲线；展示名不参与判定或身份匹配。`reporting/catalog.py` 只提供通用调色板和 UI 主题，不按指标名称推断单位、分组或业务含义。全量诊断视图按冻结指标的 `unit` 标注坐标轴，保留原始指标身份。
 
-输入归档保持各自的历史格式。`reporting.core.load_analysis` 接受旧分析 JSON 与带 manifest 的新 bundle；cache 和性能证据仍由对应分析器按原格式读取。不得因为呈现格式统一，就把不同证据类型混作同一分析输入。
+视图不声明运行元信息，不用固定字符串宣称采样或来源；运行信息由归档的 `run_meta` 提供，曲线来源由冻结的 provenance 提供。新增展示项放入相应块并同时补充 Python 字段合同，不保留旧扁平字段或转换适配器。
 
-独立的 `traffic_fidelity_report.py` 保留自包含 `fidelity.html` 作为显式例外：它提供可调阈值、ECDF 和三幅联合密度热图，通用 renderer 尚无等价交互组件。该例外只影响合成输入保真度诊断，不进入运行门禁或 `discover_reports`。若迁入 bundle，先为这些交互补齐通用组件并逐项核对信息完整性。压测的 `aggregate.py` 子进程链路属于证据生成，不改变装配契约；它继续经 `write_bundle` 发布报告。
+报告读取 `metrics.json` 中的冻结定义与序列，不重新查询服务、解析日志或生产数值指标。复杂门禁的报告必须接收明确结果，不能在 result 缺省时隐式重判。查询与 producer 规则见[指标契约](metrics.md)，主报告、默认视图和产物清单见[结果与指标](../development/results.md#收取产物)。
 
-`stress_report.py`、`monitoring/session.py` 的专属装配保留：其图表或监控视图重复度低，整体迁移成本高，均经 `write_bundle` 和 panel 适配入口发布。豁免只覆盖各自的专属布局，不允许新增独立配色、配对或落盘规则；需要复用的呈现决策仍应进入 `reporting/`。
+所有生产器直接输出同一 panel 契约：声明 `axes`，每条 series 携带 `points: [{x, y}]`；`timeX: true` 表示时间坐标，缺采以 `y: null` 保留。类目图的 `x` 是字符串，数值图的 `x` 是数值。`spec.py` 严格校验输入，不接受旧的 `x`/`xNums` + `series.data` 或显示模式标志，也不执行格式转换。`pairing.py` 可按归档事件或相对秒平移序列，差值只在同一时刻两侧都有值时产生，不补缺采。
 
-## 冻结报告对照
+## 事件
 
-`reporting/comparison.py` 是通用对比实现，`scripts/commands/compare_runs.py` 是命令入口。
-输入为两个或多个 `kind=run` 的完整 bundle。先校验 manifest，再读取 `analysis.json` 与
-`report-spec.json`；不导入业务分析器，不消费原始 evidence，也不重新生成单 run 报告。
+事件标记使用稳定 ID，显示文案不参与匹配或对齐。`charts.events.<id>` 声明 `label` 和 `source`：阶段边界使用 `source: stage`、`stage`、`boundary: start | end`；case 内事件使用 `source: case`、`event`。编译时校验阶段引用，阶段边界由运行框架自动记录；复杂程序在真实事件发生处调用 `ctx.record_event(id)`。归档保存事件 ID、epoch 秒与 monotonic 秒；阶段结束记录还保留状态，失败标记附带状态文案，阶段结束不代表操作成功。
 
-对比保留每侧的结果、KPI、说明、缺采点和原始报告链接，链接依赖输入归档仍保留在原位置。
-合图仅配对同 ID、指标集合、单位和坐标轴一致的时间面板；时间原点不同且没有显式事件对齐时
-分别展示。事件无法唯一定位时，所有 run 保留原时间轴。没有自动统计窗口、差异排名或归因。
+`charts.event_ids` 显式声明所有面板的事件选择；`charts.panels[].event_ids` 可以覆盖它，空列表表示该面板不显示事件。未选中事件仍保留在运行证据中，不在图上绘制；未发生的事件不补造。默认视图的指标面板共享它声明的事件选择。
 
-控制变量来自归档 `run_meta` 的 configuration、workload、environment 及归档 criteria；
-字段缺失标为 UNKNOWN，不从证据推测。原始门禁标准和检查仍完整显示在各 run 的报告说明中。
-对比不产生顶层 verdict 或 gate；命令退出码只描述读写与校验是否成功。
+公共投影按真实 `epoch_s` 和图表的 `timeOriginEpochS` 计算相对秒，冻结到 spec 的 `events` 与各 panel 的 `events`。专属图表可使用自己的观测或测量原点，重新装配不得改成 workload 原点。事件源缺少有效时间直接失败，不读取日志、文件或其他来源兜底。对照报告按事件 ID 对齐；同 ID 多次发生时不能推断唯一对齐点。
+
+## Bundle 与发现
+
+`write_bundle` 写出自包含 HTML、`analysis.json`、`report-spec.json` 和最后写入的 `manifest.json`。`read_bundle` 校验 identity、manifest 与 SHA，`load_analysis` 接受带 `report_analysis_schema_version` 的分析封装或 bundle；原始 case 分析不是报告封装。三类落盘 JSON 分别校验自己的版本字段，不按相同的版本数字推断格式，也不改写归档。
+
+`kind` 为 run 或 comparison，表示单 run 或运行对照；`role` 由生产者明确声明。`discover_reports(root, kind=..., role=...)` 按这两个字段发现并校验报告，不从目录名猜测。门禁使用 `role="gate"`。
+
+生产阶段未完成的失败运行生成默认报告并标明未生成的视图；已经存在但损坏的 bundle 必须报错。报告重新装配只补充归档运行信息与曲线，原始 verdict 保持不变。
+
+通用 bundle 外的输入保真度诊断由 `traffic/fidelity_report.py` 生成 `fidelity.html`，使用公共渲染器展示冻结阈值、ECDF 与联合密度；它不参与运行门禁或 bundle 发现。
+
+## 展示与交互
+
+专属视图的 `charts.curves` 每条声明都必须被面板的 `curve_ids` 引用，未接入面板的样式报错。所有选中视图都显式声明 `metrics.diagnostic_only`（可以为空）：每个查询与 Python 输出序列必须被实际面板使用或列为诊断；已注册 gate producer 的标量单列为 `GATE_EVIDENCE`。编译检查当前查询集合，报告装配再次检查冻结指标，并在诊断区记录 `metric_classification`；自动 `up` 查询用于采集完整性，Python 产出的门禁标量保留既定判定与有效性证据，不强制画成曲线。
+
+面板可选的 `presets` 使用 `visible`、`names`、`contains` 或 `groups` 选择当前面板的曲线，展开结果进入 spec 和 HTML 的切换按钮。未声明时不生成额外按钮；曲线和面板的默认可见性由视图明确声明，缺采仍按实测值处理。全量默认视图的概要/明细 presets 负责不同的投影，不与专属视图的曲线选择器混用。
+
+单 run 标题统一由运行身份生成 `case : variant : profile`，视图 YAML 不声明或覆盖标题。副标题由视图的 `report.subtitle` 提供；离线重生成使用证据中冻结的运行身份。`run_meta` 只展示本次已归档的制品、配置、模型、拓扑、输入和播放参数，不拼接其他运行。公共组件按字段分组，长配置可展开。
+
+门禁检查使用 `CheckNode` 树展示冻结结果中的父检查与具体子检查；空子列表不隐藏父结果。外层 action 的 `actual` 只记录 verdict，完整结果用校验后的工件路径引用，不把整份结果及窗口序列塞入表格单元格。门禁检查默认展开；有效性、诊断与附件使用同一折叠组件。较大的实际值展示摘要，完整值保留供展开，原始证据仍留在运行目录。
+
+场景 YAML 的 `reporting.time_axis` 决定整个 run 的报告零点与默认展示范围，所有视图和时间面板共享，不由 view YAML 分别定义。`origin` 选择 `{event: <id>}` 或 `{stage: <id>, boundary: start|end}`；`range.from` 使用 `origin` 或同型选择器，`range.until` 使用同型选择器。阶段名在编译期验证；事件 ID 引用执行层的实际记录，运行后必须唯一发生。选择自定义 case 事件时由 Python 调用 `ctx.record_event()`，不得把启动请求的时刻冒充操作实际生效时间。
+
+`traffic_started` 是公共层保留的事件：从客户端已发出请求的流水取最早 `send_start_epoch_ms`，包含失败与尚未完成的请求；多发流器取全 run 最早发送时间，并冻结来源资源和请求身份。场景也可选择故障或其他阶段作为零点；零点与展示起点独立，故障前数据可以显示为负秒。例：
+
+```yaml
+reporting:
+  time_axis:
+    origin:
+      event: traffic_started
+    range:
+      from: origin
+      until:
+        stage: drain
+        boundary: end
+```
+
+公共层将声明、解析后的绝对时间与来源记录冻结到 `workload-evidence.json`、`analysis.json` 和 `metrics.json` 的运行上下文。曲线、事件和配置参考线统一平移；原始指标仍保存绝对时间。默认范围控制视窗，不删除归档点；没有数据时不补零，不增加采集或来源回退。成功运行缺少边界事件、重复匹配或范围逆序必须报错；失败运行的事件未发生时保留门禁和错误信息，明确标示时间轴未建立，不选择替代零点。
+
+门禁窗口与展示时间轴相互独立。性能展示序列使用完整业务流量周期，覆盖 warmup 和请求排空；门禁仍使用冻结的 measurement 窗口与请求集合。离线发布从指标归档读取冻结的报告时间轴，不按当前场景 YAML 重新选择零点。
+
+时间曲线支持拖拽、输入秒数和还原区间，各时间面板同步。读数显示当前值与选区有效样本的等权 avg，并显示有效/总点数；缺采不补零。avg 用于阅读，不是时间加权均值，也不重判。全量 HTML 可以降采样，但完整序列与统计留在指标归档。
+
+## 冻结对照
+
+`comparison.py` 接收多个 run bundle，先校验再读取结果与 spec，不导入 case 分析器、不读取原始 evidence、不重建单 run 报告。每侧 verdict、KPI、缺采、说明与原报告链接保留；输入归档应留在原位置。
+
+合图只配对面板 ID、metric ID、标签、测量口径、显示缩放、单位及坐标轴一致的时间面板。显示文案不参与测量身份匹配，缺少测量身份时保留独立面板。时间原点不一致时分别展示；指定事件缺失、重复或无效时全部保留原坐标，不推导统计窗口、排名或原因。
+
+控制变量在写入归档时冻结为 `ComparisonControls`，对照读取显式契约，不从 case 证据重建。字段缺失标 UNKNOWN，不从两边同时缺失推断一致。对比不产生顶层 verdict，命令退出码只描述读取、校验与写入是否成功；入口见[命令导航](../development/entrypoints.md)。
+
+离线重判必须显式指定 `--reinterpret`，输出目录位于原证据归档之外且为空。原归档只读；来源证据 SHA 与当前分析器 SHA 写入重判证据，指标物化和报告发布只写新目录。`--json-only` 同样遵守目录保护和溯源规则。
+
+## 门禁与发布
+
+在线门禁独立保存 `<gate>-gate-evidence.json`、`<gate>-gate-result.json` 和 `<gate>-gate-manifest.json`。manifest 最后原子提交，记录输入和结果的摘要；读取时校验固定文件名和摘要。缺少提交的 manifest 表示尚未产生门禁，已提交工件缺失或校验失败属于损坏，不能回退成普通缺失视图。
+
+每个专属视图由 program 的 `ReportView` 显式注册 renderer。在线执行在资源清理、证据分析和数值投影完成后调用 renderer，直接写出包含运行上下文的最终 bundle。公共报告层不读取旧 bundle 补写运行上下文；重绘只消费校验后的冻结结果和归档指标，不重判。缺少未提交门禁且运行已失败时，可生成默认监控视图，并明确显示未生成的视角。
+
+HA 的逐阶段检查直接根据已选请求证据产生 `CheckResult`，其输入选择、样本数、窗口边界与实测值进入阶段结果。收尾阶段从已落盘的阶段检查发布门禁标量，不重新测量或比较；门禁判定不依赖指标写入或 HTML 成功。公共报告元信息只接受明确的 `run_meta`，未知信息保留为空，不转换旧 `meta` 字段补造配置。
+
+## 数据边界
+
+`RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。`FrozenReport` 与 `ChartPanel` 在归档进入对照时解析报告契约，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。

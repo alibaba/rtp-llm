@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from traffic.traffic_source import materialize,validate_plan,SOURCES
 from traffic.prefix_lineage import encode,decode,expand
-from traffic.playback_config import normalize,comparison_notice,iteration_windows
+from traffic.playback_config import normalize
 
 
 class TrafficSourceTest(unittest.TestCase):
@@ -74,21 +74,3 @@ class TrafficSourceTest(unittest.TestCase):
         with self.assertRaises(ValueError):normalize(dict(playback=dict(mode='uniform',qps=1,max_laps=0)))
         with self.assertRaises(ValueError):normalize(dict(SEND_MODE='uniform',playback=dict(mode='uniform',qps=1)))
         with self.assertRaises(ValueError):normalize(dict(playback=dict(mode='true-ts',qps=1)))
-
-    def test_cross_source_tail_and_lap_comparison_notice(self):
-        a=dict(realism='EMPIRICAL_PREFIX_STRUCTURE',tail='BLOCK_ALIGNED_LOSSY_TOKENS',playback={'identity':'none'})
-        b=dict(realism='CALIBRATED_STATISTICAL',tail='EXACT_CONFIGURED_LENGTHS',playback={'identity':'structural-relabel'})
-        self.assertIn('不可直比',comparison_notice(a,b))
-        self.assertIsNone(comparison_notice(a,a))
-
-
-class PlaybackReportTest(unittest.TestCase):
-    def test_iterations_keep_actual_windows_and_unknown_rows_separate(self):
-        rows=[dict(iteration=0,send_start_epoch_ms=100,input_len=512),
-              dict(iteration=1,send_start_epoch_ms=300,input_len=1024),
-              dict(iteration=0,send_start_epoch_ms=200,input_len=512),
-              dict(send_start_epoch_ms=400,input_len=500)]
-        windows=iteration_windows(rows)
-        self.assertEqual([w['requests'] for w in windows],[2,1])
-        self.assertEqual(windows[0]['end_epoch_ms'],200)
-        self.assertEqual(windows[1]['input_tokens'],1024)

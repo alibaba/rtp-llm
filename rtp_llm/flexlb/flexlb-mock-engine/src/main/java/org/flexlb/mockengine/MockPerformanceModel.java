@@ -35,25 +35,21 @@ final class MockPerformanceModel {
      *
      * <p>The default here is 0 (unbounded, legacy behavior): the Auto-TPM E2E
      * suites deliberately build deep prefill queues (queue-evict scenarios), so
-     * the cap is opt-in via the performance JSON — the online_eval dsv4 profiles
-     * set 4 explicitly for realistic backpressure.
+     * the cap is opt-in via the performance JSON. The current online_eval
+     * captured presets explicitly set 256; this default applies when absent.
      */
     static final int DEFAULT_MAX_WAITING_PREFILL_BATCHES = 0;
 
     /**
      * Default per-execution-batch prefill TOKEN budget, JSON
      * "prefill.max_batch_tokens" (engine-internal regroup, 20260903 #8).
-     * The default mirrors the exact figure the mock reports to the master in
-     * WorkerStatus.max_batch_tokens_size (1_048_576): one number, two uses —
+     * Without prefill.fifo, the default is also reported by the mock to the
+     * master in WorkerStatus.max_batch_tokens_size (1_048_576): one number, two uses —
      * the master clamps its decision-group token capacity against it
      * (BatcherContext prefers the worker-reported limit), the engine's own
      * regroup budget holds the same ceiling, so the two layers can never
-     * disagree about what the engine will accept. Production reference:
-     * FIFOScheduler.cc evaluateWaitingStreams — a token budget stops admitting
-     * new streams into the running batch once cumulative cost reaches it
-     * (mock caliber per the approved spec: sum(computeTokens + hitTokens),
-     * i.e. the FULL logical input length INCLUDING cache hits; the first
-     * member always admits, the budget binds from the second member on).
+     * disagree about the configured mock limit. This legacy regroup path is
+     * separate from prefill.fifo; its token accounting is mock-specific.
      * 0 disables the token dimension.
      */
     static final int DEFAULT_MAX_BATCH_TOKENS = 1_048_576;
@@ -61,12 +57,9 @@ final class MockPerformanceModel {
     /**
      * Default per-execution-batch prefill REQUEST count cap, JSON
      * "prefill.max_batch_requests" (engine-internal regroup, 20260903 #8).
-     * Default 32 keeps the same anchor as prefill.direct_batch_size_max
-     * ("matching the master FIXED_WINDOW maxRequests") — the production
-     * max_generate_batch_size sequence-count constraint (FIFOScheduler.cc
-     * evaluateRunningBatch, inclusive: running + admitted + 1 <= cap)
-     * surfacing at the engine's own admission layer. 0 disables the
-     * request-count dimension.
+     * Default 32 is a mock regroup limit, separate from the master's
+     * FIXED_WINDOW maxRequests and from the prefill.fifo request limit.
+     * 0 disables the request-count dimension.
      *
      * <p>Both dimensions at 0 = regroup fully OFF: master-composed batches
      * execute verbatim (the legacy behavior, reproducible on demand).
@@ -91,7 +84,7 @@ final class MockPerformanceModel {
 
     private record Calibration(JsonNode data, String sha256) {}
 
-    /** The file is packaged from the same audited calibration read by online_eval. */
+    /** The bundled calibration is shared with online_eval and marked legacy_unverified. */
     private static Calibration loadCalibration() throws IOException {
         try (var stream = MockPerformanceModel.class.getClassLoader()
                 .getResourceAsStream("dsv4_l20_mock_calibration.json")) {
@@ -166,7 +159,7 @@ final class MockPerformanceModel {
     // Decode step-latency sources, exactly one active per model:
     //   - explicit step_ms_by_batch curve (decodePoints non-empty; legacy
     //     declared channel, kept for suites that price steps themselves), or
-    //   - the linear production fit stepBaseMs + stepPerRunningMs * running
+    //   - the configured linear fit stepBaseMs + stepPerRunningMs * running
     //     (decodePoints empty; coefficients come from the packaged calibration
     //     unless the performance JSON declares them).
     // The runtime override (setOverrideDecodeStepMs) beats both.
@@ -308,7 +301,6 @@ final class MockPerformanceModel {
         copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
-        copy.memoryCopyLifecycle = memoryCopyLifecycle;
         copy.memoryPrefixTree = memoryPrefixTree;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
         copy.prefillReserveBlockRatio = prefillReserveBlockRatio;
@@ -344,6 +336,11 @@ final class MockPerformanceModel {
         int blockSize = performance.path("block_size").asInt(1024);
         double sleepScale = performance.path("sleep_scale").asDouble(1.0);
         JsonNode prefill = performance.path("prefill");
+        if (prefill.has("fifo") && !prefill.get("fifo").isNull()
+                && (prefill.has("direct_batch_size_max")
+                        || prefill.has("max_batch_requests") || prefill.has("max_batch_tokens"))) {
+            throw new IllegalStateException("prefill.fifo cannot be combined with legacy prefill batch limits");
+        }
         double prefillScale = prefill.path("scale").asDouble(1.0);
         // "fixed_ms" is an explicit opt-in for duration-blind suites
         // (chaos/elastic): when the JSON declares it, mock prefill is flat.
@@ -454,6 +451,11 @@ final class MockPerformanceModel {
             model.prefillReserveBlockRatio = value;
         }
         JsonNode memory = prefill.path("memory_cache");
+        for (String obsolete : List.of("read_ms_per_block", "write_ms_per_block", "copy_lifecycle")) {
+            if (memory.has(obsolete)) {
+                throw new IllegalStateException("prefill.memory_cache." + obsolete + " is unsupported");
+            }
+        }
         if (memory.has("enabled") && !memory.get("enabled").isBoolean())
             throw new IllegalStateException("prefill.memory_cache.enabled must be boolean");
         if (memory.path("enabled").asBoolean(false)) {
@@ -464,11 +466,6 @@ final class MockPerformanceModel {
             if (memory.has("enable_prefix_tree") && !memory.get("enable_prefix_tree").isBoolean())
                 throw new IllegalStateException("prefill.memory_cache.enable_prefix_tree must be boolean");
             model.memoryPrefixTree = memory.path("enable_prefix_tree").asBoolean(true);
-            // Legacy read/write latency settings are ignored: copies are instantaneous.
-            if (memory.has("copy_lifecycle") && !memory.get("copy_lifecycle").isBoolean())
-                throw new IllegalStateException("prefill.memory_cache.copy_lifecycle must be boolean");
-            model.memoryCopyLifecycle = memory.path("copy_lifecycle").asBoolean(false);
-
         }
         model.eosModel = MockEosModel.load(decode.path("eos"));
         model.prefillBatchPolicy = MockPrefillBatchPolicy.load(prefill.path("fifo"));
@@ -785,7 +782,7 @@ final class MockPerformanceModel {
     /**
      * Raw (pre-scale) per-step decode latency at the given running batch
      * size, one source: runtime override > explicit step_ms_by_batch curve >
-     * linear production fit (stepBaseMs + stepPerRunningMs × running).
+     * configured linear fit (stepBaseMs + stepPerRunningMs × running).
      */
     private double stepMs(int activeBatchSize) {
         RuntimeDecode current = runtimeDecode;
@@ -806,7 +803,7 @@ final class MockPerformanceModel {
      * FIFOScheduler semantics): the step unit WITHOUT output-length
      * multiplication, resolved with the same source priority as
      * {@link #decodeMs} (runtime override > step_ms_by_batch curve at the
-     * CURRENT running batch size > linear production fit), then scaled by
+     * CURRENT running batch size > configured linear fit), then scaled by
      * decode scale + sleep scale and jittered (same formula as
      * {@code scaledMs}). Returns >= 1 ms. Each step advances every running
      * stream by {@link #tokensPerStep()} tokens — the MTP fold the per-step
@@ -856,7 +853,6 @@ final class MockPerformanceModel {
     }
 
     int memoryCacheBlocks;
-    boolean memoryCopyLifecycle;
     boolean memoryPrefixTree = true;
 
     record RequestShape(EngineRpcService.GenerateInputPB input,

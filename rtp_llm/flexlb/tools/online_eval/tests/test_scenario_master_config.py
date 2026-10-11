@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from runtime.harness import render_env
+from flexlb_cfg import render_env
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 

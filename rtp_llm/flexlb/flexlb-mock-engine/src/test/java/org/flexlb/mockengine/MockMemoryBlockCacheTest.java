@@ -109,9 +109,13 @@ class MockMemoryBlockCacheTest {
 
     @Test void optInAndConfigurationValidation() throws Exception {
         assertEquals(0, model("{}").memoryCacheBlocks);
-        var copy = model("{\"enabled\":true,\"capacity_blocks\":10,\"read_ms_per_block\":0.2}").forEngine();
+        var copy = model("{\"enabled\":true,\"capacity_blocks\":10}").forEngine();
         assertEquals(10, copy.memoryCacheBlocks);
         assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":0}"));
+        for (String obsolete : List.of("read_ms_per_block", "write_ms_per_block", "copy_lifecycle")) {
+            assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":10,\""
+                    + obsolete + "\":0}"));
+        }
     }
     @Test void pinnedReadsSurvivePressureAndReleaseExactlyOnce() {
         var c = new MockMemoryBlockCache(2, ignored -> {});
@@ -147,20 +151,17 @@ class MockMemoryBlockCacheTest {
         assertEquals(List.of(4L), c.keys());
     }
 
-    @Test void birthTimeStartsAtCommitAndCopyConfigIsPreserved() throws Exception {
+    @Test void birthTimeStartsAtCommit() throws Exception {
         var t = new AtomicLong(); var ages = new ArrayList<Double>();
         var c = new MockMemoryBlockCache(1, ages::add, t::get);
         var w = c.beginWrite(List.of(1L));
         t.set(20_000_000); w.commit();
         t.set(25_000_000); c.beginWrite(List.of(2L)).commit();
         assertEquals(List.of(5.0), ages);
-        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":2}").forEngine();
-        assertTrue(m.memoryCopyLifecycle);
-        assertThrows(IllegalStateException.class, () -> model("{\"enabled\":true,\"capacity_blocks\":2,\"copy_lifecycle\":1}"));
     }
 
     @Test void copyCommitsWithoutLegacyDelayAndGpuEvictionPreservesMemory() throws Exception {
-        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true,\"write_ms_per_block\":60000,\"read_ms_per_block\":60000}");
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10}");
         try (var cluster = MockEngineTestCluster.create(m, 61040, 1, 0)) {
             var p = cluster.prefill(0);
             var mem = (MockMemoryBlockCache) field(p, "memoryCache");
@@ -299,7 +300,7 @@ class MockMemoryBlockCacheTest {
     }
 
     @Test void nativePrefillCompletionHonorsDeviceAndMemoryWriteFlags() throws Exception {
-        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true}");
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10}");
         m.nativeTokenCacheKeys = true;
         try (var cluster = MockEngineTestCluster.create(m, 61060, 1, 0)) {
             var p = cluster.prefill(0);
@@ -338,7 +339,7 @@ class MockMemoryBlockCacheTest {
     }
 
     @Test void cancelledPrefillCannotPublishCacheFromItsLateForwardCallback() throws Exception {
-        var m = model("{\"enabled\":true,\"capacity_blocks\":10,\"copy_lifecycle\":true}");
+        var m = model("{\"enabled\":true,\"capacity_blocks\":10}");
         m.setOverrideFixedPrefillMs(100.0);
         try (var cluster = MockEngineTestCluster.create(m, 61080, 1, 0)) {
             var p = cluster.prefill(0);

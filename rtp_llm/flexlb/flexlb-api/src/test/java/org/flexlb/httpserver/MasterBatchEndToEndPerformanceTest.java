@@ -247,7 +247,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             }
             fixture = mapper.readTree(stream);
         }
-        assertEquals(1, fixture.path("schema_version").asInt());
+        assertEquals(1, fixture.path("master_template_schema_version").asInt());
         assertEquals(512, fixture.path("block_size").asInt());
         List<TraceShape> shapes = new ArrayList<>();
         for (JsonNode node : fixture.path("templates")) {

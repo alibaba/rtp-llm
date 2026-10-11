@@ -37,6 +37,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 "collector_shutdown_s": 2,
             },
         )
+        plan["execution"]["monitoring"] = dict(plan["workload_runtime"])
         clock = Clock()
         backend = Backend(clock)
         backend.completed = False
@@ -66,7 +67,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertEqual(r["status"], "FAIL")
         self.assertEqual([s["status"] for s in r["stages"][-2:]], ["FAIL", "FAIL"])
         self.assertEqual(r["workload"]["runtime_validity"], "VALID")
-        self.assertEqual(r["workload"]["performance_verdict"], "NOT_EVALUATED")
+        self.assertEqual(r["outcome"]["gate"], "FAIL")
 
     def test_prerequisite_failure_blocks(self):
         self.assertEqual(
@@ -84,7 +85,8 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertTrue(any(c["status"] != "PASS" for c in r["cleanup"]))
 
     def test_catalog_is_disjoint_and_complete(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
@@ -92,7 +94,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         w = {p["id"] for p in classify(plans, "workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
-        self.assertIn("master_ha_failover::rolling::batch-window", w)
+        self.assertIn("master_ha_failover::default::batch-window", w)
         self.assertEqual(
             {
                 plan["scenario_id"] + "::" + plan["variant_id"]
@@ -102,11 +104,12 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 "request_completion::default",
             },
         )
-        self.assertEqual(len(plans), 14)
+        self.assertEqual(len(plans), 16)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
     def test_core_suite_is_request_completion_for_every_master_profile(self):
-        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)):
+        with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
+             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )

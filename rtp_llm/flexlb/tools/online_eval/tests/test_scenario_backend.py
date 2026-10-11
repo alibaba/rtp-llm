@@ -11,7 +11,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scenario.backend import BoundedOps, RequestBatch
+from scenario.backend import BoundedOps
+from scenario.request_batch import RequestBatch
 from scenario.lease import validate_lease
 from scenario.loader import ScenarioError
 from scenario.runtime import (
@@ -110,7 +111,7 @@ def lease_manifest():
         FLEXLB_FT_MOCK_BASE_GRPC_PORT=str(b),
     )
     return dict(
-        schema_version=1,
+        lease_schema_version=1,
         lane=0,
         backend="java_mock",
         master_base=m,

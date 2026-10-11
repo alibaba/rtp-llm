@@ -38,12 +38,7 @@ class WraparoundTests(unittest.TestCase):
 
         def http(ctx, target, endpoint, deadline, *args):
             self.assertEqual("A", target)
-            expected = (
-                "/rtp_llm/master/info"
-                if fn is master._wrap_topology
-                else "/rtp_llm/inflight_status"
-            )
-            self.assertEqual(expected, endpoint)
+            self.assertEqual("/rtp_llm/inflight_status", endpoint)
             return response
 
         return (
@@ -53,33 +48,6 @@ class WraparoundTests(unittest.TestCase):
             Deadline(budget, clock, clock.sleep),
         )
 
-    def test_topology_does_not_require_ready_discovered_or_ledger(self):
-        raw = {
-            "worker_summary": {"PREFILL": {"alive": 3}, "DECODE": {"alive": 4}},
-            "ready": False,
-        }
-        ctx, clock, mocked, deadline = self.run_gate(master._wrap_topology, raw, 60)
-        with mocked:
-            out = master._wrap_topology(ctx, {"target": "A"}, deadline)
-        self.assertEqual(["topology"], [c.id for c in out.checks])
-        self.assertEqual(0, clock())
-
-    def test_missing_alive_evidence_is_error_not_zero(self):
-        ctx, _, mocked, deadline = self.run_gate(
-            master._wrap_topology, {"worker_summary": {}}, 60
-        )
-        with mocked, self.assertRaises(KeyError):
-            master._wrap_topology(ctx, {"target": "A"}, deadline)
-
-    def test_low_alive_counts_exhaust_only_topology_budget(self):
-        raw = {"worker_summary": {"PREFILL": {"alive": 1}, "DECODE": {"alive": 4}}}
-        ctx, clock, mocked, deadline = self.run_gate(master._wrap_topology, raw, 60)
-        with mocked, self.assertRaises(StageTimeout):
-            master._wrap_topology(ctx, {"target": "A"}, deadline)
-        self.assertEqual(60, clock())
-        self.assertTrue(
-            json.loads(next(ctx.artifact_dir.glob("master-topology*")).read_text())
-        )
 
     def test_clean_ledger_needs_no_topology_or_health_response(self):
         raw = {

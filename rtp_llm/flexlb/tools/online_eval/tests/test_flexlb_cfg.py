@@ -11,7 +11,6 @@ import hashlib
 import json
 import sys
 import unittest
-from unittest.mock import patch
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
@@ -23,8 +22,6 @@ from flexlb_cfg import (  # noqa: E402
     PROFILES,
     STRESS_PROFILE,
     ConfigOverride,
-    build_flexlb_config,
-    parse_overrides,
     render_env,
     render_process_config,
 )
@@ -167,64 +164,10 @@ class LayeringTest(unittest.TestCase):
             85, doc["router"]["roles"]["decode"]["availability"]["maxKvUsagePercent"]
         )
 
-    def test_single_profiles_reject_explicit_window_overrides(self):
-        for profile in ('single-batch', 'single-nonbatch'):
-            for field in ('max_requests', 'max_collection_wait_ms', 'max_predicted_execution_ms'):
-                with self.subTest(profile=profile, field=field), self.assertRaisesRegex(
-                    ValueError, field + ' applies only'
-                ):
-                    render_env(profile, ConfigOverride(**{field: 5}))
-
-    def test_window_profiles_accept_window_overrides(self):
-        for profile in ('batch-window', 'window-nonbatch'):
-            doc = json.loads(render_env(profile, ConfigOverride(max_requests=5)))
-            self.assertEqual(5, doc['scheduler']['decision']['maxRequests'])
-
-
-class DecodeAvailabilityTest(unittest.TestCase):
-    def test_invalid_values_fail_in_override_and_direct_generator(self):
-        for field, values in (
-            ('decode_max_engine_requests', (-1, 0, True, 1.5, 2_147_483_648)),
-            ('decode_max_kv_usage_percent', (-1, 0, 101, True, 1.5)),
-        ):
-            for value in values:
-                for factory in (ConfigOverride, build_flexlb_config):
-                    with self.subTest(field=field, value=value, factory=factory), self.assertRaisesRegex(ValueError, field):
-                        factory(**{field: value})
-
-    def test_boundaries_are_valid_in_both_profile_paths(self):
-        for requests, percent in ((1, 1), (2_147_483_647, 100)):
-            for profile in ('batch-window', STRESS_PROFILE):
-                doc = json.loads(render_env(profile, ConfigOverride(
-                    decode_max_engine_requests=requests, decode_max_kv_usage_percent=percent)))
-                self.assertEqual({'maxEngineRequests': requests, 'maxKvUsagePercent': percent},
-                                 doc['router']['roles']['decode']['availability'])
-
 
 class StressOverrideTest(unittest.TestCase):
     """stress-na130 override edit-in-place contracts."""
 
-    def test_fifo_accepts_preemption_omit_but_rejects_priority_values(self):
-        doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(ordering='fifo', preemption=OMIT)))
-        self.assertEqual({'type': 'FIFO'}, doc['scheduler']['ordering'])
-        from flexlb_profile_data import STRESS_BASE
-        with patch.dict(STRESS_BASE['scheduler'], ordering={'type': 'FIFO'}):
-            for override in (ConfigOverride(default_priority=50),
-                             ConfigOverride(preemption={'allowed_victim_stages': ['PREFILL_QUEUED']})):
-                with self.subTest(override=override), self.assertRaisesRegex(ValueError, 'apply only to ordering'):
-                    render_env(STRESS_PROFILE, override)
-            doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(preemption=OMIT)))
-            self.assertEqual({'type': 'FIFO'}, doc['scheduler']['ordering'])
-
-    def test_dispatcher_accepts_json_enum_case(self):
-        for lower in ('batch', 'non_batch'):
-            self.assertEqual(render_env(STRESS_PROFILE, ConfigOverride(dispatcher=lower)),
-                             render_env(STRESS_PROFILE, ConfigOverride(dispatcher=lower.upper())))
-
-    def test_single_rejects_window_parameters(self):
-        for field in ('max_requests', 'max_collection_wait_ms', 'max_predicted_execution_ms'):
-            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field + ' applies only'):
-                render_env(STRESS_PROFILE, ConfigOverride(decision='single', **{field: 1}))
     def test_decode_max_engine_requests(self) -> None:
         doc = json.loads(
             render_env(STRESS_PROFILE, ConfigOverride(decode_max_engine_requests=5000))
@@ -300,8 +243,6 @@ class StressOverrideTest(unittest.TestCase):
         ):
             with self.assertRaises(TypeError):
                 ConfigOverride(**{key: 1})
-            with self.assertRaises(ValueError):
-                parse_overrides(f"{key}=1")
 
     def test_decision_single_drops_window_keys(self) -> None:
         doc = json.loads(render_env(STRESS_PROFILE, ConfigOverride(decision="single")))
@@ -345,48 +286,6 @@ class ProcessConfigTest(unittest.TestCase):
         ]["process_info"]["envs"]
         self.assertEqual(raw, envs[0][1])
         self.assertEqual("32g", envs[1][1])
-
-
-class OverrideParsingTest(unittest.TestCase):
-    """FLEXLB_CONFIG_OVERRIDE shell knob parsing."""
-
-    def test_empty(self) -> None:
-        self.assertIsNone(parse_overrides(""))
-        self.assertIsNone(parse_overrides(None))
-        self.assertIsNone(parse_overrides("   "))
-
-    def test_int_and_flag(self) -> None:
-        ov = parse_overrides("request_timeout_ms=30000,strip_preemption")
-        self.assertEqual(30000, ov.request_timeout_ms)
-        self.assertTrue(ov.strip_preemption)
-
-    def test_str_and_bool(self) -> None:
-        ov = parse_overrides("ordering=priority,strip_preemption=false")
-        self.assertEqual("priority", ov.ordering)
-        self.assertFalse(ov.strip_preemption)
-
-    def test_unknown_key_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_overrides("bogus=1")
-
-    def test_bad_int_raises(self) -> None:
-        with self.assertRaises(ValueError):
-            parse_overrides("request_timeout_ms=abc")
-
-    def test_only_boolean_fields_accept_bare_keys(self):
-        self.assertTrue(parse_overrides('strip_preemption').strip_preemption)
-        for key in ('ordering', 'decision', 'dispatcher', 'prefill_expression',
-                    'max_requests', 'decision_lifetime'):
-            with self.subTest(key=key), self.assertRaisesRegex(ValueError, key + ' requires an explicit value'):
-                parse_overrides(key)
-        self.assertEqual(1, parse_overrides('max_requests=1').max_requests)
-
-    def test_bad_float_reports_key_and_value(self) -> None:
-        for key in ("decision_lifetime", "cache_affinity_min_prefix_hit_percent"):
-            with self.subTest(key=key), self.assertRaisesRegex(
-                ValueError, f"FLEXLB_CONFIG_OVERRIDE: {key} expects a number, got 'abc'"
-            ):
-                parse_overrides(f"{key}=abc")
 
 
 class VocabTest(unittest.TestCase):

@@ -304,10 +304,10 @@ class PortPreflightResolveTest(unittest.TestCase):
         self.assertIn("lane 0: master 18080", warning)
         self.assertIn("auto-shifting bases 18080/55151 -> 18020/52151", warning)
         self.assertIn("to make it a contract", warning)
-        # The selected matrix stays under the stress band.
+        # The selected matrix stays under the lease band.
         self.assertLess(
             parallel_runner._matrix_tail(52151, 500, 6),
-            parallel_runner.STRESS_BAND_FLOOR,
+            parallel_runner.LEASE_BAND_FLOOR,
         )
 
     def test_explicit_busy_fails_fast_with_lane_diagnosis(self):
@@ -345,9 +345,9 @@ class PortPreflightResolveTest(unittest.TestCase):
         self.assertIn("k=0 bases 18080/55151", message)
         self.assertIn("k=1 bases 18020/52151", message)
 
-    def test_stress_band_hard_bound_shifts_even_when_free(self):
+    def test_lease_band_hard_bound_shifts_even_when_free(self):
         # stride 2000: k=0 tail 65302 >= 61000 is rejected on the HARD
-        # stress-band bound alone (all ports FREE), selecting k=1
+        # lease-band bound alone (all ports FREE), selecting k=1
         # (mock base 55151 - 2000*6 = 43151, tail 53302 < 61000).
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(parallel_runner, "port_in_use", return_value=False):
@@ -360,11 +360,11 @@ class PortPreflightResolveTest(unittest.TestCase):
         self.assertIn("auto", args.port_provenance)
         selected_tail = parallel_runner._matrix_tail(43151, 2000, 6)
         self.assertEqual(53302, selected_tail)
-        self.assertLess(selected_tail, parallel_runner.STRESS_BAND_FLOOR)
-        self.assertIn("stress band", buf.getvalue())
+        self.assertLess(selected_tail, parallel_runner.LEASE_BAND_FLOOR)
+        self.assertIn("lease band", buf.getvalue())
 
-    def test_explicit_stress_band_crossing_only_warns(self):
-        # An explicit base landing in the 61000+ stress/lease band must
+    def test_explicit_lease_band_crossing_only_warns(self):
+        # An explicit base landing in the 61000+ lease band must
         # NOT exit (leased-but-unlistened ports are invisible to bind
         # probing — refusing would false-positive); it warns.
         with mock.patch.dict(
@@ -379,7 +379,7 @@ class PortPreflightResolveTest(unittest.TestCase):
                     parallel_runner._resolve_port_bases(args)  # no exit
                 self.assertEqual("62000", os.environ["FLEXLB_FT_PARALLEL_MOCK_BASE"])
         self.assertEqual("explicit 18080/62000", args.port_provenance)
-        self.assertIn("stress band", buf.getvalue())
+        self.assertIn("lease band", buf.getvalue())
         self.assertIn("contract", buf.getvalue())
 
     def test_dry_run_explicit_busy_shows_status_without_exiting(self):

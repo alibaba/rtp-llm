@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+
+from schema_contract import matches_schema
 from typing import Mapping, Sequence
 
 from runtime.resource_plan import JavaMockBudget
@@ -33,15 +35,15 @@ class Instance:
     duration_s: float
     budget: JavaMockBudget
     metadata: dict
+    compiled: dict | None = None
+    dependencies: dict | None = None
 
 
 def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]:
     if (
-        not isinstance(payload, dict)
-        or type(payload.get("schema_version")) is not int
-        or payload["schema_version"] != 1
+        not matches_schema(payload, "instance_catalog_schema_version", 1)
     ):
-        raise InstancePlanError("unsupported instance list schema_version")
+        raise InstancePlanError("unsupported instance list instance_catalog_schema_version")
     rows = payload.get("instances")
     if not isinstance(rows, list):
         raise InstancePlanError("instance list must contain an instances array")
@@ -89,19 +91,25 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             )
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
-            execution = row.get("execution")
-            if not isinstance(execution, dict) or set(execution) != {
-                "timeout_s",
-                "cleanup_timeout_s",
-            }:
+            from scenario.suites import (
+                EXECUTION_BUDGETS, normalize_execution, normalize_metadata,
+            )
+            from scenario.loader import ScenarioError
+
+            try:
+                metadata = normalize_metadata(row.get("metadata"))
+                execution = normalize_execution(row.get("execution"), kind=metadata["kind"])
+            except ScenarioError as exc:
+                raise InstancePlanError(f"instance {identity}: {exc}") from exc
+            if not EXECUTION_BUDGETS <= set(execution):
                 raise InstancePlanError(
                     f"instance {identity} requires execution time budgets"
                 )
             if any(
-                type(value) not in (int, float)
-                or not math.isfinite(value)
-                or value <= 0
-                for value in execution.values()
+                type(execution[key]) not in (int, float)
+                or not math.isfinite(execution[key])
+                or execution[key] <= 0
+                for key in EXECUTION_BUDGETS
             ):
                 raise InstancePlanError(
                     f"instance {identity} has invalid execution time budgets"
@@ -133,10 +141,13 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
                         "resource_budget",
                         "execution",
                         "test_kind",
-                        "test",
+                        "metadata",
+                        "reports",
                     )
                     if key in row
                 },
+                row.get("compiled"),
+                payload.get("dependencies"),
             )
         )
     return instances

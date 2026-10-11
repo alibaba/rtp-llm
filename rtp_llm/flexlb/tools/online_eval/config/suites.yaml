@@ -1,4 +1,4 @@
-schema_version: 2
+suite_schema_version: 2
 default_suite: core
 ci_suites:
   core:
