@@ -398,6 +398,43 @@ def run_rank(rank, port, config):
                         oracle, reference, oracle_cache, dispatch, lengths, prefixes
                     )
                     if rank < 4:
+                        if step == 0:
+                            incompatible = (
+                                replace(CONTRACT, rotary_compute_device="cuda")
+                                if rank == 0
+                                else CONTRACT
+                            )
+                            with patch.object(
+                                worker.v4.layers[0],
+                                "forward",
+                                side_effect=AssertionError(
+                                    "rotary mismatch reached a maintained block"
+                                ),
+                            ):
+                                try:
+                                    worker._execute_native_pp_prefill(
+                                        dispatch, incompatible, round_id
+                                    )
+                                except V41InputRejected:
+                                    pass
+                                else:
+                                    raise AssertionError(
+                                        "incompatible rotary contract entered layers"
+                                    )
+                            require_raw(cache, before)
+                            clean_worker(worker)
+                            print(
+                                "DSV41_ROTARY_PP_REJECT "
+                                + json.dumps(
+                                    {
+                                        "rank": rank,
+                                        "actor": 0,
+                                        "cache_unchanged": True,
+                                        "round": round_id,
+                                    }
+                                ),
+                                flush=True,
+                            )
                         outputs = worker._execute_native_pp_prefill(
                             dispatch, CONTRACT, round_id
                         )
