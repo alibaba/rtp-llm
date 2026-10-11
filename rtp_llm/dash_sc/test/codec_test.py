@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import struct
 from unittest import TestCase, main
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.dash_sc.client import build_model_infer_request
+from rtp_llm.dash_sc import codec
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,
@@ -23,6 +25,7 @@ from rtp_llm.dash_sc.codec import (
     SamplingParams,
     StreamResponseBuilder,
     build_dash_error_response,
+    is_logging_consent_allowed,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
     parse_multimodal_parts_from_request,
@@ -46,6 +49,137 @@ def _unpack_int32_le(raw: bytes) -> list[int]:
 
 def _unpack_int64_le(raw: bytes) -> list[int]:
     return [int(x) for x in struct.unpack("<%dq" % (len(raw) // 8), raw)]
+
+
+class LoggingConsentTest(TestCase):
+    def test_consent_rules(self) -> None:
+        external = "X-DashScope-LoggingConsent"
+        inner = "X-DashScope-Inner-LoggingConsent"
+        cases = [
+            ({}, True),
+            ({external: "all"}, True),
+            ({inner: "ALL"}, True),
+            ({external: "aLl", inner.lower(): "All"}, True),
+            ({external: None, inner: None}, True),
+            ({external: "all", inner: "none"}, False),
+            ({external: "none", inner: "all"}, False),
+        ]
+        for name in (external, inner):
+            for value in (
+                "none",
+                "input",
+                "output",
+                "",
+                "unknown",
+                "null",
+                "None",
+                " all ",
+            ):
+                cases.append(({name: value}, False))
+        for headers, allowed in cases:
+            with self.subTest(headers=headers):
+                self.assertEqual(is_logging_consent_allowed(headers.items()), allowed)
+
+    def test_request_parser_resolves_consent_once(self) -> None:
+        for attributes, metadata, allowed in (
+            ({}, (), True),
+            (
+                {
+                    "X-DashScope-LoggingConsent": "ALL",
+                    "x-dashscope-inner-loggingconsent": "all",
+                },
+                (("x-dashscope-inner-loggingconsent", "ALL"),),
+                True,
+            ),
+            (
+                {
+                    "X-DashScope-LoggingConsent": "all",
+                    "X-DashScope-Inner-LoggingConsent": "none",
+                },
+                (("x-dashscope-inner-loggingconsent", "all"),),
+                False,
+            ),
+            (
+                {
+                    "X-DashScope-LoggingConsent": "none",
+                    "X-DashScope-Inner-LoggingConsent": "all",
+                },
+                (),
+                False,
+            ),
+            ({"X-DashScope-Inner-LoggingConsent": None}, (), True),
+            (
+                {"X-DashScope-LoggingConsent": "all"},
+                (("x-dashscope-inner-loggingconsent", "none"),),
+                False,
+            ),
+            ({}, (("x-dashscope-loggingconsent", "none"),), False),
+            (
+                {},
+                (
+                    ("x-dashscope-loggingconsent", "output"),
+                    ("x-dashscope-loggingconsent", "all"),
+                ),
+                False,
+            ),
+        ):
+            with self.subTest(attributes=attributes, metadata=metadata):
+                request = build_model_infer_request(
+                    request_id="consent",
+                    model_name="default",
+                    input_ids=[1, 2],
+                    sampling=SamplingParams(max_new_tokens=2),
+                )
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    {**attributes, "X-DashScope-Inner-Timeout": "3"}
+                )
+                with patch.object(
+                    codec,
+                    "parse_ds_header_attributes",
+                    wraps=codec.parse_ds_header_attributes,
+                ) as parse_headers, patch.object(
+                    codec,
+                    "is_logging_consent_allowed",
+                    wraps=codec.is_logging_consent_allowed,
+                ) as check_consent, patch.object(
+                    codec,
+                    "parse_sampling_params",
+                    wraps=codec.parse_sampling_params,
+                ) as parse_sampling, patch.object(
+                    codec,
+                    "parse_request_controls",
+                    wraps=codec.parse_request_controls,
+                ) as parse_controls:
+                    _, _, controls = parse_dash_sc_grpc_request(
+                        request, invocation_metadata=metadata
+                    )
+                self.assertEqual(controls.log_input_output, allowed)
+                self.assertEqual(controls.timeout_ms, 3000)
+                parse_headers.assert_called_once()
+                check_consent.assert_called_once()
+                parse_controls.assert_called_once()
+                parse_sampling.assert_called_once()
+                self.assertIs(
+                    parse_sampling.call_args.args[1], parse_controls.call_args.args[1]
+                )
+
+    def test_sampling_errors_keep_precedence_over_invalid_controls(self) -> None:
+        for timeout in (float("inf"), float("nan")):
+            with self.subTest(timeout=timeout):
+                request = build_model_infer_request(
+                    request_id="consent",
+                    model_name="default",
+                    input_ids=[1, 2],
+                    sampling=SamplingParams(max_new_tokens=2),
+                )
+                request.parameters["ds_header_attributes"].string_param = json.dumps(
+                    {"x-dashscope-inner-timeout": timeout}
+                )
+                request.parameters["response_format"].string_param = "{"
+                with self.assertRaisesRegex(
+                    DashScParameterError, "invalid response_format"
+                ):
+                    parse_dash_sc_grpc_request(request)
 
 
 def _tool_call_structural_tag() -> dict:
