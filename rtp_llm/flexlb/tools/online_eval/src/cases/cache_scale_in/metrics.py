@@ -23,7 +23,9 @@ def metric_contract(producer, identity, calculation):
 
 
 def produce(directory, evidence, result):
-    export_metrics(directory)
+    from pathlib import Path
+    if not (Path(directory) / "metrics.json").is_file():
+        export_metrics(directory)
     store = MetricStore.read(directory)
     epoch = evidence["provenance"]["env_epoch"]
     anchor = evidence_origin(evidence)

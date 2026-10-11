@@ -31,6 +31,8 @@ execution:
   monitoring:
     query_plan: cache_scale_in.yaml
     max_sample_gap_s: 10
+  finalize_timeout_s: 600
+  report_timeout_s: 300
 parameters:
   traffic:
     kind: java_flow

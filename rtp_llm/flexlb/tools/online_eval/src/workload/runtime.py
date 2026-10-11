@@ -174,7 +174,8 @@ class WorkloadPolicy:
         def stop_source(deadline):
             window["ended_epoch_s"] = time.time()
             source.stop(
-                min(self.options["collector_shutdown_s"], max(0, deadline.remaining()))
+                min(self.options["collector_shutdown_s"], max(0, deadline.remaining())),
+                materialize=False,
             )
 
         ctx.add_cleanup("prometheus-" + str(ctx.env_epoch), stop_source)

@@ -225,3 +225,13 @@ class RealPrometheusTest(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join()
+
+
+def test_archive_can_defer_numeric_conversion_to_finalization(tmp_path):
+    session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'})
+    session.started = time.time() - 1
+    with patch.object(session, 'api', return_value={'result': [{'metric': {}, 'values': []}]}), \
+         patch('monitoring.metric_store.export_metrics', side_effect=AssertionError('conversion during cleanup')):
+        session.archive(materialize=False)
+    assert (tmp_path / 'queries.json').is_file()
+    assert not (tmp_path / 'metrics.json').exists()

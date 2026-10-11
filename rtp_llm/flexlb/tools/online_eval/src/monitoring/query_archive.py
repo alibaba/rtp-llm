@@ -10,14 +10,15 @@ def _finite(value):
     return number if math.isfinite(number) else None
 
 
-def series(directory, anchor):
+def series(directory, anchor, *, archives=None):
     """Read only monitor query archives; return curves, provenance and health gaps."""
     series, sources, gaps, errors = {}, {}, {}, []
-    paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
-    if (Path(directory) / "queries.json").is_file():
-        paths.append(Path(directory) / "queries.json")
-    for path in paths:
-        data = json.loads(path.read_text())
+    if archives is None:
+        paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
+        if (Path(directory) / "queries.json").is_file():
+            paths.append(Path(directory) / "queries.json")
+        archives = ((path, json.loads(path.read_text())) for path in paths)
+    for path, data in archives:
         epoch = path.parent.name if path.parent != Path(directory) else "1"
         errors.extend(dict(source=epoch, **error) for error in data.get("errors", []))
         errors.extend(

@@ -219,6 +219,10 @@ def _compile_documents(documents, profile=None, handlers=None, grade="normal"):
                     ):
                         fail(loc, "stage overrides replace named params only")
                     step["params"] = {**step.get("params", {}), **copy.deepcopy(patch)}
+            # Explicit teardown shares the reserved cleanup budget unless overridden.
+            for step in steps:
+                if isinstance(step, dict) and step.get("action") == "teardown":
+                    step.setdefault("timeout_s", variant_budgets["cleanup_timeout_s"])
             compiled = stages(
                 steps,
                 source + f"::{vid}.stages",

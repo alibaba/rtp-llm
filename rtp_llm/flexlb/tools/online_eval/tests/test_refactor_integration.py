@@ -60,3 +60,12 @@ def test_ci_cases_keep_generic_and_specific_report_views():
     for name in ("cache_scale_in", "master_ha_failover", "master_performance"):
         data = yaml.safe_load((root / (name + ".yaml")).read_text())
         assert data["reports"] == ["default.yaml", name + ".yaml"]
+
+
+def test_cache_delivery_budgets_are_independent_of_observation():
+    data = load_document(ROOT/'config/scenarios/cache_scale_in.yaml')
+    for plan in compile_case(data):
+        teardown = next(s for s in plan['stages'] if s['action'] == 'teardown')
+        assert teardown['timeout_s'] == plan['execution']['cleanup_timeout_s'] == 660
+        assert plan['execution']['finalize_timeout_s'] == 600
+        assert plan['execution']['report_timeout_s'] == 300

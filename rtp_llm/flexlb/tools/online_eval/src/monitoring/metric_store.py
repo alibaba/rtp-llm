@@ -134,7 +134,7 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     if (archive_root / "queries.json").is_file():
         paths.append(archive_root / "queries.json")
     archives = [(path, json.loads(path.read_text())) for path in paths]
-    series, sources, gaps, errors = archive_series(archive_root, 0)
+    series, sources, gaps, errors = archive_series(archive_root, 0, archives=archives)
     plans, declared, observations = {}, {}, {}
     for path, data in archives:
         epoch = path.parent.name if path.parent != archive_root else "1"

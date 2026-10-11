@@ -339,7 +339,7 @@ class PrometheusSession:
             raise ValueError("unknown monitored source: " + source)
         return self.target_kinds[source]
 
-    def archive(self):
+    def archive(self, *, materialize=True):
         end = time.time()
         from monitoring.query_plan import queries_for_targets
 
@@ -400,18 +400,19 @@ class PrometheusSession:
         )
         from monitoring.metric_store import export_metrics
         root = self.directory.parent.parent if self.directory.parent.name == "telemetry" else self.directory
-        export_metrics(root)
+        if materialize:
+            export_metrics(root)
         if result["errors"]:
             raise RuntimeError("incomplete Prometheus archive")
 
-    def stop(self, timeout=10, export=True):
+    def stop(self, timeout=10, export=True, *, materialize=True):
         try:
             from runtime.cleanup import cleanup_all
             operations = [(name, lambda probe=probe: probe.stop(timeout=timeout))
                           for name, probe in self.probes.items()]
             if not self.closed and export and (self.process is not None and self.process.poll() is None
                     or self.started is not None and not any(self.query_plan["sources"].values())):
-                operations.append(("Prometheus archive", self.archive))
+                operations.append(("Prometheus archive", lambda: self.archive(materialize=materialize)))
             cleanup_all(operations)
         finally:
             self.closed = True
