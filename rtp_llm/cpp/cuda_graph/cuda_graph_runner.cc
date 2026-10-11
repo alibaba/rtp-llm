@@ -55,13 +55,6 @@ private:
     bool       active_{false};
 };
 
-void prepareCudaGraphVmmCapture() {
-    VmmBackend vmm_backend;
-    if (vmm_backend.isAvailable()) {
-        cuda_graph::graphEmptyCache();
-    }
-}
-
 int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;

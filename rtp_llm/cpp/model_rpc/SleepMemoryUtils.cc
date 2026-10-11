@@ -15,7 +15,9 @@
 #include <cuda_runtime_api.h>
 #elif USING_ROCM
 #include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
-#include <c10/cuda/CUDACachingAllocator.h>
+// HIPified PyTorch has its own allocator header; the CUDA one requires cuda_runtime_api.h.
+#include <c10/hip/HIPCachingAllocator.h>
+#include <c10/hip/HIPFunctions.h>
 #include <hip/hip_runtime.h>
 #endif
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -79,7 +81,11 @@ bool trimSleepAllocator(int64_t local_rank, int64_t epoch, int64_t world_rank, b
     {
         try {
             SleepMemoryDeviceGuard device_guard(local_rank);
+#if USING_CUDA
             c10::cuda::CUDACachingAllocator::emptyCache();
+#else
+            c10::hip::HIPCachingAllocator::emptyCache();
+#endif
         } catch (const std::exception& e) {
             ok = false;
 #if USING_CUDA
@@ -188,8 +194,12 @@ void logSleepMemorySnapshotForRank(const std::string& phase, const ParallelismCo
         gpu_used_mb                = mem.used_bytes / 1024 / 1024;
         gpu_free_mb                = mem.free_bytes / 1024 / 1024;
         gpu_total_mb               = (mem.used_bytes + mem.free_bytes) / 1024 / 1024;
-#if USING_CUDA || USING_ROCM
+#if USING_CUDA
         const auto stats  = c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device());
+#elif USING_ROCM
+        const auto stats  = c10::hip::HIPCachingAllocator::getDeviceStats(c10::hip::current_device());
+#endif
+#if USING_CUDA || USING_ROCM
         torch_reserved_mb = stats.reserved_bytes[0].current / 1024 / 1024;
         torch_alloc_mb    = stats.allocated_bytes[0].current / 1024 / 1024;
 #endif
