@@ -194,7 +194,7 @@ class WorkloadPolicy:
         )
 
     def finalize(self, ctx, result, deadline):
-        from workload.evidence_analysis import analyze_report
+        from workload.validity import analyze_report
 
         evidence = ctx.artifact_dir / "workload-evidence.json"
         records = []
@@ -239,7 +239,7 @@ class WorkloadPolicy:
         joined = {"issues": [], "requests": []}
         # Request/engine correlation is a dedicated diagnostic, never a curve source.
         if self.profile == "diagnostic":
-            from workload.evidence import join_evidence
+            from workload.request_engine import join_evidence
 
             joined = join_evidence(payload, self.environments)
             joined_path = ctx.artifact_dir / "request-engine-evidence.json"
@@ -248,7 +248,7 @@ class WorkloadPolicy:
             payload["request_engine_join"] = str(joined_path)
         payload["collection_profile"] = self.profile
         payload["monitor_backend"] = "prometheus"
-        from workload.run_provenance import collect
+        from artifacts.provenance import collect
         payload["runtime_provenance"] = collect(ctx.artifact_dir, self.environments, self.environment_metadata)
         from artifacts.json_io import write_json
         write_json(evidence, payload)
@@ -289,7 +289,7 @@ class WorkloadPolicy:
         return analysis
 
     def render(self, ctx, result, analysis, deadline):
-        from workload.report import write_views
+        from reporting.workload import write_views
         deadline.check()
         view_links = write_views(ctx.artifact_dir, analysis, self.reports)
         result["workload"]["report"] = str(next(iter(view_links.values())))

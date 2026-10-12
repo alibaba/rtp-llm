@@ -7,7 +7,7 @@ import pytest
 
 from cases.config import configure_program
 from reporting.timeline import apply, freeze, traffic_event, validate_configuration
-from runtime.client_journal import first_request
+from adapters.client_journal import first_request
 from scenario.loader import ScenarioError, load_document
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -155,7 +155,7 @@ def test_runtime_freezes_resource_onset_into_evidence_metrics_analysis_and_repor
     from types import SimpleNamespace
     from runtime.resource_evidence import ResourceEvidence
     from scenario.context import RuntimeContext
-    from workload.runtime import WorkloadPolicy
+    from workload.policy import WorkloadPolicy
 
     instance = dict(reporting=declaration(), execution={'monitoring': {}},
                     workload_runtime={'capture_metrics': False}, collection_profile='request')

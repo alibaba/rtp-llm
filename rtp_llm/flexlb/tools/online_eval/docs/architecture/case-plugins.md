@@ -66,3 +66,25 @@ GATE = GatePlugin(
 输入和证据合同必须说明字段、单位、身份标签、时间基准、窗口与缺失行为。测量须说明统计对象及归约，不能靠指标名推断算法。协议输出使用阶段引用，不要求转换为指标。请求 cohort、survivor 筛选等算法保留 Python，公共层只统一可验证的调用边界。
 
 可执行的最小例子、注册参数与测试矩阵见[新增 case](../development/adding-cases.md)。静态校验使用 `validate_case.py`；真实取证、缺采、超时和清理需额外验证。`tests/test_gate_plugin.py` 验证公共生命周期：判定和交付分离、损坏证据拒绝、已选择视图传递，以及交付失败保留原判定。
+
+## 公共源码的归属
+
+公共目录按能力职责划分；同一能力的协议实现与阶段适配可以分层，但不复制算法。
+
+| 目录 | 负责 | 不负责 |
+|---|---|---|
+| `runtime` | deadline、进程、网络、通用请求记录、观察预算与资源合同 | 实例调度、服务协议、case 步骤、HTML 发布 |
+| `adapters` | mock/master HTTP 与 gRPC、Java 客户端会话、环境与服务生命周期、启动配置 | 选择 case、声明阶段、业务门禁与报告 |
+| `scenario` | 配置编译、实例选择与调度、阶段执行、资源登记、收尾 | 实现 RPC 协议、业务测量与 HTML 渲染 |
+| `scenario/actions` | 将现场能力适配为校验参数、有预算、有输出和资源归属的步骤 | 复制 adapter 的协议和进程实现 |
+| `traffic` | 流量采集与拟合、数据格式、长度与 prefix 语义、输入生成及 pacing 合同 | 启停客户端进程、现场缩容与门禁 |
+| `workload` | 持续测量的执行策略、请求与 engine 证据关联、整轮采集有效性 | 公共门禁存储、报告发布、实例并行调度 |
+| `analysis` | 显式输入上的统计与检查 | 启动服务、采集、发布报告 |
+| `monitoring` | 采集计划、来源、Prometheus 生命周期与冻结指标 | case 流程及业务门槛 |
+| `artifacts` | 证据/判定冻结、归档、来源校验、离线读取与安全保留 | 重新决定业务判定、执行 case 步骤 |
+| `reporting` | 冻结结果到视图、公共图表、HTML 与报告 bundle | 现场操作、重判与隐藏缺采 |
+| `cases/<case>` | 该业务的输入、步骤组合、测量和专属展示 | 复制公共执行、采集和报告基础设施 |
+
+`scenario/actions/java_flow.py` 定义阶段合同，`adapters/java_flow.py` 管理客户端会话；`engine_control` action 依赖 `adapters/mock_control.py` 的协议访问。名字相近不表示冗余。新步骤先组合 adapter；只有出现新的现场协议才扩展 adapter。`runtime` 和 `adapters` 不依赖 `scenario`、`cases`、`workload` 或 `reporting`，避免基础能力反向调用业务和调度层。
+
+新增参数组合复用现有 program，仅新增 YAML；新增流程从 `program.py` 开始，按需注册 action；新增测量才增加 analysis 或 producer。无需了解实例调度、归档或 HTML 内部实现。删除能力前检查注册发现、命令入口、配置引用、延迟导入与测试；缺少普通 import 不能单独证明无用。

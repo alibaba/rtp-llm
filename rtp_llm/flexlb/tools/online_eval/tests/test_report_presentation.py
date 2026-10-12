@@ -6,8 +6,8 @@ from unittest import mock
 
 from reporting import discover_reports, load_analysis, read_bundle, render, table, write_bundle
 from reporting.run_context import canonical_spec, provenance_from
-from workload.report import write_views
-from workload.run_provenance import collect
+from reporting.workload import write_views
+from artifacts.provenance import collect
 
 
 def analysis():
@@ -44,7 +44,7 @@ class ReportPresentationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             from test_cache_scale_gate import CacheGateTest
             from cases.cache_scale_in.analysis import analyze
-            from workload.gate_result import freeze_gate
+            from artifacts.gate import freeze_gate
             from metric_fixtures import freeze_metrics
             evidence = CacheGateTest().evidence(.3)
             original = analyze(evidence)
@@ -52,7 +52,7 @@ class ReportPresentationTest(unittest.TestCase):
             freeze_metrics(directory, "cache_scale_in")
             bundle = Path(directory) / "reports/run/cache-scale-in"
             source = analysis()
-            with mock.patch("workload.report.build_panels", return_value=[]):
+            with mock.patch("reporting.workload.build_panels", return_value=[]):
                 paths = write_views(directory, source, ["default.yaml", "cache_scale_in.yaml"])
             self.assertEqual(["cache_scale_in.yaml", "default.yaml"], list(paths))
             frozen = load_analysis(bundle)

@@ -120,7 +120,7 @@ class RequestBatch(ClientRecords):
                 )
                 rpc_options = {"timeout": limit}
                 if "qos_level" in self.params:
-                    from runtime.engine_ops import QOS_LEVEL_HEADER
+                    from adapters.engine_ops import QOS_LEVEL_HEADER
 
                     rpc_options["metadata"] = (
                         (QOS_LEVEL_HEADER, str(self.params["qos_level"])),

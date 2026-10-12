@@ -77,7 +77,7 @@ def _mock_base() -> int:
 def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE) -> dict[str, str]:
     """Port-partition env overlay for lane *lane_idx* (0-based).
 
-    Every key below is process-global in runtime.environment_config (read at import), so a
+    Every key below is process-global in adapters.environment_config (read at import), so a
     per-runner-subprocess value fully owns that lane's sockets.  Values NOT
     listed here (e.g. FLEXLB_FT_HA_DUAL_MASTER) pass through unchanged from
     the orchestrator's environment.
@@ -704,7 +704,7 @@ def main() -> int:
             f"mock base {mbase}, master base {mabase})"
         )
 
-    from runtime.instance_runner import run_structured
+    from scenario.instance_runner import run_structured
 
     return run_structured(args, sys.modules[__name__])
 

@@ -93,11 +93,11 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 门禁的获取、终态补全和发布均通过 `artifacts.json_io.write_json` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
 
-`run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`runtime.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
+`run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`adapters.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
 
 停止发流和排空由 program 显式编排；门禁仅读取所声明的测量证据，全量 Prometheus 查询归档由采集器清理统一完成，公共 finalize 物化指标一次；门禁 handler 保存判定，最终归档后投影指标，再由注册 renderer 生成报告。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或判定保存异常成为 stage ERROR，报告交付错误单独记录。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
 
-跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `runtime.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
+跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `adapters.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
 
 ## 收尾与持久化
 

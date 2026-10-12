@@ -189,7 +189,7 @@ def test_failed_publication_preserves_existing_primary_and_removes_temporary(tmp
 
 def test_unrendered_default_view_uses_frozen_declaration_and_metrics(tmp_path):
     from reporting.view_config import view
-    from workload.report import build_spec
+    from reporting.workload import build_spec
     from test_workload_report_views import payload
     from reporting import run_meta
 
@@ -207,7 +207,7 @@ def test_unrendered_default_view_uses_frozen_declaration_and_metrics(tmp_path):
     expected = render(build_spec(analysis, tmp_path))
     published = publish_run(tmp_path, frozen, execution(), analysis=analysis)
     with ExperimentReader(published['experiment']) as reader, \
-            patch('workload.report.view', side_effect=AssertionError('current YAML must not be loaded')):
+            patch('reporting.workload.view', side_effect=AssertionError('current YAML must not be loaded')):
         assert reader.available_views == ['default.yaml']
         reader.render('default.yaml', tmp_path / 'default.html')
         assert (tmp_path / 'default.html').read_text() == expected

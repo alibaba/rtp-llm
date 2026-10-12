@@ -13,7 +13,7 @@ from monitoring.metric_store import MetricContractError, MetricStore
 from monitoring.query_plan import load_plan
 from reporting import load_analysis, read_bundle, write_bundle
 from reporting.spec import validate
-from runtime.instance_plan import InstancePlanError, parse_catalog
+from scenario.instance_plan import InstancePlanError, parse_catalog
 from scenario import ScenarioError, compile_scenarios
 
 ROOT = Path(__file__).resolve().parents[1]

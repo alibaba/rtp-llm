@@ -136,7 +136,7 @@ def test_ha_evidence_uses_resource_identity_and_requires_files(tmp_path):
 
 def test_environment_identity_is_frozen_before_provenance_acquisition():
     from runtime.observation import ObservationClock
-    from workload.gate_evidence import new_evidence
+    from artifacts.gate_inputs import new_evidence
     e = new_evidence('performance_evidence_schema_version', ObservationClock(10, 1), {},
                      instance='run', env_epoch=6)
     assert e['provenance'] == dict(instance='run', env_epoch=6)

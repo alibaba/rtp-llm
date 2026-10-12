@@ -8,7 +8,7 @@ from pathlib import Path
 
 from cases.master_ha_failover.analysis import row_ts_ms
 from monitoring.sources import evidence_collector, selected_sources
-from runtime.java_client import ClientOps
+from adapters.java_client import ClientOps
 from traffic.contracts import source_priority
 
 
@@ -75,7 +75,7 @@ class HaReplayClient:
         self.control.mkdir()
         self.flow_identity = dict(run_id=uuid.uuid4().hex, group_id=name, phase_id="ha")
         self.stop_command = None
-        from runtime.load_client import client_environment, collection_environment, bind_environment
+        from adapters.load_client import client_environment, collection_environment, bind_environment
         settings = {
             "DURATION_S": str(int(duration_s)),
             "MAX_CONCURRENCY": str(max_concurrency),
@@ -112,11 +112,11 @@ class HaReplayClient:
         self.finished = False
 
     def stop_sending(self):
-        from runtime.flow_control import stop_sending
+        from adapters.flow_control import stop_sending
         self.stop_command = stop_sending(self.control, self.flow_identity, self.stop_command)
 
     def validate_drain(self, rows):
-        from runtime.flow_control import read_status, validate_drain
+        from adapters.flow_control import read_status, validate_drain
         validate_drain(read_status(self.control, self.flow_identity), self.flow_identity,
                        terminal_count=len(rows), command_id=self.stop_command)
 
@@ -167,7 +167,7 @@ class HaReplayClient:
         # instead of discarding all requests observed before the failure.
         lifecycle = self.out_dir / "client_lifecycle.jsonl"
         if not path.is_file() and lifecycle.is_file():
-            from runtime.client_journal import LiveClientEvents
+            from adapters.client_journal import LiveClientEvents
 
             journal = LiveClientEvents(lifecycle)
             try:
@@ -183,7 +183,7 @@ class HaReplayClient:
             path = lifecycle
         if not self.finished:
             errors.append("HA client finish was not validated")
-        from runtime.client_journal import request_timing
+        from adapters.client_journal import request_timing
         timing = request_timing(rows)
         errors.extend(timing["errors"])
         return dict(

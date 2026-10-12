@@ -87,7 +87,7 @@ class ZkHelperOps:
 
     @staticmethod
     def _fingerprints(paths):
-        from reporting.evidence_archive import file_digest
+        from artifacts.archive import file_digest
         files = {}
         for path in paths:
             if not path.exists():

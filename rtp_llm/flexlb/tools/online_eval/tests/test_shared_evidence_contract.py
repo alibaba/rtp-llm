@@ -6,10 +6,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from runtime.flow_control import read_status, stop_sending, validate_drain
+from adapters.flow_control import read_status, stop_sending, validate_drain
 from tests.ha_fixtures import client_resource
 from tests.test_performance_gate import evidence
-from workload.run_provenance import validate_gate_provenance
+from artifacts.provenance import validate_gate_provenance
 
 
 @pytest.mark.parametrize('group,field,value', [

@@ -91,7 +91,7 @@ def analyze(evidence):
         c = validate(evidence["criteria"], evidence.get("gate_input"))
         if not matches_schema(evidence, "performance_evidence_schema_version", 2):
             raise ValueError("unsupported evidence version")
-        from workload.run_provenance import validate_gate_provenance
+        from artifacts.provenance import validate_gate_provenance
         p = validate_gate_provenance(evidence["provenance"])
         if str(p["client_environment"].get("FETCH_OUTPUT_STREAM")).lower() not in {
             "1",

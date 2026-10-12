@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from runtime.instance_plan import (
+from scenario.instance_plan import (
     InstancePlanError,
     parse_catalog,
     plan_instances,

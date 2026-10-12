@@ -209,7 +209,8 @@ def read_bundle(path):
     if (not isinstance(files, dict) or not required <= files.keys()
             or any(files[name].get("path") != name for name in required)):
         raise ValueError("report manifest lacks required bundle files")
-    from reporting.evidence_archive import file_digest, verify_references
+    from artifacts.archive import file_digest
+    from reporting.evidence_archive import verify_references
     for entry in files.values():
         target = directory / entry["path"]
         if target.resolve().parent != directory.resolve():

@@ -7,7 +7,7 @@ from inspect import signature
 from typing import Callable
 
 from cases.extension_contracts import validate_call
-from workload.gate_result import freeze_gate, load_gate
+from artifacts.gate import freeze_gate, load_gate
 
 
 @dataclass(frozen=True)

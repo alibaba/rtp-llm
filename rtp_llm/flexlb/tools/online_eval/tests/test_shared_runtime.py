@@ -8,9 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from runtime.load_client import LOAD_CLIENT_ENV_VARS
+from adapters.load_client import LOAD_CLIENT_ENV_VARS
 from runtime.requests import ClientRecords, request_success
-from runtime.java_client import ClientOps
+from adapters.java_client import ClientOps
 
 ROOT = Path(__file__).resolve().parents[1]
 

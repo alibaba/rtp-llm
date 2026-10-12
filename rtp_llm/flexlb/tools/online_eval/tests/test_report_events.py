@@ -10,7 +10,7 @@ from reporting.events import attach_events, project_events
 from reporting.view_config import view
 from scenario.loader import ScenarioError
 from scenario.runtime import RuntimeContext
-from workload.report import write_views
+from reporting.workload import write_views
 from test_workload_report_views import payload
 from test_cache_scale_gate import CacheGateTest
 from cases.cache_scale_in.program import GATE as CACHE_GATE

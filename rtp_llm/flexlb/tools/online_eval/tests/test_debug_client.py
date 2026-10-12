@@ -4,7 +4,7 @@ import json
 import unittest
 from unittest.mock import patch
 
-from runtime.debug_client import Capture, DebugClient, DebugUnavailable, validate_snapshot
+from adapters.debug_client import Capture, DebugClient, DebugUnavailable, validate_snapshot
 
 
 def snapshot():

@@ -9,9 +9,9 @@ from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from runtime.observation import ObservationClock, SampleBudget, poll_samples
 from artifacts.json_io import write_json
-from workload.gate_evidence import new_evidence
-from workload.run_provenance import gate_provenance
-from runtime.mock_control import mock_json
+from artifacts.gate_inputs import new_evidence
+from artifacts.provenance import gate_provenance
+from adapters.mock_control import mock_json
 from cases.cache_scale_in.analysis import (
     MEASUREMENT_POLICY,
     align_send_counters,
@@ -20,7 +20,7 @@ from cases.cache_scale_in.analysis import (
     topology_ready,
     window,
 )
-from workload.gate_result import gate_check
+from artifacts.gate import gate_check
 
 from cases.cache_scale_in.inputs import validate_criteria
 
@@ -50,7 +50,7 @@ def _master_count(ctx, deadline):
 
 def _affinity_transition(ctx, value, deadline):
     """Change only after a healthy baseline and independently verify the result."""
-    from runtime.master_control import affinity_request
+    from adapters.master_control import affinity_request
 
     def request(payload=None):
         return affinity_request(ctx, deadline, payload)

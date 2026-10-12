@@ -5,7 +5,7 @@ import pytest
 
 from artifacts.experiment import ExperimentReader, publish_run
 from runtime.deadline import Deadline
-from runtime.storage_retention import prune_tsdb
+from artifacts.retention import prune_tsdb
 from test_experiment_container import definition, execution
 
 

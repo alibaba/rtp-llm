@@ -12,7 +12,7 @@ from typing import Optional
 
 from flexlb_cfg import render_process_config
 from mode_profiles import resolve_address_plan
-from runtime.environment_config import (
+from adapters.environment_config import (
     DEFAULT_MASTER_HTTP_PORT,
     MASTER_PORT_STRIDE,
     MASTER_PORT_MAX_SHIFTS,
@@ -21,12 +21,12 @@ from runtime.environment_config import (
 )
 from runtime.java_runtime import resolve_java21
 from runtime.startup import startup_deadline, wait_ready, startup_phase
-from runtime.master_lifecycle import MasterLifecycle
+from adapters.master_lifecycle import MasterLifecycle
 from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use, wait_for, wait_for_port
 from runtime.paths import FLEXLB_DIR, MOCK_JAR
 from runtime.process import ManagedProcess, ProcessOps
 from runtime.resource_plan import VICTIM_OFFSETS
-from runtime.zk_helper import (
+from adapters.zk_helper import (
     ZK_LAUNCH_CMD_ENV,
     ZK_READY_TIMEOUT_S,
     ZkHelperOps,

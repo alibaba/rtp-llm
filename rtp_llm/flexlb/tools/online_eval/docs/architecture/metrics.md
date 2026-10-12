@@ -114,7 +114,7 @@ calculation:
 
 视图 YAML 的 `curves` 用本地曲线 ID 声明 `metric_id` 和 `labels` 选择，并设置名称、颜色、轴和换算；面板用 `curve_ids` 选曲线。Python program 用 `case.metric(id)` 声明依赖，编译时拒绝未定义 ID。运行时 `MetricStore.select` 显式选择标签与时间窗、检查样本数及最大间隔，`reduce` 只对单条已选序列归约；缺失数据抛出 `MetricUnavailable`，定义冲突抛出 `MetricContractError`，均不能补零。
 
-门禁的共享运行身份、制品与流量 SHA、拓扑和容量结构由 `workload.run_provenance.validate_gate_provenance` 校验，采集端和消费端使用同一合同。Fetch、请求 cohort 等测量前提仍由所属分析器校验。字段集合可从已有测量定义推导时不重复列举；消费单位和身份维度属于算法约束，不能从生产配置直接复制。诊断使用结构化结果及错误代码，不按错误文案决定是否忽略采集失败。
+门禁的共享运行身份、制品与流量 SHA、拓扑和容量结构由 `artifacts.provenance.validate_gate_provenance` 校验，采集端和消费端使用同一合同。Fetch、请求 cohort 等测量前提仍由所属分析器校验。字段集合可从已有测量定义推导时不重复列举；消费单位和身份维度属于算法约束，不能从生产配置直接复制。诊断使用结构化结果及错误代码，不按错误文案决定是否忽略采集失败。
 
 ## 按需采集与数据源扩展
 

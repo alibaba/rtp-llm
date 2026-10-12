@@ -3,7 +3,7 @@ from unittest import mock
 from types import SimpleNamespace
 
 from cases.master_ha_failover.actions import _client_check
-from workload.evidence_analysis import bounded_collection_gaps
+from workload.validity import bounded_collection_gaps
 from cases.master_performance.inputs import for_profile
 from test_performance_gate import evidence
 

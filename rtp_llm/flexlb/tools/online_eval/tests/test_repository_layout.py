@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from scripts.pipeline import execute_cases as parallel_runner
-from runtime import instance_runner
+from scenario import instance_runner
 
 
 class RepositoryLayoutTest(unittest.TestCase):
@@ -97,7 +97,7 @@ class RepositoryLayoutTest(unittest.TestCase):
 
     def test_source_components_are_unified(self):
         expected = {
-            "monitoring", "traffic", "runtime", "cases", "scenario",
+            "monitoring", "traffic", "runtime", "cases", "scenario", "adapters",
             "workload", "analysis", "reporting", "artifacts",
         }
         self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir()})

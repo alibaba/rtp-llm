@@ -64,7 +64,7 @@ class CompileTest(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; from scenario import compile_scenarios; assert not any(x in sys.modules for x in ['runtime.environment','runtime.java_runtime','runtime.process','runtime.engine_ops','grpc'])",
+                "import sys; from scenario import compile_scenarios; assert not any(x in sys.modules for x in ['adapters.environment','runtime.java_runtime','runtime.process','adapters.engine_ops','grpc'])",
             ],
             cwd=TOOLS,
             capture_output=True,

@@ -13,16 +13,16 @@ import urllib.request
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from flexlb_cfg import render_env
-from runtime.environment_config import MasterSpec
+from adapters.environment_config import MasterSpec
 from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
-from runtime.master_artifact import configure_master
+from adapters.master_artifact import configure_master
 from runtime.network import http_post_json, port_accepting
 from runtime.startup import startup_deadline, wait_ready, startup_phase
 from runtime.paths import API_JAR
 from runtime.process import ManagedProcess, ProcessOps
 
 if TYPE_CHECKING:
-    from runtime.environment import FlexEnv
+    from adapters.environment import FlexEnv
 
 
 BASE_MASTER_ENV = {

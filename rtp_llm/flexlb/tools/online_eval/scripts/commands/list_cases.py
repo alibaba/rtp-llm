@@ -164,7 +164,7 @@ def main(argv=None):
     from scenario.backend import JavaMockBackend
     from scenario.runtime import StageTimeout, execute_instance
 
-    from workload.runtime import execute_workload
+    from workload.policy import execute_workload
 
     cancelled = threading.Event()
 
@@ -206,10 +206,10 @@ def main(argv=None):
                         enforce_deadlines=True,
                     )
                 )
-                from runtime.lane_safety import cleanup_failure
+                from scenario.lane_safety import cleanup_failure
                 retirement = cleanup_failure(rows[-1])
-                from runtime.lane_safety import occupied_ports
-                from runtime.environment import port_in_use
+                from scenario.lane_safety import occupied_ports
+                from adapters.environment import port_in_use
                 busy = occupied_ports(lease["intervals"], lambda port: port_in_use(port, "0.0.0.0"))
                 if busy:
                     retirement = "lane ports not released: " + str(busy)

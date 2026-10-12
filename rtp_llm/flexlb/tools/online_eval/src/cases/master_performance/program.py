@@ -10,7 +10,7 @@ from cases.master_performance.inputs import NUMERIC_PARAMETERS
 from traffic.playback.configuration import normalize
 from cases.master_performance.inputs import validate
 from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks, observation_contract
-from runtime.java_flow import JAVA_FLOW_INPUT_FIELDS
+from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow
 from cases.metric_inputs import bind_engine_metrics
 

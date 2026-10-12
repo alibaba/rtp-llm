@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
-from runtime.engine_ops import EngineOps
+from adapters.engine_ops import EngineOps
 from scenario.actions.master import (
     decode_residual_bound,
     owner_clean,
@@ -38,7 +38,7 @@ class ExecutionEvidenceTests(unittest.TestCase):
         old.close.assert_called_once()
         engine.close.assert_not_called()
         with patch(
-            "runtime.engine_ops.grpc.insecure_channel", return_value=new
+            "adapters.engine_ops.grpc.insecure_channel", return_value=new
         ):
             self.assertIs(new, ops._channel("master"))
         self.assertIs(engine, ops._channel("engine"))

@@ -7,7 +7,7 @@ from unittest import mock
 import pytest
 from scenario import compile_scenarios
 from scenario.runtime import RuntimeContext, Deadline, execute_instance
-from workload.runtime import execute_workload, WorkloadPolicy
+from workload.policy import execute_workload, WorkloadPolicy
 from runtime.resource_evidence import ResourceEvidence
 from test_scenario_runtime import Clock, Backend, source
 from test_performance_gate import evidence as performance_evidence
@@ -24,7 +24,7 @@ def plan():
 
 @pytest.mark.parametrize("kind", ["cache", "performance"])
 def test_online_gate_never_calls_metric_or_html_delivery(tmp_path, kind):
-    from workload.gate_result import load_gate
+    from artifacts.gate import load_gate
     from types import SimpleNamespace
     case = "cache_scale_in" if kind == "cache" else "master_performance"
     module = __import__("cases." + case + ".actions", fromlist=["actions"])
@@ -59,7 +59,7 @@ def test_report_failure_preserves_gate_and_runtime_validity(tmp_path, completed)
     clock = Clock()
     backend = Backend(clock)
     backend.completed = completed
-    with mock.patch("workload.report.write_views", side_effect=RuntimeError("HTML failure")):
+    with mock.patch("reporting.workload.write_views", side_effect=RuntimeError("HTML failure")):
         result = execute_workload(plan(), backend, artifact_dir=tmp_path,
                                   clock=clock, sleeper=clock.sleep)
     assert result["execution_status"] == ("PASS" if completed else "FAIL")
@@ -149,9 +149,9 @@ def test_report_budget_is_separate_and_included_in_elapsed_time(tmp_path):
 
 @pytest.mark.parametrize("damage", ["modified", "missing"])
 def test_committed_gate_corruption_never_falls_back_to_default(tmp_path, damage):
-    from workload.gate_result import freeze_gate
+    from artifacts.gate import freeze_gate
     from cases.cache_scale_in.analysis import analyze
-    from workload.report import write_views
+    from reporting.workload import write_views
     e = CacheGateTest().evidence(.8)
     result_path = freeze_gate(tmp_path, "cache", e, analyze(e))
     if damage == "missing":

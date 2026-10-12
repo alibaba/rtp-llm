@@ -52,7 +52,7 @@ def startup_phase(directory, phase, deadline):
 
 
 def wait_flow_started(control, identity, process, deadline):
-    from runtime.flow_control import read_status
+    from adapters.flow_control import read_status
     def acknowledged():
         state = read_status(control, identity)
         if not process.alive():

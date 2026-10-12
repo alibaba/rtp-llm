@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from scenario.request_batch import RequestBatch
-from runtime.perf_presets import load_preset
+from adapters.perf_presets import load_preset
 from runtime.deadline import StageTimeout
 
 
@@ -60,7 +60,7 @@ class BoundedOps:
 def make_env_spec(plan, profile, lease):
     """Controlled environment rendering; no JVM is started by this function."""
     from flexlb_cfg import OMIT, ConfigOverride
-    from runtime.environment_config import EnvSpec, MasterSpec
+    from adapters.environment_config import EnvSpec, MasterSpec
 
     kwargs = {
         k: OMIT if v == {"omit": True} else v
@@ -69,7 +69,7 @@ def make_env_spec(plan, profile, lease):
     from scenario.environment_snapshot import EnvironmentSnapshot
     snapshot = EnvironmentSnapshot.read(plan["rendered"])
     preset_perf, preset_runtime = snapshot.performance, snapshot.runtime
-    from runtime.zookeeper_config import ZooKeeperConfig
+    from adapters.zookeeper_config import ZooKeeperConfig
     elected = plan.get('master_layout') == 'dual_zookeeper'
     spec = EnvSpec(
         label="scenario",
@@ -173,8 +173,8 @@ class JavaMockBackend:
             raise ValueError(
                 "environment topology exceeds compiled or leased worker capacity"
             )
-        from runtime.engine_ops import EngineOps
-        from runtime.environment import EnvManager
+        from adapters.engine_ops import EngineOps
+        from adapters.environment import EnvManager
 
         owner = self
 

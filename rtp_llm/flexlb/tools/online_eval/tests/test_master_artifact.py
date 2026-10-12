@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from runtime.master_artifact import configure_master
+from adapters.master_artifact import configure_master
 
 
 class MasterArtifactTest(unittest.TestCase):

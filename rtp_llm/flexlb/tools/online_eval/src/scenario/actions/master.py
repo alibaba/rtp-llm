@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from runtime.master_control import require_process as _process, master_json as _master_json
+from adapters.master_control import require_process as _process, master_json as _master_json
 
 
 def _target(params):
@@ -360,7 +360,7 @@ def _leadership_validate(params, plan):
 
 
 def _leadership(ctx, params, deadline):
-    from runtime.leadership import LeadershipSnapshot
+    from adapters.leadership import LeadershipSnapshot
     samples = []
     stable_since = None
     stable_leader = None

@@ -6,8 +6,8 @@ import pytest
 from scenario.environment_config import environment
 from scenario.backend import make_env_spec
 from scenario.loader import ScenarioError
-from runtime.leadership import LeadershipSnapshot
-from runtime.zookeeper_config import ZooKeeperConfig
+from adapters.leadership import LeadershipSnapshot
+from adapters.zookeeper_config import ZooKeeperConfig
 from scenario.actions.master import _leadership
 
 

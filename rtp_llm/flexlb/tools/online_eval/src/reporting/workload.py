@@ -6,7 +6,7 @@ from artifacts.errors import ArtifactNotProduced
 from reporting import details, write_bundle
 from reporting.run_context import canonical_spec, provenance_from
 from reporting.view_config import DEFAULT_VIEW, view
-from workload.report_panels import build_panels
+from reporting.workload_panels import build_panels
 
 
 def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None):

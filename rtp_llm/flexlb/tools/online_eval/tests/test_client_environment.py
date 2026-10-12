@@ -6,9 +6,9 @@ from unittest import mock
 
 import pytest
 
-from runtime.java_client import ClientOps
-from runtime.java_flow import JavaFlowGroup
-from runtime.load_client import (
+from adapters.java_client import ClientOps
+from adapters.java_flow import JavaFlowGroup
+from adapters.load_client import (
     FRAMEWORK_CLIENT_ENV_VARS, bind_environment, client_environment, collection_environment,
 )
 from scenario.runtime import Deadline
@@ -38,7 +38,7 @@ def test_invalid_input_is_rejected_before_launch(patch):
 def test_subprocess_boundary_also_validates_before_creating_artifacts(tmp_path):
     client = ClientOps(None)
     destination = tmp_path / 'client'
-    with mock.patch.object(client, '_argv') as argv, mock.patch('runtime.java_client.ProcessOps.start') as launch:
+    with mock.patch.object(client, '_argv') as argv, mock.patch('adapters.java_client.ProcessOps.start') as launch:
         for patch in [dict(TYPO='1'), dict(FETCH_OUTPUT_STREAM='false')]:
             environment, _ = client_environment(settings())
             with pytest.raises(ValueError):

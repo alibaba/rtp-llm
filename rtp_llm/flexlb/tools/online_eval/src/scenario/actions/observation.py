@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from runtime.debug_client import DebugClient, DebugUnavailable
+from adapters.debug_client import DebugClient, DebugUnavailable
 from runtime.observation import SampleBudget
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 

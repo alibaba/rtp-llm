@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 
 from cases.gate_plugin import GatePlugin
-from workload.gate_result import load_gate
+from artifacts.gate import load_gate
 from artifacts.errors import ArtifactNotProduced
 
 

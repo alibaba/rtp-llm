@@ -42,11 +42,11 @@ def default_perf() -> dict:
     master routing receives the same file's prefill expression through
     flexlb_cfg unless the scenario declares a model-specific override.
     """
-    from runtime.perf_presets import load_preset
+    from adapters.perf_presets import load_preset
     return load_preset("default")[0]
 
 
-from runtime.zookeeper_config import ZooKeeperConfig
+from adapters.zookeeper_config import ZooKeeperConfig
 
 
 @dataclass

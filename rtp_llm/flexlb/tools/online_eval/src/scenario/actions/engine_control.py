@@ -6,7 +6,7 @@ import math
 import uuid
 
 from scenario.contracts import StageHandler, StageOutput
-from runtime.mock_control import ENGINE_NAME, control_json, select_engines
+from adapters.mock_control import ENGINE_NAME, control_json, select_engines
 
 PERF_FIELDS = {
     "prefill_fixed_ms",

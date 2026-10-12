@@ -25,7 +25,7 @@ from pathlib import Path
 from schema_contract import matches_schema
 
 from reporting.view_config import DEFAULT_VIEW
-from runtime.instance_plan import (
+from scenario.instance_plan import (
     InstancePlanError,
     parse_catalog,
     plan_instances,
@@ -433,7 +433,7 @@ def _run_segment(index, part, group, lease, args, out, children):
 
 def _run_lane(index, lane, lease, args, out, children, dispatch=None):
     """One lease, one child per instance; failed cleanup retires this lane."""
-    from runtime.lane_safety import cleanup_failure
+    from scenario.lane_safety import cleanup_failure
     from scripts.pipeline.execute_cases import _busy_ports
     results, segments = [], []
     pending = iter(lane)

@@ -21,7 +21,7 @@ from reporting import (
 from analysis.statistics import select_window, counter_delta
 from reporting.pairing import event_anchor, shifted_panel, paired_overlay
 from reporting.renderer import render_context, render_sections
-from workload.report import write_report
+from reporting.workload import write_report
 
 
 class ReportBundleTest(unittest.TestCase):

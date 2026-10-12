@@ -10,11 +10,11 @@ from flexlb_cfg import (
     OMIT, PROFILE_CAPS, ProfileIdentityError, PROFILES, VICTIM_STAGES,
     ConfigOverride, render_env, validate_profile_identity,
 )
-from runtime.perf_presets import load_preset_bundle, preset_names
+from adapters.perf_presets import load_preset_bundle, preset_names
 from scenario.loader import ScenarioError
 from scenario.validation import fail, mapping, number, names
 
-from runtime.zookeeper_config import ZooKeeperConfig
+from adapters.zookeeper_config import ZooKeeperConfig
 
 MASTER_PATCH_FIELDS = {field.name for field in fields(ConfigOverride)} - {"strip_preemption"}
 

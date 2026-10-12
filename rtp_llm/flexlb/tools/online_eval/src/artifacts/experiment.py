@@ -281,7 +281,7 @@ class ExperimentReader:
         _verify_gate_inputs(self.entries, self.read_json)
 
     def verify_raw(self, path):
-        from reporting.evidence_archive import file_digest
+        from artifacts.archive import file_digest
         reference = self.read_json('raw-attachment.json')
         if Path(path).stat().st_size != reference['size'] or file_digest(path) != reference['sha256']:
             raise ValueError('raw attachment checksum mismatch')
@@ -313,7 +313,7 @@ class ExperimentReader:
         if name in self.views:
             spec = self.view_spec(name)
         elif name == 'default.yaml' and 'analysis.json' in self.entries:
-            from workload.report import build_spec
+            from reporting.workload import build_spec
             definition = self.read_json('experiment.json')
             spec = build_spec(self.analysis(), None, presentation=definition['views'][name])
         else:
@@ -442,7 +442,7 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
             primary.add_json('completeness.json', dict(missing=missing, omissions=primary.omitted,
                 outcome=execution.get('outcome'), invalid_views=invalid_views,
                 available_views=list(primary.views)), ArtifactRole.EXECUTION)
-        from reporting.evidence_archive import file_digest
+        from artifacts.archive import file_digest
         digest = file_digest(raw.output)
         raw_output = directory / ('experiment-' + digest + '.raw.zip')
         # Immutable attachment names preserve an earlier committed primary when

@@ -18,8 +18,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts.pipeline import execute_cases as ports
-from runtime import instance_runner as runner
-from runtime.instance_plan import parse_catalog
+from scenario import instance_runner as runner
+from scenario.instance_plan import parse_catalog
 from test_instance_plan import catalog
 
 

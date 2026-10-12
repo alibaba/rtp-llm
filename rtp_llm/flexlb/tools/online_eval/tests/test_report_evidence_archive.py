@@ -8,7 +8,8 @@ import pytest
 
 from monitoring.metric_store import MetricStore, frozen_metric_reads
 from reporting import load_analysis, read_bundle, write_bundle
-from reporting.evidence_archive import EvidenceReference, archive_session, file_digest, restore
+from artifacts.archive import file_digest
+from reporting.evidence_archive import EvidenceReference, archive_session, restore
 
 
 def evidence():
@@ -156,7 +157,7 @@ def test_comparison_run_collection_archives_and_restores_each_run(tmp_path):
 
 def test_write_views_shares_metric_reads_and_archives_across_renderers(tmp_path):
     from types import SimpleNamespace
-    from workload.report import write_views
+    from reporting.workload import write_views
 
     source = dict(evidence(), status='PASS')
     MetricStore(metric_document(1)).save(tmp_path)
@@ -169,8 +170,8 @@ def test_write_views_shares_metric_reads_and_archives_across_renderers(tmp_path)
         return render
 
     capabilities = {name: SimpleNamespace(renderer=renderer(name)) for name in ('a.yaml', 'b.yaml')}
-    with patch('workload.report.view', return_value={}), \
-            patch('workload.report.view_capabilities', return_value=capabilities), \
+    with patch('reporting.workload.view', return_value={}), \
+            patch('reporting.workload.view_capabilities', return_value=capabilities), \
             patch('monitoring.metric_store.json.load', wraps=json.load) as decoder, \
             patch('reporting.evidence_archive.gzip.GzipFile', wraps=gzip.GzipFile) as encoder:
         paths = write_views(tmp_path, source, names=['a.yaml', 'b.yaml'])

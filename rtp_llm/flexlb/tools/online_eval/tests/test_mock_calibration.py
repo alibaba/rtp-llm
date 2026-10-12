@@ -10,8 +10,8 @@ import unittest
 
 from flexlb_cfg import render_env
 from flexlb_profile_data import load_mock_calibration
-from runtime.perf_presets import ROOT, load_preset, load_performance_file
-from runtime.environment import _write_master_config
+from adapters.perf_presets import ROOT, load_preset, load_performance_file
+from adapters.environment import _write_master_config
 from scenario.backend import make_env_spec
 from scenario.compiler import environment
 

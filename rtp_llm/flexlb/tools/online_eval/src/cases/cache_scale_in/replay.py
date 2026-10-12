@@ -20,7 +20,7 @@ def cache_main():
     parser.add_argument("--client-snapshot", type=Path,
                         help="complete java_flow evidence_snapshot JSON for historical attribution")
     args = parser.parse_args()
-    from workload.reinterpretation import load_reinterpretation, import_metrics
+    from artifacts.reinterpretation import load_reinterpretation, import_metrics
     evidence = load_reinterpretation(parser, args, cache_analysis.__file__)
     original_errors = list(evidence.get("errors", []))
     if args.client_snapshot:

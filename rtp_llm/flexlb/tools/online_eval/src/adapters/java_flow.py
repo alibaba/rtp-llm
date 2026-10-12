@@ -4,9 +4,9 @@ import json
 import time
 from pathlib import Path
 
-from runtime.client_journal import LiveClientEvents
+from adapters.client_journal import LiveClientEvents
 from traffic.traffic_source import sha256_file
-from runtime.load_client import client_environment, collection_environment, bind_environment
+from adapters.load_client import client_environment, collection_environment, bind_environment
 
 JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
 
@@ -106,7 +106,7 @@ class JavaFlowGroup:
 
     def control_status(self):
         """Cheap process/control observation; request accounting remains in status()."""
-        from runtime.flow_control import read_status
+        from adapters.flow_control import read_status
         state = read_status(self.control, self.identity)
         state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
         return state
@@ -148,7 +148,7 @@ class JavaFlowGroup:
         state = self.status()
         if state.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"}:
             return state
-        from runtime.flow_control import stop_sending
+        from adapters.flow_control import stop_sending
         self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
         return self._wait(
             lambda s: s.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"},
@@ -174,7 +174,7 @@ class JavaFlowGroup:
             raise RuntimeError(
                 "flow drain journal does not account for every submission"
             )
-        from runtime.flow_control import validate_drain
+        from adapters.flow_control import validate_drain
         validate_drain(state, self.identity, terminal_count=state["observed_terminal"],
                        command_id=self.stop_command)
         return state
@@ -187,7 +187,7 @@ class JavaFlowGroup:
         return record
 
     def evidence_snapshot(self):
-        from runtime.client_journal import request_timing
+        from adapters.client_journal import request_timing
         errors = []
         try:
             state = self.status()

@@ -18,8 +18,8 @@ from reporting import discover_reports, write_bundle
 from scenario import ScenarioError, compile_scenarios
 from scenario.catalog import handlers
 from reporting.comparison import compare
-from workload.evidence_analysis import analyze_report
-from workload.report import build_spec
+from workload.validity import analyze_report
+from reporting.workload import build_spec
 import mode_profiles
 from flexlb_profile_data import REGISTERED_PROFILE_SPECS
 

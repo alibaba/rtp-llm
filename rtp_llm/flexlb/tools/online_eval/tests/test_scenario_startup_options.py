@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime.environment_config import default_perf
-from runtime.perf_presets import ROOT, capture_defaults, load_performance_file, load_preset, preset_names
+from adapters.environment_config import default_perf
+from adapters.perf_presets import ROOT, capture_defaults, load_performance_file, load_preset, preset_names
 from scenario import compile_scenarios
 from scenario.backend import make_env_spec
 from scenario.catalog import handlers
@@ -122,7 +122,7 @@ class StartupOptionsTest(unittest.TestCase):
                 load_performance_file(path)
 
     def test_paired_master_cap_requires_valid_profile_scope(self):
-        from runtime.perf_presets import PairedMasterSettings
+        from adapters.perf_presets import PairedMasterSettings
 
         document = json.loads((ROOT / "data/performance/glm_5_3_l20d.json").read_text())
         master = document["master"]

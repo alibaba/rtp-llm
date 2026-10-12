@@ -5,7 +5,7 @@ import json
 import uuid
 
 from scenario.contracts import StageHandler, StageOutput
-from runtime.mock_control import ENGINE_NAME, control_json, select_engines
+from adapters.mock_control import ENGINE_NAME, control_json, select_engines
 
 # Fault controls do not alter status-report payloads.
 FAULT_OPTIONS = {

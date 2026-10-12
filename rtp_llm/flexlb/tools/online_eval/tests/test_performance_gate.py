@@ -16,7 +16,7 @@ from metric_fixtures import freeze_metrics
 def report(directory, evidence, result):
     freeze_metrics(directory, "master_performance")
     return publish_performance(directory, evidence, result)
-from workload.gate_evidence import trace_workload_sha
+from artifacts.gate_inputs import trace_workload_sha
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 
@@ -114,7 +114,7 @@ class PerformanceGateTest(unittest.TestCase):
         self.assertEqual(analyze(e)["verdict"], "PASS")
 
     def test_completion_buckets_do_not_depend_on_journal_order(self):
-        from workload.gate_evidence import compact_flow
+        from artifacts.gate_inputs import compact_flow
         original = evidence()
         expected = analyze(original)
         shuffled = copy.deepcopy(original)

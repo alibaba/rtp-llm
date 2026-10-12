@@ -6,7 +6,7 @@ from pathlib import Path
 
 def prune_tsdb(directory, artifacts, deadline):
     from artifacts.experiment import ExperimentReader
-    from reporting.evidence_archive import file_digest
+    from artifacts.archive import file_digest
 
     directory = Path(directory).resolve()
     roots = sorted((directory / "telemetry").glob("*/data"))

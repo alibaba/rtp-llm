@@ -230,8 +230,8 @@ class EnvironmentTest(unittest.TestCase):
             mock_http_port=54999,
         )
         with patch(
-            "runtime.environment.EnvManager.ensure", return_value=env
-        ) as ensure, patch("runtime.engine_ops.EngineOps"):
+            "adapters.environment.EnvManager.ensure", return_value=env
+        ) as ensure, patch("adapters.engine_ops.EngineOps"):
             self.ctx.env_epoch = 1
             first = environment(self.raw_env, "test", PROFILE)
             backend.setup(self.ctx, first, self.deadline)
@@ -299,8 +299,8 @@ class EnvironmentTest(unittest.TestCase):
                 backend.probe_startup(self.ctx, {}, "{}", self.deadline)
 
     def test_real_harness_startup_failure_tail_uses_isolated_log(self):
-        from runtime.environment import EnvManager
-        from runtime.environment_config import EnvSpec
+        from adapters.environment import EnvManager
+        from adapters.environment_config import EnvSpec
 
         directory = Path(self.tmp.name)
         log_root = directory / "private"
@@ -328,14 +328,14 @@ class EnvironmentTest(unittest.TestCase):
                 stream.write("ConfigValidationException from owned start\n")
             return NS(pid=123, alive=lambda: False, tail_log=lambda: "owned stdout")
 
-        with patch("runtime.master_lifecycle.API_JAR", jar), patch(
-            "runtime.master_lifecycle.resolve_java21", return_value="unused-java"
+        with patch("adapters.master_lifecycle.API_JAR", jar), patch(
+            "adapters.master_lifecycle.resolve_java21", return_value="unused-java"
         ), patch(
-            "runtime.master_lifecycle.port_accepting", return_value=False
+            "adapters.master_lifecycle.port_accepting", return_value=False
         ), patch.object(
             manager.master_lifecycle, "_master_env", return_value={}
         ), patch(
-            "runtime.master_lifecycle.ProcessOps.start", side_effect=launch
+            "adapters.master_lifecycle.ProcessOps.start", side_effect=launch
         ):
             with self.assertRaises(RuntimeError) as error:
                 manager.start_master(env)

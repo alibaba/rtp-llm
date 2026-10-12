@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from tests.ha_fixtures import client_resource
-from workload.evidence_analysis import analyze_report as read_analysis
+from workload.validity import analyze_report as read_analysis
 
 def analyze_report(directory, result, evidence):
     from monitoring.metric_store import export_metrics
@@ -60,7 +60,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(report["workload"]["runtime_validity"], "INVALID")
 
     def test_failed_scrape_is_attributed_at_observed_completion(self):
-        from workload.evidence_analysis import (
+        from workload.validity import (
             classify_gaps,
             collection_gaps,
             journal_rows,
@@ -238,7 +238,7 @@ class EvidenceIntegrityTest(unittest.TestCase):
             self.assertEqual(r["workload"]["runtime_validity"], "INVALID")
 
     def test_outage_exemption_is_source_and_window_specific(self):
-        from workload.evidence_analysis import classify_gaps
+        from workload.validity import classify_gaps
 
         evidence = dict(
             clock_anchor={"epoch_s": 100},

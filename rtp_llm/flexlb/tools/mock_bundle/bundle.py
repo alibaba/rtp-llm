@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT.parent / "online_eval"))
 sys.path.insert(0, str(ROOT.parent / "online_eval" / "src"))
 from flexlb_cfg import render_env, render_process_config
 from mode_profiles import load_mode_tables, resolve_address_plan, resolve_mode
-from runtime.perf_presets import resolve_performance_calibration
+from adapters.perf_presets import resolve_performance_calibration
 
 
 def run():

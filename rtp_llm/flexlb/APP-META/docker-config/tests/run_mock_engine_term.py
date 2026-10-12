@@ -24,18 +24,12 @@ FLEXLB = CONFIG.parents[1]
 sys.path.insert(0, str(FLEXLB / "tools/online_eval"))
 sys.path.insert(0, str(FLEXLB / "tools/online_eval/src"))
 
-from runtime.harness import (  # noqa: E402
-    API_JAR,
-    MOCK_JAR,
-    JAVA_MODULE_OPTS,
-    EnvManager,
-    EnvSpec,
-    http_get_json,
-    http_post_json,
-    resolve_java21,
-    wait_for,
-)
-from runtime.engine_ops import EngineOps  # noqa: E402
+from runtime.paths import API_JAR, MOCK_JAR  # noqa: E402
+from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21  # noqa: E402
+from runtime.network import http_get_json, http_post_json, wait_for  # noqa: E402
+from adapters.environment import EnvManager  # noqa: E402
+from adapters.environment_config import EnvSpec  # noqa: E402
+from adapters.engine_ops import EngineOps  # noqa: E402
 from flexlb_cfg import render_env
 from google.protobuf.json_format import MessageToDict  # noqa: E402
 

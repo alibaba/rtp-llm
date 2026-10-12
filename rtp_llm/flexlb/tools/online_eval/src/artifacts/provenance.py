@@ -28,9 +28,9 @@ def collect(directory, environments, metadata=None, *, required=()):
 def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     """Freeze the same observed launch inputs for all gates, before collection."""
     from runtime.paths import API_JAR, MOCK_JAR
-    from runtime.java_flow import evidence_environment
+    from adapters.java_flow import evidence_environment
     from traffic.traffic_source import sha256_file
-    from workload.gate_evidence import trace_workload_sha
+    from artifacts.gate_inputs import trace_workload_sha
 
     epoch = str(ctx.env_epoch)
     observed = collect(ctx.artifact_dir, {epoch: ctx.env.run_dir}, required={

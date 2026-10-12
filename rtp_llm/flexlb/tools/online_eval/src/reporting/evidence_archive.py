@@ -1,4 +1,5 @@
 """Lossless shared series archives, linked into portable report bundles."""
+from artifacts.archive import file_digest
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -37,14 +38,6 @@ class EvidenceReference:
 
     def to_dict(self):
         return dict(path=self.path, sha256=self.sha256, fields=list(self.fields))
-
-
-def file_digest(path):
-    digest = hashlib.sha256()
-    with Path(path).open('rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 @contextmanager

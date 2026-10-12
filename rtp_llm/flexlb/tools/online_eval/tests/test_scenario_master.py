@@ -555,12 +555,12 @@ class MasterActionsTest(unittest.TestCase):
         ])
         params = dict(rows=rows, metric="ha_gate/prefill_max_share", op="le",
                       expected=0.75, min_samples=3)
-        with patch("runtime.mock_control.topology_pools",
+        with patch("adapters.mock_control.topology_pools",
                    return_value={"prefill": ["P0", "P1"]}):
             result = ha._client_check(self.ctx, params, self.deadline)
         self.assertEqual("PASS", result.checks[0].status)
         self.assertEqual(0.5, result.output["actual"])
-        with patch("runtime.mock_control.topology_pools",
+        with patch("adapters.mock_control.topology_pools",
                    return_value={"prefill": ["P1", "P2"]}), self.assertRaisesRegex(
                        ValueError, "known Prefill"):
             ha._client_check(self.ctx, params, self.deadline)

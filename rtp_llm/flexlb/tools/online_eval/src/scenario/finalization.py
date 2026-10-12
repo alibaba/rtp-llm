@@ -49,7 +49,7 @@ class RunFinalizer:
                                       analysis=analysis, deadline=deadline)
         if (not getattr(ctx.backend, "retain_tsdb", True)
                 and all(row["status"] == "PASS" for row in document["cleanup"])):
-            from runtime.storage_retention import prune_tsdb
+            from artifacts.retention import prune_tsdb
             prune_tsdb(ctx.artifact_dir, result.artifacts, deadline)
 
     @staticmethod

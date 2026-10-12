@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from scenario.runtime import Deadline
-from runtime.java_flow import JavaFlowGroup
+from adapters.java_flow import JavaFlowGroup
 from traffic.synthetic.generator import write_trace
 
 

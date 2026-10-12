@@ -5,7 +5,7 @@ from pathlib import Path
 
 from cases.master_ha_failover.analysis import measure_client_metric, row_ts_ms
 from cases.master_ha_failover.inputs import validate_client_criterion, validate_wait
-from runtime.master_control import require_process
+from adapters.master_control import require_process
 from scenario.parameters import validate_fields
 from scenario.contracts import StageHandler, StageOutput
 
@@ -270,7 +270,7 @@ def _client_check(ctx, params, deadline):
     if metric == "target_share":
         target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
     elif metric == "prefill_max_share":
-        from runtime.mock_control import topology_pools
+        from adapters.mock_control import topology_pools
 
         prefill_pool = topology_pools(ctx, deadline)["prefill"]
     actual = measure_client_metric(params, rows, target=target, prefill_pool=prefill_pool)

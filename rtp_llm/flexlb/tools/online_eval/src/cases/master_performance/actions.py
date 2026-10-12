@@ -4,8 +4,8 @@ from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from cases.master_performance.inputs import validate, for_profile
 from artifacts.json_io import write_json
-from workload.gate_evidence import compact_flow, new_evidence
-from workload.gate_result import gate_check
+from artifacts.gate_inputs import compact_flow, new_evidence
+from artifacts.gate import gate_check
 from cases.master_performance.inputs import engine_roles
 from traffic.traffic_source import sha256_file
 from runtime.observation import ObservationClock, SampleBudget, poll_samples
@@ -27,7 +27,7 @@ def observe_validate(params, plan):
 
 
 def provenance(ctx, flow):
-    from workload.run_provenance import gate_provenance
+    from artifacts.provenance import gate_provenance
     from cases.master_performance import analysis, program, inputs
     return gate_provenance(ctx, flow,
         source_files=(__file__, analysis.__file__, program.__file__, inputs.__file__),

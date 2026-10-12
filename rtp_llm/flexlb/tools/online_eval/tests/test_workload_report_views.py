@@ -9,8 +9,8 @@ from cases.config import configure_program
 from reporting import discover_reports, load_analysis, read_bundle, write_bundle
 from reporting.view_config import DEFAULT_VIEW, declaration, view
 from scenario.loader import ScenarioError, load_document
-from workload.report import write_report, write_views
-from workload.report_panels import build_panels
+from reporting.workload import write_report, write_views
+from reporting.workload_panels import build_panels
 from cases.master_ha_failover.metrics import _prefill_balance_series
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,7 +193,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_selected_view_renders_verified_frozen_gate_once(self):
         from cases.cache_scale_in.analysis import analyze
-        from workload.gate_result import freeze_gate
+        from artifacts.gate import freeze_gate
         from test_cache_scale_gate import CacheGateTest
         from metric_fixtures import freeze_metrics
         with tempfile.TemporaryDirectory() as d:
@@ -252,7 +252,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_failed_run_does_not_hide_corrupt_frozen_gate(self):
         from cases.cache_scale_in.analysis import analyze
-        from workload.gate_result import freeze_gate
+        from artifacts.gate import freeze_gate
         from test_cache_scale_gate import CacheGateTest
         with tempfile.TemporaryDirectory() as d:
             e = CacheGateTest().evidence(.8)

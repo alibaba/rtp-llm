@@ -6,15 +6,15 @@ import re
 import time
 from pathlib import Path
 
-from runtime.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
-from runtime.load_client import client_environment
+from adapters.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
+from adapters.load_client import client_environment
 from traffic.traffic_source import materialize, SourceSpecification
 from traffic.contracts import java_client_priority
 
-from runtime.java_client import ClientOps
+from adapters.java_client import ClientOps
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from runtime.mock_control import engine_snapshot
+from adapters.mock_control import engine_snapshot
 
 def _start_validate(params, plan):
     fields = JAVA_FLOW_INPUT_FIELDS | {"trace", "max_requests"}
@@ -47,7 +47,7 @@ def _start_validate(params, plan):
 
 def _start(ctx, p, deadline):
     if ctx.instance["environment"].get("master_test_control", False):
-        from runtime.master_control import affinity_request
+        from adapters.master_control import affinity_request
         initial = affinity_request(ctx, deadline)
         expected = ctx.instance["environment"]["resolved_config"]["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"]
         if initial.get("maxExtraTtftMs") != expected:

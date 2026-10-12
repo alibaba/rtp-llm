@@ -133,7 +133,7 @@ def test_performance_cli_replays_evidence_explicitly():
 def test_registered_view_extension_needs_no_workload_case_branch():
     from cases import registry
     from types import SimpleNamespace
-    from workload.report import write_views
+    from reporting.workload import write_views
 
     render = mock.Mock(return_value=Path('/unused/new/report.html'))
     validator = mock.Mock()

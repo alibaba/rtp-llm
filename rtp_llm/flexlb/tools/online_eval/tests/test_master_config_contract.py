@@ -9,8 +9,8 @@ from types import SimpleNamespace
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from runtime.environment import EnvManager
-from runtime.environment_config import EnvSpec, MasterSpec
+from adapters.environment import EnvManager
+from adapters.environment_config import EnvSpec, MasterSpec
 from flexlb_cfg import build_flexlb_config
 
 
@@ -135,7 +135,7 @@ class MasterConfigContractTest(unittest.TestCase):
             self.assertEqual(
                 ["10.0.0.3:9000"], model["hosts"]["mock.decode.hosts.address"]
             )
-            from runtime.zookeeper_config import ZooKeeperConfig
+            from adapters.zookeeper_config import ZooKeeperConfig
             spec.zk_consistency = ZooKeeperConfig()
             result = manager.master_lifecycle._master_env(env, MasterSpec(name="A", http_port=18080))
             self.assertEqual(
