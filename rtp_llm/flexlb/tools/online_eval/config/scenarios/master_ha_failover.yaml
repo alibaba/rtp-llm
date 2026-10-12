@@ -41,9 +41,6 @@ parameters:
           mean_tokens: 420
           seed: 20260913
         priority: 50
-    targets:
-    - A
-    - B
     duration_s: 240
     timeout_ms: 120000
     replay_speed: 5

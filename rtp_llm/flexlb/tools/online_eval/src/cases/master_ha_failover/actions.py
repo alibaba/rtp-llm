@@ -15,7 +15,6 @@ def _ha_validate(params, plan):
         params,
         plan,
         {
-            "targets",
             "duration_s",
             "timeout_ms",
             "fallback",
@@ -35,9 +34,6 @@ def _ha_validate(params, plan):
     environment = getattr(plan, "environment", {})
     if environment.get("master_layout", "single") not in ("dual_standalone", "dual_zookeeper"):
         raise ValueError("HA traffic requires compiled dual-master environment")
-    p.setdefault("targets", ["A", "B"])
-    if p["targets"] not in (["A", "B"], ["B", "A"]):
-        raise ValueError("HA targets must explicitly order A and B")
     for key, default, lower, upper in (
         ("duration_s", 60, 1, 3600),
         ("timeout_ms", 30000, 100, 120000),
@@ -82,12 +78,10 @@ def _ha_validate(params, plan):
 def _ha_start(ctx, params, deadline):
     from cases.master_ha_failover.client import HaReplayClient
 
-    for target in params["targets"]:
+    if set(ctx.env.master_specs) != {"A", "B"}:
+        raise ValueError("HA restart cycle requires registered Masters A and B")
+    for target in ctx.env.master_specs:
         require_process(ctx, target)
-    targets = [
-        ctx.backend.manager.master_instance_target(ctx.env, target)
-        for target in params["targets"]
-    ]
     directory = ctx.artifact_dir / f"ha-client-{ctx.resource_count}"
     directory.mkdir(parents=True, exist_ok=True)
     from runtime.startup import startup_phase
@@ -97,7 +91,6 @@ def _ha_start(ctx, params, deadline):
             ctx.env,
             directory,
             "traffic",
-            targets,
             duration_s=params["duration_s"],
             sampler_limits=params["capture"],
             monitor=ctx.monitor,
