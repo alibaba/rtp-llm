@@ -97,7 +97,10 @@ TEST(NoBlockCopyTest, VmmCopiesOnFreshAndReusedRpcThreads) {
                 // supported deployment uses the generic copy fallback; an
                 // actual batch execution failure must still fail this test.
                 TORCH_CHECK(batch_status == (batch_supported ? BatchedMemoryCopyStatus::SUCCESS :
-                                                               BatchedMemoryCopyStatus::NOT_SUPPORTED));
+                                                               BatchedMemoryCopyStatus::NOT_SUPPORTED),
+                            "batch copy device=", device, " status=", static_cast<int>(batch_status),
+                            " supported=", batch_supported, " driver=", driver_version,
+                            " runtime=", runtime_version, " compiled=", CUDART_VERSION);
                 if (!batch_supported) {
                     execNoBlockCopy(MultiCopyParams{{host}, {other}});
                 }
