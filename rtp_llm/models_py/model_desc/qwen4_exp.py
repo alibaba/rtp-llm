@@ -830,6 +830,7 @@ class Qwen4ExpModel(Qwen35Model):
         state_pool: torch.Tensor,
         ctx_pool: torch.Tensor,
         page_size: int,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Compute all target rows while leaving the persistent PLE pools intact."""
         if not bool(state_inputs.is_prefill):
@@ -913,6 +914,7 @@ class Qwen4ExpModel(Qwen35Model):
             hyper_states.reshape(batch_size, query_len, -1),
             history,
             initial_state,
+            **({"embeddings": embeddings} if embeddings is not None else {}),
         )
 
         stage = _PLETargetLayerStage(
@@ -1230,6 +1232,124 @@ class Qwen4ExpModel(Qwen35Model):
             )
         self._release_ple_target_transaction(transaction)
 
+    def _start_eager_ple_prefetch(self, inputs: PyModelInputs, attention_inputs):
+        """Read PLE contexts early; leave persistent state untouched."""
+        enabled = [
+            (int(key), ple)
+            for key, ple in self.ple_layers.items()
+            if getattr(getattr(ple, "ple_embedding", None), "supports_prefetch", False)
+        ]
+        if not enabled:
+            return {}
+        ctx_inputs = select_attention_inputs_for_tag(
+            attention_inputs, PLE_NGRAM_CTX_TAG
+        )
+        if bool(ctx_inputs.is_cuda_graph):
+            return {}
+        ids = self._ple_input_ids(inputs).reshape(-1).long()
+        plans = {}
+        for layer_idx, ple in enabled:
+            embedding = ple.ple_embedding
+            self._validate_ple_mode(ctx_inputs, allow_target_verify=True)
+            cache = self.kv_cache.get_layer_cache(layer_idx, PLE_NGRAM_CTX_TAG)
+            page_size = int(cache.seq_size_per_block)
+            if ctx_inputs.is_prefill:
+                lengths = [int(x) for x in ctx_inputs.input_lengths.tolist()]
+                raw_prefixes = ctx_inputs.prefix_lengths
+                prefixes = (
+                    [int(x) for x in raw_prefixes.tolist()]
+                    if raw_prefixes is not None and raw_prefixes.numel()
+                    else [0] * len(lengths)
+                )
+                if (
+                    not lengths
+                    or any(length <= 0 for length in lengths)
+                    or sum(lengths) != ids.numel()
+                    or len(prefixes) != len(lengths)
+                    or any(prefix < 0 for prefix in prefixes)
+                ):
+                    raise RuntimeError("PLE prefetch prefill metadata is inconsistent")
+                if len(lengths) > 128:
+                    continue
+                contexts = ids.new_full(
+                    (len(lengths), embedding.context_len), embedding.eos_token_id
+                )
+                if any(prefixes):
+                    pool = self._fixed_state_pool(
+                        cache, torch.int64, embedding.context_len, 1
+                    ).squeeze(-1)
+                    pages = torch.tensor(
+                        [
+                            (prefix - 1) // page_size if prefix else 0
+                            for prefix in prefixes
+                        ],
+                        dtype=torch.long,
+                    )
+                    blocks = self._physical_blocks(
+                        ctx_inputs,
+                        PLE_NGRAM_CTX_TAG,
+                        pages,
+                        int(pool.shape[0]),
+                        pool.device,
+                    )
+                    cached = pool.index_select(0, blocks)
+                    mask = torch.tensor(prefixes, device=ids.device).gt(0).unsqueeze(1)
+                    contexts = torch.where(mask, cached, contexts)
+                if ctx_inputs.is_target_verify:
+                    width = lengths[0]
+                    if any(length != width for length in lengths):
+                        raise RuntimeError(
+                            "PLE target prefetch requires uniform query rows"
+                        )
+                    history = torch.cat(
+                        (contexts, ids.view(len(lengths), width)), dim=1
+                    )
+                    plans[layer_idx] = [
+                        embedding.start_prefetch(embedding.hashed_ids(history, width))
+                    ]
+                else:
+                    handles = []
+                    offset = 0
+                    for slot, length in enumerate(lengths):
+                        history = torch.cat(
+                            (
+                                contexts[slot : slot + 1],
+                                ids[offset : offset + length].view(1, length),
+                            ),
+                            dim=1,
+                        )
+                        handles.append(
+                            embedding.start_prefetch(
+                                embedding.hashed_ids(history, length), slot=slot
+                            )
+                        )
+                        offset += length
+                    plans[layer_idx] = handles
+            else:
+                lengths = ctx_inputs.sequence_lengths.to(
+                    device=ids.device, dtype=torch.long
+                )
+                if ids.numel() != lengths.numel() or bool((lengths <= 0).any().item()):
+                    raise RuntimeError("PLE decode prefetch metadata is inconsistent")
+                pool = self._fixed_state_pool(
+                    cache, torch.int64, embedding.context_len, 1
+                ).squeeze(-1)
+                pages = torch.div(lengths - 1, page_size, rounding_mode="floor")
+                blocks = self._physical_blocks(
+                    ctx_inputs,
+                    PLE_NGRAM_CTX_TAG,
+                    pages,
+                    int(pool.shape[0]),
+                    pool.device,
+                )
+                history = torch.cat(
+                    (pool.index_select(0, blocks), ids.view(-1, 1)), dim=1
+                )
+                plans[layer_idx] = [
+                    embedding.start_prefetch(embedding.hashed_ids(history, 1))
+                ]
+        return plans
+
     def prepare_cuda_graph_model_inputs(self, inputs: PyModelInputs) -> None:
         """Prepare CPU-resident PLE rows before replay, without committing state."""
         if not self.requires_cuda_graph_model_input_preparation or not self.ple_layers:
@@ -1298,6 +1418,7 @@ class Qwen4ExpModel(Qwen35Model):
         hyper_states: torch.Tensor,
         input_ids: torch.Tensor,
         attention_inputs: Any,
+        prefetch=None,
     ) -> torch.Tensor:
         ple = self.ple_layers[str(layer_idx)]
         state_inputs = select_attention_inputs_for_tag(attention_inputs, PLE_STATE_TAG)
@@ -1353,7 +1474,24 @@ class Qwen4ExpModel(Qwen35Model):
         graph_capture = bool(state_inputs.is_cuda_graph)
         # Eager fallback must never reuse rows prepared for a captured graph.
         ple.ple_embedding._graph_gather_required = graph_capture
+        local_rows = (
+            [
+                (
+                    ple.ple_embedding.consume_prefetch(handle)
+                    if handle is not None
+                    else None
+                )
+                for handle in prefetch
+            ]
+            if prefetch is not None
+            else None
+        )
         if is_target_verify:
+            prefetched = (
+                {"embeddings": ple.ple_embedding._reduce_rows(local_rows[0])}
+                if local_rows is not None and local_rows[0] is not None
+                else {}
+            )
             return self._stage_ple_target_verify(
                 layer_idx=layer_idx,
                 ple=ple,
@@ -1364,6 +1502,7 @@ class Qwen4ExpModel(Qwen35Model):
                 state_pool=state_pool,
                 ctx_pool=ctx_pool,
                 page_size=page_size,
+                **prefetched,
             )
 
         if state_inputs.is_prefill:
@@ -1446,6 +1585,15 @@ class Qwen4ExpModel(Qwen35Model):
                         history,
                         page_size,
                         state,
+                        **(
+                            {
+                                "embeddings": ple.ple_embedding._reduce_rows(
+                                    local_rows[idx]
+                                )
+                            }
+                            if local_rows is not None and local_rows[idx] is not None
+                            else {}
+                        ),
                     )
                     for end, snapshot in zip(
                         range(page_size, length + page_size, page_size), snapshots
@@ -1468,10 +1616,35 @@ class Qwen4ExpModel(Qwen35Model):
                         1, end - start, -1
                     )
                     if state is None:
-                        output, state = ple.prefill(chunk_hyper, history)
+                        output, state = ple.prefill(
+                            chunk_hyper,
+                            history,
+                            **(
+                                {
+                                    "embeddings": ple.ple_embedding._reduce_rows(
+                                        local_rows[idx][:, start:end].contiguous()
+                                    )
+                                }
+                                if local_rows is not None
+                                and local_rows[idx] is not None
+                                else {}
+                            ),
+                        )
                     else:
                         output, state = ple.prefill_with_state(
-                            chunk_hyper, history, state
+                            chunk_hyper,
+                            history,
+                            state,
+                            **(
+                                {
+                                    "embeddings": ple.ple_embedding._reduce_rows(
+                                        local_rows[idx][:, start:end].contiguous()
+                                    )
+                                }
+                                if local_rows is not None
+                                and local_rows[idx] is not None
+                                else {}
+                            ),
                         )
                     chunk_outputs.append(output.squeeze(0))
                     write_rows.append(idx)
@@ -1601,7 +1774,14 @@ class Qwen4ExpModel(Qwen35Model):
         context = ctx_pool.index_select(0, ctx_read_blocks)
         history = torch.cat([context, ids.view(batch, 1)], dim=1)
         output, new_state = ple.decode_step(
-            hyper_states.view(batch, 1, -1), history, conv_buffer
+            hyper_states.view(batch, 1, -1),
+            history,
+            conv_buffer,
+            **(
+                {"embeddings": ple.ple_embedding._reduce_rows(local_rows[0])}
+                if local_rows is not None and local_rows[0] is not None
+                else {}
+            ),
         )
         state_pool.index_copy_(0, state_write_blocks, new_state.to(state_pool.dtype))
         ctx_pool.index_copy_(
@@ -1730,6 +1910,18 @@ class Qwen4ExpModel(Qwen35Model):
         return torch.where(text_flags, input_ids, torch.full_like(input_ids, eos))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        try:
+            return self._forward_with_ple_prefetch(inputs, fmha_impl)
+        finally:
+            for ple in self.ple_layers.values():
+                embedding = getattr(ple, "ple_embedding", None)
+                finish = getattr(embedding, "finish_prefetch", None)
+                if callable(finish):
+                    finish()
+
+    def _forward_with_ple_prefetch(
+        self, inputs: PyModelInputs, fmha_impl: Any = None
+    ) -> PyModelOutputs:
         if (
             self.ple_layers
             and getattr(self, "_ple_target_transaction", None) is not None
@@ -1750,6 +1942,7 @@ class Qwen4ExpModel(Qwen35Model):
             if has_side_caches
             else {}
         )
+        ple_prefetch = self._start_eager_ple_prefetch(inputs, attention_inputs)
         hidden_states = self.word_embedding(inputs)
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
@@ -1793,7 +1986,11 @@ class Qwen4ExpModel(Qwen35Model):
                     )
                 before_ple = hyper_states
                 hyper_states = self._apply_ple(
-                    i, hyper_states, ple_input_ids, attention_inputs
+                    i,
+                    hyper_states,
+                    ple_input_ids,
+                    attention_inputs,
+                    **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
                 if stats_this_forward:
                     logging.warning(

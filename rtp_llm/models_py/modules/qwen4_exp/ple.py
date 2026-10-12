@@ -137,6 +137,52 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self._graph_gather_required = False
         self._cpu_graph_buffers = {}
         self._cpu_graph_rows: Optional[torch.Tensor] = None
+        self._cpu_graph_prefetch = None
+        self._prefetcher = None
+        if self._cpu_uva_enabled and os.environ.get(
+            "RTP_LLM_QWEN4_PLE_CPU_PREFETCH", "0"
+        ).lower() in ("1", "true", "yes", "on"):
+            from rtp_llm.models_py.modules.qwen4_exp.ple_prefetch import PLEPrefetcher
+
+            self._prefetcher = PLEPrefetcher(
+                self.shards,
+                self.shard_indices,
+                self.total_shards,
+                self._cpu_uva_pointers,
+                max_eager_bytes=int(
+                    os.environ.get("RTP_LLM_QWEN4_PLE_PREFETCH_MB", "256")
+                )
+                * 1024
+                * 1024,
+            )
+
+    @property
+    def supports_prefetch(self) -> bool:
+        module_hooks = torch.nn.modules.module
+        return (
+            self._prefetcher is not None
+            and type(self) is Qwen4ExpNGramEmbedding
+            and type(self).forward is _NGRAM_FORWARD
+            and "forward" not in self.__dict__
+            and not self._forward_pre_hooks
+            and not self._forward_hooks
+            and not module_hooks._global_forward_pre_hooks
+            and not module_hooks._global_forward_hooks
+        )
+
+    def start_prefetch(self, ids: torch.Tensor, *, slot=0, out=None):
+        if not self.supports_prefetch:
+            return None
+        return self._prefetcher.start(ids, slot=slot, out=out)
+
+    def consume_prefetch(self, prefetch):
+        if self._prefetcher is None or prefetch.owner is not self._prefetcher:
+            raise RuntimeError("PLE prefetch belongs to a different embedding")
+        return prefetch.wait()
+
+    def finish_prefetch(self) -> None:
+        if self._prefetcher is not None:
+            self._prefetcher.finish()
 
     def _shift_right_ignore_eos(
         self, token_ids: torch.Tensor, shift: int
@@ -206,6 +252,11 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
             self._cpu_graph_buffers[key] = (host, device)
         host, device = self._cpu_graph_buffers[key]
+        if self.supports_prefetch:
+            self._cpu_graph_prefetch = self.start_prefetch(ngram_ids, out=device)
+            self._cpu_graph_rows = device
+            return
+        self._cpu_graph_prefetch = None
         if self._cpu_uva_enabled:
             from rtp_llm.models_py.modules.qwen4_exp.ple_gather_triton import (
                 gather_local,
@@ -243,6 +294,8 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             or rows.dtype != self.shards[0].dtype
         ):
             raise RuntimeError("PLE CPU graph lookup buffer geometry is stale")
+        if self._cpu_graph_prefetch is not None:
+            self.consume_prefetch(self._cpu_graph_prefetch)
         return rows
 
     def _gather_local(self, ngram_ids: torch.Tensor) -> torch.Tensor:
@@ -343,6 +396,9 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
             return self._reduce_rows(rows)
         return self.gather(self.hashed_ids(token_history.long(), seq_len))
+
+
+_NGRAM_FORWARD = Qwen4ExpNGramEmbedding.forward
 
 
 class Qwen4ExpPLELayer(nn.Module):
@@ -473,10 +529,12 @@ class Qwen4ExpPLELayer(nn.Module):
         hyper_states: torch.Tensor,
         token_history: torch.Tensor,
         padding_mask: Optional[torch.Tensor] = None,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run PLE prefill and return output plus the decode conv state."""
         gated_value, gated_value_normed = self._gated_values(
-            hyper_states, token_history, padding_mask
+            hyper_states, token_history, padding_mask, embeddings=embeddings
         )
         output = gated_value + self._short_conv(gated_value_normed)
         return output, self.prefill_conv_state(gated_value_normed)
@@ -486,6 +544,8 @@ class Qwen4ExpPLELayer(nn.Module):
         hyper_states: torch.Tensor,
         token_history: torch.Tensor,
         conv_buffer: torch.Tensor,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Prefix-reuse prefill: continue the conv from a cached state buffer.
 
@@ -494,7 +554,7 @@ class Qwen4ExpPLELayer(nn.Module):
         the state the next chunk/decode must resume from.
         """
         output, candidate_inputs = self.decode_chunk(
-            hyper_states, token_history, conv_buffer
+            hyper_states, token_history, conv_buffer, embeddings=embeddings
         )
         state = torch.cat([conv_buffer, candidate_inputs], dim=1)[
             :, -self.short_conv_state_len :
@@ -507,6 +567,8 @@ class Qwen4ExpPLELayer(nn.Module):
         token_history: torch.Tensor,
         page_size: int,
         conv_buffer: Optional[torch.Tensor] = None,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         """Gather once while retaining every page's resumable prefill state.
 
@@ -526,7 +588,8 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("PLE snapshot convolution buffer geometry is invalid")
         if length <= 0:
             raise ValueError("PLE snapshot prefill must contain at least one token")
-        embeddings = self.ple_embedding(token_history, length)
+        if embeddings is None:
+            embeddings = self.ple_embedding(token_history, length)
         outputs, snapshots = [], []
         for start in range(0, length, page_size):
             end = min(start + page_size, length)
@@ -573,6 +636,8 @@ class Qwen4ExpPLELayer(nn.Module):
         hyper_state: torch.Tensor,
         token_history_step: torch.Tensor,
         conv_buffer: torch.Tensor,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> tuple:
         """One decode token: PLE output plus the rolled conv buffer.
 
@@ -583,7 +648,7 @@ class Qwen4ExpPLELayer(nn.Module):
         of a zero left pad.
         """
         gated_value, gated_value_normed = self._gated_values(
-            hyper_state, token_history_step
+            hyper_state, token_history_step, embeddings=embeddings
         )
         conv_in = torch.cat([conv_buffer, gated_value_normed], dim=1).transpose(1, 2)
         conv_out = F.silu(
@@ -603,6 +668,8 @@ class Qwen4ExpPLELayer(nn.Module):
         hyper_states: torch.Tensor,
         token_history: torch.Tensor,
         conv_buffer: torch.Tensor,
+        *,
+        embeddings: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Evaluate a speculative decode chunk without committing its state.
 
@@ -653,7 +720,9 @@ class Qwen4ExpPLELayer(nn.Module):
         ):
             raise ValueError("qwen4_exp PLE decode chunk inputs must share one device")
 
-        gated_value, candidate_inputs = self._gated_values(hyper_states, token_history)
+        gated_value, candidate_inputs = self._gated_values(
+            hyper_states, token_history, embeddings=embeddings
+        )
         conv_in = torch.cat([conv_buffer, candidate_inputs], dim=1).transpose(1, 2)
         conv_out = F.silu(
             F.conv1d(
