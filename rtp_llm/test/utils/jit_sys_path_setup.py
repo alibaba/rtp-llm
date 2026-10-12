@@ -27,7 +27,6 @@ from rtp_llm.utils import jit_cache_env as cache_env
 def get_package_info(package_name):
     """Get package version and installation path"""
     try:
-        # Try to import the package first to get its location
         import importlib
 
         runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
@@ -35,28 +34,30 @@ def get_package_info(package_name):
         if package_name == "tvm_ffi":
             meta_package_name = "apache-tvm-ffi"
 
-        if runfiles_dir and os.path.exists(runfiles_dir):
-            if runfiles_dir not in sys.path:
-                sys.path.insert(0, runfiles_dir)
+        saved_path = list(sys.path)
+        try:
+            if runfiles_dir and os.path.exists(runfiles_dir):
+                if runfiles_dir not in sys.path:
+                    sys.path.insert(0, runfiles_dir)
 
-            for item in os.listdir(runfiles_dir):
-                if item.startswith("pip_"):
-                    pip_path = os.path.join(runfiles_dir, item, "site-packages")
-                    if os.path.exists(pip_path) and pip_path not in sys.path:
-                        sys.path.insert(0, pip_path)
+                for item in os.listdir(runfiles_dir):
+                    if item.startswith("pip_"):
+                        pip_path = os.path.join(runfiles_dir, item, "site-packages")
+                        if os.path.exists(pip_path) and pip_path not in sys.path:
+                            sys.path.insert(0, pip_path)
 
-        module = importlib.import_module(package_name)
-        if hasattr(module, "__file__") and module.__file__:
-            package_path = Path(module.__file__).parent
-            # Get version from metadata
-            try:
-                dist = importlib.metadata.distribution(meta_package_name)
-                version = dist.version
-                return version, str(package_path)
-            except:
-                # If no metadata, use __version__ attribute
-                if hasattr(module, "__version__"):
-                    return module.__version__, str(package_path)
+            # Probe via metadata only: importing the module here would pin the
+            # runfiles copy in sys.modules for the rest of the process, and any
+            # JIT rules that process generates would then anchor include paths
+            # to the per-action runfiles tree, which dangles for every other
+            # consumer of the shared JIT workspace.
+            dist = importlib.metadata.distribution(meta_package_name)
+            version = dist.version
+            package_path = dist.locate_file(package_name)
+        finally:
+            sys.path[:] = saved_path
+        if Path(str(package_path)).exists():
+            return version, str(package_path)
         return None, None
     except Exception as e:
         logging.info(f"[Package Copy] Failed to get info for {package_name}: {e}")
@@ -330,6 +331,33 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
             logging.info(f"[Package Setup] Skipped eviction of {op_dir}: lock busy")
 
 
+def _evict_managed_flashinfer_workspaces(default_workspace: Path) -> None:
+    """Evict stale ops in the managed JIT scopes, not just the env's workspace.
+
+    The server process resolves its managed JIT scope lazily
+    (jit_cache_manager.setup_jit_cache_env) and only then points
+    FLASHINFER_WORKSPACE_BASE at the managed root, so this wrapper's env var still
+    holds the home default. Sweep the existing managed flashinfer component roots
+    read-only: exporting the component env here would make the server treat it as
+    explicit and fork the scope id away from the out-of-server computed one.
+    """
+    try:
+        from rtp_llm.utils import jit_cache_manager as manager
+
+        override = os.environ.get("TEST_JIT_LOCAL_DIR", "").strip()
+        local_root = Path(override) if override else manager.LOCAL_JIT_ROOT
+        scopes_root = local_root / manager.RTP_JIT_VERSION
+    except Exception:
+        logging.warning("[Package Setup] managed JIT root unavailable", exc_info=True)
+        return
+    if not scopes_root.is_dir():
+        return
+    seen = {default_workspace.resolve()}
+    for component_root in sorted(scopes_root.glob("*/flashinfer")):
+        if component_root.is_dir() and component_root.resolve() not in seen:
+            _evict_dangling_flashinfer_ops(component_root)
+
+
 def setup_jit_cache(cache_dir=None, packages=None):
     bootstrap_remote_jit_dir()
     cache_env.configure_writable_cache_env(
@@ -338,7 +366,9 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "flashinfer",
         cache_subpath=(".cache", "flashinfer"),
     )
-    _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
+    default_workspace = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
+    _evict_dangling_flashinfer_ops(default_workspace)
+    _evict_managed_flashinfer_workspaces(default_workspace)
     cache_env.configure_writable_cache_env(
         "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
     )
