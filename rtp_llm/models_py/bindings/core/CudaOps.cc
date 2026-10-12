@@ -422,8 +422,8 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
 }
 
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
-    auto mask_float = mask.to(logits.dtype());
-    logits.masked_fill_(mask_float.to(torch::kBool) == 0, -1e9f);
+    // Contract (mask_logits.cu): mask != 0 bans the token (-inf); 0 allows it.
+    logits.masked_fill_(mask.to(torch::kBool), -std::numeric_limits<float>::infinity());
 }
 
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,

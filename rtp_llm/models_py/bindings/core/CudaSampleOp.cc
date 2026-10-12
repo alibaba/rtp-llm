@@ -760,12 +760,19 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
             }
         }
         selected = torch::multinomial(probs_t, 1, /*replacement=*/false, gen).squeeze(-1);
-        if (params.do_sample.has_value()) {
-            // Per-row merge: do_sample=false rows must take argmax even in a
-            // mixed batch, instead of being sampled together with the rest.
-            auto greedy      = torch::argmax(probs_t, -1, /*keepdim=*/false);
-            auto do_sample_npu = params.do_sample.value().to(probs_t.device());
-            selected          = torch::where(do_sample_npu, selected, greedy);
+        // Per-row merge: greedy rows (do_sample=false OR temperature<=0) must
+        // take argmax even in a mixed batch, instead of being sampled.
+        if (has_not_do_sample) {
+            auto greedy       = torch::argmax(probs_t, -1, /*keepdim=*/false);
+            auto keep_sampled = params.do_sample.has_value()
+                                    ? params.do_sample.value().to(probs_t.device())
+                                    : torch::ones({(int64_t)batch_size},
+                                                  torch::TensorOptions().dtype(torch::kBool).device(probs_t.device()));
+            if (has_temp_greedy) {
+                auto temp_npu = params.temperature.to(probs_t.device());
+                keep_sampled  = keep_sampled & (temp_npu > 0.0f);
+            }
+            selected = torch::where(keep_sampled, selected, greedy);
         }
     }
     samples_t.copy_(selected);

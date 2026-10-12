@@ -291,9 +291,8 @@ class WeightConverter:
             skip_python_model=True,
         )
         loader = model.create_model_loader()
-        from rtp_llm.device.device_type import get_device_type, DeviceType
-        _dn = "npu" if get_device_type() == DeviceType.Ascend else ("hip" if get_device_type() == DeviceType.ROCm else "cuda")
-        device_str = f"{_dn}:{parallelism_config.local_rank}"
+        from rtp_llm.device.device_type import device_name
+        device_str = f"{device_name()}:{parallelism_config.local_rank}"
         max_retry_times = 3
         for i in range(max_retry_times):
             try:

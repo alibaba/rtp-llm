@@ -28,7 +28,8 @@ def get_device_type() -> DeviceType:
         import torch_npu
         if torch.npu.is_available():
             return DeviceType.Ascend
-    except ImportError:
+    except (ImportError, OSError):
+        # torch_npu raises OSError when CANN libs are missing/ABI-incompatible.
         pass
     return DeviceType.Cpu
 
@@ -47,6 +48,12 @@ def is_ascend() -> bool:
 
 def is_ppu() -> bool:
     return get_device_type() == DeviceType.Ppu
+
+
+def device_name() -> str:
+    if get_device_type() == DeviceType.Ascend:
+        return "npu"
+    return "cuda"
 
 
 def device_count() -> int:

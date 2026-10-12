@@ -129,9 +129,8 @@ class TorchSymmMemCommunicator:
             return
 
         if isinstance(device, int):
-            from rtp_llm.device.device_type import get_device_type, DeviceType
-            _dn = "npu" if get_device_type() == DeviceType.Ascend else ("hip" if get_device_type() == DeviceType.ROCm else "cuda")
-            device = torch.device(f"{_dn}:{device}")
+            from rtp_llm.device.device_type import device_name
+            device = torch.device(f"{device_name()}:{device}")
         elif isinstance(device, str):
             device = torch.device(device)
 
