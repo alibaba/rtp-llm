@@ -95,6 +95,20 @@ def save_tensors(path, values):
         torch.save(values, stream)
 
 
+def loader_signature(weights):
+    result = {}
+    for layer, mapping in enumerate((weights.global_weights, *weights.weights)):
+        for name, value in sorted(mapping.items()):
+            if name == W.rope_cos_sin_cache:
+                continue
+            result[f"{layer - 1}:{name}"] = {
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "sha256": tensor_hash(value.cpu()),
+            }
+    return result
+
+
 def require_exact_tree(expected, actual):
     if isinstance(expected, torch.Tensor):
         assert isinstance(actual, torch.Tensor)
