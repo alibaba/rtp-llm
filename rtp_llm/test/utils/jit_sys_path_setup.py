@@ -334,38 +334,6 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
             logging.info(f"[Package Setup] Skipped eviction of {op_dir}: lock busy")
 
 
-def _evict_managed_flashinfer_workspaces(default_workspace: Path) -> None:
-    """Evict stale ops in the managed JIT scopes, not just the env's workspace.
-
-    The server process resolves its managed JIT scope lazily
-    (jit_cache_manager.setup_jit_cache_env) and only then points
-    FLASHINFER_WORKSPACE_BASE at the managed root, so this wrapper's env var still
-    holds the home default. Sweep the existing managed flashinfer component roots
-    read-only: exporting the component env here would make the server treat it as
-    explicit and fork the scope id away from the out-of-server computed one.
-    """
-    try:
-        from rtp_llm.utils import jit_cache_manager as manager
-
-        local_root = Path(manager.LOCAL_JIT_ROOT)
-        version_dir = manager.RTP_JIT_VERSION
-    except ImportError:
-        # Some test wrappers' deps do not include the manager's watchdog tree;
-        # its roots are fixed paths, so fall back to the literals.
-        local_root = Path("/tmp/rtp-llm/.jit_cache")
-        version_dir = "v2"
-    override = os.environ.get("TEST_JIT_LOCAL_DIR", "").strip()
-    if override:
-        local_root = Path(override)
-    scopes_root = local_root / version_dir
-    if not scopes_root.is_dir():
-        return
-    seen = {default_workspace.resolve()}
-    for component_root in sorted(scopes_root.glob("*/flashinfer")):
-        if component_root.is_dir() and component_root.resolve() not in seen:
-            _evict_dangling_flashinfer_ops(component_root)
-
-
 def setup_jit_cache(cache_dir=None, packages=None):
     bootstrap_remote_jit_dir()
     cache_env.configure_writable_cache_env(
@@ -374,9 +342,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "flashinfer",
         cache_subpath=(".cache", "flashinfer"),
     )
-    default_workspace = Path(os.environ["FLASHINFER_WORKSPACE_BASE"])
-    _evict_dangling_flashinfer_ops(default_workspace)
-    _evict_managed_flashinfer_workspaces(default_workspace)
+    _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
     cache_env.configure_writable_cache_env(
         "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
     )
