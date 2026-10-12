@@ -66,7 +66,7 @@ class PlaybackControlsTest(unittest.TestCase):
             raw = module.encode(events)
             with tempfile.TemporaryDirectory() as tmp:
                 root=Path(tmp); model=root/'model.xz'; model.write_bytes(raw)
-                params=dict(path='model.xz',sha256=hashlib.sha256(raw).hexdigest(),count=100,
+                params=dict(path='model.xz',count=100,
                     output_tokens=64,priority=50,output_distribution=dict(kind='discrete',values=[1,16,64],weights=[0,1,3],seed=7))
                 module.write_trace(root/'a',params,'A',root)
                 module.write_trace(root/'b',params,'B',root)

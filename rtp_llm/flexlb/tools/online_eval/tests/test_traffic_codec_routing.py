@@ -49,7 +49,7 @@ class CodecRoutingTest(unittest.TestCase):
                     self.assertNotEqual(templates[0]['labels'][1], templates[1]['labels'][1])
                 materialize_main(['--lineage-model', str(model), '--out', str(root/'cli.jsonl'), '--namespace', 'test'])
                 from traffic.traffic_source import materialize
-                specification = dict(kind='trace', model='prefix_lineage', parameters=dict(path=model.name, sha256=manifest['sha256'],
+                specification = dict(kind='trace', model='prefix_lineage', parameters=dict(path=model.name,
                                     count=manifest['count'], output_tokens=1, priority=50))
                 plan = materialize(root/'plan.jsonl', specification, 'test', model.parent,
                                    max_requests=3)

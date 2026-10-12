@@ -86,7 +86,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                 manifest = datasets.read_manifest(selected)
                 specification = dict(kind='trace', model=manifest['codec']['name'],
                     version=str(manifest['codec']['version']), parameters=dict(
-                        path=selected.name, sha256=manifest['sha256'], count=manifest['count'],
+                        path=selected.name,  count=manifest['count'],
                         output_tokens=1, priority=50))
                 out = data / 'plan.jsonl'
                 materialize(out, specification, 'custom', selected.parent, max_requests=1)
@@ -100,7 +100,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                 self.assertEqual(2, params.families)
                 self.assertEqual('unit-test', provenance['origin'])
 
-    def test_existing_scenarios_pin_matching_files(self):
+    def test_existing_scenarios_select_files_without_authored_checksums(self):
         from scenario.loader import load_document
 
         def sources(node):
@@ -120,13 +120,12 @@ class TrafficDatasetsTest(unittest.TestCase):
             for params in sources(load_document(case)):
                 path = (case.parent / params['path']).resolve()
                 with self.subTest(case=case.name, source=params['path']):
-                    self.assertRegex(params['sha256'], r'^[0-9a-f]{64}$')
+                    self.assertNotIn('sha256', params)
                     self.assertIs(type(params['count']), int)
                     self.assertGreater(params['count'], 0)
                     if path not in tracked and not path.is_file():
-                        self.skipTest(f'external capture unavailable: {path}; runtime SHA check remains required')
+                        self.skipTest(f'external capture unavailable: {path}; source file unavailable')
                     manifest = datasets.read_manifest(path)
-                    self.assertEqual(manifest['sha256'], params['sha256'], str(case))
                     self.assertEqual(manifest['count'], params['count'], str(case))
 
     def test_default_profile_preserves_fixed_seed_trace(self):
@@ -149,7 +148,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                     manifest = datasets.read_manifest(model)
                     specification = dict(kind='trace', model=manifest['codec']['name'],
                         version=str(manifest['codec']['version']), parameters=dict(
-                            path=model.name, sha256=manifest['sha256'], count=manifest['count'],
+                            path=model.name,  count=manifest['count'],
                             output_tokens=1, priority=50))
                     output = Path(directory) / f'{name}.jsonl'
                     materialize(output, specification, name, model.parent, max_requests=8)

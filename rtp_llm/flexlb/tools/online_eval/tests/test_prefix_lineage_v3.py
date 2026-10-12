@@ -17,7 +17,7 @@ class ExactLineageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root/'model.xz').write_bytes(raw)
-            parameters = dict(path='model.xz', sha256=hashlib.sha256(raw).hexdigest(),
+            parameters = dict(path='model.xz',
                               count=4, output_tokens=350, priority=50)
             def project(name, params, limit=None):
                 path = materialize(root/name, dict(kind='trace', model='prefix_lineage',
@@ -40,7 +40,7 @@ class ExactLineageTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root/'model.xz').write_bytes(raw)
-            params = dict(path='model.xz', sha256=hashlib.sha256(raw).hexdigest(),
+            params = dict(path='model.xz',
                 count=len(events), output_tokens=8192, priority=50,
                 output_distribution=dict(kind='geometric', mean_tokens=400, seed=20260922))
             def project(name, parameters, limit=None):

@@ -25,7 +25,7 @@ class TrafficSourceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d);model=root/'model.xz';model.write_bytes(raw)
             spec=dict(kind='trace',model='prefix_lineage',version='2',parameters=dict(
-                path=str(model),sha256=hashlib.sha256(raw).hexdigest(),count=4,output_tokens=8,priority=50))
+                path=str(model),count=4,output_tokens=8,priority=50))
             target=materialize(root/'trace.jsonl',spec,'r',root)
             rows=[json.loads(l) for l in target.read_text().splitlines()]
             self.assertEqual([r['ts'] for r in rows],[0,51,999,1000])

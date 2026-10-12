@@ -31,7 +31,7 @@ def main(argv=None):
         model = args.lineage_model.resolve()
         manifest = read_manifest(model)
         spec = dict(kind="trace", model="prefix_lineage", parameters=dict(
-            path=model.name, sha256=manifest["sha256"], count=manifest["count"],
+            path=model.name,  count=manifest["count"],
             output_tokens=args.output_tokens, priority=args.priority,
         ))
         base_dir = model.parent

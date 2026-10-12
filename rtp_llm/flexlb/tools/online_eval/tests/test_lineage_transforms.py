@@ -18,7 +18,7 @@ class LineageTransformsTest(unittest.TestCase):
         model = root / f'v{version}.xz'
         model.write_bytes(raw)
         spec = dict(kind='trace', model='prefix_lineage', version=str(version),
-            parameters=dict(path=model.name, sha256=hashlib.sha256(raw).hexdigest(),
+            parameters=dict(path=model.name,
                 count=2, output_tokens=9, priority=50, max_input_tokens=cap))
         output = root / f'v{version}.jsonl'
         materialize(output, spec, 'sample', root, max_requests=limit)
@@ -57,7 +57,7 @@ class LineageTransformsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             spec = dict(kind='trace', model='prefix_lineage', version='2',
-                parameters=dict(path=str(model), sha256=manifest['sha256'],
+                parameters=dict(path=str(model),
                     count=manifest['count'], output_tokens=8, priority=50,
                     max_input_tokens=32768))
             output = root / 'filtered.jsonl'
@@ -67,6 +67,17 @@ class LineageTransformsTest(unittest.TestCase):
             self.assertEqual(result['length_filter']['excluded_before_limit'], expected_excluded)
             self.assertTrue(all(json.loads(line)['il'] <= 32768
                 for line in output.read_text().splitlines()))
+
+    def test_source_digest_is_observed_without_an_authored_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for index, parent in enumerate((0, -1)):
+                root = Path(directory) / str(index)
+                root.mkdir()
+                raw = encode_v2([[0, 512, -1, 0], [1, 512, parent, 1 if parent == 0 else 0]])
+                _, manifest = self._project(root, raw, 2)
+                digest = hashlib.sha256(raw).hexdigest()
+                self.assertEqual(manifest['model_sha256'], digest)
+                self.assertEqual(manifest['transformations']['source_sha256'], digest)
 
     def test_invalid_filter_fails_loud(self):
         with tempfile.TemporaryDirectory() as directory:

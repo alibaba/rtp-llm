@@ -19,7 +19,6 @@ from traffic.output_sampling import output_sampler, output_semantics
 @dataclass(frozen=True)
 class LineageProjection:
     path: str
-    sha256: str
     count: int
     output_tokens: int
     priority: int
@@ -28,14 +27,14 @@ class LineageProjection:
 
     @classmethod
     def read(cls, value):
-        required = {"path", "sha256", "count", "output_tokens", "priority"}
+        required = {"path", "count", "output_tokens", "priority"}
         optional = {"max_input_tokens", "output_distribution"}
         if not isinstance(value, dict) or not required <= set(value) or set(value) - required - optional:
-            raise ValueError("lineage requires pinned model and output settings")
+            raise ValueError("lineage requires model path, count and output settings")
         result = cls(**value)
-        if (type(result.path) is not str or type(result.sha256) is not str
+        if (type(result.path) is not str
                 or type(result.count) is not int or result.count < 1):
-            raise ValueError("invalid pinned lineage identity/count")
+            raise ValueError("invalid lineage path/count")
         cap = result.max_input_tokens
         if cap is not None and (type(cap) is not int or not 1 <= cap <= 2147483647):
             raise ValueError("invalid input length filter")
@@ -45,7 +44,7 @@ class LineageProjection:
         return result
 
     def to_dict(self):
-        result = dict(path=self.path, sha256=self.sha256, count=self.count,
+        result = dict(path=self.path, count=self.count,
                       output_tokens=self.output_tokens, priority=self.priority)
         if self.max_input_tokens is not None:
             result["max_input_tokens"] = self.max_input_tokens
@@ -66,8 +65,7 @@ class LineageProjector:
         sampler = output_sampler(parameters.to_dict())
         cap = parameters.max_input_tokens
         raw = (Path(base_dir) / parameters.path).read_bytes()
-        if hashlib.sha256(raw).hexdigest() != parameters.sha256:
-            raise ValueError('lineage model checksum mismatch')
+        source_sha256 = hashlib.sha256(raw).hexdigest()
         model = self.decode(raw)
         metadata = model.metadata
         if type(parameters.count) is not int or len(model.events) != parameters.count:
@@ -100,8 +98,8 @@ class LineageProjector:
                 selected=selected, excluded_after_limit=max(0, len(model.events)-selected-excluded)))
         result = dict(source_codec=dict(name="prefix_lineage", version=metadata.version),
             realism=metadata.realism, tail=metadata.tail.value, arrival=metadata.arrival,
-            model_sha256=parameters.sha256, provenance=metadata.provenance,
-            transformations=dict(source_sha256=parameters.sha256, applied=transformations,
+            model_sha256=source_sha256, provenance=metadata.provenance,
+            transformations=dict(source_sha256=source_sha256, applied=transformations,
                 source_requests=len(model.events), selected_requests=selected))
         if cap is not None:
             result['length_filter'] = dict(max_input_tokens=cap, selected=selected,

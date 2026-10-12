@@ -120,7 +120,7 @@ class FrontendPrefixFitTest(unittest.TestCase):
                     version="3",
                     parameters=dict(
                         path=str(model),
-                        sha256=hashlib.sha256(model.read_bytes()).hexdigest(),
+
                         count=3,
                         output_tokens=420,
                         priority=50,

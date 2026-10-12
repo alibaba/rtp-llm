@@ -144,7 +144,7 @@ def fit(a):
     source = json.loads(a.source_info.read_text()) if a.source_info else None
     model_path.with_suffix('.manifest.json').write_text(
         json.dumps(build_manifest(model_path, source), indent=2) + '\n')
-    write_trace(plan, dict(path=str(model_path.resolve()),sha256=hashlib.sha256(raw).hexdigest(),
+    write_trace(plan, dict(path=str(model_path.resolve()),
         count=len(model),output_tokens=a.output_tokens,priority=50),a.namespace,a.out)
     digest = hashlib.sha256()
     with plan.open("rb") as f:
