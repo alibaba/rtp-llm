@@ -180,18 +180,42 @@ per_tensor_absmax_kernel(const T* __restrict__ input, float* __restrict__ output
     max_value = blockReduceMax(max_value);
 
     if (tid == 0) {
-        atomicMaxFloat(output_s, max_value / tensorrt_llm::common::FP8_E4M3_MAX);
+        // Every scratch entry is overwritten, including blocks with no input.
+        output_s[blockIdx.x] = max_value / tensorrt_llm::common::FP8_E4M3_MAX;
     }
 }
 
-template<typename T, typename DST_DTYPE>
+template<typename T, typename DST_DTYPE, bool REDUCE_SCALE = false>
 __global__ void per_tensor_quant_fp8_kernel(const T* __restrict__ input,
                                             DST_DTYPE* __restrict__ output,
                                             const float* __restrict__ scale,
-                                            const int64_t num_elements) {
+                                            const int64_t num_elements,
+                                            const int num_scales = 1,
+                                            float* output_scale = nullptr) {
     const int   gid        = blockIdx.x * blockDim.x + threadIdx.x;
     const int   grid_size  = blockDim.x * gridDim.x;
-    float       safe_scale = fmax(1e-9, *scale);
+    float tensor_scale;
+    if constexpr (REDUCE_SCALE) {
+        // Each CTA obtains the same global scale without a grid-wide barrier.
+        // The preceding kernel writes all scratch entries on this stream.
+        __shared__ float reduced_scale;
+        float local_scale = 0.0f;
+        for (int i = threadIdx.x; i < num_scales; i += blockDim.x) {
+            local_scale = fmaxf(local_scale, scale[i]);
+        }
+        local_scale = blockReduceMax(local_scale);
+        if (threadIdx.x == 0) {
+            reduced_scale = local_scale;
+            if (blockIdx.x == 0) {
+                *output_scale = local_scale;
+            }
+        }
+        __syncthreads();
+        tensor_scale = reduced_scale;
+    } else {
+        tensor_scale = *scale;
+    }
+    float       safe_scale = fmax(1e-9, tensor_scale);
     const float scale_val  = 1.0f / safe_scale;
 
     // We want to store 128 bits of data at a time. 16 = 128 / 8 bits
@@ -382,21 +406,36 @@ void per_tensor_quant_fp8(torch::Tensor input, torch::Tensor output_q, torch::Te
     assert(num_elements % (16 / input.element_size()) == 0);
     const int num_blocks = min((num_elements + block_size - 1) / block_size, 1024);
 
+    // Limit partial scales without reducing quantization parallelism.
+    const int absmax_blocks = min(num_blocks, 512);
+
     dim3 grid(num_blocks);
+    dim3 absmax_grid(absmax_blocks);
     dim3 block(block_size);
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
+    // PyTorch's allocator keeps this storage valid for asynchronous work on the
+    // current stream, including CUDA Graph capture/replay.
+    auto partial_scales = is_static ? torch::Tensor() : torch::empty({absmax_blocks}, output_s.options());
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FLOAT_FP16(input.scalar_type(), scalar_t, [&] {
-        if (is_static == false) {
-            per_tensor_absmax_kernel<scalar_t><<<grid, block, 0, stream>>>(
-                static_cast<scalar_t*>(input.data_ptr()), static_cast<float*>(output_s.data_ptr()), num_elements);
+        if (!is_static) {
+            per_tensor_absmax_kernel<scalar_t><<<absmax_grid, block, 0, stream>>>(
+                static_cast<scalar_t*>(input.data_ptr()), partial_scales.data_ptr<float>(), num_elements);
+            per_tensor_quant_fp8_kernel<scalar_t, __nv_fp8_e4m3, true><<<grid, block, 0, stream>>>(
+                static_cast<scalar_t*>(input.data_ptr()),
+                static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
+                partial_scales.data_ptr<float>(),
+                num_elements,
+                absmax_blocks,
+                output_s.data_ptr<float>());
+        } else {
+            per_tensor_quant_fp8_kernel<scalar_t, __nv_fp8_e4m3><<<grid, block, 0, stream>>>(
+                static_cast<scalar_t*>(input.data_ptr()),
+                static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
+                output_s.data_ptr<float>(),
+                num_elements);
         }
-        per_tensor_quant_fp8_kernel<scalar_t, __nv_fp8_e4m3>
-            <<<grid, block, 0, stream>>>(static_cast<scalar_t*>(input.data_ptr()),
-                                         static_cast<__nv_fp8_e4m3*>(output_q.data_ptr()),
-                                         static_cast<float*>(output_s.data_ptr()),
-                                         num_elements);
         return true;
     });
 }

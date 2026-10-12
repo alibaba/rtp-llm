@@ -55,6 +55,14 @@ py_test (
 )
 
 py_test (
+    name = "per_tensor_scaled_fp8_quant_fused_test",
+    srcs = ["per_tensor_scaled_fp8_quant_fused_test.py"],
+    deps = py_test_deps,
+    tags = ["open_skip"],
+    exec_properties = {'gpu':'A10'},
+)
+
+py_test (
     name = "per_token_scaled_fp8_quant_test",
     srcs = ["per_token_scaled_fp8_quant_test.py"],
     deps = py_test_deps,

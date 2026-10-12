@@ -224,7 +224,7 @@ def scaled_fp8_per_tensor_quant(
 
     if scale is None:
         # dynamic quant
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+        scale = torch.empty(1, device=input.device, dtype=torch.float32)
         per_tensor_quant_fp8(input, output, scale, False)
     else:
         # static quant
