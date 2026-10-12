@@ -429,7 +429,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        const auto block_budget = blockBudgetForConfig(config);
+        auto block_budget = blockBudgetForConfig(config);
+        addBudgetBytes(block_budget.paged_block_bytes, model_config.auxiliary_paged_cache_bytes_per_block);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
