@@ -1,6 +1,13 @@
 py_test(
     name = "rope_applier_test",
     srcs = ["rope_applier_test.py"],
+    # The factory import chain pulls CUDA ops (libcuda), so this test needs a
+    # GPU worker even though it only exercises CPU-side selection logic.
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
     deps = [
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],

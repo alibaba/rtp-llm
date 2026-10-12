@@ -19,6 +19,7 @@ class ModelArgs:
         "ckpt_path",
         "tokenizer_path",
         "ptuning_path",
+        "decision_source",
         "extra_data_path",
         "local_extra_data_path",
         "model_type",
@@ -38,6 +39,10 @@ class ModelArgs:
         self.ckpt_path: str = ""
         self.tokenizer_path: str = ""
         self.ptuning_path: str = ""
+        # Decision checkpoints whose original release keeps the head/adapter
+        # beside a separate base checkpoint (e.g. kev-0.5b's head.pt adapter
+        # directory) are served by pointing this at that directory.
+        self.decision_source: str = ""
 
         # Model type and task
         self.model_type: str = ""

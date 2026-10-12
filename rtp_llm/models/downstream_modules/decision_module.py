@@ -1,7 +1,9 @@
 """Unified decision-head downstream module.
 
-Serves any checkpoint whose ``config.json`` carries a ``"decision"`` block
-(written by rtp_llm/tools/convert_decision_head.py).  Two head
+Serves any checkpoint whose ``config.json`` carries a ``"decision"`` block,
+or one of the recognized original release layouts (JEV-27B-VL's
+``adapter_vllm`` verbalizer head, kev-0.5b's ``head.pt`` pointer head; see
+decision_sources.py).  Two head
 families are supported through one code path:
 
 * ``linear``  -- a single [num_labels, hidden] readout over answer codes
@@ -209,9 +211,26 @@ class DecisionHandler(CustomHandler):
         if self.head_type == HEAD_TYPE_LINEAR:
             self.weight_key = settings["head_weight"]
             self.bias_key = settings.get("head_bias")
-            self.num_labels = int(settings["num_labels"])
+            # JEV native layout: the head is lm_head rows of the verbalizer
+            # token ids plus inline bias values; no head tensor is
+            # materialized in the checkpoint.
+            self.label_token_ids = (
+                [int(t) for t in settings["label_token_ids"]]
+                if settings.get("label_token_ids")
+                else None
+            )
+            self.inline_bias = (
+                torch.tensor(settings["head_bias"], dtype=torch.float32)
+                if isinstance(settings.get("head_bias"), list)
+                else None
+            )
+            effective_bias = self.bias_key or self.inline_bias is not None
+            self.num_labels = int(
+                settings.get("num_labels")
+                or (len(self.label_token_ids) if self.label_token_ids else 0)
+            )
             self.linear = torch.nn.Linear(
-                config.hidden_size, self.num_labels, bias=self.bias_key is not None
+                config.hidden_size, self.num_labels, bias=effective_bias
             )
             if self.prompt_format == PROMPT_FORMAT_DECIDER:
                 # decider packs every question into one sequence and reads each
@@ -223,9 +242,11 @@ class DecisionHandler(CustomHandler):
                     settings.get("decider_temperature", self.temperature)
                 )
         elif self.head_type == HEAD_TYPE_POINTER:
-            self.query_weight_key = settings["head_query_weight"]
+            # kev native layout: the pointer tensors ride inline from head.pt.
+            self.head_tensors = settings.get("head_tensors")
+            self.query_weight_key = settings.get("head_query_weight")
             self.query_bias_key = settings.get("head_query_bias")
-            self.key_weight_key = settings["head_key_weight"]
+            self.key_weight_key = settings.get("head_key_weight")
             self.key_bias_key = settings.get("head_key_bias")
             marker_ids = settings.get("marker_token_ids") or {}
             try:
@@ -238,11 +259,12 @@ class DecisionHandler(CustomHandler):
                 ) from e
             self.proj_dim = int(settings["proj_dim"])
             self.scale = float(settings.get("scale", 1.0 / math.sqrt(self.proj_dim)))
+            has_bias = self.head_tensors is not None or self.query_bias_key
             self.query = torch.nn.Linear(
-                config.hidden_size, self.proj_dim, bias=self.query_bias_key is not None
+                config.hidden_size, self.proj_dim, bias=bool(has_bias)
             )
             self.key = torch.nn.Linear(
-                config.hidden_size, self.proj_dim, bias=self.key_bias_key is not None
+                config.hidden_size, self.proj_dim, bias=bool(has_bias)
             )
         elif self.head_type == HEAD_TYPE_JOINT:
             self.head_config = {
@@ -263,12 +285,19 @@ class DecisionHandler(CustomHandler):
 
     def custom_weight_info(self) -> List[CustomAtomicWeight]:
         if self.head_type == HEAD_TYPE_LINEAR:
-            keys = [self.weight_key] + ([self.bias_key] if self.bias_key else [])
+            if self.label_token_ids is not None:
+                # the verbalizer head reads backbone lm_head rows (reranker
+                # precedent); the row selection happens in init
+                keys = [self.weight_key]
+            else:
+                keys = [self.weight_key] + ([self.bias_key] if self.bias_key else [])
         elif self.head_type == HEAD_TYPE_JOINT:
             keys = [self.lexical_weight_key] + [
                 self.joint_prefix + name for name, _ in self.joint.named_parameters()
             ]
         else:
+            if self.head_tensors is not None:
+                return []
             keys = [self.query_weight_key, self.key_weight_key]
             keys += [self.query_bias_key] if self.query_bias_key else []
             keys += [self.key_bias_key] if self.key_bias_key else []
@@ -281,6 +310,15 @@ class DecisionHandler(CustomHandler):
         data_type = to_torch_dtype(self.config_.data_type)
         if self.head_type == HEAD_TYPE_LINEAR:
             weight = tensor_map[self.weight_key]
+            if self.label_token_ids is not None:
+                # JEV verbalizer head: select lm_head rows for the label ids
+                # and keep the fitted bias values inline.
+                rows = weight.index_select(
+                    0, torch.tensor(self.label_token_ids, dtype=torch.long, device=weight.device)
+                ).contiguous()
+                weight = rows
+                if self.inline_bias is not None:
+                    self.linear.bias.data = self.inline_bias.to(weight.device)
             if weight.ndim != 2 or weight.shape != (self.num_labels, self.config_.hidden_size):
                 raise ValueError(
                     f"decision head weight must be [{self.num_labels}, "
@@ -294,23 +332,39 @@ class DecisionHandler(CustomHandler):
                 self.linear.bias.data = bias
             self.linear = self.linear.to(data_type).eval().to(self.device)
         elif self.head_type == HEAD_TYPE_POINTER:
-            for key, module in (
-                (self.query_weight_key, self.query),
-                (self.key_weight_key, self.key),
-            ):
-                weight = tensor_map[key]
-                if weight.ndim != 2 or weight.shape != (self.proj_dim, self.config_.hidden_size):
-                    raise ValueError(
-                        f"pointer head {key} must be [{self.proj_dim}, "
-                        f"{self.config_.hidden_size}], got {list(weight.shape)}"
-                    )
-                module.weight.data = weight
-            for bias_key, module in (
-                (self.query_bias_key, self.query),
-                (self.key_bias_key, self.key),
-            ):
-                if bias_key:
-                    module.bias.data = tensor_map[bias_key]
+            if self.head_tensors is not None:
+                # kev native head.pt: the pointer tensors ride inline.
+                state = self.head_tensors
+                for key, module in (("q", self.query), ("k", self.key)):
+                    w = state[f"{key}.weight"]
+                    if w.ndim != 2 or tuple(w.shape) != (
+                        self.proj_dim, self.config_.hidden_size
+                    ):
+                        raise ValueError(
+                            f"pointer head {key}.weight must be "
+                            f"[{self.proj_dim}, {self.config_.hidden_size}], "
+                            f"got {tuple(w.shape)}"
+                        )
+                    module.weight.data = w
+                    module.bias.data = state[f"{key}.bias"]
+            else:
+                for key, module in (
+                    (self.query_weight_key, self.query),
+                    (self.key_weight_key, self.key),
+                ):
+                    weight = tensor_map[key]
+                    if weight.ndim != 2 or weight.shape != (self.proj_dim, self.config_.hidden_size):
+                        raise ValueError(
+                            f"pointer head {key} must be [{self.proj_dim}, "
+                            f"{self.config_.hidden_size}], got {list(weight.shape)}"
+                        )
+                    module.weight.data = weight
+                for bias_key, module in (
+                    (self.query_bias_key, self.query),
+                    (self.key_bias_key, self.key),
+                ):
+                    if bias_key:
+                        module.bias.data = tensor_map[bias_key]
             self.query = self.query.to(data_type).eval().to(self.device)
             self.key = self.key.to(data_type).eval().to(self.device)
         else:
@@ -910,7 +964,29 @@ class DecisionModule(CustomModule):
         super().__init__(config, tokenizer)
         settings = load_decision_settings(self.config_.ckpt_path)
         if settings is None:
-            raise ValueError(f"no {DECISION_CONFIG_KEY!r} block in checkpoint config.json")
+            # No in-checkpoint contract: try the original release layouts
+            # (JEV adapter_vllm inside the checkpoint, kev via
+            # --decision_source) before giving up.
+            from rtp_llm.models.downstream_modules.decision_sources import (
+                detect_native_decision_source,
+                resolve_jev_labels,
+                resolve_kev_markers,
+            )
+
+            settings = detect_native_decision_source(
+                self.config_.ckpt_path,
+                getattr(self.config_, "decision_source", "") or None,
+            )
+            if settings is None:
+                raise ValueError(
+                    f"no {DECISION_CONFIG_KEY!r} block in checkpoint config.json "
+                    f"and no recognized native decision release layout at "
+                    f"{self.config_.ckpt_path!r}"
+                )
+            if settings.pop("_native_source") == "jev":
+                settings = resolve_jev_labels(settings, self.tokenizer_)
+            else:
+                settings = resolve_kev_markers(settings, self.tokenizer_)
         self.settings = settings
         self.renderer = DecisionRenderer(self.config_, self.tokenizer_, settings)
         self.handler = DecisionHandler(self.config_, settings)
@@ -921,8 +997,18 @@ def create_decision_module(
 ) -> Optional[DecisionModule]:
     settings = load_decision_settings(config.ckpt_path)
     if settings is None:
-        return None
+        from rtp_llm.models.downstream_modules.decision_sources import (
+            detect_native_decision_source,
+        )
+
+        if (
+            detect_native_decision_source(
+                config.ckpt_path, getattr(config, "decision_source", "") or None
+            )
+            is None
+        ):
+            return None
     if tokenizer is None:
         raise ValueError("decision module requires a tokenizer")
-    logging.info("loading decision module (head_type=%s)", settings.get("head_type"))
+    logging.info("loading decision module (head_type=%s)", (settings or {}).get("head_type"))
     return DecisionModule(config, tokenizer)

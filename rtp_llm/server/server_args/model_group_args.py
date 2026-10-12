@@ -15,6 +15,15 @@ def init_model_group_args(parser, model_args):
         help="分词器的路径",
     )
     model_group.add_argument(
+        "--decision_source",
+        env_name="DECISION_SOURCE",
+        bind_to=(model_args, "decision_source"),
+        type=str,
+        default="",
+        help="原始 decision 发布的 adapter 目录（如 kev 的 head.pt 目录）；"
+        "ckpt_path 指向基座时由此目录合成 decision 配置",
+    )
+    model_group.add_argument(
         "--act_type",
         env_name="ACT_TYPE",
         bind_to=(model_args, "act_type"),

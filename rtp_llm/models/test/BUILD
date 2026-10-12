@@ -49,8 +49,8 @@ py_test(
 )
 
 py_test(
-    name = "convert_decision_head_jev_vl_test",
-    srcs = ["convert_decision_head_jev_vl_test.py"],
+    name = "decision_sources_test",
+    srcs = ["decision_sources_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
 

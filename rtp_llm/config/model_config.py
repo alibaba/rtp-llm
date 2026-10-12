@@ -2,6 +2,8 @@ import json
 import logging
 import math
 import os
+import struct
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
@@ -130,6 +132,7 @@ class ModelConfig(CppModelConfig):
         "eplb_config",
         "ckpt_path",
         "tokenizer_path",
+        "decision_source",
         "position_ids_style",
         "pre_seq_len",
         "use_kvcache",
@@ -606,6 +609,9 @@ class ModelConfig(CppModelConfig):
             ""  # Model name (also set to engine_config.runtime_config.model_name)
         )
         self.lora_infos: Dict[str, str] = {}  # Python-only (C++ lora code removed)
+        # Original-release decision adapter directory (kev head.pt layout);
+        # empty means the decision contract lives in the checkpoint itself.
+        self.decision_source: str = ""
 
         # Model architecture fields
         self.inter_size: int = 0  # FFN intermediate size (for regular FFN layers)
@@ -819,6 +825,29 @@ class ModelConfig(CppModelConfig):
         )
 
 
+def _checkpoint_has_visual_weights(ckpt_path: str) -> bool:
+    """True when the checkpoint index (or any root shard) carries visual.* tensors."""
+    index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as reader:
+            weight_map = json.load(reader).get("weight_map") or {}
+        return any(name.startswith("visual.") for name in weight_map)
+    for pattern in ("*.safetensors", "*.bin"):
+        for shard in Path(ckpt_path).glob(pattern):
+            try:
+                with open(shard, "rb") as f:
+                    if pattern.endswith("safetensors"):
+                        header_len = struct.unpack("<Q", f.read(8))[0]
+                        names = json.loads(f.read(header_len)).keys()
+                    else:
+                        continue
+                if any(name.startswith("visual.") for name in names):
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def get_task_type_from_ckpt_path(
     task_type: Optional[TaskType],
     ckpt_path: str,
@@ -837,7 +866,6 @@ def get_task_type_from_ckpt_path(
     if task_type is not None:
         logging.info(f"use {task_type} from args")
         return task_type
-
     def _is_dense_embedding_task(ckpt_path: str) -> bool:
         def _check_is_sentence_transformer_repo() -> bool:
             if os.path.exists(
@@ -981,6 +1009,7 @@ def build_model_config(
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
+    model_config.decision_source = model_args.decision_source
     model_config.model_type = model_args.model_type
     if vit_config:
         model_config.extra_data_path = vit_config.extra_data_path
@@ -1003,6 +1032,21 @@ def build_model_config(
         model_config.ckpt_path,
         embedding_config,
     )
+
+    # Text-only decision deployments over VL-family checkpoints (JEV-27B-VL
+    # original release) must not boot the multimodal engine: the config
+    # carries vision token ids but the release ships no visual weights, so
+    # the phantom vision tower would crash at load.
+    if (
+        model_config.task_type == TaskType.SEQ_CLASSIFICATION
+        and model_config.mm_model_config.is_multimodal
+        and not _checkpoint_has_visual_weights(model_config.ckpt_path)
+    ):
+        logging.info(
+            "decision deployment on a vision-family config without visual "
+            "weights: keeping the text-only engine"
+        )
+        model_config.mm_model_config.is_multimodal = False
 
     # Set quantization from quantization_config
     if quantization_config is not None:

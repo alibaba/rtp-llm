@@ -155,9 +155,9 @@ def cuda13_suites():
 
     # Decision models: the JEV-27B-VL case exercises the /v1/classifier
     # decision schema (document + typed questions -> per-question
-    # probabilities) through the unified decision module; its serving copy
-    # lives on the shared 3fs models volume (converted by
-    # rtp_llm/tools/convert_decision_head.py).
+    # probabilities) through the unified decision module; the original
+    # release layout is served in place (LoRA via --lora_info, verbalizer
+    # head synthesized from adapter_vllm/decision_head.json).
     native.test_suite(
         name = "smoke_sm120_qwen35_decision_models",
         tests = [
