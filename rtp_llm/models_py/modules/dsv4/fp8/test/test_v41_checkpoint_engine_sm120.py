@@ -109,7 +109,7 @@ def canonical_attention_profile(profile):
     # Compact aliases keep the longest checkpoint trace name within 255 bytes.
     return (
         profile[:-2] + "_j"
-        if profile.endswith(("_s", "_f", "_c", "_m", "_n"))
+        if profile.endswith(("_s", "_f", "_c", "_m", "_n", "_w"))
         else profile
     )
 
@@ -128,6 +128,20 @@ def checkpoint_collapse(collapse, maintained):
         yield
 
 
+@contextmanager
+def checkpoint_post(post, maintained):
+    with mhc_post_reference(post and not maintained), (
+        patch.object(
+            delayed_hc,
+            "post_delayed",
+            side_effect=AssertionError("Maintained post reached default dispatch"),
+        )
+        if maintained
+        else nullcontext()
+    ):
+        yield
+
+
 def run_rank(
     rank,
     port,
@@ -139,6 +153,7 @@ def run_rank(
     context=256,
     maintained_attention=False,
     maintained_collapse=False,
+    maintained_post=False,
 ):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
@@ -199,6 +214,10 @@ def run_rank(
         maintained_collapse and not (maintained_attention and compare_collapse)
     ):
         raise ValueError("Maintained collapse requires qualified composed controls")
+    if type(maintained_post) is not bool or (
+        maintained_post and not (maintained_collapse and compare_post)
+    ):
+        raise ValueError("Maintained post requires qualified composed controls")
     if compare_attention and not (compare_projection and compare_block_norm):
         raise ValueError("Attention comparison requires the qualified W13 composition")
     if compare_projection and not compare_router:
@@ -358,7 +377,10 @@ def run_rank(
             raise ValueError("Attention recipes require the final eager W13 profile")
         profiles.extend(base[:-2] + suffix for suffix in ("_s", "_f", "_c"))
         if maintained_attention:
-            profiles = [base[:-2] + ("_n" if maintained_collapse else "_m")]
+            profiles = [
+                base[:-2]
+                + ("_w" if maintained_post else "_n" if maintained_collapse else "_m")
+            ]
         if any(len(profile.encode()) > 255 for profile in profiles):
             raise ValueError(
                 "Attention trace profile exceeds the filesystem name limit"
@@ -453,6 +475,8 @@ def run_rank(
                 config.deepseek_v41_config.update(MAINTAINED_ATTENTION_CHOICES)
             if maintained_collapse:
                 config.deepseek_v41_config["mhc_collapse_mode"] = "ordered_fp32"
+            if maintained_post:
+                config.deepseek_v41_config["mhc_post_mode"] = "ordered_fp32"
             parallelism, loader = make_loader(config, kv_config, 8, rank)
             started = time.monotonic()
             weights = loader.load_weights(f"cuda:{rank}")
@@ -546,6 +570,26 @@ def run_rank(
                                 full_nas=full,
                                 mhc_collapse_mode="ordered_fp32",
                                 diagnostic_collapse_hook=False,
+                            )
+                        ),
+                        flush=True,
+                    )
+                if maintained_post:
+                    assert model._mhc_post_mode == "ordered_fp32"
+                    for layer in model.v4.layers:
+                        assert layer.attn_hc.post_mode == "ordered_fp32"
+                        assert layer.ffn_hc.post_mode == "ordered_fp32"
+                    model._check_execution_config()
+                    print(
+                        "DSV41_MAINTAINED_POST_OWNER "
+                        + json.dumps(
+                            dict(
+                                rank=rank,
+                                layers=len(model.v4.layers),
+                                full_nas=full,
+                                mhc_post_mode="ordered_fp32",
+                                mhc_collapse_mode="ordered_fp32",
+                                diagnostic_post_hook=False,
                             )
                         ),
                         flush=True,
@@ -772,6 +816,9 @@ def run_rank(
                                 else {}
                             ),
                         }
+                        if maintained_post:
+                            post_metadata.pop("mhc_post_reference", None)
+                            post_metadata["mhc_post_mode"] = "ordered_fp32"
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
                 ) as snapshots, tp8_projection(
@@ -789,8 +836,9 @@ def run_rank(
                     down,
                     routed=routed_down,
                     kernel=reference_kernel,
-                ), mhc_post_reference(
+                ), checkpoint_post(
                     post,
+                    maintained_post,
                 ), engram_projection_reference(
                     engram,
                     kernel=reference_kernel,
@@ -1118,6 +1166,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         context=256,
         maintained_attention=False,
         maintained_collapse=False,
+        maintained_post=False,
     ):
         self.assertEqual(torch.cuda.device_count(), 8)
         with socket.socket() as sock:
@@ -1135,6 +1184,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 context,
                 maintained_attention,
                 maintained_collapse,
+                maintained_post,
             ),
             nprocs=8,
             join=True,
@@ -1147,6 +1197,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         *,
         maintained_attention=False,
         maintained_collapse=False,
+        maintained_post=False,
     ):
         torch.manual_seed(41990)
         with tempfile.TemporaryDirectory() as temporary:
@@ -1179,6 +1230,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 context=context,
                 maintained_attention=maintained_attention,
                 maintained_collapse=maintained_collapse,
+                maintained_post=maintained_post,
             )
 
     def test_bounded_checkpoint_cold_engine(self):
@@ -1202,6 +1254,17 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
     def test_bounded_checkpoint_maintained_collapse(self):
         self.run_bounded_checkpoint(
             9, maintained_attention=True, maintained_collapse=True
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1",
+        "maintained post requires the qualified composed controls",
+    )
+    def test_bounded_checkpoint_maintained_post(self):
+        self.run_bounded_checkpoint(
+            9, maintained_attention=True, maintained_collapse=True, maintained_post=True
         )
 
     def test_two_page_bounded_checkpoint_cold_decode(self):
@@ -1240,6 +1303,18 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
 
     @unittest.skipUnless(
         os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1",
+        "full maintained post requires admission and qualified controls",
+    )
+    def test_full_nas_checkpoint_maintained_post(self):
+        self.run_full_checkpoint(
+            9, maintained_attention=True, maintained_collapse=True, maintained_post=True
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
         and os.environ.get("DSV41_TEST_TRACE_DIR"),
         "full checkpoint trace requires explicit admission and a trace directory",
     )
@@ -1247,7 +1322,12 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         self.run_full_checkpoint(3)
 
     def run_full_checkpoint(
-        self, new_tokens, *, maintained_attention=False, maintained_collapse=False
+        self,
+        new_tokens,
+        *,
+        maintained_attention=False,
+        maintained_collapse=False,
+        maintained_post=False,
     ):
         from transformers import AutoTokenizer
 
@@ -1354,6 +1434,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 new_tokens=new_tokens,
                 maintained_attention=maintained_attention,
                 maintained_collapse=maintained_collapse,
+                maintained_post=maintained_post,
             )
 
 
