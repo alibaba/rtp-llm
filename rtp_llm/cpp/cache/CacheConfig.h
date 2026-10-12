@@ -34,16 +34,26 @@ inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std:
 inline uint32_t boundedActiveTailPhysicalBlockCount(const CacheGroupPolicy& policy,
                                                     const RuntimeConfig&    runtime_config,
                                                     const std::string&      tag) {
-    RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::SWA && !policy.enable_prefix_reuse
-                                && policy.active_tail_blocks > 0,
-                            "bounded active-tail pool requires non-reused SWA policy for tag=%s",
+    RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::SWA && policy.active_tail_blocks > 0
+                                && (!policy.enable_prefix_reuse || policy.sliding_window_size > 0),
+                            "bounded active-tail pool requires SWA policy with a positive reuse window for tag=%s",
                             tag.c_str());
     const auto batch_size    = static_cast<uint64_t>(std::max<int64_t>(runtime_config.max_generate_batch_size, 1));
     const auto growth_blocks = static_cast<uint64_t>(std::max<int64_t>(runtime_config.max_block_size_per_item, 0));
+    const auto tail_blocks   = static_cast<uint64_t>(policy.active_tail_blocks);
     // This is a deployment capacity policy based on concurrent streams. Fan-out
     // sequences share the fixed pool and can still exhaust it during generation.
     // incrMalloc allocates the next extent before removeSkippedBlocks releases the old tail.
-    const auto per_request_blocks = static_cast<uint64_t>(policy.active_tail_blocks) + 2u * growth_blocks;
+    // Reused prefill also holds its starting window until forward consumes it,
+    // while allocation retains the new tail. Reserve a full tail for that lease
+    // rather than depending on prefix/block alignment to subtract one block.
+    const auto prefix_window_blocks = policy.enable_prefix_reuse ? tail_blocks : 0u;
+    RTP_LLM_CHECK_WITH_INFO(growth_blocks <= (std::numeric_limits<uint64_t>::max() - tail_blocks) / 2u,
+                            "bounded active-tail growth capacity overflows for tag=%s tail=%u growth=%lu",
+                            tag.c_str(),
+                            policy.active_tail_blocks,
+                            growth_blocks);
+    const auto per_request_blocks = tail_blocks + std::max(2u * growth_blocks, prefix_window_blocks);
     RTP_LLM_CHECK_WITH_INFO(batch_size <= (std::numeric_limits<uint32_t>::max() - 1u) / per_request_blocks,
                             "bounded active-tail capacity overflows for tag=%s tail=%u growth=%lu batch=%lu",
                             tag.c_str(),

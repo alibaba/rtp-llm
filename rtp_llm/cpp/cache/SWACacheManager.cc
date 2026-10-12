@@ -30,7 +30,9 @@ bool SWACacheManager::shouldCheckSWATailBlockIds() const {
 }
 
 bool SWACacheManager::effectiveReuseCacheForAllocation(bool enable_reuse_cache) const {
-    return enable_reuse_cache && policy().enable_prefix_reuse;
+    // Bounded groups reuse a leased tail window through BlockTree, without
+    // retaining historical step checkpoints in the request's fixed-size pool.
+    return enable_reuse_cache && policy().enable_prefix_reuse && !policy().bounded_by_active_tail;
 }
 
 int SWACacheManager::activeTailBlockCount() const {
