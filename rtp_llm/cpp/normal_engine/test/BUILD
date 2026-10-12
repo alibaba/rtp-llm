@@ -92,9 +92,13 @@ cc_test(
     data = [],
     copts = test_copts,
     # The selector suite embeds Python/Torch. Keep BoringSSL out of hashlib's
-    # OpenSSL namespace and logging globals separate from rtp_compute_ops's
-    # copies (otherwise their exit handlers double-free the same allocation).
-    linkopts = ["-Wl,--exclude-libs,libcrypto.a:libcrypto.pic.a:libssl.a:libssl.pic.a:libalog.a:libalog.pic.a:libkmonitor_client_cpp.lo:libkmonitor_client_cpp.pic.lo"],
+    # OpenSSL namespace. Localize logging state, not the entire logging archive:
+    # dependent DSOs still need exported methods such as alog::Logger::setLevel.
+    additional_linker_inputs = ["engine_logging_globals.map"],
+    linkopts = [
+        "-Wl,--exclude-libs,libcrypto.a:libcrypto.pic.a:libssl.a:libssl.pic.a",
+        "-Wl,--version-script=$(location engine_logging_globals.map)",
+    ],
     deps = [
         ":mock_engine",
         "//rtp_llm/cpp/cache",
