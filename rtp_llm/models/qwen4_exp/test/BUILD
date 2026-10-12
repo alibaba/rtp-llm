@@ -55,3 +55,9 @@ py_test(
         "gpu_count": "8",
     },
 )
+
+py_test(
+    name = "moe_fp4_test",
+    srcs = ["moe_fp4_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

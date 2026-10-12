@@ -334,3 +334,12 @@ dsv4_sm100_py_test(
     ],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "cutlass_nvfp4_executor_test",
+    srcs = ["cutlass_nvfp4_executor_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
