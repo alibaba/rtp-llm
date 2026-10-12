@@ -127,3 +127,10 @@ def test_experiment_parameter_target_must_be_selected():
     with pytest.raises(ScenarioError, match='unselected'):
         CiPlanner().build('workload', instances='cache_scale_in::default::batch-window',
                           experiment_params='{"master_performance":{"execution.timeout_s":1000}}')
+
+
+def test_runtime_preparation_tracks_only_selected_helpers():
+    plan = CiPlanner().build('workload')
+    assert plan.to_dict('workload_other')['prepare_zookeeper'] is True
+    assert plan.to_dict('workload_cache_batch')['prepare_zookeeper'] is False
+    assert plan.to_dict('workload_cache_single')['prepare_zookeeper'] is False

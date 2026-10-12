@@ -318,7 +318,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_fails_compilation_for_wrong_environment(self):
         plan = SimpleNamespace(path="stage", environment={})
-        with self.assertRaisesRegex(ValueError, "dual_standalone"):
+        with self.assertRaisesRegex(ValueError, "dual-master"):
             ha._ha_validate(dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000)), plan)
         plan.environment = {
             "master_layout": "dual_standalone",
@@ -474,7 +474,7 @@ class MasterActionsTest(unittest.TestCase):
             self.assertEqual(0, plan["resource_budget"]["max_dynamic_additions"])
             if plan["scenario_id"] == "master_ha_failover":
                 self.assertEqual(
-                    "dual_standalone", plan["environment"]["master_layout"]
+                    "dual_zookeeper", plan["environment"]["master_layout"]
                 )
                 ids = [stage["id"] for stage in plan["stages"]]
                 self.assertLess(ids.index("kill_a"), ids.index("kill_b"))

@@ -102,3 +102,12 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 外部配置按目标版本的源码或部署原文编写，由目标 jar 的解析器验证，不只替换 `schemaVersion`。发现协议、字段消费、单位与补齐默认值都须核对；不支持的组合停止测试。schema 1 的动态发现需要显式 `discovery_file` 及编入目标 jar 的 [WhaleFileDiscovery](../../../whale_mock/discovery_adapter/WhaleFileDiscovery.java)，Python 的环境桥接不会自动改造 jar。
 
 `actual-master-config.json` 是传入原文，不能当解析后回读。先验证目标制品能发现 worker 并完成完整请求，再开展版本对照。制品、适配代码和配置差异随运行归档；解释规则见[结果与指标](results.md)。
+
+
+## Master 选举配置
+
+`environment.master_layout` 支持 `single`、`dual_standalone`、`dual_zookeeper`。普通功能和性能用例使用独立调度；需要验证生产主从选举的 HA 用例使用 `dual_zookeeper`。此模式为 A/B 分配不同 loopback IP、相同 HTTP/management/gRPC 端口，选举身份与转发身份共用显式 advertised IP，启动时调用生产 `/hook/after_start` 注册选举；Linux 支持该 loopback 拓扑，本地其他系统需先准备对应地址。
+
+`environment.zookeeper` 仅用于 `dual_zookeeper`，可声明 `mode: helper` 和 `session_timeout_ms`，或声明 `mode: external`、`address`（host:port 列表，可带 chroot）与会话超时。helper 是测试依赖，独占启动并随环境回收；external 不启动或停止外部服务。每个运行使用独立的选举 role，避免不同实验共用外部 ZK 时互相选举。未配置 ZK 的普通用例不准备或启动 helper；CI 根据编译选择自动准备所需运行时。
+
+HA 的选举门禁检查唯一 leader、所有存活 Master 的领导权视图收敛、存活节点接管及重启节点回归；快照进入实验产物。独立 Master 重启验证不覆盖这些语义。测试 helper 不代表生产 ZK 集群的 quorum、网络分区或集群容灾；这些目标需要外部 ZK 环境与相应故障步骤。

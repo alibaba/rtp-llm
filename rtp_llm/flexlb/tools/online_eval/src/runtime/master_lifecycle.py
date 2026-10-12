@@ -6,8 +6,10 @@ references and incarnation history stay on that environment for cleanup.
 
 from __future__ import annotations
 import json
+import hashlib
 import os
 import time
+import urllib.request
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from flexlb_cfg import render_env
@@ -104,8 +106,10 @@ class MasterLifecycle:
         if mspec is not None:
             # Per-instance layer (HA dual-master path only — the legacy
             # single-master path keeps mspec None and never reaches here).
+            if mspec.advertised_ip is not None:
+                menv["FLEXLB_ADVERTISED_IP"] = mspec.advertised_ip
             if spec.zk_consistency is not None:
-                menv["HIPPO_ROLE"] = mspec.hippo_role or f"flexlb_ft_{spec.label}"
+                menv["HIPPO_ROLE"] = mspec.hippo_role or "flexlb_ft_" + hashlib.sha256(str(env.run_dir.resolve()).encode()).hexdigest()[:16]
                 if not env.zk_connect_string:
                     # Fail-closed: a master must never boot with
                     # needConsistency=true against a missing/dead ZK —
@@ -123,9 +127,7 @@ class MasterLifecycle:
                             # Default 10s: session expiry inside the ≤60s
                             # convergence window; widen via the
                             # zk_consistency dict for slow-CI layouts.
-                            "zkTimeoutMs": int(
-                                spec.zk_consistency.get("zkTimeoutMs", 10000)
-                            ),
+                            "zkTimeoutMs": spec.zk_consistency.session_timeout_ms,
                         },
                     },
                     separators=(",", ":"),
@@ -263,6 +265,14 @@ class MasterLifecycle:
         with startup_phase(env.run_dir, f'master/{name}', deadline):
             wait_ready(deadline, f'master/{name}/http',
                        lambda: port_accepting(port, host), process=proc)
+            if env.spec.zk_consistency is not None:
+                # Production sidecars invoke this hook to join the election.
+                # Opening the HTTP listener alone does not register a leader.
+                deadline.check()
+                with urllib.request.urlopen(f'http://{host}:{port}/hook/after_start',
+                        timeout=min(10, deadline.remaining())) as response:
+                    if response.status != 200 or response.read().decode().strip() != 'success':
+                        raise RuntimeError('Master online hook failed')
             def info():
                 status, data = http_post_json(
                     f'http://{host}:{port}/rtp_llm/master/info', {},
@@ -307,10 +317,7 @@ class MasterLifecycle:
         probed on the instance's OWN bind ip.
 
         On the Tier-2/3 same-port layout the probe against 127.0.0.2 must
-        not be confused by a sibling instance bound to 127.0.0.1 — distinct
-        addresses coexist, so only a wildcard squatter (e.g. the current
-        NettyServerBuilder.forPort gRPC bind, until the production-side
-        per-address prerequisite lands) reports the port busy on both.
+        not be confused by a sibling bound to another IP at the same port.
         """
         ports = [mspec.http_port, mspec.management(), mspec.grpc_port()]
         return [p for p in ports if port_accepting(p, mspec.bind_ip)]

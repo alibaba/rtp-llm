@@ -69,6 +69,8 @@ def make_env_spec(plan, profile, lease):
     from scenario.environment_snapshot import EnvironmentSnapshot
     snapshot = EnvironmentSnapshot.read(plan["rendered"])
     preset_perf, preset_runtime = snapshot.performance, snapshot.runtime
+    from runtime.zookeeper_config import ZooKeeperConfig
+    elected = plan.get('master_layout') == 'dual_zookeeper'
     spec = EnvSpec(
         label="scenario",
         runtime_mode="scenario",
@@ -81,12 +83,15 @@ def make_env_spec(plan, profile, lease):
         master_stable_window_s=plan.get("master_stable_window_s", 3),
         masters=(
             [
-                MasterSpec(name="A", http_port=lease["master_base"]),
-                MasterSpec(name="B", http_port=lease["master_base"] + 3),
+                MasterSpec(name="A", http_port=lease["master_base"], advertised_ip="127.0.0.1" if elected else None),
+                MasterSpec(name="B", http_port=lease["master_base"] if elected else lease["master_base"] + 3,
+                           bind_ip="127.0.0.2" if elected else "127.0.0.1",
+                           advertised_ip="127.0.0.2" if elected else None),
             ]
-            if plan.get("master_layout", "single") == "dual_standalone"
+            if plan.get("master_layout", "single") in ("dual_standalone", "dual_zookeeper")
             else []
         ),
+        zk_consistency=ZooKeeperConfig.read(plan["zookeeper"]) if elected else None,
         perf=preset_perf,
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
         master_debug_log=plan.get("master_debug_log", False),

@@ -347,7 +347,57 @@ def _wrap_inflight(ctx, params, deadline):
     )
 
 
+
+def _leadership_validate(params, plan):
+    p = validate_fields(params, plan, {'targets', 'leader'}, {'targets'})
+    if plan.environment.get('master_layout') != 'dual_zookeeper':
+        raise ValueError('leadership checks require dual_zookeeper')
+    if p['targets'] not in (['A'], ['B'], ['A', 'B']):
+        raise ValueError('leadership targets must identify the live Master group')
+    if 'leader' in p and p['leader'] not in p['targets']:
+        raise ValueError('expected leader must belong to the live group')
+    return p
+
+
+def _leadership(ctx, params, deadline):
+    from runtime.leadership import LeadershipSnapshot
+    samples = []
+    stable_since = None
+    stable_leader = None
+    artifact = ctx.artifact_dir / f'master-leadership-{ctx.resource_count}.json'
+    try:
+        while True:
+            deadline.check()
+            states = {name: LeadershipSnapshot.read(_master_json(ctx, name,
+                '/rtp_llm/schedule_snapshot', deadline, True)) for name in params['targets']}
+            leaders = [name for name, state in states.items() if state.leader]
+            samples.append({'time_s': ctx.clock(), 'leaders': leaders,
+                            'states': {name: state.to_dict() for name, state in states.items()}})
+            if len(leaders) > 1:
+                raise ValueError('multiple elected Masters observed')
+            leader = leaders[0] if leaders else None
+            address = None if leader is None else states[leader].local_host + ':' + str(ctx.env.master_specs[leader].http_port)
+            converged = leader is not None and all(state.enabled and state.master_host == address for state in states.values())
+            converged = converged and ('leader' not in params or params['leader'] == leader)
+            samples[-1]['leader'] = leader
+            if converged:
+                if stable_since is None or stable_leader != leader:
+                    stable_since, stable_leader = ctx.clock(), leader
+                if ctx.clock() - stable_since >= 1:
+                    break
+            else:
+                stable_since = None
+                stable_leader = None
+            deadline.sleep(0.25)
+    finally:
+        artifact.write_text(json.dumps(samples, indent=2) + '\n')
+    return StageOutput({'snapshot': ctx.register_resource('snapshot', samples, historical=True)},
+        [CheckResult('leadership', 'PASS', actual=samples[-1], expected=params)], [str(artifact)])
+
+
 HANDLERS = [
+    StageHandler("master_leadership", _leadership_validate, _leadership,
+                 {"snapshot": "snapshot"}, checks=frozenset({"leadership"})),
     StageHandler(
                 "master_fault",
                 _fault_validate,

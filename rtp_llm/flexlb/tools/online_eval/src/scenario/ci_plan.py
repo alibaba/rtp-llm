@@ -14,6 +14,7 @@ class CiInstance:
     identity: str
     case: str
     profile: str
+    prepare_zookeeper: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ class CiPlan:
         selected = self.identities(worker)
         selected_profiles = [profile for profile in self.profiles if any(identity.endswith("::" + profile) for identity in selected)]
         return {'ci_partition_schema_version': 2, 'job': self.job, 'suite': self.suite,
+                'prepare_zookeeper': any(instance.prepare_zookeeper for instance in self.instances if instance.identity in selected),
                 'experiment_params': json.loads(self.experiment_params), 'profiles': list(self.profiles), 'parallel': self.parallel, 'grade': self.grade,
                 'instances': list(self.identities()), 'worker': worker,
                 'selected_instances': list(selected), 'selected_profiles': selected_profiles,
@@ -74,7 +76,8 @@ class CiPlanner:
         registry = handlers()
         for profile in selected_profiles:
             plans = classify(compile_scenarios(documents, profile, registry, grade=grade), None if exact is not None else suite, catalog=self.catalog_path)
-            selected.extend(CiInstance(p['id'], p['scenario_id'], p['profile']) for p in plans
+            selected.extend(CiInstance(p['id'], p['scenario_id'], p['profile'],
+                                       p['environment'].get('zookeeper', {}).get('mode') == 'helper') for p in plans
                             if exact is None or p['id'] in exact)
         actual = {instance.identity for instance in selected}
         if exact is not None and actual != set(exact):

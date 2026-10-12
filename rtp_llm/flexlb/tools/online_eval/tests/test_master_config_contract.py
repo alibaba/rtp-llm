@@ -135,7 +135,8 @@ class MasterConfigContractTest(unittest.TestCase):
             self.assertEqual(
                 ["10.0.0.3:9000"], model["hosts"]["mock.decode.hosts.address"]
             )
-            spec.zk_consistency = {"zkTimeoutMs": 10000}
+            from runtime.zookeeper_config import ZooKeeperConfig
+            spec.zk_consistency = ZooKeeperConfig()
             result = manager.master_lifecycle._master_env(env, MasterSpec(name="A", http_port=18080))
             self.assertEqual(
                 {"needConsistency", "zookeeperConfig"},

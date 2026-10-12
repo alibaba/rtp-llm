@@ -67,11 +67,12 @@ class ZkHelperOps:
             cp_file = directory / 'classpath.txt'
             env = dict(os.environ, JAVA_HOME=str(Path(java_bin).resolve().parents[1]))
             profile = ['-Popensource,!internal']
-            ZkHelperOps._mvnw(profile + ['-pl', 'flexlb-sync', '-am', 'test-compile'], env,
-                             what='ZooKeeper test-compile')
-            ZkHelperOps._mvnw(profile + ['-pl', 'flexlb-sync', 'dependency:build-classpath',
+            # The selected terminal module is flexlb-sync. Resolve its dependencies
+            # in the same reactor that builds them; no installed snapshot needed.
+            ZkHelperOps._mvnw(profile + ['-pl', 'flexlb-sync', '-am', 'package',
+                'dependency:build-classpath', '-DskipTests', '-Dmdep.regenerateFile=true',
                 f'-Dmdep.outputFile={cp_file}', '-Dmdep.includeScope=test'], env,
-                what='ZooKeeper dependency classpath')
+                what='ZooKeeper reactor runtime preparation')
             if not cp_file.is_file() or not cp_file.read_text().strip():
                 raise RuntimeError('ZooKeeper preparation produced no classpath')
             paths = ZkHelperOps._classpath_paths(cp_file)

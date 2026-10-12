@@ -85,7 +85,7 @@ def test_http_helpers_do_not_swallow_stage_interrupt():
 def test_single_and_dual_master_share_topology_wait(tmp_path):
     from runtime.master_lifecycle import MasterLifecycle
     clock = Clock()
-    env = NS(run_dir=tmp_path, spec=NS(n_prefill=2, n_decode=1, master_stable_window_s=1))
+    env = NS(run_dir=tmp_path, spec=NS(n_prefill=2, n_decode=1, master_stable_window_s=1, zk_consistency=None))
     proc = NS(alive=lambda: True)
     data = dict(ready=True, worker_summary={'PREFILL': dict(discovered=2, alive=2),
                                            'DECODE': dict(discovered=1, alive=1)})
@@ -129,8 +129,9 @@ def test_missing_zk_preparation_fails_before_starting_mock(tmp_path):
     from runtime.environment import EnvManager
     from runtime.environment_config import EnvSpec
     from runtime.zk_helper import ZkHelperOps
+    from runtime.zookeeper_config import ZooKeeperConfig
     spec = EnvSpec(label='fixture', n_prefill=1, n_decode=1, perf={},
-                   masters=[NS(name='A')], zk_consistency={})
+                   masters=[NS(name='A')], zk_consistency=ZooKeeperConfig())
     manager = EnvManager(tmp_path, verbose=False)
     with patch.object(manager, '_start_mock') as start, patch('runtime.environment.resolve_java21', return_value='java'), patch.object(
             ZkHelperOps, 'default_launch_argv', side_effect=RuntimeError('not prepared')):
@@ -157,3 +158,34 @@ def test_process_death_during_probe_cannot_be_mistaken_for_readiness():
         return True
     with pytest.raises(RuntimeError, match='owned process died'):
         wait_ready(Clock().deadline(), 'http', foreign_port, process=process)
+
+
+def test_elected_master_invokes_production_online_hook(tmp_path):
+    from runtime.master_lifecycle import MasterLifecycle
+    from runtime.zookeeper_config import ZooKeeperConfig
+    clock = Clock()
+    env = NS(run_dir=tmp_path, spec=NS(n_prefill=1, n_decode=1,
+        master_stable_window_s=0, zk_consistency=ZooKeeperConfig()))
+    proc = NS(alive=lambda: True)
+    response = Mock(status=200)
+    response.read.return_value = b'success'
+    response.__enter__ = Mock(return_value=response)
+    response.__exit__ = Mock(return_value=False)
+    with patch('runtime.master_lifecycle.port_accepting', return_value=True), patch(
+            'runtime.master_lifecycle.http_post_json', return_value=(200, {'ready': True})), patch(
+            'runtime.master_lifecycle.urllib.request.urlopen', return_value=response) as online:
+        MasterLifecycle(Mock())._wait_master(env, proc, 'B', '127.0.0.2', 18080, clock.deadline())
+    assert online.call_args.args[0] == 'http://127.0.0.2:18080/hook/after_start'
+    assert online.call_args.kwargs['timeout'] <= 2
+
+
+def test_zookeeper_helper_keeps_stdin_open(tmp_path):
+    from runtime.environment import EnvManager
+    from runtime.zookeeper_config import ZooKeeperConfig
+    proc = NS(pid=100, alive=lambda: True)
+    env = NS(zk_helper=None, run_dir=tmp_path, zk_launch_argv=['java', 'launcher'])
+    with patch('runtime.environment.ProcessOps.start', return_value=proc) as start, patch(
+            'runtime.environment.ZkHelperOps.find_ready_connect_string', return_value='127.0.0.1:2181'):
+        EnvManager(tmp_path, verbose=False).start_zk_helper(env, deadline=Clock().deadline())
+    assert start.call_args.kwargs['keep_stdin'] is True
+    assert env.zk_connect_string == '127.0.0.1:2181'

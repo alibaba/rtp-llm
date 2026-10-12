@@ -246,7 +246,7 @@ class EnvManager:
         )
 
         # Resolve all required ZK artifacts before launching the mock cluster.
-        if spec.masters and spec.zk_consistency is not None:
+        if spec.masters and spec.zk_consistency is not None and spec.zk_consistency.mode == 'helper':
             with startup_phase(env.run_dir, 'zookeeper/artifacts', deadline):
                 override = os.environ.get(ZK_LAUNCH_CMD_ENV)
                 env.zk_launch_argv = (shlex.split(override) if override else
@@ -265,7 +265,10 @@ class EnvManager:
                 # masters can grab the election lock at startup; Tier-1
                 # (zk_consistency=None) skips it entirely.
                 if spec.zk_consistency is not None:
-                    self.start_zk_helper(env, deadline=deadline)
+                    if spec.zk_consistency.mode == 'helper':
+                        self.start_zk_helper(env, deadline=deadline)
+                    else:
+                        env.zk_connect_string = spec.zk_consistency.address
                 for mspec in spec.masters:
                     self.start_master_instance(env, mspec, deadline=deadline)
             elif spec.master_profile != "none":
@@ -395,7 +398,7 @@ class EnvManager:
             override = os.environ.get(ZK_LAUNCH_CMD_ENV)
             argv = shlex.split(override) if override else ZkHelperOps.default_launch_argv(resolve_java21())
         log_file = env.run_dir / "zk_helper.log"
-        proc = ProcessOps.start(argv, dict(os.environ), log_file, cwd=FLEXLB_DIR)
+        proc = ProcessOps.start(argv, dict(os.environ), log_file, cwd=FLEXLB_DIR, keep_stdin=True)
         env.zk_helper = proc
         deadline = startup_deadline(deadline, ZK_READY_TIMEOUT_S)
         with startup_phase(env.run_dir, 'zookeeper', deadline):
@@ -409,6 +412,8 @@ class EnvManager:
             self._log(f"stopping ZK helper (pid={env.zk_helper.pid})")
             # Contract exit path: SIGTERM (launcher also exits on stdin EOF).
             env.zk_helper.terminate()
+            if env.zk_helper.proc.stdin is not None:
+                env.zk_helper.proc.stdin.close()
             env.zk_helper = None
         env.zk_connect_string = None
 

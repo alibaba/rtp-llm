@@ -33,8 +33,8 @@ def _ha_validate(params, plan):
         from runtime.observation import capture_limits
         capture_limits(p["capture"], plan.path + ".capture")
     environment = getattr(plan, "environment", {})
-    if environment.get("master_layout", "single") != "dual_standalone":
-        raise ValueError("HA traffic requires compiled dual_standalone environment")
+    if environment.get("master_layout", "single") not in ("dual_standalone", "dual_zookeeper"):
+        raise ValueError("HA traffic requires compiled dual-master environment")
     p.setdefault("targets", ["A", "B"])
     if p["targets"] not in (["A", "B"], ["B", "A"]):
         raise ValueError("HA targets must explicitly order A and B")

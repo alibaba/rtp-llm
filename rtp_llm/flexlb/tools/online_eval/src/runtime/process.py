@@ -85,13 +85,14 @@ class ProcessOps:
 
     @staticmethod
     def start(
-        argv: list[str], env: dict, log_file: Path, cwd: Optional[Path] = None
+        argv: list[str], env: dict, log_file: Path, cwd: Optional[Path] = None, *, keep_stdin: bool = False
     ) -> ManagedProcess:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         out = open(log_file, "wb")
         try:
             proc = subprocess.Popen(
                 argv,
+                stdin=subprocess.PIPE if keep_stdin else None,
                 stdout=out,
                 stderr=subprocess.STDOUT,
                 env=env,
