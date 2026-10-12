@@ -6,6 +6,10 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <algorithm>
+#include <chrono>
+#include <thread>
 
 namespace rtp_llm {
 
@@ -92,6 +96,62 @@ TEST_F(RequestBlockBufferStoreTest, testPinnedCopyPayloadAndLifetime) {
     std::weak_ptr<void> last_owner = retained.front()->addr;
     retained.clear();
     EXPECT_TRUE(last_owner.expired());
+}
+
+TEST_F(RequestBlockBufferStoreTest, testExpiryWithContinuousAndRepeatedCompletions) {
+    auto store  = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    auto old    = std::make_shared<RequestBlockBuffer>("old");
+    auto recent = std::make_shared<RequestBlockBuffer>("recent");
+    ASSERT_TRUE(store->setRequestBlockBuffer(old));
+    ASSERT_TRUE(store->setRequestBlockBuffer(recent));
+    store->delRequestBlockBuffer("old");
+    store->delRequestBlockBuffer("recent");
+    constexpr int64_t retention_us = 1000 * 60 * 60;
+    const auto        start        = currentTimeUs();
+    auto              previous     = start;
+    int64_t           max_gap      = 0;
+    int               completed    = 0;
+    while (currentTimeUs() - start <= retention_us + 100000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        auto id = "current-" + std::to_string(completed++);
+        ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>(id)));
+        store->delRequestBlockBuffer(id);
+        store->delRequestBlockBuffer("recent");
+        const auto now = currentTimeUs();
+        max_gap        = std::max(max_gap, now - previous);
+        previous       = now;
+    }
+    ASSERT_LT(max_gap, retention_us);
+    EXPECT_TRUE(store->setRequestBlockBuffer(old));
+    EXPECT_FALSE(store->setRequestBlockBuffer(recent));
+}
+
+TEST_F(RequestBlockBufferStoreTest, testMissingCompletionsDoNotAccumulate) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    for (int i = 0; i < 1000; ++i) {
+        store->delRequestBlockBuffer("missing-" + std::to_string(i));
+    }
+    EXPECT_TRUE(store->expired_request_caches_.empty());
+    EXPECT_TRUE(store->request_cache_map_.empty());
+}
+
+TEST_F(RequestBlockBufferStoreTest, testStaleExpiryPreservesLiveRequest) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("live")));
+    auto retained = store->getOrInsertRequestBlockBuffer("live");
+    store->expired_request_caches_.push_back({"live", currentTimeUs() - 1000 * 60 * 60 - 1});
+    store->delRequestBlockBuffer("missing");
+    EXPECT_EQ(store->getOrInsertRequestBlockBuffer("live"), retained);
+}
+
+TEST_F(RequestBlockBufferStoreTest, testStopClearsExpiryMetadata) {
+    auto store = std::make_shared<RequestBlockBufferStore>(memory_util_);
+    ASSERT_TRUE(store->setRequestBlockBuffer(std::make_shared<RequestBlockBuffer>("completed")));
+    store->delRequestBlockBuffer("completed");
+    ASSERT_FALSE(store->expired_request_caches_.empty());
+    store->stop();
+    EXPECT_TRUE(store->request_cache_map_.empty());
+    EXPECT_TRUE(store->expired_request_caches_.empty());
 }
 
 TEST_F(RequestBlockBufferStoreTest, testWatchFunc_SetBeforeBlocks) {

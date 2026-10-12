@@ -12,6 +12,8 @@ RequestBlockBufferStore::RequestBlockBufferStore(const std::shared_ptr<MemoryUti
 void RequestBlockBufferStore::stop() {
     std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
     auto                                tmp_buffers = std::move(request_cache_map_);
+    expired_request_caches_.clear();
+    request_expiry_times_.clear();
     lock.unlock();
 
     // avoid deadlock
@@ -207,15 +209,27 @@ void RequestBlockBufferStore::delRequestBlockBuffer(const std::string& requestid
 
     {
         std::unique_lock<std::shared_mutex> lock(request_cache_map_mutex_);
-        for (int i = expired_request_caches_.size() - 1; i >= 0; i--) {
-            if (currentTimeUs() - expired_request_caches_[i].second > 1000 * 60 * 60) {
-                request_cache_map_.erase(expired_request_caches_[i].first);
-                expired_request_caches_.pop_back();
-            } else {
-                break;
-            }
+        constexpr int64_t                   retention_us = 1000 * 60 * 60;
+        const auto                          now_us       = currentTimeUs();
+        auto                                current      = request_cache_map_.find(requestid);
+        if (current != request_cache_map_.end() && !current->second) {
+            request_expiry_times_[requestid] = now_us;
+            expired_request_caches_.push_back({requestid, now_us});
         }
-        expired_request_caches_.push_back({requestid, currentTimeUs()});
+
+        // Expire oldest entries; a repeated deletion refreshes the tombstone.
+        while (!expired_request_caches_.empty() && now_us - expired_request_caches_.front().second > retention_us) {
+            const auto& expired = expired_request_caches_.front();
+            auto        latest  = request_expiry_times_.find(expired.first);
+            if (latest != request_expiry_times_.end() && latest->second == expired.second) {
+                auto cached = request_cache_map_.find(expired.first);
+                if (cached != request_cache_map_.end() && !cached->second) {
+                    request_cache_map_.erase(cached);
+                }
+                request_expiry_times_.erase(latest);
+            }
+            expired_request_caches_.pop_front();
+        }
     }
 }
 
