@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
 
 #include <gtest/gtest.h>
+#include <memory>
+#include <pybind11/embed.h>
 #include <stdexcept>
 
 namespace rtp_llm {
@@ -13,6 +15,16 @@ struct ShutdownCall {
 
 class RtpLLMOpShutdownTest: public ::testing::TestWithParam<ShutdownCall> {
 protected:
+    static void SetUpTestSuite() {
+        // RtpLLMOp is a Python binding: stop() releases the GIL around
+        // blocking teardown even when the backend has not been initialized.
+        interpreter_ = std::make_unique<py::scoped_interpreter>();
+    }
+
+    static void TearDownTestSuite() {
+        interpreter_.reset();
+    }
+
     void expectUnavailable(RtpLLMOp& op) {
         try {
             GetParam().invoke(op);
@@ -21,6 +33,7 @@ protected:
             EXPECT_STREQ(error.what(), "backend lifecycle control is not initialized");
         }
     }
+    inline static std::unique_ptr<py::scoped_interpreter> interpreter_;
 };
 
 TEST_P(RtpLLMOpShutdownTest, RejectsBeforeInitialization) {
