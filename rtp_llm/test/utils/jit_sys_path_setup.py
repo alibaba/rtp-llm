@@ -11,6 +11,7 @@ a specific version of flashinfer different from the system-installed one.
 import importlib.metadata
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -264,6 +265,34 @@ def bootstrap_remote_jit_dir():
         logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
 
+def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
+    """Drop cached FlashInfer ops whose build rules reference include paths that no
+    longer resolve.
+
+    FlashInfer's generated FMHA ninja rules embed the absolute include paths of the
+    flashinfer package instance that generated them. A bazel test action's runfiles
+    sandbox is per-action, so rules generated from a runfiles import dangle for every
+    later action that reuses the shared workspace and fail with missing-header
+    errors. Evicting the affected ops makes FlashInfer regenerate them against the
+    current package copy.
+    """
+    build_files = sorted(workspace.rglob("build.ninja"))
+    for build_file in build_files:
+        op_dir = build_file.parent
+        try:
+            rules = build_file.read_text(errors="ignore")
+        except OSError:
+            continue
+        include_paths = re.findall(r"-I(/\S+)", rules)
+        stale = any(not Path(path).exists() for path in include_paths)
+        src_link = op_dir / "src"
+        if not stale and src_link.is_symlink() and not src_link.exists():
+            stale = True
+        if stale:
+            shutil.rmtree(op_dir, ignore_errors=True)
+            logging.info(f"[Package Setup] Evicted stale FlashInfer cache op: {op_dir}")
+
+
 def setup_jit_cache(cache_dir=None, packages=None):
     bootstrap_remote_jit_dir()
     cache_env.configure_writable_cache_env(
@@ -272,6 +301,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
         "flashinfer",
         cache_subpath=(".cache", "flashinfer"),
     )
+    _evict_dangling_flashinfer_ops(Path(os.environ["FLASHINFER_WORKSPACE_BASE"]))
     cache_env.configure_writable_cache_env(
         "TRITON_CACHE_DIR", Path.home() / ".triton" / "cache", "triton"
     )
