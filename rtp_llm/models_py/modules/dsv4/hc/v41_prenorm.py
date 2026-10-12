@@ -8,11 +8,39 @@ Ported from RTP-LLM e4a9162f6f. The upstream SM100 capability gate is retained.
 """
 
 import importlib
+import math
 from functools import lru_cache
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
+
+
+def require_fp32_prenorm_precision() -> None:
+    """Require caller-selected IEEE FP32 arithmetic without changing global state."""
+    if torch.get_float32_matmul_precision() != "highest":
+        raise ValueError("V4.1 FP32 mHC prenorm requires highest FP32 matmul precision")
+
+
+def prenorm_fp32(residual: torch.Tensor, fn: torch.Tensor, eps: float) -> torch.Tensor:
+    """Project and normalize the complete residual stream in FP32."""
+    if residual.ndim not in (3, 4) or min(residual.shape[-2:]) <= 0:
+        raise ValueError("FP32 mHC prenorm requires [..., streams, dim] residuals")
+    streams, dim = residual.shape[-2:]
+    if fn.shape != (streams * (streams + 2), streams * dim):
+        raise ValueError("FP32 mHC prenorm weight must match the residual streams")
+    if residual.dtype != torch.bfloat16 or fn.dtype != torch.float32:
+        raise TypeError("FP32 mHC prenorm requires BF16 residuals and FP32 weights")
+    if fn.device != residual.device:
+        raise ValueError("FP32 mHC prenorm operands must share a device")
+    if type(eps) not in (int, float) or not math.isfinite(eps) or eps <= 0:
+        raise ValueError("FP32 mHC prenorm eps must be positive and finite")
+    require_fp32_prenorm_precision()
+    flattened = residual.flatten(-2).float()
+    return F.linear(flattened, fn) * torch.rsqrt(
+        flattened.square().mean(dim=-1, keepdim=True) + eps
+    )
 
 
 @lru_cache(maxsize=1)

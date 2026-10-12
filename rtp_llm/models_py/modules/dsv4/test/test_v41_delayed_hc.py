@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import identity_pre_mix
 
 class DelayedHCTest(unittest.TestCase):
     @staticmethod
-    def unit(pre_bias, *, collapse_mode=None, post_mode=None):
+    def unit(pre_bias, *, collapse_mode=None, post_mode=None, prenorm_mode=None):
         base = torch.zeros(24)
         base[:4] = torch.tensor(pre_bias)
         return DelayedHCUnit(
@@ -27,6 +27,7 @@ class DelayedHCTest(unittest.TestCase):
             hc_eps=1e-6,
             collapse_mode=collapse_mode,
             post_mode=post_mode,
+            prenorm_mode=prenorm_mode,
         )
 
     def test_entry_uses_identity_and_next_sublayer_uses_previous_mix(self):
@@ -261,6 +262,55 @@ class DelayedHCTest(unittest.TestCase):
                 ValueError, "post_mode"
             ):
                 self.unit([0.0] * 4, post_mode=mode)
+
+    def test_fp32_prenorm_selection_preserves_default_and_is_read_only(self):
+        previous = torch.get_float32_matmul_precision()
+        self.addCleanup(torch.set_float32_matmul_precision, previous)
+        torch.set_float32_matmul_precision("highest")
+        self.assertIsNone(self.unit([0.0] * 4).prenorm_mode)
+        owner = self.unit([0.0] * 4, prenorm_mode="fp32")
+        self.assertEqual(owner.prenorm_mode, "fp32")
+        with self.assertRaises(AttributeError):
+            owner.prenorm_mode = None
+        for mode in (False, True, 0, [], "", "torch", "FP32"):
+            with self.assertRaisesRegex(ValueError, "prenorm_mode"):
+                self.unit([0.0] * 4, prenorm_mode=mode)
+
+    def test_fp32_prenorm_precision_rejection_preserves_previous_mix(self):
+        previous = torch.get_float32_matmul_precision()
+        self.addCleanup(torch.set_float32_matmul_precision, previous)
+        torch.set_float32_matmul_precision("highest")
+        owner = self.unit([0.0] * 4, prenorm_mode="fp32")
+        residual = torch.ones(2, 4, 3, dtype=torch.bfloat16)
+        before = residual.clone()
+        owner.pre(residual)
+        saved = owner.pre_mix_out
+        torch.set_float32_matmul_precision("high")
+        with self.assertRaisesRegex(ValueError, "highest FP32"):
+            owner.pre(residual)
+        with self.assertRaisesRegex(ValueError, "highest FP32"):
+            self.unit([0.0] * 4, prenorm_mode="fp32")
+        self.assertEqual(torch.get_float32_matmul_precision(), "high")
+        self.assertIs(owner.pre_mix_out, saved)
+        torch.testing.assert_close(residual, before, rtol=0, atol=0)
+
+    def test_fp32_prenorm_composes_with_empty_ordered_read_and_write(self):
+        previous = torch.get_float32_matmul_precision()
+        self.addCleanup(torch.set_float32_matmul_precision, previous)
+        torch.set_float32_matmul_precision("highest")
+        owner = self.unit(
+            [0.0] * 4,
+            prenorm_mode="fp32",
+            collapse_mode="ordered_fp32",
+            post_mode="ordered_fp32",
+        )
+        for shape in ((2, 4, 3), (2, 3, 4, 3), (0, 4, 3), (2, 0, 4, 3)):
+            residual = torch.ones(shape, dtype=torch.bfloat16)
+            y, post, comb = owner.pre(residual)
+            torch.testing.assert_close(y, residual[..., 0, :], rtol=0, atol=0)
+            result = owner.post(y, residual, post, comb)
+            self.assertIs(result, residual)
+            self.assertEqual(owner.pre_mix_out.shape, residual.shape[:-1])
 
 
 if __name__ == "__main__":

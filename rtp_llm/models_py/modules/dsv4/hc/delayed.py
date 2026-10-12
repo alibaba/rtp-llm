@@ -122,6 +122,7 @@ class DelayedHCUnit(HCUnitBase):
         *args,
         collapse_mode: Optional[str] = None,
         post_mode: Optional[str] = None,
+        prenorm_mode: Optional[str] = None,
         **kwargs,
     ) -> None:
         if collapse_mode is not None and (
@@ -132,9 +133,20 @@ class DelayedHCUnit(HCUnitBase):
             type(post_mode) is not str or post_mode != "ordered_fp32"
         ):
             raise ValueError("Delayed mHC post_mode must be ordered_fp32 or None")
+        if prenorm_mode is not None and (
+            type(prenorm_mode) is not str or prenorm_mode != "fp32"
+        ):
+            raise ValueError("Delayed mHC prenorm_mode must be fp32 or None")
+        if prenorm_mode is not None:
+            from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import (
+                require_fp32_prenorm_precision,
+            )
+
+            require_fp32_prenorm_precision()
         super().__init__(*args, **kwargs)
         self._collapse_mode = collapse_mode
         self._post_mode = post_mode
+        self._prenorm_mode = prenorm_mode
         mix_width = self.hc_mult * (self.hc_mult + 2)
         expected_fn_shape = (mix_width, self.hc_mult * self.dim)
         if tuple(self.fn.shape) != expected_fn_shape:
@@ -161,6 +173,10 @@ class DelayedHCUnit(HCUnitBase):
     def post_mode(self) -> Optional[str]:
         return self._post_mode
 
+    @property
+    def prenorm_mode(self) -> Optional[str]:
+        return self._prenorm_mode
+
     def collapse(self, x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         if self._collapse_mode == "ordered_fp32":
             return collapse_ordered_fp32(x, pre_mix)
@@ -173,6 +189,17 @@ class DelayedHCUnit(HCUnitBase):
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
         previous_mix = None
+        if self._prenorm_mode == "fp32":
+            from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import (
+                prenorm_fp32,
+                require_fp32_prenorm_precision,
+            )
+
+            require_fp32_prenorm_precision()
+            if x.dtype != torch.bfloat16:
+                raise TypeError("FP32 delayed mHC prenorm requires BF16 residuals")
+            if any(t.device != x.device for t in (self.fn, self.base, self.scale)):
+                raise ValueError("FP32 delayed mHC prenorm weights must share a device")
         if self._collapse_mode == "ordered_fp32":
             if x.dtype != torch.bfloat16:
                 raise TypeError("Ordered delayed mHC requires BF16 residuals")
@@ -189,7 +216,10 @@ class DelayedHCUnit(HCUnitBase):
         if (
             x.is_cuda
             and x.dtype == torch.bfloat16
-            and (self._collapse_mode is None or x.numel() != 0)
+            and (
+                (self._collapse_mode is None and self._prenorm_mode is None)
+                or x.numel() != 0
+            )
         ):
             from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import prenorm
 
@@ -197,7 +227,11 @@ class DelayedHCUnit(HCUnitBase):
             residual = x.reshape(1, -1, self.hc_mult, self.dim)
             if self._collapse_mode == "ordered_fp32":
                 residual = residual.contiguous()
-            mixes = prenorm(residual, self.fn, self.norm_eps)
+            mixes = (
+                prenorm_fp32(residual, self.fn, self.norm_eps)
+                if self._prenorm_mode == "fp32"
+                else prenorm(residual, self.fn, self.norm_eps)
+            )
             if mixes is None:
                 mixes = ops.mhc_pre_norm_fn(
                     residual, self.fn, None, self.norm_eps, n_splits=1
@@ -212,10 +246,13 @@ class DelayedHCUnit(HCUnitBase):
             post = post.reshape(*shape[:-1], 1)
             comb = comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult)
         else:
-            flattened = x.flatten(-2).float()
-            mixes = F.linear(flattened, self.fn.float()) * torch.rsqrt(
-                flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
-            )
+            if self._prenorm_mode == "fp32":
+                mixes = prenorm_fp32(x, self.fn, self.norm_eps)
+            else:
+                flattened = x.flatten(-2).float()
+                mixes = F.linear(flattened, self.fn.float()) * torch.rsqrt(
+                    flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
+                )
             pre, post, comb = _hc_split_sinkhorn(
                 mixes,
                 self.scale,
