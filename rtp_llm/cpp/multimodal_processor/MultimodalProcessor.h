@@ -88,6 +88,11 @@ private:
 
     ErrorInfo checkExpandLength(const ExpandedOutput& expand_output);
 
+    ErrorResult<std::vector<MultimodalInput>>
+    expandMultimodalInputs(const std::vector<MultimodalInput>&                            inputs,
+                           const std::optional<std::vector<MultimodalExpansionMetadata>>& metadata,
+                           const std::vector<torch::Tensor>&                              features);
+
     ErrorResult<ExpandedOutput> useExpandedTokenLayout(const GenerateInput&                             input,
                                                        const std::vector<torch::Tensor>&                features,
                                                        const std::optional<std::vector<torch::Tensor>>& feature_hashes);
@@ -99,7 +104,8 @@ public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
                                        const std::string&                           vit_role_addr,
-                                       grpc::ServerContext*                         server_context = nullptr);
+                                       grpc::ServerContext*                         server_context  = nullptr,
+                                       const std::string&                           rendered_prompt = "");
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
                                                          const std::vector<rtp_llm::MultimodalInput>& mm_inputs);

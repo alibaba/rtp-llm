@@ -72,7 +72,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
 
         if (mm_processor_ != nullptr && !multimodal_inputs.empty()) {
             auto mm_res = mm_processor_->updateMultimodalFeatures(
-                embedding_input, multimodal_inputs, request->vit_role_addr(), context);
+                embedding_input, multimodal_inputs, request->vit_role_addr(), context, request->rendered_prompt());
             if (!mm_res.ok()) {
                 ErrorDetailsPB details;
                 details.set_error_code(static_cast<int64_t>(mm_res.code()));

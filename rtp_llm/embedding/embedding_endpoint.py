@@ -212,6 +212,7 @@ class EmbeddingEndpoint(object):
             gen_timeline=profile_config.get("gen_timeline", False),
             profile_step=profile_config.get("profile_step", 1),
             profile_trace_name=profile_config.get("profile_trace_name", ""),
+            rendered_prompt=input.rendered_prompt,
         )
         try:
             response = await stub.embedding(request)

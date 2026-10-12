@@ -276,32 +276,12 @@ MultimodalProcessor::expandRenderedPrompt(const std::string&                    
     }
 }
 
-ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
-                                                        grpc::ServerContext*                     server_context) {
-    if (input->generate_config && input->generate_config->calculate_loss) {
-        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
-    }
-    std::string ip_port = "";
-    if (input->generate_config) {
-        for (auto& role_addr : input->generate_config->role_addrs) {
-            if (role_addr.role == RoleType::VIT) {
-                ip_port = role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
-                break;
-            }
-        }
-    }
-    CHECK_AND_RETURN_REF(
-        mm_embedding_res,
-        MultimodalEmbedding(
-            input->multimodal_inputs.value(), ip_port, input->request_id, server_context, input->rendered_prompt));
-    auto                       mm_features = std::move(mm_embedding_res.mm_features);
-    std::vector<torch::Tensor> mm_extra_input;
-    if (mm_embedding_res.mm_extra_input.has_value()) {
-        mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
-    }
-    auto mm_inputs = input->multimodal_inputs.value();
-    if (mm_embedding_res.mm_expansion_metadata.has_value()) {
-        const auto& metadata = mm_embedding_res.mm_expansion_metadata.value();
+ErrorResult<std::vector<MultimodalInput>> MultimodalProcessor::expandMultimodalInputs(
+    const std::vector<MultimodalInput>&                            mm_inputs,
+    const std::optional<std::vector<MultimodalExpansionMetadata>>& expansion_metadata,
+    const std::vector<torch::Tensor>&                              mm_features) {
+    if (expansion_metadata.has_value()) {
+        const auto& metadata = expansion_metadata.value();
         if (metadata.size() != mm_features.size()) {
             return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
                              "multimodal expansion metadata count does not match feature count");
@@ -352,8 +332,37 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
             return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
                              "multimodal expansion metadata does not cover every input");
         }
-        mm_inputs = std::move(expanded_inputs);
+        return expanded_inputs;
     }
+    return std::vector<MultimodalInput>(mm_inputs);
+}
+
+ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
+                                                        grpc::ServerContext*                     server_context) {
+    if (input->generate_config && input->generate_config->calculate_loss) {
+        return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
+    }
+    std::string ip_port = "";
+    if (input->generate_config) {
+        for (auto& role_addr : input->generate_config->role_addrs) {
+            if (role_addr.role == RoleType::VIT) {
+                ip_port = role_addr.ip + ":" + std::to_string(role_addr.grpc_port);
+                break;
+            }
+        }
+    }
+    CHECK_AND_RETURN_REF(
+        mm_embedding_res,
+        MultimodalEmbedding(
+            input->multimodal_inputs.value(), ip_port, input->request_id, server_context, input->rendered_prompt));
+    auto                       mm_features = std::move(mm_embedding_res.mm_features);
+    std::vector<torch::Tensor> mm_extra_input;
+    if (mm_embedding_res.mm_extra_input.has_value()) {
+        mm_extra_input = std::move(mm_embedding_res.mm_extra_input.value());
+    }
+    CHECK_AND_RETURN_REF(
+        mm_inputs,
+        expandMultimodalInputs(input->multimodal_inputs.value(), mm_embedding_res.mm_expansion_metadata, mm_features));
     torch::Tensor token_ids = input->input_ids;
     // A frontend layout already describes the expanded token sequence.
     if (!input->multimodal_token_layout.has_value()) {
@@ -399,17 +408,35 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
                                                         const std::string&                           vit_role_addr,
-                                                        grpc::ServerContext*                         server_context) {
-    CHECK_AND_RETURN_REF(mm_embedding_res,
-                         MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id, server_context));
+                                                        grpc::ServerContext*                         server_context,
+                                                        const std::string&                           rendered_prompt) {
+    CHECK_AND_RETURN_REF(
+        mm_embedding_res,
+        MultimodalEmbedding(mm_inputs, vit_role_addr, input->request_id, server_context, rendered_prompt));
     MultimodalFeature mm_features;
     mm_features.features = std::move(mm_embedding_res.mm_features);
-    CHECK_AND_RETURN_REF(expanded_ids,
-                         expandTokenIds(mm_features.features,
-                                        input->token_ids,
-                                        mm_inputs,
-                                        input->token_type_ids,
-                                        mm_embedding_res.mm_feature_hashes));
+    CHECK_AND_RETURN_REF(
+        expanded_inputs,
+        expandMultimodalInputs(mm_inputs, mm_embedding_res.mm_expansion_metadata, mm_features.features));
+    auto token_ids      = input->token_ids;
+    auto token_type_ids = input->token_type_ids;
+    if (mm_embedding_res.expanded_token_ids.has_value()) {
+        token_ids = mm_embedding_res.expanded_token_ids.value();
+        if (!token_ids.defined() || token_ids.dim() != 1 || token_ids.scalar_type() != torch::kInt32
+            || !token_ids.device().is_cpu() || !token_ids.is_contiguous()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "invalid expanded embedding token IDs");
+        }
+        if (input->input_lengths.numel() != 1 || token_type_ids.numel() == 0
+            || !token_type_ids.eq(token_type_ids[0]).all().item<bool>()) {
+            return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
+                             "expanded embedding prompts require one sequence and uniform token type IDs");
+        }
+        token_type_ids = torch::full_like(token_ids, token_type_ids[0].item<int32_t>());
+    }
+    CHECK_AND_RETURN_REF(
+        expanded_ids,
+        expandTokenIds(
+            mm_features.features, token_ids, expanded_inputs, token_type_ids, mm_embedding_res.mm_feature_hashes));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;

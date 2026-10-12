@@ -14,9 +14,7 @@ from rtp_llm.models.downstream_modules.embedding.api_datatype import (
     ChatCompletionRequest,
     ChatMessage,
 )
-from rtp_llm.models.downstream_modules.openai_render import (
-    OpenAIRenderBasicInfo,
-)
+from rtp_llm.models.downstream_modules.openai_render import OpenAIRenderBasicInfo
 from rtp_llm.utils.time_util import current_time_ms
 
 
@@ -54,6 +52,7 @@ class CommonInputGenerator(object):
                     self.config_.special_tokens.pad_token_id + 1
                 )
             multimodal_inputs = []
+            rendered_prompt = ""
             if (
                 isinstance(prompt, str)
                 or (isinstance(prompt, list) and isinstance(prompt[0], str))
@@ -85,6 +84,7 @@ class CommonInputGenerator(object):
                     torch.int32
                 )
                 multimodal_inputs = rendered_input.multimodal_inputs
+                rendered_prompt = rendered_input.rendered_prompt
             else:
                 logging.error(f"Unsupported prompt type: {type(prompt)}")
                 raise FtRuntimeException(
@@ -115,4 +115,5 @@ class CommonInputGenerator(object):
                 token_type_ids=combo_token_types,
                 input_lengths=input_lengths,
                 multimodal_inputs=multimodal_inputs,
+                rendered_prompt=rendered_prompt,
             )

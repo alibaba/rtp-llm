@@ -681,6 +681,7 @@ message EmbeddingInputPB {
     bool gen_timeline = 7;
     int32 profile_step = 8;
     string profile_trace_name = 9;
+    string rendered_prompt = 10;
 }
 
 message EmbeddingHealthRequestPB {

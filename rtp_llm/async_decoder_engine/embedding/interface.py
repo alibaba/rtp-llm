@@ -12,6 +12,7 @@ class EngineInputs:
     input_lengths: torch.Tensor
     config: Dict[str, Any] = {}
     multimodal_inputs: List[MultimodalInput] = []
+    rendered_prompt: str = ""
 
     def __init__(
         self,
@@ -20,12 +21,14 @@ class EngineInputs:
         input_lengths: torch.Tensor,
         config: Dict[str, Any] = {},
         multimodal_inputs: List[MultimodalInput] = [],
+        rendered_prompt: str = "",
     ):
         self.token_ids = token_ids
         self.token_type_ids = token_type_ids
         self.input_lengths = input_lengths
         self.config = config
         self.multimodal_inputs = multimodal_inputs
+        self.rendered_prompt = rendered_prompt
 
     @property
     def input_length(self):

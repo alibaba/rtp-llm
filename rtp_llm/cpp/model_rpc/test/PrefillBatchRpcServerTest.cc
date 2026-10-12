@@ -309,7 +309,8 @@ private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> inputs,
                                                       std::string          = "",
                                                       int64_t              = 0,
-                                                      grpc::ServerContext* = nullptr) override {
+                                                      grpc::ServerContext* = nullptr,
+                                                      const std::string&   = "") override {
         ++calls;
         if (throws) {
             throw std::runtime_error("embedding failed");
@@ -1582,7 +1583,7 @@ TEST_F(PrefillBatchTraceTest, VitPreservesErrorsAndEndsOnException) {
         EXPECT_EQ(result.code(), code);
         EXPECT_EQ(result.ToString(), "embedding failed");
     }
-    processor->throws = true;
+    processor->throws           = true;
     const auto exception_result = server.prepareInput(makeVitRequest(4301), input, parent);
     EXPECT_EQ(exception_result.code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_EQ(exception_result.ToString(), "embedding failed");
