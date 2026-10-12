@@ -1,12 +1,12 @@
 import functools
 import logging
 import re
+from contextvars import ContextVar
 
 # Forward references for type hints
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.config.quant_config import (
     Fp8PerTensorQuantConfig,
     ModelOptFp4Config,
@@ -74,6 +74,108 @@ def select_output_vocab_rows(
         )
     indices = torch.tensor(output_vocab_ids, dtype=torch.long, device=tensor.device)
     return tensor.index_select(0, indices).contiguous()
+
+
+_active_weight_database: ContextVar[Optional[BaseDatabase]] = ContextVar(
+    "active_weight_database", default=None
+)
+
+
+def _apply_mega_moe_fp4_wrappers(
+    weight_info: "ModelWeightInfo",
+    database: Optional[BaseDatabase] = None,
+    quant_config: Optional[QuantizationConfig] = None,
+) -> "ModelWeightInfo":
+    """Walk ``weight_info`` and replace MoE w1/w2 weights with mega-MoE FP4
+    load-time quantizers when a MegaMoE strategy is selected.
+
+    Three cases are handled:
+      - **Offline FP4 ckpt** (``quantization_config.expert_dtype == "fp4"``,
+        fallback: legacy ``experts.*.weight_scale`` keys): replace with
+        :class:`OfflineMegaMoeFp4MoeWeight` (direct load; scale key is
+        ``.scale`` for UE8M0 or ``.weight_scale`` for float32).
+        ``MOE_STRATEGY=mega_moe_se`` or ``mega_moe_fused`` additionally wraps
+        shared experts as FP8 per-block
+        (:class:`OfflineMegaMoeFp8SharedExpertWeight`);
+        ``MOE_STRATEGY=mega_moe`` leaves shared experts on the normal FFN path.
+      - ``MoeAtomicWeight`` (BF16 ckpt): wrap with
+        :class:`OnlineMegaMoeFp4Weight` (BF16 → FP4).
+      - ``PerBlockFp8Weight`` for moe_w1/moe_w2 (FP8 ckpt under
+        ``Fp8BlockWiseQuantConfig``): replace with
+        :class:`OnlineMegaMoeFp4FromFp8Weight` (FP8 → FP4).
+    """
+    from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+        is_offline_mega_moe_fp4_ckpt,
+        wrap_for_offline_fp4,
+    )
+    from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+        is_mega_moe_fused_strategy,
+        is_mega_moe_strategy,
+        wrap_moe_for_mega_moe,
+    )
+    from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
+
+    if not is_mega_moe_strategy():
+        return weight_info
+
+    is_offline = is_offline_mega_moe_fp4_ckpt(database)
+    include_shared_expert = is_mega_moe_fused_strategy()
+    scale_dtype = (
+        PerBlockFp8Weight._get_scale_dtype(getattr(quant_config, "scale_fmt", None))
+        if is_offline
+        else torch.float32
+    )
+    if is_offline:
+        logging.info(
+            "[mega_moe] offline FP4 MoE detected in ckpt; using "
+            "OfflineMegaMoeFp4MoeWeight%s (skip online quantization)",
+            " and OfflineMegaMoeFp8SharedExpertWeight" if include_shared_expert else "",
+        )
+
+    from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
+
+    def _walk(weight: WeightModule) -> WeightModule:
+        if is_offline:
+            wrapped = wrap_for_offline_fp4(
+                weight,
+                include_shared_expert=include_shared_expert,
+                scale_dtype=scale_dtype,
+            )
+        else:
+            wrapped = wrap_moe_for_mega_moe(weight)
+        if wrapped is not weight:
+            return wrapped
+        if isinstance(weight, MoeWeight):
+            for name, sw in list(weight.sub_weights.items()):
+                weight.sub_weights[name] = _walk(sw)
+            if W.moe_w1 in weight.sub_weights:
+                weight.moe_w1 = weight.sub_weights[W.moe_w1]
+            if W.moe_w2 in weight.sub_weights:
+                weight.moe_w2 = weight.sub_weights[W.moe_w2]
+            return weight
+        if isinstance(weight, FfnWeight):
+            for name, sw in list(weight.sub_weights.items()):
+                weight.sub_weights[name] = _walk(sw)
+            weight.w1 = weight.sub_weights.get(W.ffn_w1)
+            weight.w2 = weight.sub_weights.get(W.ffn_w2)
+            weight.w3 = weight.sub_weights.get(W.ffn_w3)
+            weight.w13 = weight.sub_weights.get(W.ffn_w13)
+            weight.b1 = weight.sub_weights.get(W.ffn_b1)
+            weight.b2 = weight.sub_weights.get(W.ffn_b2)
+            weight.b3 = weight.sub_weights.get(W.ffn_b3)
+            weight.b13 = weight.sub_weights.get(W.ffn_b13)
+            return weight
+        return weight
+
+    if weight_info.layer_weights:
+        new_layer_weights: List[Any] = []
+        for layer in weight_info.layer_weights:
+            if isinstance(layer, list):
+                new_layer_weights.append([_walk(w) for w in layer])
+            else:
+                new_layer_weights.append(_walk(layer))
+        weight_info.layer_weights = new_layer_weights
+    return weight_info
 
 
 class ModelWeightInfo:
@@ -333,7 +435,11 @@ class ModelDeployWeightInfo:
         )
         return ffn_config
 
-    def get_weight_info(self) -> ModelWeightInfo:
+    def get_weight_info(
+        self, database: Optional[BaseDatabase] = None
+    ) -> ModelWeightInfo:
+        if database is None:
+            database = _active_weight_database.get()
         weight_info = self._get_weight_info()
         # avoid circular import
 
@@ -370,6 +476,17 @@ class ModelDeployWeightInfo:
                 list(weight_info.weights), weight_info.layer_weights
             )
             self._validate_output_vocab_sources(weight_info)
+
+        # MegaMoE strategies force load-time FP4 quantization for MoE weights
+        # regardless of whether a quant_config is set. This must run
+        # AFTER `to_quant_weight_info` so we can replace any PerBlockFp8Weight
+        # MoE wrapper with the FP8→FP4 variant. `database` / `quant_config`
+        # auto-detect offline FP4 MoE (`expert_dtype=fp4` or legacy
+        # `experts.*.weight_scale`) and pick UE8M0 vs float32 scale dtype.
+        if getattr(self.model_config, "model_type", "") in {"glm_5", "glm_5_mtp"}:
+            weight_info = _apply_mega_moe_fp4_wrappers(
+                weight_info, database=database, quant_config=self._quant_config
+            )
 
         if self.tie_word_embeddings:
             logging.info("fix tie_word_embeddings")
@@ -626,7 +743,14 @@ class ModelDeployWeightInfo:
         if isinstance(database, CkptDatabase) and not database.is_ft_style:
             self.process_meta_from_ckpt(database.pretrain_file_list)
             self.process_meta_from_ckpt(database.finetune_file_list)
-            weight_info = self.get_weight_info()
+            # Keep the parameterless virtual API used by DSV4 and multimodal
+            # providers. The base normalization pipeline can still inspect this
+            # checkpoint while selecting GLM's offline quantization wrappers.
+            token = _active_weight_database.set(database)
+            try:
+                weight_info = self.get_weight_info()
+            finally:
+                _active_weight_database.reset(token)
             self._filter_ckpt_files_by_weight_info(database, weight_info)
             return weight_info
         elif database.is_ft_style:

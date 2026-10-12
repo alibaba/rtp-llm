@@ -4,16 +4,22 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 from typing import List
+from unittest.mock import patch
 
 import torch
-
 from rtp_llm.config.output_vocab_config import OUTPUT_TOKENS_FILENAME
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, PreShardedTensor
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
     ModelWeightInfo,
     select_output_vocab_rows,
 )
+from rtp_llm.model_loader.offline_modelopt_fp4_quant_weight import (
+    OfflineMegaMoeFp4MoeWeight,
+    OfflineMegaMoeFp8SharedExpertWeight,
+)
+from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import OnlineMegaMoeFp4Weight
 from rtp_llm.model_loader.tensor_source import TensorCollector
 from rtp_llm.model_loader.weight_module import AtomicWeight
 from rtp_llm.models.base_model import BaseModel
@@ -772,6 +778,75 @@ class FinalizeOutputVocabConfigTest(unittest.TestCase):
         fake = self._make_fake(tp=1, dp=1, ep=1, has_lm_head=False)
         with self.assertRaisesRegex(ValueError, "requires a model LM head"):
             BaseModel._finalize_output_vocab_config(fake)
+
+
+class MegaMoeCompositeDelegationTest(unittest.TestCase):
+    def wrapper(self, wrapper_type):
+        wrapper = wrapper_type.__new__(wrapper_type)
+        wrapper.kernel = MoeAtomicWeight.__new__(MoeAtomicWeight)
+        wrapper.scale = MoeAtomicWeight.__new__(MoeAtomicWeight)
+        wrapper.kernel.name = "kernel"
+        wrapper.scale.name = "scale"
+        wrapper.sub_weights = {"kernel": wrapper.kernel, "scale": wrapper.scale}
+        return wrapper
+
+    def test_raw_loading_and_names_delegate_to_both_components(self):
+        for wrapper_type in (
+            OfflineMegaMoeFp4MoeWeight,
+            OfflineMegaMoeFp8SharedExpertWeight,
+        ):
+            with self.subTest(wrapper=wrapper_type.__name__):
+                wrapper = self.wrapper(wrapper_type)
+                kernel, scale = torch.ones(2, 3), torch.ones(2, 1)
+                with patch.object(
+                    wrapper.kernel, "_load_raw_tensor", return_value={"kernel": kernel}
+                ) as load_k:
+                    with patch.object(
+                        wrapper.scale, "_load_raw_tensor", return_value={"scale": scale}
+                    ) as load_s:
+                        result = wrapper._load_raw_tensor(None, 7, "cpu", None)
+                self.assertIs(result["kernel"], kernel)
+                self.assertIs(result["scale"], scale)
+                load_k.assert_called_once_with(None, 7, "cpu", None)
+                load_s.assert_called_once_with(None, 7, "cpu", None)
+                with patch.object(
+                    wrapper.kernel, "get_tensor_names", return_value={"ckpt.kernel"}
+                ):
+                    with patch.object(
+                        wrapper.scale, "get_tensor_names", return_value={"ckpt.scale"}
+                    ):
+                        self.assertEqual(
+                            wrapper.get_tensor_names(7, None),
+                            {"ckpt.kernel", "ckpt.scale"},
+                        )
+
+    def test_presharded_routed_weights_are_not_partitioned_twice(self):
+        for wrapper_type in (OfflineMegaMoeFp4MoeWeight, OnlineMegaMoeFp4Weight):
+            with self.subTest(wrapper=wrapper_type.__name__):
+                wrapper = self.wrapper(wrapper_type)
+                kernel, scale = torch.ones(2, 3), torch.ones(2, 1)
+                result = wrapper._split(
+                    {
+                        "kernel": PreShardedTensor(kernel),
+                        "scale": PreShardedTensor(scale),
+                    },
+                    None,
+                )
+                self.assertIs(result["kernel"], kernel)
+                self.assertIs(result["scale"], scale)
+
+    def test_shared_replication_guard_and_tensor_identity_are_preserved(self):
+        wrapper = self.wrapper(OfflineMegaMoeFp8SharedExpertWeight)
+        tensors = {"kernel": torch.ones(2, 3), "scale": torch.ones(2, 1)}
+        result = wrapper._split(tensors, SimpleNamespace(tp_size=1, ffn_tp_size=1))
+        self.assertIs(result["kernel"], tensors["kernel"])
+        self.assertIs(result["scale"], tensors["scale"])
+        self.assertRaises(
+            ValueError,
+            wrapper._split,
+            tensors,
+            SimpleNamespace(tp_size=1, ffn_tp_size=2),
+        )
 
 
 if __name__ == "__main__":

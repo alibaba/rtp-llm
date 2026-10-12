@@ -3,8 +3,6 @@ from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
@@ -36,6 +34,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -80,17 +79,9 @@ class GenericMoeLayer(nn.Module):
             )
         else:
             self.fake_balance_expert = None
-        config_adapter = MoEConfigAdapter(
-            model_config=config,
-            parallelism_config=parallelism_config,
-            moe_config=moe_config,
-            quant_config=quant_config,
-            enable_cuda_graph=enable_cuda_graph,
+        self.fused_moe = self._create_fused_moe(
+            weights, moe_config, max_generate_batch_size, enable_cuda_graph
         )
-        config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
-        self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
-        router = self.fused_moe.router
-        router_tp_size = router.tp_collective_size
 
         self.num_local_experts = self.num_experts // max(self.ep_size, 1)
         self.add_shared_expert = (
@@ -130,22 +121,46 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert is not None
             and self.ffn_tp_size > 1
             and self.ep_size == 1
-            and self.ffn_tp_size == router_tp_size
+            and self._supports_unified_tp_allreduce()
+        )
+        logger.debug(
+            "MoE unified TP all-reduce %s (backend=%s, ffn_tp_size=%d, ep_size=%d)",
+            "enabled" if self.use_unified_tp_allreduce else "disabled",
+            type(self.fused_moe).__name__,
+            self.ffn_tp_size,
+            self.ep_size,
+        )
+        self.correction_bias = weights.get(W.e_score_correction_b)
+        self.group_topk = GroupTopK() if self.correction_bias is not None else None
+
+    def _create_fused_moe(
+        self,
+        weights: Dict[str, torch.Tensor],
+        moe_config: MoeConfig,
+        max_generate_batch_size: int,
+        enable_cuda_graph: bool,
+    ):
+        config_adapter = MoEConfigAdapter(
+            model_config=self.config,
+            parallelism_config=self.parallelism_config,
+            moe_config=moe_config,
+            quant_config=self.config.quant_config,
+            enable_cuda_graph=enable_cuda_graph,
+        )
+        config_adapter.has_shared_expert_gate = (
+            weights.get(W.shared_expert_gate) is not None
+        )
+        return FusedMoeFactory().create_fused_moe(config_adapter, weights)
+
+    def _supports_unified_tp_allreduce(self) -> bool:
+        router = self.fused_moe.router
+        return (
+            self.ffn_tp_size == router.tp_collective_size
             and router.supports_skip_tp_allreduce
         )
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "GenericMoE unified TP all-reduce %s "
-                "(router=%s, ffn_tp_size=%d, router_tp_size=%d, ep_size=%d)",
-                "enabled" if self.use_unified_tp_allreduce else "disabled",
-                type(router).__name__,
-                self.ffn_tp_size,
-                router_tp_size,
-                self.ep_size,
-            )
 
-        # for group topk
-        self.correction_bias = weights.get(W.e_score_correction_b, None)
+    def _gate_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.gate(hidden_states)
 
     def _merge_shared_expert_output(
         self,
@@ -171,9 +186,9 @@ class GenericMoeLayer(nn.Module):
             return torch.sigmoid(gate_output) * shared_expert_output
         return shared_expert_output
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens, _ = hidden_states.shape
-        router_logits = self.gate(hidden_states)
+        router_logits = self._gate_logits(hidden_states)
 
         topk_weights = torch.empty(
             (num_tokens, self.top_k),
@@ -189,23 +204,16 @@ class GenericMoeLayer(nn.Module):
         )
 
         if self.correction_bias is not None:
-            self.group_topk = GroupTopK()
-            self.renormalize = self.config.has_moe_norm
-            self.num_expert_group = self.config.moe_n_group
-
-            self.topk_group = self.config.moe_topk_group
-            self.n_routed_experts = self.config.expert_num  # config.n_routed_experts
-            self.routed_scaling_factor = self.config.routed_scaling_factor
             self.group_topk(
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 scores=router_logits,
                 correction_bias=self.correction_bias,
-                n_group=self.num_expert_group,
-                topk_group=self.topk_group,
+                n_group=self.config.moe_n_group,
+                topk_group=self.config.moe_topk_group,
                 topk=self.top_k,
-                renormalize=self.renormalize,
-                routed_scaling_factor=self.routed_scaling_factor,
+                renormalize=self.config.has_moe_norm,
+                routed_scaling_factor=self.config.routed_scaling_factor,
             )
         else:
             self.select_topk(router_logits, topk_ids, topk_weights)
@@ -213,6 +221,15 @@ class GenericMoeLayer(nn.Module):
         if self.fake_balance_expert is not None:
             self.fake_balance_expert(topk_ids, topk_weights)
 
+        return topk_ids, topk_weights
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        topk_ids, topk_weights = self._route(hidden_states)
         # In pure-TP mode both the routed experts and the shared expert produce
         # TP-partial outputs.  Reduce their sum once instead of reducing each
         # path separately.  This is especially important for decode, where the
@@ -225,9 +242,20 @@ class GenericMoeLayer(nn.Module):
             activation="SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
+        return self._add_shared_expert(hidden_states, experts_output, x_fp8, x_scale)
+
+    def _add_shared_expert(
+        self,
+        hidden_states: torch.Tensor,
+        experts_output: torch.Tensor,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if self.shared_expert is not None:
             shared_expert_output = self.shared_expert(
                 hidden_states,
+                x_fp8=x_fp8,
+                x_scale=x_scale,
                 skip_allreduce=(
                     self.use_ep_shared_allreduce or self.use_unified_tp_allreduce
                 ),

@@ -867,6 +867,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("decode_capture_batch_sizes", &HWKernelConfig::decode_capture_batch_sizes)
         .def_readwrite("disable_dpc_random", &HWKernelConfig::disable_dpc_random)
         .def_readwrite("rocm_disable_custom_ag", &HWKernelConfig::rocm_disable_custom_ag)
+        .def_readwrite("enable_fuse_kernels", &HWKernelConfig::enable_fuse_kernels)
         .def("to_string", &HWKernelConfig::to_string)
         .def(py::pickle(
             [](const HWKernelConfig& self) {
@@ -885,10 +886,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disable_dpc_random,
                                       self.rocm_disable_custom_ag,
                                       self.generation_prefill_cuda_graph_max_requests,
-                                      self.generation_prefill_capture_token_buckets);
+                                      self.generation_prefill_capture_token_buckets,
+                                      self.enable_fuse_kernels);
             },
             [](py::tuple t) {
-                if (t.size() != 14 && t.size() != 16)
+                if (t.size() != 14 && t.size() != 16 && t.size() != 17)
                     throw std::runtime_error("Invalid state!");
                 HWKernelConfig c;
                 try {
@@ -906,9 +908,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.decode_capture_batch_sizes   = t[11].cast<std::vector<int>>();
                     c.disable_dpc_random           = t[12].cast<bool>();
                     c.rocm_disable_custom_ag       = t[13].cast<bool>();
-                    if (t.size() == 16) {
+                    if (t.size() >= 16) {
                         c.generation_prefill_cuda_graph_max_requests = t[14].cast<int>();
                         c.generation_prefill_capture_token_buckets   = t[15].cast<std::vector<int>>();
+                    }
+                    if (t.size() == 17) {
+                        c.enable_fuse_kernels = t[16].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("HWKernelConfig unpickle error: ") + e.what());
@@ -2151,6 +2156,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         // Fields merged from PyModelConfig
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
+        .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
+        .def_readwrite("enable_glm52_shared_indexer_kv_cache", &ModelConfig::enable_glm52_shared_indexer_kv_cache)
+        .def_readwrite("glm52_indexer_kv_slot_mapping", &ModelConfig::glm52_indexer_kv_slot_mapping)
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)

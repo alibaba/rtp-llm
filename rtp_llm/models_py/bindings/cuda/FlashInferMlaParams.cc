@@ -541,6 +541,13 @@ void FlashInferMlaAttnParams::fillParams(torch::Tensor t_prefix_lengths,
 void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                                         torch::Tensor kv_cache_block_id_device,
                                                         int           seq_size_per_block) {
+    fillDecodeCudaGraphParamsImpl(sequence_lengths_plus_1_d, kv_cache_block_id_device, seq_size_per_block, false);
+}
+
+void FlashInferMlaAttnParams::fillDecodeCudaGraphParamsImpl(torch::Tensor sequence_lengths_plus_1_d,
+                                                            torch::Tensor kv_cache_block_id_device,
+                                                            int           seq_size_per_block,
+                                                            bool          include_slot_mapping) {
     RTP_LLM_CHECK_WITH_INFO(sequence_lengths_plus_1_d.defined() && sequence_lengths_plus_1_d.is_cuda(),
                             "fillDecodeCudaGraphParams expects CUDA sequence_lengths_plus_1_d");
     RTP_LLM_CHECK_WITH_INFO(sequence_lengths_plus_1_d.scalar_type() == torch::kInt32,
@@ -588,21 +595,47 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     set_i32_shape(reuse_cache_page_indice_h, {0});
     set_i32_shape(batch_reuse_info_vec_d, {batch_size, 4});
     set_i32_shape(batch_reuse_info_vec_h, {batch_size, 4});
+    if (include_slot_mapping) {
+        set_i32_shape(slot_mapping_d_, {batch_size});
+    }
 
     cudaStream_t stream = GET_CURRENT_STREAM();
-    invokePrepareFlashInferDecodeParams(sequence_lengths_plus_1_d.data_ptr<int32_t>(),
-                                        kv_cache_block_id_device.data_ptr<int32_t>(),
-                                        batch_indice_d.data_ptr<int32_t>(),
-                                        page_indice_d.data_ptr<int32_t>(),
-                                        decode_page_indptr_d.data_ptr<int32_t>(),
-                                        paged_kv_last_page_len_d.data_ptr<int32_t>(),
-                                        qo_indptr_d.data_ptr<int32_t>(),
-                                        kvlen_d.data_ptr<int32_t>(),
-                                        positions_d.data_ptr<int32_t>(),
-                                        batch_size,
-                                        max_blocks_per_batch,
-                                        seq_size_per_block,
-                                        stream);
+#if USING_ROCM
+    RTP_LLM_CHECK_WITH_INFO(!include_slot_mapping, "Sparse MLA device slot mapping requires CUDA");
+#endif
+    if (include_slot_mapping) {
+#if !USING_ROCM
+        invokePrepareFlashInferDecodeParams(sequence_lengths_plus_1_d.data_ptr<int32_t>(),
+                                            kv_cache_block_id_device.data_ptr<int32_t>(),
+                                            batch_indice_d.data_ptr<int32_t>(),
+                                            page_indice_d.data_ptr<int32_t>(),
+                                            decode_page_indptr_d.data_ptr<int32_t>(),
+                                            paged_kv_last_page_len_d.data_ptr<int32_t>(),
+                                            qo_indptr_d.data_ptr<int32_t>(),
+                                            kvlen_d.data_ptr<int32_t>(),
+                                            positions_d.data_ptr<int32_t>(),
+                                            slot_mapping_d_.data_ptr<int64_t>(),
+                                            batch_size,
+                                            max_blocks_per_batch,
+                                            seq_size_per_block,
+                                            max_batch_size_,
+                                            stream);
+#endif
+    } else {
+        invokePrepareFlashInferDecodeParams(sequence_lengths_plus_1_d.data_ptr<int32_t>(),
+                                            kv_cache_block_id_device.data_ptr<int32_t>(),
+                                            batch_indice_d.data_ptr<int32_t>(),
+                                            page_indice_d.data_ptr<int32_t>(),
+                                            decode_page_indptr_d.data_ptr<int32_t>(),
+                                            paged_kv_last_page_len_d.data_ptr<int32_t>(),
+                                            qo_indptr_d.data_ptr<int32_t>(),
+                                            kvlen_d.data_ptr<int32_t>(),
+                                            positions_d.data_ptr<int32_t>(),
+                                            batch_size,
+                                            max_blocks_per_batch,
+                                            seq_size_per_block,
+                                            stream);
+    }
 
     batch_indice                 = batch_indice_d;
     page_indice                  = page_indice_d;
@@ -614,7 +647,7 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     kvlen                        = kvlen_d;
     positions                    = positions_d;
     batch_reuse_info_vec         = batch_reuse_info_vec_d;
-    slot_mapping                 = torch::Tensor();
+    slot_mapping                 = include_slot_mapping ? slot_mapping_d_ : torch::Tensor();
 }
 
 void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths,

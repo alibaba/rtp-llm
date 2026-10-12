@@ -32,6 +32,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #endif
 #include "autil/TimeUtility.h"
+#include "autil/EnvUtil.h"
 #include <cmath>
 #include <limits>
 #include <cstdlib>
@@ -41,6 +42,23 @@
 #include <vector>
 
 namespace rtp_llm {
+
+bool pythonDraftSupportsMtpIndexerShare(const py::object& py_model) {
+    if (py_model.is_none()) {
+        return false;
+    }
+    py::gil_scoped_acquire gil;
+    try {
+        const auto has_callable = [&py_model](const char* name) {
+            return py::hasattr(py_model, name) && PyCallable_Check(py_model.attr(name).ptr()) != 0;
+        };
+        return has_callable("clone_for_cuda_graph") && has_callable("set_mtp_indexer_role")
+               && has_callable("load_mtp_indexer_topk") && has_callable("snapshot_mtp_indexer_topk");
+    } catch (const py::error_already_set& e) {
+        RTP_LLM_LOG_WARNING("failed to inspect Python draft MTP indexer sharing APIs: %s", e.what());
+        return false;
+    }
+}
 
 bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
@@ -720,6 +738,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_                 = params.model_config_.vocab_size;
     draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
+    const auto& draft_config   = propose_params->getEngineInitParams().model_config_;
+    const auto& draft_parallel = propose_params->getEngineInitParams().parallelism_config;
+    const char* share_env      = std::getenv("RTP_LLM_ENABLE_MTP_INDEXER_SHARE");
+    mtp_indexer_share_enabled_ =
+        !is_dspark_ && share_env && std::string(share_env) == "1" && !params.py_sp_model.is_none()
+        && pythonDraftSupportsMtpIndexerShare(params.py_sp_model) && params.hw_kernel_config.enable_cuda_graph
+        && !params.device_resource_config.enable_layer_micro_batch
+        && !params.parallelism_config.prefill_cp_config.is_enabled() && !draft_parallel.prefill_cp_config.is_enabled()
+        && draft_config.index_share_for_mtp_iteration && draft_config.num_layers == 1
+        && draft_config.attn_config.indexer_topk > 0 && propose_step_ >= 3;
+    mtp_indexer_topk_ = draft_config.attn_config.indexer_topk;
+    RTP_LLM_LOG_INFO("MTP index sharing enabled=%d topk=%ld", mtp_indexer_share_enabled_, mtp_indexer_topk_);
+
     dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
@@ -940,12 +971,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // PREFILL descriptors omit every proposal-only tensor, so do not
             // instantiate a PROPOSE wrapper for that graph.
             if (!dspark_prefill_commit_only_) {
-                draft_model_.reset(new PyWrappedModel(model_params,
-                                                      params.py_sp_model,
-                                                      false,
-                                                      false,
-                                                      is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
-                                                      draft_graph_allowed));
+                draft_model_.reset(
+                    new PyWrappedModel(model_params,
+                                       params.py_sp_model,
+                                       false,
+                                       false,
+                                       is_dspark_ ? DSparkModelRole::PROPOSE : DSparkModelRole::NONE,
+                                       draft_graph_allowed,
+                                       false,
+                                       mtp_indexer_share_enabled_ ? MtpIndexerRole::REUSE : MtpIndexerRole::NORMAL));
             }
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
@@ -953,15 +987,42 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
+                py::object prefill_py_model = params.py_sp_model;
+                {
+                    py::gil_scoped_acquire gil;
+                    if (py::hasattr(prefill_py_model, "clone_for_cuda_graph")) {
+                        prefill_py_model = prefill_py_model.attr("clone_for_cuda_graph")();
+                    }
+                }
+                const bool mega_ep = !is_dspark_ && params.moe_config.moe_strategy.rfind("mega_moe", 0) == 0
+                                     && params.parallelism_config.ep_size > 1;
+                const bool disable_prefill_graph =
+                    autil::EnvUtil::getEnv("DISABLE_SP_PREFILL_CUDA_GRAPH", false)
+                    || (mega_ep && !mtp_indexer_share_enabled_
+                        && !autil::EnvUtil::getEnv("RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH", false));
+                RTP_LLM_CHECK_WITH_INFO(!mtp_indexer_share_enabled_ || !disable_prefill_graph,
+                                        "MTP index sharing requires the draft-extend graph");
                 sp_prefill_draft_model_.reset(
                     new PyWrappedModel(model_params,
-                                       params.py_sp_model,
+                                       prefill_py_model,
                                        !is_dspark_,
                                        false,
                                        is_dspark_ ? DSparkModelRole::COMMIT : DSparkModelRole::NONE,
-                                       draft_graph_allowed,
-                                       dspark_prefill_commit_only_));
+                                       draft_graph_allowed && !disable_prefill_graph,
+                                       dspark_prefill_commit_only_,
+                                       mtp_indexer_share_enabled_ ? MtpIndexerRole::SEED : MtpIndexerRole::NORMAL));
             }
+        }
+        if (mtp_indexer_share_enabled_) {
+            py::gil_scoped_acquire gil;
+            const bool             share_mega = params.moe_config.moe_strategy.rfind("mega_moe", 0) == 0
+                                    && params.parallelism_config.ep_size > 1
+                                    && params.parallelism_config.world_size > 1;
+            py::object seed_py_model =
+                share_mega ? params.py_sp_model.attr("clone_for_cuda_graph")(py::arg("share_mega_buf") = true) :
+                             params.py_sp_model.attr("clone_for_cuda_graph")();
+            seed_decode_draft_model_.reset(new PyWrappedModel(
+                model_params, seed_py_model, false, false, DSparkModelRole::NONE, true, false, MtpIndexerRole::SEED));
         }
         break;  // NOTE: only support one mtp model now
     }
@@ -1996,6 +2057,8 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
 }
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
+    if (mtp_indexer_share_enabled_)
+        return;
     if (!useAsyncPrepare()) {
         return;
     }
@@ -2317,6 +2380,10 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     auto draft_prefill_model_output = draft_prefill_model->forward(model_input);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);
+    if (mtp_indexer_share_enabled_) {
+        draft_prefill_model_output.mtp_indexer_topk =
+            draft_prefill_model->snapshotMtpIndexerTopk(model_input.input_lengths.size(0)).clone();
+    }
     return draft_prefill_model_output;
 }
 
@@ -2405,6 +2472,8 @@ void MtpExecutor::releaseAllModelBuffers() {
     if (draft_model_) {
         draft_model_->releaseBuffers();
     }
+    if (seed_decode_draft_model_)
+        seed_decode_draft_model_->releaseBuffers();
     if (sp_prefill_draft_model_) {
         sp_prefill_draft_model_->releaseBuffers();
     }
@@ -2613,6 +2682,47 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     }
     const auto all_streams = stream_groups.allStreams();
 
+    // Seeds remain request-scoped and TP-local. Seed/reuse decode models share
+    // MegaMoE communication buffers, so DP peers can independently choose their
+    // indexer path while entering the same EP collective. TP peers still agree.
+    bool use_seed_graph = false;
+    if (mtp_indexer_share_enabled_) {
+        std::vector<torch::Tensor> seed_rows;
+        bool                       all_seeded = isTpRank0() && all_streams.size() == batch_size;
+        if (all_seeded) {
+            seed_rows.reserve(batch_size);
+            for (const auto& stream : all_streams) {
+                const auto& seed = stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
+                if (!seed.defined() || !seed.is_cuda() || seed.numel() != mtp_indexer_topk_) {
+                    all_seeded = false;
+                    break;
+                }
+                seed_rows.push_back(seed.reshape({1, mtp_indexer_topk_}));
+            }
+        }
+        // Keep graph selection on the host; TP=1 needs no tensor or collective.
+        use_seed_graph = !all_seeded;
+        if (parallelism_config_.tp_size > 1) {
+            auto seed_flag = torch::tensor({isTpRank0() && !all_seeded ? 1 : 0}, torch::kInt32);
+            execBroadcastCpu({{seed_flag}, 0});
+            use_seed_graph = seed_flag.item<int32_t>() != 0;
+        }
+
+        if (!use_seed_graph) {
+            torch::Tensor ordered_seed;
+            if (isTpRank0()) {
+                ordered_seed = torch::cat(seed_rows, 0).contiguous();
+            } else {
+                ordered_seed = torch::empty({static_cast<int64_t>(batch_size), mtp_indexer_topk_},
+                                            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+            }
+            if (parallelism_config_.tp_size > 1) {
+                execBroadcast({{ordered_seed}, 0});
+            }
+            draft_model_->loadMtpIndexerTopk(ordered_seed);
+        }
+    }
+
     torch::Tensor pre_target_token_t;
     // Prefer device state published before the bookkeeping worker launches.
     // Batch gather: pre_target_token[i] = accept_tokens[i, accept_len[i]-1]
@@ -2676,10 +2786,12 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG(
             "[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, propose_step_ - 1, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
-        int64_t start_time_us     = autil::TimeUtility::currentTimeInMicroSeconds();
-        draft_decode_model_output = forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT);
+        int64_t    start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        ModelBase* active_draft  = i == 0 && use_seed_graph ? seed_decode_draft_model_.get() : draft_model_.get();
+        RTP_LLM_CHECK(active_draft != nullptr);
+        draft_decode_model_output = std::move(forwardModel(active_draft, model_input, ModelInputsModelRole::DRAFT));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
+        maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *active_draft);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
         // sample
@@ -2912,6 +3024,8 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         state.next_position_ids_gpu =
             next_position_ids_all.defined() ? next_position_ids_all.narrow(0, idx, 1) : torch::Tensor();
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        const auto& topk             = draft_prefill_output.model_output.mtp_indexer_topk;
+        state.mtp_indexer_topk_gpu   = topk.defined() ? topk.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {
@@ -3060,6 +3174,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.next_kv_cache_kernel_block_id_gpu =
             next_kv_cache_kernel_block_id.defined() ? next_kv_cache_kernel_block_id.narrow(1, idx, 1) : torch::Tensor();
         state.last_hidden_states_gpu = last_hidden_all.defined() ? last_hidden_all.narrow(0, idx, 1) : torch::Tensor();
+        const auto& topk             = draft_prefill_output.model_output.mtp_indexer_topk;
+        state.mtp_indexer_topk_gpu   = topk.defined() ? topk.narrow(0, idx, 1) : torch::Tensor();
 
         const auto next_batch_size = stream->nextBatchSize();
         if (draft_probs_all.defined() && next_batch_size > 0) {

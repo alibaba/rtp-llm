@@ -619,6 +619,7 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
+        torch::Tensor mtp_indexer_topk_gpu;
         // Upper bound for the sequence length represented by the previous
         // round. It equals host seqLength when no worker is pending; otherwise
         // it chains from the prior published bound so multiple overlapped

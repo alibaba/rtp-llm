@@ -1,5 +1,21 @@
 test_envs = {}
 
+py_test(
+    name = "decode_metadata_contract_test",
+    srcs = ["decode_metadata_contract_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "A10_CU13"},
+)
+
+py_test(
+    name = "indexer_paged_contract_test",
+    srcs = ["indexer_paged_contract_test.py"],
+    deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
+    tags = ["A10_CU13"],
+    exec_properties = {"gpu": "A10_CU13"},
+)
+
 flashinfer_test_envs = {
     "FLASHINFER_JIT_VERBOSE": "1",  # Enable verbose JIT compilation logs
 }

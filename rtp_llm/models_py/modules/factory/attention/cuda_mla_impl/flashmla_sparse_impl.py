@@ -1,14 +1,23 @@
 """
-Unified Sparse MLA implementation for both prefill and decode stages.
-Uses flash_mla_sparse_fwd kernel with triton-based index conversion.
+Sparse MLA implementation for prefill and decode.
+
+Two operators:
+- SparseMlaOp:    BF16 KV cache → flash_mla_sparse_fwd
+- SparseMlaFp8Op: FP8 paged KV cache. Two paths controlled by USE_GATHER_PATH env:
+    * USE_GATHER_PATH=1 (prefill): gather + upconvert FP8 → BF16 workspace,
+      then flash_mla_sparse_fwd. ~1.7x faster than with_kvcache for large s_q.
+    * Otherwise: flash_mla_with_kvcache directly on FP8 paged cache.
 """
 
-from typing import Any, Dict, List, Optional
+import logging
+import os
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 import torch
 
-# Check CUDA version for flash_mla compatibility
-_FLASH_MLA_AVAILABLE = False
+# flash_mla requires CUDA >= 12.9. On unsupported envs the symbols stay
+# undefined and any caller using sparse MLA will fail fast at use time.
 try:
     if torch.version.cuda:
         major, minor = map(int, torch.version.cuda.split(".")[:2])
@@ -30,9 +39,16 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_kv_cache_writ
     MlaKVCacheWriteOp,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import MlaImplBase
+from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
+    strided_slice_copy_,
+)
 from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
     triton_convert_req_index_to_global_index,
 )
+from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
+    fused_qk_rope_cat_cache_mla,
+)
+from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -45,10 +61,43 @@ from rtp_llm.utils.model_weight import W
 
 from .rope_emb_new import NewMlaRotaryEmbeddingOp
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-# for bf16 prefill && decode
+
+def _topk_2d(topk_indices: torch.Tensor) -> torch.Tensor:
+    """[T, topk] or [T, h_kv, topk] → [T, topk]. MLA always has h_kv=1."""
+    return topk_indices if topk_indices.dim() == 2 else topk_indices[:, 0, :]
+
+
+def _as_uint8(kv: torch.Tensor) -> torch.Tensor:
+    """Reinterpret an FP8 tensor as uint8 (no-op if already uint8)."""
+    return kv.view(torch.uint8) if kv.dtype != torch.uint8 else kv
+
+
+def _is_multi_token_decode(attn_inputs: PyAttentionInputs) -> bool:
+    return bool(getattr(attn_inputs, "is_target_verify", False)) or bool(
+        getattr(attn_inputs, "is_draft_extend", False)
+    )
+
+
+def _allocate_prefill_fused_kv(
+    total_kv_len: int,
+    width: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Allocate the layer-local BF16 gather destination after Indexer."""
+    return torch.empty((total_kv_len, width), dtype=torch.bfloat16, device=device)
+
+
+# ---------------------------------------------------------------------------
+# BF16 sparse MLA operator
+# ---------------------------------------------------------------------------
+
+
 class SparseMlaOp(object):
-    """Unified Sparse MLA FMHA operator for both prefill and decode stages."""
+    """BF16 sparse MLA: flash_mla_sparse_fwd on a flat KV buffer."""
 
     def __init__(
         self,
@@ -61,7 +110,6 @@ class SparseMlaOp(object):
         top_k: int,
         parallelism_config: Optional[ParallelismConfig] = None,
     ):
-        super().__init__()
         self.num_heads = num_heads
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -72,64 +120,44 @@ class SparseMlaOp(object):
         self.scale = (self.qk_head_dim**-0.5) * softmax_extra_scale
         self.top_k = top_k
 
-        # Batch-related indices will be computed in plan
-        self.block_table = None
-        self.mla_params = None
+        # Filled by plan() each forward
+        self.block_table: Optional[torch.Tensor] = None
+        self.mla_params: Optional[rtp_llm_ops.FlashInferMlaAttnParams] = None
+
+    # Sub-classes that consume KV in paged layout override this to True.
+    expects_paged_kv: bool = False
 
     def plan(
         self,
         mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
         block_table: torch.Tensor,
         attn_inputs: Optional[PyAttentionInputs] = None,
-    ):
+    ) -> None:
         self.block_table = block_table
         self.mla_params = mla_params
 
     def _convert_topk_indices_to_global(
         self, topk_indices: torch.Tensor
     ) -> torch.Tensor:
+        """Request-local topk → physical positions in the flat paged cache.
+
+        Returns [T, 1, topk]. h_kv=1 for MLA — heads share indices.
         """
-        Convert topk_indices from request-local indices to global cache indices.
-
-        Args:
-            topk_indices: [num_tokens, h_kv, topk] - local indices within each request
-                         typically h_kv=1 for MLA
-
-        Returns:
-            global_indices: [num_tokens, h_kv, topk] - global cache indices
-        """
-        # Handle both 2D [num_tokens, topk] and 3D [num_tokens, h_kv, topk] input
-        if topk_indices.dim() == 2:
-            num_tokens, topk = topk_indices.shape
-            h_kv = 1
-            topk_indices_2d = topk_indices
-        else:
-            num_tokens, h_kv, topk = topk_indices.shape
-            # Flatten to 2D for triton kernel: [num_tokens, topk]
-            # All heads share the same indices, so we can just take the first head
-            topk_indices_2d = topk_indices[:, 0, :]
-
-        assert topk == self.top_k, f"topk {topk} not equal to top_k {self.top_k}"
-        assert self.block_table is not None
-        assert self.mla_params is not None
-
-        global_indices_2d = triton_convert_req_index_to_global_index(
+        assert self.block_table is not None and self.mla_params is not None
+        topk_2d = _topk_2d(topk_indices)
+        topk = topk_2d.shape[1]
+        assert topk == self.top_k, f"topk {topk} != top_k {self.top_k}"
+        global_2d = triton_convert_req_index_to_global_index(
             req_id=self.mla_params.batch_indice_d,
             block_table=self.block_table,
-            token_indices=topk_indices_2d,
+            token_indices=topk_2d,
             TOKENS_PER_BLOCK_FOR_BLOCK_TABLE=self.token_per_block,
             ENTRIES_PER_BLOCK=self.token_per_block,
             NUM_TOPK_TOKENS=topk,
-            BLOCK_N=min(128, topk),  # tile width, must divide topk
+            BLOCK_N=min(128, topk),
             HAS_PREFILL_WORKSPACE=False,
         )
-
-        # Expand back to 3D: [num_tokens, h_kv, topk]
-        global_indices_3d = global_indices_2d.unsqueeze(1).expand(
-            num_tokens, h_kv, topk
-        )
-
-        return global_indices_3d
+        return global_2d.unsqueeze(1)
 
     def forward(
         self,
@@ -139,90 +167,150 @@ class SparseMlaOp(object):
         kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
-        """
-        Forward pass for sparse MLA attention (both prefill and decode).
+        """q: [T, H, qk_head_dim], kv: [total_kv_len, 1, kv_lora_rank+rope].
 
-        Args:
-            q: Query tensor of shape [total_q_len, num_heads, qk_head_dim]
-            kv: Key-Value tensor of shape [total_cache_len, kv_lora_rank + rope_head_dim]
-                For prefill: this is the concatenated [compressed_kv, k_pe]
-                For decode: this is read from kv_cache with global indices
-            topk_indices: Sparse indices tensor of shape [total_q_len, num_heads, topk]
-                These are request-local indices that need conversion to global cache indices
-
-        Returns:
-            Attention output of shape [total_q_len, num_heads, kv_lora_rank]
+        Returns [T, H, kv_lora_rank].
         """
-        flatten_topk_indices = self._convert_topk_indices_to_global(topk_indices)
-        out_batch, _, _ = flash_mla_sparse_fwd(
-            q,
-            kv,  # Full KV cache with global indices
-            flatten_topk_indices,
-            self.scale,
-            d_v=self.kv_lora_rank,
+        global_indices = self._convert_topk_indices_to_global(topk_indices)
+        out, _, _ = flash_mla_sparse_fwd(
+            q, kv, global_indices, self.scale, d_v=self.kv_lora_rank
         )
-        return out_batch
+        return out
+
+
+# ---------------------------------------------------------------------------
+# FP8 sparse MLA operator (gather path + with_kvcache fallback)
+# ---------------------------------------------------------------------------
 
 
 class SparseMlaFp8DecodeParams(object):
-    def __init__(
-        self,
-        tile_scheduler_metadata: Any,
-        num_splits: Any,
-    ):
+    """Wraps the (sched_meta, num_splits) returned by get_mla_metadata.
+
+    Kept as a plain class (not a dataclass) for backwards compatibility — the
+    CP variant in flashmla_sparse_cp_impl.py imports this name.
+    """
+
+    def __init__(self, tile_scheduler_metadata, num_splits):
         self.tile_scheduler_metadata = tile_scheduler_metadata
         self.num_splits = num_splits
 
 
-class SparseMlaFp8Op(SparseMlaOp):
-    """FP8 quantized Sparse MLA FMHA operator for both prefill and decode stages.
+@dataclass
+class _GatherWorkspace:
+    """Metadata for the gather + sparse_fwd prefill path.
 
-    This implementation follows vllm's _forward_fp8_kv_mixed_batch approach,
-    which treats all tokens as one batch and uses flash_mla_with_kvcache kernel.
+    plan() only records the layout. The large BF16 fused-KV tensor is allocated
+    in forward(), after the indexer logits have gone out of scope, so the CUDA
+    caching allocator can reuse that block instead of keeping both active.
     """
 
-    def __init__(
-        self,
-        num_heads: int,
-        kv_lora_rank: int,
-        qk_rope_head_dim: int,
-        qk_nope_head_dim: int,
-        page_size: int,
-        softmax_extra_scale: float,
-        top_k: int,
-        parallelism_config: Optional[ParallelismConfig] = None,
-    ):
-        super().__init__(
-            num_heads=num_heads,
-            kv_lora_rank=kv_lora_rank,
-            qk_rope_head_dim=qk_rope_head_dim,
-            qk_nope_head_dim=qk_nope_head_dim,
-            page_size=page_size,
-            softmax_extra_scale=softmax_extra_scale,
-            top_k=top_k,
+    workspace_starts: torch.Tensor  # [batch_size], int32, indptr[:-1]
+    seq_lens: torch.Tensor  # [batch_size], int32, indptr diff
+    total_kv_len: int
+    batch_size: int
+
+
+class SparseMlaFp8Op(SparseMlaOp):
+    """FP8 sparse MLA. See module docstring for path selection."""
+
+    expects_paged_kv = True
+
+    def __init__(self, *args, **kwargs):
+        self.use_cuda_graph = bool(kwargs.pop("use_cuda_graph", False))
+        super().__init__(*args, **kwargs)
+        # In CUDA graph mode the captured kernels keep the scheduler storage
+        # address. Replacing this object during replay leaves the graph with a
+        # dangling/stale pointer, so plan() must refresh it in place.
+        self._sched_meta = None
+        self._sched_meta_key = None
+        self._deterministic_decode = os.environ.get("DETERMINISTIC_GEMM") == "1"
+        self._decode_phase = False
+        self._chunk_sched_meta = {}
+        # Gather workspace (None when path is disabled / no work to do)
+        self._gather: Optional[_GatherWorkspace] = None
+
+    def _reset_sched_meta(self, num_q_tokens_per_head_k: int) -> None:
+        key = (
+            int(num_q_tokens_per_head_k),
+            int(self.top_k),
+            int(self.num_heads),
+            1,
+            True,
         )
-        self._fp8_kernel_metadata = None
+        if self._sched_meta is None or (
+            not self.use_cuda_graph and self._sched_meta_key != key
+        ):
+            self._sched_meta, _ = get_mla_metadata(
+                cache_seqlens=None,
+                num_q_tokens_per_head_k=num_q_tokens_per_head_k,
+                topk=self.top_k,
+                num_heads_q=self.num_heads,
+                num_heads_k=1,
+                is_fp8_kvcache=True,
+            )
+            self._sched_meta_key = key
+        elif self.use_cuda_graph and self._sched_meta_key != key:
+            raise ValueError(
+                "Sparse MLA FP8 CUDA graph replay changed scheduler shape: "
+                f"captured={self._sched_meta_key}, current={key}"
+            )
+
+        if (
+            self.use_cuda_graph
+            and self._sched_meta_key == key
+            and getattr(self._sched_meta, "tile_scheduler_metadata", None) is not None
+            and getattr(self._sched_meta, "num_splits", None) is not None
+        ):
+            return
+
+        self._sched_meta.tile_scheduler_metadata = None
+        self._sched_meta.num_splits = None
 
     def plan(
         self,
         mla_params: rtp_llm_ops.FlashInferMlaAttnParams,
         block_table: torch.Tensor,
         attn_inputs: Optional[PyAttentionInputs] = None,
-    ):
-        self.block_table = block_table
-        self.mla_params = mla_params
-
-        # Note that get_mla_metadata not doing anything but return empty structure
-        tile_scheduler_metadata, num_splits = get_mla_metadata(  # type: ignore
-            cache_seqlens=None,
-            num_q_tokens_per_head_k=mla_params.batch_indice_h.shape[0] * self.num_heads,
-            topk=self.top_k,
-            num_heads_q=self.num_heads,
-            num_heads_k=1,
-            is_fp8_kvcache=True,
+    ) -> None:
+        super().plan(mla_params, block_table, attn_inputs)
+        self._decode_phase = (
+            attn_inputs is None
+            or not attn_inputs.is_prefill
+            or _is_multi_token_decode(attn_inputs)
         )
-        self._fp8_kernel_metadata = SparseMlaFp8DecodeParams(
-            tile_scheduler_metadata, num_splits
+
+        # get_mla_metadata returns an empty FlashMLASchedMeta; the kernel fills
+        # it on first call, then reuses it for the rest of the forward.
+        self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
+
+        # Gather path: only for prefill, gated by env var.
+        gather_enabled = (
+            os.environ.get("USE_GATHER_PATH", "0") == "1"
+            and attn_inputs is not None
+            and getattr(attn_inputs, "is_prefill", False)
+            and not _is_multi_token_decode(attn_inputs)
+            and not self.use_cuda_graph
+        )
+        self._gather = self._build_gather_workspace() if gather_enabled else None
+
+    def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
+        """Slice the prefill indptr and record the gather layout.
+
+        prefill_ragged_kv_len_indptr_d = [0, kv_len_0, kv_len_0+kv_len_1, ...].
+        The buffer can be longer than the actual batch, hence the [:batch+1] slice.
+        Returns None if total_kv_len == 0 (no prefill tokens).
+        """
+        assert self.mla_params is not None and self.block_table is not None
+        batch_size = int(self.block_table.shape[0])
+        indptr = self.mla_params.prefill_ragged_kv_len_indptr_d[: batch_size + 1]
+        total_kv_len = int(indptr[batch_size].item())
+        if total_kv_len == 0:
+            return None
+        return _GatherWorkspace(
+            workspace_starts=indptr[:batch_size],
+            seq_lens=indptr[1:] - indptr[:batch_size],
+            total_kv_len=total_kv_len,
+            batch_size=batch_size,
         )
 
     def forward(
@@ -233,84 +321,126 @@ class SparseMlaFp8Op(SparseMlaOp):
         kv_scale: Optional[torch.Tensor] = None,
         layer_id: int = 0,
     ) -> torch.Tensor:
-        """
-        Forward pass for FP8 quantized sparse MLA attention (mixed batch approach).
+        if self._gather is not None:
+            return self._forward_gather(q, kv, topk_indices)
+        return self._forward_with_kvcache(q, kv, topk_indices, layer_id)
 
-        This follows vllm's _forward_fp8_kv_mixed_batch logic:
-        1. Convert per-request indices to global indices
-        2. Call flash_mla_with_kvcache with FP8 support
+    def _forward_gather(
+        self,
+        q: torch.Tensor,
+        kv_cache_fp8: torch.Tensor,
+        topk_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        """gather + flash_mla_sparse_fwd (prefill fast path)."""
+        ws = self._gather
+        assert (
+            ws is not None
+            and self.mla_params is not None
+            and self.block_table is not None
+        )
 
-        Args:
-            q: Query tensor of shape [total_q_len, num_heads, qk_head_dim]
-            kv: Key-Value cache tensor (FP8) of shape [num_blocks, block_size, kv_dim]
-                where kv_dim = kv_lora_rank + rope_head_dim
-            topk_indices: Sparse indices tensor of shape [total_q_len, h_kv, topk]
-                These are request-local indices that need conversion to global cache indices
-            kv_scale: FP8 scale tensor (optional, for future use)
+        # Layer-local lifetime lets the caching allocator reuse indexer logits
+        # storage. No synchronize/empty_cache is needed (or desirable).
+        fused_kv = _allocate_prefill_fused_kv(
+            ws.total_kv_len,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            self.block_table.device,
+        )
 
-        Returns:
-            Attention output of shape [total_q_len, num_heads, kv_lora_rank]
-        """
-        # Convert per-request indices to global slots (decode) or workspace offsets (prefill)
-        # Output shape: [total_q_len, h_kv, topk]
-        global_topk_indices = self._convert_topk_indices_to_global(topk_indices)
+        # Cache as uint8, drop head dim if present → [num_blocks, block_size, 656]
+        src = _as_uint8(kv_cache_fp8)
+        if src.ndim == 4:
+            src = src.squeeze(2)
 
-        # Squeeze h_kv dimension if it's 1 (MLA typically uses h_kv=1)
-        # Shape: [total_q_len, topk]
-        if global_topk_indices.shape[1] == 1:
-            global_topk_indices = global_topk_indices.squeeze(1)
+        # FP8 paged → BF16 contiguous workspace
+        rtp_llm_ops.cp_gather_and_upconvert_fp8_kv_cache_v2(
+            src,
+            fused_kv,
+            self.block_table.to(torch.int32),
+            ws.seq_lens,
+            ws.workspace_starts,
+            ws.batch_size,
+            ws.total_kv_len,
+        )
 
-        # Add batch dimension for kernel: (T, topk) -> (1, T, topk)
-        # This treats all tokens as one batch (mixed batch approach)
-        global_topk_indices = global_topk_indices.unsqueeze(0)
+        # Request-local topk → workspace offset (ws_starts[req] + local_pos)
+        offsets = ws.workspace_starts[self.mla_params.batch_indice_d]
+        topk_2d = _topk_2d(topk_indices)
+        padding_mask = topk_2d < 0
+        raw_global = topk_2d + offsets.unsqueeze(1)
+        global_indices = raw_global.masked_fill(padding_mask, -1).unsqueeze(1)
 
-        # Add batch dimension to q: (T, H, D) -> (1, T, H, D)
-        q_batched = q.unsqueeze(0)
+        out, _, _ = flash_mla_sparse_fwd(
+            q,
+            fused_kv.unsqueeze(1),  # [total_kv_len, 1, dim]
+            global_indices,
+            self.scale,
+            d_v=self.kv_lora_rank,
+        )
+        return out
 
-        # Prepare KV cache for kernel
-        # Convert to uint8 view and add head dimension if needed
-        # Expected shape: (num_blocks, block_size, num_heads_k, head_dim)
-        if kv.dtype == torch.float8_e4m3fn or kv.dtype == torch.float8_e5m2:
-            kv_cache = kv.view(torch.uint8)
-        else:
-            kv_cache = kv
-
-        # Add head dimension if not present (MLA uses single KV head)
-        # Shape: (num_blocks, block_size, kv_dim) -> (num_blocks, block_size, 1, kv_dim)
+    def _forward_with_kvcache(
+        self,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        topk_indices: torch.Tensor,
+        layer_id: int = 0,
+    ) -> torch.Tensor:
+        """flash_mla_with_kvcache directly on FP8 paged cache."""
+        assert self._sched_meta is not None
+        if layer_id == 0:
+            self._sched_meta.tile_scheduler_metadata = None
+            self._sched_meta.num_splits = None
+            for meta in self._chunk_sched_meta.values():
+                meta.tile_scheduler_metadata = None
+                meta.num_splits = None
+        # Cache layout: (num_blocks, block_size, num_heads_k=1, dim)
+        kv_cache = _as_uint8(kv)
         if kv_cache.ndim == 3:
             kv_cache = kv_cache.unsqueeze(-2)
 
-        if layer_id == 0 and self._fp8_kernel_metadata is not None:
-            # Clear nested fields on get_mla_metadata's scheduler object (e.g.
-            # FlashMLASchedMeta), not on SparseMlaFp8DecodeParams.
-            sched = self._fp8_kernel_metadata.tile_scheduler_metadata
-            if sched is not None:
-                sched.tile_scheduler_metadata = None
-                sched.num_splits = None
-
-        # Call FlashMLA sparse decode kernel
-        attn_out, _ = flash_mla_with_kvcache(
-            q=q_batched,
-            k_cache=kv_cache,
-            block_table=self.block_table,
-            head_dim_v=self.kv_lora_rank,
-            cache_seqlens=None,
-            tile_scheduler_metadata=self._fp8_kernel_metadata.tile_scheduler_metadata,  # type: ignore
-            num_splits=self._fp8_kernel_metadata.num_splits,  # type: ignore
-            is_fp8_kvcache=True,
-            indices=global_topk_indices,
-            softmax_scale=self.scale,
+        # Indices: [T, 1, topk] → [1, T, topk] (kernel expects batched layout)
+        global_indices = (
+            self._convert_topk_indices_to_global(topk_indices).squeeze(1).unsqueeze(0)
         )
 
-        # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
-        return attn_out.squeeze(0)
+        # Bound decode query width to keep FlashMLA's BF16 rounding consistent
+        # with small batches; even one ULP can change sparse routing.
+        chunk_size = (
+            4 if self._deterministic_decode and self._decode_phase else q.shape[0]
+        )
+        outputs = []
+        for begin in range(0, q.shape[0], chunk_size):
+            end = min(begin + chunk_size, q.shape[0])
+            meta = self._sched_meta
+            if chunk_size < q.shape[0]:
+                size = end - begin
+                if size not in self._chunk_sched_meta:
+                    self._chunk_sched_meta[size] = get_mla_metadata()[0]
+                meta = self._chunk_sched_meta[size]
+            output, _ = flash_mla_with_kvcache(
+                q=q[begin:end].unsqueeze(0),
+                k_cache=kv_cache,
+                block_table=self.block_table,
+                head_dim_v=self.kv_lora_rank,
+                cache_seqlens=None,
+                tile_scheduler_metadata=meta,
+                num_splits=None,
+                is_fp8_kvcache=True,
+                indices=global_indices[:, begin:end],
+                softmax_scale=self.scale,
+            )
+            outputs.append(output.squeeze(0))
+        return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+
+
+# ---------------------------------------------------------------------------
+# MLA layer wrapper: RoPE + KV write + input/output BMM + the operator above
+# ---------------------------------------------------------------------------
 
 
 class SparseMlaImpl(MlaImplBase):
-    """
-    Unified Sparse MLA implementation for both prefill and decode stages.
-    Uses the same operator (SparseMlaOp) for both stages with triton-based index conversion.
-    """
+    """Wraps a SparseMlaOp / SparseMlaFp8Op with rope, KV write, and absorbed BMMs."""
 
     def __init__(
         self,
@@ -324,7 +454,7 @@ class SparseMlaImpl(MlaImplBase):
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
-        fmha_impl: Optional[SparseMlaOp] = None,
+        fmha_impl: Optional[type] = None,
     ) -> None:
         super().__init__(
             attn_configs=attn_configs,
@@ -345,23 +475,22 @@ class SparseMlaImpl(MlaImplBase):
         self.nope_head_dim = attn_configs.nope_head_dim
         self.is_prefill = attn_inputs.is_prefill
         self.parallelism_config = parallelism_config
-        self.fmha_params = None
-        self.rope_params = None
 
-        self.fmha_impl = None
-
-        # Initialize unified FMHA operator for both prefill and decode
+        # Pick the right op class
         if fmha_impl is not None:
-            fmha_impl_cls = fmha_impl
+            op_cls = fmha_impl
         elif attn_configs.kv_cache_dtype == KvCacheDataType.BASE:
-            fmha_impl_cls = SparseMlaOp
+            op_cls = SparseMlaOp
         elif attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
-            fmha_impl_cls = SparseMlaFp8Op
+            op_cls = SparseMlaFp8Op
         else:
             raise ValueError(
                 f"Unsupported kv_cache_dtype: {attn_configs.kv_cache_dtype}"
             )
-        self.fmha_impl = fmha_impl_cls(
+        op_kwargs = {"parallelism_config": parallelism_config}
+        if issubclass(op_cls, SparseMlaFp8Op):
+            op_kwargs["use_cuda_graph"] = is_cuda_graph
+        self.fmha_impl: SparseMlaOp = op_cls(
             attn_configs.head_num,
             attn_configs.kv_lora_rank,
             attn_configs.rope_head_dim,
@@ -369,32 +498,103 @@ class SparseMlaImpl(MlaImplBase):
             attn_configs.kernel_tokens_per_block,
             attn_configs.softmax_extra_scale,
             attn_configs.indexer_topk,
-            parallelism_config=parallelism_config,
+            **op_kwargs,
         )
 
         self.rope_impl = NewMlaRotaryEmbeddingOp(
             cos_sin_cache=cos_sin_cache,
             is_neox_style=self.attn_configs.rope_config.is_neox_style,
         )
-
         self.kv_cache_write_op = MlaKVCacheWriteOp(
             kv_cache_dtype=attn_configs.kv_cache_dtype,
         )
 
+        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled()
+        self._kv_cache_type = (
+            "fp8_ds_mla"
+            if attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+            else "auto"
+        )
+        self._cos_sin_cache = cos_sin_cache
+        self._is_neox_style = attn_configs.rope_config.is_neox_style
+        self._cuda_dag_indexer_metadata = None
+
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
-        # Create parameters
+        # create_params is a hook subclasses (e.g. SparseMlaCpImpl) override
+        # to attach CP-specific state after the base prepare(). Keep the call
+        # — do not inline.
         self.create_params(attn_inputs)
 
-    def create_params(self, attn_inputs: PyAttentionInputs):
-        """Create FMHA parameters."""
+    def create_params(self, attn_inputs: PyAttentionInputs) -> None:
+        """Allocate fmha_params and run the first prepare(). Override hook."""
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
         self.rope_params = self.fmha_params
         self.prepare(attn_inputs)
 
+    def _refresh_paged_mqa_schedule_metadata(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool
+    ) -> None:
+        """Refresh DeepGEMM paged-MQA schedule metadata for graph replay.
+
+        The target-verify DSA indexer uses the paged logits kernel even though
+        the outer attention input is prefill-shaped. CUDA graph replay must keep
+        the captured schedule tensor address stable, so replay updates it in
+        place instead of replacing the tensor object.
+        """
+        if not (
+            _is_multi_token_decode(attn_inputs)
+            or not bool(getattr(attn_inputs, "is_prefill", False))
+        ):
+            return
+        try:
+            import deep_gemm
+        except Exception:
+            return
+        if not hasattr(deep_gemm, "get_paged_mqa_logits_metadata"):
+            return
+
+        if _is_multi_token_decode(attn_inputs):
+            lengths = self.fmha_params.expanded_seq_lens
+        else:
+            lengths = self.fmha_params.kvlen_d
+        if not isinstance(lengths, torch.Tensor) or lengths.numel() == 0:
+            return
+        lengths_2d = lengths.reshape(-1, 1)
+        new_schedule = deep_gemm.get_paged_mqa_logits_metadata(
+            lengths_2d, self.seq_size_per_block, deep_gemm.get_num_sms()
+        )
+
+        current = getattr(self.fmha_params, "schedule_metadata", None)
+        has_current = False
+        if isinstance(current, torch.Tensor):
+            try:
+                has_current = current.numel() > 0
+            except RuntimeError:
+                has_current = False
+        if has_current:
+            if tuple(current.shape) != tuple(new_schedule.shape):
+                if forbid_realloc:
+                    raise RuntimeError(
+                        "Sparse MLA paged-MQA schedule metadata shape changed "
+                        f"during CUDA graph replay: captured={tuple(current.shape)}, "
+                        f"current={tuple(new_schedule.shape)}"
+                    )
+                self.fmha_params.schedule_metadata = new_schedule
+            else:
+                current.copy_(new_schedule)
+        else:
+            if forbid_realloc:
+                raise RuntimeError(
+                    "Sparse MLA paged-MQA schedule metadata was not captured before "
+                    "CUDA graph replay"
+                )
+            self.fmha_params.schedule_metadata = new_schedule
+
+    # -- Hooks expected by MlaImplBase --------------------------------------
+
     @staticmethod
     def fmha_type() -> FMHAType:
-        """Return FMHA type."""
         return FMHAType.SPARSE_FLASHMLA
 
     @staticmethod
@@ -412,74 +612,155 @@ class SparseMlaImpl(MlaImplBase):
             in (KvCacheDataType.BASE, KvCacheDataType.FP8)
         )
 
-    def prepare(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False):
-        """Prepare stage: update parameters and plan for processing.
-
-        forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
-        """
-        assert (
-            self.fmha_params is not None
-        ), "fmha_params should be initialized in __init__"
-
-        # Fill parameters - one call fills all parameters (base and derived)
+    def prepare(
+        self, attn_inputs: PyAttentionInputs, forbid_realloc: bool = False
+    ) -> None:
+        """Refresh per-forward params + plan. forbid_realloc=True under cuda graph replay."""
         self.fmha_params.fill_params(
             attn_inputs, self.seq_size_per_block, forbid_realloc
         )
-        # Plan for processing
+        self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc)
+        block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+        if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+            block_table = attn_inputs.kv_cache_block_id_device
         self.fmha_impl.plan(
             self.fmha_params,
-            attn_inputs.kv_cache_kernel_block_id_device,
+            block_table,
             attn_inputs=attn_inputs,
         )
 
-    def _apply_input_bmm(self, q: torch.Tensor, layer_id: int) -> torch.Tensor:
-        """
-        Apply input batch matrix multiplication to transform q_nope.
+    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+        if (
+            _is_multi_token_decode(attn_inputs)
+            and isinstance(self.fmha_impl, SparseMlaFp8Op)
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+            and self.fmha_params.multi_token_decode_total_tokens > 0
+        ):
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_block_id_device
+            self.fmha_params.fill_multi_token_decode_cuda_graph_params(
+                attn_inputs.input_lengths_device,
+                attn_inputs.prefix_lengths_device,
+                block_table,
+                self.seq_size_per_block,
+            )
+            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
+            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+        # Decode fast path (draft model): SparseMlaImpl handles decode for sparse
+        # configs because MlaFlashInferDecodeImpl rejects when is_sparse=True.
+        # fillParams' 3 toHostContiguousI32 D2H syncs go away by delegating to
+        # the device-only fillDecodeCudaGraphParams kernel.
+        elif (
+            not getattr(attn_inputs, "is_prefill", True)
+            and isinstance(self.fmha_impl, SparseMlaOp)
+            and attn_inputs.sequence_lengths_plus_1_device is not None
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+        ):
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_block_id_device
+            self.fmha_params.fill_sparse_mla_decode_cuda_graph_params(
+                attn_inputs.sequence_lengths_plus_1_device,
+                block_table,
+                self.seq_size_per_block,
+            )
+            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
+            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+        elif (
+            getattr(attn_inputs, "is_prefill", False)
+            and not _is_multi_token_decode(attn_inputs)
+            and isinstance(self.fmha_impl, SparseMlaFp8Op)
+            and attn_inputs.kv_cache_kernel_block_id_device is not None
+            and self.fmha_params.prefill_tokens_per_batch > 0
+        ):
+            block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
+            if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
+                block_table = attn_inputs.kv_cache_block_id_device
+            self.fmha_params.fill_target_verify_cuda_graph_params(
+                attn_inputs.input_lengths_device,
+                attn_inputs.prefix_lengths_device,
+                block_table,
+                self.seq_size_per_block,
+            )
+            self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
+            self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+        else:
+            self.prepare(attn_inputs, forbid_realloc=True)
 
-        Args:
-            q: Query tensor of shape [*, num_heads, qk_head_dim]
-            layer_id: Current layer ID
+        if self._cuda_dag_indexer_metadata is not None:
+            self._cuda_dag_indexer_metadata.prepare()
 
-        Returns:
-            Transformed query tensor with same shape as input
+    # -- BMMs ----------------------------------------------------------------
+
+    def _apply_input_bmm(
+        self,
+        q: torch.Tensor,
+        layer_id: int,
+        out: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Project q_nope @ W_kc to kv_lora_rank, assemble [T, H, kv_lora_rank|rope].
+
+        q_pe is a strided view from torch.split — calling .contiguous() here would
+        re-introduce the very copy the strided triton kernel is replacing.
         """
-        # Split q into nope and pe parts
         q_nope, q_pe = q.view(
             -1, self.num_heads, self.nope_head_dim + self.rope_head_dim
         ).split([self.nope_head_dim, self.rope_head_dim], dim=-1)
 
-        q_transformed = torch.empty(
+        expected_shape = (
             q_nope.shape[0],
             self.num_heads,
             self.kv_lora_rank + self.rope_head_dim,
-            dtype=q.dtype,
-            device=q.device,
         )
-        q_transformed[..., self.kv_lora_rank :] = q_pe
-        if q_nope.shape[0] == 0:
-            return q_transformed
-        k_weight = self.weights[layer_id][W.mla_kc]
-        out_nope = q_transformed[..., : self.kv_lora_rank].transpose(0, 1)
-        torch.bmm(q_nope.transpose(0, 1), k_weight, out=out_nope)  # type: ignore
+        if out is None:
+            q_transformed = torch.empty(
+                expected_shape,
+                dtype=q.dtype,
+                device=q.device,
+            )
+        elif (
+            tuple(out.shape) != expected_shape
+            or out.dtype != q.dtype
+            or out.device != q.device
+            or not out.is_contiguous()
+        ):
+            raise ValueError(
+                "SparseMLA input BMM out must be contiguous and match q: "
+                f"expected shape/dtype/device={expected_shape}/{q.dtype}/{q.device}, "
+                f"got {tuple(out.shape)}/{out.dtype}/{out.device}, "
+                f"contiguous={out.is_contiguous()}"
+            )
+        else:
+            q_transformed = out
+        strided_slice_copy_(q_transformed, q_pe, self.kv_lora_rank)
+
+        if q_nope.shape[0] > 0:
+            k_weight = self.weights[layer_id][W.mla_kc]
+            out_nope = q_transformed[..., : self.kv_lora_rank].transpose(0, 1)
+            torch.bmm(q_nope.transpose(0, 1), k_weight, out=out_nope)  # type: ignore
         return q_transformed
 
     def _apply_output_bmm(
         self, attn_output: torch.Tensor, layer_id: int
     ) -> torch.Tensor:
-        """
-        Apply output batch matrix multiplication to get final output.
+        """Project [T, H, kv_lora_rank] @ W_vc → [T, H, v_head_dim].
 
-        Args:
-            attn_output: Attention output of shape [*, num_heads, kv_lora_rank]
-            layer_id: Current layer ID
-
-        Returns:
-            Final output tensor with shape [*, num_heads, nope_head_dim]
+        Allocates contiguous [T, H, V] and asks cuBLAS to write a transposed
+        [H, T, V] view via strideC, eliminating a post-bmm .contiguous() copy.
         """
         v_weight = self.weights[layer_id][W.mla_vc]
-        output = torch.bmm(attn_output.transpose(0, 1), v_weight)
-        output = output.transpose(0, 1)
+        output = torch.empty(
+            attn_output.shape[0],
+            self.num_heads,
+            v_weight.shape[-1],
+            dtype=attn_output.dtype,
+            device=attn_output.device,
+        )
+        torch.bmm(attn_output.transpose(0, 1), v_weight, out=output.transpose(0, 1))
         return output
+
+    # -- Main forward --------------------------------------------------------
 
     def forward(
         self,
@@ -490,60 +771,47 @@ class SparseMlaImpl(MlaImplBase):
         layer_id: int,
         topk_indices: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Forward pass for sparse MLA attention (prefill or decode).
+        """Sparse MLA forward. q: [T, H, qk_head_dim], topk: [T, (H,) topk] (req-local).
+        Returns [T, H, nope_head_dim]."""
+        assert topk_indices is not None and kv_cache is not None
 
-        Args:
-            q: Query tensor
-                - Prefill: [total_q_len, num_heads, qk_head_dim]
-                - Decode: [batch_size, num_heads, qk_head_dim]
-            compressed_kv: Compressed KV tensor
-                - Prefill: [total_kv_len, kv_lora_rank]
-                - Decode: [batch_size, kv_lora_rank] (not used)
-            k_pe: Key position encoding
-                - Prefill: [total_kv_len, rope_head_dim]
-                - Decode: [batch_size, rope_head_dim] (not used)
-            kv_cache: KV cache object
-            layer_id: Current layer ID
-            topk_indices: Sparse indices (request-local)
-                - Prefill: [total_q_len, num_heads, topk]
-                - Decode: [batch_size, num_heads, topk]
-
-        Returns:
-            Attention output
-                - Prefill: [total_q_len, num_heads, nope_head_dim]
-                - Decode: [batch_size, num_heads, nope_head_dim]
-        """
-        assert self.rope_impl is not None and self.rope_params is not None
-        assert topk_indices is not None, "topk_indices is required for sparse MLA"
-        assert kv_cache is not None, "kv_cache is required for sparse MLA"
-        assert self.fmha_impl is not None, "fmha_impl is not initialized"
-
-        # Apply RoPE to q_pe and k_pe
+        # 1. RoPE on q_pe and k_pe; write KV to cache + optional store
         q_pe = q[:, :, self.nope_head_dim :]
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        if self._fuse_qk_rope_cat_cache_mla and kv_cache is not None:
+            fused_qk_rope_cat_cache_mla(
+                q=q,
+                compressed_kv=compressed_kv,
+                k_pe=k_pe,
+                kv_cache=kv_cache.kv_cache_base,
+                slot_mapping=self.rope_params.slot_mapping,
+                positions=self.rope_params.positions_d,
+                cos_sin_cache=self._cos_sin_cache,
+                kv_lora_rank=self.kv_lora_rank,
+                rope_head_dim=self.rope_head_dim,
+                is_neox_style=self._is_neox_style,
+                kv_cache_type=self._kv_cache_type,
+            )
+        else:
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+            self.kv_cache_write_op.forward(
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                self.rope_params,
+            )
+
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-
-        # Apply input BMM to transform query
         q_transformed = self._apply_input_bmm(q, layer_id)
 
-        # Get full KV cache: [num_blocks * page_size, kv_lora_rank + rope_head_dim]
-        # Reshape from [num_blocks, page_size, kv_dim] to [num_blocks * page_size, h_kv, kv_dim]
-        kv_cache_flat = kv_cache.kv_cache_base.view(
-            -1, 1, kv_cache.kv_cache_base.size(-1)
-        )
-        # Call unified Op with input kv (returns [total_q_len, num_heads, kv_lora_rank])
+        # 3. Sparse attention. FP8 op consumes paged shape; BF16 op wants flat.
+        kv_input = kv_cache.kv_cache_base
+        if not self.fmha_impl.expects_paged_kv:
+            kv_input = kv_input.view(-1, 1, kv_input.size(-1))
         attn_output = self.fmha_impl.forward(
-            q_transformed, kv_cache_flat, topk_indices, layer_id=layer_id
+            q_transformed, kv_input, topk_indices, layer_id=layer_id
         )
 
-        # Apply output BMM to get final output
-        output = self._apply_output_bmm(attn_output, layer_id)
-
-        return output
-
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        self.prepare(attn_inputs, forbid_realloc=True)
+        # 4. Project attention output via W_vc → final output
+        return self._apply_output_bmm(attn_output, layer_id)

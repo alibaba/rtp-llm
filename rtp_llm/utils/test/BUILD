@@ -271,3 +271,9 @@ py_test(
         "//rtp_llm:utils",
     ],
 )
+
+py_test(
+    name = "dsa_indexing_test",
+    srcs = ["dsa_indexing_test.py"],
+    data = ["//rtp_llm:utils/dsa_indexing.py"],
+)

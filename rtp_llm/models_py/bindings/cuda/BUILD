@@ -184,7 +184,10 @@ cc_library(
         # topk_v3's cluster-launch kernels need cooperative_groups::this_cluster,
         # which the PPU toolkit lacks; python indexer.py degrades via hasattr.
         "@//:using_ppu": [],
-        "//conditions:default": ["//rtp_llm/models_py/bindings/cuda/kernels:topk_v3"],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3",
+            "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_tie_break",
+        ],
     }) + select({
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",

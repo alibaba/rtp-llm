@@ -18,10 +18,10 @@ using CudaGraphPrepareStream = cudaStream_t;
 constexpr int kMaxCudaGraphPrepareFillRegions = 32;
 
 struct CudaGraphPrepareFillRegion {
-    int32_t*       ptr       = nullptr;
-    const int32_t* value_ptr = nullptr;
-    int64_t        count     = 0;
-    int32_t        value     = 0;
+    int32_t*       ptr          = nullptr;
+    const int32_t* value_ptr    = nullptr;
+    int64_t        count        = 0;
+    int32_t        value        = 0;
     int32_t        value_offset = 0;
     int32_t        step         = 0;
 };
@@ -33,6 +33,21 @@ struct CudaGraphPrepareFillParams {
 
 void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrepareStream stream);
 
+void invokePrepareFlashInferDecodeParams(const int32_t*         sequence_lengths_plus_1,
+                                         const int32_t*         block_ids,
+                                         int32_t*               batch_indice,
+                                         int32_t*               page_indice,
+                                         int32_t*               decode_page_indptr,
+                                         int32_t*               paged_kv_last_page_len,
+                                         int32_t*               qo_indptr,
+                                         int32_t*               kvlen,
+                                         int32_t*               positions,
+                                         int32_t                batch_size,
+                                         int32_t                max_blocks_per_batch,
+                                         int32_t                seq_size_per_block,
+                                         CudaGraphPrepareStream stream);
+
+#if !USING_ROCM
 void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          const int32_t* block_ids,
                                          int32_t*       batch_indice,
@@ -42,9 +57,54 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                          int32_t*       qo_indptr,
                                          int32_t*       kvlen,
                                          int32_t*       positions,
+                                         int64_t*       slot_mapping,
                                          int32_t        batch_size,
                                          int32_t        max_blocks_per_batch,
                                          int32_t        seq_size_per_block,
-                                         CudaGraphPrepareStream stream);
+                                         int32_t        captured_batch_capacity,
+                                         cudaStream_t   stream);
+
+void invokePrepareFlashInferPrefillParams(const int32_t* input_lengths,
+                                          const int32_t* prefix_lengths,
+                                          const int32_t* block_ids,
+                                          int32_t*       batch_indice,
+                                          int32_t*       page_indice,
+                                          int32_t*       decode_page_indptr,
+                                          int32_t*       paged_kv_last_page_len,
+                                          int32_t*       qo_indptr,
+                                          int32_t*       prefill_ragged_kv_len_indptr,
+                                          int32_t*       kvlen,
+                                          int32_t*       positions,
+                                          int64_t*       slot_mapping,
+                                          int32_t        batch_size,
+                                          int32_t        max_blocks_per_batch,
+                                          int32_t        seq_size_per_block,
+                                          int32_t        captured_total_tokens,
+                                          cudaStream_t   stream);
+
+void invokePrepareSparseMlaTargetVerifyParams(const int32_t* input_lengths,
+                                              const int32_t* prefix_lengths,
+                                              const int32_t* block_ids,
+                                              int32_t*       batch_indice,
+                                              int32_t*       page_indice,
+                                              int32_t*       decode_page_indptr,
+                                              int32_t*       paged_kv_last_page_len,
+                                              int32_t*       qo_indptr,
+                                              int32_t*       prefill_ragged_kv_len_indptr,
+                                              int32_t*       kvlen,
+                                              int32_t*       positions,
+                                              int64_t*       slot_mapping,
+                                              int32_t*       expanded_seq_lens,
+                                              int32_t*       topk_indices_offset,
+                                              int32_t*       ks,
+                                              int32_t*       ke,
+                                              int32_t        batch_size,
+                                              int32_t        max_blocks_per_batch,
+                                              int32_t        seq_size_per_block,
+                                              int32_t        captured_batch_capacity,
+                                              int32_t        captured_total_tokens,
+                                              cudaStream_t   stream);
+
+#endif
 
 }  // namespace rtp_llm

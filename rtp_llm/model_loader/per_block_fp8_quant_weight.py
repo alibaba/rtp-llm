@@ -1,9 +1,9 @@
 import copy
 import functools
+import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
@@ -334,6 +334,22 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             return False
         return True
 
+    @staticmethod
+    def _get_scale_dtype(scale_fmt: Optional[str]) -> torch.dtype:
+        if scale_fmt in (None, "float32"):
+            return torch.float32
+        if scale_fmt == "ue8m0":
+            return torch.float8_e8m0fnu
+        raise ValueError(f"unsupported scale_fmt: {scale_fmt!r}")
+
+    @staticmethod
+    def _get_scale_suffix(scale_fmt: Optional[str]) -> str:
+        # UE8M0 (glm5 quant / V4-style) stores scales as ``.scale``;
+        # legacy DeepSeek FP8 float32 scales use ``.weight_scale_inv``.
+        if scale_fmt == "ue8m0":
+            return ".scale"
+        return QS_SUFFIX
+
     def __init__(
         self,
         src_weight_info: WeightModule,
@@ -344,6 +360,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         kernel: WeightModule
         scale: WeightModule
         self.group_size = quant_config.group_size()
+        self.scale_dtype = self._get_scale_dtype(
+            getattr(quant_config, "scale_fmt", None)
+        )
+        self.qs_suffix = self._get_scale_suffix(
+            getattr(quant_config, "scale_fmt", None)
+        )
         if src_weight_info.name == W.attn_qkv_w:
             kernel, scale = self._get_qkv_quant_weight(src_weight_info, self.group_size)
         elif src_weight_info.name == W.attn_o_w:
@@ -417,7 +439,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             for sub_w in weights
         ]
         qkv_s_list = [
-            CkptWeightInfo(sub_w.name[: -len(W_SUFFIX)] + QS_SUFFIX, sub_w.merge_fun)
+            CkptWeightInfo(
+                sub_w.name[: -len(W_SUFFIX)] + self.qs_suffix, sub_w.merge_fun
+            )
             for sub_w in weights
         ]
         kernel = create_w8a8_fp8_per_block_weight(
@@ -434,7 +458,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             W.attn_qkv_s,
             qkv_s_list,
             merge_block_scale,
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
         )
         return [kernel, scale]
@@ -464,8 +488,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = W8A8Fp8PerBlockLinearAttnAtomicWeight(
             W.linear_attn_qkvz_s,
             [
-                CkptWeightInfo(qkv_name + QS_SUFFIX, identity),
-                CkptWeightInfo(z_name + QS_SUFFIX, identity),
+                CkptWeightInfo(qkv_name + self.qs_suffix, identity),
+                CkptWeightInfo(z_name + self.qs_suffix, identity),
             ],
             merge_qkv_z,
             src_weight_info.config,
@@ -491,7 +515,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
 
         scale = W8A8Fp8PerBlockLinearAttnAtomicWeight(
             scale_key,
-            [CkptWeightInfo(w_name + QS_SUFFIX, src_weight_info.weights[0].merge_fun)],
+            [
+                CkptWeightInfo(
+                    w_name + self.qs_suffix, src_weight_info.weights[0].merge_fun
+                )
+            ],
             identity,
             src_weight_info.config,
             torch.float32,
@@ -516,8 +544,12 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             scale_key,
-            [CkptWeightInfo(w_name + QS_SUFFIX, src_weight_info.weights[0].merge_fun)],
-            data_type=torch.float32,
+            [
+                CkptWeightInfo(
+                    w_name + self.qs_suffix, src_weight_info.weights[0].merge_fun
+                )
+            ],
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
         )
         return [kernel, scale]
@@ -554,7 +586,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.attn_o_s,
-            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+            [CkptWeightInfo(w_name + self.qs_suffix, identity)],
             functools.partial(
                 mla_pad_scale,
                 head_num=src_weight_info.config.head_num,
@@ -562,7 +594,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 rope_head_dim=0,
                 group_size=group_size,
             ),
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
         )
 
@@ -585,9 +617,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.mla_kv_b_s,
-            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+            [CkptWeightInfo(w_name + self.qs_suffix, identity)],
             identity,
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
         )
         return [kernel, scale]
@@ -603,7 +635,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             w,
             [
                 CkptWeightInfo(w_name + QW_SUFFIX, identity),
-                CkptWeightInfo(w_name + QS_SUFFIX, identity),
+                CkptWeightInfo(w_name + self.qs_suffix, identity),
             ],
             functools.partial(
                 process_func,
@@ -633,9 +665,9 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         scale = create_w8a8_fp8_per_block_weight(
             src_weight_info,
             W.mla_q_b_s,
-            [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+            [CkptWeightInfo(w_name + self.qs_suffix, identity)],
             identity,
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
         )
         return [kernel, scale]
@@ -662,11 +694,11 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             src_weight_info,
             W.mla_fusedqkrope_s,
             [
-                CkptWeightInfo(q_w_name + QS_SUFFIX, identity),
-                CkptWeightInfo(k_w_name + QS_SUFFIX, identity),
+                CkptWeightInfo(q_w_name + self.qs_suffix, identity),
+                CkptWeightInfo(k_w_name + self.qs_suffix, identity),
             ],
             concat_0,
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
         )
 
@@ -701,15 +733,15 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                     src_weight_info,
                     s,
                     [
-                        CkptWeightInfo(w1_name + QS_SUFFIX, identity),
-                        CkptWeightInfo(w3_name + QS_SUFFIX, identity),
+                        CkptWeightInfo(w1_name + self.qs_suffix, identity),
+                        CkptWeightInfo(w3_name + self.qs_suffix, identity),
                     ],
                     functools.partial(
                         pad_w13,
                         align_size=src_weight_info.config.align_size // group_size,
                         dim=0,
                     ),
-                    data_type=torch.float32,
+                    data_type=self.scale_dtype,
                     config=src_weight_info.config,
                 ),
             ]
@@ -734,13 +766,13 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             scale = create_w8a8_fp8_per_block_weight(
                 src_weight_info,
                 s,
-                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+                [CkptWeightInfo(w_name + self.qs_suffix, identity)],
                 functools.partial(
                     pad,
                     align_size=src_weight_info.config.align_size // group_size,
                     dim=0,
                 ),
-                data_type=torch.float32,
+                data_type=self.scale_dtype,
                 config=src_weight_info.config,
             )
             return [kernel, scale]
@@ -760,13 +792,13 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             scale = create_w8a8_fp8_per_block_weight(
                 src_weight_info,
                 W.ffn_s2,
-                [CkptWeightInfo(w_name + QS_SUFFIX, identity)],
+                [CkptWeightInfo(w_name + self.qs_suffix, identity)],
                 functools.partial(
                     pad,
                     align_size=src_weight_info.config.align_size // group_size,
                     dim=1,
                 ),
-                data_type=torch.float32,
+                data_type=self.scale_dtype,
                 config=src_weight_info.config,
             )
             return [kernel, scale]
@@ -805,7 +837,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 )
             ],
             opt2,
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
             enable_pure_tp_preshard=preshard,
         )
@@ -841,7 +873,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             W.moe_s1,
             [CkptWeightInfo(scale_name, opt1) for scale_name in scale_names],
             opt2,
-            data_type=torch.float32,
+            data_type=self.scale_dtype,
             config=src_weight_info.config,
             enable_pure_tp_preshard=preshard,
         )
@@ -853,13 +885,17 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        # need reshape for kernel weight
-        processed_res = super()._postprocess(tensor, device, load_config)
-        kernel_weight = processed_res[self.kernel.name]
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
-        from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
+            _transform_scale_ue8m0,
+            requant_weight_ue8m0,
+        )
+
+        # need reshape for kernel weight
+        processed_res = super()._postprocess(tensor, device, load_config)
+        kernel_weight = processed_res[self.kernel.name]
 
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
@@ -890,14 +926,19 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            # Online SM100/SM120 loading can already produce the final packed
-            # UE8M0 representation directly from source weights.  Legacy/pre-quantized
-            # inputs still arrive with floating-point block scales and require
-            # the old dequantize/requantize conversion here.
-            if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
-                kernel_weight, scale_weight = requant_weight_ue8m0(
-                    kernel_weight, scale_weight
-                )
+            skip_moe_scale_repack = os.environ.get("MOE_STRATEGY") in (
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+            ) and self.kernel.name in (W.moe_w1, W.moe_w2)
+            if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
+                if scale_weight.dtype == torch.float8_e8m0fnu:
+                    scale_weight = _transform_scale_ue8m0(
+                        scale_weight, mn=kernel_weight.shape[-2]
+                    )
+                elif scale_weight.dtype != torch.int32:
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight
+                    )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight
@@ -915,7 +956,19 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         ):
             return False
         name = src_weight_info.name
-        return name in cls.w8a8_weight_list and name not in [W.mla_kc, W.mla_vc]
+        if name not in cls.w8a8_weight_list or name in [W.mla_kc, W.mla_vc]:
+            return False
+        # skip_moe normally leaves MoE w1/w2 in compute dtype so the FP8->FP4
+        # mega_moe path can quantize them itself.  The FP8 mega kernel consumes
+        # checkpoint FP8 per-block weights directly, so keep the FP8 loader on.
+        if getattr(quant_config, "skip_moe", False) and isinstance(
+            src_weight_info, MoeAtomicWeight
+        ):
+            return os.environ.get("MOE_STRATEGY") in (
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+            )
+        return True
 
     def __init__(
         self,
