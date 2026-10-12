@@ -1,0 +1,68 @@
+ARG FROM_IMAGE
+FROM ${FROM_IMAGE}
+
+ARG APP_NAME
+ENV APP_NAME=${APP_NAME}
+ENV JAVA_HOME=/opt/taobao/java
+ENV PATH="${PATH}:${JAVA_HOME}/bin"
+ENV NGINX_SKIP=1
+
+USER root
+SHELL ["/bin/bash", "-c"]
+
+COPY environment/arm64/noble-aliyun-ports.list /etc/apt/sources.list
+
+RUN rm -rf /etc/apt/sources.list.d/* && \
+    export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        gzip \
+        iproute2 \
+        net-tools \
+        openjdk-21-jre-headless \
+        procps \
+        sudo \
+        tar \
+        wget && \
+    rm -rf /var/lib/apt/lists/* && \
+    if ! id admin >/dev/null 2>&1; then /usr/sbin/useradd --create-home admin; fi && \
+    mkdir -p /opt/taobao && \
+    rm -rf "${JAVA_HOME}" && \
+    ln -s /usr/lib/jvm/java-21-openjdk-arm64 "${JAVA_HOME}"
+
+COPY environment/common/bin/ /home/admin/${APP_NAME}/bin
+
+RUN mkdir -p \
+        /home/admin/${APP_NAME}/target \
+        /home/admin/${APP_NAME}/logs \
+        /root/logs \
+        /root/snapshots && \
+    echo "/home/admin/${APP_NAME}/bin/appctl.sh stop" > /home/admin/stop.sh && \
+    echo "/home/admin/${APP_NAME}/bin/appctl.sh restart" > /home/admin/start.sh && \
+    echo "/home/admin/${APP_NAME}/bin/preload.sh" > /home/admin/health.sh && \
+    cp /home/admin/${APP_NAME}/bin/prestop.sh /home/admin/prestop.sh && \
+    cp /home/admin/${APP_NAME}/bin/whale_start.sh /home/admin/whale_start.sh && \
+    mkdir -p /etc/ilogtail/users /etc/uniagent/users && \
+    touch /etc/ilogtail/users/1577156732608266 && \
+    chmod +x /home/admin/*.sh
+
+COPY environment/common/cai/ /home/admin/cai/
+
+RUN chmod -R a+x /home/admin/${APP_NAME}/bin/ /home/admin/cai/bin/ && \
+    mkdir -p /logs/eagleeye && \
+    chmod -R a+xw /logs
+
+VOLUME /home/admin/${APP_NAME}/logs \
+       /home/admin/logs \
+       /home/admin/cai/logs \
+       /home/admin/diamond \
+       /logs/eagleeye
+
+WORKDIR /home/admin/${APP_NAME}/bin
+
+COPY environment/common/bin/RASP.sh /home/admin/RASP.sh
+
+ENTRYPOINT ["/bin/bash", "-lc", "source /home/admin/RASP.sh start && exec /home/admin/start.sh"]

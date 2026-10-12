@@ -245,7 +245,7 @@ class BatchDeliveryStrategyTest {
         ScheduledRequest first = fixture.item(1L);
         ScheduledRequest second = fixture.item(2L);
         fixture.slots.commitLostFor(first);
-        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork(99L, WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
+        fixture.capabilities.precedingWork(new WorkSnapshot(1_000L, List.of(new WorkSnapshot.RequestWork("99", WorkSnapshot.Phase.COMMITTED, 25L)), List.of(), 0L));
 
         fixture.context.deliver(
                 fixture.strategy, List.of(first, second),

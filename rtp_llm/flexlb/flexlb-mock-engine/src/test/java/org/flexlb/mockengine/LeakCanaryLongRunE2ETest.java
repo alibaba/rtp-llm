@@ -48,10 +48,10 @@ class LeakCanaryLongRunE2ETest {
             assertEquals(8510, rejected.getCode());
             assertEquals(1, h.decodeEndpoint(0).getInflightCount(),
                     "Prefill rejection alone cannot prove that Decode is safe to release");
-            assertTrue(h.decodeEndpoint(0).routingView().inflightHardKv() > 0);
+            assertTrue(h.decodeEndpoint(0).routingView().inputKvReserved() > 0);
             AutoTpmE2EHarness.await(() -> h.decodeEndpoint(0).getInflightCount() == 0,
                     7_000, "an unobserved rejected request must expire without a Decode terminal report");
-            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv());
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inputKvReserved());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
             assertEquals(0, h.decodeEngines.get(0).getAcceptedCount(),
                     "this scenario must not manufacture a Decode completion to reclaim ownership");
@@ -69,7 +69,8 @@ class LeakCanaryLongRunE2ETest {
             h.fixedWindowDecision().setMaxRequests(4);
             h.fixedWindowDecision().setMaxCollectionWaitMs(5);
             h.config.getRequestLifecycle().getRequest().setTimeoutMs(INACTIVITY_TIMEOUT_MS);
-            h.prefillSelector = ctx -> (int) (ctx.getRequestId() % 2);
+            h.prefillSelector = ctx -> Math.floorMod(
+                    ctx.getRequestId().hashCode(), 2);
             h.startAutoPump(10);
 
             JavaMockEngineCluster.FastRpcService faultTarget = h.prefillEngines.get(0);
@@ -147,7 +148,7 @@ class LeakCanaryLongRunE2ETest {
                     INACTIVITY_TIMEOUT_MS + 1_000, "failed requests must settle within the inactivity bound");
             assertEquals(0, h.decodeEndpoint(0).getInflightCount(),
                     "decode shadow inflight must settle to zero");
-            assertEquals(0L, h.decodeEndpoint(0).routingView().inflightHardKv(),
+            assertEquals(0L, h.decodeEndpoint(0).routingView().inputKvReserved(),
                     "no orphaned hard-KV reservation");
             assertEquals(0, h.decodeEndpoint(0).resourceSnapshot().acceptedCount());
             assertEquals(0, h.prefillEndpoint(0).queuedRequestCount());
@@ -172,7 +173,7 @@ class LeakCanaryLongRunE2ETest {
             if (!"completed".equals(state)) { return; }
             long observedAt = completedAt.computeIfAbsent(requestId, ignored -> now);
             if (now - observedAt >= COMPLETION_SETTLEMENT_MS) {
-                assertTrue(h.decodeEndpoint(0).reservationHandle(requestId) == null,
+                assertTrue(h.decodeEndpoint(0).reservationHandle(Long.toString(requestId)) == null,
                         "completed request " + requestId + " must settle via WorkerStatus, before inactivity expiry");
             }
         });

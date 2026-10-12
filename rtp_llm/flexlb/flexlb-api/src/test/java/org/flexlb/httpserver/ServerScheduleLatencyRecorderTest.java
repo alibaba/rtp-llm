@@ -14,6 +14,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ServerScheduleLatencyRecorderTest {
 
     @Test
+    void ignoresCompletionWithoutContext() {
+        ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
+
+        recorder.recordCompletion(null, System.nanoTime());
+
+        assertEquals(0L, recorder.snapshot().get("completion_count"));
+        assertEquals(0L, ((Map<?, ?>) recorder.snapshot().get("server_total_ms")).get("count"));
+    }
+
+    @Test
     void recordsServerTotalStagesAndRates() {
         ServerScheduleLatencyRecorder recorder = new ServerScheduleLatencyRecorder();
         long end = System.nanoTime();

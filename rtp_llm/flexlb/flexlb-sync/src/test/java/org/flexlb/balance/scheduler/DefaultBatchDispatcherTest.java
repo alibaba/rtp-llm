@@ -9,23 +9,30 @@ import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.BatchDeliveryStrategy.PreparedSubmission;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -36,12 +43,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -62,7 +71,7 @@ class DefaultBatchDispatcherTest {
         SchedulingTestConfig.useBatchDispatcher(config);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance());
         callback = new TestCallback();
     }
 
@@ -70,6 +79,68 @@ class DefaultBatchDispatcherTest {
     void tearDown() {
         org.flexlb.telemetry.FlexlbTrace.configure(null, "");
         dispatcher.shutdown();
+    }
+
+    @Test
+    void unusedDispatcherRegistersAndReportsZeroExecutorValues() {
+        dispatcher.shutdown();
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, monitor, 1, 1);
+
+        for (String metric : List.of(
+                MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS,
+                MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE,
+                MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE)) {
+            verify(monitor).register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+            verify(monitor).report(metric, 0.0);
+        }
+    }
+
+    @Test
+    void executorMetricsTrackBusyQueuedAndIdleState() throws Exception {
+        dispatcher.shutdown();
+        FlexMonitor monitor = mock(FlexMonitor.class);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, monitor, 1, 1);
+        ThreadPoolExecutor executor = (ThreadPoolExecutor)
+                ReflectionTestUtils.getField(dispatcher, "dispatchExecutor");
+        PrefillEndpoint endpoint = createPrefillEndpoint();
+        CountDownLatch firstDispatchStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirstDispatch = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any()))
+                .thenAnswer(invocation -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = invocation.getArgument(2);
+                    if (request.getBatchId() == 1L) {
+                        firstDispatchStarted.countDown();
+                        assertTrue(releaseFirstDispatch.await(5, TimeUnit.SECONDS));
+                    }
+                    return CompletableFuture.completedFuture(
+                            ackResponse(request.getBatchId(), List.of(request.getBatchId())));
+                });
+
+        try {
+            submit(List.of(createScheduledRequest(1L, 500, 200, endpoint)),
+                    1L, 100, "executor_metrics", callback);
+            assertTrue(firstDispatchStarted.await(5, TimeUnit.SECONDS));
+            submit(List.of(createScheduledRequest(2L, 500, 200, endpoint)),
+                    2L, 100, "executor_metrics", callback);
+
+            clearInvocations(monitor);
+            dispatcher.reportExecutorMetrics();
+            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, 1.0);
+            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, 1.0);
+            verify(monitor).report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, 1.0);
+        } finally {
+            releaseFirstDispatch.countDown();
+        }
+
+        RequestLifecycleTestSupport.awaitCondition(() -> executor.getCompletedTaskCount() == 2L
+                && callback.successCount.get() == 2);
+        clearInvocations(monitor);
+        dispatcher.reportExecutorMetrics();
+        dispatcher.reportExecutorMetrics();
+        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_ACTIVE_THREADS, 0.0);
+        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_QUEUE_SIZE, 0.0);
+        verify(monitor, times(2)).report(MetricConstant.DISPATCH_EXECUTOR_POOL_SIZE, 1.0);
     }
 
     @Test
@@ -417,7 +488,7 @@ class DefaultBatchDispatcherTest {
     void shutdownWakesCapacityWaiterAndNextReservationReturnsAdmissionFailure()
             throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
@@ -458,7 +529,7 @@ class DefaultBatchDispatcherTest {
                 if (completion.status() == DeliveryResult.Status.NOT_SENT) {
                     failures.incrementAndGet();
                     attempted.countDown();
-                    if (item.requestId() == 1L) {
+                    if (item.requestId().equals("1")) {
                         throw new IllegalStateException("first callback failed");
                     }
                 } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
@@ -493,7 +564,7 @@ class DefaultBatchDispatcherTest {
                 } else if (completion.status() == DeliveryResult.Status.UNCERTAIN) {
                     uncertain.incrementAndGet();
                     attempted.countDown();
-                    if (item.requestId() == 1L) {
+                    if (item.requestId().equals("1")) {
                         throw new IllegalStateException("first callback failed");
                     }
                 }
@@ -510,7 +581,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void acceptedRpcCompletesNormallyAfterShutdown() throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 0);
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, prefillEp);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture = new CompletableFuture<>();
@@ -676,7 +747,7 @@ class DefaultBatchDispatcherTest {
     void logicalCapacityRejectsAndUnusedReservationRestoresCapacity()
             throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
@@ -700,7 +771,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void closingAnyUnusedReservationSignalsAndRestoresCapacity() throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PreparedSubmission running = reservePermit();
         PreparedSubmission queued = reservePermit();
         CapacityBoundary unavailable = unavailableBoundary();
@@ -724,7 +795,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void acceptedReservationsSubmitWithoutSecondCapacityCheck() {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 1);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 1);
         PrefillEndpoint endpoint = createPrefillEndpoint();
         ScheduledRequest firstItem = createScheduledRequest(1L, 500, 200, endpoint);
         ScheduledRequest secondItem = createScheduledRequest(2L, 500, 200, endpoint);
@@ -777,7 +848,7 @@ class DefaultBatchDispatcherTest {
     @Test
     void submittedReservationReleasesCapacityAfterRpcHandoff() throws Exception {
         dispatcher.shutdown();
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, 1, 0);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, NoOpFlexMonitor.getInstance(), 1, 0);
         PrefillEndpoint endpoint = createPrefillEndpoint();
         ScheduledRequest item = createScheduledRequest(1L, 500, 200, endpoint);
         CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture =
@@ -956,15 +1027,16 @@ class DefaultBatchDispatcherTest {
 
     private ScheduledRequest createScheduledRequest(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setSeqLen(seqLen);
 
         BalanceContext ctx = new BalanceContext(config);
         ctx.setRequest(request);
 
         // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
-        EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
-                .setRequestId(requestId)
+        EngineRpcService.GenerateInputPB input = RequestIdFixtures.write(
+                        EngineRpcService.GenerateInputPB.newBuilder(),
+                        Long.toString(requestId))
                 .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
                 .build();
         ctx.setGenerateInputPb(input.toByteString());

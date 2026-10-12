@@ -83,7 +83,7 @@ MASTER_PROMETHEUS_PREFIXES = (
     # run_online_eval.sh (the master-side trim at the source).
     "flexlb_auto_tpm_request_count",
     "flexlb_app_engine_balancing_master_all_qps",
-    "flexlb_app_flexlb_scheduler_inflight_size",
+    "flexlb_app_flexlb_tracked_request_count",
     "flexlb_app_flexlb_inflight_batch_count",
     "flexlb_app_flexlb_inflight_request_count",
     "flexlb_auto_tpm_decode_reserved_count",
