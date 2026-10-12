@@ -52,6 +52,242 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_engram_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_engram_boundary_replay.py"],
+    deps = [":dsv41_attention_replay", ":dsv41_mhc_boundary_replay", "//rtp_llm:torch", "//rtp_llm:transformers"],
+)
+
+py_library(
+    name = "dsv41_query_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_query_boundary_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
+)
+
+py_library(
+    name = "dsv41_query_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_query_owner_replay.py"],
+    deps = [":dsv41_query_boundary_replay", "//rtp_llm:torch"],
+)
+
+py_library(
+    name = "dsv41_output_projection_replay",
+    testonly = True,
+    srcs = ["dsv41_output_projection_replay.py"],
+    deps = [":dsv41_query_owner_replay", "//rtp_llm:torch"],
+)
+
+py_library(
+    name = "dsv41_output_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_output_owner_replay.py"],
+    deps = [":dsv41_output_projection_replay", "//rtp_llm:torch"],
+)
+
+py_library(
+    name = "dsv41_sparse_precision_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_precision_replay.py"],
+    deps = [":dsv41_output_owner_replay", "//rtp_llm:torch", "//rtp_llm:triton"],
+)
+
+py_library(
+    name = "dsv41_sparse_order_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_order_replay.py"],
+    deps = [":dsv41_sparse_precision_replay", "//rtp_llm:torch", "//rtp_llm:triton"],
+)
+
+py_library(
+    name = "dsv41_sparse_prefill_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_prefill_owner_replay.py"],
+    deps = [
+        ":dsv41_output_owner_replay",
+        ":dsv41_sparse_order_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_sparse_prefill_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_deep_attention_history_replay",
+    testonly = True,
+    srcs = ["dsv41_deep_attention_history_replay.py", "dsv41_deep_native_history_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_sparse_prefill_owner_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_deep_history_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_decode_tilelang_reference_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_block_norm_reference_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_kv_projection_reference_testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
+    name = "dsv41_block_norm_replay",
+    testonly = True,
+    srcs = ["dsv41_block_norm_replay.py"],
+    deps = [
+        ":dsv41_corrected_history_replay",
+        ":dsv41_mhc_collapse_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_block_norm_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_kv_projection_replay",
+    testonly = True,
+    srcs = ["dsv41_kv_projection_replay.py"],
+    deps = [
+        ":dsv41_kv_boundary_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_kv_projection_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_kv_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_kv_boundary_replay.py"],
+    deps = [
+        ":dsv41_block_norm_replay",
+        ":dsv41_query_boundary_replay",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
+    name = "dsv41_ffn_projection_replay",
+    testonly = True,
+    srcs = ["dsv41_ffn_projection_replay.py"],
+    deps = [
+        ":dsv41_ffn_peer_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_expert_projection_reference_testlib",
+    ],
+)
+
+py_library(
+    name = "dsv41_ffn_peer_replay",
+    testonly = True,
+    srcs = ["dsv41_ffn_peer_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_corrected_history_replay",
+        ":dsv41_ffn_boundary_replay",
+        ":dsv41_query_boundary_replay",
+        ":dsv41_query_owner_replay",
+        ":dsv41_reference_probe",
+        ":dsv41_router_boundary_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_expert_precision_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_router_eager_reference_testlib",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
+    name = "dsv41_router_eager_replay",
+    testonly = True,
+    srcs = ["dsv41_router_eager_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_corrected_history_replay",
+        ":dsv41_query_boundary_replay",
+        ":dsv41_reference_probe",
+        ":dsv41_router_boundary_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_router_eager_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_router_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_router_boundary_replay.py"],
+    deps = [
+        ":dsv41_attention_replay",
+        ":dsv41_corrected_history_replay",
+        ":dsv41_query_boundary_replay",
+        ":dsv41_reference_probe",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_corrected_history_replay",
+    testonly = True,
+    srcs = ["dsv41_corrected_history_replay.py"],
+    deps = [
+        ":dsv41_deep_attention_history_replay",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
+    name = "dsv41_projection_history_replay",
+    testonly = True,
+    srcs = ["dsv41_projection_history_replay.py"],
+    deps = [
+        ":dsv41_corrected_history_replay",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_mhc_collapse_replay",
+    testonly = True,
+    srcs = ["dsv41_mhc_collapse_replay.py"],
+    deps = [
+        ":dsv41_deep_attention_history_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
+    name = "dsv41_deep_decode_sparse_replay",
+    testonly = True,
+    srcs = ["dsv41_deep_decode_sparse_replay.py"],
+    deps = [
+        ":dsv41_mhc_collapse_replay",
+        ":dsv41_sparse_precision_replay",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
+    name = "dsv41_deep_decode_tile_replay",
+    testonly = True,
+    srcs = ["dsv41_deep_decode_tile_replay.py"],
+    deps = [
+        ":dsv41_deep_decode_sparse_replay",
+        "//rtp_llm:torch",
+        "//rtp_llm:triton",
+    ],
+)
+
+py_library(
+    name = "dsv41_decode_tilelang_replay",
+    testonly = True,
+    srcs = ["dsv41_decode_tilelang_replay.py"],
+    deps = [
+        ":dsv41_deep_decode_sparse_replay",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_decode_tilelang_reference_testlib",
+        "//rtp_llm:torch",
+    ],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],

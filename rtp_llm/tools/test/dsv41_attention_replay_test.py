@@ -160,11 +160,17 @@ class AttentionReplayHistoryTest(unittest.TestCase):
                     validate_native_recipe(traces)
                 traces[1]["metadata"][field] = recipe[field]
 
-    def down_recipe_traces(self, *, sparse=False, routed=False):
+    def down_recipe_traces(
+        self, *, sparse=False, routed=False, post=False, engram=False
+    ):
         profile = "tp8_projection_mhc_fp32_compressor_recipe"
         if sparse:
             profile += "_sparse_sink_div_rn_prefill"
         profile += "_expert_down_reference" if routed else "_shared_down_reference"
+        if post:
+            profile += "_mhc_post_reference"
+        if engram:
+            profile += "_engram_reference"
         metadata = {
             "precision_profile": profile,
             "compressor_fused": True,
@@ -175,6 +181,14 @@ class AttentionReplayHistoryTest(unittest.TestCase):
             "routed_down_reference": routed,
             "down_reference_kernel_sha256": "a" * 64,
         }
+        if post:
+            metadata["mhc_post_reference"] = True
+        if engram:
+            metadata.update(
+                engram_projection_reference=True,
+                engram_gate_reference=True,
+                engram_reference_kernel_sha256="a" * 64,
+            )
         traces = self.traces()
         for trace in traces:
             trace["metadata"].update(metadata)
@@ -238,6 +252,178 @@ class AttentionReplayHistoryTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "kernel hash differs"):
                     validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
 
+    def test_post_recipes_retain_independent_attention_controls(self):
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                traces = self.down_recipe_traces(sparse=sparse, routed=True, post=True)
+                recipe = validate_native_recipe(
+                    traces, reference_kernel_sha256="a" * 64
+                )
+                prior = validate_native_recipe(
+                    self.down_recipe_traces(sparse=sparse, routed=True),
+                    reference_kernel_sha256="a" * 64,
+                )
+                self.assertEqual(
+                    recipe,
+                    {
+                        **prior,
+                        "precision_profile": traces[0]["metadata"]["precision_profile"],
+                        "mhc_post_reference": True,
+                    },
+                )
+                self.assertEqual(
+                    official_history_control(recipe), official_history_control(prior)
+                )
+                self.assertNotIn("mhc_post_reference", prior)
+
+    def test_post_recipes_require_explicit_boolean_flag_and_kernel_identity(self):
+        for sparse in (False, True):
+            for invalid in (None, False, 1, "true", "missing"):
+                with self.subTest(sparse=sparse, post_flag=invalid):
+                    traces = self.down_recipe_traces(
+                        sparse=sparse, routed=True, post=True
+                    )
+                    if invalid == "missing":
+                        del traces[1]["metadata"]["mhc_post_reference"]
+                    else:
+                        traces[1]["metadata"]["mhc_post_reference"] = invalid
+                    with self.assertRaisesRegex(ValueError, "mhc_post_reference"):
+                        validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+            for digest in (None, "a" * 63, "b" * 64):
+                with self.subTest(sparse=sparse, kernel_digest=digest):
+                    with self.assertRaisesRegex(ValueError, "kernel hash differs"):
+                        validate_native_recipe(
+                            self.down_recipe_traces(
+                                sparse=sparse, routed=True, post=True
+                            ),
+                            reference_kernel_sha256=digest,
+                        )
+
+    def test_history_cannot_mix_post_recipes_or_apply_unrecorded_post(self):
+        for sparse in (False, True):
+            traces = self.down_recipe_traces(sparse=sparse, routed=True, post=True)
+            traces[-1] = self.down_recipe_traces(sparse=sparse, routed=True)[-1]
+            with self.subTest(sparse=sparse):
+                with self.assertRaisesRegex(ValueError, "mix recipes across steps"):
+                    validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+        for invalid in (True, None, 0, "false"):
+            traces = self.down_recipe_traces(routed=True)
+            traces[1]["metadata"]["mhc_post_reference"] = invalid
+            with self.subTest(unrecorded_post=invalid):
+                with self.assertRaisesRegex(ValueError, "mhc_post_reference"):
+                    validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+
+    def test_engram_recipes_preserve_the_independent_attention_control(self):
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                traces = self.down_recipe_traces(
+                    sparse=sparse, routed=True, post=True, engram=True
+                )
+                recipe = validate_native_recipe(
+                    traces, reference_kernel_sha256="a" * 64
+                )
+                prior = validate_native_recipe(
+                    self.down_recipe_traces(sparse=sparse, routed=True, post=True),
+                    reference_kernel_sha256="a" * 64,
+                )
+                self.assertEqual(
+                    recipe,
+                    {
+                        **prior,
+                        "precision_profile": traces[0]["metadata"]["precision_profile"],
+                        "engram_projection_reference": True,
+                        "engram_gate_reference": True,
+                        "engram_reference_kernel_sha256": "a" * 64,
+                    },
+                )
+                self.assertEqual(
+                    official_history_control(recipe), official_history_control(prior)
+                )
+                self.assertNotIn("engram_projection_reference", prior)
+                self.assertNotIn("engram_gate_reference", prior)
+
+    def test_engram_recipes_require_exact_flags_and_matching_kernel_identity(self):
+        for sparse in (False, True):
+            for field in ("engram_projection_reference", "engram_gate_reference"):
+                for invalid in (None, False, 1, "true", "missing"):
+                    with self.subTest(sparse=sparse, field=field, invalid=invalid):
+                        traces = self.down_recipe_traces(
+                            sparse=sparse, routed=True, post=True, engram=True
+                        )
+                        if invalid == "missing":
+                            del traces[1]["metadata"][field]
+                        else:
+                            traces[1]["metadata"][field] = invalid
+                        with self.assertRaisesRegex(ValueError, field):
+                            validate_native_recipe(
+                                traces, reference_kernel_sha256="a" * 64
+                            )
+            for invalid in (None, "", "a" * 63, "b" * 64):
+                traces = self.down_recipe_traces(
+                    sparse=sparse, routed=True, post=True, engram=True
+                )
+                traces[1]["metadata"]["engram_reference_kernel_sha256"] = invalid
+                with self.subTest(sparse=sparse, digest=invalid):
+                    with self.assertRaisesRegex(ValueError, "Engram kernel hash"):
+                        validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+
+    def test_history_rejects_mixed_or_unrecorded_engram_substitutions(self):
+        for sparse in (False, True):
+            traces = self.down_recipe_traces(
+                sparse=sparse, routed=True, post=True, engram=True
+            )
+            traces[-1] = self.down_recipe_traces(sparse=sparse, routed=True, post=True)[
+                -1
+            ]
+            with self.subTest(sparse=sparse):
+                with self.assertRaisesRegex(ValueError, "mix recipes across steps"):
+                    validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+            for field in ("engram_projection_reference", "engram_gate_reference"):
+                for invalid in (True, None, 0, "false"):
+                    traces = self.down_recipe_traces(
+                        sparse=sparse, routed=True, post=True
+                    )
+                    traces[1]["metadata"][field] = invalid
+                    with self.subTest(field=field, invalid=invalid):
+                        with self.assertRaisesRegex(ValueError, field):
+                            validate_native_recipe(
+                                traces, reference_kernel_sha256="a" * 64
+                            )
+            traces = self.down_recipe_traces(sparse=sparse, routed=True, post=True)
+            traces[1]["metadata"]["engram_reference_kernel_sha256"] = "a" * 64
+            with self.assertRaisesRegex(ValueError, "unexpected Engram kernel hash"):
+                validate_native_recipe(traces, reference_kernel_sha256="a" * 64)
+        for routed, post in ((False, True), (True, False)):
+            with self.subTest(routed=routed, post=post):
+                with self.assertRaisesRegex(ValueError, "composed TP8/mHC"):
+                    validate_native_recipe(
+                        self.down_recipe_traces(routed=routed, post=post, engram=True),
+                        reference_kernel_sha256="a" * 64,
+                    )
+
+    def test_four_step_history_checks_the_first_post_eos_consumed_token(self):
+        traces = self.traces()
+        end = sum(len(trace["metadata"]["input_ids"][0]) for trace in traces)
+        traces.append({"metadata": {"input_ids": [[1]], "start_pos": end}})
+        identities = history_identities(traces)
+        self.assertEqual(len(identities), 4)
+        self.assertEqual(identities[-1], {"input_ids": [1], "start_pos": end})
+        native = [
+            {
+                "metadata": {
+                    "input_ids": identity["input_ids"],
+                    "cache_spans": [
+                        [1, 1, 1, 1, identity["start_pos"], len(identity["input_ids"])]
+                    ],
+                }
+            }
+            for identity in identities
+        ]
+        self.assertEqual(history_identities(traces, native), identities)
+        native[-1]["metadata"]["input_ids"] = [455]
+        with self.assertRaisesRegex(ValueError, "divergent consumed prefixes"):
+            history_identities(traces, native)
+
     def test_history_cannot_combine_individually_valid_recipes(self):
         traces = self.down_recipe_traces()
         traces[-1] = self.down_recipe_traces(sparse=True, routed=True)[-1]
@@ -263,6 +449,7 @@ class AttentionReplayHistoryTest(unittest.TestCase):
             "sparse_sink_div_rn_decode",
             "shared_down_reference",
             "routed_down_reference",
+            "mhc_post_reference",
         ):
             with self.subTest(field=field):
                 traces[1]["metadata"][field] = True

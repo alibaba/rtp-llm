@@ -25,6 +25,25 @@ import torch.multiprocessing as mp
 from rtp_llm.cpp.normal_engine.test import libth_v41_native_engine_test as native_ops
 from rtp_llm.models_py.distributed import collective_torch as collective
 from rtp_llm.models_py.model_desc.deepseek_v41_model import DeepSeekV41Model
+from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_block_norm_reference as block_norm_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_cuda_frequency_reference as cuda_frequency_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_expert_projection_reference as expert_projection_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_kv_projection_reference as kv_projection_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_router_eager_reference as router_eager_provider,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test import (
+    v41_short_sparse_plan_reference as short_sparse_provider,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import (
     load_configuration,
     make_loader,
@@ -34,19 +53,38 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import f
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
     compressor_bf16,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_decode_tilelang_reference import (
+    decode_tilelang_reference,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_engram_precision import (
+    engram_gate_reference,
+    engram_projection_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
     expert_down_reference,
     load_reference_kernel,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_collapse_reference import (
+    mhc_collapse_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
     mhc_fp32,
     mhc_post_reference,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_output_precision import (
+    output_projection_reference,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_query_precision import (
+    query_projection_reference,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
     sparse_sink_div_rn,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_prefill_reference import (
+    sparse_prefill_reference,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
@@ -58,6 +96,11 @@ from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
 from rtp_llm.ops.compute_ops import PyModelInitResources, PyModelOutputs
 from rtp_llm.tools.dsv41_trace import capture_model_boundaries, save_model_trace
 from rtp_llm.utils.model_weight import W
+
+
+def canonical_attention_profile(profile):
+    # Compact aliases keep the longest checkpoint trace name within 255 bytes.
+    return profile[:-2] + "_j" if profile.endswith(("_s", "_f", "_c")) else profile
 
 
 def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, context=256):
@@ -99,6 +142,56 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
     compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
     compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
+    compare_engram = os.environ.get("DSV41_TEST_COMPARE_ENGRAM") == "1"
+    compare_query = os.environ.get("DSV41_TEST_COMPARE_QUERY") == "1"
+    compare_output = os.environ.get("DSV41_TEST_COMPARE_OUTPUT") == "1"
+    compare_sparse_prefill = (
+        os.environ.get("DSV41_TEST_COMPARE_SPARSE_PREFILL_REFERENCE") == "1"
+    )
+    compare_collapse = os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
+    compare_tilelang = os.environ.get("DSV41_TEST_COMPARE_DECODE_TILELANG") == "1"
+    compare_block_norm = os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
+    compare_kv = os.environ.get("DSV41_TEST_COMPARE_KV_PROJECTION") == "1"
+    compare_router = os.environ.get("DSV41_TEST_COMPARE_ROUTER_EAGER") == "1"
+    compare_projection = os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+    compare_attention = os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+    if compare_attention and not (compare_projection and compare_block_norm):
+        raise ValueError("Attention comparison requires the qualified W13 composition")
+    if compare_projection and not compare_router:
+        raise ValueError("Expert projection comparison requires all router controls")
+    if compare_router and not compare_kv:
+        raise ValueError("Eager router comparison requires both qualified WKV recipes")
+    if compare_kv and not (compare_tilelang and compare_block_norm):
+        raise ValueError("WKV comparison requires both qualified decode recipes")
+    if compare_block_norm and not compare_tilelang:
+        raise ValueError(
+            "Block normalization requires the qualified decode composition"
+        )
+    if compare_collapse and not compare_sparse_prefill:
+        raise ValueError(
+            "mHC collapse diagnostic requires the scoped prefill composition"
+        )
+    if compare_tilelang and not compare_collapse:
+        raise ValueError(
+            "TileLang decode diagnostic requires the mHC collapse composition"
+        )
+    if compare_sparse_prefill and not compare_output:
+        raise ValueError(
+            "Sparse prefill diagnostic requires the qualified output composition"
+        )
+    if compare_output and not all(
+        (
+            compare_tp8,
+            compare_mhc,
+            compare_recipe,
+            compare_sparse,
+            compare_down,
+            compare_post,
+            compare_engram,
+            compare_query,
+        )
+    ):
+        raise ValueError("Output diagnostic requires the qualified query composition")
     shared_eos_trace = os.environ.get("DSV41_TEST_TRACE_SHARED_EOS") == "1"
     paired = (
         compare_tp8
@@ -108,6 +201,17 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         or compare_sparse
         or compare_down
         or compare_post
+        or compare_engram
+        or compare_query
+        or compare_output
+        or compare_sparse_prefill
+        or compare_collapse
+        or compare_tilelang
+        or compare_block_norm
+        or compare_kv
+        or compare_router
+        or compare_projection
+        or compare_attention
     )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
     if compare_mhc:
@@ -149,6 +253,100 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
             "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
         ):
             profiles.append(f"{base}_expert_down_reference_mhc_post_reference")
+    if compare_engram:
+        profiles.extend(
+            f"{profile}_engram_reference"
+            for profile in profiles.copy()
+            if profile.endswith("_mhc_post_reference")
+        )
+    if compare_query:
+        query_profiles = [
+            f"{profile}_query_reference"
+            for profile in profiles
+            if profile.endswith("_engram_reference")
+        ]
+        profiles.extend(query_profiles)
+        if query_profiles:
+            profiles.append(
+                query_profiles[-1].replace(
+                    "_sparse_sink_div_rn_prefill_", "_sparse_sink_div_rn_"
+                )
+            )
+    if compare_output:
+        profiles.append(f"{profiles[-1]}_output_reference")
+    if compare_sparse_prefill:
+        profiles.append(f"{profiles[-1]}_sparse_prefill_reference")
+    if compare_collapse:
+        profiles.append(f"{profiles[-1]}_mhc_collapse_reference")
+    if compare_tilelang:
+        profiles.append(f"{profiles[-1]}_decode_tilelang_reference")
+    if compare_block_norm:
+        profiles.append(f"{profiles[-1]}_block_norm_reference")
+    if compare_kv:
+        profiles.extend(f"{profile}_kv_ref" for profile in profiles[-2:])
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError("WKV trace profile exceeds the filesystem name limit")
+    if compare_router:
+        # The longest existing WKV recipe is 253 bytes; keep the suffix compact.
+        profiles.extend(f"{profile}_g" for profile in profiles[-2:])
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError("Router trace profile exceeds the filesystem name limit")
+    if compare_projection:
+        # Replacing the eager suffix keeps the longest trace name at 255 bytes.
+        profiles.extend(
+            profile.removesuffix("_g") + ("_j" if profile.endswith("_g") else "_p")
+            for profile in profiles[-4:]
+        )
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError(
+                "Expert projection trace exceeds the filesystem name limit"
+            )
+    expert_projection_source_hash = (
+        hashlib.sha256(
+            Path(expert_projection_provider.__file__).read_bytes()
+        ).hexdigest()
+        if compare_projection
+        else None
+    )
+    if compare_attention:
+        base = profiles[-1]
+        if not base.endswith("_j"):
+            raise ValueError("Attention recipes require the final eager W13 profile")
+        profiles.extend(base[:-2] + suffix for suffix in ("_s", "_f", "_c"))
+        if any(len(profile.encode()) > 255 for profile in profiles):
+            raise ValueError(
+                "Attention trace profile exceeds the filesystem name limit"
+            )
+    short_sparse_source_hash = (
+        hashlib.sha256(Path(short_sparse_provider.__file__).read_bytes()).hexdigest()
+        if compare_attention
+        else None
+    )
+    cuda_frequency_source_hash = (
+        hashlib.sha256(Path(cuda_frequency_provider.__file__).read_bytes()).hexdigest()
+        if compare_attention
+        else None
+    )
+    router_eager_source_hash = (
+        hashlib.sha256(Path(router_eager_provider.__file__).read_bytes()).hexdigest()
+        if compare_router
+        else None
+    )
+    kv_projection_source_hash = (
+        hashlib.sha256(Path(kv_projection_provider.__file__).read_bytes()).hexdigest()
+        if compare_kv
+        else None
+    )
+    block_norm_source_hash = (
+        hashlib.sha256(Path(block_norm_provider.__file__).read_bytes()).hexdigest()
+        if compare_block_norm
+        else None
+    )
+    tilelang_source_hash = (
+        hashlib.sha256(Path(tilelang_kernels.__file__).read_bytes()).hexdigest()
+        if compare_tilelang
+        else None
+    )
     trace_steps = dict.fromkeys(profiles, 0)
     post_trace_steps = {}
     post_trace_requests = {}
@@ -178,6 +376,14 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
         if compare_post and not compare_down:
             raise ValueError(
                 "mHC post comparison requires all fourteen preceding controls"
+            )
+        if compare_engram and not compare_post:
+            raise ValueError(
+                "Engram comparison requires all sixteen preceding controls"
+            )
+        if compare_query and not compare_engram:
+            raise ValueError(
+                "Query comparison requires all eighteen preceding controls"
             )
         reference_kernel = load_reference_kernel() if compare_down else None
         reference_hash = (
@@ -261,8 +467,33 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
-                post = profile.endswith("_mhc_post_reference")
-                down_profile = profile.removesuffix("_mhc_post_reference")
+                canonical = canonical_attention_profile(profile)
+                short_sparse = profile.endswith(("_s", "_c"))
+                cuda_frequency = profile.endswith(("_f", "_c"))
+                expert_projection = canonical.endswith(("_p", "_j"))
+                projection_base = canonical.removesuffix("_p").removesuffix("_j")
+                router_eager = canonical.endswith(("_g", "_j"))
+                router_base = projection_base.removesuffix("_g")
+                kv_reference = router_base.endswith("_kv_ref")
+                kv_base = router_base.removesuffix("_kv_ref")
+                block_norm = kv_base.endswith("_block_norm_reference")
+                block_norm_base = kv_base.removesuffix("_block_norm_reference")
+                tilelang_decode = block_norm_base.endswith("_decode_tilelang_reference")
+                tilelang_base = block_norm_base.removesuffix(
+                    "_decode_tilelang_reference"
+                )
+                collapse = tilelang_base.endswith("_mhc_collapse_reference")
+                collapse_base = tilelang_base.removesuffix("_mhc_collapse_reference")
+                sparse_prefill = collapse_base.endswith("_sparse_prefill_reference")
+                prefill_base = collapse_base.removesuffix("_sparse_prefill_reference")
+                output_reference = prefill_base.endswith("_output_reference")
+                output_base = prefill_base.removesuffix("_output_reference")
+                query_reference = output_base.endswith("_query_reference")
+                query_base = output_base.removesuffix("_query_reference")
+                engram = query_base.endswith("_engram_reference")
+                post_profile = query_base.removesuffix("_engram_reference")
+                post = post_profile.endswith("_mhc_post_reference")
+                down_profile = post_profile.removesuffix("_mhc_post_reference")
                 recipe = "compressor_recipe" in profile
                 sparse = "sparse_sink_div_rn" in profile
                 sparse_decode = sparse and "sparse_sink_div_rn_prefill" not in profile
@@ -296,7 +527,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         trace_request = post_trace_requests.setdefault(
                             (profile, prompt_index), request_id
                         )
-                        limit = 4 if shared_eos_trace else 3
+                        limit = 4 if shared_eos_trace or engram else 3
                         tracing = trace_step < limit and request_id == trace_request
                         post_metadata = {
                             "prompt_index": prompt_index,
@@ -310,6 +541,122 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                                 }
                                 if shared_eos_trace
                                 else {"mhc_post_reference": True}
+                            ),
+                            **(
+                                {
+                                    "engram_projection_reference": True,
+                                    "engram_gate_reference": True,
+                                    "engram_reference_kernel_sha256": reference_hash,
+                                }
+                                if engram
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "query_first_reference": True,
+                                    "query_second_reference": True,
+                                    "query_reference_kernel_sha256": reference_hash,
+                                }
+                                if query_reference
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "output_projection_reference": True,
+                                    "output_reference_kernel_sha256": reference_hash,
+                                }
+                                if output_reference
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "sparse_prefill_reference": True,
+                                    "sparse_prefill_reference_scope": "short-single-initial",
+                                    "sparse_prefill_reference_kernel_sha256": reference_hash,
+                                }
+                                if sparse_prefill
+                                else {}
+                            ),
+                            **({"mhc_collapse_reference": True} if collapse else {}),
+                            **(
+                                {
+                                    "short_sparse_plan_reference": True,
+                                    "short_sparse_plan_scope": "explicit-short-attentions",
+                                    "short_sparse_plan_owners": len(model.v4.layers),
+                                    "short_sparse_plan_provider_sha256": short_sparse_source_hash,
+                                }
+                                if short_sparse
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "cuda_frequency_reference": True,
+                                    "cuda_frequency_scope": "explicit-attentions",
+                                    "cuda_frequency_owners": len(model.v4.layers),
+                                    "cuda_frequency_provider_sha256": cuda_frequency_source_hash,
+                                }
+                                if cuda_frequency
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "expert_projection_reference": True,
+                                    "expert_projection_reference_scope": "explicit-shared-routed-w13",
+                                    "expert_projection_reference_dim": config.hidden_size,
+                                    "expert_projection_shared_owners": len(
+                                        model.v4.layers
+                                    ),
+                                    "expert_projection_routed_owners": len(
+                                        model.v4.layers
+                                    ),
+                                    "expert_projection_reference_kernel_sha256": reference_hash,
+                                    "expert_projection_provider_sha256": expert_projection_source_hash,
+                                }
+                                if expert_projection
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "router_eager_reference": True,
+                                    "router_eager_reference_scope": "explicit-gates",
+                                    "router_eager_reference_dim": config.hidden_size,
+                                    "router_eager_reference_owners": len(
+                                        model.v4.layers
+                                    ),
+                                    "router_eager_provider_sha256": router_eager_source_hash,
+                                }
+                                if router_eager
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "kv_projection_reference": True,
+                                    "kv_projection_reference_scope": "explicit-attentions",
+                                    "kv_projection_reference_dim": config.hidden_size,
+                                    "kv_projection_reference_kernel_sha256": reference_hash,
+                                    "kv_projection_provider_sha256": kv_projection_source_hash,
+                                }
+                                if kv_reference
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "block_norm_reference": True,
+                                    "block_norm_reference_scope": "explicit-blocks",
+                                    "block_norm_reference_dim": config.hidden_size,
+                                    "block_norm_provider_sha256": block_norm_source_hash,
+                                }
+                                if block_norm
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "decode_tilelang_reference": True,
+                                    "decode_tilelang_reference_scope": "single-token-planar",
+                                    "decode_tilelang_provider_sha256": tilelang_source_hash,
+                                }
+                                if tilelang_decode
+                                else {}
                             ),
                         }
                 with (
@@ -331,6 +678,83 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     kernel=reference_kernel,
                 ), mhc_post_reference(
                     post,
+                ), engram_projection_reference(
+                    engram,
+                    kernel=reference_kernel,
+                ), engram_gate_reference(
+                    engram,
+                ), query_projection_reference(
+                    query_reference,
+                    kernel=reference_kernel,
+                ), output_projection_reference(
+                    output_reference,
+                    kernel=reference_kernel,
+                ), sparse_prefill_reference(
+                    sparse_prefill,
+                ), mhc_collapse_reference(
+                    collapse,
+                ), decode_tilelang_reference(
+                    tilelang_decode,
+                ), block_norm_provider.block_norm_reference(
+                    block_norm,
+                    norms=(
+                        tuple(
+                            norm
+                            for layer in model.v4.layers
+                            for norm in (layer.attn_norm, layer.ffn_norm)
+                        )
+                        if block_norm
+                        else ()
+                    ),
+                    dim=config.hidden_size,
+                ), kv_projection_provider.kv_projection_reference(
+                    kv_reference,
+                    attentions=(
+                        tuple(layer.attn for layer in model.v4.layers)
+                        if kv_reference
+                        else ()
+                    ),
+                    kernel=reference_kernel,
+                ), router_eager_provider.router_eager_reference(
+                    router_eager,
+                    gates=(
+                        tuple(layer.ffn.gate for layer in model.v4.layers)
+                        if router_eager
+                        else ()
+                    ),
+                ), expert_projection_provider.expert_projection_reference(
+                    expert_projection,
+                    shared=(
+                        tuple(
+                            layer.ffn.shared_experts.w13._sm120_linear
+                            for layer in model.v4.layers
+                        )
+                        if expert_projection
+                        else ()
+                    ),
+                    routed=(
+                        tuple(
+                            layer.ffn._strategy._local.local.experts
+                            for layer in model.v4.layers
+                        )
+                        if expert_projection
+                        else ()
+                    ),
+                    kernel=reference_kernel,
+                ), short_sparse_provider.short_sparse_plan_reference(
+                    short_sparse,
+                    attentions=(
+                        tuple(layer.attn for layer in model.v4.layers)
+                        if short_sparse
+                        else ()
+                    ),
+                ), cuda_frequency_provider.cuda_frequency_reference(
+                    cuda_frequency,
+                    attentions=(
+                        tuple(layer.attn for layer in model.v4.layers)
+                        if cuda_frequency
+                        else ()
+                    ),
                 ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
@@ -490,9 +914,41 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     and os.environ.get("DSV41_TEST_TRACE_DIR")
                 ):
                     expected_traces = {
-                        (profile, prompt): min(4 if shared_eos_trace else 3, new_tokens)
+                        (profile, prompt): min(
+                            (
+                                4
+                                if shared_eos_trace
+                                or canonical_attention_profile(profile)
+                                .removesuffix("_p")
+                                .removesuffix("_j")
+                                .removesuffix("_g")
+                                .removesuffix("_kv_ref")
+                                .removesuffix("_block_norm_reference")
+                                .removesuffix("_decode_tilelang_reference")
+                                .removesuffix("_mhc_collapse_reference")
+                                .removesuffix("_sparse_prefill_reference")
+                                .removesuffix("_output_reference")
+                                .removesuffix("_query_reference")
+                                .endswith("_engram_reference")
+                                else 3
+                            ),
+                            new_tokens,
+                        )
                         for profile in profiles
-                        if shared_eos_trace or profile.endswith("_mhc_post_reference")
+                        if shared_eos_trace
+                        or canonical_attention_profile(profile)
+                        .removesuffix("_p")
+                        .removesuffix("_j")
+                        .removesuffix("_g")
+                        .removesuffix("_kv_ref")
+                        .removesuffix("_block_norm_reference")
+                        .removesuffix("_decode_tilelang_reference")
+                        .removesuffix("_mhc_collapse_reference")
+                        .removesuffix("_sparse_prefill_reference")
+                        .removesuffix("_output_reference")
+                        .removesuffix("_query_reference")
+                        .removesuffix("_engram_reference")
+                        .endswith("_mhc_post_reference")
                         for prompt in range(len(prompts))
                     }
                     assert post_trace_steps == expected_traces, post_trace_steps
@@ -663,9 +1119,29 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 prefix="v41-full-engine-", dir=storage
             )
         reserve_gib = int(os.environ.get("DSV41_TEST_STORAGE_RESERVE_GIB", "64"))
-        self.assertGreaterEqual(reserve_gib, 32)
+        fresh_attention_experiment = (
+            os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+            and os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+            and os.environ.get("DSV41_TEST_COMPARE_BLOCK_NORM") == "1"
+            and not reuse
+        )
+        minimum_reserve = (
+            24
+            if fresh_attention_experiment
+            else (
+                28
+                if os.environ.get("DSV41_TEST_COMPARE_EXPERT_PROJECTION") == "1"
+                and not reuse
+                else 32
+            )
+        )
+        self.assertGreaterEqual(reserve_gib, minimum_reserve)
+        output_budget = 2**30 if fresh_attention_experiment else 0
         free_storage = shutil.disk_usage(storage).free
-        self.assertGreater(free_storage, (0 if reuse else total) + reserve_gib * 2**30)
+        self.assertGreater(
+            free_storage,
+            (0 if reuse else total) + reserve_gib * 2**30 + output_budget,
+        )
         memory = {
             key: int(value.split()[0]) * 1024
             for key, value in (
@@ -692,10 +1168,15 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         print(
             f"full-engine admission bytes={total} available_ram={memory['MemAvailable']} "
             f"free_storage={free_storage} reserve_gib={reserve_gib} "
-            f"reuse_tables={bool(reuse)} prompts={prompts}",
+            f"reuse_tables={bool(reuse)} prompts={prompts}"
+            + (f" output_budget_bytes={output_budget}" if output_budget else ""),
             flush=True,
         )
         with directory_context as directory:
+            print(
+                f"DSV41_ENGINE_ENGRAM_STAGING {directory} reuse_tables={bool(reuse)}",
+                flush=True,
+            )
             self.run_checkpoint(
                 root, directory, prompts, full=True, new_tokens=new_tokens
             )

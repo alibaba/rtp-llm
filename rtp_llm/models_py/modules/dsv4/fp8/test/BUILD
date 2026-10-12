@@ -27,6 +27,180 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_library(
+    name = "v41_cuda_frequency_reference_testlib",
+    testonly = True,
+    srcs = ["v41_cuda_frequency_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_cuda_frequency_reference_sm120",
+    srcs = ["test_v41_cuda_frequency_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_cuda_frequency_reference_testlib",
+        ":v41_deep_history_testlib",
+        "//rtp_llm/tools:dsv41_output_projection_replay",
+    ],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_library(
+    name = "v41_short_sparse_plan_reference_testlib",
+    testonly = True,
+    srcs = ["v41_short_sparse_plan_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_decode_tilelang_reference_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_short_sparse_plan_reference_sm120",
+    srcs = ["test_v41_short_sparse_plan_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_short_sparse_plan_reference_testlib",
+        ":v41_sparse_prefill_reference_testlib",
+        "//rtp_llm/tools:dsv41_projection_history_replay",
+    ],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_library(
+    name = "v41_expert_projection_reference_testlib",
+    testonly = True,
+    srcs = ["v41_expert_projection_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_expert_precision_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_expert_projection_reference_sm120",
+    srcs = ["test_v41_expert_projection_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_expert_projection_reference_testlib"],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_expert_precision_testlib",
+    testonly = True,
+    srcs = ["v41_expert_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_router_eager_reference_testlib",
+    testonly = True,
+    srcs = ["v41_router_eager_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_router_eager_reference_sm120",
+    srcs = ["test_v41_router_eager_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_router_eager_reference_testlib"],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_kv_projection_reference_testlib",
+    testonly = True,
+    srcs = ["v41_kv_projection_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_deep_history_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_kv_projection_reference_sm120",
+    srcs = ["test_v41_kv_projection_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_kv_projection_reference_testlib"],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_block_norm_reference_testlib",
+    testonly = True,
+    srcs = ["v41_block_norm_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_block_norm_reference_sm120",
+    srcs = ["test_v41_block_norm_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_block_norm_reference_testlib"],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_decode_tilelang_reference_testlib",
+    testonly = True,
+    srcs = ["v41_decode_tilelang_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_decode_tilelang_reference_sm120",
+    srcs = ["test_v41_decode_tilelang_reference_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_decode_tilelang_reference_testlib",
+        ":v41_deep_history_testlib",
+    ],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_library(
+    name = "v41_mhc_collapse_reference_testlib",
+    testonly = True,
+    srcs = ["v41_mhc_collapse_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_deep_history_testlib",
+    testonly = True,
+    srcs = [
+        "v41_compressor_precision.py",
+        "v41_engram_precision.py",
+        "v41_expert_precision.py",
+        "v41_mhc_precision.py",
+        "v41_output_precision.py",
+        "v41_query_precision.py",
+        "v41_sparse_precision.py",
+        "v41_tp8_projection.py",
+        "test_v41_decode_attention_sm120.py",
+        "test_v41_decode_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_attention_owner_testlib",
+        ":v41_sparse_prefill_reference_testlib",
+    ],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
     name = "v41_attention_owner_testlib",
     srcs = ["test_v41_attention_owner_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS,
@@ -73,6 +247,38 @@ py_test(
     name = "test_v41_mhc_post_precision_sm120",
     srcs = ["test_v41_mhc_post_precision_sm120.py", "v41_mhc_precision.py"],
     deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_engram_precision_sm120",
+    srcs = ["test_v41_engram_precision_sm120.py", "v41_engram_precision.py", "v41_expert_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_query_precision_sm120",
+    srcs = ["test_v41_query_precision_sm120.py", "v41_query_precision.py", "v41_expert_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_query_boundary_replay"],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_output_precision_sm120",
+    srcs = [
+        "test_v41_output_precision_sm120.py",
+        "v41_output_precision.py",
+        "v41_expert_precision.py",
+        "v41_tp8_projection.py",
+        "v41_query_precision.py",
+        "v41_compressor_precision.py",
+        "v41_sparse_precision.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_output_projection_replay"],
     tags = ["SM120", "manual"],
     target_compatible_with = _DSV4_SM120_ONLY,
 )
@@ -198,6 +404,32 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_sparse_prefill_reference_sm120",
+    srcs = [
+        "test_v41_sparse_prefill_reference_sm120.py",
+        "v41_sparse_prefill_reference.py",
+        "v41_sparse_precision.py",
+        "v41_compressor_precision.py",
+        "v41_query_precision.py",
+        "v41_output_precision.py",
+        "v41_tp8_projection.py",
+        "v41_expert_precision.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_sparse_order_replay"],
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_sparse_prefill_reference_testlib",
+    testonly = True,
+    srcs = ["v41_sparse_prefill_reference.py"],
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_sparse_precision_replay"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_v41_engram_full_tables_sm120",
     srcs = ["test_v41_engram_full_tables_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS,
@@ -254,8 +486,11 @@ py_test(
     srcs = [
         "test_v41_checkpoint_engine_sm120.py",
         "v41_compressor_precision.py",
+        "v41_engram_precision.py",
         "v41_expert_precision.py",
         "v41_mhc_precision.py",
+        "v41_output_precision.py",
+        "v41_query_precision.py",
         "v41_reference_precision.py",
         "v41_sparse_precision.py",
         "v41_tp8_projection.py",
@@ -265,7 +500,18 @@ py_test(
         "test_v41_attention_owner_sm120.py",
     ],
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
-    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_trace"],
+    deps = _DSV4_FP8_TEST_DEPS + [
+        ":v41_decode_tilelang_reference_testlib",
+        ":v41_short_sparse_plan_reference_testlib",
+        ":v41_cuda_frequency_reference_testlib",
+        ":v41_mhc_collapse_reference_testlib",
+        ":v41_block_norm_reference_testlib",
+        ":v41_kv_projection_reference_testlib",
+        ":v41_sparse_prefill_reference_testlib",
+        ":v41_router_eager_reference_testlib",
+        ":v41_expert_projection_reference_testlib",
+        "//rtp_llm/tools:dsv41_trace",
+    ],
     tags = ["SM120", "manual"],
     env = {"GPU_COUNT": "8"},
     exec_properties = {"gpu": "SM120", "gpu_count": "8"},
