@@ -50,7 +50,7 @@ def fields(kind, path):
     if not path:
         return {'scenarios': SCENARIO_FIELDS, 'report_views': VIEW_FIELDS,
                 'monitoring': ('metric_plan_schema_version', 'include', 'exclude', 'sources', 'produced'),
-                'suite': ('suite_schema_version', 'default_suite', 'ci_suites'),
+                'suite': ('suite_schema_version', 'default_suite', 'default_profile', 'suites', 'ci_jobs'),
                 'mode': ('mode_profiles_schema_version', 'runtime_modes', 'master_modes')}[kind]
     if kind == 'monitoring' and (len(path) == 3 and path[0] == 'sources'
                                  or len(path) == 2 and path[0] == 'produced'):

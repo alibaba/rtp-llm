@@ -25,7 +25,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | case YAML | `case_schema_version` | 2 |
 | 指标集合 | `metric_plan_schema_version` | 5 |
 | 报告视图 YAML | `report_view_schema_version` | 1 |
-| CI suite | `suite_schema_version` | 2 |
+| Suite 与 CI 策略 | `suite_schema_version` | 3 |
 | mode profile | `mode_profiles_schema_version` | 1 |
 | Python 内部 program document | `program_schema_version` | 1 |
 | 冻结执行计划 | `execution_plan_schema_version` | 1 |

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run instances selected by config/suites.yaml or an explicit kind filter.
 
-Use --suite workload_manual for default workload instances, --suite functional
-or --suite workload for all variants of that kind, or --suite all for full regression.
+Use --suite for explicit groups, --kind for all variants of a kind,
+or --all for the complete catalog. Listing and execution share defaults.
 Port leasing and lane planning remain in the existing parallel runner.
 """
 import sys

@@ -17,7 +17,8 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.suites import classify, preselect_documents, suite_names
+from scenario.suites import classify, preselect_documents
+from scripts.pipeline.selection import add_selection_arguments, resolve_selection
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
@@ -99,11 +100,7 @@ def summarize(rows):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="scenario file or directory")
-    parser.add_argument("--profile")
-    parser.add_argument("--master-mode", choices=("sb", "sn", "wb", "wn"))
-    parser.add_argument(
-        "--suite", choices=suite_names(), default="all"
-    )
+    add_selection_arguments(parser)
     parser.add_argument(
         "--grade", choices=("strict", "normal", "loose"), default="normal"
     )
@@ -116,13 +113,7 @@ def main(argv=None):
                         help="optional single-file scenario experiment archive")
     parser.add_argument("--lease-json", type=Path)
     args = parser.parse_args(argv)
-    if args.master_mode:
-        from mode_profiles import resolve_mode
-
-        selected = resolve_mode("scenario", args.master_mode)["master_profile"]
-        if args.profile and args.profile != selected:
-            parser.error("--profile disagrees with --master-mode")
-        args.profile = selected
+    resolve_selection(args, parser)
     try:
         from scenario.execution_plan import dependency_files
         dependencies = dependency_files()
@@ -140,12 +131,12 @@ def main(argv=None):
             plans = select(
                 classify(
                     compile_scenarios(
-                        preselect_documents(load_scenarios(args.source), args.suite),
+                        preselect_documents(load_scenarios(args.source), args.suite, kind=args.kind),
                         args.profile,
                         registry,
                         grade=args.grade,
                     ),
-                    args.suite,
+                    args.suite, kind=args.kind,
                 ),
                 args.instances,
             )

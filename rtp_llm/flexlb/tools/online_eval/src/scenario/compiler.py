@@ -10,7 +10,7 @@ from flexlb_cfg import PROFILES
 from runtime.resource_plan import VICTIM_OFFSETS
 from scenario.validation import fail, mapping, identifier, number, names
 from scenario.stage_compiler import OUTPUTS, stages
-from scenario.suites import EXECUTION_FIELDS, EXECUTION_BUDGETS
+from scenario.execution_policy import EXECUTION_FIELDS, EXECUTION_BUDGETS
 from scenario.environment_config import environment, read_environment, variant_environment_fields, CAPABILITIES
 
 CATEGORIES = {

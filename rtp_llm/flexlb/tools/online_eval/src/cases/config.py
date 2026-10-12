@@ -149,7 +149,7 @@ def _program_document(config, name, source):
         program_schema_version=1, environment=copy.deepcopy(environment), variants=[]
     )
     document["id"] = config.identity
-    from scenario.suites import EXECUTION_BUDGETS
+    from scenario.execution_policy import EXECUTION_BUDGETS
 
     document["profiles"] = list(config.profiles)
     document["execution"] = {

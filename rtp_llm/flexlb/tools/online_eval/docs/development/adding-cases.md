@@ -124,13 +124,13 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 唯一的字段排序表在 `scripts/pipeline/config_order.py`。命令只移动已有字段块，不补默认值、改标量或重排列表，并在写入前检查解析值不变。新业务参数按其输入含义组织，不为了格式工具另建 YAML schema。
 
-每个 case 顶层必须声明 `program: default`，Python 必须提供 `default(case)`。`variants` 只追加额外测试点，不能占用 `id: default`。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
+每个 case 顶层必须声明 `program: default`，Python 必须注册 `default` builder。`variants` 只追加额外测试点，不能占用 `id: default`。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
 
 ## 数据、运行策略与参数约束
 
 | 段 | 负责什么 | 主要消费者 |
 |---|---|---|
-| `metadata` | 测试性质、目标、分类与标签；`kind` 参与 CI 筛选和执行器选择 | suite 选择、实例清单、执行器与报告 |
+| `metadata` | 测试性质、目标、分类与标签；`kind` 参与性质筛选和执行器选择 | suite 选择、实例清单、执行器与报告 |
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
 | `execution` | 实例、阶段和清理预算，以及 `collection` 和 `monitoring` 取证策略 | runner、阶段执行器、客户端与采集器 |
 | `parameters` | 按流量、流程、观测、分析与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |

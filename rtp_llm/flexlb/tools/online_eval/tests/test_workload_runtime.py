@@ -90,15 +90,15 @@ class WorkloadRuntimeTests(unittest.TestCase):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
-        f = {p["id"] for p in classify(plans, "functional")}
-        w = {p["id"] for p in classify(plans, "workload")}
+        f = {p["id"] for p in classify(plans, kind="functional")}
+        w = {p["id"] for p in classify(plans, kind="workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
         self.assertIn("master_ha_failover::default::batch-window", w)
         self.assertEqual(
             {
                 plan["scenario_id"] + "::" + plan["variant_id"]
-                for plan in classify(plans, "functional")
+                for plan in classify(plans, kind="functional")
             },
             {
                 "request_completion::default",

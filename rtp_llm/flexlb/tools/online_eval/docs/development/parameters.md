@@ -9,7 +9,9 @@
 | `--master-mode sb\|sn\|wb\|wn` | Master 形态缩写，映射在 `config/mode_profiles.yaml` |
 | `--profile` | 完整 profile 名，和显式 mode 不一致时失败 |
 | `--grade strict\|normal\|loose` | 配置门槛档位，传递给实际实例执行器 |
-| `--suite core\|functional\|workload\|all` | CI suite 或实例性质筛选，默认值来自 `config/suites.yaml` |
+| `--suite` | 配置中的固定组合，与 `--kind`、`--all` 互斥；默认值来自 `config/suites.yaml` |
+| `--kind functional\|workload` | 选择该性质的全部变体 |
+| `--all` | 全部 case 与变体 |
 | `--case-dir` | 场景 YAML 文件或目录 |
 | `--instances` | 精确的编译实例 ID；可先用 `list_cases.py --list-json` 获取 |
 | `--categories` | 按 category 选择实例 |

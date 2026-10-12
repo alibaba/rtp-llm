@@ -34,7 +34,7 @@ def test_case_compilation_freezes_variant_gate_chart_and_diagnostic_consumers():
          patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
         doc = configure_program(load_document(path), str(path))
         instances = compile_scenarios([(str(path), doc)], handlers=handlers())
-    assert len(instances) == 6
+    assert len(instances) == 4
     for instance in instances:
         frozen = instance['implementation']['monitoring_query_plan']
         assert frozen['sha256'] == plan_hash(frozen['definition'])

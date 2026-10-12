@@ -95,6 +95,7 @@ class ChildProcesses:
 
 
 def _catalog(args):
+    from scripts.pipeline.selection import selection_arguments
     instances = []
     if not SCENARIO_RUNNER.is_file():
         raise InstancePlanError(
@@ -110,8 +111,7 @@ def _catalog(args):
             args.profile,
             "--grade",
             args.grade,
-            "--suite",
-            getattr(args, "suite", "all"),
+            *selection_arguments(args),
             "--list-json",
         ],
         capture_output=True,

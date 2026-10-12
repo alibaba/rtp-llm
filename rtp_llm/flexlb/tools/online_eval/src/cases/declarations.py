@@ -8,7 +8,7 @@ from typing import Optional
 from cases.config_data import mapping, data_only
 from cases.variants import VariantAxis
 from scenario.loader import ScenarioError
-from scenario.suites import normalize_metadata, normalize_execution, DEFAULT_MONITORING
+from scenario.execution_policy import normalize_metadata, normalize_execution, DEFAULT_MONITORING
 from scenario.validation import names
 from flexlb_cfg import PROFILES
 

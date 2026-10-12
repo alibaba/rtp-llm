@@ -91,7 +91,7 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             )
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
-            from scenario.suites import (
+            from scenario.execution_policy import (
                 EXECUTION_BUDGETS, normalize_execution, normalize_metadata,
             )
             from scenario.loader import ScenarioError

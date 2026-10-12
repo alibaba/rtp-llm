@@ -1,9 +1,25 @@
-suite_schema_version: 2
+suite_schema_version: 3
 default_suite: core
-ci_suites:
+default_profile: batch-window
+suites:
   core:
   - request_completion::default
-  workload_manual:
+  workload:
   - cache_scale_in::default
   - master_ha_failover::default
   - master_performance::default
+ci_jobs:
+  quick:
+    suite: core
+    profiles:
+    - batch-window
+    - single-nonbatch
+    - single-batch
+    - window-nonbatch
+    parallel: 1
+  workload:
+    suite: workload
+    profiles:
+    - batch-window
+    - single-nonbatch
+    parallel: 1

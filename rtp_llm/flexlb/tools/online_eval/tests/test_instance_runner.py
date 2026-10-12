@@ -56,6 +56,9 @@ class InstanceRunnerTest(unittest.TestCase):
     def args(self, **kwargs):
         values = dict(
             source="yaml",
+            suite=None,
+            kind=None,
+            all=True,
             case_dir=str(self.root / "config/scenarios"),
             instances=None,
             categories=None,

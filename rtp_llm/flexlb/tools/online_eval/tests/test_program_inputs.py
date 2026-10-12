@@ -83,7 +83,7 @@ def test_ha_windows_and_check_binding_are_yaml_data_and_compile_to_typed_outputs
     assert stages["b_success"]["params"]["rows"] == {"$ref": "stages.both.output.rows"}
     with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
          patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
-        assert len(compile_scenarios([("ha.yaml", document)], handlers=handlers())) == 6
+        assert len(compile_scenarios([("ha.yaml", document)], handlers=handlers())) == 4
 
 
 @pytest.mark.parametrize("window", ["typo", "outage"])

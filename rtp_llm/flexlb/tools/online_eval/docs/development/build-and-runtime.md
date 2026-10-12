@@ -54,7 +54,7 @@ runner 为每个实例启动并回收 Master、Mock Engine、load client 和所�
 ```bash
 export FLEXLB_FT_WORKER_PORT_CAPACITY=2048
 python3 tools/online_eval/scripts/commands/list_cases.py \
-  --source tools/online_eval/config/scenarios --suite all --list-json
+  --source tools/online_eval/config/scenarios --all --list-json
 ```
 
 `all` 包括功能与持续负载场景。依次选择 `single-nonbatch`、`single-batch`、`window-nonbatch`、`batch-window` 执行，每种形态使用独立输出目录。

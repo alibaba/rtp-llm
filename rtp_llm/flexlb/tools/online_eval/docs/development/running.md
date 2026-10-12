@@ -7,14 +7,27 @@
 ```bash
 python3 tools/online_eval/scripts/commands/list_cases.py \
   --source tools/online_eval/config/scenarios \
-  --profile batch-window --suite all --list-json
+  --profile batch-window --all --list-json
 
 python3 tools/online_eval/scripts/commands/run_cases.py \
   --profile batch-window --suite workload \
   --instances '<case>::<variant>::<profile>' --parallel 1 --dry-run
 ```
 
-`core` 根据 `config/suites.yaml` 选 CI 实例；常规 workload 验证使用 `--suite workload_manual`，只选择该配置声明的默认实例。`functional` 和 `workload` 按 `metadata.kind` 筛选，会包含专项变体；`all` 选择全部。默认 suite 也来自该配置，不在文档维护实例数量。`--case-dir` 可指向一份 YAML 或目录，`--instances` 使用清单中的完整 ID。
+`--suite` 只选择 `config/suites.yaml` 中的固定组合：`core` 用于快速验证，`workload` 用于默认 workload 验证。`--kind functional|workload` 选择该性质的全部变体，`--all` 选择全量；这三种选择互斥。列表与执行入口共用配置中的默认 suite 和 profile。列表可用 `--profile all` 展开所有支持的 profile；执行入口一次运行一个 profile。
+
+`--case-dir` 可指向一份 YAML 或目录，`--instances` 使用清单中的完整 ID，并在 suite 或 kind 的选择范围内进一步筛选。固定组合缺少成员时直接失败，不静默少跑。
+
+CI 执行策略在同一配置的 `ci_jobs` 中声明 suite、profiles 和 parallel，不复制成员清单。使用下面的入口先预览，再执行；profile 按配置顺序串行运行，产物分别保存在 profile 子目录，任一失败停止后续执行。`ci-results.json` 记录实际执行范围与退出码，具体门禁以各 profile 的 `aggregate.json` 为准。
+
+```bash
+python3 tools/online_eval/scripts/commands/run_ci.py \
+  --job quick --out-dir /path/to/new-ci-run --dry-run
+python3 tools/online_eval/scripts/commands/run_ci.py \
+  --job workload --out-dir /path/to/new-workload-run
+```
+
+这些策略和入口不会自动创建外部 CI 任务；流水线需要显式调用 `run_ci.py --job <job>`，不能仅凭 `ci_jobs` 配置认为已接入。
 
 `--dry-run` 显示执行、端口及报告视图计划，不启动服务。核对 profile、worker 端口容量、lane 和内存预算后再执行；编译与执行使用同一组端口容量参数。列表顺序和 dry-run 成功不代表测试通过。
 
