@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from monitoring.collection_plan import select_plan, instance_plan, physical_metrics
 from monitoring.query_plan import load_plan, plan_hash
 from reporting.view_config import view

@@ -8,10 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from cases import registry as module
-from cases.registry import (CaseRegistry, CaseDefinition, MetricProducer,
-                            ProducerPhase, RegisteredCase, ReportView, EvidenceSource)
-from cases.validation import validate_cases
+from case_api import registry as module
+from case_api.registry import CaseRegistry
+from case_api.registry import CaseDefinition
+from case_api.registry import MetricProducer
+from case_api.registry import ProducerPhase
+from case_api.registry import RegisteredCase
+from case_api.registry import ReportView
+from case_api.registry import EvidenceSource
+from scenario.case_validation import validate_cases
 
 ROOT = Path(__file__).resolve().parents[1]
 

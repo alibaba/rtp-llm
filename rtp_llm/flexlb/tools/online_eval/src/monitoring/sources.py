@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 import inspect
 
-from cases.registry import registry
+from case_api.registry import registry
 from monitoring.probe import PrometheusEvidence
 
 

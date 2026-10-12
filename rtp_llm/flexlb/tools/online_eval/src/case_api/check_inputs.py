@@ -1,8 +1,8 @@
 """Compile declared comparisons into case-owned measurement contracts."""
 
 from analysis.checks import validate_comparison
-from cases.inputs import fields
-from cases.windows import check_windows
+from case_api.inputs import fields
+from case_api.windows import check_windows
 
 
 def metric_criterion(case, spec, *, metric, unit, windows, op, path,

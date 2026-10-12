@@ -3,15 +3,19 @@
 import copy
 import math
 
-from cases.inputs import fields
+from case_api.inputs import fields
 from cases.master_ha_failover.analysis import HA_METRICS
 from analysis.checks import validate_comparison
 from scenario.loader import ScenarioError
-from cases.numeric_parameters import (
-    SOURCE_NUMBERS, OUTPUT_DISTRIBUTION_NUMBERS, CAPTURE_NUMBERS, FRACTION,
-    POSITIVE_COUNT, COUNT, OFFSET, NONNEGATIVE,
-    number_fields,
-)
+from case_api.numeric_parameters import SOURCE_NUMBERS
+from case_api.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
+from case_api.numeric_parameters import CAPTURE_NUMBERS
+from case_api.numeric_parameters import FRACTION
+from case_api.numeric_parameters import POSITIVE_COUNT
+from case_api.numeric_parameters import COUNT
+from case_api.numeric_parameters import OFFSET
+from case_api.numeric_parameters import NONNEGATIVE
+from case_api.numeric_parameters import number_fields
 
 
 NUMERIC_PARAMETERS = {
@@ -111,7 +115,8 @@ def validate_client_criterion(params, *, path="client criterion"):
 
 
 def read_cycle(case):
-    from cases.windows import ObservationWindow, check_windows
+    from case_api.windows import ObservationWindow
+    from case_api.windows import check_windows
 
     if isinstance(case.parameters.get("procedure"), dict) and "restart_mode" in case.parameters["procedure"]:
         raise ScenarioError("restart_mode is owned by flow identity, not parameters")

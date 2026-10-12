@@ -1,11 +1,11 @@
 """One continuous real-trace replay across a dual-master restart cycle."""
 
-from cases.registry import ReportView
+from case_api.registry import ReportView
 from cases.master_ha_failover.report import validate_view, write_report
 
 from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 
-from cases.config import output
+from case_api.builder import output
 from cases.master_ha_failover.inputs import NUMERIC_PARAMETERS
 from cases.master_ha_failover.inputs import read_cycle
 from scenario.loader import ScenarioError
@@ -102,9 +102,11 @@ def produce_gate_metrics(directory):
     produce_gates(directory)
 
 
-from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from case_api.registry import CaseDefinition
+from case_api.registry import MetricProducer
+from case_api.registry import ProducerPhase
 from cases.master_ha_failover.metrics import metric_contract
-from cases.registry import EvidenceSource
+from case_api.registry import EvidenceSource
 from cases.master_ha_failover.metrics import produce as produce_evidence
 from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
 

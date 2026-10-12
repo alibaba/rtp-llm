@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from cases import registry
+from case_api import registry
 from reporting.curves import materialize, project_panels
 
 

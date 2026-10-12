@@ -16,7 +16,8 @@ def metric_classification(identity, definition, presentation):
     if identity in presentation["metrics"]["diagnostic_only"]:
         return "DIAGNOSTIC_ONLY"
     if definition.get("producer") and definition.get("value_kind") == "scalar":
-        from cases.registry import registry, ProducerPhase
+        from case_api.registry import registry
+        from case_api.registry import ProducerPhase
         if registry().producers[definition["producer"]].phase is ProducerPhase.GATE:
             return "GATE_EVIDENCE"
     return None

@@ -15,10 +15,10 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 下面的最小例子验证请求终态。创建 `src/cases/protocol_terminal/`，加入空的 `__init__.py` 和下列 `program.py`，再创建 `config/scenarios/protocol_terminal.yaml`。名称仅用于演示新增目录的接入方式；所有取值由示例 YAML 明确给出，预算和阈值不是框架默认值。小型 case 不需要专属采集器、producer、报告或重判入口。
 
 ```python
-from cases.config import output
-from cases.inputs import fields
-from cases.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
-from cases.registry import CaseDefinition
+from case_api.builder import output
+from case_api.inputs import fields
+from case_api.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
+from case_api.registry import CaseDefinition
 from traffic.contracts import driver
 
 
@@ -110,7 +110,7 @@ python3 tools/online_eval/scripts/commands/validate_case.py \
 | 2 | `metadata`、`profiles` | 用途、测试性质与运行形态 |
 | 3 | `environment`、`execution` | 模型/拓扑、采集策略与时间预算 |
 | 4 | `parameters`、`parameter_schema` | 流量输入、指标绑定、门槛及约束 |
-| 5 | `variant_axis`、`variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
+| 5 | `variants`、`profile_overrides` | 默认程序之外的测试点和覆盖 |
 | 6 | `reporting`、`reports` | 时间轴与交付视图 |
 
 `parameters` 按 `traffic` → `procedure` → `observation` → `analysis` → `checks` 排列，只声明 program 使用的组。`observation` 内按采样与覆盖设置 → `inputs` → `capture` → `windows` 排列；未使用的字段不补齐。根参数及变体覆盖都由配置排序命令检查，指标绑定集合、窗口名和检查项的内部顺序保持原样。流量先写来源和播放方式，再写并发、预算与客户端资源。指标集合按身份/继承 → 来源查询 → Python 输出排列；视图按身份 → 查询依赖/事件 → 曲线绑定 → 面板排列，曲线先写 `metric_id`/`labels` 再写展示属性。命名集合及列表顺序保留，不能按字母重排阶段、曲线或面板。
@@ -151,7 +151,7 @@ program 用 `case.inputs(...)` 声明各组允许和必需的字段，得到 `Pr
 
 运行身份使用 `case::variant::profile`，配置、制品和实际流量用冻结的 SHA 与运行配置追溯。观测参数不另声明手工实验身份；性能证据必须保留实例身份、配置 SHA、制品和流量 SHA，缺失或损坏的证据不能通过门禁。
 
-program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `cases.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；program 可以进一步收紧运行预算，但不能改变公共字段类型或放宽通用范围。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
+program 通过 `NUMERIC_PARAMETERS` 把必需的 dotted path 绑定到 `case_api.numeric_parameters` 中的语义类型：计数、正整数、非负实数、`FRACTION`、有符号偏移、priority 和 Java 请求长度。类型和协议范围只在公共类型中定义，公共字段组直接复用；program 可以进一步收紧运行预算，但不能改变公共字段类型或放宽通用范围。`unit: ratio` 不是类型约束，倾斜比等比值可以大于 1；只有明确绑定 `FRACTION` 的比例限制在 `[0,1]`。
 
 `parameter_schema` 可省略，只声明场景自己的 `minimum`、`maximum`，不能改变整数类型或放宽 program 契约。variant 的范围只能在场景范围上继续收紧。所有字段在 program 构建前校验，包括 variant 合并后的值；未绑定字段、缺字段、错误类型、非有限或越界值失败。展开后的每个 variant 数值契约写入 `implementation.numeric_parameters`，供编译结果与运行证据核对。
 
@@ -191,7 +191,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 先阅读[case 插件结构](../architecture/case-plugins.md)，理解编译、取证、测量、判定和交付的生命周期。目录按职责拆分，不要求每个 case 搭齐所有模块。
 
-`src/cases/config.py` 和 `registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：
+`src/case_api/builder.py` 和 `src/case_api/registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：
 
 | 文件 | 职责 |
 |---|---|
@@ -206,14 +206,14 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 按实际需要建文件，小型 case 只需 `program.py`，不创建空的层次。这里的归属表示业务合同由谁维护，不表示代码永远不可复用：同类 program 可显式注册同一实现；跨业务一致的统计、协议、采集或渲染功能才提到公共组件。不能因文件名同为 `analysis.py` 或 `metrics.py` 就把不同业务口径合并。
 
-`cases.registry` 自动发现 `cases` 下包含 `program.py` 的直接子目录。program 导出 `CASE: CaseDefinition`，明确声明构建器、参数约束、动作、报告、指标生产者和采集源。目录名就是稳定 case 名；新增 case 不修改公共名单。注册快照校验能力冲突并保持不可变，YAML 只能选择已发现入口，不能导入代码。通用构建接口是 `cases.config.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
+`case_api.registry` 自动发现 `cases` 下包含 `program.py` 的直接子目录。program 导出 `CASE: CaseDefinition`，明确声明构建器、参数约束、动作、报告、指标生产者和采集源。目录名就是稳定 case 名；新增 case 不修改公共名单。注册快照校验能力冲突并保持不可变，YAML 只能选择已发现入口，不能导入代码。通用构建接口是 `case_api.builder.CaseBuilder`；`output(stage, name)` 声明有类型的前序输出引用。
 
 `CASE.actions` 声明所属能力；单次运行的分析参数由所属 program 校验。指标用 `case.metric(id, ...)` 声明所有门禁及 producer 的采样输入依赖，编译检查 ID、单位与身份标签。采集清单来自这些依赖、报告曲线与显式诊断项的并集；目录中无人消费的能力不采集，不能靠 producer 运行时加载整份 plan 扩大清单。复杂指标的 producer 注册到 `CASE.producers`，`monitoring/producers.py` 负责调用这些能力；定义数据放在 `config/monitoring/`，规则见[指标配置](../../config/monitoring/README.md)。
 
 `CASE.producers` 注册 `MetricProducer(describe, execute, phase)`。GATE 的 `execute(directory)` 在最终遥测导出后投影已冻结的门禁数值，FINALIZE 的 `execute(directory, context)` 发布收尾证据；函数名没有自动注册含义。报告通过 `CASE.report_views` 注册 `ReportView(validator, renderer)`；renderer 接收目录、运行分析和视图定义，读取校验后的冻结判定，在统一报告阶段生成 bundle，返回 HTML 路径，不重判或重新发布指标。门禁 bundle 声明 `role="gate"`，发现与汇总通过 manifest 校验，不根据目录名猜测。报告协议见[报告契约](../architecture/reporting.md)。
 
 
-注册接口的参数契约定义在 `cases.extension_contracts`，发现阶段检查可调用参数，不执行能力函数：
+注册接口的参数契约定义在 `case_api.extension_contracts`，发现阶段检查可调用参数，不执行能力函数：
 
 | 能力 | 调用约定 |
 |---|---|
@@ -250,7 +250,9 @@ handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知�
 
 `profiles` 选择运行形态；`environment.profile_overrides` 覆盖非身份环境字段；检查的 `expected_by_profile` 声明形态相关阈值；`warning_profiles` 只将指定形态下的普通阈值失败标为警告，不能豁免缺失数据。所有 profile 名均验证，包括未被选中的规则。
 
-变体选择已注册的 Python program 或经 `parameter_schema` 校验的数据覆盖。维度、字段与身份必须一致，不把多项无关偏离包装成同一个参数变体；字段合并以加载器契约为准。未知或隐藏兜底值必须失败，不能靠 program 补齐未声明的输入。
+变体用于表达实验目的、实验对象或实现流程的变化，例如正反对照、故障类型或替代实现。设计时不宜为每个 QPS、时长或容量值分别新增变体；参数扫描使用独立的实验输入覆盖，保持同一实验身份。这是 case 设计规范，不由字段差异自动推断或强制判定。
+
+变体用唯一 `id` 标识，可组合 `program`、`environment`、`parameters` 和 `parameter_schema`，不需要声明变化轴，名字也不必等于 program 名。`program` 必须已注册；覆盖数据仍按字段、类型、数值范围、未消费参数和 profile 身份合同校验。`parameter_schema` 只能收窄 program 声明的数值范围。根配置的 `profiles`、执行预算和报告声明适用于所有变体；变体不能写入这些未支持的覆盖字段，避免配置被接收后静默忽略。YAML 仍只表达数据，步骤与分支由 Python 实现。
 
 ## 验证
 

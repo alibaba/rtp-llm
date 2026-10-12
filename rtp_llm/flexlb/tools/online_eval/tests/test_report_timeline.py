@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from reporting.timeline import apply, freeze, traffic_event, validate_configuration
 from adapters.client_journal import first_request
 from scenario.loader import ScenarioError, load_document

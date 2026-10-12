@@ -6,8 +6,8 @@ import copy
 def validate_cases(source, *, profile=None):
     from scenario import load_scenarios, compile_scenarios
     from scenario.catalog import handlers
-    from cases.registry import registry
-    from cases.config_data import merge_data
+    from case_api.registry import registry
+    from scenario.config_data import merge_data
     from monitoring.query_plan import definitions, SOURCE_KINDS
 
     plans = compile_scenarios(load_scenarios(source), profile, handlers())

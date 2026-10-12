@@ -532,7 +532,7 @@ class MasterActionsTest(unittest.TestCase):
                 self.assertEqual(536, plan["environment"]["n_decode"])
 
     def test_ha_non_rolling_option_retains_full_outage_checks(self):
-        from cases.config import configure_program
+        from scenario.program_compiler import configure_program
         from scenario.loader import load_document, ScenarioError
 
         path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"

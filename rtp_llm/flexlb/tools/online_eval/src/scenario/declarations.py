@@ -5,8 +5,8 @@ import copy
 from dataclasses import dataclass, field
 from typing import Optional
 
-from cases.config_data import mapping, data_only
-from cases.variants import VariantAxis
+from scenario.config_data import mapping
+from scenario.config_data import data_only
 from scenario.loader import ScenarioError
 from scenario.execution_policy import normalize_metadata, normalize_execution, DEFAULT_MONITORING
 from scenario.validation import names
@@ -24,8 +24,7 @@ class VariantDeclaration:
 
     @classmethod
     def read(cls, value, source):
-        mapping(value, {'id', 'program', 'profiles', 'environment', 'execution', 'parameters',
-                        'metadata', 'parameter_schema', 'reports', 'reporting'}, source)
+        mapping(value, {'id', 'program', 'environment', 'parameters', 'parameter_schema'}, source)
         groups = {}
         for name in ('environment', 'parameters', 'parameter_schema'):
             group = value.get(name, {})
@@ -107,7 +106,6 @@ class CaseDeclaration:
     metadata: dict
     execution: ExecutionPolicy
     variants: tuple[VariantDeclaration, ...]
-    variant_axis: Optional[VariantAxis]
     reports: Optional[tuple[str, ...]]
     reporting: Optional[dict]
     declaration: dict = field(repr=False)
@@ -115,7 +113,7 @@ class CaseDeclaration:
     @classmethod
     def read(cls, value, source):
         data_only(value, source)
-        mapping(value, {'case_schema_version', 'case', 'program', 'variant_axis', 'id', 'profiles',
+        mapping(value, {'case_schema_version', 'case', 'program', 'id', 'profiles',
                         'environment', 'execution', 'parameters', 'variants', 'metadata',
                         'parameter_schema', 'reports', 'reporting'}, source)
         if type(value.get('case_schema_version')) is not int or value['case_schema_version'] != 2:
@@ -132,12 +130,14 @@ class CaseDeclaration:
             if not isinstance(group, dict):
                 raise ScenarioError(source + '.' + name + ': expected mapping')
             groups[name] = copy.deepcopy(group)
+        variants = value.get('variants', [])
+        if 'variants' in value and (not isinstance(variants, list) or not variants):
+            raise ScenarioError(source + '.variants: expected a nonempty list')
         reports = value.get('reports')
         if reports is not None and not isinstance(reports, list):
             raise ScenarioError(source + '.reports: expected list')
         return cls(value.get('case'), value.get('id', value.get('case')), value.get('program'),
                    tuple(profiles), **groups, metadata=metadata, execution=execution,
-                   variant_axis=VariantAxis.from_config(value, source),
-                   variants=tuple(VariantDeclaration.read(row, source + '.variants') for row in value.get('variants', [])),
+                   variants=tuple(VariantDeclaration.read(row, source + '.variants') for row in variants),
                    reports=tuple(reports) if reports is not None else None, reporting=copy.deepcopy(value.get('reporting')),
                    declaration=copy.deepcopy(value))

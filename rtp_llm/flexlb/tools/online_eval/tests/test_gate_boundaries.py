@@ -131,7 +131,7 @@ def test_performance_cli_replays_evidence_explicitly():
 
 
 def test_registered_view_extension_needs_no_workload_case_branch():
-    from cases import registry
+    from case_api import registry
     from types import SimpleNamespace
     from reporting.workload import write_views
 

@@ -199,11 +199,6 @@ parameters:
       unit: boolean
       op: eq
       expected: 0
-variant_axis:
-  kind: data
-  fields:
-  - parameters.procedure.post_affinity_ms
-  - parameters.checks.collapse.expected
 variants:
 - id: affinity_disabled
   parameters:

@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pytest
 from scenario.loader import load_document
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers
 from scenario.suites import preselect_documents

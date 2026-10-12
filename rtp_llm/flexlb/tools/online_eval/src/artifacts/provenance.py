@@ -40,7 +40,10 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     trace["workload_sha256"] = trace_workload_sha(trace["path"])
     client = json.loads((flow.directory / "flow-input.json").read_text())
     from runtime import observation
-    from cases import windows, metric_inputs, check_inputs, numeric_parameters
+    from case_api import windows
+    from case_api import metric_inputs
+    from case_api import check_inputs
+    from case_api import numeric_parameters
     import input_contract
     from analysis import statistics, time_buckets
     common = (Path(__file__), observation.__file__, windows.__file__, metric_inputs.__file__, input_contract.__file__,

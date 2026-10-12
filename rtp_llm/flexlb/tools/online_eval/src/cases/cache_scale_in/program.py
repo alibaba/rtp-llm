@@ -1,11 +1,11 @@
 """Warm once, shrink in one step, keep the Java sender running, adjudicate offline."""
 
-from cases.registry import ReportView
+from case_api.registry import ReportView
 from cases.cache_scale_in.report import validate_view, write_report
 
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
-from cases.config import output
+from case_api.builder import output
 from cases.cache_scale_in.inputs import NUMERIC_PARAMETERS
 from traffic.playback.configuration import normalize
 from cases.cache_scale_in.inputs import (
@@ -13,7 +13,7 @@ from cases.cache_scale_in.inputs import (
 )
 from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow
-from cases.metric_inputs import bind_engine_metrics
+from case_api.metric_inputs import bind_engine_metrics
 
 
 def default(case):
@@ -70,7 +70,7 @@ def default(case):
     case.step("teardown", "teardown")
 
 
-from cases.gate_plugin import GatePlugin
+from case_api.gate_plugin import GatePlugin
 from cases.cache_scale_in.analysis import analyze
 from cases.cache_scale_in.metrics import produce
 
@@ -78,7 +78,9 @@ GATE = GatePlugin('cache', analyze, produce, write_report)
 REPORT_VIEWS = {'cache_scale_in.yaml': ReportView(validate_view, GATE.render)}
 
 
-from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from case_api.registry import CaseDefinition
+from case_api.registry import MetricProducer
+from case_api.registry import ProducerPhase
 from cases.cache_scale_in.metrics import metric_contract
 
 CASE = CaseDefinition(

@@ -277,7 +277,7 @@ class WorkloadPolicy:
         result["workload"]["metrics"] = str(ctx.artifact_dir / "metrics.json")
         program = ctx.instance.get("implementation", {}).get("program")
         if program is not None:
-            from cases.registry import produce_gate_metrics
+            from case_api.registry import produce_gate_metrics
             produce_gate_metrics(program, ctx.artifact_dir)
         analysis = analyze_report(ctx.artifact_dir, result, payload)
         from monitoring.producers import produce

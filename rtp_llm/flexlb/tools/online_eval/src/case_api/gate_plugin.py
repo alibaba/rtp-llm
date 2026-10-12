@@ -6,7 +6,7 @@ import re
 from inspect import signature
 from typing import Callable
 
-from cases.extension_contracts import validate_call
+from case_api.extension_contracts import validate_call
 from artifacts.gate import freeze_gate, load_gate
 
 

@@ -139,7 +139,7 @@ def test_view_kind_is_shared_instead_of_case_specific(legacy):
 
 
 def test_compilation_rejects_event_stage_typo_before_execution():
-    from cases.config import configure_program
+    from scenario.program_compiler import configure_program
     from scenario.loader import load_document
     from reporting.view_config import VIEWS
     config = load_document(VIEWS.parent/'scenarios/master_ha_failover.yaml')

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from cases.config import CaseBuilder
+from case_api.builder import CaseBuilder
 from cases.master_performance.program import default, NUMERIC_PARAMETERS
 from cases.cache_scale_in.inputs import validate_criteria
 from types import SimpleNamespace

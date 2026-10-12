@@ -11,8 +11,8 @@ from unittest import mock
 
 import yaml
 
-from cases.config import configure_program
-from cases import registry
+from scenario.program_compiler import configure_program
+from case_api import registry
 from case_registry_fixtures import entry, snapshot
 from reporting import discover_reports, write_bundle
 from scenario import ScenarioError, compile_scenarios

@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from cases.gate_plugin import GatePlugin
+from case_api.gate_plugin import GatePlugin
 from artifacts.gate import load_gate
 from artifacts.errors import ArtifactNotProduced
 

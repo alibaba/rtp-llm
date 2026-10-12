@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from cases.registry import registry
+from case_api.registry import registry
 from scenario.actions.engine_control import HANDLERS as ENGINE_CONTROL_HANDLERS
 from scenario.actions.engine_fault import HANDLERS as ENGINE_FAULT_HANDLERS
 from scenario.actions.environment import HANDLERS as ENVIRONMENT_HANDLERS

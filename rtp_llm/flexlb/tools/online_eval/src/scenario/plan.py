@@ -6,7 +6,7 @@ import json
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from cases.declarations import MonitoringPolicy
+    from scenario.declarations import MonitoringPolicy
     from scenario.environment_config import EnvironmentDeclaration
 
 from flexlb_cfg import PROFILES
@@ -47,7 +47,7 @@ class ExecutionBudgets:
         monitoring = value.get("monitoring")
         if monitoring is not None and not isinstance(monitoring, dict):
             raise ScenarioError("execution monitoring requires a mapping")
-        from cases.declarations import MonitoringPolicy
+        from scenario.declarations import MonitoringPolicy
         return cls(**budgets, collection=collection,
                    monitoring=MonitoringPolicy.read(monitoring) if monitoring is not None else None)
 

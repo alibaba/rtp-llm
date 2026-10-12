@@ -10,10 +10,14 @@ import re
 from types import MappingProxyType
 from typing import Mapping
 
-from cases.extension_contracts import (
-    ProgramBuilder, ViewValidator, ViewRenderer, ProducerDescription,
-    GateProducer, FinalizeProducer, SourceFactory, validate_call,
-)
+from case_api.extension_contracts import ProgramBuilder
+from case_api.extension_contracts import ViewValidator
+from case_api.extension_contracts import ViewRenderer
+from case_api.extension_contracts import ProducerDescription
+from case_api.extension_contracts import GateProducer
+from case_api.extension_contracts import FinalizeProducer
+from case_api.extension_contracts import SourceFactory
+from case_api.extension_contracts import validate_call
 
 
 class ProducerPhase(str, Enum):
@@ -137,7 +141,7 @@ class CaseRegistry:
 
 def discover(root=None, *, package='cases'):
     """Only immediate, owned package directories containing program.py are cases."""
-    root = Path(root) if root is not None else Path(__file__).parent
+    root = Path(root) if root is not None else Path(__file__).resolve().parent.parent / "cases"
     entries = []
     for path in sorted(root.iterdir()):
         if path.is_dir() and (path / 'program.py').is_file():

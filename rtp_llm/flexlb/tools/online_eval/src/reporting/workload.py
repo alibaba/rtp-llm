@@ -1,7 +1,7 @@
 """Publish selected case views or the default view of all archived metrics."""
 
 
-from cases.registry import view_capabilities
+from case_api.registry import view_capabilities
 from artifacts.errors import ArtifactNotProduced
 from reporting import details, write_bundle
 from reporting.run_context import canonical_spec, provenance_from

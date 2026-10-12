@@ -30,7 +30,7 @@ def archive(root, queries, **kwargs):
 
 class MetricPlanTest(unittest.TestCase):
     def test_compilation_checks_declared_gate_units_modes_and_labels(self):
-        from cases.config import configure_program
+        from scenario.program_compiler import configure_program
         from scenario.loader import load_document
         root = Path(__file__).resolve().parents[1]
         config = load_document(root / "config/scenarios/cache_scale_in.yaml")

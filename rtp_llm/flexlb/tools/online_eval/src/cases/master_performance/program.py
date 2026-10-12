@@ -1,18 +1,18 @@
 """Single-run absolute gate; profiles are separate runs, never an A/B dependency."""
 
-from cases.registry import ReportView
+from case_api.registry import ReportView
 from cases.master_performance.report import validate_view, write_report
 
 from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
-from cases.config import output
+from case_api.builder import output
 from cases.master_performance.inputs import NUMERIC_PARAMETERS
 from traffic.playback.configuration import normalize
 from cases.master_performance.inputs import validate
 from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks, observation_contract
 from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow
-from cases.metric_inputs import bind_engine_metrics
+from case_api.metric_inputs import bind_engine_metrics
 
 
 def default(case):
@@ -32,7 +32,7 @@ def default(case):
         raise ValueError("performance gate requires engine_tps input")
     flow = driver(data.traffic, "java_flow")
     client, _ = normalize(flow["client"])
-    from cases.inputs import fields
+    from case_api.inputs import fields
     slo = fields(data.analysis["slo"], {"ttft_ms", "e2e_ms", "tpot_ms"}, "parameters.analysis.slo")
     c = validate(dict({k: data.observation[k] for k in OBSERVATION_FIELDS},
                       **observation_contract(data.observation),
@@ -69,7 +69,7 @@ def default(case):
     case.step("teardown", "teardown")
 
 
-from cases.gate_plugin import GatePlugin
+from case_api.gate_plugin import GatePlugin
 from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 
@@ -77,7 +77,9 @@ GATE = GatePlugin('performance', analyze, produce, write_report)
 REPORT_VIEWS = {'master_performance.yaml': ReportView(validate_view, GATE.render)}
 
 
-from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from case_api.registry import CaseDefinition
+from case_api.registry import MetricProducer
+from case_api.registry import ProducerPhase
 from cases.master_performance.metrics import metric_contract
 
 CASE = CaseDefinition(

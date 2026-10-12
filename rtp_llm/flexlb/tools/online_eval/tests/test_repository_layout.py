@@ -95,10 +95,16 @@ class RepositoryLayoutTest(unittest.TestCase):
             any(name.startswith("flexlb_test_framework.cases") for name in sys.modules)
         )
 
+    def test_cases_root_contains_only_concrete_case_packages(self):
+        self.assertEqual(
+            {'__init__.py'},
+            {path.name for path in (ROOT / 'src/cases').glob('*.py')},
+        )
+
     def test_source_components_are_unified(self):
         expected = {
             "monitoring", "traffic", "runtime", "cases", "scenario", "adapters",
-            "workload", "analysis", "reporting", "artifacts",
+            "workload", "analysis", "reporting", "artifacts", "case_api",
         }
         self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir()})
         for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):

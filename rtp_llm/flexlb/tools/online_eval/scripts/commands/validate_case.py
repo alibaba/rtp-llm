@@ -18,7 +18,7 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true', help='print expanded contracts as JSON')
     args = parser.parse_args(argv)
     try:
-        from cases.validation import validate_cases
+        from scenario.case_validation import validate_cases
         report = validate_cases(args.source, profile=args.profile)
     except (ValueError, OSError) as exc:
         if args.json:

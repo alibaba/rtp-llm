@@ -7,11 +7,11 @@ from unittest import mock
 
 import pytest
 
-from cases import registry
+from case_api import registry
 from scenario.environment_config import environment
 from scenario.backend import make_env_spec
 from scenario.environment_snapshot import EnvironmentSnapshot
-from cases.config_data import merge_environment
+from scenario.config_data import merge_environment
 from reporting.run_context import checks_section, provenance_from
 from reporting.comparison_model import measurement_signature
 
@@ -20,7 +20,7 @@ def test_new_directory_is_discovered_without_framework_registration(tmp_path):
     package = tmp_path / 'discovery_fixture'
     case = package / 'new_case'
     case.mkdir(parents=True)
-    (case / 'program.py').write_text('from cases.registry import CaseDefinition\ndef build(case): pass\nCASE = CaseDefinition({"default": build})\n')
+    (case / 'program.py').write_text('from case_api.registry import CaseDefinition\ndef build(case): pass\nCASE = CaseDefinition({"default": build})\n')
     (package / 'helpers.py').write_text('raise AssertionError("helpers must not be imported")')
     sys.path.insert(0, str(tmp_path))
     try:

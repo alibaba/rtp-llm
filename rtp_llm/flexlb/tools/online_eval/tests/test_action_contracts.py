@@ -7,9 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from cases.master_ha_failover import actions as master_ha
-from cases import registry
+from case_api import registry
 from case_registry_fixtures import entry, snapshot
 from cases.master_performance import program as master_performance
 from scenario import ScenarioError, compile_scenarios

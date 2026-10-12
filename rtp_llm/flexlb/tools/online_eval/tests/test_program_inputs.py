@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from scenario import compile_scenarios
 from scenario.catalog import handlers
 from scenario.loader import ScenarioError, load_document
@@ -67,7 +67,6 @@ def test_qps_has_one_yaml_source_and_is_frozen_into_observation(name, stage):
 def test_inactive_ha_checks_are_validated_without_running_their_program(patch):
     data = config("master_ha_failover")
     del data["variants"]
-    del data["variant_axis"]
     data["parameters"]["checks"]["outage_failures"].update(patch)
     with pytest.raises(ValueError):
         configure_program(data, "ha.yaml")
@@ -105,7 +104,6 @@ def test_bad_inactive_window_boundary_is_rejected_at_compile_time():
 def test_inactive_procedure_waits_still_have_a_strict_contract(wait):
     data = config("master_ha_failover")
     del data["variants"]
-    del data["variant_axis"]
     data["parameters"]["procedure"]["outage_wait"] = wait
     with pytest.raises(ValueError):
         configure_program(data, "ha.yaml")

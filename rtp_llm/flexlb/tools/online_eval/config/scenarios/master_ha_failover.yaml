@@ -259,10 +259,6 @@ parameters:
       expected: 0
       min_samples: 1
       unit: requests
-variant_axis:
-  kind: flow
-  fields:
-  - program
 variants:
 - id: non_rolling
   program: non_rolling

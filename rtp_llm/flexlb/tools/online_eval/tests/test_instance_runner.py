@@ -207,7 +207,7 @@ def evaluate(ctx, params, deadline):
     status = 'FAIL' if grade == 'strict' else 'PASS'
     return StageOutput({'observed': grade}, [CheckResult('selected', status, actual=grade)])
 child.handlers = lambda: {'grade_probe': StageHandler('grade_probe', validate, evaluate, {'observed': 'string'}, checks=frozenset({'selected'}))}
-from cases import registry
+from case_api import registry
 fixture = ModuleType('grade_protocol_fixture')
 fixture.__file__ = __file__
 def build(case):

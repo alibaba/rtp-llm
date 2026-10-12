@@ -27,7 +27,7 @@
 
 ## 整窗门禁能力
 
-`cases.gate_plugin.GatePlugin` 组合三种业务函数：
+`case_api.gate_plugin.GatePlugin` 组合三种业务函数：
 
 ```python
 GATE = GatePlugin(
@@ -83,6 +83,7 @@ GATE = GatePlugin(
 | `monitoring` | 采集计划、来源、Prometheus 生命周期与冻结指标 | case 流程及业务门槛 |
 | `artifacts` | 证据/判定冻结、归档、来源校验、离线读取与安全保留 | 重新决定业务判定、执行 case 步骤 |
 | `reporting` | 冻结结果到视图、公共图表、HTML 与报告 bundle | 现场操作、重判与隐藏缺采 |
+| `case_api` | 作者的构建、注册、输入约束、门禁扩展合同 | 具体实验参数、流程或业务算法 |
 | `cases/<case>` | 该业务的输入、步骤组合、测量和专属展示 | 复制公共执行、采集和报告基础设施 |
 
 `scenario/actions/java_flow.py` 定义阶段合同，`adapters/java_flow.py` 管理客户端会话；`engine_control` action 依赖 `adapters/mock_control.py` 的协议访问。名字相近不表示冗余。新步骤先组合 adapter；只有出现新的现场协议才扩展 adapter。`runtime` 和 `adapters` 不依赖 `scenario`、`cases`、`workload` 或 `reporting`，避免基础能力反向调用业务和调度层。

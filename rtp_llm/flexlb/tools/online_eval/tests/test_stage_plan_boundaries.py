@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from scenario.contracts import StageHandler
 from scenario.loader import ScenarioError, load_document
 from scenario.stage_compiler import stages
@@ -53,35 +53,30 @@ def test_handler_replacement_environment_reaches_only_later_stages():
     assert replacement == {'nested': {'workers': [2, 3]}}
 
 
-@pytest.mark.parametrize('kind', [[], {}])
-def test_malformed_variant_dimension_is_a_configuration_error(kind):
+@pytest.mark.parametrize('variants', [None, [], {}, 'unknown'])
+def test_malformed_variants_are_configuration_errors(variants):
     from pathlib import Path
-
     root = Path(__file__).resolve().parents[1]
-    config = load_document(root/'config/scenarios/request_completion.yaml')
-    config.update(variant_axis={'kind': kind, 'fields': ['parameters.traffic.count']},
-                  variants=[{'id': 'two', 'parameters': {'traffic': {'count': 2}}}])
-    with pytest.raises(ScenarioError, match='variant_axis.kind must be data, scale or flow'):
+    config = load_document(root / 'config/scenarios/request_completion.yaml')
+    config['variants'] = variants
+    with pytest.raises(ScenarioError, match='expected a nonempty list'):
         configure_program(config, 'case.yaml')
 
 
-def test_variant_dimension_guard_runs_before_the_variant_program():
+def test_variant_parameter_guard_runs_before_the_variant_program():
     from pathlib import Path
     from cases.request_completion import program
-
-    root = Path(__file__).resolve().parents[1]
-    config = load_document(root/'config/scenarios/request_completion.yaml')
-    config.update(variant_axis={'kind': 'data', 'fields': ['parameters.traffic.count']},
-                  variants=[{'id': 'two', 'parameters': {'traffic': {'count': 2, 'input_len': 10}}}])
     from dataclasses import replace
-    from cases import registry
+    from case_api import registry
     from case_registry_fixtures import snapshot
     from unittest.mock import Mock
+    root = Path(__file__).resolve().parents[1]
+    config = load_document(root / 'config/scenarios/request_completion.yaml')
+    config['variants'] = [{'id': 'invalid', 'parameters': {'traffic': {'count': 0}}}]
     build = Mock(wraps=program.default)
     original = registry.registry().cases['request_completion']
     changed = replace(original, definition=replace(original.definition, builders={'default': build}))
     with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
-        with pytest.raises(ScenarioError, match='outside declared dimension'):
+        with pytest.raises(ScenarioError, match='traffic.count'):
             configure_program(config, 'case.yaml')
-    # Root default is built; the invalid variant never calls its program.
     assert build.call_count == 1

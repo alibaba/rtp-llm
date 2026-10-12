@@ -4,12 +4,16 @@ from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 
 import math
 from input_contract import finite_number, NumberRule
-from cases.numeric_parameters import (
-    SOURCE_NUMBERS, JAVA_FLOW_NUMBERS, CAPTURE_NUMBERS, FRACTION,
-    NONNEGATIVE, COUNT, OFFSET, number_fields,
-)
+from case_api.numeric_parameters import SOURCE_NUMBERS
+from case_api.numeric_parameters import JAVA_FLOW_NUMBERS
+from case_api.numeric_parameters import CAPTURE_NUMBERS
+from case_api.numeric_parameters import FRACTION
+from case_api.numeric_parameters import NONNEGATIVE
+from case_api.numeric_parameters import COUNT
+from case_api.numeric_parameters import OFFSET
+from case_api.numeric_parameters import number_fields
 from scenario.parameters import validate_fields
-from cases.metric_inputs import metric_fields
+from case_api.metric_inputs import metric_fields
 
 PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s", "warmup_min_s", "post_affinity_ms"})
 OBSERVATION_FIELDS = frozenset({"warmup_timeout_s", "sample_s",
@@ -95,8 +99,9 @@ CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'sustain_s', 'ab
 
 
 def compile_checks(case, checks, policy):
-    from cases.inputs import fields
-    from cases.check_inputs import metric_criterion, compile_metric_checks
+    from case_api.inputs import fields
+    from case_api.check_inputs import metric_criterion
+    from case_api.check_inputs import compile_metric_checks
 
     fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
     fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.analysis.collapse')
@@ -111,7 +116,7 @@ def compile_checks(case, checks, policy):
 
 
 def observation_contract(data):
-    from cases.windows import anchored_windows
+    from case_api.windows import anchored_windows
     from runtime.observation import capture_limits
     windows = anchored_windows(data["windows"], {
         "baseline": "baseline_ready", "post": "target_topology_observed",

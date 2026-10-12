@@ -3,8 +3,8 @@
 import math
 from dataclasses import dataclass
 
-from cases.config import output
-from cases.inputs import fields
+from case_api.builder import output
+from case_api.inputs import fields
 from scenario.loader import ScenarioError
 
 

@@ -2,14 +2,15 @@
 
 from dataclasses import replace
 
-from cases.config import output
-from cases.inputs import fields
-from cases.windows import check_windows
+from case_api.builder import output
+from case_api.inputs import fields
+from case_api.windows import check_windows
 from traffic.contracts import driver
-from cases.numeric_parameters import (
-    COUNT, NONNEGATIVE, POSITIVE_COUNT, JAVA_LENGTH,
-    number_fields,
-)
+from case_api.numeric_parameters import COUNT
+from case_api.numeric_parameters import NONNEGATIVE
+from case_api.numeric_parameters import POSITIVE_COUNT
+from case_api.numeric_parameters import JAVA_LENGTH
+from case_api.numeric_parameters import number_fields
 
 
 NUMERIC_PARAMETERS = {
@@ -56,7 +57,9 @@ def default(case):
     case.step("cleanup", "teardown")
 
 
-from cases.registry import CaseDefinition, MetricProducer, ProducerPhase
+from case_api.registry import CaseDefinition
+from case_api.registry import MetricProducer
+from case_api.registry import ProducerPhase
 
 CASE = CaseDefinition(
     builders={"default": default},

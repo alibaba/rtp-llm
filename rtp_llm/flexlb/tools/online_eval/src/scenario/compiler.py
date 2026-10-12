@@ -183,7 +183,7 @@ def _compile_documents(documents, profile=None, handlers=None, grade="normal"):
                 loc + ".environment_overrides",
                 variant_environment_fields(),
             )
-            from cases.config_data import merge_environment
+            from scenario.config_data import merge_environment
             env = merge_environment(env, patch)
             declaration, resolver = read_environment(env, source + f"::{vid}.environment")
             # Action validation receives the same resolved topology as execution.

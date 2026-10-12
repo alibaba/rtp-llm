@@ -94,7 +94,7 @@ def load_document(path):
 
 def load_scenarios(root, *, experiment_params=None):
     """Load data-only configurations and invoke their registered Python builders."""
-    from cases.config import configure_program
+    from scenario.program_compiler import configure_program
 
     from scenario.experiment_params import ExperimentParams
     overrides = ExperimentParams.read(experiment_params)

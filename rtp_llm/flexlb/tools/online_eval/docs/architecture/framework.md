@@ -55,10 +55,11 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 | 目录 | 内容 |
 |---|---|
 | `cases/<case>/` | 该 case 的 program、action、输入合同、纯分析、指标生产、报告与离线重判 |
-| `cases/config.py`、`cases/registry.py` | 公共 case 构建接口与显式注册 |
-| `scenario/` | 配置编译、基础 action、资源句柄、阶段执行与清理 |
-| `runtime/` | 端口/进程/Java/HTTP/gRPC 等协议与资源底座 |
-| `workload/` | 连续负载的通用采集生命周期、证据核对、来源与全量视图 |
+| `case_api/` | 作者使用的构建、注册、输入合同与门禁插件 |
+| `scenario/` | YAML 声明与编译、静态校验、实例调度、基础 action、资源句柄、阶段执行与清理 |
+| `runtime/` | deadline、进程、网络及通用资源合同 |
+| `adapters/` | 服务与客户端协议、环境生命周期和启动配置 |
+| `workload/` | 持续测量策略、请求与 engine 证据关联、采集有效性 |
 | `analysis/` | 可复用统计、只读检查及输入保真度分析，不定义某个 case 的门槛 |
 | `monitoring/`、`reporting/` | 指标查询/归档与图表/spec/bundle 的公共能力 |
 | `traffic/`、`artifacts/` | 流量构造、播放与制品管理 |

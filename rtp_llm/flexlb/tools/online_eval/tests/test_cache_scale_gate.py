@@ -377,7 +377,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_topology_budget_is_independent_of_drain(self):
         import yaml
-        from cases.config import configure_program
+        from scenario.program_compiler import configure_program
         case = yaml.safe_load((ROOT / "config/scenarios/cache_scale_in.yaml").read_text())
         for mode in ("graceful",):
             changed = copy.deepcopy(case)

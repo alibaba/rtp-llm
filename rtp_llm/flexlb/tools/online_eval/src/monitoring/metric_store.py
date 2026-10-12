@@ -284,7 +284,7 @@ def publish(store, metric_id, definition, rows, *, producer, evidence):
     import hashlib
     from importlib.util import find_spec
     from monitoring.producers import output_contract
-    from cases.registry import registry
+    from case_api.registry import registry
 
     declared = store.document["definitions"].get(metric_id)
     if declared is None or declared != definition or declared.get("producer") != producer or producer not in registry().producers:

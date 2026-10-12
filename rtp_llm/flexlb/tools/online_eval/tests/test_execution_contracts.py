@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from input_contract import mapping_fields
 from runtime.observation import ObservationClock, SampleBudget, evidence_origin, poll_samples
 from scenario.loader import ScenarioError, load_document
@@ -85,7 +85,7 @@ def test_capture_budget_is_explicit_and_bounded(name):
 
 
 def test_shared_field_guard_keeps_detail_with_adapter_exception_boundary():
-    from cases.inputs import fields
+    from case_api.inputs import fields
     from scenario.parameters import validate_fields
     for read in (lambda data: mapping_fields(data, {"a"}, "input", required={"a"}),
                  lambda data: fields(data, {"a"}, "input"),

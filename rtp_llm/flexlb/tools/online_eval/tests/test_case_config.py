@@ -11,7 +11,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from scenario import (
     ScenarioError,
     compile_scenarios,
@@ -78,7 +78,6 @@ class CaseConfigTest(unittest.TestCase):
 
     def config(self):
         config = load_document(ROOT / "config/scenarios/request_completion.yaml")
-        config["variant_axis"] = {"kind": "data", "fields": ["parameters.traffic", "parameters.procedure", "parameters.checks"]}
         config["variants"] = [{"id": "immediate"}]
         return config
 
@@ -99,7 +98,6 @@ class CaseConfigTest(unittest.TestCase):
 
     def test_extra_configuration_reuses_python_case_without_new_code(self):
         config = self.config()
-        config["variant_axis"] = {"kind": "scale", "fields": ["environment.n_prefill", "environment.n_decode"]}
         config["profiles"] = ["single-nonbatch"]
         config["parameters"]["traffic"].update(input_len=8192, output_len=16, count=3)
         config["variants"] = [

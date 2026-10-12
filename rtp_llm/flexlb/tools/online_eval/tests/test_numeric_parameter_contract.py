@@ -8,11 +8,18 @@ from unittest.mock import patch
 
 import pytest
 
-from cases.config import configure_program, program_module
-from cases.numeric_parameters import (
-    COUNT, FRACTION, JAVA_LENGTH, NONNEGATIVE, OFFSET, POSITIVE_COUNT, PRIORITY,
-    NumberRule, narrow_parameters, parameter_rules,
-)
+from scenario.program_compiler import configure_program
+from scenario.program_compiler import program_module
+from case_api.numeric_parameters import COUNT
+from case_api.numeric_parameters import FRACTION
+from case_api.numeric_parameters import JAVA_LENGTH
+from case_api.numeric_parameters import NONNEGATIVE
+from case_api.numeric_parameters import OFFSET
+from case_api.numeric_parameters import POSITIVE_COUNT
+from case_api.numeric_parameters import PRIORITY
+from case_api.numeric_parameters import NumberRule
+from case_api.numeric_parameters import narrow_parameters
+from case_api.numeric_parameters import parameter_rules
 from scenario.loader import ScenarioError, load_document
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,7 +71,7 @@ def test_shared_field_cannot_drift_between_programs():
     module = program_module('cache_scale_in', 'fixture')
     declarations = dict(module.definition.numeric_parameters)
     declarations['traffic.source.parameters.priority'] = COUNT
-    from cases import registry
+    from case_api import registry
     from case_registry_fixtures import snapshot
     changed = replace(module, definition=replace(module.definition, numeric_parameters=declarations))
     with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
@@ -93,7 +100,6 @@ def test_yaml_cannot_weaken_protocol_type_or_range(spec):
 
 def test_case_and_variant_constraints_intersect_and_are_frozen():
     data = config('request_completion')
-    data['variant_axis'] = dict(kind='data', fields=['parameters.traffic.count'])
     data['variants'] = [dict(id='small', parameters=dict(traffic=dict(count=2)),
                              parameter_schema={'traffic.count': {'maximum': 2}})]
     document = configure_program(data, 'case.yaml')
@@ -116,7 +122,7 @@ def test_declared_fields_are_required_without_yaml_schema():
 
 @pytest.mark.parametrize('name', CASES)
 def test_every_declared_field_rejects_bool_before_program_build(name):
-    from cases.config import CaseBuilder
+    from case_api.builder import CaseBuilder
     data = config(name)
     module = program_module(name, 'fixture')
     rules = narrow_parameters(parameter_rules(module.definition.numeric_parameters), data.get('parameter_schema', {}))
@@ -139,12 +145,12 @@ def test_master_state_archive_rejects_negative_ledger_counts():
         _state_series([row], 0)
 
 
-def test_variant_constraint_cannot_escape_its_declared_axis():
+def test_variant_can_narrow_another_declared_parameter():
     data = config('request_completion')
-    data['variant_axis'] = dict(kind='data', fields=['parameters.traffic.count'])
-    data['variants'] = [dict(id='small', parameter_schema={'traffic.input_len': {'maximum': 100}})]
-    with pytest.raises(ScenarioError, match='outside declared dimension'):
-        configure_program(data, 'case.yaml')
+    data['variants'] = [dict(id='small', parameters={'traffic': {'input_len': 64}},
+                            parameter_schema={'traffic.input_len': {'maximum': 100}})]
+    document = configure_program(data, 'case.yaml')
+    assert document['variants'][1]['stages'][1]['params']['input_len'] == 64
 
 
 def test_nonrepresentable_numbers_are_rejected_without_overflow():

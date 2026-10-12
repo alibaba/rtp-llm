@@ -140,7 +140,7 @@ def test_invalid_survivor_measurement_cannot_be_selected(tmp_path):
 def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec):
     from importlib.util import find_spec
     from types import SimpleNamespace
-    from cases.registry import registry
+    from case_api.registry import registry
     from metric_fixtures import freeze_metrics
     from monitoring.metric_store import publish,MetricContractError
     store=freeze_metrics(tmp_path,"cache_scale_in")

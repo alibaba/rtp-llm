@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from cases.registry import view_capabilities
+from case_api.registry import view_capabilities
 from reporting.view_schema import (
     validate_bindings, validate_default, validate_monitoring_policy,
     validate_selected, validate_structure, validate_text,

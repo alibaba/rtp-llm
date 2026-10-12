@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from cases.config_data import mapping
+from scenario.config_data import mapping
 
 
 @dataclass(frozen=True)

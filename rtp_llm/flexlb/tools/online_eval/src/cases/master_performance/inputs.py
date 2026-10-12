@@ -1,12 +1,16 @@
 """Validate the case gate inputs and their declared metric bindings."""
 
-from cases.metric_inputs import metric_fields
+from case_api.metric_inputs import metric_fields
 from input_contract import finite_number as finite
-from cases.numeric_parameters import (
-    SOURCE_NUMBERS, OUTPUT_DISTRIBUTION_NUMBERS, JAVA_FLOW_NUMBERS, CAPTURE_NUMBERS,
-    NONNEGATIVE, FRACTION, COUNT, OFFSET,
-    number_fields,
-)
+from case_api.numeric_parameters import SOURCE_NUMBERS
+from case_api.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
+from case_api.numeric_parameters import JAVA_FLOW_NUMBERS
+from case_api.numeric_parameters import CAPTURE_NUMBERS
+from case_api.numeric_parameters import NONNEGATIVE
+from case_api.numeric_parameters import FRACTION
+from case_api.numeric_parameters import COUNT
+from case_api.numeric_parameters import OFFSET
+from case_api.numeric_parameters import number_fields
 
 OBSERVATION_FIELDS = frozenset({"sample_s", "max_gap_s"})
 
@@ -98,8 +102,9 @@ CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'slo_ttft_ms', '
 
 
 def compile_checks(case, checks, inputs):
-    from cases.inputs import fields
-    from cases.check_inputs import metric_criterion, compile_metric_checks
+    from case_api.inputs import fields
+    from case_api.check_inputs import metric_criterion
+    from case_api.check_inputs import compile_metric_checks
 
     bindings = metric_fields(engine_tps(inputs))
     fields(checks, set(RULES) | {'engine_tps'}, 'parameters.checks')
@@ -123,7 +128,7 @@ def compile_checks(case, checks, inputs):
 
 
 def observation_contract(data):
-    from cases.windows import anchored_windows
+    from case_api.windows import anchored_windows
     from runtime.observation import capture_limits
     bounds = anchored_windows(data["windows"], {
         "measurement": "observation_start",

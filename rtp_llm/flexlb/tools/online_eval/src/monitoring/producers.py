@@ -1,6 +1,7 @@
 """Numeric producers are registered Python capabilities with explicit ownership."""
 
-from cases.registry import registry, ProducerPhase
+from case_api.registry import registry
+from case_api.registry import ProducerPhase
 from monitoring.metric_store import MetricStore, MetricContractError
 
 

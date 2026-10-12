@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from cases.config import configure_program
+from scenario.program_compiler import configure_program
 from reporting import discover_reports, load_analysis, read_bundle, write_bundle
 from reporting.view_config import DEFAULT_VIEW, declaration, view
 from scenario.loader import ScenarioError, load_document
@@ -203,7 +203,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             freeze_metrics(d, "cache_scale_in")
             before = (Path(d) / "cache-gate-result.json").read_bytes()
             from dataclasses import replace
-            from cases import registry
+            from case_api import registry
             from cases.cache_scale_in.program import GATE
             from case_registry_fixtures import entry, snapshot
             render = mock.Mock(wraps=GATE.write_report)

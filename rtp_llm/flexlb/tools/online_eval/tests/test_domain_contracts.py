@@ -125,7 +125,7 @@ def test_playback_objects_enforce_curve_and_lap_contracts():
 
 def test_freezing_preserves_collection_definition_order(tmp_path):
     from pathlib import Path
-    from cases.config import configure_program
+    from scenario.program_compiler import configure_program
     from scenario.catalog import handlers
     from scenario.loader import load_document
     from monitoring.collection_plan import instance_plan
