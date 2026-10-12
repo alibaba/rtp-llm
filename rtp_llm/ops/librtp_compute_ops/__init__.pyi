@@ -187,8 +187,12 @@ class LayerKVCache:
     @property
     def layer_id(self) -> int:
         """
-        Global layer id
+        Stage-local storage layer id
         """
+
+    @property
+    def read_replica_source_layer_id(self) -> typing.Optional[int]:
+        """Global source of a read replica, or None for a producer."""
 
     @property
     def group_id(self) -> int:
@@ -339,6 +343,8 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    engram_token_windows: torch.Tensor | None
+    v41_cache_spans: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -352,6 +358,8 @@ class PyModelInputs:
         attention_inputs: PyAttentionInputs | dict[str, PyAttentionInputs] = ...,
         bert_embedding_inputs: BertEmbeddingInputs = ...,
         dspark_call_phase: DSparkCallPhase = ...,
+        engram_token_windows: torch.Tensor | None = ...,
+        v41_cache_spans: torch.Tensor | None = ...,
     ) -> None: ...
     @property
     def attention_inputs(self) -> PyAttentionInputs | dict[str, PyAttentionInputs]:

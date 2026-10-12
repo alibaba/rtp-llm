@@ -230,9 +230,9 @@ py_test(
         "//rtp_llm:testlib",
     ],
     env = {"GPU_COUNT": "2"},
-    tags = ["RTX_5000_PRO"],
+    tags = ["SM120"],
     exec_properties = {
-        "gpu": "RTX_5000_PRO",
+        "gpu": "SM120",
         "gpu_count": "2",
     },
     target_compatible_with = _DSV4_SM120_ONLY,
@@ -499,8 +499,8 @@ py_test(
     main = "test_moe_final_out_cache_cuda.py",
     deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
-    tags = ["RTX_5000_PRO"],
-    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
     target_compatible_with = _DSV4_SM120_ONLY,
 )
 

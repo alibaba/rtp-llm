@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <unordered_set>
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -12,6 +13,10 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+
+KVCacheAllocationLeasePtr KVCacheAllocator::retainAllocation(const KVCacheResource&) const {
+    throw std::logic_error("cache allocation leases require independent hybrid pools");
+}
 
 bool KVCacheAllocator::init() {
     RTP_LLM_CHECK_WITH_INFO(doInit(), "init failed");

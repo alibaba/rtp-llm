@@ -52,6 +52,9 @@ KVCacheSpecPtr makeFakeSpec(const std::string& tag) {
 
 class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
+    explicit FakeKVCacheAllocator(const CacheConfig& config):
+        KVCacheAllocator(config), topology_(config.topologyPtr()) {}
+
     FakeKVCacheAllocator(const CacheConfig&          config,
                          const std::vector<int32_t>& full_group_ids,
                          const std::vector<int32_t>& other_group_ids,
@@ -193,6 +196,52 @@ protected:
 private:
     std::shared_ptr<const CacheTopology> topology_;
 };
+
+TEST(ReadReplicaGroupPolicyTest, OmitsReplicaStorageFromRemoteLocations) {
+    CacheConfig config;
+    config.layer_num = config.layer_all_num = 1;
+    config.fromGroupedSpecs({makeFakeSpec("producer"), makeFakeSpec("replica")},
+                            {{0}, {0}},
+                            {CacheGroupType::FULL, CacheGroupType::FULL},
+                            {"producer", "replica"});
+    auto groups                            = config.topology().groups();
+    groups[1].read_replica_source_layer_id = 20;
+    config.setTopology(std::move(groups), config.topology().layers());
+    auto                 allocator = std::make_shared<FakeKVCacheAllocator>(config);
+    FullLayerGroupPolicy policy(allocator, {0}, {});
+    ASSERT_TRUE(policy.init());
+    ASSERT_EQ(policy.groups().size(), 1u);
+    EXPECT_EQ(policy.groups().at(0).tag, "producer");
+    EXPECT_EQ(policy.reachableAggregateMasks().size(), 1u);
+}
+
+TEST(ReadReplicaGroupPolicyTest, WritePolicyCountsLocalReplicaStorageButDoesNotPublishIt) {
+    CacheConfig config;
+    config.layer_num = config.layer_all_num = 1;
+    config.fromGroupedSpecs({makeFakeSpec("full"), makeFakeSpec("swa"), makeFakeSpec("replica")},
+                            {{0}, {0}, {0}},
+                            {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::FULL},
+                            {"full", "swa", "replica"});
+    auto groups                            = config.topology().groups();
+    groups[2].read_replica_source_layer_id = 20;
+    config.setTopology(std::move(groups), config.topology().layers());
+    auto                       allocator = std::make_shared<FakeKVCacheAllocator>(config);
+    FullLinearLayerGroupPolicy policy(allocator, {0}, {1}, 1);
+    ASSERT_TRUE(policy.init());
+    const auto full_mask = policy.groups().at(0).group_name_bithash;
+    const auto all_mask  = full_mask | policy.groups().at(1).group_name_bithash;
+    policy.addLocationSpecGroup(full_mask, "full");
+    policy.addLocationSpecGroup(all_mask, "full_swa");
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(config.topologyPtr());
+    resource->setCacheKeys({1000});
+    resource->setLastBlockAligned(true);
+    resource->mutableBlockIds(0).add({1});
+    resource->mutableBlockIds(1).add({2});
+    std::vector<std::string> names;
+    EXPECT_TRUE(policy.getNeedWriteGroups(resource, names));
+    EXPECT_TRUE(names.empty());
+}
 
 MATCHER_P(LocationsEqLocationsView, locations_view, "") {
     const kv_cache_manager::Locations& locations = arg;

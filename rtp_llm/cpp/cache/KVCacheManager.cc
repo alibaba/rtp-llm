@@ -641,6 +641,11 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
     return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
 }
 
+KVCacheAllocationLeasePtr KVCacheManager::retainAllocation(const KVCacheResource& resource) const {
+    RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "cache allocation lease requires an initialized manager");
+    return allocator_->retainAllocation(resource);
+}
+
 bool KVCacheManager::hasP2PConnector() const {
     return coordinator_ && coordinator_->hasP2PConnector();
 }

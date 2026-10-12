@@ -138,6 +138,7 @@ protected:
     }
 
     std::map<int32_t, std::vector<int>> group_to_layer_ids_;
+    size_t                              local_group_count_ = 0;
 };
 
 class FullLayerGroupPolicy: public DefaultLayerGroupPolicy {

@@ -29,6 +29,23 @@ class _RoutingCache:
 
 
 class PyModelInputsCompatTest(unittest.TestCase):
+    def test_v41_dispatch_metadata_is_optional_cpu_input(self) -> None:
+        self.assertIsNone(PyModelInputs().v41_cache_spans)
+        spans = torch.tensor([[41, 9, 3, 2, 128, 32]], dtype=torch.int64)
+        inputs = PyModelInputs(v41_cache_spans=spans)
+        self.assertTrue(torch.equal(inputs.v41_cache_spans, spans))
+        self.assertEqual(inputs.v41_cache_spans.device.type, "cpu")
+        inputs.v41_cache_spans = torch.empty((0, 6), dtype=torch.int64)
+        self.assertEqual(inputs.v41_cache_spans.shape, (0, 6))
+        self.assertFalse(hasattr(inputs, "v41_cache_leases"))
+        old = PyModelInputs(torch.tensor([1], dtype=torch.int32))
+        self.assertIsNone(old.engram_token_windows)
+        self.assertIsNone(old.v41_cache_spans)
+        windows = torch.tensor([[1, -1, -1, -1]], dtype=torch.int32)
+        history = PyModelInputs(engram_token_windows=windows, v41_cache_spans=None)
+        self.assertTrue(torch.equal(history.engram_token_windows, windows))
+        self.assertIsNone(history.v41_cache_spans)
+
     def test_hybrid_attention_config_has_explicit_constructors(self) -> None:
         default_config = HybridAttentionConfig()
         self.assertFalse(default_config.enable_hybrid_attention)

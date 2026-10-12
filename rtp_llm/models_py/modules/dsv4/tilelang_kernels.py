@@ -4,7 +4,7 @@ Keeps only what dsv4/attention.py uses:
 - ``sparse_attn_kernel`` — top-k sparse attention + per-head learned sink.
 
 The math is bit-for-bit from the upstream V4 release at
-``/mnt/nas1/hf/DeepSeek-V4-Flash/inference/kernel.py``.  No modifications.
+``DeepSeek-V4-Flash/inference/kernel.py``.  No modifications.
 Wrapped in a lazy-import guard so dsv4 stays importable on hosts without
 tilelang installed (fallbacks to the PyTorch reference at call site).
 

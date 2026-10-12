@@ -984,6 +984,7 @@ class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
     charge_to_paged_budget: typing.Any
+    single_block_per_request: typing.Any
     def __init__(self) -> None: ...
 
 class CacheMemoryPolicyDesc:
@@ -1024,6 +1025,7 @@ class KVCacheSpecDesc:
     memory: typing.Any
     tail: typing.Any
     cp: typing.Any
+    read_replica_source_layer_id: typing.Optional[int]
     def __init__(self) -> None: ...
 
 

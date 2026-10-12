@@ -11,6 +11,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
+#include "rtp_llm/cpp/normal_engine/V41CacheDispatch.h"
 
 namespace rtp_llm {
 
@@ -38,6 +39,8 @@ struct NormalModelInputGathererConfig {
     bool                        warm_up{};
     bool                        enable_detail_log{};
     bool                        enable_model_inputs_log{};
+    bool                        enable_engram_token_windows{};
+    bool                        enable_v41_cache_dispatch{};
 };
 
 class NormalModelInputGatherer {
@@ -61,6 +64,7 @@ private:
                                          TensorHolder&       host_holder) const;
 
     NormalModelInputGathererConfig config_;
+    mutable V41CacheDispatch       v41_cache_dispatch_;
 };
 
 }  // namespace rtp_llm

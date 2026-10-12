@@ -54,10 +54,12 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":rocm_fp8_ptpc_hipb_solutions",
+        "modules/dsv4/fp8/_v41_cache_triton.LICENSE",
     ],
     deps = [
         ":utils",
         ":tile_kernels_mhc",
+        "//rtp_llm:safetensors_header",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
@@ -75,6 +77,11 @@ py_library(
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
             "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
         ],
+        "//conditions:default": [],
+    }) + select({
+        # Mapped-host Engram registration uses the CUDA runtime Python bindings.
+        "@//:using_cuda13_x86": ["@pip_gpu_cuda13_torch_cuda_bindings//:pkg"],
+        "@//:using_cuda13_arm": ["@pip_cuda13_arm_torch_cuda_bindings//:pkg"],
         "//conditions:default": [],
     }) + select({
         # cuda13 locks currently ship flash-mla (+tilelang on arm; no fast-hadamard).
@@ -177,6 +184,57 @@ py_library(
 )
 
 # Source-level policy tests deliberately do not import GPU modules.
+filegroup(
+    name = "dsv41_cache_codec_sources",
+    srcs = [
+        "//rtp_llm:models/dsv41_kv_cache.py",
+        "modules/dsv4/v41_cache.py",
+        "modules/dsv4/v41_cache_plan.py",
+        "modules/dsv4/v41_cache_transfer.py",
+        "modules/dsv4/v41_pp.py",
+        "modules/dsv4/v41_engram_hash.py",
+        "modules/dsv4/_v41_engram_hash_triton.py",
+        "modules/dsv4/v41_engram_host.py",
+        "modules/dsv4/_v41_engram_lookup_triton.py",
+        "modules/dsv4/v41_engram_inject.py",
+        "modules/dsv4/v41_engram.py",
+        "modules/dsv4/v41_engram_weights.py",
+        "modules/dsv4/v41_engram_stage.py",
+        "modules/dsv4/_v41_engram_inject_triton.py",
+        "modules/dsv4/v41_mxfp8.py",
+        "modules/dsv4/v41_expert.py",
+        "modules/dsv4/v41_routed.py",
+        "modules/dsv4/v41_moe.py",
+        "modules/dsv4/v41_dispatch.py",
+        "modules/dsv4/v41_collective.py",
+        "modules/dsv4/v41_feed_forward.py",
+        "modules/dsv4/v41_block.py",
+        "modules/dsv4/v41_stage_attention.py",
+        "modules/dsv4/v41_stage.py",
+        "modules/dsv4/v41_model.py",
+        "modules/dsv4/v41_stage_pp.py",
+        "modules/dsv4/v41_cp.py",
+        "modules/dsv4/v41_attention.py",
+        "modules/dsv4/v41_indexer.py",
+        "modules/dsv4/v41_compressor.py",
+        "modules/dsv4/v41_projection.py",
+        "modules/dsv4/v41_attention_projection.py",
+        "modules/dsv4/rope.py",
+        "modules/dsv4/moe/strategies/base.py",
+        "modules/dsv4/moe/strategies/v41_grouped_fp4.py",
+        "modules/dsv4/_v41_mxfp8_triton.py",
+        "modules/dsv4/hc/delayed.py",
+        "modules/dsv4/hc/base.py",
+        "modules/dsv4/hc/fallback_impl.py",
+        "modules/dsv4/_profiler.py",
+        "modules/dsv4/fp8/_v41_cache_triton.py",
+        "modules/dsv4/fp8/_v41_attention_triton.py",
+        "modules/dsv4/fp8/_v41_indexer_triton.py",
+        "modules/dsv4/fp8/_v41_compressor_state_triton.py",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "prefill_policy_source_data",
     srcs = [

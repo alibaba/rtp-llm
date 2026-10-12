@@ -95,12 +95,120 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_cache_codec_hardware",
+    srcs = ["test_v41_cache_codec_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_engram_hash_hardware",
+    srcs = ["test_v41_engram_hash_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_engram_lookup_hardware",
+    srcs = ["test_v41_engram_lookup_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_engram_inject_hardware",
+    srcs = ["test_v41_engram_inject_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_engram_hardware",
+    srcs = ["test_v41_engram_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_dispatch_hardware",
+    srcs = ["test_v41_dispatch_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_attention_hardware",
+    srcs = ["test_v41_attention_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_indexer_hardware",
+    srcs = ["test_v41_indexer_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_compressor_hardware",
+    srcs = ["test_v41_compressor_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_routed_hardware",
+    srcs = ["test_v41_routed_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_expert_hardware",
+    srcs = ["test_v41_expert_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_mxfp8_hardware",
+    srcs = ["test_v41_mxfp8_hardware.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_sm120_sparse_mla_hardware",
     srcs = ["test_sm120_sparse_mla_hardware.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["RTX_5000_PRO"],
+    tags = ["SM120"],
     exec_properties = {
-        "gpu": "RTX_5000_PRO",
+        "gpu": "SM120",
         "gpu_count": "1",
     },
     target_compatible_with = _DSV4_SM120_ONLY,
@@ -110,9 +218,9 @@ py_test(
     name = "test_sm120_indexer_hardware",
     srcs = ["test_sm120_indexer_hardware.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["RTX_5000_PRO"],
+    tags = ["SM120"],
     exec_properties = {
-        "gpu": "RTX_5000_PRO",
+        "gpu": "SM120",
         "gpu_count": "1",
     },
     target_compatible_with = _DSV4_SM120_ONLY,
@@ -122,9 +230,9 @@ py_test(
     name = "test_sm120_prefill_indices_hardware",
     srcs = ["test_sm120_prefill_indices_hardware.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["RTX_5000_PRO"],
+    tags = ["SM120"],
     exec_properties = {
-        "gpu": "RTX_5000_PRO",
+        "gpu": "SM120",
         "gpu_count": "1",
     },
     target_compatible_with = _DSV4_SM120_ONLY,
@@ -134,9 +242,9 @@ py_test(
     name = "test_sm120_prefill_indices_producer_matrix",
     srcs = ["test_sm120_prefill_indices_producer_matrix.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["RTX_5000_PRO"],
+    tags = ["SM120"],
     exec_properties = {
-        "gpu": "RTX_5000_PRO",
+        "gpu": "SM120",
         "gpu_count": "1",
     },
     target_compatible_with = _DSV4_SM120_ONLY,
@@ -149,9 +257,9 @@ py_test(
     srcs = ["test_dsv4_persistent_topk.py"],
     main = "test_dsv4_persistent_topk.py",
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["RTX_5000_PRO"],
+    tags = ["SM120"],
     exec_properties = {
-        "gpu": "RTX_5000_PRO",
+        "gpu": "SM120",
         "gpu_count": "1",
     },
     target_compatible_with = _DSV4_SM120_ONLY,
@@ -227,7 +335,7 @@ py_test(
     name = "test_sm120_prefill_split",
     srcs = ["test_sm120_prefill_split.py"],
     deps = _DSV4_FP8_TEST_DEPS,
-    tags = ["RTX_5000_PRO"],
-    exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
     target_compatible_with = _DSV4_SM120_ONLY,
 )

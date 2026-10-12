@@ -21,6 +21,28 @@ PPIntermediateTensors ModelBase::makePPWarmUpInputTensors(const GptModelInputs&,
     RTP_LLM_FAIL("PP warmup input construction is not implemented by this model");
 }
 
+void sliceV41CacheInputs(const GptModelInputs& source, GptModelInputs& dest, size_t batch_offset, size_t batch_size) {
+    dest.v41_cache_spans = torch::Tensor();
+    dest.v41_cache_leases.clear();
+    if (!source.v41_cache_spans.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(source.v41_cache_leases.empty(), "V4.1 leases require dispatch spans");
+        return;
+    }
+    const auto& spans = source.v41_cache_spans;
+    RTP_LLM_CHECK_WITH_INFO(spans.device().is_cpu() && spans.scalar_type() == torch::kInt64 && spans.dim() == 2
+                                && spans.size(1) == 6 && spans.is_contiguous()
+                                && batch_offset <= static_cast<size_t>(spans.size(0))
+                                && batch_size <= static_cast<size_t>(spans.size(0)) - batch_offset
+                                && (source.v41_cache_leases.empty()
+                                    || source.v41_cache_leases.size() == static_cast<size_t>(spans.size(0))),
+                            "V4.1 microbatch requires aligned dispatch spans and local leases");
+    dest.v41_cache_spans = spans.narrow(0, batch_offset, batch_size);
+    if (!source.v41_cache_leases.empty()) {
+        dest.v41_cache_leases.assign(source.v41_cache_leases.begin() + batch_offset,
+                                     source.v41_cache_leases.begin() + batch_offset + batch_size);
+    }
+}
+
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     GptModelInputShapeHints shape_hints{};
     shape_hints[GptModelInputIndex::comboTokens]  = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
@@ -86,6 +108,23 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     shape_hints[GptModelInputIndex::isTargetVerify]   = inputs.is_target_verify;
     shape_hints[GptModelInputIndex::pdSeparation]     = inputs.pd_separation;
     shape_hints[GptModelInputIndex::shutdownSentinel] = inputs.shutdown;
+    if (inputs.engram_token_windows.defined()) {
+        const auto& windows = inputs.engram_token_windows;
+        RTP_LLM_CHECK_WITH_INFO(windows.device().is_cpu() && windows.scalar_type() == torch::kInt32
+                                    && windows.is_contiguous() && windows.dim() == 2
+                                    && windows.size(0) == shape_hints[GptModelInputIndex::comboTokens]
+                                    && windows.size(1) == 4,
+                                "Engram token windows must be contiguous CPU int32 [combo_tokens, 4]");
+        shape_hints[GptModelInputIndex::engramTokenWindows] = 1;
+    }
+    if (inputs.v41_cache_spans.defined()) {
+        const auto& spans = inputs.v41_cache_spans;
+        RTP_LLM_CHECK_WITH_INFO(spans.device().is_cpu() && spans.scalar_type() == torch::kInt64 && spans.is_contiguous()
+                                    && spans.dim() == 2 && spans.size(1) == 6
+                                    && spans.size(0) == shape_hints[GptModelInputIndex::inputLengths],
+                                "V4.1 cache spans must be contiguous CPU int64 [batch, 6]");
+        shape_hints[GptModelInputIndex::v41CacheSpans] = 1;
+    }
     shape_hints[GptModelInputIndex::mtpHiddenStatesRows] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
 
@@ -226,6 +265,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto mm_features_locs_size   = checkedHint(GptModelInputIndex::mmFeaturesLocs, "mmFeaturesLocs");
     const auto hidden_states_size      = checkedHint(GptModelInputIndex::mtpHiddenStates, "mtpHiddenStates");
     const auto request_length = checkedHint(GptModelInputIndex::gptModelRequestLength, "gptModelRequestLength");
+    const auto has_engram_windows      = checkedHint(GptModelInputIndex::engramTokenWindows, "engramTokenWindows");
+    RTP_LLM_CHECK_WITH_INFO(has_engram_windows <= 1, "invalid Engram window presence hint");
+    const auto has_v41_spans = checkedHint(GptModelInputIndex::v41CacheSpans, "v41CacheSpans");
+    RTP_LLM_CHECK_WITH_INFO(has_v41_spans <= 1, "invalid V4.1 cache span presence hint");
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<int64_t>    dims,
@@ -272,6 +315,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {checkedHint(GptModelInputIndex::comboTokens, "comboTokens")},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
+        inputs.engram_token_windows = has_engram_windows ?
+                                          allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {checkedHint(GptModelInputIndex::comboTokens, "comboTokens"), 4}) :
+                                          torch::Tensor();
+        inputs.v41_cache_spans      = has_v41_spans ?
+                                          allocBuf(rtp_llm::DataType::TYPE_INT64,
+                                                   {checkedHint(GptModelInputIndex::inputLengths, "inputLengths"), 6}) :
+                                          torch::Tensor();
+        inputs.v41_cache_leases.clear();
         inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {checkedHint(GptModelInputIndex::inputLengths, "inputLengths")},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
@@ -382,6 +434,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     };
 
     collect(inputs.combo_tokens);
+    if (has_engram_windows) {
+        collect(inputs.engram_token_windows);
+    }
+    if (has_v41_spans) {
+        collect(inputs.v41_cache_spans);
+    }
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);

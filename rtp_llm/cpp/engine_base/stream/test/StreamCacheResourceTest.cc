@@ -138,6 +138,52 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
     EXPECT_EQ(resource.kvCache().blocks(0, "__warmup__").size(), 2);
 }
 
+TEST_F(StreamCacheResourceTest, AllocationLeaseSurvivesStreamReleaseUntilLastConsumerCompletes) {
+    auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 9, 2, DataType::TYPE_FP16, 2);
+    config.use_independent_block_pools = true;
+    cache_manager_                     = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(cache_manager_->init());
+    const auto      initially_free = cache_manager_->freeBlocksNum();
+    ResourceContext context;
+    context.cache_manager  = cache_manager_;
+    context.reuse_cache    = false;
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids       = torch::tensor(std::vector<int32_t>{1, 2, 3}, torch::kInt32);
+    query->generate_config = std::make_shared<GenerateConfig>();
+    ModelConfig model_config;
+    model_config.max_seq_len                  = 32;
+    model_config.attn_config.tokens_per_block = 2;
+    stream_ = std::make_shared<NormalGenerateStream>(query, model_config, RuntimeConfig{}, context, nullptr);
+    stream_->generate_status_->status = StreamState::RUNNING;
+    auto& resource                    = stream_->streamCacheResource();
+    EXPECT_ANY_THROW(resource.retainAllocation());
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    auto       lease          = resource.retainAllocation();
+    auto       consumer       = lease;
+    const auto tables         = lease->blockTables();
+    const auto allocated_free = cache_manager_->freeBlocksNum();
+    ASSERT_LT(allocated_free, initially_free);
+    stream_->releaseResource();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), allocated_free);
+    EXPECT_EQ(lease->blockTables(), tables);
+    EXPECT_ANY_THROW(resource.retainAllocation());
+    lease.reset();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), allocated_free);
+    consumer.reset();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), initially_free);
+}
+
+TEST_F(StreamCacheResourceTest, AllocationLeaseRejectsLegacyAllocatorWithoutChangingBlocks) {
+    prepareResource();
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    const auto before = cache_manager_->freeBlocksNum();
+    EXPECT_THROW(resource.retainAllocation(), std::logic_error);
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), before);
+    stream_->releaseResource();
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+}
+
 TEST_F(StreamCacheResourceTest, testAllocateResource) {
     prepareResource();
 

@@ -1,14 +1,7 @@
-"""DeepSeek-V4 model entry point (skeleton).
+"""DeepSeek-V4 registration, checkpoint configuration and model construction.
 
-This file establishes the registration and HF config parsing for DeepseekV4.
-For M0 the forward path is intentionally not wired up — `_create_python_model`
-raises so the engine fails fast if you try to actually run inference. Subsequent
-milestones (M1 mHC, M2 HCA, M3 CSA, M4 heterogeneous KV cache) flesh out the
-real model body in `rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
-
-Key V4 architecture differences vs V3 — see
-`/home/wangyin.yx/workspace/work_memory/plans/develop_ds_v4.md` for the full
-breakdown:
+Execution is implemented in `rtp_llm/models_py/model_desc/deepseek_v4_model.py`.
+Key architecture differences from V3:
 
   - MQA single-KV-head with head_dim=512 (no kv_lora_rank, no v_head_dim split)
   - Per-layer attention type from `compress_ratios`: 0=SWA-only, 4=CSA, 128=HCA
@@ -607,13 +600,13 @@ class DeepSeekV4(DeepSeekV2):
         )
 
     @staticmethod
-    def _from_hf(config: ModelConfig, ckpt_path: str):  # noqa: C901  (acceptably long)
-        config_path = os.path.join(ckpt_path, "config.json")
-        if not os.path.exists(config_path):
-            return
-
-        with open(config_path) as reader:
-            config_json = json.loads(reader.read())
+    def _from_hf(config: ModelConfig, ckpt_path: str, config_json=None):  # noqa: C901
+        if config_json is None:
+            config_path = os.path.join(ckpt_path, "config.json")
+            if not os.path.exists(config_path):
+                return
+            with open(config_path) as reader:
+                config_json = json.load(reader)
 
         # ---- basic geometry ----
         config.num_layers = config_json["num_hidden_layers"]

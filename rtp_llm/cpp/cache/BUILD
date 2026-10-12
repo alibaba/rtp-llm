@@ -262,6 +262,7 @@ cc_library(
 cc_library(
     name = "kv_cache_allocator_hdr",
     hdrs = [
+        "KVCacheAllocationLease.h",
         "KVCacheAllocator.h",
     ],
     copts = copts(),
@@ -281,6 +282,7 @@ cc_library(
         "HybridPoolKVCacheAllocator.cc",
         "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
+        "KVCacheAllocationLease.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
@@ -288,6 +290,7 @@ cc_library(
         "HybridPoolKVCacheAllocator.h",
         "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",
+        "KVCacheAllocationLease.h",
         "SingleTypeKVCacheAllocator.h",
     ],
     copts = copts(),

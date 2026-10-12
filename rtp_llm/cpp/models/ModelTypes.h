@@ -104,6 +104,8 @@ enum GptModelInputIndex : size_t {
     // (which get an empty relayed plan) pack cache_keys like the root.
     pdSeparation,
     shutdownSentinel,
+    engramTokenWindows,
+    v41CacheSpans,
     gptModelInputLength,
 };
 
@@ -111,6 +113,8 @@ enum GptModelInputIndex : size_t {
 // last_hidden_states easily exceeds what int32 can carry (256K tokens *
 // 12288 = 3.2G elements).
 using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModelInputLength>;
+
+void sliceV41CacheInputs(const GptModelInputs& source, GptModelInputs& dest, size_t batch_offset, size_t batch_size);
 
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.

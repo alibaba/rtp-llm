@@ -171,7 +171,23 @@ std::tuple<torch::Tensor, torch::Tensor> zigzagRemapTokenFields(const torch::Ten
     return {inputs.text_tokens_mask, inputs.combo_tokens_type_ids};
 }
 
+torch::Tensor zigzagRemapEngramHistory(const torch::Tensor& windows, int cp_rank, int cp_size) {
+    ParallelismConfig config;
+    config.tp_rank = cp_rank;
+    config.tp_size = cp_size;
+    ZigZagProcessor processor(config);
+    GptModelInputs  inputs;
+    inputs.combo_tokens         = windows.select(1, 0).contiguous();
+    inputs.input_lengths        = torch::tensor({static_cast<int32_t>(windows.size(0))}, torch::kInt32);
+    inputs.sequence_lengths     = torch::empty({0}, torch::kInt32);
+    inputs.engram_token_windows = windows;
+    torch_ext::PyContextParallelParams cp_params;
+    processor.handleInputs(inputs, cp_params);
+    return inputs.engram_token_windows;
+}
+
 PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
+    m.def("remap_engram_history", &zigzagRemapEngramHistory);
     m.def("context_parallel_load_balance_split",
           &zigzagProcessorPlanWrapper,
           py::arg("total_input_tokens"),

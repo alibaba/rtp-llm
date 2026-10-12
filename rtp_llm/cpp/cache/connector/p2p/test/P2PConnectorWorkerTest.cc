@@ -1161,6 +1161,23 @@ protected:
     }
 };
 
+TEST_F(LayerCacheBufferUtilTest, ReadReplicaHasNoTransferWindow) {
+    const auto source                      = makeTestCacheTopology(2, 1, {{0, 1}});
+    auto       groups                      = source->groups();
+    groups[1].read_replica_source_layer_id = 20;
+    KVCacheResource resource;
+    resource.initGroups(CacheTopology::create(std::move(groups), source->layers()));
+    resource.setCacheKeys({1000});
+    resource.mutableBlockIds(0).add({1});
+    resource.mutableBlockIds(1).add({2});
+    const auto& replica_tag = source->groupById(1).tag;
+    EXPECT_FALSE(LayerCacheBufferUtil::hasTransferableBlocks(resource, 0, replica_tag, 0, -1, 0, 1));
+    EXPECT_EQ(LayerCacheBufferUtil::convertLayer(resource, 0, 0, replica_tag, 0, -1, 0, 1), nullptr);
+    const auto buffers = LayerCacheBufferUtil::convert(resource, 0, 0, -1, 0, 1);
+    ASSERT_EQ(buffers.size(), 1u);
+    EXPECT_EQ(buffers.front()->cacheTag(), source->groupById(0).tag);
+}
+
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxEqualActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx == actual_block_count (3) -> out of range

@@ -198,6 +198,10 @@ void HybridPoolKVCacheAllocator::freeBlocksInGroup(int gid, const BlockIndicesTy
     }
 }
 
+KVCacheAllocationLeasePtr HybridPoolKVCacheAllocator::retainAllocation(const KVCacheResource& resource) const {
+    return KVCacheAllocationLeasePtr(new KVCacheAllocationLease(resource, config_.topologyPtr(), group_block_pools_));
+}
+
 GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     const auto topology = config_.topologyPtr();
     RTP_LLM_CHECK_WITH_INFO(kv_cache_groups_.size() == topology->groups().size(),

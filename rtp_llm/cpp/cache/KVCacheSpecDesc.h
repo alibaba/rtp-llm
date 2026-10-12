@@ -37,6 +37,7 @@ struct CacheCapacityPolicyDesc {
     std::optional<bool>     reservable;
     std::optional<uint32_t> explicit_block_num;
     std::optional<bool>     charge_to_paged_budget;
+    std::optional<bool>     single_block_per_request;
 };
 
 struct CacheMemoryPolicyDesc {
@@ -81,6 +82,9 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
+
+    // A local storage slot for another stage's producer, excluded from publication.
+    std::optional<uint32_t> read_replica_source_layer_id;
 };
 
 struct SpecBuildContext {

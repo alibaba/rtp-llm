@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
@@ -194,7 +195,8 @@ void checkPpIndependentPools(const ModelConfig& model_config, const ParallelismC
 void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
     // DSV4 explicitly owns its opaque PP cache contract; do not relax the
     // upstream capability gate for unrelated opaque/sliding-window models.
-    const bool allow_dsv4_opaque = stage_config.model_type == "deepseek_v4";
+    const bool allow_dsv4_opaque =
+        stage_config.model_type == "deepseek_v4" || stage_config.model_type == "deepseek_v41";
     for (size_t layer_id = 0; layer_id < stage_config.kv_cache_spec_descs.size(); ++layer_id) {
         for (const auto& desc : stage_config.kv_cache_spec_descs[layer_id]) {
             RTP_LLM_CHECK_WITH_INFO(allow_dsv4_opaque
@@ -208,10 +210,86 @@ void validateStageScopedDescsForPP(const ModelConfig& stage_config) {
     }
 }
 
+void validateDsv41CacheDescs(const ModelConfig&       model_config,
+                             const ParallelismConfig& parallelism_config,
+                             bool                     is_draft_model) {
+    RTP_LLM_CHECK_WITH_INFO(!is_draft_model && model_config.num_layers == 40
+                                && model_config.kv_cache_spec_descs.size() == 40,
+                            "V4.1 exact cache requires 40 target layers");
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
+                            "V4.1 exact cache requires unsharded CP cache");
+    RTP_LLM_CHECK_WITH_INFO(model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
+                            "V4.1 exact cache requires independent pools");
+    if (parallelism_config.pp_size > 1) {
+        const std::vector<int64_t> expected_counts{21, 19};
+        RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size == 2
+                                    && parallelism_config.pp_stage_layer_counts == expected_counts,
+                                "V4.1 prefill cache requires PP2 with layer counts [21, 19]");
+    }
+    for (size_t layer = 0; layer < 40; ++layer) {
+        std::map<std::string, uint32_t> expected_ratios{{"swa_kv", 128}};
+        if (layer == 2 || layer == 8 || layer == 14) {
+            expected_ratios.emplace("csa_kv", 2);
+            expected_ratios.emplace("indexer_kv", 1);
+            expected_ratios.emplace("csa_state", 2);
+        } else if (layer == 20) {
+            expected_ratios.emplace("hca_kv", 1);
+            expected_ratios.emplace("indexer_kv", 1);
+        }
+        for (const auto& desc : model_config.kv_cache_spec_descs[layer]) {
+            const auto expected = expected_ratios.find(desc.tag);
+            RTP_LLM_CHECK_WITH_INFO(expected != expected_ratios.end(),
+                                    "V4.1 layer=%zu has duplicate or unexpected tag=%s",
+                                    layer,
+                                    desc.tag.c_str());
+            const bool     state = desc.tag == "csa_state" || desc.tag == "swa_kv";
+            const auto     policy = SpecBuilder::groupPolicy(desc);
+            RTP_LLM_CHECK_WITH_INFO(policy.single_block_per_request == state
+                                        && policy.group_type == (state ? CacheGroupType::SWA : CacheGroupType::FULL)
+                                        && (!state || !policy.enable_prefix_reuse),
+                                    "V4.1 layer=%zu tag=%s requires persistent state allocation without prefix reuse",
+                                    layer,
+                                    desc.tag.c_str());
+            const auto     dtype = desc.tag == "csa_state" ? DataType::TYPE_FP32 : DataType::TYPE_UINT8;
+            const uint32_t elems = desc.tag == "csa_state"  ? 1024 :
+                                   desc.tag == "swa_kv"     ? 528 :
+                                   desc.tag == "indexer_kv" ? 68 :
+                                                              288;
+            RTP_LLM_CHECK_WITH_INFO(
+                !desc.read_replica_source_layer_id.has_value()
+                    && desc.cache_type == (state ? KVCacheSpecType::OpaqueState : KVCacheSpecType::OpaqueKV)
+                    && desc.is_state_cache == state && desc.entry_elems == elems && desc.entry_dtype == dtype
+                    && desc.dtype == dtype && desc.compression_ratio == expected->second
+                    && desc.entry_count_mode
+                           == (state ? OpaqueBlockEntryCountMode::STATE_RING :
+                                       OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED)
+                    && desc.state_ring_overlap == 0 && desc.state_ring_include_gen_num_per_cycle == state
+                    && desc.block_stride_bytes_override == 0
+                    && desc.block_stride_bytes_alignment == (desc.tag == "swa_kv" ? 512u : 0u)
+                    && desc.block_stride_alignment_min_entries == 0,
+                "V4.1 layer=%zu tag=%s has invalid exact-cache geometry or ownership",
+                layer,
+                desc.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(desc.cp.has_value() && desc.cp->mapping == CpBlockMappingMode::NONE
+                                        && desc.cp->slice == CpBlockSliceMode::NONE && desc.cp->scale_seq_size == false
+                                        && desc.cp->align_payload == false
+                                        && desc.cp->prefill_slice_layout == CpPrefillSliceLayout::NONE,
+                                    "V4.1 layer=%zu tag=%s requires explicit unsharded CP policy",
+                                    layer,
+                                    desc.tag.c_str());
+            expected_ratios.erase(expected);
+        }
+        RTP_LLM_CHECK_WITH_INFO(expected_ratios.empty(), "V4.1 layer=%zu is missing producer cache descriptors", layer);
+    }
+}
+
 ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       model_config,
                                                        const ParallelismConfig& parallelism_config,
                                                        bool                     is_draft_model) {
 
+    if (model_config.model_type == "deepseek_v41") {
+        validateDsv41CacheDescs(model_config, parallelism_config, is_draft_model);
+    }
     const int64_t pp_size = std::max<int64_t>(1, parallelism_config.pp_size);
     if (pp_size <= 1 || is_draft_model) {
         return model_config;
@@ -244,6 +322,17 @@ ModelConfig CacheConfigCreator::stageScopedModelConfig(const ModelConfig&       
     stage_config.global_layer_begin = static_cast<uint32_t>(begin);
     stage_config.kv_cache_spec_descs.assign(model_config.kv_cache_spec_descs.begin() + begin,
                                             model_config.kv_cache_spec_descs.begin() + end);
+
+    if (model_config.model_type == "deepseek_v41" && begin == 21) {
+        // L20 is the producer. Slot zero on stage one only stores the two read replicas.
+        for (const auto& source_desc : model_config.kv_cache_spec_descs[20]) {
+            if (source_desc.tag == "hca_kv" || source_desc.tag == "indexer_kv") {
+                auto replica                         = source_desc;
+                replica.read_replica_source_layer_id = 20;
+                stage_config.kv_cache_spec_descs.front().push_back(std::move(replica));
+            }
+        }
+    }
 
     auto& types = stage_config.hybrid_attention_config.hybrid_attention_types;
     if (!types.empty()) {

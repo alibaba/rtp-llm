@@ -484,19 +484,6 @@ class DeepSeekV4Model(GptModelBase):
         self._materialized = False
         self._ckpt_path: str = model_config.ckpt_path
 
-        # Optional on-demand timeline capture. Set DSV4_PROFILE_TRACE=/path/trace.json
-        # and touch /tmp/dsv4_profile_trigger to capture the NEXT forward only.
-        self._profile_path = os.environ.get("DSV4_PROFILE_TRACE")
-        self._profile_trigger = "/tmp/dsv4_profile_trigger"
-        self._profile_done = False
-        if self._profile_path:
-            logging.info(
-                "[DeepSeekV4Model] timeline trigger: `touch %s` — "
-                "next forward captures to %s",
-                self._profile_trigger,
-                self._profile_path,
-            )
-
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
             return self._initialize_impl(init_resource)

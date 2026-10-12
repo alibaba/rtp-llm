@@ -1,4 +1,313 @@
 py_test(
+    name = "dsv41_kv_cache_test",
+    srcs = ["dsv41_kv_cache_test.py"],
+    data = ["//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:sdk"],
+)
+
+py_test(
+    name = "dsv41_cache_production_test",
+    srcs = ["dsv41_cache_production_test.py"],
+    data = [
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+        "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
+    ],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "dsv41_cache_codec_test",
+    srcs = ["dsv41_cache_codec_test.py"],
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_delayed_hc_test",
+    srcs = ["dsv41_delayed_hc_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_delayed_hc_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_engram_hash_test",
+    srcs = ["dsv41_engram_hash_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_engram_hash_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
+    name = "dsv41_engram_host_test",
+    srcs = ["dsv41_engram_host_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_engram_host_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
+    name = "dsv41_engram_inject_test",
+    srcs = ["dsv41_engram_inject_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_engram_inject_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
+    name = "dsv41_mxfp8_test",
+    srcs = ["dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_mxfp8_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
+    name = "dsv41_engram_test",
+    srcs = [
+        "dsv41_engram_test.py",
+        "dsv41_engram_host_test.py",
+        "dsv41_engram_inject_test.py",
+        "dsv41_mxfp8_test.py",
+        "dsv41_cache_codec_test.py",
+    ],
+    main = "dsv41_engram_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_engram_weights_test",
+    srcs = [
+        "dsv41_engram_weights_test.py",
+        "dsv41_engram_test.py",
+        "dsv41_engram_host_test.py",
+        "dsv41_engram_inject_test.py",
+        "dsv41_mxfp8_test.py",
+        "dsv41_cache_codec_test.py",
+    ],
+    main = "dsv41_engram_weights_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_engram_stage_test",
+    srcs = [
+        "dsv41_engram_stage_test.py",
+        "dsv41_engram_weights_test.py",
+        "dsv41_engram_hash_test.py",
+        "dsv41_engram_test.py",
+        "dsv41_engram_host_test.py",
+        "dsv41_engram_inject_test.py",
+        "dsv41_mxfp8_test.py",
+        "dsv41_cache_codec_test.py",
+    ],
+    main = "dsv41_engram_stage_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_cp_test",
+    srcs = ["dsv41_cp_test.py", "dsv41_stage_test.py", "dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py", "dsv41_engram_stage_test.py", "dsv41_engram_weights_test.py", "dsv41_engram_hash_test.py", "dsv41_engram_test.py", "dsv41_engram_host_test.py", "dsv41_engram_inject_test.py"],
+    main = "dsv41_cp_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_stage_pp_test",
+    # CP simulation also checks peer-wide validation before replica imports.
+    srcs = ["dsv41_stage_pp_test.py", "dsv41_cp_test.py", "dsv41_pp_test.py", "dsv41_cache_transfer_test.py", "dsv41_stage_test.py", "dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py", "dsv41_engram_stage_test.py", "dsv41_engram_weights_test.py", "dsv41_engram_hash_test.py", "dsv41_engram_test.py", "dsv41_engram_host_test.py", "dsv41_engram_inject_test.py"],
+    main = "dsv41_stage_pp_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_cache_plan_test",
+    srcs = ["dsv41_cache_plan_test.py", "dsv41_cp_test.py", "dsv41_stage_pp_test.py", "dsv41_pp_test.py", "dsv41_cache_transfer_test.py", "dsv41_stage_test.py", "dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py", "dsv41_engram_stage_test.py", "dsv41_engram_weights_test.py", "dsv41_engram_hash_test.py", "dsv41_engram_test.py", "dsv41_engram_host_test.py", "dsv41_engram_inject_test.py"],
+    main = "dsv41_cache_plan_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_model_test",
+    srcs = ["dsv41_model_test.py", "dsv41_stage_test.py", "dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py", "dsv41_engram_stage_test.py", "dsv41_engram_weights_test.py", "dsv41_engram_hash_test.py", "dsv41_engram_test.py", "dsv41_engram_host_test.py", "dsv41_engram_inject_test.py"],
+    main = "dsv41_model_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_stage_test",
+    srcs = ["dsv41_stage_test.py", "dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py", "dsv41_engram_stage_test.py", "dsv41_engram_weights_test.py", "dsv41_engram_hash_test.py", "dsv41_engram_test.py", "dsv41_engram_host_test.py", "dsv41_engram_inject_test.py"],
+    main = "dsv41_stage_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources", "//rtp_llm/config/test:testdata/deepseek_v41_flash.json"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_stage_attention_test",
+    srcs = ["dsv41_stage_attention_test.py", "dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_stage_attention_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_block_test",
+    srcs = ["dsv41_block_test.py", "dsv41_delayed_hc_test.py", "dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_indexer_test.py", "dsv41_attention_test.py", "dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_block_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_feed_forward_test",
+    srcs = ["dsv41_feed_forward_test.py", "dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_feed_forward_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_collective_test",
+    srcs = ["dsv41_collective_test.py", "dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_collective_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_attention_test",
+    srcs = ["dsv41_attention_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_attention_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_indexer_test",
+    srcs = ["dsv41_indexer_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_indexer_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_attention_projection_test",
+    srcs = ["dsv41_attention_projection_test.py", "dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_attention_projection_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_projection_test",
+    srcs = ["dsv41_projection_test.py", "dsv41_compressor_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_projection_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_compressor_test",
+    srcs = ["dsv41_compressor_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_compressor_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_dispatch_test",
+    srcs = ["dsv41_dispatch_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_dispatch_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_moe_test",
+    srcs = ["dsv41_moe_test.py", "dsv41_dispatch_test.py", "dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_moe_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_routed_test",
+    srcs = ["dsv41_routed_test.py", "dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_routed_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_expert_test",
+    srcs = ["dsv41_expert_test.py", "dsv41_mxfp8_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_expert_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_pp_test",
+    srcs = ["dsv41_pp_test.py", "dsv41_cache_transfer_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_pp_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_cache_transfer_test",
+    srcs = ["dsv41_cache_transfer_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_cache_transfer_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch"],
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "dsv41_cache_triton_test",
+    srcs = ["dsv41_cache_triton_test.py", "dsv41_cache_codec_test.py"],
+    main = "dsv41_cache_triton_test.py",
+    data = ["//rtp_llm/models_py:dsv41_cache_codec_sources"],
+    deps = ["//rtp_llm:sdk", "//rtp_llm:torch", "//rtp_llm:triton"],
+    env = {"CUDA_VISIBLE_DEVICES": "", "TRITON_INTERPRET": "1"},
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

@@ -63,6 +63,30 @@ TEST_F(ModelDataTest, testConstruct) {
     EXPECT_EQ(std::vector<int>(sl.data_ptr<int>(), sl.data_ptr<int>() + sl.numel()), std::vector<int>({1, 2, 3, 4}));
 }
 
+TEST_F(ModelDataTest, V41DispatchShapeHintsAndMicrobatchSlicing) {
+    GptModelInputs inputs;
+    inputs.input_lengths = torch::ones({3}, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::v41CacheSpans], 0);
+    inputs.v41_cache_spans = torch::arange(18, torch::kInt64).reshape({3, 6});
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::v41CacheSpans], 1);
+    GptModelInputs micro = inputs;
+    sliceV41CacheInputs(inputs, micro, 1, 2);
+    EXPECT_TRUE(torch::equal(micro.v41_cache_spans, inputs.v41_cache_spans.narrow(0, 1, 2)));
+    EXPECT_TRUE(micro.v41_cache_leases.empty());
+    EXPECT_ANY_THROW(sliceV41CacheInputs(inputs, micro, 2, 2));
+    inputs.v41_cache_leases.resize(2);
+    EXPECT_ANY_THROW(sliceV41CacheInputs(inputs, micro, 0, 1));
+    inputs.v41_cache_spans = torch::ones({3, 6}, torch::kInt32);
+    EXPECT_ANY_THROW(getModelInputShapeHints(inputs));
+    inputs.v41_cache_spans = torch::ones({2, 6}, torch::kInt64);
+    EXPECT_ANY_THROW(getModelInputShapeHints(inputs));
+    inputs.v41_cache_spans = torch::ones({6, 3}, torch::kInt64).transpose(0, 1);
+    EXPECT_ANY_THROW(getModelInputShapeHints(inputs));
+    inputs.input_lengths   = torch::empty({0}, torch::kInt32);
+    inputs.v41_cache_spans = torch::empty({0, 6}, torch::kInt64);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::v41CacheSpans], 1);
+}
+
 TEST_F(ModelDataTest, testTensorHolderReleasesOnThirdRound) {
     TensorHolder holder;
     auto         t0 = torch::empty({1}, torch::kFloat32);
@@ -96,7 +120,8 @@ TEST_F(ModelDataTest, testPrefillCPExecutionFollowsRoleConfig) {
                 config.prefill_cp_config.kv_cache_sharded = true;
                 config.prefill_cp_config.prefill_cp_size  = 4;
                 const auto props                          = buildExecProperties(config, DeviceResourceConfig{});
-                const bool local_cp                       = role != RoleType::DECODE && tp_size > 1;
+                // PREFILL_CP requires a separately resolved compatibility profile.
+                const bool local_cp = role != RoleType::DECODE && tp_size > 1 && method == CPRotateMethod::ALL_GATHER;
                 EXPECT_EQ(props.enable_prefill_cp, local_cp);
                 EXPECT_EQ(props.prefill_cp_kv_cache_sharded, local_cp);
                 // The receiving role must retain remote CP geometry for PD.
@@ -165,6 +190,23 @@ TEST_F(ModelDataTest, testComboPositionIdsDeviceIsEncodedInTpShapeHints) {
     shape_hints               = getModelInputShapeHints(inputs);
     device_bits               = static_cast<uint32_t>(shape_hints[GptModelInputIndex::tensorDeviceMap]);
     EXPECT_EQ(device_bits & GptModelInputDeviceBit::kDeviceBitComboPositionIds, 0u);
+}
+
+TEST_F(ModelDataTest, testEngramHistoryShapeHintsValidateRowsAndPresence) {
+    GptModelInputs inputs;
+    inputs.combo_tokens = torch::arange(3, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::engramTokenWindows], 0);
+    inputs.engram_token_windows = torch::full({3, 4}, -1, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::engramTokenWindows], 1);
+    inputs.engram_token_windows = torch::full({2, 4}, -1, torch::kInt32);
+    EXPECT_THROW(getModelInputShapeHints(inputs), RTPException);
+    inputs.engram_token_windows = torch::full({3, 4}, -1, torch::kInt64);
+    EXPECT_THROW(getModelInputShapeHints(inputs), RTPException);
+    inputs.engram_token_windows = torch::full({4, 3}, -1, torch::kInt32).transpose(0, 1);
+    EXPECT_THROW(getModelInputShapeHints(inputs), RTPException);
+    inputs.combo_tokens         = torch::empty({0}, torch::kInt32);
+    inputs.engram_token_windows = torch::empty({0, 4}, torch::kInt32);
+    EXPECT_EQ(getModelInputShapeHints(inputs)[GptModelInputIndex::engramTokenWindows], 1);
 }
 
 }  // namespace rtp_llm

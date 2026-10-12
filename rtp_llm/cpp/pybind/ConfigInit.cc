@@ -1823,17 +1823,24 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reservable", &CacheCapacityPolicyDesc::reservable)
         .def_readwrite("explicit_block_num", &CacheCapacityPolicyDesc::explicit_block_num)
         .def_readwrite("charge_to_paged_budget", &CacheCapacityPolicyDesc::charge_to_paged_budget)
+        .def_readwrite("single_block_per_request", &CacheCapacityPolicyDesc::single_block_per_request)
         .def(py::pickle(
             [](const CacheCapacityPolicyDesc& self) {
-                return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget);
+                return py::make_tuple(self.reservable,
+                                      self.explicit_block_num,
+                                      self.charge_to_paged_budget,
+                                      self.single_block_per_request);
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
-                if (t.size() != 3)
+                if (t.size() != 3 && t.size() != 4)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable             = t[0].cast<std::optional<bool>>();
                 c.explicit_block_num     = t[1].cast<std::optional<uint32_t>>();
                 c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
+                if (t.size() == 4) {
+                    c.single_block_per_request = t[3].cast<std::optional<bool>>();
+                }
                 return c;
             }));
 
@@ -1912,6 +1919,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
+        .def_readwrite("read_replica_source_layer_id", &KVCacheSpecDesc::read_replica_source_layer_id)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
@@ -1933,11 +1941,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.capacity,
                                       self.memory,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.read_replica_source_layer_id);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 20 && t.size() != 21)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1959,6 +1968,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                if (t.size() == 21) {
+                    c.read_replica_source_layer_id = t[20].cast<std::optional<uint32_t>>();
+                }
                 return c;
             }));
 

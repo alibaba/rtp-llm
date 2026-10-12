@@ -20,6 +20,10 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
+namespace rtp_llm {
+class KVCacheAllocationLease;
+}
+
 namespace torch_ext {
 
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
@@ -34,6 +38,7 @@ struct LayerKVCache {
     int           layer_id           = -1;
     int           group_id           = -1;
     std::string   tag                = "default";
+    std::optional<uint32_t> read_replica_source_layer_id;
 
     LayerKVCache() = default;
 
@@ -164,6 +169,7 @@ private:
                             group_id,
                             group.tag,
                             buffers.kv_scale_addr);
+        result.read_replica_source_layer_id = group.read_replica_source_layer_id;
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -363,10 +369,14 @@ struct PyModelInputs {
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
     // Only interpreted by a DSpARK draft model. All other models leave NONE.
-    // Kept second-to-last so existing brace-init sites keep compiling.
+    // New fields are appended so existing brace-init sites keep compiling.
     rtp_llm::DSparkCallPhase dspark_call_phase = rtp_llm::DSparkCallPhase::NONE;
     // PP: boundary tensors from the upstream stage; empty under pp_size=1.
     PPIntermediates pp_intermediates;
+    torch::Tensor   engram_token_windows;  // optional device int32 [tokens, 4]
+    torch::Tensor   v41_cache_spans;       // optional CPU int64 [batch, 6]
+    // Opaque process-local ownership; retaining this input retains its native pages.
+    std::vector<std::shared_ptr<const rtp_llm::KVCacheAllocationLease>> v41_cache_leases;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
+#include "rtp_llm/cpp/normal_engine/EngramTokenHistory.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 
@@ -324,6 +325,9 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
 
     GptModelInputs model_input;
     model_input.combo_tokens          = torch::empty({(int64_t)current_tokens_size}, pinned_i32);
+    if (config_.enable_engram_token_windows) {
+        model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
+    }
     model_input.input_lengths         = torch::empty({(int64_t)total_batch_size}, pinned_i32);
     model_input.sequence_lengths      = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
     model_input.prefix_lengths        = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
@@ -444,6 +448,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 ctx.merged_tokens[ctx.batch_idx]    = currentTokens[0];
                 ctx.input_lengths[ctx.batch_idx]    = stream->inputLength();
                 ctx.sequence_lengths[ctx.batch_idx] = stream->seqLength() - 1;
+                if (config_.enable_engram_token_windows && !stream->isFakeStream()) {
+                    fillEngramTokenWindows(stream->completeTokenIdsPtr()->data(i),
+                                           stream->seqLength(),
+                                           stream->seqLength() - 1,
+                                           1,
+                                           model_input.engram_token_windows.data_ptr<int32_t>() + ctx.batch_idx * 4);
+                }
                 if (ctx.need_cal_position_id) {
                     stream->generateNextPositionId(ctx.combo_position_ids
                                                    + ctx.batch_idx * config_.position_id_len_factor);
@@ -496,6 +507,13 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));
+            if (config_.enable_engram_token_windows && !stream->isFakeStream()) {
+                fillEngramTokenWindows(stream->completeTokenIdsPtr()->data(i),
+                                       stream->seqLength(),
+                                       stream->prefixLength(),
+                                       input_tokens.size(),
+                                       model_input.engram_token_windows.data_ptr<int32_t>() + ctx.token_idx * 4);
+            }
 
             for (int index = 0; index < (int)input_tokens.size(); ++index) {
                 if (input_tokens[index] >= ctx.input_vocab_size
@@ -627,7 +645,26 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
+    if (config_.enable_engram_token_windows) {
+        if (deviceInputEnabled()) {
+            return absl::FailedPreconditionError("Engram history does not yet support RTP_LLM_DEVICE_INPUT");
+        }
+        for (const auto& stream : stream_groups.allStreams()) {
+            if (stream->hasPendingAsyncBookkeeping()) {
+                return absl::FailedPreconditionError("Engram requires committed token history before gathering");
+            }
+        }
+    }
     auto model_input = allocateModelInputBuffers(stream_groups);
+    std::optional<V41CacheDispatch> next_dispatch;
+    if (config_.enable_v41_cache_dispatch) {
+        next_dispatch = v41_cache_dispatch_;
+        try {
+            next_dispatch->prepare(stream_groups, model_input);
+        } catch (const std::exception& error) {
+            return absl::FailedPreconditionError(error.what());
+        }
+    }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
@@ -662,6 +699,9 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
                                                            torch::TensorOptions(torch::kInt64).pinned_memory(true));
         std::copy(
             blocks_to_zero.begin(), blocks_to_zero.end(), model_input.kv_cache_blocks_to_zero.data_ptr<int64_t>());
+    }
+    if (next_dispatch) {
+        v41_cache_dispatch_ = std::move(*next_dispatch);
     }
     return model_input;
 }

@@ -188,7 +188,7 @@ bool KVCacheGroup::prefixReusable() const {
 }
 
 bool KVCacheGroup::hasSparseSlots() const {
-    return policy().group_type != CacheGroupType::FULL;
+    return policy().group_type != CacheGroupType::FULL && !policy().single_block_per_request;
 }
 
 bool KVCacheGroup::hasKernelBlockSubdiv() const {

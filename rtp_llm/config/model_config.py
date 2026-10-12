@@ -54,6 +54,8 @@ def ssm_state_dtype_str_to_data_type(ssm_state_dtype: str) -> DataType:
 class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
+        "is_deepseek_v41",
+        "deepseek_v41_config",
         "is_mtp",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
@@ -524,6 +526,8 @@ class ModelConfig(CppModelConfig):
         """Initialize ModelConfig with quant_algo member and default values."""
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
+        self.is_deepseek_v41: bool = False
+        self.deepseek_v41_config: Dict[str, Any] = {}
         self.is_mtp: bool = False
         # DSpARK draft checkpoint metadata. Runtime proposal width comes only
         # from sp_config.gen_num_per_cycle.

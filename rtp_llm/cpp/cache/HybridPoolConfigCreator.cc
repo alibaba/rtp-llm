@@ -134,6 +134,7 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
         CacheGroupPolicy policy;
         uint32_t         local_kv_head_num = 1;
         std::vector<int> layer_ids;
+        std::optional<uint32_t> read_replica_source_layer_id;
     };
 
     std::map<std::string, GroupBuildState> group_by_tag;
@@ -173,9 +174,14 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
                 state.type              = type;
                 state.policy            = policy;
                 state.local_kv_head_num = local_kv_head_num;
+                state.read_replica_source_layer_id = desc.read_replica_source_layer_id;
                 group_it                = group_by_tag.emplace(spec->tag, std::move(state)).first;
                 ordered_tags.push_back(spec->tag);
             } else {
+                RTP_LLM_CHECK_WITH_INFO(group_it->second.read_replica_source_layer_id
+                                            == desc.read_replica_source_layer_id,
+                                        "hybrid-pool tag=%s mixes producer and read-replica ownership",
+                                        spec->tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
                                         "hybrid-pool tag=%s has multiple physical prototypes",
                                         spec->tag.c_str());
@@ -206,6 +212,7 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
         group.policy            = state.policy;
         group.layer_ids         = state.layer_ids;
         group.local_kv_head_num = state.local_kv_head_num;
+        group.read_replica_source_layer_id = state.read_replica_source_layer_id;
         groups.push_back(group);
         for (int layer_id : state.layer_ids) {
             auto& layer = layers[static_cast<size_t>(layer_id)];
@@ -343,6 +350,15 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     const auto kernel_tokens_per_block   = kv_cache_config.kernel_seq_size_per_block > 0 ?
                                                static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
                                                physical_tokens_per_block;
+    if (model_config.model_type == "deepseek_v41") {
+        RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block == 256 && kernel_tokens_per_block == 256,
+                                "V4.1 exact cache requires physical/kernel pages 256/256");
+        RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
+                                "V4.1 exact cache requires unsharded CP cache");
+        RTP_LLM_CHECK_WITH_INFO(!is_mtp && !is_draft_model, "V4.1 draft cache is not implemented");
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.dsv4_fixed_pool_blocks == 0,
+                                "V4.1 does not support the V4 fixed-pool capacity override");
+    }
     RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "hybrid-pool seq_size_per_block must be > 0");
     RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "hybrid-pool kernel_seq_size_per_block must be > 0");
     RTP_LLM_CHECK_WITH_INFO(

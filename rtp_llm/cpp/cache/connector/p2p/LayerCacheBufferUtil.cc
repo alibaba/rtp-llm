@@ -32,6 +32,10 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
         return std::nullopt;
     }
 
+    const auto& transfer_tags = resource.transferGroupTagsForLayer(layer_id);
+    if (std::find(transfer_tags.begin(), transfer_tags.end(), cache_tag) == transfer_tags.end()) {
+        return std::nullopt;
+    }
     const auto& cache_keys                = resource.cacheKeys();
     const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag);
     const auto  rank                      = static_cast<size_t>(cp_rank);
@@ -62,7 +66,7 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
-        for (const auto& tag : resource.groupTagsForLayer(layer_id)) {
+        for (const auto& tag : resource.transferGroupTagsForLayer(layer_id)) {
             auto buffer =
                 convertLayer(resource, batch_id, layer_id, tag, start_block_idx, block_count, cp_rank, cp_size);
             if (buffer) {

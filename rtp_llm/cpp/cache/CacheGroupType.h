@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <vector>
 
 namespace rtp_llm {
@@ -53,6 +54,7 @@ struct CacheGroupPolicy {
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;
+    bool                 single_block_per_request = false;
     CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
     uint32_t             active_tail_blocks     = 0;
     bool                 validate_tail_blocks   = true;
@@ -79,6 +81,9 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;
+    }
+    if (policy.single_block_per_request) {
+        throw std::invalid_argument("persistent request state requires generation-aware cache transfer");
     }
 
     const bool block_round_robin = policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;

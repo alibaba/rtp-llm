@@ -413,9 +413,7 @@ def forward_layers(
     if _fs_marks is not None:
         _fs_marks["pos"] = time.perf_counter()
 
-    # MOEDBG hook (mirrors V4Transformer.forward standalone path so the
-    # smoke / production prefill path produces the same per-layer dump
-    # consumed by /tmp/moedbg_runs diff scripts).  Read once per forward.
+    # Match standalone per-layer tensor recording; read the flag once per forward.
     _rt_on = _rt.ENABLED
     if _rt_on:
         _rt.begin(seqlen=int(input_ids.size(0)))

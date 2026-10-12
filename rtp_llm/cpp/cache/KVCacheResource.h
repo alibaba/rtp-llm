@@ -89,6 +89,9 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 class KVCacheResource {
 public:
     void initGroups(std::shared_ptr<const CacheTopology> topology);
+    std::shared_ptr<const CacheTopology> topologyPtr() const {
+        return topology_.lock();
+    }
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(int group_id) const;
@@ -110,6 +113,7 @@ public:
     const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
 
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
+    const std::vector<std::string>& transferGroupTagsForLayer(int layer_id) const;
     const std::string&              soleGroupTagForLayer(int layer_id) const;
 
     int layerNum() const;
@@ -173,12 +177,14 @@ public:
     std::string debugString() const;
 
 private:
+    std::weak_ptr<const CacheTopology> topology_;
     int  groupIdForTag(std::string_view tag) const;
     int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
     bool hasOneGroupPerLayer() const;
 
     std::unordered_map<std::string, int>  tag_to_group_id_;
     std::vector<std::vector<std::string>> layer_group_tags_;
+    std::vector<std::vector<std::string>> transfer_layer_group_tags_;
     // layer_id -> group_id -> block_indices
     LayerAttnBlockIds layer_group_block_ids;
     // group_id -> block_indices

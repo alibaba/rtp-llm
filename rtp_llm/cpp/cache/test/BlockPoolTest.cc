@@ -36,6 +36,25 @@ protected:
     bool                       old_core_dump_on_exception_{false};
 };
 
+TEST_F(BlockPoolTest, RetainRequestBlocksRejectsInvalidOrUnownedPagesWithoutPartialReferences) {
+    auto pool = createBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto blocks = pool->malloc(1);
+    ASSERT_EQ(blocks, (BlockIndicesType{1}));
+    for (const auto& invalid : std::vector<BlockIndicesType>{{0}, {-1}, {10}, {1, 1}, {1, 2}}) {
+        EXPECT_FALSE(pool->tryRetainRequestBlocks(invalid));
+    }
+    pool->requestFree(blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    EXPECT_FALSE(pool->tryRetainRequestBlocks(blocks));
+    blocks = pool->malloc(static_cast<int>(pool->totalBlocksNum()));
+    ASSERT_TRUE(pool->tryRetainRequestBlocks(blocks));
+    pool->requestFree(blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), 0u);
+    pool->requestFree(blocks);
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+}
+
 namespace {
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {

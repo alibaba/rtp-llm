@@ -26,6 +26,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", evict=" << static_cast<int>(policy.evict_policy) << ", reservable=" << policy.reservable
        << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
+       << ", single_block_per_request=" << policy.single_block_per_request
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
@@ -129,6 +130,7 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.evict_policy == rhs.evict_policy && lhs.reservable == rhs.reservable
            && lhs.explicit_block_num == rhs.explicit_block_num
+           && lhs.single_block_per_request == rhs.single_block_per_request
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
@@ -228,6 +230,13 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     RTP_LLM_CHECK_WITH_INFO(groupNums() > 0, "CacheConfig::mergeMTPModule requires destination topology");
     RTP_LLM_CHECK_WITH_INFO(propose_config.groupNums() > 0, "CacheConfig::mergeMTPModule requires propose topology");
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
+    for (const auto* config : {static_cast<const CacheConfig*>(this), &propose_config}) {
+        for (const auto& group : config->topology().groups()) {
+            RTP_LLM_CHECK_WITH_INFO(!group.read_replica_source_layer_id.has_value(),
+                                    "CacheConfig::mergeMTPModule does not support read replicas (tag=%s)",
+                                    group.tag.c_str());
+        }
+    }
 
     auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
     sub_cfg->block_num     = block_num;

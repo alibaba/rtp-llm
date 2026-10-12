@@ -32,6 +32,7 @@ public:
     void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) override;
 
     GroupedCacheLayerLayout allLayerCacheBase() const override;
+    KVCacheAllocationLeasePtr retainAllocation(const KVCacheResource& resource) const override;
 
     size_t                  freeBlocksNum() const override;
     size_t                  availableBlocksNum() const override;

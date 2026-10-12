@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
 
 namespace rtp_llm {
 namespace {
@@ -79,6 +80,38 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
 
 TEST(CacheTopologyTest, RejectsInconsistentReverseMembership) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full", {0})}, {{0, {"full"}}, {1, {"full"}}}));
+}
+
+TEST(CacheTopologyTest, PersistentStateRejectsIncompatiblePolicies) {
+    auto group                            = makeGroup("state", {0}, CacheGroupType::SWA);
+    auto spec                             = std::make_shared<FixedStateCacheSpec>();
+    spec->tag                             = "state";
+    spec->seq_size_per_block              = 8;
+    group.spec                            = spec;
+    group.policy.single_block_per_request = true;
+    group.policy.cp_mapping               = CpBlockMappingMode::NONE;
+    EXPECT_NO_THROW(CacheTopology::create({group}, {{0, {"state"}}}));
+    for (int invalid = 0; invalid < 5; ++invalid) {
+        auto changed = group;
+        switch (invalid) {
+            case 0:
+                changed.policy.enable_prefix_reuse = true;
+                break;
+            case 1:
+                changed.policy.cp_mapping = CpBlockMappingMode::COMPACT_LAST_RANK;
+                break;
+            case 2:
+                changed.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+                break;
+            case 3:
+                changed.policy.group_type = CacheGroupType::FULL;
+                break;
+            case 4:
+                changed.spec = makeGroup("state", {0}).spec;
+                break;
+        }
+        EXPECT_ANY_THROW(CacheTopology::create({changed}, {{0, {"state"}}}));
+    }
 }
 
 TEST(CacheTopologyTest, ResolvesDefaultKernelSizeFromGroupSpanAndPolicy) {
