@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Tuple
 
 import requests
 
+from rtp_llm.test.perf_test.batch_perf_impl import configure_batch_scheduler
 from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import _median_run_time
 from rtp_llm.test.perf_test.perf_utils import _sanitize_provenance_value
 
@@ -114,7 +115,9 @@ class PrefixPromptFactory:
         text, _ = self._exact_text_and_ids(target_len, prefix)
         return text
 
-    def make_case(self, case_id: int, total_len: int, cache_len: int) -> Tuple[str, str, int]:
+    def make_case(
+        self, case_id: int, total_len: int, cache_len: int
+    ) -> Tuple[str, str, int]:
         if cache_len < 0 or cache_len >= total_len:
             raise ValueError(
                 f"cache_len must satisfy 0 <= cache_len < total_len, "
@@ -171,9 +174,7 @@ def _post_prefill(
     }
     started = time.perf_counter()
     try:
-        response = requests.post(
-            f"http://127.0.0.1:{port}", json=body, timeout=timeout
-        )
+        response = requests.post(f"http://127.0.0.1:{port}", json=body, timeout=timeout)
     except Exception as exc:
         return {
             "success": False,
@@ -301,7 +302,9 @@ class CacheGridRunner:
                     if self._is_reusable_record(record):
                         self._results[str(record["case_key"])] = record
             else:
-                logging.info("cache grid: checkpoint fingerprint changed; rerunning all cases")
+                logging.info(
+                    "cache grid: checkpoint fingerprint changed; rerunning all cases"
+                )
 
     @staticmethod
     def case_key(case: Dict[str, int]) -> str:
@@ -318,8 +321,7 @@ class CacheGridRunner:
             requested_cache_len = int(record.get("cache_len_requested", -1))
             metadata_matches = bool(
                 int(record.get("case_id", -1)) == int(case["case_id"])
-                and int(record.get("batch_size", -1))
-                == int(case.get("batch_size", 1))
+                and int(record.get("batch_size", -1)) == int(case.get("batch_size", 1))
                 and int(record.get("input_len", -1)) == int(case["input_len"])
                 and requested_cache_len == int(case["cache_len"])
                 and int(record.get("measure_runs", -1)) == self.measure_runs
@@ -355,6 +357,10 @@ class CacheGridRunner:
 
     def run(self) -> List[Dict[str, Any]]:
         pending = [c for c in self.cases if self.case_key(c) not in self._results]
+        if pending:
+            # BatchDecodeScheduler defaults to decode and otherwise skips
+            # prefill, including the requests that seed the prefix cache.
+            configure_batch_scheduler(self.port, 1, 1, is_decode=False)
         logging.info(
             "cache grid: %d total cases, %d already complete, %d pending",
             len(self.cases),
@@ -398,9 +404,13 @@ class CacheGridRunner:
                         f"{key}:seed",
                     )
                     if not seed_result.get("success"):
-                        raise RuntimeError(seed_result.get("error", "seed request failed"))
+                        raise RuntimeError(
+                            seed_result.get("error", "seed request failed")
+                        )
 
-                prefix_ids = _encode(self.factory.tokenizer, prefix) if cache_len else []
+                prefix_ids = (
+                    _encode(self.factory.tokenizer, prefix) if cache_len else []
+                )
                 runs: List[Dict[str, Any]] = []
                 for run_idx in range(self.measure_runs):
                     # Vary only the continuation suffix; this prevents the
@@ -410,13 +420,18 @@ class CacheGridRunner:
                             total_len, prefix + f" __run_{run_idx}_"
                         )
                         if run_ids[:cache_len] != prefix_ids:
-                            raise ValueError(f"run {run_idx} did not preserve cache prefix")
+                            raise ValueError(
+                                f"run {run_idx} did not preserve cache prefix"
+                            )
                     else:
                         run_target, _ = self.factory._exact_text_and_ids(
                             total_len, f"case_{case['case_id']}_cold_run_{run_idx}_"
                         )
                     result = _post_prefill(
-                        self.port, run_target, self.request_timeout, f"{key}:run{run_idx}"
+                        self.port,
+                        run_target,
+                        self.request_timeout,
+                        f"{key}:run{run_idx}",
                     )
                     runs.append(result)
 
@@ -447,7 +462,9 @@ class CacheGridRunner:
                     "input_len": total_len,
                     "cache_len_requested": cache_len,
                     "cache_len_observed": reuse_values,
-                    "input_len_observed": [int(r.get("input_len", 0)) for r in successful],
+                    "input_len_observed": [
+                        int(r.get("input_len", 0)) for r in successful
+                    ],
                     "expected_reuse_len": expected_reuse,
                     "success_runs": len(successful),
                     "measure_runs": self.measure_runs,
@@ -468,13 +485,20 @@ class CacheGridRunner:
                     "status": (
                         "ok"
                         if reuse_exact and shape_exact and timing_valid
-                        else "invalid_shape"
-                        if len(successful) == self.measure_runs and not shape_exact
-                        else "invalid_timing"
-                        if len(successful) == self.measure_runs and not timing_valid
-                        else "invalid_reuse"
-                        if len(successful) == self.measure_runs
-                        else "failed"
+                        else (
+                            "invalid_shape"
+                            if len(successful) == self.measure_runs and not shape_exact
+                            else (
+                                "invalid_timing"
+                                if len(successful) == self.measure_runs
+                                and not timing_valid
+                                else (
+                                    "invalid_reuse"
+                                    if len(successful) == self.measure_runs
+                                    else "failed"
+                                )
+                            )
+                        )
                     ),
                 }
             except Exception as exc:

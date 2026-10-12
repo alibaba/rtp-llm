@@ -11,8 +11,43 @@ from rtp_llm.test.perf_test.dataclass import (
     ResponseInfo,
     TestResultMetrics,
     analyze_results,
+    counted_throughput,
 )
 from rtp_llm.utils.util import check_with_info
+
+
+def configure_batch_scheduler(
+    base_port: int, batch_size: int, dp_size: int, is_decode: bool
+) -> None:
+    check_with_info(
+        batch_size % dp_size == 0,
+        f"concurrency {batch_size} must be divisible by dp_size {dp_size}",
+    )
+    payload = {
+        "batch_size": batch_size // dp_size,
+        "mode": "decode" if is_decode else "prefill",
+    }
+    last_error = None
+    for attempt in range(1, 21):
+        try:
+            response = requests.post(
+                f"http://127.0.0.1:{base_port}/update_scheduler_info",
+                json=payload,
+                timeout=60,
+            )
+            if (
+                response.status_code == 200
+                and response.json().get("status", "ok") == "ok"
+            ):
+                return
+            last_error = f"{response.text}, {response.status_code}"
+        except Exception as e:
+            last_error = repr(e)
+        logging.warning(
+            "failed to set concurrency, retrying (%d/20): %s", attempt, last_error
+        )
+        time.sleep(3)
+    raise Exception(f"failed to set concurrency after retries: {last_error}")
 
 
 def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
@@ -22,9 +57,7 @@ def _effective_profile_steps(is_decode: bool, decode_test_length: int) -> int:
     return min(decode_test_length, profile_steps) if is_decode else 1
 
 
-def _wait_for_trace_flush(
-    log_path: str, offset: int, budget_s: int
-) -> int:
+def _wait_for_trace_flush(log_path: str, offset: int, budget_s: int) -> int:
     """Wait for the engine's async trace save to complete.
 
     The save worker exports each profiled window on a background thread
@@ -55,9 +88,7 @@ def _wait_for_trace_flush(
         except OSError:
             pass
         time.sleep(0.25)
-    logging.warning(
-        "[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s
-    )
+    logging.warning("[PERF_PROFILE_FLUSH] timed out after %ss; continuing", budget_s)
     return offset
 
 
@@ -111,7 +142,9 @@ def _curl_server_single_worker(
             logging.warning(f"request failed: {response.content}")
             return ResponseInfo({}, False)
         logging.debug(response.text)
-        return ResponseInfo(response.json())
+        return ResponseInfo(
+            response.json(), expected_output_len=int(gen_config["min_new_tokens"])
+        )
     except Exception as e:
         logging.warning(f" request exception: {e}")
         return ResponseInfo({}, False)
@@ -179,6 +212,14 @@ class BatchPerfImpl(object):
             ), f"query list length {len(query)} != batch_size {batch_size}"
             self.input_queries = query
         self.is_decode = is_decode
+        decode_scheduler_mode = os.environ.get("PERF_DECODE_SCHEDULER_MODE", "decode")
+        if decode_scheduler_mode not in ("decode", "prefill"):
+            raise ValueError(
+                f"unsupported decode scheduler mode: {decode_scheduler_mode!r}"
+            )
+        # Scheduler mode selects whether the prompt forward runs. is_decode
+        # independently controls generation length and the measured TPOT.
+        self.scheduler_is_decode = is_decode and decode_scheduler_mode == "decode"
         self.max_requests_per_process = 128
         self.num_processes = max(
             1,
@@ -244,8 +285,11 @@ class BatchPerfImpl(object):
         key = "avg_decode_time" if self.is_decode else "avg_prefill_time"
         measurements: List[TestResultMetrics] = []
         all_measure_responses: List[ResponseInfo] = []
+        measured_elapsed_s = 0.0
         for i in range(measure_runs):
+            window_start = time.perf_counter()
             responses = self._curl_server_responses()
+            measured_elapsed_s += time.perf_counter() - window_start
             metric = analyze_results(responses)
             logging.info(
                 "[PERF_MEASURE_RUN] %d/%d trace=%s success=%d/%d "
@@ -277,6 +321,23 @@ class BatchPerfImpl(object):
         else:
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
+
+        pooled = analyze_results(all_measure_responses)
+        results.total_requests = pooled.total_requests
+        results.success_requests = pooled.success_requests
+        results.fail_requests = pooled.fail_requests
+        gpu_count = int(
+            os.environ.get(
+                "PERF_GPU_COUNT",
+                os.environ.get(
+                    "WORLD_SIZE",
+                    str(self.dp_size * int(os.environ.get("TP_SIZE", "1"))),
+                ),
+            )
+        )
+        results.counted_throughput = counted_throughput(
+            all_measure_responses, measured_elapsed_s, gpu_count
+        )
 
         if self.profile and self.profile_runs > 0:
             # Pre-arm via /start_profile with enable_all_rank=true so that
@@ -325,38 +386,9 @@ class BatchPerfImpl(object):
         return results
 
     def _set_concurrency(self):
-        check_with_info(
-            self.batch_size % self.dp_size == 0,
-            f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
+        configure_batch_scheduler(
+            self.base_port, self.batch_size, self.dp_size, self.scheduler_is_decode
         )
-        local_batch_size = self.batch_size // self.dp_size
-        payload = {
-            "batch_size": local_batch_size,
-            "mode": "decode" if self.is_decode else "prefill",
-        }
-        last_error = None
-        for attempt in range(1, 21):
-            try:
-                response = requests.post(
-                    f"http://127.0.0.1:{self.base_port}/update_scheduler_info",
-                    json=payload,
-                    timeout=60,
-                )
-                if (
-                    response.status_code == 200
-                    and response.json().get("status", "ok") == "ok"
-                ):
-                    return
-                last_error = f"{response.text}, {response.status_code}"
-            except Exception as e:
-                last_error = repr(e)
-            logging.warning(
-                "failed to set concurrency, retrying (%d/20): %s",
-                attempt,
-                last_error,
-            )
-            time.sleep(3)
-        raise Exception(f"failed to set concurrency after retries: {last_error}")
 
     def _curl_server_responses(self, profile: bool = False) -> List[ResponseInfo]:
         request_batches: List[List[int]] = []

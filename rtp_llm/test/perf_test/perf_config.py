@@ -71,6 +71,16 @@ def parse_args(
     )
     perf.add_argument("--generate_config", type=str, default="{}")
     perf.add_argument(
+        "--decode_scheduler_mode",
+        choices=["decode", "prefill"],
+        default="decode",
+        help=(
+            "Scheduler mode for decode measurements: decode skips the prompt forward "
+            "(historical synthetic KV); prefill computes the prompt before decoding. "
+            "Decode length and TPOT measurement are unchanged."
+        ),
+    )
+    perf.add_argument(
         "--result_dir",
         type=str,
         default=os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "./perf_results"),
@@ -209,6 +219,9 @@ def _apply_run_overrides(args: argparse.Namespace) -> None:
         if value < 0:
             raise ValueError(f"--{option} must be >= 0, got {value}")
         os.environ[env_name] = str(value)
+    os.environ["PERF_DECODE_SCHEDULER_MODE"] = vars(args).get(
+        "decode_scheduler_mode", "decode"
+    )
 
 
 def _replace_cli_value(argv: List[str], key: str, new_value: str) -> None:

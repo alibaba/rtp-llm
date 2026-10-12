@@ -141,7 +141,9 @@ def _load_cache_grid_cases(path: str) -> List[Dict[str, int]]:
         ]
         block = int(config.get("cache_block_size", 4096))
         if block <= 0 or any(ratio < 0.0 or ratio >= 1.0 for ratio in ratios):
-            raise ValueError("cache_ratios must be in [0, 1) and block must be positive")
+            raise ValueError(
+                "cache_ratios must be in [0, 1) and block must be positive"
+            )
         raw_cases = []
         case_id = 0
         for seq_len in seq_lens:
@@ -241,6 +243,7 @@ def _explicit_batch_size_list(args: argparse.Namespace) -> Optional[List[int]]:
 
 
 _PERFORMANCE_ENV_NAMES = {
+    "PERF_DECODE_SCHEDULER_MODE",
     "ACT_TYPE",
     "CACHE_CONFIG",
     "CACHE_STORE_TYPE",

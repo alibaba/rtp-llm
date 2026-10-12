@@ -368,6 +368,26 @@ def write_test_info(
         "effective_runtime_config": runtime_config,
         "argv": _redact_argv(sys.argv),
     }
+    if os.environ.get("PERF_RECORD_DEVICE_IDENTITY", "0") == "1":
+        # This runs under gpu_lock before measured requests. CUDA ordinal and
+        # NVML index can differ; report the runtime identity rather than infer
+        # the physical device from CUDA_VISIBLE_DEVICES alone.
+        import torch
+
+        properties = []
+        for ordinal in range(torch.cuda.device_count()):
+            device = torch.cuda.get_device_properties(ordinal)
+            properties.append(
+                {
+                    "cuda_ordinal": ordinal,
+                    "name": device.name,
+                    "uuid": str(getattr(device, "uuid", "unavailable")),
+                    "compute_capability": [device.major, device.minor],
+                    "num_sms": device.multi_processor_count,
+                    "total_memory_bytes": device.total_memory,
+                }
+            )
+        info["runtime_device_identity"] = properties
     path = os.path.join(args.result_dir, "test_info.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(info, f, indent=2)

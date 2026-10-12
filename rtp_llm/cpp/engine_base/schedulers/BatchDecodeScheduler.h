@@ -208,7 +208,9 @@ public:
     void initRunningStreams() {
         // set kvcache block
         for (auto it = running_streams_.begin(); it != running_streams_.end(); it++) {
-            (*it)->setPerfTest(true);
+            // Decode-only mode uses synthetic KV/tokens; prefill mode runs the
+            // real prompt and preserves sampled tokens during subsequent MTP.
+            (*it)->setPerfTest(scheduler_type_ == SchedulerType::kBatchDecode);
             // reset start time，to get more accurate avg token time
             (*it)->resetBeginTime(autil::TimeUtility::currentTimeInMicroSeconds());
             // only set gen_timeline = True for first rank
@@ -279,7 +281,7 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;
