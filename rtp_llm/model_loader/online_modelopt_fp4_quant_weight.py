@@ -217,6 +217,11 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         self.scale_2 = scale_2
         self.input_scale = input_scale
         self._block_size = max(quant_config.group_size(), NVFP4_BLOCK_SIZE)
+        self._cache = None
+        if quant_config.online_cache_dir:
+            from rtp_llm.model_loader.nvfp4_cache import Nvfp4ExpertCache
+
+            self._cache = Nvfp4ExpertCache(quant_config.online_cache_dir)
         activation_amax = quant_config.activation_amax
         self._input_scale = (
             1.0
@@ -285,9 +290,23 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
             weight = kernel_dict[self.kernel.name]
             if weight.ndim != 3 or weight.shape[0] != 1:
                 raise ValueError("online NVFP4 expected exactly one expert")
-            packed, scale, scale_2 = quantize_expert_to_nvfp4(
-                weight[0], self._block_size
-            )
+            if self._cache is None:
+                packed, scale, scale_2 = quantize_expert_to_nvfp4(
+                    weight[0], self._block_size
+                )
+            else:
+                packed, scale, scale_2 = self._cache.get_or_quantize(
+                    weight[0],
+                    block_size=self._block_size,
+                    input_scale=self._input_scale,
+                    identity=dict(
+                        layer=layer_id,
+                        expert=int(expert_id),
+                        weight=self.kernel.name,
+                        source_templates=[item.name for item in self.kernel.weights],
+                    ),
+                )
+                scale_2 = scale_2.reshape(())
             if output is None:
                 output = {
                     self.kernel.name: torch.empty(

@@ -250,6 +250,7 @@ class Qwen4Exp(Qwen35Moe):
                 group_size=16,
                 is_quanted=False,
                 activation_amax=32.0,
+                online_cache_dir=os.environ.get("RTP_LLM_QWEN4_NVFP4_CACHE_DIR"),
                 require_contiguous_experts=True,
             )
             config._qwen4_moe_only_fp4 = True
@@ -380,6 +381,7 @@ class Qwen4Exp(Qwen35Moe):
                 group_size=16,
                 is_quanted=False,
                 activation_amax=32.0,
+                online_cache_dir=os.environ.get("RTP_LLM_QWEN4_NVFP4_CACHE_DIR"),
                 require_contiguous_experts=True,
             )
             model_config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)

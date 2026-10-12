@@ -1,5 +1,7 @@
+import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
@@ -50,6 +52,44 @@ class OnlineNvfp4Test(unittest.TestCase):
         self.assertEqual(p.shape, (7, 16))
         self.assertFalse(p.any())
         self.assertTrue(torch.isfinite(s.float()).all() and torch.isfinite(a))
+
+    def test_loader_reuses_private_raw_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            original = MoeAtomicWeight(
+                W.moe_w2,
+                [CkptWeightInfo("down.{expert_id}")],
+                process_fun=stack_,
+                config=MoeConfig(expert_num=2),
+            )
+            quant = OnlineModelOptFp4MoeWeight(
+                original,
+                ModelOptFp4Config(
+                    bits=4,
+                    group_size=16,
+                    is_quanted=False,
+                    activation_amax=32.0,
+                    online_cache_dir=directory,
+                ),
+            )
+            config = SimpleNamespace(
+                compute_dtype=torch.bfloat16,
+                moe_pure_tp_preshard=False,
+                get_selected_experts=lambda layer, count: [0, 1],
+            )
+            source = Source(
+                {
+                    f"down.{i}": torch.full((4, 32), i + 0.5, dtype=torch.bfloat16)
+                    for i in range(2)
+                }
+            )
+            expected = quant._load_raw_tensor(source, 0, "cpu", config)
+            with mock.patch(
+                "rtp_llm.model_loader.nvfp4_cache.quantize_expert_to_nvfp4",
+                side_effect=AssertionError("must reuse cached tensors"),
+            ):
+                got = quant._load_raw_tensor(source, 0, "cpu", config)
+            for name in got:
+                self.assertTrue(torch.equal(got[name].float(), expected[name].float()))
 
     def test_cutlass_rejects_noncontiguous_experts_before_io(self):
         source = Source({})
