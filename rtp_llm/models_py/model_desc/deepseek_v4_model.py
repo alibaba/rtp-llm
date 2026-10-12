@@ -240,6 +240,7 @@ def _args_from_model_config(
         dim=model_config.hidden_size,
         n_heads=attn_config.head_num,
         n_layers=model_config.num_layers,
+        gen_num_per_cycle=int(model_config.gen_num_per_cycle),
         n_mtp_layers=0,  # MTP wiring lands later; main-layer inference first.
         q_lora_rank=attn_config.q_lora_rank,
         head_dim=attn_config.size_per_head,
@@ -829,7 +830,9 @@ class DeepSeekV4Model(GptModelBase):
         # doing it here (outside graph capture) caches the compiled kernel so
         # subsequent calls inside CUDA graph capture hit the cache and skip
         # JIT — which would otherwise abort via __unexpected (noexcept violation).
-        model_warm_up = model_warm_up_enabled()
+        # These prewarm recipes use V4 cache layouts and block128 quantization.
+        # V4.1 eager providers compile on their first admitted forward instead.
+        model_warm_up = model_warm_up_enabled() and self._v4_args.v41_config is None
         if device_str.startswith("cuda") and model_warm_up:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 

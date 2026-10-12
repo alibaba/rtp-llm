@@ -97,6 +97,17 @@ def _record_for_request(result: dict, request_id: int) -> dict:
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    def test_idle_prefill_runs_model_without_cache_store_or_lm_head(self) -> None:
+        model = CacheStoreForwardModel()
+        result = run_scenario(model, "idle_prefill")
+
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(model.seen_input_lengths, [[]])
+        self.assertEqual(model.seen_cache_store_inputs, [])
+        self.assertEqual(result["records"], [])
+        self.assertFalse(result["has_logits"])
+        self.assertEqual(result["hidden_rows"], 0)
+
     def test_multi_tag_uses_each_tag_local_physical_block_table(self) -> None:
         model = CacheStoreForwardModel()
         result = run_scenario(model, "multi_tag")

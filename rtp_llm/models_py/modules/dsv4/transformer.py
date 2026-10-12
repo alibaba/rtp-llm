@@ -119,6 +119,9 @@ class V4Args:
     # the default reflects that; the BF16 path remains supported for
     # debugging by callers that pass ``fp8_kv_cache=False`` explicitly.
     fp8_kv_cache: bool = True
+    # V4.1 uses delayed mHC and a distinct compressed attention/cache layout.
+    v41_config: Optional[Dict] = None
+    gen_num_per_cycle: int = 1
 
 
 def _block_kwargs(
@@ -188,6 +191,7 @@ def _build_block(
     layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     commit_only: bool = False,
     cache_layer_id: Optional[int] = None,
+    shared_attention: Optional[Dict] = None,
 ) -> Block:
     return Block(
         **_block_kwargs(
@@ -196,7 +200,10 @@ def _build_block(
             layer_weights,
             commit_only=commit_only,
             cache_layer_id=cache_layer_id,
-        )
+        ),
+        v41_config=args.v41_config,
+        shared_attention=shared_attention,
+        gen_num_per_cycle=args.gen_num_per_cycle,
     )
 
 
@@ -218,6 +225,18 @@ class V4Transformer(nn.Module):
         # ``prefill/forward.py`` and ``DeepSeekV4Model.prepare_fmha_impl``
         # can dispatch via ``v4.fp8_kv_cache`` without reading args.
         self.fp8_kv_cache = args.fp8_kv_cache
+        if args.v41_config is not None:
+            if args.pp_size != 1 or (
+                args.pp_layer_ids is not None
+                and args.pp_layer_ids != list(range(args.n_layers))
+            ):
+                raise NotImplementedError(
+                    "V4.1 transformer PP requires imported attention and delayed mHC state"
+                )
+            if not args.fp8_kv_cache or self.commit_only:
+                raise NotImplementedError(
+                    "V4.1 requires the target paged-cache runtime"
+                )
 
         from rtp_llm.utils.model_weight import W
 
@@ -228,6 +247,7 @@ class V4Transformer(nn.Module):
             if args.pp_layer_ids
             else list(range(args.n_layers))
         )
+        shared_attention = {}
         self.layers = nn.ModuleList(
             [
                 _build_block(
@@ -236,10 +256,18 @@ class V4Transformer(nn.Module):
                     layer_weights=mw.weights[global_id],
                     commit_only=self.commit_only,
                     cache_layer_id=local_id,
+                    shared_attention=shared_attention,
                 )
                 for local_id, global_id in enumerate(self.pp_global_layer_ids)
             ]
         )
+        if args.v41_config is not None:
+            # The previous sublayer owns this sublayer's residual readout.
+            previous = None
+            for layer in self.layers:
+                layer.attn_hc.set_previous(previous)
+                layer.ffn_hc.set_previous(layer.attn_hc)
+                previous = layer.ffn_hc
 
         self.pp_has_embedding = bool(getattr(args, "pp_has_embedding", True))
         self.pp_has_lm_head = bool(getattr(args, "pp_has_lm_head", True))
@@ -285,15 +313,20 @@ class V4Transformer(nn.Module):
                 raise TypeError(
                     f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
                 )
-            self.head_hc = build_hc_head(
-                gw[W.v4_hc_head_fn],
-                gw[W.v4_hc_head_base],
-                gw[W.v4_hc_head_scale],
-                dim=args.dim,
-                hc_mult=args.hc_mult,
-                norm_eps=args.norm_eps,
-                hc_eps=args.hc_eps,
-            )
+            if args.v41_config is not None:
+                from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCHead
+
+                self.head_hc = DelayedHCHead(self.layers[-1].ffn_hc)
+            else:
+                self.head_hc = build_hc_head(
+                    gw[W.v4_hc_head_fn],
+                    gw[W.v4_hc_head_base],
+                    gw[W.v4_hc_head_scale],
+                    dim=args.dim,
+                    hc_mult=args.hc_mult,
+                    norm_eps=args.norm_eps,
+                    hc_eps=args.hc_eps,
+                )
 
         self._dbg_step = 0
         self.register_buffer("_mtp_hidden_buffer", None, persistent=False)

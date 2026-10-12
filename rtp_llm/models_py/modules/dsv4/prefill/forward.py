@@ -323,6 +323,19 @@ def forward_layers(
     """Run stage-local layers over flat tokens with per-request cu_seqlens.
 
     Non-last stages return [T, hc, dim]; the last stage reduces to [T, dim]."""
+    args = getattr(v4, "args", None)
+    if input_ids.numel() == 0 and getattr(args, "v41_config", None) is not None:
+        if args.ep_size != 8 or args.pp_size != 1 or getattr(v4, "_cp_size", 1) != 1:
+            raise NotImplementedError("V4.1 idle prefill requires PP1/CP1/DP8/EP8")
+        # No local tokens means no attention, history, mHC or cache writes.
+        # Every layer must still execute its ordinary MoE collective schedule.
+        hidden = torch.empty(
+            (0, args.dim), dtype=torch.bfloat16, device=input_ids.device
+        )
+        with prefill_forward_scope(v4, None, 0, input_ids.device):
+            for layer in v4.layers:
+                layer.ffn(hidden, input_ids)
+        return hidden
     _fs_marks: Optional[Dict[str, float]] = None
     _fs_mem0 = None
     _fs_ev0 = None
@@ -886,6 +899,9 @@ def forward_prefill(
                 dtype=torch.int32,
                 device=input_ids.device,
             )
+    # Native PyAttentionInputs exposes a host mirror; Triton metadata kernels
+    # need device-accessible boundaries even when that mirror is not pinned.
+    cu_seqlens = cu_seqlens.to(device=input_ids.device, non_blocking=True)
     positions = getattr(attn, "combo_position_ids", None)
     # warmup / cudagraph capture path doesn't populate combo_position_ids —
     # synthesize from (prefix_lengths, input_lengths). Prefer ``_d`` (GPU)

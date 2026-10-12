@@ -33,4 +33,13 @@ void topk_v3(const torch::Tensor& logits,
              int64_t k,
              int64_t max_seq_len);
 
+// DSv4.1 prefill-only K512: select with the original FP32 TopK, then replace
+// out-of-range or nonfinite selected tokens with -1 without filling those slots.
+void dsv41_topk_v3_finite(const torch::Tensor& logits,
+                         const torch::Tensor& lengths,
+                         torch::Tensor& output,
+                         torch::Tensor& workspace,
+                         int64_t k,
+                         int64_t max_seq_len);
+
 }  // namespace torch_ext

@@ -183,6 +183,7 @@ _env = {
     "dsv4_global_chunk_tokens_configured": chunk_env.dsv4_global_chunk_tokens_configured,
     "combine_routed_and_shared": None,  # installed below
     "_FINAL_OUT_CACHE": {},
+    "_FINAL_OUT_RETIRED": [],
     "_CHUNKED_MOE_LOGGED": False,
 }
 exec(
@@ -382,8 +383,11 @@ def run_caller(
     fresh()
     err = None
     try:
-        y = moe(x, ids)
+        # The production caller reuses its output workspace across forwards.
+        y = moe(x, ids).clone()
     except Exception as e:  # noqa: BLE001
+        if not fail_next:
+            raise
         err = e
         y = None
     return {

@@ -293,7 +293,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
         self.assertIn(device_index, _SHARED_EXPERT_STREAM_CACHE)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_capture_requires_precreated_stream(self):
+    def test_overlap_capture_uses_current_stream_without_precreation(self):
         _SHARED_EXPERT_STREAM_CACHE.clear()
         x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
         shared = _Shared().cuda()
@@ -303,13 +303,13 @@ class TestSharedExpertExecutor(unittest.TestCase):
             "torch.cuda.is_current_stream_capturing",
             return_value=True,
         ):
-            with self.assertRaisesRegex(
-                RuntimeError, "not created before CUDA graph capture"
-            ):
-                executor.start(shared, x)
+            executor.start(shared, x)
+            self.assertIsNone(executor._active_stream)
+            self.assertEqual(_SHARED_EXPERT_STREAM_CACHE, {})
+            self.assertTrue(torch.equal(executor.finish(), shared(x).float()))
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
-    def test_overlap_executor_captures_with_precreated_stream(self):
+    def test_overlap_executor_captures_on_current_stream_after_overlap_warmup(self):
         _SHARED_EXPERT_STREAM_CACHE.clear()
         x = torch.randn(33, 128, device="cuda", dtype=torch.bfloat16)
         shared = _Shared().cuda()
@@ -326,7 +326,7 @@ class TestSharedExpertExecutor(unittest.TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 executor.start(shared, x)
-                self.assertIs(executor._active_stream, warmup_stream)
+                self.assertIsNone(executor._active_stream)
                 out.copy_(executor.finish())
 
             x.mul_(2.0)
@@ -369,9 +369,11 @@ class TestSharedExpertExecutor(unittest.TestCase):
             w13_w.shape,
             (512, 256),
         )
-        self.assertEqual(w13_s.shape[0], 512)
         if w13_s.dtype == torch.int32:
+            self.assertEqual(w13_s.shape[0], 512)
             self.assertEqual(w13_s.stride(0), 1)
+        else:
+            self.assertEqual(tuple(w13_s.shape), (4, 2))
         self.assertFalse(hasattr(shared, "w1"))
         self.assertFalse(hasattr(shared, "w3"))
 
@@ -383,6 +385,15 @@ class TestSharedExpertExecutor(unittest.TestCase):
                     device="cuda",
                     dtype=torch.bfloat16,
                 )
+                if not FusedSharedExpertFastPath.can_run(shared, x):
+                    with self.assertRaisesRegex(RuntimeError, "loader-merged"):
+                        executor.run(shared, x)
+                    fallback = SequentialSharedExpertExecutor(executor)
+                    fallback.start(shared, x)
+                    got = fallback.finish()
+                    ref = split_ref(x).float()
+                    torch.testing.assert_close(got, ref, rtol=0.02, atol=0.002)
+                    continue
                 gemm_calls = []
 
                 def fake_with_record(a, b, output, *args, **kwargs):

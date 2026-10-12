@@ -66,6 +66,32 @@ TEST(Dsv4DpPrefillPolicyTest, ProfileGating) {
 
 class Dsv4DpPrefillPhaseTest: public testing::TestWithParam<int> {};
 
+TEST(Dsv4DpPrefillPolicyTest, V41OnlyAdmitsEightRankPrefill) {
+    for (const char* strategy : {static_cast<const char*>(nullptr), "auto", "v41_nccl_ep", "sm120_decode", "other"}) {
+        for (RoleType role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+            for (int world : {1, 2, 4, 8}) {
+                const bool admitted = role == RoleType::PREFILL && world == 8
+                                      && (!strategy || std::string(strategy) == "auto"
+                                          || std::string(strategy) == "v41_nccl_ep");
+                EXPECT_EQ(dsv4DpPrefillPhaseSyncEnabled(
+                              "deepseek_v41", strategy, role, 1, 1, world, world, world, false, false, false),
+                          admitted);
+            }
+        }
+    }
+    auto enabled = [](int pp, int tp, int ep, int world, bool sp, bool cp, bool ffn) {
+        return dsv4DpPrefillPhaseSyncEnabled(
+            "deepseek_v41", "auto", RoleType::PREFILL, pp, tp, 8, ep, world, sp, cp, ffn);
+    };
+    EXPECT_FALSE(enabled(2, 1, 8, 8, false, false, false));
+    EXPECT_FALSE(enabled(1, 2, 8, 8, false, false, false));
+    EXPECT_FALSE(enabled(1, 1, 4, 8, false, false, false));
+    EXPECT_FALSE(enabled(1, 1, 8, 16, false, false, false));
+    EXPECT_FALSE(enabled(1, 1, 8, 8, true, false, false));
+    EXPECT_FALSE(enabled(1, 1, 8, 8, false, true, false));
+    EXPECT_FALSE(enabled(1, 1, 8, 8, false, false, true));
+}
+
 TEST_P(Dsv4DpPrefillPhaseTest, AlignsEveryContextPlacement) {
     const int world = GetParam();
     SCOPED_TRACE(testing::Message() << "world=" << world);
@@ -139,7 +165,7 @@ TEST_P(Dsv4DpPrefillPhaseTest, AlignsEveryContextPlacement) {
 
 INSTANTIATE_TEST_SUITE_P(WorldSizes,
                          Dsv4DpPrefillPhaseTest,
-                         testing::Values(2, 4),
+                         testing::Values(2, 4, 8),
                          [](const testing::TestParamInfo<int>& info) { return "World" + std::to_string(info.param); });
 
 TEST(Dsv4DpPrefillPolicyTest, PreservesMultiplePrefillsInOrder) {

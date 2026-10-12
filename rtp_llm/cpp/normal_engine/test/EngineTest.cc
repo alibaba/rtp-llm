@@ -131,6 +131,42 @@ TEST_F(NormalEngineTest, fakeStreamsHaveExecutableChunksWithFastGen) {
     }
 }
 
+TEST_F(NormalEngineTest, V41IdleExecutorRunsModelWithoutSamplingOrAdvancingPlaceholder) {
+    auto engine = createMockEngine(CustomConfig{});
+    auto fake = engine->createMinFakeStream(1, true);
+    ModelConfig config;
+    RuntimeConfig runtime;
+    KVCacheConfig cache;
+    auto params = createEngineInitParams(CustomConfig{}, config, runtime, cache);
+    params.model_config_.model_type = "deepseek_v41";
+    bool called = false;
+    class IdleModel final: public ModelBase {
+    public:
+        explicit IdleModel(bool& called): called_(called) {}
+        GptModelOutputs forward(const GptModelInputs& inputs) override {
+            called_ = true;
+            EXPECT_TRUE(inputs.is_fake_stream);
+            EXPECT_EQ(inputs.combo_tokens.numel(), 0);
+            EXPECT_EQ(inputs.input_lengths.numel(), 0);
+            // Undefined logits deliberately cannot be consumed by a sampler.
+            return {};
+        }
+    private:
+        bool& called_;
+    };
+    NormalExecutor executor(params, engine->getCacheManager(), false);
+    executor.model_ = std::make_unique<IdleModel>(called);
+    ScheduleOutput schedule;
+    schedule.streams = {fake};
+    const auto step = fake->iterCount();
+    EXPECT_TRUE(executor.process(schedule).ok());
+    EXPECT_TRUE(called);
+    EXPECT_EQ(fake->iterCount(), step);
+    EXPECT_TRUE(fake->isContextStream());
+    EXPECT_EQ(fake->seqLength(), 1);
+    EXPECT_TRUE(engine->stop().ok());
+}
+
 TEST_F(NormalEngineTest, realStreamsHaveExecutableContextWithFastGen) {
     for (const bool fast_gen : {false, true}) {
         CustomConfig config;
@@ -520,7 +556,16 @@ TEST_F(NormalEngineTest, testRejectOutputVocabWithPrefillCP) {
     CustomConfig config;
     config.output_vocab_ids   = {0, 2, 7};
     config.prefill_cp_enabled = true;
-    EXPECT_THROW(createMockEngine(config), std::exception);
+    ModelConfig model_config;
+    RuntimeConfig runtime;
+    KVCacheConfig cache;
+    auto params = createEngineInitParams(config, model_config, runtime, cache);
+    // A CP method at TP1 is disabled by local_cp_enabled(). Exercise an
+    // actual local CP topology so this test reaches the intended guard.
+    params.parallelism_config.tp_size = params.parallelism_config.world_size = 2;
+    params.parallelism_config.role_type = RoleType::PREFILL;
+    ASSERT_TRUE(params.parallelism_config.local_cp_enabled());
+    EXPECT_THROW(std::make_shared<NormalEngine>(params, nullptr), std::exception);
 }
 
 TEST_F(NormalEngineTest, testRejectOutputVocabWithDeviceInput) {

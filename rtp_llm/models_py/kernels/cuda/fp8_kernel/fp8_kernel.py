@@ -14,8 +14,6 @@ from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
-    from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
-
     from rtp_llm.ops.compute_ops import (
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
@@ -74,7 +72,7 @@ def create_per_token_group_quant_fp8_output_scale(
     if scale_ue8m0:
         assert column_major_scales and scale_tma_aligned
         *x_batch, x_q_mn, x_q_k = x_shape
-        x_s_mn, x_s_k = x_q_mn, x_q_k // 128
+        x_s_mn, x_s_k = x_q_mn, x_q_k // group_size
         aligned_mn = ceil_align(x_s_mn, 4)
         aligned_k = ceil_align(x_s_k, 4)
         # TODO(FIXME): Fix cuda kernel and recover here to empty.
@@ -267,6 +265,9 @@ def cutlass_moe_mm_fp8_scaled(
     elements_m,
     swap_ab,
 ) -> None:
+    # rtp_kernel also imports optional attention backends at package startup.
+    # Quantization and non-CUTLASS users do not require those dependencies.
+    from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
 
     assert per_act_token == True
     assert per_out_ch == False

@@ -459,6 +459,13 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
+    if (name == "idle_prefill") {
+        auto scenario = makeMultiTagScenario();
+        scenario.inputs = makeInputs({}, {}, {}, 0, {}, 2, 0, 4, 16);
+        scenario.inputs.is_fake_stream = true;
+        scenario.inputs.engram_token_windows = pinnedTensor({}, {0, 4});
+        return scenario;
+    }
     if (name == "multi_tag") {
         return makeMultiTagScenario();
     }
@@ -536,6 +543,11 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     Weights weights;
     weights.layers.resize(1);
+    if (scenario_name == "idle_prefill") {
+        auto head = std::make_shared<DenseWeights>();
+        head->kernel = torch::ones({8, 1}, torch::TensorOptions(torch::kBFloat16).device(torch::kCUDA));
+        weights.lm_head = std::move(head);
+    }
     GptModelDescription description;
     description.data_type                    = DataType::TYPE_FP16;
     description.norm_type                    = NormType::rmsnorm;
@@ -565,14 +577,18 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
                               manager,
                               scenario.mtp_cache_config_index};
 
+    GptModelOutputs outputs;
     {
         PyWrappedModel model(params, std::move(py_model));
         if (scenario.replace_cp_processor) {
             model.context_parallel_processor_ = std::make_unique<TestContextParallelProcessor>(scenario.parallelism);
         }
-        (void)model.forward(scenario.inputs);
+        outputs = model.forward(scenario.inputs);
     }
-    return serializeResult(*cache_store, scenario.base_addresses);
+    auto result = serializeResult(*cache_store, scenario.base_addresses);
+    result["has_logits"] = outputs.logits.defined();
+    result["hidden_rows"] = outputs.hidden_states.defined() ? outputs.hidden_states.size(0) : -1;
+    return result;
 }
 
 }  // namespace

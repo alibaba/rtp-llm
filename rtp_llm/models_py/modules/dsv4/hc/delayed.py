@@ -1,177 +1,150 @@
-"""V4.1 delayed mHC with explicit per-forward coefficients.
+"""DeepSeek V4.1 delayed hyper-connections.
 
-Adapted from donor 88993fcb36838def206525a079145a823e879e8a and the
-checkpoint's inference/model.py. The existing V4 Sinkhorn implementation is
-shared; coefficient ownership follows V4.1. This is the unfused Torch path.
+The coefficients projected at a sublayer are used to collapse the *next*
+sublayer's residual. Post/residual mixing still belongs to the current
+sublayer. The last FFN pre-mix is also the final head readout; V4.1 has no
+learned ``hc_head`` weights.
+
+Ported from RTP-LLM e4a9162f6f; standalone explicit-coefficient fixtures live
+in delayed_reference.py.
 """
 
-import math
-from dataclasses import dataclass
+from __future__ import annotations
+
+import importlib
+import weakref
+from functools import lru_cache
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.dsv4.hc.base import HCUnitBase
 from rtp_llm.models_py.modules.dsv4.hc.fallback_impl import _hc_split_sinkhorn
+from rtp_llm.models_py.modules.dsv4.hc.tilelang_impl import TileLangHCUnit
 
 
-def _residual(x: torch.Tensor) -> None:
-    if (
-        x.ndim not in (3, 4)
-        or x.shape[-2] <= 0
-        or x.shape[-1] <= 0
-        or x.dtype not in (torch.bfloat16, torch.float16, torch.float32)
-    ):
-        raise ValueError(
-            "Delayed mHC residual requires floating [T, hc, dim] or [B, S, hc, dim]"
-        )
+@lru_cache(maxsize=1)
+def _tile_ops():
+    # Set up libz3/TVM before importing the vendored TileLang kernels.
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels  # noqa: F401
 
-
-def _mix(tensor: torch.Tensor, shape: tuple[int, ...], device: torch.device) -> None:
-    if (
-        tuple(tensor.shape) != shape
-        or tensor.dtype != torch.float32
-        or tensor.device != device
-    ):
-        raise ValueError(
-            "Delayed mHC coefficients must be FP32 with matching shape/device"
-        )
-
-
-def identity_pre_mix(residual: torch.Tensor) -> torch.Tensor:
-    """Initial global-layer-zero readout selects the first residual lane."""
-    _residual(residual)
-    result = torch.zeros(
-        residual.shape[:-1], dtype=torch.float32, device=residual.device
-    )
-    result[..., 0] = 1
-    return result
-
-
-def collapse_delayed(
-    residual: torch.Tensor, previous_pre_mix: torch.Tensor
-) -> torch.Tensor:
-    """Use the predecessor's coefficients for attention/FFN or final readout."""
-    _residual(residual)
-    _mix(previous_pre_mix, tuple(residual.shape[:-1]), residual.device)
-    return (
-        (residual.float() * previous_pre_mix.unsqueeze(-1))
-        .sum(dim=-2)
-        .to(residual.dtype)
+    return importlib.import_module(
+        "rtp_llm.models_py.3rdparty.tile_kernels.modeling.mhc.functional"
     )
 
 
-@dataclass(frozen=True)
-class DelayedHCMixes:
-    next_pre_mix: torch.Tensor
-    post: torch.Tensor
-    residual_mix: torch.Tensor
+def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
+    """Read residual streams using FP32 coefficients and accumulation."""
+    if tuple(pre_mix.shape) != tuple(x.shape[:-1]):
+        raise ValueError(
+            f"Delayed mHC pre-mix {tuple(pre_mix.shape)} does not match "
+            f"residual {tuple(x.shape)}"
+        )
+    if x.is_cuda and x.dtype == torch.bfloat16:
+        ops = _tile_ops()
+        shape = x.shape
+        return ops.mhc_pre_apply_mix(
+            x.reshape(1, -1, shape[-2], shape[-1]),
+            pre_mix.reshape(1, -1, shape[-2], 1).contiguous(),
+        ).reshape(*shape[:-2], shape[-1])
+    return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
 
 
-class DelayedHCUnit(nn.Module):
-    """Current post/residual mixing, with pre-mix passed to the next sublayer.
-
-    ``pre`` requires the previous coefficients even for the first local layer.
-    Stage zero explicitly constructs identity_pre_mix; stage one uses its PP
-    frame. No predecessor pointers, cached pre_mix_out or learned head weights.
-    """
-
-    def __init__(
-        self,
-        fn: torch.Tensor,
-        base: torch.Tensor,
-        scale: torch.Tensor,
-        *,
-        dim: int,
-        hc_mult: int = 4,
-        hc_sinkhorn_iters: int = 20,
-        norm_eps: float = 1e-6,
-        hc_eps: float = 1e-6
-    ):
-        super().__init__()
-        if any(type(n) is not int or n <= 0 for n in (dim, hc_mult, hc_sinkhorn_iters)):
+class DelayedHCUnit(HCUnitBase):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        mix_width = self.hc_mult * (self.hc_mult + 2)
+        expected_fn_shape = (mix_width, self.hc_mult * self.dim)
+        if tuple(self.fn.shape) != expected_fn_shape:
             raise ValueError(
-                "Delayed mHC dimensions and Sinkhorn iterations must be positive integers"
+                f"Delayed mHC fn shape {tuple(self.fn.shape)} != {expected_fn_shape}"
             )
-        if any(
-            not isinstance(e, (float, int))
-            or isinstance(e, bool)
-            or not math.isfinite(e)
-            or e <= 0
-            for e in (norm_eps, hc_eps)
-        ):
-            raise ValueError("Delayed mHC epsilons must be finite and positive")
-        width = hc_mult * (hc_mult + 2)
-        if (
-            fn.shape != (width, hc_mult * dim)
-            or base.numel() != width
-            or scale.numel() != 3
-        ):
-            raise ValueError("Delayed mHC weights have incompatible dimensions")
-        if any(
-            t.dtype != torch.float32 or t.device != fn.device for t in (fn, base, scale)
-        ):
-            raise ValueError("Delayed mHC weights must be FP32 on one device")
-        self.fn = fn.contiguous()
-        self.base = base.reshape(width).contiguous()
-        self.scale = scale.reshape(3).contiguous()
-        self.dim = dim
-        self.hc_mult = hc_mult
-        self.hc_sinkhorn_iters = hc_sinkhorn_iters
-        self.norm_eps = norm_eps
-        self.hc_eps = hc_eps
+        if self.base.numel() != mix_width or self.scale.numel() != 3:
+            raise ValueError("Delayed mHC requires mix-width base and three scales")
+        if any(t.dtype != torch.float32 for t in (self.fn, self.base, self.scale)):
+            raise TypeError("Delayed mHC fn, base and scale must be FP32")
+        # AtomicWeight gives named scale tensors a trailing singleton axis.
+        # mHC scales are three scalar coefficients, unlike quantization scales;
+        # restore the kernel's 1-D contract once, before graph capture.
+        self.base = self.base.reshape(mix_width).contiguous()
+        self.scale = self.scale.reshape(3).contiguous()
+        self._previous_ref = None
+        self.pre_mix_out: Optional[torch.Tensor] = None
 
-    def _check(self, residual: torch.Tensor) -> None:
-        _residual(residual)
-        if (
-            residual.shape[-2:] != (self.hc_mult, self.dim)
-            or residual.device != self.fn.device
-        ):
-            raise ValueError("Delayed mHC residual disagrees with its weights")
+    def set_previous(self, previous: Optional["DelayedHCUnit"]) -> None:
+        # Avoid registering predecessors as nested modules or creating cycles.
+        self._previous_ref = weakref.ref(previous) if previous is not None else None
 
-    def pre(
-        self, residual: torch.Tensor, previous_pre_mix: torch.Tensor
-    ) -> tuple[torch.Tensor, DelayedHCMixes]:
-        self._check(residual)
-        collapsed = collapse_delayed(residual, previous_pre_mix)
-        flat = residual.flatten(-2).float()
-        projection = F.linear(flat, self.fn) * torch.rsqrt(
-            flat.square().mean(dim=-1, keepdim=True) + self.norm_eps
-        )
-        pre, post, comb = _hc_split_sinkhorn(
-            projection,
-            self.scale,
-            self.base,
-            self.hc_mult,
-            self.hc_sinkhorn_iters,
-            self.hc_eps,
-        )
-        return collapsed, DelayedHCMixes(pre, post, comb)
+    def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
+        shape = x.shape
+        if x.is_cuda and x.dtype == torch.bfloat16:
+            from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import prenorm
 
-    def post(
-        self, output: torch.Tensor, residual: torch.Tensor, mixes: DelayedHCMixes
-    ) -> torch.Tensor:
-        self._check(residual)
-        shape = tuple(residual.shape)
-        if (
-            output.shape != shape[:-2] + (self.dim,)
-            or output.device != residual.device
-            or output.dtype != residual.dtype
-        ):
-            raise ValueError("Delayed mHC sublayer output disagrees with its residual")
-        if not isinstance(mixes, DelayedHCMixes):
-            raise ValueError("Delayed mHC requires the current sublayer's mixes")
-        _mix(mixes.next_pre_mix, shape[:-1], residual.device)
-        _mix(mixes.post, shape[:-1], residual.device)
-        _mix(
-            mixes.residual_mix,
-            shape[:-2] + (self.hc_mult, self.hc_mult),
-            residual.device,
-        )
-        # comb[source, destination], matching the checkpoint's explicit reduction.
-        combined = (
-            mixes.residual_mix.unsqueeze(-1) * residual.float().unsqueeze(-2)
-        ).sum(dim=-3)
-        return (mixes.post.unsqueeze(-1) * output.float().unsqueeze(-2) + combined).to(
-            residual.dtype
-        )
+            ops = _tile_ops()
+            residual = x.reshape(1, -1, self.hc_mult, self.dim)
+            mixes = prenorm(residual, self.fn, self.norm_eps)
+            if mixes is None:
+                mixes = ops.mhc_pre_norm_fn(
+                    residual, self.fn, None, self.norm_eps, n_splits=1
+                )
+            pre, post, comb = ops.mhc_pre_split_mixes(
+                mixes, self.scale, self.base, self.hc_mult, 2.0, self.hc_eps
+            )
+            comb = ops.sinkhorn_normalize(
+                comb, repeat=self.hc_sinkhorn_iters, eps=self.hc_eps
+            )
+            self.pre_mix_out = pre.reshape(*shape[:-1]).contiguous()
+            post = post.reshape(*shape[:-1], 1)
+            comb = comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult)
+        else:
+            flattened = x.flatten(-2).float()
+            mixes = F.linear(flattened, self.fn.float()) * torch.rsqrt(
+                flattened.square().mean(dim=-1, keepdim=True) + self.norm_eps
+            )
+            pre, post, comb = _hc_split_sinkhorn(
+                mixes,
+                self.scale,
+                self.base,
+                self.hc_mult,
+                self.hc_sinkhorn_iters,
+                self.hc_eps,
+            )
+            self.pre_mix_out = pre
+            post = post.unsqueeze(-1)
+
+        if self._previous_ref is None:
+            # Identity readout at entry selects lane zero, not the new mix.
+            # A single row is already contiguous; copy so in-place norm in
+            # Block's fast path cannot overwrite the residual lane.
+            y = x[..., 0, :].clone(memory_format=torch.contiguous_format)
+        else:
+            previous = self._previous_ref()
+            if previous is None or previous.pre_mix_out is None:
+                raise RuntimeError("Delayed mHC predecessor has not run")
+            y = collapse_delayed(x, previous.pre_mix_out)
+        return y, post, comb
+
+    def _post_impl(self, x, residual, post, comb):
+        if residual.is_cuda and residual.dtype == torch.bfloat16:
+            return TileLangHCUnit._post_impl(self, x, residual, post, comb)
+        return (
+            post.float() * x.float().unsqueeze(-2)
+            + torch.matmul(comb.float().transpose(-1, -2), residual.float())
+        ).to(residual.dtype)
+
+
+class DelayedHCHead(nn.Module):
+    def __init__(self, last_ffn: DelayedHCUnit) -> None:
+        super().__init__()
+        self._last_ffn_ref = weakref.ref(last_ffn)
+
+    def head(self, hidden: torch.Tensor) -> torch.Tensor:
+        unit = self._last_ffn_ref()
+        if unit is None or unit.pre_mix_out is None:
+            raise RuntimeError("V4.1 final FFN pre-mix is unavailable")
+        return collapse_delayed(hidden, unit.pre_mix_out)
+
+
+__all__ = ["DelayedHCUnit", "DelayedHCHead", "collapse_delayed"]

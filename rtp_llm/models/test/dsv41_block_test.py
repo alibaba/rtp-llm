@@ -20,7 +20,7 @@ from rtp_llm.models.test.dsv41_projection_test import norm, projection
 with patch.dict(
     sys.modules,
     {
-        "rtp_llm.models_py.modules.dsv4.hc.delayed": hc,
+        "rtp_llm.models_py.modules.dsv4.hc.delayed_reference": hc,
         "rtp_llm.models_py.modules.dsv4.v41_attention_projection": queries,
         "rtp_llm.models_py.modules.dsv4.v41_feed_forward": ffn,
         "rtp_llm.models_py.modules.dsv4.v41_moe": moe,

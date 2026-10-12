@@ -83,6 +83,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
+from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear, _is_v41_fp8_scale
 from rtp_llm.models_py.modules.factory.linear import LinearFactory
 from rtp_llm.models_py.utils.arch import is_sm12x, is_sm120
 from rtp_llm.models_py.utils.memory import dispose_tensor
@@ -431,23 +432,17 @@ def _prepare_wo_a_stacked(
     R: int,
     K: int,
 ) -> tuple:
-    """Stack V4 wo_a ckpt (``[G*R, K]`` fp8 + ``[G*R/128, K/128]`` e8m0fnu)
-    into the ``fp8_einsum``-expected layout, computed once at init:
+    """Stack V4 block128 or V4.1 block32 output weights and packed scales.
 
-    - weight: ``[G, R, K]`` fp8 contiguous (free view)
-    - scale : ``[G, R, K/512]`` int32 UE8M0 packed, MN-major TMA-aligned
-      (stride ``(K/512 * tma_R, 1, tma_R)``)
-
-    Cast e8m0fnu → fp32, row-repeat by 128 along R so
-    ``get_mn_major_tma_aligned_packed_ue8m0_tensor`` (which operates on
-    fp32 ``[*, mn, k/128]``) sees the full [G, R, K/128] grid.  The helper
-    floor-log2 bitcasts each block scale and packs 4 UE8M0 bytes per
-    int32; output shape ``[G, R, K/512]`` matches
-    ``deep_gemm.fp8_einsum(..., recipe=(1, 1, 128))`` expectations."""
+    Weight is [G,R,K]. Scale rows expand to R before packing four UE8M0
+    exponents per int32 in MN-major TMA layout, giving [G,R,K/(4*block)].
+    The consuming GEMM must use the matching block-size recipe.
+    """
     w_stk = weight_fp8.view(G, R, K).contiguous()
-    scale_fp32 = scale_raw.float().view(G, R // 128, K // 128)
-    idx = torch.arange(R, device=scale_raw.device) // 128
-    scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
+    scale_block = K // scale_raw.shape[-1]
+    scale_fp32 = scale_raw.float().view(G, R // scale_block, K // scale_block)
+    idx = torch.arange(R, device=scale_raw.device) // scale_block
+    scale_rep = scale_fp32.index_select(-2, idx).contiguous()
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
 
@@ -459,6 +454,8 @@ def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
     TMA-aligned packed layout when needed. Framework descriptor path may
     deliver the scale already packed (dtype int32) — we no-op then."""
     assert s is not None, "expected non-null FP8 scale"
+    if _is_v41_fp8_scale(w, s):
+        return V41MXFP8Linear(w, s)
     # DeepGEMM's packed int32 UE8M0 contract is unsupported on consumer
     # Blackwell. Keep the compact raw UE8M0 scale for the SM120 CUTLASS
     # blockwise backend, which decodes it to float32 at construction time.
@@ -487,6 +484,8 @@ def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):
     packed form so subsequent callers don't repack."""
     w = weights[weight_key]
     s = weights[scale_key]
+    if _is_v41_fp8_scale(w, s):
+        return _v4_fp8_linear(w, s)
     from rtp_llm.models_py.utils.arch import is_sm120
 
     if s.dtype == torch.float8_e8m0fnu and not is_sm120(s.device):
@@ -900,6 +899,7 @@ class PrefillMeta(NamedTuple):
     # by ``build_and_propagate_prefill_meta_fp8`` from the forward's local
     # ``PrefillWorkspace``; non-None for every production prefill call.
     workspace: Optional[PrefillWorkspace] = None
+    request_row_slices: Optional[Tuple[slice, ...]] = None
 
 
 class PrefillQKV(NamedTuple):
@@ -996,20 +996,23 @@ class AttentionFP8(nn.Module):
             then build a CudaFp8DeepGEMMLinear via ``_v4_fp8_linear``.
 
             Scale slicing depends on layout:
-              * legacy raw UE8M0 [N//128, K//128]: row/col strides are
-                block-128 → ``slice.start // 128``.
+              * raw UE8M0 uses block128 (V4) or block32 (V4.1), derived
+                from the full weight and scale shapes before TP slicing.
               * framework packed int32 [N, K//128//4]: N is fully
                 expanded (slice by full N stride) and K is packed 4×
                 (slice by ``slice.start // 512``)."""
             w = layer_weights[w_tag]
             s = layer_weights[s_tag]
             scale_is_packed_int32 = s.dtype == torch.int32
+            if not scale_is_packed_int32:
+                scale_rows = w.shape[0] // s.shape[0]
+                scale_cols = w.shape[1] // s.shape[1]
             if row_slice is not None:
                 w = w[row_slice]
                 if scale_is_packed_int32:
                     s = s[row_slice]
                 else:
-                    s = s[row_slice.start // 128 : row_slice.stop // 128]
+                    s = s[row_slice.start // scale_rows : row_slice.stop // scale_rows]
             if col_slice is not None:
                 w = w[:, col_slice]
                 if scale_is_packed_int32:
@@ -1020,7 +1023,9 @@ class AttentionFP8(nn.Module):
                     )
                     s = s[:, col_slice.start // 512 : col_slice.stop // 512]
                 else:
-                    s = s[:, col_slice.start // 128 : col_slice.stop // 128]
+                    s = s[
+                        :, col_slice.start // scale_cols : col_slice.stop // scale_cols
+                    ]
             if row_slice is not None or col_slice is not None:
                 w = w.contiguous()
                 s = s.contiguous()
@@ -1046,13 +1051,16 @@ class AttentionFP8(nn.Module):
         wo_a_w = layer_weights[W.v4_attn_wo_a_w]
         wo_a_s = layer_weights[W.v4_attn_wo_a_s]
         if tp_size > 1:
+            scale_rows = wo_a_w.shape[0] // wo_a_s.shape[0]
             wo_a_w = wo_a_w[wo_a_row_slice].contiguous()
             if wo_a_s.dtype == torch.int32:
                 # framework path: scale is already (N, K//128//4) int32
                 wo_a_s = wo_a_s[wo_a_row_slice].contiguous()
             else:
                 wo_a_s = wo_a_s[
-                    wo_a_row_slice.start // 128 : wo_a_row_slice.stop // 128
+                    wo_a_row_slice.start
+                    // scale_rows : wo_a_row_slice.stop
+                    // scale_rows
                 ].contiguous()
         self.wo_a_w = wo_a_w
         self.wo_a_s = wo_a_s

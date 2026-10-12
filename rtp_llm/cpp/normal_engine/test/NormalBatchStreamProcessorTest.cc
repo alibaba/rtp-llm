@@ -274,6 +274,45 @@ TEST_F(V41CacheDispatchTest, FailedGatherDoesNotConsumeGenerationsOrLeakLeases) 
     EXPECT_EQ(manager_->freeBlocksNum(), initially_free);
 }
 
+TEST_F(V41CacheDispatchTest, IdlePrefillHasNoRequestsAndPreservesLiveGeneration) {
+    auto live = makeStream(41);
+    chunk(live, 0, 2);
+    auto first = gather({live});
+    ASSERT_TRUE(first.ok()) << first.status();
+    auto fake = makeStream(99);
+    fake->setIsFakeStream(true);
+    const auto free_blocks = manager_->freeBlocksNum();
+    const auto fake_step = fake->iterCount();
+    for (int round = 0; round < 2; ++round) {
+        auto idle = gather({fake});
+        ASSERT_TRUE(idle.ok()) << idle.status();
+        EXPECT_TRUE(idle->is_fake_stream);
+        for (const auto& tensor : {idle->combo_tokens, idle->input_lengths, idle->prefix_lengths,
+                                  idle->sequence_lengths, idle->lm_output_indexes, idle->request_id}) {
+            ASSERT_TRUE(tensor.defined());
+            EXPECT_EQ(tensor.numel(), 0);
+        }
+        EXPECT_EQ(idle->engram_token_windows.sizes().vec(), (std::vector<int64_t>{0, 4}));
+        EXPECT_EQ(idle->v41_cache_spans.sizes().vec(), (std::vector<int64_t>{0, 6}));
+        EXPECT_TRUE(idle->v41_cache_leases.empty());
+        EXPECT_EQ(idle->kv_cache_block_id.sizes().vec(),
+                  (std::vector<int64_t>{static_cast<int64_t>(config_.groupNums()), 0, 0}));
+        EXPECT_EQ(idle->kv_cache_kernel_block_id.numel(), 0);
+        EXPECT_FALSE(idle->kv_cache_blocks_to_zero.defined());
+        EXPECT_FALSE(idle->kv_cache_update_mapping.defined());
+        EXPECT_EQ(manager_->freeBlocksNum(), free_blocks);
+        EXPECT_EQ(fake->iterCount(), fake_step);
+    }
+    chunk(live, 2, 4);
+    auto next = gather({live});
+    ASSERT_TRUE(next.ok()) << next.status();
+    EXPECT_EQ(next->v41_cache_spans[0][1].item<int64_t>(), first->v41_cache_spans[0][1].item<int64_t>());
+    EXPECT_EQ(next->v41_cache_spans[0][3].item<int64_t>(), 1);
+    EXPECT_EQ(toVec<int32_t>(next->engram_token_windows), (std::vector<int32_t>{13, 12, 11, -1, 14, 13, 12, 11}));
+    fake->setIsFakeStream(false);
+    fake->releaseResource();
+}
+
 TEST_F(V41CacheDispatchTest, ReusedRequestIdAndResetCacheRequireNewGeneration) {
     auto stream = makeStream(41);
     auto old    = gather({stream});

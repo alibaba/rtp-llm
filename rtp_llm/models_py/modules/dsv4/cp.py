@@ -637,6 +637,15 @@ def _cp_gather_2d(
     return local_2d.contiguous()
 
 
+def cp_swa_replay_starts(cp_ctx) -> Optional[Tuple[int, ...]]:
+    """Return per-request fresh offsets, including legacy single-request replay."""
+    starts = getattr(cp_ctx, "swa_replay_starts_host", None)
+    if starts is not None:
+        return starts
+    start = getattr(cp_ctx, "swa_replay_start", None)
+    return (start,) if start is not None else None
+
+
 def _cp_restore_gathered_full_2d(
     gathered: torch.Tensor,
     cp_ctx: CPContext,

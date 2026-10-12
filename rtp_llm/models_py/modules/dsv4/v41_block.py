@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from rtp_llm.models_py.modules.dsv4.hc.delayed import (
+from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import (
     DelayedHCMixes,
     DelayedHCUnit,
     collapse_delayed,

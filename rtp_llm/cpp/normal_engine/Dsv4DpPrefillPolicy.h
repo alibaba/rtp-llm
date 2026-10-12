@@ -20,8 +20,14 @@ inline bool dsv4DpPrefillPhaseSyncEnabled(std::string_view model_type,
                                           bool             speculative,
                                           bool             local_cp,
                                           bool             ffn_disaggregate) {
-    return model_type == "deepseek_v4" && moe_strategy && std::string_view(moe_strategy) == "sm120_decode"
-           && role == RoleType::PDFUSION && pp_size == 1 && tp_size == 1 && dp_size > 1 && ep_size == dp_size
+    const bool v4 = model_type == "deepseek_v4" && moe_strategy
+                    && std::string_view(moe_strategy) == "sm120_decode" && role == RoleType::PDFUSION;
+    // V4.1 currently qualifies only eager prefill on the complete eight-rank
+    // group. Decode/PDFUSION must not inherit this admission before qualification.
+    const bool v41 = model_type == "deepseek_v41" && role == RoleType::PREFILL && dp_size == 8
+                     && (!moe_strategy || std::string_view(moe_strategy) == "auto"
+                         || std::string_view(moe_strategy) == "v41_nccl_ep");
+    return (v4 || v41) && pp_size == 1 && tp_size == 1 && dp_size > 1 && ep_size == dp_size
            && world_size == dp_size && !speculative && !local_cp && !ffn_disaggregate;
 }
 

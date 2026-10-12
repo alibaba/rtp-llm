@@ -18,6 +18,41 @@ _DSV4_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_v41_query_sm120",
+    srcs = ["test_v41_query_sm120.py", "test_v41_query_quant.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_upstream_linear_sm120",
+    srcs = ["test_v41_upstream_linear_sm120.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_engram",
+    srcs = ["test_engram.py"],
+    deps = _DSV4_TEST_DEPS,
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_engram_cuda_sm120",
+    srcs = ["test_engram_cuda.py"],
+    main = "test_engram_cuda.py",
+    deps = _DSV4_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_cp_context_build",
     srcs = ["test_cp_context_build.py"],
     deps = _DSV4_TEST_DEPS,
@@ -184,6 +219,27 @@ py_test(
 py_test(
     name = "test_hc_impl",
     srcs = ["test_hc_impl.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_delayed_hc",
+    srcs = ["test_v41_delayed_hc.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+)
+
+py_test(
+    name = "test_v41_delayed_hc_cuda_graph",
+    srcs = ["test_v41_delayed_hc_cuda_graph.py"],
     deps = [
         "//rtp_llm/models_py:modules",
         "//rtp_llm/models_py:tile_kernels_mhc",

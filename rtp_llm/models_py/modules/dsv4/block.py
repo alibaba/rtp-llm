@@ -84,13 +84,40 @@ class Block(nn.Module):
         stage_context: Optional[object] = None,
         commit_only: bool = False,
         cache_layer_id: Optional[int] = None,
+        v41_config: Optional[Dict] = None,
+        shared_attention: Optional[Dict] = None,
+        gen_num_per_cycle: int = 1,
     ):
         super().__init__()
         self.layer_id = layer_id
         self.cache_layer_id = layer_id if cache_layer_id is None else cache_layer_id
         self.fp8_kv_cache = fp8_kv_cache
+        self.engram = None
+        self.engram_hashes = None
+        self.engram_token_mask = None
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
+        attn_extra = {}
+        moe_extra = {}
+        if v41_config is not None:
+            if commit_only:
+                raise NotImplementedError("V4.1 commit-only blocks are not integrated")
+            if shared_attention is None:
+                raise ValueError(
+                    "V4.1 blocks require transformer-owned attention state"
+                )
+            if n_hash_layers != 0:
+                raise ValueError("V4.1 has no token-to-expert hash layers")
+            from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
+            from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
+
+            attn_cls = AttentionV41FP8
+            attn_extra = dict(
+                v41_config=v41_config,
+                shared_attention=shared_attention,
+                gen_num_per_cycle=gen_num_per_cycle,
+            )
+            moe_extra = dict(expert_recipe=V41_EXPERT_RECIPE)
         self.attn = attn_cls(
             layer_id=layer_id,
             cache_layer_id=self.cache_layer_id,
@@ -118,6 +145,7 @@ class Block(nn.Module):
             layer_weights=layer_weights,
             tp_size=tp_size,
             tp_rank=tp_rank,
+            **attn_extra,
         )
         self._cp_sync_after_attn_done = False
         if commit_only:
@@ -154,6 +182,7 @@ class Block(nn.Module):
             cp_size=cp_size,
             cp_enabled=cp_enabled,
             stage_context=stage_context,
+            **moe_extra,
         )
         # Framework loader already casts norms to bf16 (compute_dtype) and
         # hc_* tensors to fp32 (descriptor data_type); pass refs straight
@@ -165,7 +194,12 @@ class Block(nn.Module):
         self.attn_norm = RMSNorm(layer_weights[W.v4_attn_norm], norm_eps)
         self.ffn_norm = RMSNorm(layer_weights[W.v4_ffn_norm], norm_eps)
 
-        self.attn_hc = build_hc_unit(
+        hc_factory = build_hc_unit
+        if v41_config is not None:
+            from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCUnit
+
+            hc_factory = DelayedHCUnit
+        self.attn_hc = hc_factory(
             layer_weights[W.v4_hc_attn_fn],
             layer_weights[W.v4_hc_attn_base],
             layer_weights[W.v4_hc_attn_scale],
@@ -177,7 +211,7 @@ class Block(nn.Module):
             layer_id=layer_id,
             name="attn",
         )
-        self.ffn_hc = build_hc_unit(
+        self.ffn_hc = hc_factory(
             layer_weights[W.v4_hc_ffn_fn],
             layer_weights[W.v4_hc_ffn_base],
             layer_weights[W.v4_hc_ffn_scale],
@@ -246,12 +280,28 @@ class Block(nn.Module):
         return impls
 
     def prefill_fast_callable(self):
+        if getattr(self, "engram", None) is not None:
+            return None
         if not isinstance(self.attn, AttentionFP8):
             return None
         # ``prefill.forward_layers`` caches this private callable only after the
         # layer has passed the production FP8 support matrix. Keep the public
         # ``forward_prefill_fast`` wrapper defensive for tests/manual calls.
         return self._forward_prefill_fast_fp8
+
+    def _inject_engram(self, hidden: torch.Tensor) -> torch.Tensor:
+        if getattr(self, "engram", None) is None:
+            return hidden
+        if self.engram_hashes is None:
+            raise RuntimeError(
+                f"Engram token history is missing for layer {self.layer_id}"
+            )
+        shape = hidden.shape
+        return self.engram(
+            hidden.reshape(-1, shape[-2], shape[-1]),
+            self.engram_hashes,
+            self.engram_token_mask,
+        ).reshape(shape)
 
     def prefill_fast_attn_pre(self, x: torch.Tensor):
         attn_hc_pre, _, _, _ = self._prefill_fast_hc_impls()
@@ -330,6 +380,7 @@ class Block(nn.Module):
 
         _dbg_layer = _rt.should_record_layer(self.layer_id)
         # Attention path
+        x = self._inject_engram(x)
         residual = x
         x_pre, post, comb = self.attn_hc.pre(
             x,
@@ -504,6 +555,8 @@ class Block(nn.Module):
         if _dbg_layer and dbg_pos >= 0:
             dbg_pos_mask = dbg_positions.to(torch.long) == int(dbg_pos)
             dbg_pos_name = f"pos{dbg_pos}"
+        # Engram updates every residual stream before delayed mHC projection.
+        x = self._inject_engram(x)
         # Attention path
         residual = x
         x_pre, post, comb = self.attn_hc.pre(

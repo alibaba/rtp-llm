@@ -186,6 +186,7 @@ class MoE(nn.Module):
         cp_size: int = 1,
         cp_enabled: bool = False,
         stage_context: Optional[object] = None,
+        expert_recipe: Optional[object] = None,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -251,6 +252,7 @@ class MoE(nn.Module):
             cp_size=cp_size,
             cp_enabled=cp_enabled,
             stage_context=stage_context,
+            expert_recipe=expert_recipe,
         )
         forced, strict = _resolve_forced(strategy)
         strategy_cls = select_strategy(cfg, forced=forced, strict=strict)
@@ -280,11 +282,18 @@ class MoE(nn.Module):
                 expert_weights=shared_w,
                 swiglu_limit=swiglu_limit,
             )
+            # Upstream selects native group-32 linears from checkpoint geometry.
+            shared_weight, shared_scale = shared_w["w13_w"], shared_w["w13_s"]
+            native_mxfp8 = tuple(shared_scale.shape) == (
+                (shared_weight.shape[0] + 31) // 32,
+                (shared_weight.shape[1] + 31) // 32,
+            )
             self._shared_executor = get_shared_expert_executor(
                 max_tokens_per_rank=max_tokens_per_rank,
                 dim=dim,
                 inter_dim=moe_inter_dim,
                 swiglu_limit=swiglu_limit,
+                native_mxfp8=native_mxfp8,
             )
             self._shared_executor.prepare(self.shared_experts)
         self._final_out: torch.Tensor | None = None

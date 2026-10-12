@@ -26,6 +26,219 @@ _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+py_test(
+    name = "test_v41_engram_full_tables_sm120",
+    srcs = ["test_v41_engram_full_tables_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+py_test(
+    name = "test_v41_native_engine_sm120",
+    srcs = [
+        "test_v41_native_engine_sm120.py",
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_loader_worker_sm120",
+    srcs = [
+        "test_v41_loader_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_checkpoint_engine_sm120",
+    srcs = [
+        "test_v41_checkpoint_engine_sm120.py",
+        "test_v41_loader_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+py_test(
+    name = "test_v41_native_prefill_sm120",
+    srcs = [
+        "test_v41_native_prefill_sm120.py",
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_prefill_test"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_dp_worker_sm120",
+    srcs = [
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_nccl_ep_sm120",
+    srcs = ["test_v41_nccl_ep_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_worker_sm120",
+    srcs = [
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_transformer_sm120",
+    srcs = ["test_v41_transformer_sm120.py", "test_v41_attention_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_attention_owner_sm120",
+    srcs = ["test_v41_attention_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_attention_projections_sm120",
+    srcs = ["test_v41_attention_projections_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_sparse_selection_sm120",
+    srcs = [
+        "test_v41_sparse_selection_sm120.py",
+        "test_dsv4_top_k_per_row_prefill.py",
+        "test_topk_v3.py",
+        "test_v41_prefill_index_plan.py",
+        "test_v41_prefill_topk.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_candidates_sm120",
+    srcs = [
+        "test_v41_candidates_sm120.py",
+        "test_v41_candidate_topk.py",
+        "test_v41_prefill_candidates.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_upstream_fp4_sm120",
+    srcs = [
+        "test_v41_upstream_fp4_sm120.py",
+        "test_v41_fp4_codec.py",
+        "test_v41_fp4_transport.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_upstream_swa_sm120",
+    srcs = [
+        "test_v41_upstream_swa_sm120.py",
+        "test_v41_swa_codec.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_prefill_metadata_sm120",
+    srcs = [
+        "test_v41_prefill_metadata_sm120.py",
+        "test_v41_prefill_metadata.py",
+        "test_v41_prefill_kv_workspace.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 _DSV4_FP8_TESTS = [
     "test_bf16_gemm_fp32",
     "test_compressor_disable_raw_path",
