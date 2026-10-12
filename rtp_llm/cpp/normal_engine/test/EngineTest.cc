@@ -776,6 +776,56 @@ print("PROBE cwd:", os.getcwd(), file=sys.stderr))");
             fprintf(stderr, "PROBE sys.path exec exception: %s\n", e.what());
             fflush(stderr);
         }
+        // PROBE v4: apply the candidate FIX (drop nvidia sys.path entries) and
+        // split the import into phases to locate the remaining crash point.
+        try {
+            py::exec(R"(
+import os, sys
+sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "nvidia"))]
+print("PROBE filtered sys.path:", sys.path, file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE filter exec exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::exec(R"(
+import ctypes, os, sys
+_tp = None
+for p in sys.path:
+    c = os.path.join(p, "torch")
+    if os.path.isfile(os.path.join(c, "__init__.py")):
+        _tp = c
+        break
+print("PROBE torch pkg dir:", _tp, file=sys.stderr)
+ctypes.CDLL(os.path.join(_tp, "lib", "libtorch_global_deps.so"), mode=ctypes.RTLD_GLOBAL)
+print("PROBE global_deps loaded", file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE global_deps phase exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::exec(R"(
+import ctypes, glob, os, sys
+_tp = None
+for p in sys.path:
+    c = os.path.join(p, "torch")
+    if os.path.isfile(os.path.join(c, "__init__.py")):
+        _tp = c
+        break
+_ext = glob.glob(os.path.join(_tp, "_C.cpython-*.so"))
+print("PROBE _C ext:", _ext, file=sys.stderr)
+ctypes.CDLL(_ext[0])
+print("PROBE _C dlopen-only loaded, constructors ran, no PyInit", file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE _C dlopen phase exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::exec(R"(import torch.version; print("PROBE torch.version ok:", torch.version.__version__, file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE torch.version exception: %s\n", e.what());
+            fflush(stderr);
+        }
         try {
             py::module_::import("torch");
         } catch (const std::exception& e) {
@@ -783,6 +833,7 @@ print("PROBE cwd:", os.getcwd(), file=sys.stderr))");
             fflush(stderr);
             throw;
         }
+        py::exec(R"(import sys; print("PROBE torch at:", sys.modules['torch'].__file__, file=sys.stderr))");
         _probeDumpMaps("PROBE after torch import", 1);
     }
 
