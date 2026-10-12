@@ -297,6 +297,42 @@ charts:
       axis: ratio
       color: '#13c2c2'
       hidden: false
+    mock/device_evicted_blocks_per_accepted_request:
+      metric_id: mock/device_evicted_blocks_per_accepted_request
+      labels: {}
+      name: Device 驱逐 blocks / accepted request
+      group: 驱逐强度
+      unit: blocks/request
+      axis: blocks_per_request
+      color: '#f5222d'
+      hidden: false
+    mock/device_eviction_turnover_percent_min:
+      metric_id: mock/device_eviction_turnover_percent_min
+      labels: {}
+      name: Device 驱逐量 / 缓存容量 / 分钟
+      group: 驱逐强度
+      unit: '%/min'
+      axis: turnover
+      color: '#f5222d'
+      hidden: false
+    mock/memory_evicted_blocks_per_accepted_request:
+      metric_id: mock/memory_evicted_blocks_per_accepted_request
+      labels: {}
+      name: Memory 驱逐 blocks / accepted request
+      group: 驱逐强度
+      unit: blocks/request
+      axis: blocks_per_request
+      color: '#fa8c16'
+      hidden: false
+    mock/memory_eviction_turnover_percent_min:
+      metric_id: mock/memory_eviction_turnover_percent_min
+      labels: {}
+      name: Memory 驱逐量 / 缓存容量 / 分钟
+      group: 驱逐强度
+      unit: '%/min'
+      axis: turnover
+      color: '#fa8c16'
+      hidden: false
   panels:
   - id: cache-hit
     title: Prefill 缓存命中率 · P 数量
@@ -426,7 +462,24 @@ charts:
         title: Memory 缓存占用率（0–1）
         position: right
     caption: 容量驱逐与 H2D 主动删除分别计数，主动删除不算驱逐。速率按 Prometheus 窗口计算；统计仍上报的全部 P，过渡期包含被摘机。Memory
-      占用率按总块数加权。保留 Memory 对照只在基线就绪后切换，不增加物理容量。缺采不补零。
+      占用率按总块数加权。保留 Memory 对照只在基线就绪后切换，不增加物理容量。缺采不补零。占用率使用已分配块，包含待写占用。
+    empty_caption: 缺少监控数据；不从日志或 snapshot 补算。
+  - id: cache-eviction-intensity
+    title: 驱逐强度 · 每请求驱逐量 / 每分钟容量周转
+    curve_ids:
+    - mock/device_evicted_blocks_per_accepted_request
+    - mock/device_eviction_turnover_percent_min
+    - mock/memory_evicted_blocks_per_accepted_request
+    - mock/memory_eviction_turnover_percent_min
+    axes:
+      blocks_per_request:
+        title: 驱逐 blocks / 接纳请求
+        position: left
+      turnover:
+        title: 每分钟驱逐占总容量 %
+        position: right
+    caption: 按相同速率窗口归一化，接纳数是请求数而非 batch RPC 数。100%/min 表示一分钟驱逐量等于一份缓存容量，不表示所有块都被替换一次。接纳为零时不补零；背压可能压低总
+      blocks/s，需结合本图、命中率和 QPS 判断驱逐放大。统计仍上报的 P，包含过渡期被摘机。
     empty_caption: 缺少监控数据；不从日志或 snapshot 补算。
 sections:
   audit:

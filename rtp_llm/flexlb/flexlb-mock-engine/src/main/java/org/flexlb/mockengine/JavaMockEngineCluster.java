@@ -6617,6 +6617,13 @@ public final class JavaMockEngineCluster {
             snap.put("completed", completedCount.get());
             snap.put("cache_keys", cache.lruKeyBlocks());
             snap.put("cache_evictions", cache.evictions());
+            if (isDiagnosticPrefill()) {
+                snap.put("memory_evicted_blocks", memoryCache == null ? 0L : memoryCache.evictions());
+                snap.put("memory_consumed_blocks", memoryConsumedBlocks.sum());
+                snap.put("memory_read_blocks", memoryReadBlocks.sum());
+                snap.put("memory_total_blocks", memoryCache == null ? 0 : memoryCache.capacity());
+                snap.put("memory_allocated_blocks", memoryCache == null ? 0 : memoryCache.size() + memoryCache.pendingBlocks());
+            }
             // Full per-engine key list (flexlb_test_framework KV cases' per-engine key-set
             // exposure). Debug endpoint — the whole list is exposed by design
             // (default 6000-block caches included); sorted for determinism.

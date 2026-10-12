@@ -86,6 +86,14 @@ D 提前分配后，P 入队拒绝会清理 D 的准备状态。Master 可能先
 引用尚未释放的块不能计入可驱逐空间。容量测试先确认单请求能够准入，再以跨请求的
 工作集超过容量构造驱逐，避免把超大请求的准入拒绝误当缓存淘汰。
 
+Mock 的 Memory 命中在执行 lane 开始时消费源条目，Device 共享键在 Prefill 完成时发布。
+两者之间，相同 prefix 可能失去共享命中。`/memory_cache_policy` 的 `consume_on_read`
+布尔控制只用于机理对照：关闭消费保留 Memory 条目并释放读 pin，不增加容量，也不把
+请求私有的 Device 副本登记为共享缓存。它不是生产修复或 Device 加载去重的模拟。
+当前真实 block-tree 路径在 Device cache 启用时，于 H2D 成功结算中先登记 Device
+CACHE 引用再撤销源层引用；加载中的相同 prefix 可以 join。判断 mock/real 对齐必须
+检查实际采用的代码和缓存配置，不能只比较最终命中率。
+
 多 Master 共用引擎时，引擎上报的负载可能来自其他 Master。Scheduler 请求数、
 Prefill ownership、Decode reservation/dispatch permit 和引擎负载应分别核账；
 单个 Master 无客户端流量不意味着共享引擎空闲。完整流量排空后再验证全局收尾。

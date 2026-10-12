@@ -374,6 +374,66 @@ sources:
       exported_metrics:
       - mock_memory_cache_allocated_blocks
       - mock_memory_cache_total_blocks
+    device_evicted_blocks_per_accepted_request:
+      promql: sum by (role) (rate(mock_engine_cache_evictions_total${selector}[${window_ms}ms]))
+        / sum by (role) (rate(mock_engine_accepted_total${selector}[${window_ms}ms]))
+      unit: blocks/request
+      value_kind: gauge
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_evictions_total
+      - mock_engine_accepted_total
+    device_eviction_turnover_percent_min:
+      promql: 6000 * sum by (role) (rate(mock_engine_cache_evictions_total${selector}[${window_ms}ms]))
+        / sum by (role) (rtp_llm_kv_cache_pool_total_blocks${selector})
+      unit: '%/min'
+      value_kind: gauge
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_engine_cache_evictions_total
+      - rtp_llm_kv_cache_pool_total_blocks
+    memory_evicted_blocks_per_accepted_request:
+      promql: sum by (role) (rate(mock_memory_cache_evicted_blocks_total${selector}[${window_ms}ms]))
+        / sum by (role) (rate(mock_engine_accepted_total${selector}[${window_ms}ms]))
+      unit: blocks/request
+      value_kind: gauge
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_memory_cache_evicted_blocks_total
+      - mock_engine_accepted_total
+    memory_eviction_turnover_percent_min:
+      promql: 6000 * sum by (role) (rate(mock_memory_cache_evicted_blocks_total${selector}[${window_ms}ms]))
+        / sum by (role) (mock_memory_cache_total_blocks${selector})
+      unit: '%/min'
+      value_kind: gauge
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_memory_cache_evicted_blocks_total
+      - mock_memory_cache_total_blocks
 produced:
   derived/survivor_hit_ratio:
     producer: cache_windows

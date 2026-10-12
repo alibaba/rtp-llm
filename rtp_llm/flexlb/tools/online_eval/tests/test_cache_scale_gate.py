@@ -100,7 +100,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
             "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
-            "prefill-tps", "prefill-qps", "client-latency", "cache-turnover",
+            "prefill-tps", "prefill-qps", "client-latency", "cache-turnover", "cache-eviction-intensity",
         ])
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 

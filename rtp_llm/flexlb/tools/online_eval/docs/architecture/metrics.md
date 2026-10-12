@@ -133,3 +133,14 @@ case 的 `CaseDefinition.sources` 声明额外数据源能力，由自动发现�
 收尾先结束适配器读取，再从 TSDB 按实际 scrape 时间导出选中字段。`*.prometheus.json` 保留原始查询、时间边界、源地址与错误，协议证据 JSONL 从这些样本生成；producer 再按冻结定义落入统一 `metrics.json`。不使用 PromQL lookback 补断档。物理来源仍是 `debug_api`，传输记录为 `prometheus`，不会因为用了 SDK 就改成生产 Master 原生指标。exporter、采集错误与收尾由共同资源所有者管理，结束 probe 后再关闭 TSDB；失败时仍尝试保存其他采集证据并回收所有进程。
 
 接口协议与字段语义独立于测试目的时放公共源模块；专属协议解释放 `cases/<case>/`，通过相同注册入口接入公共生命周期。采样新增源遵循 [新增 case](../development/adding-cases.md) 的必要性与字段完整性规则。请求 journal 是事件证据，由注册 producer 按冻结窗口计算，不需要转成逐请求 Prometheus 标签。
+
+## 缓存驱逐与搬运删除
+
+Device 与 Memory 的容量驱逐 counter 使用 block 数。`mock_memory_cache_consumed_blocks_total`
+单独统计 H2D 后删除的 Memory 源块，不计入容量驱逐。Memory 读取 counter 可重复计数同一块，
+消费 counter 只记录实际删除；保留源条目的对照仍释放读 pin，消费数为零。
+
+驱逐程度同时观察 blocks/s、blocks/accepted request 和驱逐量相对缓存容量的周转率。
+接纳请求数不能用 batch RPC 数替代。背压或准入失败会降低总驱逐速率，不能据此认定驱逐
+压力消失。100% 容量周转表示驱逐量等于一份容量，可能反复驱逐同一组块，不表示所有块
+均被替换一次。聚合人口和过渡期摘机影响以各指标、报告的冻结口径为准。
