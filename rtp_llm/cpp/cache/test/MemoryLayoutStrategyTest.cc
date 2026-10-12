@@ -270,6 +270,62 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     EXPECT_EQ(buf_info[1].size_bytes, config.kv_scale_stride_bytes);
 }
 
+TEST_F(MemoryLayoutStrategyTest, SparseMhaFp8UsesFp32UnitScaleLayout) {
+    for (const bool sparse : {false, true}) {
+        const size_t heads = 2;
+        const size_t tokens = 128;
+        const size_t k_bytes = heads * tokens * 256;
+        auto spec = std::dynamic_pointer_cast<TestKVCacheSpec>(
+            createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, heads, tokens, k_bytes, k_bytes));
+        spec->k_scale_bytes = heads * tokens * sizeof(float);
+        spec->v_scale_bytes = spec->k_scale_bytes;
+        CacheConfig cache_config;
+        cache_config.block_num = 3;
+        cache_config.is_sparse = sparse;
+        auto cfg = DeviceBlockPoolConfigHelper::createMemoryLayoutConfig(
+            false, 1, spec->block_size_bytes(), spec->scale_block_size_bytes(),
+            spec, cache_config, heads, tokens, 1);
+        EXPECT_FALSE(cfg.is_mla);
+        EXPECT_TRUE(cfg.hasScale());
+        auto kv = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
+        auto scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
+        MemoryLayoutStrategy strategy;
+        ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+        auto views = strategy.getLayerScaleCacheTensors();
+        ASSERT_EQ(views.size(), 1);
+        EXPECT_EQ(views[0].scalar_type(), torch::kFloat32);
+        EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, static_cast<int64_t>(2 * heads * tokens)}));
+        EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
+        EXPECT_TRUE(torch::equal(views[0], torch::ones_like(views[0])));
+    }
+}
+
+TEST_F(MemoryLayoutStrategyTest, SparseMlaAndIndexerKeepByteScaleLayout) {
+    for (const auto type : {KVCacheSpecType::MultiHeadLatentAttention, KVCacheSpecType::OpaqueKV}) {
+        auto spec = std::dynamic_pointer_cast<TestKVCacheSpec>(
+            createTestKvCacheSpec(1, DataType::TYPE_FP8_E4M3, 1, 128, 32768, 32768));
+        spec->type = type;
+        spec->k_scale_bytes = 1024;
+        spec->v_scale_bytes = 0;
+        CacheConfig cache_config;
+        cache_config.block_num = 3;
+        cache_config.is_sparse = true;
+        auto cfg = DeviceBlockPoolConfigHelper::createMemoryLayoutConfig(
+            false, 1, spec->block_size_bytes(), spec->scale_block_size_bytes(),
+            spec, cache_config, 1, 128, 1);
+        EXPECT_TRUE(cfg.is_mla);
+        auto kv = torch::empty({static_cast<int64_t>(cfg.kv_block_pool_size_bytes)}, torch::kUInt8);
+        auto scale = torch::empty({static_cast<int64_t>(cfg.kv_scale_pool_size_bytes)}, torch::kUInt8);
+        MemoryLayoutStrategy strategy;
+        ASSERT_TRUE(strategy.init(cfg, kv, scale, kv.data_ptr()));
+        auto views = strategy.getLayerScaleCacheTensors();
+        ASSERT_EQ(views.size(), 1);
+        EXPECT_EQ(views[0].scalar_type(), torch::kUInt8);
+        EXPECT_EQ(views[0].sizes(), torch::IntArrayRef({3, 128, 8}));
+        EXPECT_EQ(views[0].data_ptr(), scale.data_ptr());
+    }
+}
+
 TEST_F(MemoryLayoutStrategyTest, GetLayerCacheTensors) {
     auto ctx = createTestContext();
 
