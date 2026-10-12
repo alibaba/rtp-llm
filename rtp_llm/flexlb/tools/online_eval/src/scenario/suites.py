@@ -1,7 +1,7 @@
 """Explicit suite membership and typed execution policies for CI jobs."""
 import copy
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -13,10 +13,21 @@ from flexlb_cfg import PROFILES
 CATALOG = Path(__file__).resolve().parents[2] / "config/suites.yaml"
 
 @dataclass(frozen=True)
+class CiWorker:
+    cases: tuple[str, ...] = ()
+    exclude_cases: tuple[str, ...] = ()
+    profiles: tuple[str, ...] = ()
+
+    def matches(self, case, profile):
+        return (not self.cases or case in self.cases) and case not in self.exclude_cases and profile in self.profiles
+
+
+@dataclass(frozen=True)
 class CiJob:
     suite: str
     profiles: tuple[str, ...]
     parallel: int
+    workers: dict[str, CiWorker] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class SuiteCatalog:
@@ -57,7 +68,7 @@ class SuiteCatalog:
         jobs = {}
         for name, value in data['ci_jobs'].items():
             identifier(name, 'ci_jobs.name')
-            mapping(value, 'ci_jobs.' + name, {'suite', 'profiles', 'parallel'}, {'suite', 'profiles', 'parallel'})
+            mapping(value, 'ci_jobs.' + name, {'suite', 'profiles', 'parallel', 'workers'}, {'suite', 'profiles', 'parallel'})
             if type(value['suite']) is not str or value['suite'] not in suites:
                 raise ScenarioError('CI job must name a declared suite: ' + name)
             if not suites[value['suite']]:
@@ -66,7 +77,29 @@ class SuiteCatalog:
             if not value['profiles']:
                 raise ScenarioError('CI job profiles must be nonempty')
             number(value['parallel'], 'ci_jobs.' + name + '.parallel', minimum=1, integer=True)
-            jobs[name] = CiJob(value['suite'], tuple(value['profiles']), value['parallel'])
+            workers = {}
+            declarations = value.get('workers', {name: {}})
+            if not isinstance(declarations, dict) or not declarations:
+                raise ScenarioError('CI workers must be a nonempty mapping: ' + name)
+            for worker, placement in declarations.items():
+                identifier(worker, 'ci_jobs.' + name + '.workers.name')
+                mapping(placement, 'CI worker ' + worker, {'cases', 'exclude_cases', 'profiles'})
+                groups = {}
+                for key in ('cases', 'exclude_cases'):
+                    group = placement.get(key, [])
+                    if not isinstance(group, list) or any(type(case) is not str for case in group) or len(set(group)) != len(group):
+                        raise ScenarioError('CI worker cases must be unique names: ' + worker)
+                    for case in group:
+                        identifier(case, 'CI worker case')
+                    groups[key] = tuple(group)
+                if groups['cases'] and groups['exclude_cases']:
+                    raise ScenarioError('CI worker cannot combine cases and exclude_cases: ' + worker)
+                profiles = placement.get('profiles', value['profiles'])
+                names(profiles, 'CI worker profiles', value['profiles'])
+                if not profiles:
+                    raise ScenarioError('CI worker profiles must be nonempty: ' + worker)
+                workers[worker] = CiWorker(**groups, profiles=tuple(profiles))
+            jobs[name] = CiJob(value['suite'], tuple(value['profiles']), value['parallel'], workers)
         return cls(data['default_suite'], data['default_profile'], suites, jobs)
 
 @dataclass(frozen=True)

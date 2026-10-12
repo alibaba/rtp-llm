@@ -18,18 +18,18 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
 
 `--case-dir` 可指向一份 YAML 或目录，`--instances` 使用清单中的完整 ID，并在 suite 或 kind 的选择范围内进一步筛选。固定组合缺少成员时直接失败，不静默少跑。
 
-CI 执行策略在同一配置的 `ci_jobs` 中声明 suite、profiles 和 parallel，不复制成员清单。使用下面的入口先预览，再执行；profile 按配置顺序串行运行，产物分别保存在 profile 子目录，任一失败停止后续执行。`ci-results.json` 记录实际执行范围与退出码，具体门禁以各 profile 的 `aggregate.json` 为准。
+CI 使用同一份配置的 `ci_jobs`：suite 和 profiles 定义运行集，parallel 定义 lane 数；可选的 workers 只声明资源分配条件，不另建子 suite 或复制成员清单。`cases` 或 `exclude_cases` 按 case 分组，worker 的 profiles 默认为 job 的 profiles。规划器先编译全部选例并检查每个实例恰好分配一次；缺失、重复分配或非法 ID 会在任何 worker 启动前失败。
+
+`plan_ci.py` 和 `run_ci.py` 共用 `CiPlanner`。前者输出完整实例清单、worker 分组和选中 worker 的实例；后者只执行该计划中的完整 ID，逐 profile 串行运行。`--suite`、`--profiles` 可覆盖 job 默认范围；显式 `--instances` 覆盖 suite/profile 选择，但仍须符合 job 支持的 profile。`--worker` 选择一个资源组，不隐式增加测试点。
 
 ```bash
+python3 tools/online_eval/scripts/commands/plan_ci.py \
+  --job workload --json /path/to/ci-plan.json
 python3 tools/online_eval/scripts/commands/run_ci.py \
-  --job quick --out-dir /path/to/new-ci-run --dry-run
-python3 tools/online_eval/scripts/commands/run_ci.py \
-  --job workload --out-dir /path/to/new-workload-run
+  --job workload --worker <worker> --out-dir /path/to/new-ci-run --dry-run
 ```
 
-手动流水线可先调用 `scripts/commands/plan_ci.py --suite <suite> --profiles <profile列表> --json /path/to/selection.json` 编译完整选例。`--instances <case::variant::profile列表>` 可覆盖 suite/profile 选择；未知或重复 ID 在启动执行组前失败。输出按配置的缩容 case 划分两个 profile 执行组，其余实例归入第三组；额外的缩容对照变体仍进入对应缩容组。空组由流水线跳过，各组使用独立 job，组内串行、profile 输出目录分开。这是固定分组，运行中不迁移任务。
-
-这些策略和入口不会自动创建外部 CI 任务；流水线需要显式调用 `run_ci.py --job <job>`，不能仅凭 `ci_jobs` 配置认为已接入。
+外层 CI 只准备环境、申请资源、传递选例参数并调用这两个入口，不自行枚举 profile、解析实例 ID 或按 case 编写分配条件。每个 worker 的完整运行计划保存在 `ci-plan.json`，执行状态保存在 `ci-results.json`；具体门禁以各 profile 的 `aggregate.json` 为准。失败时停止后续 profile，保留已执行范围。配置声明不等于平台接入成功；接入状态需要核对实际流水线配置及运行结果。
 
 `--dry-run` 显示执行、端口及报告视图计划，不启动服务。核对 profile、worker 端口容量、lane 和内存预算后再执行；编译与执行使用同一组端口容量参数。列表顺序和 dry-run 成功不代表测试通过。
 
