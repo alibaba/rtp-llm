@@ -71,6 +71,44 @@ def collapse_ordered_fp32(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tenso
     return (pre_mix.unsqueeze(-1) * x.float()).sum(dim=-2).to(x.dtype)
 
 
+def post_ordered_fp32(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    post: torch.Tensor,
+    comb: torch.Tensor,
+) -> torch.Tensor:
+    """Reduce source streams in FP32 before adding and writing the BF16 result."""
+    if residual.ndim not in (3, 4) or min(residual.shape[-2:]) <= 0:
+        raise ValueError("Ordered delayed mHC post requires [..., streams, dim]")
+    leading = residual.shape[:-2]
+    streams, dim = residual.shape[-2:]
+    if (
+        x.shape != leading + (dim,)
+        or post.shape != leading + (streams, 1)
+        or comb.shape != leading + (streams, streams)
+    ):
+        raise ValueError("Ordered delayed mHC post operands must match residuals")
+    if x.dtype != torch.bfloat16 or residual.dtype != torch.bfloat16:
+        raise TypeError("Ordered delayed mHC post requires BF16 activations")
+    if post.dtype != torch.float32 or comb.dtype != torch.float32:
+        raise TypeError("Ordered delayed mHC post requires FP32 coefficients")
+    if any(value.device != residual.device for value in (x, post, comb)):
+        raise ValueError("Ordered delayed mHC post operands must share a device")
+    mixed = (comb.unsqueeze(-1) * residual.float().unsqueeze(-2)).sum(dim=-3)
+    result = post * x.float().unsqueeze(-2) + mixed
+    residual.copy_(result.to(residual.dtype))
+    return residual
+
+
+def post_delayed(owner, x, residual, post, comb):
+    if residual.is_cuda and residual.dtype == torch.bfloat16:
+        return TileLangHCUnit._post_impl(owner, x, residual, post, comb)
+    return (
+        post.float() * x.float().unsqueeze(-2)
+        + torch.matmul(comb.float().transpose(-1, -2), residual.float())
+    ).to(residual.dtype)
+
+
 class DelayedHCPredecessor(Protocol):
     @property
     def pre_mix_out(self) -> Optional[torch.Tensor]:
@@ -79,13 +117,24 @@ class DelayedHCPredecessor(Protocol):
 
 
 class DelayedHCUnit(HCUnitBase):
-    def __init__(self, *args, collapse_mode: Optional[str] = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        collapse_mode: Optional[str] = None,
+        post_mode: Optional[str] = None,
+        **kwargs,
+    ) -> None:
         if collapse_mode is not None and (
             type(collapse_mode) is not str or collapse_mode != "ordered_fp32"
         ):
             raise ValueError("Delayed mHC collapse_mode must be ordered_fp32 or None")
+        if post_mode is not None and (
+            type(post_mode) is not str or post_mode != "ordered_fp32"
+        ):
+            raise ValueError("Delayed mHC post_mode must be ordered_fp32 or None")
         super().__init__(*args, **kwargs)
         self._collapse_mode = collapse_mode
+        self._post_mode = post_mode
         mix_width = self.hc_mult * (self.hc_mult + 2)
         expected_fn_shape = (mix_width, self.hc_mult * self.dim)
         if tuple(self.fn.shape) != expected_fn_shape:
@@ -107,6 +156,10 @@ class DelayedHCUnit(HCUnitBase):
     @property
     def collapse_mode(self) -> Optional[str]:
         return self._collapse_mode
+
+    @property
+    def post_mode(self) -> Optional[str]:
+        return self._post_mode
 
     def collapse(self, x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
         if self._collapse_mode == "ordered_fp32":
@@ -189,12 +242,9 @@ class DelayedHCUnit(HCUnitBase):
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
-        if residual.is_cuda and residual.dtype == torch.bfloat16:
-            return TileLangHCUnit._post_impl(self, x, residual, post, comb)
-        return (
-            post.float() * x.float().unsqueeze(-2)
-            + torch.matmul(comb.float().transpose(-1, -2), residual.float())
-        ).to(residual.dtype)
+        if self._post_mode == "ordered_fp32":
+            return post_ordered_fp32(x, residual, post, comb)
+        return post_delayed(self, x, residual, post, comb)
 
 
 class DelayedHCHead(nn.Module):
@@ -214,4 +264,5 @@ __all__ = [
     "DelayedHCHead",
     "collapse_delayed",
     "collapse_ordered_fp32",
+    "post_ordered_fp32",
 ]
