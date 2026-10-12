@@ -101,6 +101,7 @@ def _compress_norm_main_store_kernel(
     MAIN_BLOCKS: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
     TRAP: tl.constexpr,
+    ROUND_INPUT_BF16: tl.constexpr = False,
 ):
     token = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
@@ -140,6 +141,10 @@ def _compress_norm_main_store_kernel(
         )
     else:
         pooled = current
+    if ROUND_INPUT_BF16:
+        # Test-only released-reference boundary. Production launches retain
+        # their existing FP32 normalization until eager/fused qualification.
+        pooled = pooled.to(tl.bfloat16).to(tl.float32)
     inverse_rms = tl.rsqrt(tl.sum(pooled * pooled, 0) / 512 + EPS)
     weight = tl.load(norm_weight + columns).to(tl.float32)
     latent = (pooled * inverse_rms * weight).to(tl.bfloat16)

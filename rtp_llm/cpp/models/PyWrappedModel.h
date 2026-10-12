@@ -2,6 +2,7 @@
 #pragma once
 #include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include <optional>
 #include <string>
@@ -68,6 +69,13 @@ public:
                                     const PPIntermediateTensors* input_tensors,
                                     PPIntermediateTensors*       output_tensors) override;
     PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    PreparedPPModelInputsPtr prepareV41PP(const GptModelInputs& inputs,
+                                           const std::shared_ptr<V41PPCacheBatch>& batch) override;
+    GptModelOutputs forwardV41PP(const PreparedPPModelInputsPtr& prepared,
+                                  int64_t transfer_round,
+                                  const PPIntermediateTensors* input_tensors,
+                                  PPIntermediateTensors* output_tensors) override;
+    void retireV41PP(const std::array<int64_t, 3>& identity) override;
     GptModelOutputs       forwardMicroBatched(const GptModelInputs& inputs);
     void                  releaseBuffers() override;
     torch::Tensor         getMtpTargetHiddenStates(int64_t num_tokens) override;
@@ -115,6 +123,10 @@ private:
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
          splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
+    PyModelInputs buildPyModelInputs(const GptModelInputs& inputs, PyContextParallelParams& cp_params);
+    GptModelOutputs finalizeModelOutputs(const PyModelOutputs& outputs,
+                                          const GptModelInputs& inputs,
+                                          const PyContextParallelParams& cp_params);
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
@@ -155,6 +167,7 @@ private:
     torch_ext::PyAttentionInputs    attention_inputs_;
     torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
     CudaGraphState                  graph_state_;
+    const std::shared_ptr<const char> native_pp_owner_ = std::make_shared<const char>(0);
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -227,7 +240,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "kernel_tokens_per_block=%zu",
                                 params.tokens_per_block,
                                 params.kernel_tokens_per_block);
-        init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
+        init_resources.kv_cache.emplace(
+            params.kv_cache_layer_layout.value(),
+            params.cache_manager ? params.cache_manager->allLayerCacheBase().topologyPtr() : nullptr);
     }
     init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
     init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);

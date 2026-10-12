@@ -12,7 +12,16 @@ import triton.language as tl
 
 @triton.jit
 def _sparse_prefill(
-    Q, KV, IDX, LENS, SINK, OUT, COUNT, HEADS: tl.constexpr, WIDTH: tl.constexpr
+    Q,
+    KV,
+    IDX,
+    LENS,
+    SINK,
+    OUT,
+    COUNT,
+    HEADS: tl.constexpr,
+    WIDTH: tl.constexpr,
+    DIRECT_SINK_DIV_RN: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     heads = tl.program_id(1) * 16 + tl.arange(0, 16)
@@ -46,10 +55,18 @@ def _sparse_prefill(
         total = total * alpha + tl.sum(probabilities, 1)
         maximum = next_max
     sink = tl.load(SINK + heads, heads < HEADS, other=0)
-    next_max = tl.maximum(maximum, sink)
-    alpha = tl.exp(maximum - next_max)
-    denominator = total * alpha + tl.exp(sink - next_max)
-    result = acc * (alpha / denominator)[:, None]
+    if DIRECT_SINK_DIV_RN:
+        # Test-only reference epilogue. Empty/masked rows have no key maximum
+        # and must stay zero even when the sink's mass underflows.
+        has_keys = total > 0
+        finite_max = tl.where(has_keys, maximum, 0.0)
+        denominator = total + tl.exp(sink - finite_max)
+        result = tl.where(has_keys[:, None], tl.div_rn(acc, denominator[:, None]), 0.0)
+    else:
+        next_max = tl.maximum(maximum, sink)
+        alpha = tl.exp(maximum - next_max)
+        denominator = total * alpha + tl.exp(sink - next_max)
+        result = acc * (alpha / denominator)[:, None]
     tl.store(OUT + address, result, heads[:, None] < HEADS)
 
 

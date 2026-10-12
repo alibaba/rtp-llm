@@ -1,6 +1,40 @@
 #include "OpDefs.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocationLease.h"
 
 namespace torch_ext {
+std::vector<std::map<std::string, std::vector<int32_t>>>
+KVCache::nativeAllocationTables(const PyModelInputs& inputs) const {
+    const auto& spans = inputs.v41_cache_spans;
+    if (!allocator_topology_ || !spans.defined() || spans.device().type() != torch::kCPU
+        || spans.scalar_type() != torch::kInt64 || spans.dim() != 2 || spans.size(1) != 6
+        || !spans.is_contiguous() || spans.size(0) < 1
+        || inputs.v41_cache_leases.size() != static_cast<size_t>(spans.size(0))) {
+        throw std::invalid_argument("native cache ownership requires allocator provenance and complete dispatch leases");
+    }
+    std::vector<std::map<std::string, std::vector<int32_t>>> tables;
+    tables.reserve(inputs.v41_cache_leases.size());
+    for (const auto& lease : inputs.v41_cache_leases) {
+        if (!lease || lease->topologyPtr() != allocator_topology_) {
+            throw std::invalid_argument("native cache dispatch lease belongs to a different allocator");
+        }
+        std::map<std::string, std::vector<int32_t>> row;
+        for (const auto& group : grouped_layout_.topology().groups()) {
+            const auto found = lease->blockTables().find(group.tag);
+            if (found == lease->blockTables().end() || found->second.empty()) {
+                throw std::invalid_argument("native cache dispatch lease is missing tagged pages");
+            }
+            for (const auto page : found->second) {
+                if (page <= 0 || static_cast<uint32_t>(page) >= group.block_num) {
+                    throw std::invalid_argument("native cache dispatch lease has invalid physical pages");
+                }
+            }
+            row.emplace(group.tag, found->second);
+        }
+        tables.push_back(std::move(row));
+    }
+    return tables;
+}
+
 namespace {
 
 void registerCacheGroupType(pybind11::module& m) {
@@ -62,6 +96,8 @@ void registerPyOpDefs(pybind11::module& m) {
                       "Global source layer for a read replica, or None for a producer");
 
     pybind11::class_<KVCache>(m, "KVCache")
+        .def("native_allocation_tables", &KVCache::nativeAllocationTables,
+             "Validate native dispatch leases and return copied physical block tables")
         .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology group id order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
         .def("get_layer_cache",

@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/V41PPLocalCache.h"
 #include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
@@ -785,6 +786,128 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
 }
 
+PyModelInputs PyWrappedModel::buildPyModelInputs(const GptModelInputs& inputs, PyContextParallelParams& cp_params) {
+    const bool              has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+    if (device_props_.enable_prefill_cp && has_context_request) {
+        // Build rank-local inputs and CP metadata. The processor also handles
+        // MTP hidden states according to its configured global/local layout.
+        context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+    }
+
+    torch::Tensor token_ids;
+    if (inputs.combo_tokens.device().is_cuda()) {
+        token_ids = inputs.combo_tokens;
+    } else {
+        buffer_holder_.hold_host(inputs.combo_tokens);
+        token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    }
+
+    torch::Tensor input_hiddens =
+        inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
+
+    torch::Tensor combo_position_ids = torch::empty({0});
+    if (inputs.combo_position_ids.defined()) {
+        if (inputs.combo_position_ids.device().is_cuda()) {
+            combo_position_ids = inputs.combo_position_ids;
+        } else {
+            buffer_holder_.hold_host(inputs.combo_position_ids);
+            combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
+        }
+    }
+
+    auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
+    auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
+    auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+    if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
+        prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
+    }
+    if (device_props_.enable_prefill_cp && has_context_request) {
+        attention_inputs_.context_parallel_info = cp_params;
+        for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
+            tagged_inputs.context_parallel_info = cp_params;
+        }
+    }
+
+    if (device_props_.enable_prefill_cp && has_context_request) {
+        // ContextParallelProcessor rewrites input_lengths to the rank-local
+        // chunk; cache-store planning must keep the full pre-sharding lengths.
+        // Python consumes the tag map when present, not the primary copy.
+        // Restore every copy without changing its tag-local physical table.
+        auto restore_full_lengths = [&](auto& attn) {
+            if (attn.cache_store_inputs.has_value()) {
+                attn.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
+            }
+        };
+        restore_full_lengths(attention_inputs_);
+        for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
+            restore_full_lengths(tagged_inputs);
+        }
+    }
+    auto py_model_inputs              = PyModelInputs({token_ids,
+                                                       input_hiddens,
+                                                       combo_position_ids,
+                                                       embedding_inputs,
+                                                       multimodal_inputs,
+                                                       attention_inputs_,
+                                                       attention_inputs_by_tag_,
+                                                       bert_embedding_inputs});
+    py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
+    // PP: stage-boundary tensors populated by forwardPP.
+    py_model_inputs.pp_intermediates = inputs.pp_intermediates;
+    py_model_inputs.v41_cache_spans  = inputs.v41_cache_spans;
+    py_model_inputs.v41_cache_leases = inputs.v41_cache_leases;
+    if (inputs.engram_token_windows.defined()) {
+        buffer_holder_.hold_host(inputs.engram_token_windows);
+        py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, true);
+    }
+    return py_model_inputs;
+}
+
+GptModelOutputs PyWrappedModel::finalizeModelOutputs(const PyModelOutputs& py_model_outputs,
+                                                     const GptModelInputs& inputs,
+                                                     const PyContextParallelParams& cp_params) {
+    const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+    // In-model DSpARK proposals leave on draft_tokens; pp_intermediates ride along the same way.
+    auto attach_model_side_outputs = [&py_model_outputs](GptModelOutputs outputs) {
+        outputs.draft_tokens     = py_model_outputs.draft_tokens;
+        outputs.pp_intermediates = py_model_outputs.pp_intermediates;
+        return outputs;
+    };
+    if (!py_model_outputs.pp_intermediates.empty()) {
+        // The model emitted a stage boundary. Forward its tensors directly;
+        // final hidden cloning, CP output collectives and lm_head are unused.
+        return attach_model_side_outputs(GptModelOutputs{});
+    }
+    auto hidden_states = py_model_outputs.hidden_states.clone();
+    if (inputs.is_fake_stream && inputs.combo_tokens.numel() == 0) {
+        // The zero-token DP participant has completed its model collectives.
+        // There are no rows for the LM head or the sampler.
+        GptModelOutputs outputs;
+        outputs.hidden_states = hidden_states;
+        outputs.all_hidden_states = hidden_states;
+        return attach_model_side_outputs(std::move(outputs));
+    }
+    if (is_dspark_draft_) {
+        // DSpARK already applies its full-vocabulary lm_head and Markov
+        // head in Python. Running the generic C++ post-layers path would
+        // apply lm_head a second time and, under prefill CP, all-gather
+        // the replicated logits as though they were vocabulary shards.
+        GptModelOutputs outputs;
+        outputs.hidden_states     = hidden_states;
+        outputs.all_hidden_states = hidden_states;
+        return attach_model_side_outputs(std::move(outputs));
+    }
+    if (device_props_.enable_prefill_cp && has_context_request) {
+        if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
+            context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+            return attach_model_side_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
+        }
+        size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+        return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
+    }
+    return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true));
+}
+
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
     DevicePerfWrapper wrapper(enable_device_perf_, "py model forward");
@@ -817,82 +940,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
-        const bool              has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
-        if (device_props_.enable_prefill_cp && has_context_request) {
-            // Build rank-local inputs and CP metadata. The processor also handles
-            // MTP hidden states according to its configured global/local layout.
-            context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
-        }
-
-        torch::Tensor token_ids;
-        if (inputs.combo_tokens.device().is_cuda()) {
-            token_ids = inputs.combo_tokens;
-        } else {
-            buffer_holder_.hold_host(inputs.combo_tokens);
-            token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
-        }
-
-        torch::Tensor input_hiddens =
-            inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-
-        torch::Tensor combo_position_ids = torch::empty({0});
-        if (inputs.combo_position_ids.defined()) {
-            if (inputs.combo_position_ids.device().is_cuda()) {
-                combo_position_ids = inputs.combo_position_ids;
-            } else {
-                buffer_holder_.hold_host(inputs.combo_position_ids);
-                combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
-            }
-        }
-
-        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
-        if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
-        }
-        if (device_props_.enable_prefill_cp && has_context_request) {
-            attention_inputs_.context_parallel_info = cp_params;
-            for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
-                tagged_inputs.context_parallel_info = cp_params;
-            }
-        }
-
-        if (device_props_.enable_prefill_cp && has_context_request) {
-            // ContextParallelProcessor rewrites input_lengths to the rank-local
-            // chunk; cache-store planning must keep the full pre-sharding lengths.
-            // Python consumes the tag map when present, not the primary copy.
-            // Restore every copy without changing its tag-local physical table.
-            auto restore_full_lengths = [&](auto& attn) {
-                if (attn.cache_store_inputs.has_value()) {
-                    attn.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
-                }
-            };
-            restore_full_lengths(attention_inputs_);
-            for (auto& [tag, tagged_inputs] : attention_inputs_by_tag_) {
-                restore_full_lengths(tagged_inputs);
-            }
-        }
-        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        auto py_model_inputs = buildPyModelInputs(inputs, cp_params);
+        const bool has_cache_store_work = !inputs.warmup && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
-
-        auto py_model_inputs              = PyModelInputs({token_ids,
-                                                           input_hiddens,
-                                                           combo_position_ids,
-                                                           embedding_inputs,
-                                                           multimodal_inputs,
-                                                           attention_inputs_,
-                                                           attention_inputs_by_tag_,
-                                                           bert_embedding_inputs});
-        py_model_inputs.dspark_call_phase = inputs.dspark_call_phase;
-        // PP: stage-boundary tensors populated by forwardPP.
-        py_model_inputs.pp_intermediates = inputs.pp_intermediates;
-        py_model_inputs.v41_cache_spans  = inputs.v41_cache_spans;
-        py_model_inputs.v41_cache_leases = inputs.v41_cache_leases;
-        if (inputs.engram_token_windows.defined()) {
-            buffer_holder_.hold_host(inputs.engram_token_windows);
-            py_model_inputs.engram_token_windows = inputs.engram_token_windows.to(torch::kCUDA, true);
-        }
         PyModelOutputs py_model_outputs;
 
         // Obtain the model outputs before choosing stage transport or final output processing.
@@ -927,45 +977,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        // In-model DSpARK proposals leave on draft_tokens; pp_intermediates ride along the same way.
-        auto attach_model_side_outputs = [&py_model_outputs](GptModelOutputs outputs) {
-            outputs.draft_tokens     = py_model_outputs.draft_tokens;
-            outputs.pp_intermediates = py_model_outputs.pp_intermediates;
-            return outputs;
-        };
-        if (!py_model_outputs.pp_intermediates.empty()) {
-            // The model emitted a stage boundary. Forward its tensors directly;
-            // final hidden cloning, CP output collectives and lm_head are unused.
-            return attach_model_side_outputs(GptModelOutputs{});
-        }
-        auto hidden_states = py_model_outputs.hidden_states.clone();
-        if (inputs.is_fake_stream && inputs.combo_tokens.numel() == 0) {
-            // The zero-token DP participant has completed its model collectives.
-            // There are no rows for the LM head or the sampler.
-            GptModelOutputs outputs;
-            outputs.hidden_states = hidden_states;
-            outputs.all_hidden_states = hidden_states;
-            return attach_model_side_outputs(std::move(outputs));
-        }
-        if (is_dspark_draft_) {
-            // DSpARK already applies its full-vocabulary lm_head and Markov
-            // head in Python. Running the generic C++ post-layers path would
-            // apply lm_head a second time and, under prefill CP, all-gather
-            // the replicated logits as though they were vocabulary shards.
-            GptModelOutputs outputs;
-            outputs.hidden_states     = hidden_states;
-            outputs.all_hidden_states = hidden_states;
-            return attach_model_side_outputs(std::move(outputs));
-        }
-        if (device_props_.enable_prefill_cp && has_context_request) {
-            if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
-                context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return attach_model_side_outputs(forwardPostLayersLastHidden(hidden_states, inputs));
-            }
-            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
-        }
-        return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true));
+        return finalizeModelOutputs(py_model_outputs, inputs, cp_params);
 
     } catch (const py::error_already_set& e) {
         if (inputs.v41_cache_spans.defined()) {
@@ -1214,6 +1226,121 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
 }
 
 /** Pass upstream PP intermediates to forward() and collect this stage's outputs. */
+namespace {
+
+struct PyWrappedV41PPInputs final: PreparedPPModelInputs {
+    ~PyWrappedV41PPInputs() override {
+        // Slots and error unwinding may release the last descriptor from a
+        // C++ engine thread that does not hold the Python interpreter lock.
+        py::gil_scoped_acquire gil;
+        dispatch = py::object();
+    }
+
+    std::shared_ptr<const char> owner;
+    V41PPCacheBatchPtr batch;
+    GptModelInputs inputs;
+    PyContextParallelParams cp_params;
+    py::object dispatch;
+    bool executed = false;
+};
+
+}  // namespace
+
+PreparedPPModelInputsPtr PyWrappedModel::prepareV41PP(const GptModelInputs& inputs,
+                                                       const std::shared_ptr<V41PPCacheBatch>& batch) {
+    // Final CP exit collectives depend on the output mode and selected global
+    // rows. Agree those across WORLD before either stage builds a descriptor.
+    auto signature = torch::full({6}, -1, torch::kInt64);
+    auto* wire = signature.data_ptr<int64_t>();
+    wire[0] = 1;
+    wire[1] = inputs.need_all_logits;
+    wire[2] = inputs.need_all_hidden_states;
+    const auto& indexes = inputs.lm_output_indexes;
+    if (pp_size_ != 2 || !batch || enable_cuda_graph_ || int(device_props_.enable_layer_micro_batch)
+        || !device_props_.enable_prefill_cp || inputs.pd_separation || inputs.warmup
+        || !indexes.defined() || !indexes.device().is_cpu() || indexes.scalar_type() != torch::kInt32
+        || indexes.dim() != 1 || !indexes.is_contiguous() || indexes.numel() < 1 || indexes.numel() > 2
+        || indexes.numel() != static_cast<int64_t>(batch ? batch->bindings().size() : 0)) {
+        wire[0] = 0;
+    } else {
+        wire[3] = indexes.numel();
+        for (int64_t row = 0; row < indexes.numel(); ++row) {
+            wire[4 + row] = indexes.data_ptr<int32_t>()[row];
+            if (wire[4 + row] < 0 || wire[4 + row] >= inputs.combo_tokens.numel()) {
+                wire[0] = 0;
+            }
+        }
+    }
+    auto peers = torch::empty({8 * signature.numel()}, torch::kInt64);
+    execAllGather({{peers}, ParallelMode::WORLD, {signature}, false});
+    for (int peer = 0; peer < 8; ++peer) {
+        if (!torch::equal(signature, peers.narrow(0, peer * signature.numel(), signature.numel())) || wire[0] != 1) {
+            throw V41InputRejected("Native V4.1 PP requires agreed eager output modes and valid global LM rows");
+        }
+    }
+    auto prepared = std::make_shared<PyWrappedV41PPInputs>();
+    prepared->owner = native_pp_owner_;
+    prepared->batch = batch;
+    prepared->inputs = inputs;
+    holdInputsHostBuffers(prepared->inputs);
+    // This path must build its own native attention metadata once. It cannot
+    // consume a previous ordinary forward's optional asynchronous preparation.
+    prepared_attention_inputs_.store(false, std::memory_order_release);
+    try {
+        auto local = buildPyModelInputs(prepared->inputs, prepared->cp_params);
+        py::gil_scoped_acquire gil;
+        prepared->dispatch = py_model_.attr("_prepare_native_pp_engine")(local);
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+        return prepared;
+    } catch (const py::error_already_set& e) {
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+        py::gil_scoped_acquire gil;
+        if (e.matches(py::module_::import("rtp_llm.models_py.model_desc.v41_errors").attr("V41InputRejected"))) {
+            throw V41InputRejected(e.what());
+        }
+        throw;
+    } catch (...) {
+        prepared_attention_inputs_.store(false, std::memory_order_release);
+        throw;
+    }
+}
+
+GptModelOutputs PyWrappedModel::forwardV41PP(const PreparedPPModelInputsPtr& opaque,
+                                              int64_t transfer_round,
+                                              const PPIntermediateTensors* input_tensors,
+                                              PPIntermediateTensors* output_tensors) {
+    const auto prepared = std::dynamic_pointer_cast<PyWrappedV41PPInputs>(opaque);
+    if (!prepared || prepared->owner != native_pp_owner_ || !prepared->batch->initialized()
+        || !prepared->batch->executing() || prepared->executed || transfer_round < 0) {
+        throw V41InputRejected("Native V4.1 PP execution requires its current initialized WORLD-begun descriptor");
+    }
+    PyModelOutputs py_outputs;
+    try {
+        py::gil_scoped_acquire gil;
+        const py::object incoming = input_tensors ? py::cast(input_tensors->tensors) : py::none();
+        py_outputs = py_model_.attr("_execute_native_pp_engine")(prepared->dispatch, transfer_round, incoming)
+                         .cast<PyModelOutputs>();
+        prepared->executed = true;
+    } catch (const py::error_already_set& e) {
+        py::gil_scoped_acquire gil;
+        if (e.matches(py::module_::import("rtp_llm.models_py.model_desc.v41_errors").attr("V41InputRejected"))) {
+            throw V41InputRejected(e.what());
+        }
+        prepared->executed = true;
+        throw;
+    }
+    auto outputs = finalizeModelOutputs(py_outputs, prepared->inputs, prepared->cp_params);
+    if (output_tensors) {
+        output_tensors->tensors = std::move(outputs.pp_intermediates);
+    }
+    return outputs;
+}
+
+void PyWrappedModel::retireV41PP(const std::array<int64_t, 3>& identity) {
+    py::gil_scoped_acquire gil;
+    py_model_.attr("_retire_native_pp_engine")(identity);
+}
+
 GptModelOutputs PyWrappedModel::forwardPP(const GptModelInputs&        inputs,
                                           const PPIntermediateTensors* input_tensors,
                                           PPIntermediateTensors*       output_tensors) {

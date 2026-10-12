@@ -235,5 +235,34 @@ int main() {
     bad                                   = c;
     bad.prefill_cp_config.prefill_cp_size = 4;
     reject_dspark(bad);
+    // V4.1 reuses the qualified physical CP4/EP4 geometry, with its own
+    // 21/19 partition and PREFILL-only eager admission.
+    auto v41 = makeCompat(true);
+    v41.role_type = RoleType::PREFILL;
+    v41.pp_stage_layer_counts = {21, 19};
+    v41.prefill_cp_config.prefill_cp_size = 4;
+    v41.resolve_local_cp("deepseek_v41", false, false, false);
+    check(v41.local_cp_enabled(), "V4.1 CEP4PP2 PREFILL capability missing");
+    check(v41.get_attn_tp_size() == 1 && v41.get_ffn_tp_size() == 1,
+          "V4.1 weights must use full attention and shared FFN heads");
+    reject(v41, "deepseek_v41", true);
+    reject(v41, "deepseek_v41", false, true);
+    reject(v41, "deepseek_v41", false, false, true);
+    for (int variant = 0; variant < 10; ++variant) {
+        auto invalid = v41;
+        switch (variant) {
+            case 0: invalid.role_type = RoleType::PDFUSION; break;
+            case 1: invalid.pp_stage_layer_counts = {22, 18}; break;
+            case 2: invalid.pp_ep_backend = "purecp_bf16"; break;
+            case 3: invalid.dp_size = 2; break;
+            case 4: invalid.prefill_cp_config.kv_cache_sharded = true; break;
+            case 5: invalid.prefill_cp_config.prefill_cp_size = 2; break;
+            case 6: invalid.ffn_sp_size = 2; break;
+            case 7: invalid.enable_sp = true; break;
+            case 8: invalid.use_ub_comm = true; break;
+            case 9: invalid.ffn_disaggregate_config.enable_ffn_disaggregate = true; break;
+        }
+        reject(invalid, "deepseek_v41");
+    }
     std::cout << checks << " production local-CP policy checks passed\n";
 }

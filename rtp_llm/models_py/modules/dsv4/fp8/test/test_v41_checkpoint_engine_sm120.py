@@ -31,8 +31,22 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
     save_checkpoint,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_transformer_sm120 import fixture
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_compressor_precision import (
+    compressor_bf16,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_expert_precision import (
+    expert_down_reference,
+    load_reference_kernel,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
+    mhc_fp32,
+    mhc_post_reference,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_reference_precision import (
     reference_precision,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_precision import (
+    sparse_sink_div_rn,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
@@ -79,12 +93,98 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
     stopped = threading.Event()
     precision = os.environ.get("DSV41_TEST_REFERENCE_PRECISION", "baseline")
     compare_tp8 = os.environ.get("DSV41_TEST_COMPARE_TP8") == "1"
+    compare_mhc = os.environ.get("DSV41_TEST_COMPARE_MHC") == "1"
+    compare_compressor = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR") == "1"
+    compare_recipe = os.environ.get("DSV41_TEST_COMPARE_COMPRESSOR_RECIPE") == "1"
+    compare_sparse = os.environ.get("DSV41_TEST_COMPARE_SPARSE_SINK") == "1"
+    compare_down = os.environ.get("DSV41_TEST_COMPARE_EXPERT_DOWN") == "1"
+    compare_post = os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
+    shared_eos_trace = os.environ.get("DSV41_TEST_TRACE_SHARED_EOS") == "1"
+    paired = (
+        compare_tp8
+        or compare_mhc
+        or compare_compressor
+        or compare_recipe
+        or compare_sparse
+        or compare_down
+        or compare_post
+    )
     profiles = [precision, "tp8_projection"] if compare_tp8 else [precision]
+    if compare_mhc:
+        profiles.append("mhc_fp32")
+        if compare_tp8:
+            profiles.append("tp8_projection_mhc_fp32")
+    base_profiles = profiles.copy()
+    if compare_compressor:
+        profiles += [
+            "compressor_bf16" if profile == "baseline" else f"{profile}_compressor_bf16"
+            for profile in base_profiles
+        ]
+    if compare_recipe:
+        profiles += [
+            (
+                "compressor_recipe"
+                if profile == "baseline"
+                else f"{profile}_compressor_recipe"
+            )
+            for profile in base_profiles
+        ]
     current_profile = [precision]
+    if compare_sparse:
+        profiles += [
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn",
+        ]
+    if compare_down:
+        for base in (
+            "tp8_projection_mhc_fp32_compressor_recipe",
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
+        ):
+            profiles.extend(
+                (f"{base}_shared_down_reference", f"{base}_expert_down_reference")
+            )
+    if compare_post:
+        for base in (
+            "tp8_projection_mhc_fp32_compressor_recipe",
+            "tp8_projection_mhc_fp32_compressor_recipe_sparse_sink_div_rn_prefill",
+        ):
+            profiles.append(f"{base}_expert_down_reference_mhc_post_reference")
     trace_steps = dict.fromkeys(profiles, 0)
+    post_trace_steps = {}
+    post_trace_requests = {}
+    post_request_prompts = {}
     try:
-        if compare_tp8 and precision != "baseline":
-            raise ValueError("TP8 comparison requires unpatched production math")
+        if shared_eos_trace and (
+            paired
+            or precision != "baseline"
+            or new_tokens < 4
+            or not os.environ.get("DSV41_TEST_TRACE_DIR")
+        ):
+            raise ValueError(
+                "Shared-EOS tracing requires baseline decode, a trace directory and no comparison profiles"
+            )
+        if paired and precision != "baseline":
+            raise ValueError("Paired comparison requires unpatched production math")
+        if compare_sparse and not (compare_tp8 and compare_mhc and compare_recipe):
+            raise ValueError(
+                "Sparse comparison requires TP8, mHC and compressor recipe controls"
+            )
+        if compare_down and not (
+            compare_tp8 and compare_mhc and compare_recipe and compare_sparse
+        ):
+            raise ValueError(
+                "Expert output comparison requires all ten preceding controls"
+            )
+        if compare_post and not compare_down:
+            raise ValueError(
+                "mHC post comparison requires all fourteen preceding controls"
+            )
+        reference_kernel = load_reference_kernel() if compare_down else None
+        reference_hash = (
+            hashlib.sha256(Path(reference_kernel.__file__).read_bytes()).hexdigest()
+            if reference_kernel is not None
+            else None
+        )
         with reference_precision(precision), torch.inference_mode():
             assert torch.cuda.get_device_capability() == (12, 0)
             if full:
@@ -161,12 +261,77 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     stopped.set()
                 trace_directory = os.environ.get("DSV41_TEST_TRACE_DIR")
                 profile = current_profile[0]
+                post = profile.endswith("_mhc_post_reference")
+                down_profile = profile.removesuffix("_mhc_post_reference")
+                recipe = "compressor_recipe" in profile
+                sparse = "sparse_sink_div_rn" in profile
+                sparse_decode = sparse and "sparse_sink_div_rn_prefill" not in profile
+                down = down_profile.endswith(
+                    ("_shared_down_reference", "_expert_down_reference")
+                )
+                routed_down = down_profile.endswith("_expert_down_reference")
                 tracing = (
                     bool(trace_directory) and rank == 0 and trace_steps[profile] < 3
                 )
+                prompt_index = 0
+                trace_step = trace_steps[profile]
+                post_metadata = {}
+                if post or shared_eos_trace:
+                    tracing = False
+                    if trace_directory and rank == 0 and request.input_ids.numel():
+                        attn = next(iter(request.attention_inputs.values()))
+                        request_id, _, _, _, start, count = request.v41_cache_spans[
+                            0
+                        ].tolist()
+                        ids = request.input_ids.tolist()
+                        if attn.is_prefill:
+                            prompt_index = prompts.index(ids)
+                            post_request_prompts[request_id] = prompt_index
+                            consumed = ids.copy()
+                        else:
+                            prompt_index = post_request_prompts[request_id]
+                            consumed = [*sequences[request_id], *ids]
+                        assert count == len(ids) and start + count == len(consumed)
+                        trace_step = post_trace_steps.get((profile, prompt_index), 0)
+                        trace_request = post_trace_requests.setdefault(
+                            (profile, prompt_index), request_id
+                        )
+                        limit = 4 if shared_eos_trace else 3
+                        tracing = trace_step < limit and request_id == trace_request
+                        post_metadata = {
+                            "prompt_index": prompt_index,
+                            "prompt_token_ids": prompts[prompt_index],
+                            "consumed_token_ids": consumed,
+                            **(
+                                {
+                                    "shared_eos_diagnostic": True,
+                                    "engram_token_windows": request.engram_token_windows.tolist(),
+                                    "sequence_lengths": attn.sequence_lengths.tolist(),
+                                }
+                                if shared_eos_trace
+                                else {"mhc_post_reference": True}
+                            ),
+                        }
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
-                ) as snapshots, tp8_projection(profile == "tp8_projection"):
+                ) as snapshots, tp8_projection(
+                    profile.startswith("tp8_projection")
+                ), mhc_fp32(
+                    "mhc_fp32" in profile
+                ), compressor_bf16(
+                    profile.endswith("compressor_bf16") or recipe,
+                    fused=recipe,
+                    hca_projection=recipe,
+                ), sparse_sink_div_rn(
+                    sparse,
+                    decode=sparse_decode,
+                ), expert_down_reference(
+                    down,
+                    routed=routed_down,
+                    kernel=reference_kernel,
+                ), mhc_post_reference(
+                    post,
+                ):
                     hidden = forward(request, fmha_impl).hidden_states
                 if tracing and hidden.numel():
                     snapshots["hidden"] = hidden.detach().cpu()
@@ -183,18 +348,35 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                     trace_root = Path(trace_directory)
                     if not full:
                         trace_root /= f"bounded-context{context}-tokens{new_tokens}"
-                    if compare_tp8:
+                    if paired:
                         trace_root /= profile
                     save_model_trace(
-                        trace_root / f"native-prompt0-step{trace_steps[profile]}.pt",
+                        trace_root / f"native-prompt{prompt_index}-step{trace_step}.pt",
                         snapshots,
                         {
                             "input_ids": request.input_ids.tolist(),
                             "cache_spans": request.v41_cache_spans.tolist(),
                             "precision_profile": profile,
+                            "compressor_fused": recipe,
+                            "hca_bf16_projection": recipe,
+                            "sparse_sink_div_rn_prefill": sparse,
+                            "sparse_sink_div_rn_decode": sparse_decode,
+                            **post_metadata,
+                            **(
+                                {
+                                    "shared_down_reference": True,
+                                    "routed_down_reference": routed_down,
+                                    "down_reference_kernel_sha256": reference_hash,
+                                }
+                                if down
+                                else {}
+                            ),
                         },
                     )
-                    trace_steps[profile] += 1
+                    if post or shared_eos_trace:
+                        post_trace_steps[profile, prompt_index] = trace_step + 1
+                    else:
+                        trace_steps[profile] += 1
                 assert hidden.shape == (request.input_ids.numel(), config.hidden_size)
                 assert bool(hidden.isfinite().all())
                 if request.input_ids.numel():
@@ -285,6 +467,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                         assert tokens[: len(prompt)] == prompt
                         assert len(tokens) == len(prompt) + new_tokens
                         assert all(0 <= token < config.vocab_size for token in tokens)
+                        if not full:
+                            assert 127 not in tokens, "fixture sampled its image token"
                         request_id = len(sequences)
                         assert sequences[request_id] == tokens[:-1]
                         assert len(hashes[request_id]) == new_tokens
@@ -300,6 +484,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, new_tokens, conte
                             flush=True,
                         )
                     dist.barrier(group=control)
+                if (
+                    (compare_post or shared_eos_trace)
+                    and rank == 0
+                    and os.environ.get("DSV41_TEST_TRACE_DIR")
+                ):
+                    expected_traces = {
+                        (profile, prompt): min(4 if shared_eos_trace else 3, new_tokens)
+                        for profile in profiles
+                        if shared_eos_trace or profile.endswith("_mhc_post_reference")
+                        for prompt in range(len(prompts))
+                    }
+                    assert post_trace_steps == expected_traces, post_trace_steps
                 peers = [None] * 8
                 dist.all_gather_object(peers, outputs_by_prompt, group=control)
                 for profile in profiles:
@@ -369,6 +565,10 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             args, weights = fixture(experts=16, full_schedule=True, max_seq_len=context)
+            # Greedy ties choose the lower ID. Keep the synthetic image token
+            # from interrupting text-only generation under diagnostic math.
+            head = weights.global_weights[W.lm_head]
+            head[127].copy_(head[126])
             save_checkpoint(root, args, weights)
             del weights
             gc.collect()

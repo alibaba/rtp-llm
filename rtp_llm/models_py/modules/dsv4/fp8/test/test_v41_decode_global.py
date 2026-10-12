@@ -42,7 +42,9 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
     # Permute physical ids independently across regions to catch pool mixups.
     main_table = torch.arange(1, batch * pages + 1, device=device).view(batch, pages)
     index_table = main_table.flip(1).contiguous()
-    state_table = torch.arange(1, batch * 2 + 1, device=device).view(batch, 2)
+    # The native owner retains one physical state ring per request, including
+    # across raw token pages; GLOBAL/indexer remain paged independently.
+    state_table = torch.arange(1, batch + 1, device=device).view(batch, 1)
     tables = {
         main_region: main_table.int(),
         INDEXER_KV: index_table.int(),
@@ -63,7 +65,7 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
         ),
         CSA_STATE: (
             torch.arange(
-                (batch * 2 + 1) * ring_entries * 1024,
+                (batch + 1) * ring_entries * 1024,
                 device=device,
                 dtype=torch.float32,
             )
@@ -87,7 +89,9 @@ def _layout_owner(device, ratio, batch, *, ring_entries=_STATE_EB):
         _rope_max_seq_len=_MAX_SEQ_LEN,
         _cp_ctx=None,
         _kv_cache=SimpleNamespace(
-            get_kernel_seq_size_per_block=lambda tag: _KV_TPB,
+            get_kernel_seq_size_per_block=lambda tag: (
+                _STATE_TPB if tag == CSA_STATE else _KV_TPB
+            ),
             get_seq_size_per_block=lambda tag: _STATE_TPB,
         ),
         _block_tables_by_type=tables,
@@ -365,9 +369,7 @@ class V41DecodeGlobalCPU(unittest.TestCase):
         requests = torch.zeros_like(positions)
         expected = []
         for position in positions.tolist():
-            block = int(
-                owner._block_tables_by_type[CSA_STATE][0, (position // 256) % 2]
-            )
+            block = int(owner._block_tables_by_type[CSA_STATE][0, 0])
             expected.append(block * 8 + position % 8)
         torch.testing.assert_close(
             owner._slots(CSA_STATE, positions, requests),
@@ -386,7 +388,7 @@ class V41DecodeGlobalCPU(unittest.TestCase):
         self.assertTrue((slots[:12] == -1).all())
         self.assertEqual(len(set(slots[12:].tolist())), 8)
         owner._block_tables_by_type[CSA_STATE][0, 0] = 0
-        owner._block_tables_by_type[CSA_STATE][1, 1] = -1
+        owner._block_tables_by_type[CSA_STATE][1, 0] = -1
         got = owner._read_state(torch.tensor([7, 257]), torch.tensor([0, 1]))
         torch.testing.assert_close(got, torch.zeros(2, 1024), rtol=0, atol=0)
 
@@ -493,7 +495,7 @@ class V41DecodeGlobalCUDA(unittest.TestCase):
                         }
                     for table in old.owner._block_tables_by_type.values():
                         table[0, 0] = 0
-                        table[1, 1] = -1
+                        table[1, min(1, table.shape[1] - 1)] = -1
                         table[2].zero_()  # fake/unallocated request
                     new = _clone_case(old)
                     initial = _snapshot(old)

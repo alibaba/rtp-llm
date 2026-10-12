@@ -1,6 +1,19 @@
 package(default_visibility = ["//:__subpackages__"])
 
 py_library(
+    name = "dsv41_pp_smoke",
+    testonly = True,
+    srcs = ["dsv41_pp_smoke.py"],
+    deps = [":dsv41_phase_smoke"],
+)
+
+py_library(
+    name = "dsv41_phase_smoke",
+    testonly = True,
+    srcs = ["dsv41_phase_smoke.py"],
+)
+
+py_library(
     name = "dsv41_trace",
     srcs = ["dsv41_trace.py"],
     deps = ["//rtp_llm:torch"],
@@ -19,9 +32,50 @@ py_library(
 )
 
 py_library(
+    name = "dsv41_attention_replay",
+    testonly = True,
+    srcs = ["dsv41_attention_replay.py", "dsv41_attention_history_replay.py", "dsv41_native_history_replay.py"],
+    deps = [
+        ":dsv41_reference_probe",
+        ":dsv41_trace_compare",
+        "//rtp_llm:safetensors",
+        "//rtp_llm:torch",
+        "//rtp_llm:transformers",
+    ],
+)
+
+py_library(
+    name = "dsv41_mhc_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_mhc_boundary_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
+)
+
+py_library(
     name = "checkpoint_inventory_lib",
     srcs = ["checkpoint_inventory.py"],
     deps = ["//rtp_llm:config", "//rtp_llm:safetensors_header"],
+)
+
+py_library(
+    name = "dsv41_sparse_arithmetic_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_arithmetic_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch", "//rtp_llm:triton"],
+)
+
+py_library(
+    name = "dsv41_sparse_owner_replay",
+    testonly = True,
+    srcs = ["dsv41_sparse_owner_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
+)
+
+py_library(
+    name = "dsv41_ffn_boundary_replay",
+    testonly = True,
+    srcs = ["dsv41_ffn_boundary_replay.py"],
+    deps = [":dsv41_attention_replay", "//rtp_llm:torch"],
 )
 
 py_binary(

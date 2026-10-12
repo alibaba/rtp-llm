@@ -80,6 +80,23 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
     return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
 }
 
+void NormalGenerateStream::collectPPPrefillHiddenStates(const StreamUpdateInfo& update_info) {
+    if (!generate_input_->generate_config->return_all_hidden_states || !update_info.all_hidden_states.defined()) {
+        return;
+    }
+    const auto& hidden = update_info.all_hidden_states;
+    const auto batch_size = static_cast<int64_t>(currentBatchSize());
+    RTP_LLM_CHECK_WITH_INFO(hidden.dim() == 2 && batch_size > 0 && hidden.size(0) % batch_size == 0,
+                            "PP prompt hidden states must have complete sequence rows");
+    // Result storage may be reused before the next chunk arrives. Keep each
+    // sequence's context rows independent of the stream's advanced cursors.
+    pp_prefill_hidden_chunks_.push_back(hidden.reshape({batch_size, -1, hidden.size(1)}).cpu().clone());
+    if (!update_info.intermediate_chunk) {
+        pp_prefill_hidden_states_ = torch::cat(pp_prefill_hidden_chunks_, 1).reshape({-1, hidden.size(1)});
+        pp_prefill_hidden_chunks_.clear();
+    }
+}
+
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
@@ -134,9 +151,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.hidden_states = update_info.hidden_states.narrow(0, i, 1).cpu();
             }
         }
-        if (generate_input_->generate_config->return_all_hidden_states && update_info.all_hidden_states.defined()
-            && iter_count_ == 1) {
-            generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+        if (generate_input_->generate_config->return_all_hidden_states) {
+            if (pp_prefill_hidden_states_.defined()) {
+                generate_output.all_hidden_states = pp_prefill_hidden_states_;
+            } else if (update_info.all_hidden_states.defined() && iter_count_ == 1) {
+                generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
+            }
         }
         if (loss_.defined()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
@@ -288,6 +308,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     RTP_LLM_LOG_DEBUG("stream [%s] enqueue generate output", streamLogTag().c_str());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
+    pp_prefill_hidden_states_ = torch::Tensor();
 
     if (hasErrorWithoutLock()) {
         return;

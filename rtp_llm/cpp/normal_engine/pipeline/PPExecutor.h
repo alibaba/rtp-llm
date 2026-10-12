@@ -1,7 +1,9 @@
 #pragma once
 
 #include <functional>
+#include <array>
 #include <list>
+#include <map>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -37,6 +39,9 @@ class Sampler;
 class ExpertBalancer;
 class ModelInputsLogger;
 class SpecLogitsVerifyRunner;
+class V41PPAdmission;
+class V41PPCacheBatch;
+struct PreparedPPModelInputs;
 
 using PPTickets = std::vector<std::unique_ptr<PPCommTicket>>;
 
@@ -99,6 +104,8 @@ private:
         PPTickets                          plan_sends;
         PPTickets                          activation_sends;
         PPTickets                          execution_result_sends;
+        std::shared_ptr<V41PPCacheBatch>    v41_cache_batch;
+        std::shared_ptr<PreparedPPModelInputs> v41_model_inputs;
 
         void reset();
     };
@@ -108,6 +115,8 @@ private:
     void releaseAllModelBuffers();
 
     void prepareStreams(std::list<GenerateStreamPtr>& streams);
+    void retireV41Requests(std::vector<int64_t>& finished_request_ids);
+    void rejectV41Batch(InflightBatch& batch, const std::string& message);
 
     absl::StatusOr<PPExecutionPlan> buildPlan(const StreamGroups&         stream_groups,
                                               const std::vector<int64_t>& finished_request_ids);
@@ -220,6 +229,8 @@ private:
     std::unique_ptr<PPTransport> transport_;
     std::vector<InflightBatch>   slots_;
     size_t                       current_slot_ = 0;
+    std::unique_ptr<V41PPAdmission> v41_pp_admission_;
+    std::map<int64_t, std::array<int64_t, 3>> v41_request_identities_;
 
     bool                               enable_detail_log_ = false;
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;

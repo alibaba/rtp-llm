@@ -26,6 +26,8 @@ class KVCacheAllocationLease;
 
 namespace torch_ext {
 
+struct PyModelInputs;
+
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
 // When kernel_seq_size_per_block < seq_size_per_block the tensor is presented at
 // kernel-block granularity:
@@ -60,7 +62,14 @@ struct LayerKVCache {
    is projected to its own stage layers, so local ids may differ from global. */
 class KVCache {
 public:
-    explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
+    explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout,
+                     std::shared_ptr<const rtp_llm::CacheTopology> allocator_topology = nullptr):
+        grouped_layout_(std::move(grouped_layout)), allocator_topology_(std::move(allocator_topology)) {}
+
+    // Read-only physical ownership. Only native C++ construction attaches
+    // allocator provenance; a projected/Python-created cache view has none.
+    std::vector<std::map<std::string, std::vector<int32_t>>>
+    nativeAllocationTables(const PyModelInputs& inputs) const;
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
@@ -247,6 +256,7 @@ private:
     }
 
     const rtp_llm::GroupedCacheLayerLayout grouped_layout_;
+    const std::shared_ptr<const rtp_llm::CacheTopology> allocator_topology_;
 };
 
 struct PyModelInitResources {

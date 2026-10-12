@@ -26,6 +26,65 @@ _DSV4_FP8_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+py_library(
+    name = "v41_attention_owner_testlib",
+    srcs = ["test_v41_attention_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_cp_owner_testlib",
+    srcs = ["test_v41_cp_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_attention_owner_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_transformer_testlib",
+    srcs = ["test_v41_transformer_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_attention_owner_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_library(
+    name = "v41_worker_testlib",
+    srcs = ["test_v41_worker_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_transformer_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_cp_owner_sm120",
+    srcs = ["test_v41_cp_owner_sm120.py", "test_v41_attention_owner_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_mhc_post_precision_sm120",
+    srcs = ["test_v41_mhc_post_precision_sm120.py", "v41_mhc_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_expert_precision_sm120",
+    srcs = ["test_v41_expert_precision_sm120.py", "v41_expert_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 py_test(
     name = "test_v41_reference_math_sm120",
     srcs = ["test_v41_reference_math_sm120.py"],
@@ -106,7 +165,7 @@ py_test(
 
 py_test(
     name = "test_v41_decode_global_sm120",
-    srcs = ["test_v41_decode_global_sm120.py", "test_v41_decode_global.py"],
+    srcs = ["test_v41_decode_global_sm120.py", "test_v41_decode_global.py", "v41_compressor_precision.py"],
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["SM120"],
     exec_properties = {"gpu": "SM120", "gpu_count": "1"},
@@ -116,6 +175,22 @@ py_test(
 py_test(
     name = "test_v41_decode_attention_sm120",
     srcs = ["test_v41_decode_attention_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_sparse_precision_sm120",
+    srcs = [
+        "test_v41_sparse_precision_sm120.py",
+        "v41_sparse_precision.py",
+        "v41_compressor_precision.py",
+        "test_v41_attention_owner_sm120.py",
+        "test_v41_decode_attention_sm120.py",
+        "test_v41_decode_owner_sm120.py",
+    ],
     deps = _DSV4_FP8_TEST_DEPS,
     tags = ["SM120"],
     exec_properties = {"gpu": "SM120", "gpu_count": "1"},
@@ -151,6 +226,14 @@ py_test(
     timeout = "long",
 )
 
+py_library(
+    name = "v41_loader_worker_testlib",
+    srcs = ["test_v41_loader_worker_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_worker_testlib"],
+    visibility = ["//visibility:public"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
 py_test(
     name = "test_v41_loader_worker_sm120",
     srcs = [
@@ -170,7 +253,11 @@ py_test(
     name = "test_v41_checkpoint_engine_sm120",
     srcs = [
         "test_v41_checkpoint_engine_sm120.py",
+        "v41_compressor_precision.py",
+        "v41_expert_precision.py",
+        "v41_mhc_precision.py",
         "v41_reference_precision.py",
+        "v41_sparse_precision.py",
         "v41_tp8_projection.py",
         "test_v41_loader_worker_sm120.py",
         "test_v41_worker_sm120.py",

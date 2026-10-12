@@ -5,12 +5,13 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/BlockPool.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
 
 class HybridPoolKVCacheAllocator;
+class BlockPool;
+using BlockPoolPtr = std::shared_ptr<BlockPool>;
 
 // A physical allocation snapshot, independent of prefix-cache keys. Acquire while
 // the caller owns the request and serializes allocation/free. Retain the lease

@@ -260,6 +260,14 @@ cc_library(
 )
 
 cc_library(
+    name = "kv_cache_allocation_lease_hdr",
+    hdrs = ["KVCacheAllocationLease.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [":batch_kv_cache_resource"],
+)
+
+cc_library(
     name = "kv_cache_allocator_hdr",
     hdrs = [
         "KVCacheAllocationLease.h",

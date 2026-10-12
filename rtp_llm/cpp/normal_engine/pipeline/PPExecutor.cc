@@ -2,6 +2,8 @@
 
 #include "rtp_llm/cpp/normal_engine/pipeline/PPSerialization.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPPrefillGuardPolicy.h"
+#include "rtp_llm/cpp/normal_engine/pipeline/V41PPAdmission.h"
+#include "rtp_llm/cpp/models/V41InputRejected.h"
 
 #include <algorithm>
 #include <chrono>
@@ -104,6 +106,10 @@ GenerateStreamPtr PPExecutor::createMinFakeDecodeStream(const ModelConfig&      
 }
 
 void PPExecutor::InflightBatch::reset() {
+    // Ticket completion precedes reset; descriptors retain native pages and
+    // their Python snapshots through both activation and result consumers.
+    v41_model_inputs.reset();
+    v41_cache_batch.reset();
     skip_run      = true;
     stream_groups = StreamGroups();
     round_snapshot.clear();
@@ -330,6 +336,12 @@ PPExecutor::PPExecutor(const EngineInitParams&                params,
     round_device_sync_ = autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_DEVICE_SYNC", static_cast<int64_t>(1)) != 0;
     round_fwd_event_sync_ =
         autil::EnvUtil::getEnv<int64_t>("RTP_LLM_PP_ROUND_FWD_EVENT_SYNC", static_cast<int64_t>(1)) != 0;
+    if (!warm_up_ && params.model_config_.model_type == "deepseek_v41") {
+        RTP_LLM_CHECK_WITH_INFO(!sp_enabled_ && !params.hw_kernel_config.enable_cuda_graph
+                                    && round_device_sync_ && round_fwd_event_sync_,
+                                "V4.1 PP requires eager gen=0 with the qualified forward/device drains");
+        v41_pp_admission_ = std::make_unique<V41PPAdmission>(cache_manager_, params.model_config_, parallelism_config_);
+    }
     RTP_LLM_LOG_INFO("PPExecutor per-round sync: device_sync=%d fwd_event_sync=%d "
                      "(RTP_LLM_PP_ROUND_DEVICE_SYNC / RTP_LLM_PP_ROUND_FWD_EVENT_SYNC)",
                      static_cast<int>(round_device_sync_),
@@ -512,6 +524,66 @@ void PPExecutor::releaseAllModelBuffers() {
     }
 }
 
+void PPExecutor::retireV41Requests(std::vector<int64_t>& finished_request_ids) {
+    // Plans carry terminal IDs only on stage roots. Broadcast them before any
+    // rank reclaims its independent pools or receiver identity.
+    auto count = torch::tensor({static_cast<int64_t>(finished_request_ids.size())}, torch::kInt64);
+    execBroadcastCpu({{count}, 0});
+    const auto size = count.item<int64_t>();
+    auto ids = isStageRoot() ? torch::tensor(finished_request_ids, torch::kInt64) :
+                              torch::empty({size}, torch::kInt64);
+    if (size) {
+        execBroadcastCpu({{ids}, 0});
+    }
+    auto counts = torch::empty({8}, torch::kInt64);
+    execAllGather({{counts}, ParallelMode::WORLD, {count}, false});
+    RTP_LLM_CHECK_WITH_INFO(torch::equal(counts, count.expand({8})),
+                            "V4.1 PP terminal request counts disagree across WORLD");
+    if (!size) {
+        return;
+    }
+    auto identities = torch::full({size, 3}, -1, torch::kInt64);
+    finished_request_ids.assign(ids.data_ptr<int64_t>(), ids.data_ptr<int64_t>() + size);
+    for (int64_t row = 0; row < size; ++row) {
+        identities.data_ptr<int64_t>()[row * 3] = finished_request_ids[row];
+        const auto found = v41_request_identities_.find(finished_request_ids[row]);
+        if (found != v41_request_identities_.end()) {
+            std::copy(found->second.begin(), found->second.end(), identities.data_ptr<int64_t>() + row * 3);
+        }
+    }
+    auto peers = torch::empty({8 * identities.numel()}, torch::kInt64);
+    auto wire = identities.flatten();
+    execAllGather({{peers}, ParallelMode::WORLD, {wire}, false});
+    for (int peer = 0; peer < 8; ++peer) {
+        RTP_LLM_CHECK_WITH_INFO(torch::equal(wire, peers.narrow(0, peer * wire.numel(), wire.numel())),
+                                "V4.1 PP terminal identities disagree across WORLD");
+    }
+    for (const auto id : finished_request_ids) {
+        const auto found = v41_request_identities_.find(id);
+        if (found != v41_request_identities_.end()) {
+            model_->retireV41PP(found->second);
+            v41_pp_admission_->retire(found->second);
+            v41_request_identities_.erase(found);
+        }
+    }
+}
+
+void PPExecutor::rejectV41Batch(InflightBatch& batch, const std::string& message) {
+    if (isFirstStage() && isStageRoot()) {
+        size_t row = 0;
+        for (const auto& stream : batch.stream_groups.allStreams()) {
+            stream->reportError(ErrorCode::INVALID_PARAMS, message);
+            if (batch.round_snapshot.at(row++).tracks_chunk_result) {
+                stream->ppResultReturned();
+            }
+            stream->clearPPInflight();
+        }
+    }
+    batch.v41_model_inputs.reset();
+    batch.v41_cache_batch.reset();
+    batch.skip_run = true;
+}
+
 absl::Status PPExecutor::warmUp(const ScheduleOutput& schedule_output) {
     RTP_LLM_CHECK_WITH_INFO(model_ != nullptr, "model is not initialized for PP warmup");
 
@@ -633,6 +705,13 @@ absl::StatusOr<PPExecutionPlan> PPExecutor::buildPlan(const StreamGroups&       
     RETURN_IF_STATUS_OR_ERROR(model_input_status);
     plan.model_input          = std::move(model_input_status.value());
     plan.model_input.skip_run = stream_groups.empty();
+    if (v41_pp_admission_ && !plan.model_input.skip_run) {
+        // The gatherer sets this from the PREFILL server role. Native V4.1 PP
+        // admits ordinary requests on that role; real PD remains unsupported.
+        plan.model_input.pd_separation = std::any_of(streams.begin(), streams.end(), [](const auto& stream) {
+            return stream->queryPdSep();
+        });
+    }
 
     static const bool kLogWindow = std::getenv("RTP_LLM_LOG_TPSYNC") != nullptr;
     if (kLogWindow && !plan.model_input.skip_run) {
@@ -1172,11 +1251,35 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         asyncSendPlan(plan, !isStageRoot(), inflight.plan_sends);
     }
 
+    if (v41_pp_admission_) {
+        retireV41Requests(plan.finished_request_ids);
+        // V4.1 fake inputs contain no request, history or physical lease.
+        if (plan.model_input.is_fake_stream && !plan.model_input.combo_tokens.numel()) {
+            plan.model_input.skip_run = inflight.skip_run = true;
+        }
+        if (!plan.model_input.skip_run) {
+            try {
+                inflight.v41_cache_batch = v41_pp_admission_->prepareWithWorker(
+                    plan.model_input, [&](const GptModelInputs& inputs, const V41PPCacheBatchPtr& batch) {
+                        inflight.v41_model_inputs = model_->prepareV41PP(inputs, batch);
+                    });
+            } catch (const V41InputRejected& error) {
+                rejectV41Batch(inflight, error.what());
+                plan.model_input.skip_run = true;
+            }
+        }
+    }
+
     /** 5. run the batch. */
     if (!plan.model_input.skip_run) {
         PPTickets             tensor_receives;
         PPIntermediateTensors input_tensors;
         PPIntermediateTensors output_tensors;
+        int64_t v41_transfer_round = -1;
+        if (v41_pp_admission_) {
+            v41_pp_admission_->initializeFresh(inflight.v41_cache_batch);
+            v41_transfer_round = v41_pp_admission_->beginExecution(inflight.v41_cache_batch);
+        }
 
         if (!isFirstStage()) {
             input_tensors = receiveTensors(tensor_receives);
@@ -1207,7 +1310,7 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
         }
 
         GptModelInputs& local_model_input = plan.model_input;
-        if (cache_manager_) {
+        if (cache_manager_ && !v41_pp_admission_) {
             cache_manager_->zeroBlocks(local_model_input.kv_cache_blocks_to_zero);
             local_model_input.kv_cache_blocks_to_zero = torch::Tensor();
             if (local_model_input.kv_cache_update_mapping.defined()) {
@@ -1233,8 +1336,12 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
                                                torch::TensorOptions(torch::kInt32).pinned_memory(true));
             saved_input_lengths.copy_(local_model_input.input_lengths);
         }
-        auto model_output = model_->forwardPP(
-            local_model_input, isFirstStage() ? nullptr : &input_tensors, isLastStage() ? nullptr : &output_tensors);
+        auto model_output = v41_pp_admission_ ?
+            model_->forwardV41PP(inflight.v41_model_inputs, v41_transfer_round,
+                                  isFirstStage() ? nullptr : &input_tensors,
+                                  isLastStage() ? nullptr : &output_tensors) :
+            model_->forwardPP(local_model_input, isFirstStage() ? nullptr : &input_tensors,
+                                isLastStage() ? nullptr : &output_tensors);
         if (saved_input_lengths.defined()) {
             local_model_input.input_lengths = std::move(saved_input_lengths);
         }
@@ -1257,8 +1364,26 @@ absl::Status PPExecutor::process(const ScheduleOutput& schedule_output, int64_t 
             cudaDeviceSynchronize();
         }
 
+        if (v41_pp_admission_) {
+            if (!isLastStage()) {
+                asyncSendTensors(output_tensors, inflight.activation_sends);
+                waitAll(inflight.activation_sends, "V4.1 activation consumers");
+            }
+            // CUDA ticket waits establish stream ordering; drain the actual
+            // hardware before WORLD completion or cursor publication.
+            cudaSyncAndCheck();
+            v41_pp_admission_->completeExecution(inflight.v41_cache_batch, true);
+            v41_pp_admission_->commit(inflight.v41_cache_batch);
+            for (const auto& binding : inflight.v41_cache_batch->bindings()) {
+                const auto& span = binding.span;
+                v41_request_identities_[span[0]] = {span[0], span[1], span[2]};
+            }
+        }
+
         if (!isLastStage()) {
-            asyncSendTensors(output_tensors, inflight.activation_sends);
+            if (!v41_pp_admission_) {
+                asyncSendTensors(output_tensors, inflight.activation_sends);
+            }
             // Chunked prefill: release fastgen context streams as soon as the chunk
             // has left stage 0 so the pipeline fills. Re-scheduling is gated by
             // pp_outstanding_results_ in PPScheduler (the final chunk must not

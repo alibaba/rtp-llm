@@ -175,6 +175,7 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/models_py/bindings/core:tensor_holder",
         "//rtp_llm/cpp/normal_engine:pipeline_types",
+        "//rtp_llm/cpp/normal_engine:v41_pp_local_cache",
         "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
         "//rtp_llm/cpp/cache:cache_types",

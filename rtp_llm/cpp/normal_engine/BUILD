@@ -36,6 +36,39 @@ cc_library(
 )
 
 cc_library(
+    name = "v41_pp_local_cache",
+    srcs = ["pipeline/V41PPLocalCache.cc"],
+    hdrs = ["pipeline/V41PPLocalCache.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/engine_base/stream:complete_token_ids",
+    ] + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "//conditions:default": [],
+    }) + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "v41_pp_admission",
+    srcs = ["pipeline/V41PPAdmission.cc"],
+    hdrs = ["pipeline/V41PPAdmission.h"],
+    copts = copts(),
+    deps = [
+        ":v41_pp_local_cache",
+        "//rtp_llm/cpp/models:models",
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        "//rtp_llm/models_py/bindings/core:op_data",
+    ] + torch_deps(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
@@ -59,6 +92,7 @@ cc_library(
         ":dsv4_dp_prefill_policy",
         ":pipeline_types",
         ":pp_prefill_guard_policy",
+        ":v41_pp_admission",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:pp_topology_validator",
         "//rtp_llm/cpp/config:config_modules",

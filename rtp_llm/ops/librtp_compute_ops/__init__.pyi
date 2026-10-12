@@ -215,6 +215,10 @@ class LayerKVCache:
 class KVCache:
     """Read-only whole-model KV cache created by the C++ runtime."""
 
+    def native_allocation_tables(self, arg0: PyModelInputs) -> list[dict[str, list[int]]]:
+        """Validate opaque native dispatch leases and copy physical block tables."""
+        ...
+
     @property
     def group_tags(self) -> list[str]: ...
     @property

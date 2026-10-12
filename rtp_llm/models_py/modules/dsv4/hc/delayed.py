@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 import weakref
 from functools import lru_cache
-from typing import Optional
+from typing import Optional, Protocol
 
 import torch
 import torch.nn.functional as F
@@ -52,6 +52,13 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
 
 
+class DelayedHCPredecessor(Protocol):
+    @property
+    def pre_mix_out(self) -> Optional[torch.Tensor]:
+        """Coefficients produced locally or imported at a pipeline boundary."""
+        ...
+
+
 class DelayedHCUnit(HCUnitBase):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -70,10 +77,10 @@ class DelayedHCUnit(HCUnitBase):
         # restore the kernel's 1-D contract once, before graph capture.
         self.base = self.base.reshape(mix_width).contiguous()
         self.scale = self.scale.reshape(3).contiguous()
-        self._previous_ref = None
+        self._previous_ref: Optional[weakref.ReferenceType[DelayedHCPredecessor]] = None
         self.pre_mix_out: Optional[torch.Tensor] = None
 
-    def set_previous(self, previous: Optional["DelayedHCUnit"]) -> None:
+    def set_previous(self, previous: Optional[DelayedHCPredecessor]) -> None:
         # Avoid registering predecessors as nested modules or creating cycles.
         self._previous_ref = weakref.ref(previous) if previous is not None else None
 
