@@ -281,7 +281,7 @@ class PureTpRouterFp4PerGroup(PureTpRouterBase):
 
 
 class PureTpRouterNvfp4Cutlass(PureTpRouterFp4PerGroup):
-    """Replicated tokens and global expert IDs for CUTLASS expert parallelism."""
+    """Replicated tokens and global IDs for CUTLASS expert/tensor parallelism."""
 
     def __init__(self, config, quant_config):
         PureTpRouterBase.__init__(self, config, quant_config, do_recompute_topk=False)
