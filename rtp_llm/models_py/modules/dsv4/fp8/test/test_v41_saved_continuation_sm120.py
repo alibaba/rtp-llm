@@ -9,7 +9,7 @@ import subprocess
 import time
 import traceback
 import unittest
-from contextlib import nullcontext
+from contextlib import ExitStack
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
@@ -56,9 +56,11 @@ ROUNDS = 12
 
 def worker_choices(model):
     choices = dict(CHOICES)
-    mode = model._v4_args.v41_config.get("mhc_collapse_mode")
-    if mode is not None:
-        choices["mhc_collapse_mode"] = mode
+    for component in ("collapse", "post"):
+        key = f"mhc_{component}_mode"
+        mode = model._v4_args.v41_config.get(key)
+        if mode is not None:
+            choices[key] = mode
     return choices
 
 
@@ -212,6 +214,7 @@ def validate_saved(state, admitted, model, generation, rank, identity):
         or admitted["config"] != model._v4_args.v41_config
         or admitted["choices"] != worker_choices(model)
         or model._mhc_collapse_mode != admitted["choices"].get("mhc_collapse_mode")
+        or model._mhc_post_mode != admitted["choices"].get("mhc_post_mode")
         or model._rotary_compute_device != "cuda"
         or model._sparse_attention_mode != "short_preserved"
     ):
@@ -357,17 +360,18 @@ def continue_worker(model, head, generation, rank, admitted, pages, phase):
 
 
 def run_rank(rank, port, config, generation, phase, directory):
-    with (
-        patch.object(
-            delayed_hc,
-            "collapse_delayed",
-            side_effect=AssertionError(
-                "Selected continuation reached default collapse"
-            ),
-        )
-        if config.get("mhc_collapse_mode") == "ordered_fp32"
-        else nullcontext()
-    ):
+    with ExitStack() as stack:
+        for component in ("collapse", "post"):
+            if config.get(f"mhc_{component}_mode") == "ordered_fp32":
+                stack.enter_context(
+                    patch.object(
+                        delayed_hc,
+                        f"{component}_delayed",
+                        side_effect=AssertionError(
+                            f"Selected continuation reached default {component}"
+                        ),
+                    )
+                )
         run_rank_impl(rank, port, config, generation, phase, directory)
 
 
@@ -418,6 +422,8 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
             mode = config.get("mhc_collapse_mode")
             assert layer.attn_hc.collapse_mode == mode
             assert layer.ffn_hc.collapse_mode == mode
+            assert layer.attn_hc.post_mode == config.get("mhc_post_mode")
+            assert layer.ffn_hc.post_mode == config.get("mhc_post_mode")
         if config.get("mhc_collapse_mode") is not None:
             emit(
                 "DSV41_SAVED_COLLAPSE_OWNER",
@@ -427,6 +433,17 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
                 layers=len(model.v4.layers),
                 mhc_collapse_mode="ordered_fp32",
                 diagnostic_collapse_hook=False,
+            )
+        if config.get("mhc_post_mode") is not None:
+            emit(
+                "DSV41_SAVED_POST_OWNER",
+                generation=generation,
+                rank=rank,
+                phase=phase,
+                layers=len(model.v4.layers),
+                mhc_post_mode="ordered_fp32",
+                mhc_collapse_mode=config.get("mhc_collapse_mode"),
+                diagnostic_post_hook=False,
             )
         state_path = directory / f"rank{rank}.state.pt"
         manifest_path = directory / f"rank{rank}.state.json"
@@ -474,22 +491,36 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
             for raw in model.kv_cache.storage.values():
                 raw.fill_(SENTINEL)
             before = {key: raw.clone() for key, raw in model.kv_cache.storage.items()}
-            for variant in (
+            variants = [
                 "generation",
                 "policy",
                 "missing_pool",
                 "corrupt_row",
                 "history",
+            ]
+            if (
+                config.get("mhc_post_mode") is not None
+                and config.get("mhc_collapse_mode") is not None
             ):
+                variants.append("collapse_policy")
+            for variant in variants:
                 mutated = copy.deepcopy(state)
                 if rank == 0:
                     if variant == "generation":
                         mutated["metadata"]["generation"] = 1 - generation
-                    elif variant == "policy":
+                    elif variant in ("policy", "collapse_policy"):
                         policy = (
                             "mhc_collapse_mode"
-                            if config.get("mhc_collapse_mode") is not None
-                            else "sparse_attention_mode"
+                            if variant == "collapse_policy"
+                            else (
+                                "mhc_post_mode"
+                                if config.get("mhc_post_mode") is not None
+                                else (
+                                    "mhc_collapse_mode"
+                                    if config.get("mhc_collapse_mode") is not None
+                                    else "sparse_attention_mode"
+                                )
+                            )
                         )
                         mutated["metadata"]["choices"][policy] = None
                     elif variant == "history":
@@ -595,11 +626,13 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
 
 
 class SavedContinuationSM120Test(unittest.TestCase):
-    def run_case(self, generation, *, collapse_mode=None):
+    def run_case(self, generation, *, collapse_mode=None, post_mode=None):
         self.assertEqual(torch.cuda.device_count(), 8)
-        suffix = "-collapse" if collapse_mode is not None else ""
+        suffix = ("-collapse" if collapse_mode is not None else "") + (
+            "-post" if post_mode is not None else ""
+        )
         root = Path(os.environ["DSV41_TEST_HANDOFF_ROOT"]) / f"gen{generation}{suffix}"
-        root.mkdir()
+        root.mkdir(parents=True)
         checkpoint_root = root / "checkpoint"
         checkpoint_root.mkdir()
         (root / "tables").mkdir()
@@ -608,6 +641,8 @@ class SavedContinuationSM120Test(unittest.TestCase):
         config.update(CHOICES)
         if collapse_mode is not None:
             config["mhc_collapse_mode"] = collapse_mode
+        if post_mode is not None:
+            config["mhc_post_mode"] = post_mode
         save_json(root / "fixture.json", config)
         for phase in ("source", "resume"):
             baseline = gpu_observation()
@@ -648,6 +683,7 @@ class SavedContinuationSM120Test(unittest.TestCase):
             completed=True,
             standalone_decode_role=False,
             **({} if collapse_mode is None else {"mhc_collapse_mode": collapse_mode}),
+            **({} if post_mode is None else {"mhc_post_mode": post_mode}),
         )
 
     def test_generation_zero(self):
@@ -661,6 +697,18 @@ class SavedContinuationSM120Test(unittest.TestCase):
 
     def test_ordered_collapse_generation_one(self):
         self.run_case(1, collapse_mode="ordered_fp32")
+
+    def test_ordered_post_generation_zero(self):
+        self.run_case(0, post_mode="ordered_fp32")
+
+    def test_ordered_post_generation_one(self):
+        self.run_case(1, post_mode="ordered_fp32")
+
+    def test_ordered_collapse_post_generation_zero(self):
+        self.run_case(0, collapse_mode="ordered_fp32", post_mode="ordered_fp32")
+
+    def test_ordered_collapse_post_generation_one(self):
+        self.run_case(1, collapse_mode="ordered_fp32", post_mode="ordered_fp32")
 
 
 if __name__ == "__main__":
