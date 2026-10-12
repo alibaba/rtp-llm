@@ -51,13 +51,16 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 final class GlobalQueueCoordinator implements AutoCloseable {
 
+    static final String QUEUE_FULL_REJECTION_MESSAGE = "Too many requests. Your requests are being throttled due to system capacity limits. Please try again later.";
+
     private static final int MIN_PLANNER_THREADS = 1;
 
     enum OfferResult {
         ENQUEUED,
         COMPLETED,
         QUEUE_FULL,
-        QUEUE_PRIORITY_THROTTLED,
+        QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+        QUEUE_FULL_LOW_PRIORITY_REJECTED,
         CLOSED
     }
 
@@ -170,11 +173,11 @@ final class GlobalQueueCoordinator implements AutoCloseable {
                     return OfferResult.QUEUE_FULL;
                 }
                 if (entry.priority < config.priorityOrdering().getHighPriorityThreshold()) {
-                    return OfferResult.QUEUE_PRIORITY_THROTTLED;
+                    return OfferResult.QUEUE_FULL_LOW_PRIORITY_REJECTED;
                 }
                 victim = orderedQueue.findQueuedRequestToPreempt(entry.priority, inFlight);
                 if (victim == null) {
-                    return OfferResult.QUEUE_FULL;
+                    return OfferResult.QUEUE_FULL_HIGH_PRIORITY_REJECTED;
                 }
                 removeRequestUnderLock(victim);
             }
@@ -188,8 +191,8 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             lock.unlock();
         }
         if (victim != null) {
-            completeDecisionResponse(victim, error(StrategyErrorType.PRIORITY_PREEMPTED,
-                    "Rate limit reached. Please slow down and retry."));
+            completeDecisionResponse(victim, error(StrategyErrorType.QUEUED_REQUEST_PREEMPTED,
+                    QUEUE_FULL_REJECTION_MESSAGE));
         }
         return OfferResult.ENQUEUED;
     }

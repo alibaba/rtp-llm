@@ -510,7 +510,7 @@ public class RequestRegistry {
     public void finishYielded(ScheduledRequest victim, String detail) {
         finishVictim(
                 victim,
-                StrategyErrorType.PRIORITY_PREEMPTED,
+                StrategyErrorType.QUEUED_REQUEST_PREEMPTED,
                 detail);
     }
 

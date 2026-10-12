@@ -20,6 +20,7 @@ import org.flexlb.enums.StatusEnum;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -76,6 +77,16 @@ public final class FlexlbTrace {
     // strongly here would retain it forever.
     private static final Map<Span, BusinessError> BUSINESS_ERRORS =
             Collections.synchronizedMap(new WeakHashMap<>());
+    private static final Set<Integer> BUSINESS_REJECTION_CODES = Set.of(
+            StrategyErrorType.QUEUE_FULL.getErrorCode(),
+            StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED.getErrorCode(),
+            StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode(),
+            StrategyErrorType.QUEUED_REQUEST_PREEMPTED.getErrorCode(),
+            StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode(),
+            StrategyErrorType.INVALID_REQUEST.getErrorCode(),
+            StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode(),
+            StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
+            StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode());
     @Getter
     private static volatile boolean enabled;
     private static volatile Tracer tracer = OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME);
@@ -96,12 +107,7 @@ public final class FlexlbTrace {
         if (code == StatusEnum.INTERNAL_ERROR.getCode()) {
             return "FLEXLB_INTERNAL_ERROR";
         }
-        if (code == StrategyErrorType.QUEUE_FULL.getErrorCode()
-                || code == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()
-                || code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
-                || code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()
-                || code == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
-                || code == StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {
+        if (BUSINESS_REJECTION_CODES.contains(code)) {
             return "FLEXLB_BUSINESS_REJECTED";
         }
         return "FLEXLB_SCHEDULE_FAILED";

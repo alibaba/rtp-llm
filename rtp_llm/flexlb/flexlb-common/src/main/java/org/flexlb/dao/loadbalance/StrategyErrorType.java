@@ -17,6 +17,9 @@ public enum StrategyErrorType {
 
     // queue error
     QUEUE_FULL(8502, false),
+    QUEUE_FULL_LOW_PRIORITY_REJECTED(8433, false),
+    QUEUE_FULL_HIGH_PRIORITY_REJECTED(8434, false),
+    QUEUED_REQUEST_PREEMPTED(8435, false),
     QUEUE_TIMEOUT(8503, false, "GatewayTimeout"),
     REQUEST_CANCELLED(8504, false),
 

@@ -69,5 +69,8 @@ class StrategyErrorTypeTest {
         assertEquals(8429, response.getCode());
         assertEquals(detail, response.getErrorMessage());
         assertEquals(8502, Response.buildErrorResponse(StrategyErrorType.QUEUE_FULL, "queue full").getCode());
+        assertEquals(8433, StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED.getErrorCode());
+        assertEquals(8434, StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED.getErrorCode());
+        assertEquals(8435, StrategyErrorType.QUEUED_REQUEST_PREEMPTED.getErrorCode());
     }
 }

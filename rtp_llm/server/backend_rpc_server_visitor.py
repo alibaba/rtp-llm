@@ -58,6 +58,10 @@ DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
 _TERMINAL_ROUTE_EXCEPTION_TYPES = frozenset(
     {
         ExceptionType.PRIORITY_PREEMPTED,
+        ExceptionType.QUEUED_REQUEST_PREEMPTED,
+        ExceptionType.QUEUE_FULL_LOW_PRIORITY_REJECTED,
+        ExceptionType.QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+        ExceptionType.ROUTER_QUEUE_FULL,
         ExceptionType.PRIORITY_ADMISSION_REJECTED,
         ExceptionType.RESOURCE_EXHAUSTED,
         ExceptionType.ADMISSION_UNAVAILABLE,
@@ -191,7 +195,7 @@ class BackendRPCServerVisitor:
                 exception_type = int(e.exception_type)
                 # These are completed admission decisions, not transient route
                 # transport failures.  A new request id would change request
-                # identity and hide the typed 429 result selected by Master.
+                # identity and hide the business rejection selected by Master.
                 if any(
                     exception_type == int(terminal_type)
                     for terminal_type in _TERMINAL_ROUTE_EXCEPTION_TYPES

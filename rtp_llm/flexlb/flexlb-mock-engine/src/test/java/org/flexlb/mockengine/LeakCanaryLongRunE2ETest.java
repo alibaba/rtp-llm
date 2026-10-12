@@ -124,7 +124,8 @@ class LeakCanaryLongRunE2ETest {
                 int code = response.isSuccess() ? 200 : response.getCode();
                 codeTally.merge(code, 1, Integer::sum);
                 assertTrue(code == 200 || code == 8400 || code == 8429
-                                || code == 8430 || code == 8431
+                                || code == 8430 || code == 8431 || code == 8433
+                                || code == 8434 || code == 8435
                                 || code == 8510 || code == 8511 || code == 8515,
                         "unexpected terminal code " + code + ": " + response.getErrorMessage());
             }

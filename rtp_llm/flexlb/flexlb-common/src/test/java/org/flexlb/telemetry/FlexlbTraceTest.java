@@ -102,7 +102,7 @@ class FlexlbTraceTest {
     @Test
     void scheduleFailureClassificationDoesNotGuessFromUnknownCodes() {
         assertEquals("FLEXLB_INTERNAL_ERROR", FlexlbTrace.scheduleFailureType(500));
-        for (int code : new int[] {8502, 8429, 8406, 8430, 8431, 8432}) {
+        for (int code : new int[] {8502, 8433, 8434, 8435, 8429, 8406, 8430, 8431, 8432}) {
             assertEquals("FLEXLB_BUSINESS_REJECTED", FlexlbTrace.scheduleFailureType(code));
         }
         for (int code : new int[] {503, 429, 8402, 8511, 8513, -1}) {

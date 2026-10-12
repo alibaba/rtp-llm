@@ -196,8 +196,9 @@ class RequestSchedulerTest {
             scheduler.submit(incoming);
 
             Response displaced = queuedFuture.get(5, TimeUnit.SECONDS);
-            assertEquals(8429, displaced.getCode());
-            assertEquals("Rate limit reached. Please slow down and retry.", displaced.getErrorMessage());
+            assertEquals(8435, displaced.getCode());
+            assertEquals("Too many requests. Your requests are being throttled "
+                    + "due to system capacity limits. Please try again later.", displaced.getErrorMessage());
             verify(eviction, timeout(1_000)).tryAdmit(incoming, incomingFuture, selectedRoute, selectedEndpoint);
             verify(router).select(incoming, null);
         } finally {

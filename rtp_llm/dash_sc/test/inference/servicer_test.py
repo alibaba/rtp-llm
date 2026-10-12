@@ -205,6 +205,39 @@ class DashErrorSpecForFtExceptionTest(unittest.TestCase):
             DASH_ERROR_CAPACITY,
         )
 
+    def test_high_priority_queue_rejection_maps_to_resource_exhausted_with_qos(self) -> None:
+        error = FtRuntimeException(
+            ExceptionType.QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+            "private scheduler diagnostic",
+        )
+        with_qos = _dash_error_mapping_for_ft_exception(error, qos_level=60)
+        without_qos = _dash_error_mapping_for_ft_exception(error)
+        self.assertEqual(DASH_ERROR_RESOURCE_EXHAUSTED, with_qos.error_spec)
+        self.assertEqual("Too many requests.", with_qos.public_message)
+        self.assertEqual(DASH_ERROR_CAPACITY, without_qos.error_spec)
+
+    def test_low_priority_queue_rejection_maps_to_service_overloaded_with_qos(self) -> None:
+        error = FtRuntimeException(
+            ExceptionType.QUEUE_FULL_LOW_PRIORITY_REJECTED,
+            "private scheduler diagnostic",
+        )
+        with_qos = _dash_error_mapping_for_ft_exception(error, qos_level=40)
+        without_qos = _dash_error_mapping_for_ft_exception(error)
+        self.assertEqual(DASH_ERROR_ADMISSION_OVERLOADED, with_qos.error_spec)
+        self.assertEqual("Too many requests.", with_qos.public_message)
+        self.assertEqual(DASH_ERROR_CAPACITY, without_qos.error_spec)
+
+    def test_queued_victim_maps_to_service_overloaded_without_qos(self) -> None:
+        error = FtRuntimeException(ExceptionType.QUEUED_REQUEST_PREEMPTED, "private scheduler diagnostic")
+        mapping = _dash_error_mapping_for_ft_exception(error)
+        self.assertEqual(DASH_ERROR_ADMISSION_OVERLOADED, mapping.error_spec)
+        self.assertEqual("Too many requests.", mapping.public_message)
+
+    def test_fifo_queue_full_stays_unavailable_with_qos(self) -> None:
+        error = FtRuntimeException(ExceptionType.ROUTER_QUEUE_FULL, "queue full")
+        mapping = _dash_error_mapping_for_ft_exception(error, qos_level=60)
+        self.assertEqual(DASH_ERROR_CAPACITY, mapping.error_spec)
+
     def test_typed_admission_reason_matrix(self) -> None:
         cases = (
             (

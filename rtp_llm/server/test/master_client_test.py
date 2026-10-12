@@ -251,6 +251,18 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                 ExceptionType.ADMISSION_UNAVAILABLE,
                 AdmissionRejectReason.UNSPECIFIED,
             ),
+            (
+                ExceptionType.QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+            (
+                ExceptionType.QUEUE_FULL_LOW_PRIORITY_REJECTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
+            (
+                ExceptionType.QUEUED_REQUEST_PREEMPTED,
+                AdmissionRejectReason.UNSPECIFIED,
+            ),
         )
         for exception_type, reason in cases:
             with self.subTest(exception_type=exception_type, reason=reason):

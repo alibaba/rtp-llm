@@ -678,6 +678,27 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.attempts, 1)
 
+    async def test_queue_rejections_are_terminal_and_never_retried(self):
+        for error_type in (
+            ExceptionType.QUEUE_FULL_LOW_PRIORITY_REJECTED,
+            ExceptionType.QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+            ExceptionType.QUEUED_REQUEST_PREEMPTED,
+            ExceptionType.ROUTER_QUEUE_FULL,
+        ):
+            with self.subTest(error_type=error_type):
+                client = _AlwaysFailingModelRpcClient(
+                    FtRuntimeException(error_type, "Too many requests.")
+                )
+                visitor = self._visitor(client)
+                visitor.set_request_id_factory(lambda: 456)
+
+                stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+                with self.assertRaises(FtRuntimeException) as raised:
+                    [output async for output in stream]
+
+                self.assertEqual(error_type, raised.exception.exception_type)
+                self.assertEqual(1, client.attempts)
+
     async def test_batch_slo_expired_is_terminal_and_keeps_request_identity(self):
         client = _AlwaysFailingModelRpcClient(
             FtRuntimeException(

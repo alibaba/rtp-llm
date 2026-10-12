@@ -138,6 +138,9 @@ class ExceptionType(IntEnum):
     # trustworthy priority provenance. Dash surfaces this as 503, never as a
     # QoS-tiered 429 resource rejection.
     ADMISSION_UNAVAILABLE = 8432, ExceptionCategory.CAPACITY
+    QUEUE_FULL_LOW_PRIORITY_REJECTED = 8433, ExceptionCategory.CAPACITY
+    QUEUE_FULL_HIGH_PRIORITY_REJECTED = 8434, ExceptionCategory.CAPACITY
+    QUEUED_REQUEST_PREEMPTED = 8435, ExceptionCategory.CAPACITY
 
     # route error
     ROUTE_ERROR = 8500, ExceptionCategory.CAPACITY

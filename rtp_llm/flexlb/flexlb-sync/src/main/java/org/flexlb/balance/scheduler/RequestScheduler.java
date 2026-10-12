@@ -129,10 +129,13 @@ public final class RequestScheduler {
             switch (globalQueue.offer(context, future, context.getPriority())) {
                 case ENQUEUED, COMPLETED -> { }
                 case QUEUE_FULL -> future.complete(error(StrategyErrorType.QUEUE_FULL,
-                        "Too many requests. Your requests are being throttled "
-                                + "due to system capacity limits. Please try again later."));
-                case QUEUE_PRIORITY_THROTTLED -> future.complete(error(
-                        StrategyErrorType.PRIORITY_PREEMPTED, "Rate limit reached. Please slow down and retry."));
+                        GlobalQueueCoordinator.QUEUE_FULL_REJECTION_MESSAGE));
+                case QUEUE_FULL_HIGH_PRIORITY_REJECTED -> future.complete(error(
+                        StrategyErrorType.QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+                        GlobalQueueCoordinator.QUEUE_FULL_REJECTION_MESSAGE));
+                case QUEUE_FULL_LOW_PRIORITY_REJECTED -> future.complete(error(
+                        StrategyErrorType.QUEUE_FULL_LOW_PRIORITY_REJECTED,
+                        GlobalQueueCoordinator.QUEUE_FULL_REJECTION_MESSAGE));
                 case CLOSED -> future.complete(error(StrategyErrorType.DISPATCH_FAILED, "request scheduler is shutting down"));
             }
         } catch (Throwable failure) {

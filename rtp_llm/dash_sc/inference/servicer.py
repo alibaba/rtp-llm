@@ -332,6 +332,15 @@ def _dash_error_mapping_for_ft_exception(
     )
     if typed_mapping is not None:
         return typed_mapping
+    if exception_type == ExceptionType.QUEUED_REQUEST_PREEMPTED:
+        return _LOW_QOS_REJECTION_MAPPING
+    if exception_type in (
+        ExceptionType.QUEUE_FULL_LOW_PRIORITY_REJECTED,
+        ExceptionType.QUEUE_FULL_HIGH_PRIORITY_REJECTED,
+    ):
+        if qos_level is None:
+            return _SERVICE_UNAVAILABLE_MAPPING
+        return _LOW_QOS_REJECTION_MAPPING if qos_level < 50 else _HIGH_QOS_REJECTION_MAPPING
     if exception_type == ExceptionType.GRAMMAR_COMPILE_OVERLOADED:
         return _DashFtErrorMapping(
             DASH_ERROR_ADMISSION_OVERLOADED,
