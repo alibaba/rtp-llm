@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
+#include <cstddef>
 #include <vector>
 #include <string>
 #include <map>
@@ -147,6 +148,10 @@ public:
     // Model policy for prefix recomputation; live P/D transfers are unaffected.
     int     cache_min_replay_tokens = 1;
     int64_t cache_key_hash_seed     = 0;
+
+    // GPU side caches owned by a model plugin but sized per FULL cache block.
+    // They are not allocated by BlockPool, yet must reduce its block budget.
+    size_t auxiliary_paged_cache_bytes_per_block = 0;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";
