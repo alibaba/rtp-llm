@@ -160,7 +160,10 @@ class Qwen4Exp(Qwen35Moe):
             kv_cache_dtype = getattr(
                 attn_config, "kv_cache_dtype", KvCacheDataType.BASE
             )
-            if kv_cache_dtype != KvCacheDataType.BASE:
+            if kv_cache_dtype != KvCacheDataType.BASE and not (
+                kv_cache_dtype == KvCacheDataType.FP8
+                and os.environ.get("RTP_LLM_QWEN4_FP8_KV_EXPERIMENTAL", "0") == "1"
+            ):
                 raise RuntimeError(
                     "qwen4_exp QSA paged attention requires the base BF16 KV cache"
                 )

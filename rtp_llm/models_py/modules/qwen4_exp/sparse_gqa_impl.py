@@ -82,6 +82,20 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
+    def _paged_kv_scale_args(self, cache):
+        from .sparse_paged_fmha import main_kv_scale_view
+
+        if cache is None:
+            return {}
+        scale = getattr(cache, "kv_scale_base", None)
+        view = main_kv_scale_view(
+            cache.kv_cache_base,
+            scale,
+            kv_heads=self.kv_head_num,
+            page_size=int(self.attn_configs.kernel_tokens_per_block),
+        )
+        return {} if view is None else {"kv_scale": view}
+
     def _validate_runtime_mode(self) -> None:
         """Keep the correctness bridge inside its deliberately narrow scope."""
         inputs = self.attn_inputs
@@ -245,9 +259,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "qwen4_exp QSA paged attention requires a device int32 main block table"
             )
 
-        if cache is None or cache.dtype != torch.bfloat16:
+        if cache is None or cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
             raise RuntimeError(
-                "qwen4_exp QSA paged attention requires a BF16 main KV cache"
+                "qwen4_exp QSA paged attention requires a BF16 or FP8 E4M3 main KV cache"
             )
         if cache.device != device:
             raise RuntimeError(
@@ -322,6 +336,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         """Validate side and main paged geometry before either cache is written."""
         if self._selected_indices is not None:
             raise RuntimeError("qwen4_exp sparse GQA has an unconsumed selection")
+        self._paged_kv_scale_args(qsa_runtime.main_cache)
         if self._is_draft_graph():
             from rtp_llm.models_py.modules.qwen4_exp.draft_prefill_graph import (
                 draft_graph_lanes,
@@ -521,9 +536,12 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             )
 
         cache = kv_cache.kv_cache_base
-        if cache.dtype != torch.bfloat16 or cache.device != qkv.device:
+        if (
+            cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn)
+            or cache.device != qkv.device
+        ):
             raise RuntimeError(
-                "qwen4_exp sparse GQA requires a device-local BF16 main KV cache"
+                "qwen4_exp sparse GQA requires a device-local BF16 or FP8 E4M3 main KV cache"
             )
         if cache.dim() == 2:
             required_width = 2 * self.kv_head_num * page_size * self.head_dim
@@ -779,8 +797,13 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             sparse_paged_gqa_attn,
         )
 
-        if kv_cache is None or kv_cache.kv_cache_base.dtype != torch.bfloat16:
-            raise RuntimeError("qwen4_exp draft Graph requires BF16 main KV cache")
+        if kv_cache is None or kv_cache.kv_cache_base.dtype not in (
+            torch.bfloat16,
+            torch.float8_e4m3fn,
+        ):
+            raise RuntimeError(
+                "qwen4_exp draft Graph requires BF16 or FP8 E4M3 main KV cache"
+            )
         tokens = int(qkv.shape[0])
         batch = int(self.attn_inputs.input_lengths_device.numel())
         lanes = draft_graph_lanes(self.attn_inputs, tokens)
@@ -810,6 +833,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             selected.contiguous(),
             page_size=int(self.attn_configs.kernel_tokens_per_block),
             kv_head_num=self.kv_head_num,
+            **self._paged_kv_scale_args(kv_cache),
             graph_capture=True,
         )
         output = (
@@ -873,6 +897,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 "the attention module must run the indexer and pass it in"
             )
 
+        self._paged_kv_scale_args(kv_cache)
         if self._is_draft_graph():
             output = self._forward_draft_graph(qkv, kv_cache, selected_indices)
             if uses_stored_selection:
@@ -1030,6 +1055,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             selected_indices.contiguous(),
             page_size=page_size,
             kv_head_num=self.kv_head_num,
+            **self._paged_kv_scale_args(kv_cache),
             **({"graph_capture": True} if self.attn_inputs.is_cuda_graph else {}),
         )
         return output.transpose(1, 2).reshape(tokens, self.q_width)
@@ -1105,6 +1131,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 selected.contiguous(),
                 page_size=page_size,
                 kv_head_num=self.kv_head_num,
+                **self._paged_kv_scale_args(kv_cache),
             )
             return (
                 output.transpose(1, 2)
@@ -1126,6 +1153,7 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                 request["selected_indices"],
                 page_size=page_size,
                 kv_head_num=self.kv_head_num,
+                **self._paged_kv_scale_args(kv_cache),
             )
             outputs.append(
                 request_output.transpose(1, 2).reshape(query_len, self.q_width)

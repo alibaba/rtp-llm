@@ -3,7 +3,7 @@
 The QSA indexer returns request-local absolute token indices.  This kernel maps
 each selected token through the main MHA cache block table and performs GQA
 attention without materialising gathered K/V tensors.  It is intentionally
-Qwen4-specific: BF16 HND cache layout, token-level selections, and block id zero
+Qwen4-specific: BF16 or FP8 E4M3 HND cache layout, token-level selections, and block id zero
 reserved as the allocator sentinel.
 
 The same B/S-shaped primitive serves ordinary decode, target verification, and
@@ -76,10 +76,43 @@ def _validate_sparse_paged_indices(
     )
 
 
+def main_kv_scale_view(cache, scale, *, kv_heads, page_size):
+    """Validate the native per-token/head K/V dequant scale layout.
+
+    The fused native writer currently casts to E4M3 and writes unit scales.
+    Readers consume the stored scale rather than assuming that value, so PD
+    copies and future scaled writers preserve the same cache contract.
+    No tensor contents are read back during capture.
+    """
+    if cache.dtype == torch.bfloat16:
+        return None
+    if cache.dtype != torch.float8_e4m3fn:
+        raise ValueError("QSA main KV must be BF16 or FP8 E4M3")
+    pages = int(cache.shape[0])
+    if scale is None or scale.dtype != torch.float32 or scale.device != cache.device:
+        raise ValueError("FP8 main KV requires device-local FP32 K/V scales")
+    shape = (pages, 2, kv_heads, page_size)
+    if scale.ndim == 2:
+        width = 2 * kv_heads * page_size
+        if scale.shape[0] != pages or scale.shape[1] < width or scale.stride(1) != 1:
+            raise ValueError("FP8 main KV packed scale geometry is invalid")
+        return torch.as_strided(
+            scale, shape, (scale.stride(0), kv_heads * page_size, page_size, 1)
+        )
+    if tuple(scale.shape) != shape or tuple(scale.stride()[1:]) != (
+        kv_heads * page_size,
+        page_size,
+        1,
+    ):
+        raise ValueError("FP8 main KV scale geometry must be HND per-token/head")
+    return scale
+
+
 @triton.jit
 def _sparse_paged_gqa_kernel(
     q_ptr,
     cache_ptr,
+    cache_scale_ptr,
     block_table_ptr,
     kv_lens_ptr,
     selected_ptr,
@@ -91,6 +124,10 @@ def _sparse_paged_gqa_kernel(
     stride_cache_kv,
     stride_cache_h,
     stride_cache_token,
+    stride_scale_page,
+    stride_scale_kv,
+    stride_scale_h,
+    stride_scale_token,
     stride_bt_b,
     stride_bt_block,
     stride_len_b,
@@ -103,6 +140,7 @@ def _sparse_paged_gqa_kernel(
     selected_width,
     max_blocks,
     cache_blocks,
+    FP8_CACHE: tl.constexpr,
     H_Q: tl.constexpr,
     H_KV: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
@@ -156,6 +194,15 @@ def _sparse_paged_gqa_kernel(
             + rd[None, :]
         )
         k = tl.load(k_ptr, mask=valid[:, None], other=0.0).to(tl.float32)
+        if FP8_CACHE:
+            scale_ptr = (
+                cache_scale_ptr
+                + physical_block * stride_scale_page
+                + kv_head * stride_scale_h
+                + token_offset * stride_scale_token
+            )
+            k_scale = tl.load(scale_ptr, mask=valid, other=1.0)
+            k *= k_scale[:, None]
         score = tl.sum(q[None, :] * k, axis=1) * SCALE
         score = tl.where(valid, score, float("-inf"))
         max_score = tl.maximum(max_score, tl.max(score, axis=0))
@@ -191,7 +238,19 @@ def _sparse_paged_gqa_kernel(
         )
         v_ptr = k_ptr + stride_cache_kv
         k = tl.load(k_ptr, mask=valid[:, None], other=0.0).to(tl.float32)
+        if FP8_CACHE:
+            scale_ptr = (
+                cache_scale_ptr
+                + physical_block * stride_scale_page
+                + kv_head * stride_scale_h
+                + token_offset * stride_scale_token
+            )
+            k_scale = tl.load(scale_ptr, mask=valid, other=1.0)
+            k *= k_scale[:, None]
         v = tl.load(v_ptr, mask=valid[:, None], other=0.0).to(tl.float32)
+        if FP8_CACHE:
+            v_scale = tl.load(scale_ptr + stride_scale_kv, mask=valid, other=1.0)
+            v *= v_scale[:, None]
         score = tl.sum(q[None, :] * k, axis=1) * SCALE
         score = tl.where(valid, score, float("-inf"))
         safe_delta = tl.where(valid, score - max_score, float("-inf"))
@@ -214,6 +273,7 @@ def _sparse_paged_gqa_kernel(
 def _sparse_paged_online_split_kernel(
     q_ptr,
     cache_ptr,
+    cache_scale_ptr,
     block_table_ptr,
     kv_lens_ptr,
     selected_ptr,
@@ -225,6 +285,10 @@ def _sparse_paged_online_split_kernel(
     stride_cache_kv,
     stride_cache_h,
     stride_cache_token,
+    stride_scale_page,
+    stride_scale_kv,
+    stride_scale_h,
+    stride_scale_token,
     stride_bt_b,
     stride_bt_block,
     stride_len_b,
@@ -234,6 +298,7 @@ def _sparse_paged_online_split_kernel(
     selected_width,
     max_blocks,
     cache_blocks,
+    FP8_CACHE: tl.constexpr,
     H_Q: tl.constexpr,
     H_KV: tl.constexpr,
     QUERY_LEN: tl.constexpr,
@@ -284,6 +349,14 @@ def _sparse_paged_online_split_kernel(
             + rd[None, :]
         )
         key = tl.load(key_ptr, mask=valid[:, None], other=0.0).to(tl.float32)
+        if FP8_CACHE:
+            scale_ptr = (
+                cache_scale_ptr
+                + physical * stride_scale_page
+                + kv_head * stride_scale_h
+                + (index % PAGE_SIZE) * stride_scale_token
+            )
+            key *= tl.load(scale_ptr, mask=valid, other=1.0)[:, None]
         score = tl.sum(q[None, :] * key, axis=1) * SCALE
         score = tl.where(valid, score, float("-inf"))
         next_max = tl.maximum(maximum, tl.max(score, axis=0))
@@ -292,6 +365,10 @@ def _sparse_paged_online_split_kernel(
         value = tl.load(key_ptr + stride_cache_kv, mask=valid[:, None], other=0.0).to(
             tl.float32
         )
+        if FP8_CACHE:
+            value *= tl.load(scale_ptr + stride_scale_kv, mask=valid, other=1.0)[
+                :, None
+            ]
         acc = acc * alpha + tl.sum(weights[:, None] * value, axis=0)
         normalizer = normalizer * alpha + tl.sum(weights)
         maximum = next_max
@@ -338,6 +415,7 @@ def sparse_paged_gqa_attn(
     *,
     page_size: int,
     kv_head_num: int | None = None,
+    kv_scale: torch.Tensor | None = None,
     block_k: int = _BLOCK_K,
     graph_capture: bool = False,
 ) -> torch.Tensor:
@@ -424,8 +502,11 @@ def sparse_paged_gqa_attn(
         raise ValueError(
             "q, kv_cache, block_table, kv_lens, and selected must share CUDA"
         )
-    if kv_cache.dtype != torch.bfloat16:
-        raise ValueError("qwen4 sparse paged GQA requires a BF16 main KV cache")
+    scale_view = main_kv_scale_view(
+        kv_cache, kv_scale, kv_heads=kv_heads, page_size=page_size
+    )
+    scale_pointer = kv_cache if scale_view is None else scale_view
+    scale_strides = (0, 0, 0, 0) if scale_view is None else scale_view.stride()
     expected_inner_strides = (
         kv_heads * page_size * head_dim,
         page_size * head_dim,
@@ -516,18 +597,21 @@ def sparse_paged_gqa_attn(
             _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
                 q,
                 kv_cache,
+                scale_pointer,
                 block_table,
                 kv_lens,
                 selected,
                 partial,
                 *q.stride()[:3],
                 *kv_cache.stride()[:4],
+                *scale_strides,
                 *block_table.stride(),
                 *kv_lens.stride(),
                 *selected.stride()[:2],
                 selected_width,
                 int(block_table.shape[1]),
                 cache_blocks,
+                FP8_CACHE=scale_view is not None,
                 H_Q=q_heads,
                 H_KV=kv_heads,
                 QUERY_LEN=query_len,
@@ -547,12 +631,14 @@ def sparse_paged_gqa_attn(
     _sparse_paged_gqa_kernel[grid](
         q,
         kv_cache,
+        scale_pointer,
         block_table,
         kv_lens,
         selected,
         output,
         *q.stride()[:3],
         *kv_cache.stride()[:4],
+        *scale_strides,
         *block_table.stride(),
         *kv_lens.stride(),
         *selected.stride()[:2],
@@ -560,6 +646,7 @@ def sparse_paged_gqa_attn(
         selected_width,
         int(block_table.shape[1]),
         cache_blocks,
+        FP8_CACHE=scale_view is not None,
         H_Q=q_heads,
         H_KV=kv_heads,
         PAGE_SIZE=page_size,
