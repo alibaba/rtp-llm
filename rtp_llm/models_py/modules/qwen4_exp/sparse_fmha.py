@@ -219,6 +219,7 @@ def _sparse_prefill_grouped_kernel(
     MAX_BLKS: tl.constexpr,
     BLK_K: tl.constexpr,
     BLK_H: tl.constexpr,
+    SKIP_EMPTY: tl.constexpr = False,
 ):
     """Share selected K/V across GQA heads and use tensor-core reductions."""
     pid_b = tl.program_id(0)
@@ -245,28 +246,31 @@ def _sparse_prefill_grouped_kernel(
         tr = blk * BLK_K + tl.arange(0, BLK_K)
         idx = tl.load(idx_base + tr, mask=tr < K, other=-1)
         valid = (tr < K) & (idx >= 0) & (idx < T)
-        k = tl.load(
-            k_base + idx[:, None] * stride_k_t + rd[None, :],
-            mask=valid[:, None],
-            other=0.0,
-        )
-        score = tl.dot(q, tl.trans(k)) * SCALE
-        score = tl.where(valid[None, :], score, float("-inf"))
-        next_max = tl.maximum(max_score, tl.max(score, axis=1))
-        rescale = tl.where(next_max == float("-inf"), 0.0, tl.exp(max_score - next_max))
-        weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
-        v = tl.load(
-            v_base + idx[:, None] * stride_v_t + rd[None, :],
-            mask=valid[:, None],
-            other=0.0,
-        )
-        # Keep softmax probabilities in FP32. tf32x3 avoids the BF16
-        # probability rounding of a single BF16 tensor-core PV product.
-        acc = acc * rescale[:, None] + tl.dot(
-            weights, v.to(tl.float32), input_precision="tf32x3"
-        )
-        sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
-        max_score = next_max
+        if not SKIP_EMPTY or tl.sum(valid.to(tl.int32), 0) > 0:
+            k = tl.load(
+                k_base + idx[:, None] * stride_k_t + rd[None, :],
+                mask=valid[:, None],
+                other=0.0,
+            )
+            score = tl.dot(q, tl.trans(k)) * SCALE
+            score = tl.where(valid[None, :], score, float("-inf"))
+            next_max = tl.maximum(max_score, tl.max(score, axis=1))
+            rescale = tl.where(
+                next_max == float("-inf"), 0.0, tl.exp(max_score - next_max)
+            )
+            weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
+            v = tl.load(
+                v_base + idx[:, None] * stride_v_t + rd[None, :],
+                mask=valid[:, None],
+                other=0.0,
+            )
+            # Keep softmax probabilities in FP32. tf32x3 avoids the BF16
+            # probability rounding of a single BF16 tensor-core PV product.
+            acc = acc * rescale[:, None] + tl.dot(
+                weights, v.to(tl.float32), input_precision="tf32x3"
+            )
+            sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
+            max_score = next_max
     out = tl.where(sum_exp[:, None] > 0, acc / sum_exp[:, None], 0.0)
     tl.store(
         out_ptr
@@ -391,6 +395,20 @@ def sparse_prefill_attn(
         # fits the shared-memory budget and avoids padding work for TP8's
         # three query heads per KV head.
         blk_k = 32
+    skip_empty = (
+        grouped
+        and D == 256
+        and q_per_kv in (6, 12)
+        and S >= 128
+        and K >= 256
+        and os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY", "0")
+        .strip()
+        .lower()
+        in ("1", "true", "on")
+    )
+    grouped_options = {"BLK_H": 16} if grouped else {}
+    if skip_empty:
+        grouped_options.update(SKIP_EMPTY=True, num_stages=1)
     kernel[grid](
         q,
         k,
@@ -415,7 +433,7 @@ def sparse_prefill_attn(
         q_per_kv=q_per_kv,
         MAX_BLKS=triton.cdiv(K, blk_k),
         BLK_K=blk_k,
-        **({"BLK_H": 16} if grouped else {}),
+        **grouped_options,
     )
     return out
 
