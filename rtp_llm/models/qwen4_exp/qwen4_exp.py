@@ -241,6 +241,9 @@ class Qwen4Exp(Qwen35Moe):
         config = super()._create_config(ckpt_path)
         config._qwen4_moe_only_fp8 = False
         config._qwen4_moe_only_fp4 = False
+        config._qwen4_vocab_cpu_offload = str_to_bool(
+            os.environ.get("RTP_LLM_QWEN4_VOCAB_CPU_OFFLOAD", "false")
+        )
         config._qwen4_attention_fp8 = str_to_bool(
             os.environ.get("RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL", "false")
         )

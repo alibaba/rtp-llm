@@ -499,6 +499,16 @@ class Qwen4ExpModel(Qwen35Model):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        if getattr(self.config, "_qwen4_vocab_cpu_offload", False):
+            from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import (
+                Qwen4CpuVocabEmbedding,
+            )
+
+            self.embed_tokens = Qwen4CpuVocabEmbedding(
+                self.embed_tokens.weight,
+                self.embed_tokens.tp_size,
+                torch.device("cuda", torch.cuda.current_device()),
+            )
         self.ple_layers = nn.ModuleDict()
         self.requires_cuda_graph_model_input_preparation = (
             bool(getattr(self.config, "enable_qwen4_ple", False))
