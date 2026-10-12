@@ -83,10 +83,15 @@ def wait_for(
 
 
 def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Probe address occupancy without listening or accepting connections.
+
+    Wildcard probes match JVM bindings and detect conflicts on other interfaces.
+    The context closes the socket immediately; this creates no network service.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind((host, port))
+            sock.bind((host, port))  # lgtm [py/bind-socket-all-network-interfaces]
             return False
         except OSError:
             return True
