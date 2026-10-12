@@ -1,4 +1,4 @@
-"""Build and launch the local ZooKeeper helper using its readiness protocol."""
+"""Prepare ZooKeeper outside runs; launch only verified compiled artifacts."""
 
 from __future__ import annotations
 
@@ -20,15 +20,7 @@ ZK_READY_TIMEOUT_S = float(os.environ.get("FLEXLB_FT_ZK_READY_TIMEOUT_S", "120")
 
 
 class ZkHelperOps:
-    """Lifecycle glue for the ZK helper JVM.
-
-    Default launch: resolve the flexlb-sync TEST classpath once per run-dir
-    via ``mvnw -pl flexlb-sync -am dependency:build-classpath`` (cached in
-    <run_dir>/zk_classpath.txt), then
-    ``java -cp test-classes:classes:<deps> org.flexlb.consistency.ZkTestingServerLauncher``.
-    Override the whole command through FLEXLB_FT_ZK_LAUNCH_CMD if the
-    flexlb-sync assembly differs.
-    """
+    """Explicit preparation owns Maven; runtime never compiles shared targets."""
 
     @staticmethod
     def find_ready_connect_string(log_file: Path) -> Optional[str]:
@@ -65,61 +57,61 @@ class ZkHelperOps:
             )
 
     @staticmethod
-    def _ensure_test_classpath(java_bin: str, run_dir: Path) -> str:
-        """flexlb-sync TEST-scope dependency classpath via mvnw (cached).
-
-        Field-tested two-step boot (flexlb-sync owner contract):
-          1. ``-pl flexlb-sync -am test-compile`` — compiles the launcher
-             itself (src/test) plus reactor deps;
-          2. ``-pl flexlb-sync dependency:build-classpath`` (NO -am:
-             with it every reactor module writes its own outputFile)
-             with an ABSOLUTE -Dmdep.outputFile and includeScope=test
-             (curator-test is test-scoped in flexlb-sync/pom.xml).
-        Cached per run-dir so repeated env builds reuse one resolution.
-        """
-        cp_file = run_dir / "zk_classpath.txt"
-        if cp_file.is_file() and cp_file.stat().st_size > 0:
-            return cp_file.read_text(encoding="utf-8").strip()
-        env = dict(os.environ)
-        # mvnw honours JAVA_HOME; derive it from the resolved java binary.
-        java_home = Path(java_bin).resolve().parents[1]
-        if (java_home / "bin" / "java").exists():
-            env.setdefault("JAVA_HOME", str(java_home))
-        ZkHelperOps._mvnw(
-            ["-pl", "flexlb-sync", "-am", "test-compile"],
-            env,
-            timeout_s=900,
-            what="mvnw test-compile (flexlb-sync)",
-        )
-        ZkHelperOps._mvnw(
-            [
-                "-pl",
-                "flexlb-sync",
-                "dependency:build-classpath",
-                f"-Dmdep.outputFile={cp_file}",  # absolute (run_dir is abs)
-                "-Dmdep.includeScope=test",
-            ],
-            env,
-            timeout_s=600,
-            what="mvnw dependency:build-classpath (flexlb-sync)",
-        )
-        if not cp_file.is_file() or cp_file.stat().st_size == 0:
-            raise RuntimeError(
-                f"mvnw build-classpath produced no classpath file: {cp_file}"
-            )
-        return cp_file.read_text(encoding="utf-8").strip()
+    def prepare(java_bin: str) -> Path:
+        import fcntl
+        from artifacts.json_io import write_json
+        directory = FLEXLB_DIR / 'flexlb-sync' / 'target' / 'online-eval-runtime'
+        directory.mkdir(parents=True, exist_ok=True)
+        with (directory / 'prepare.lock').open('w') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            cp_file = directory / 'classpath.txt'
+            env = dict(os.environ, JAVA_HOME=str(Path(java_bin).resolve().parents[1]))
+            profile = ['-Popensource,!internal']
+            ZkHelperOps._mvnw(profile + ['-pl', 'flexlb-sync', '-am', 'test-compile'], env,
+                             what='ZooKeeper test-compile')
+            ZkHelperOps._mvnw(profile + ['-pl', 'flexlb-sync', 'dependency:build-classpath',
+                f'-Dmdep.outputFile={cp_file}', '-Dmdep.includeScope=test'], env,
+                what='ZooKeeper dependency classpath')
+            if not cp_file.is_file() or not cp_file.read_text().strip():
+                raise RuntimeError('ZooKeeper preparation produced no classpath')
+            paths = ZkHelperOps._classpath_paths(cp_file)
+            write_json(directory / 'manifest.json', {'files': ZkHelperOps._fingerprints(paths)})
+        return directory
 
     @staticmethod
-    def default_launch_argv(java_bin: str, run_dir: Path) -> list[str]:
-        deps = ZkHelperOps._ensure_test_classpath(java_bin, run_dir)
-        sync_target = FLEXLB_DIR / "flexlb-sync" / "target"
-        cp = os.pathsep.join(
-            [
-                str(sync_target / "test-classes"),
-                str(sync_target / "classes"),
-                deps,
-            ]
-        )
+    def _classpath_paths(cp_file):
+        target = FLEXLB_DIR / 'flexlb-sync' / 'target'
+        return [target / 'test-classes', target / 'classes',
+                *[Path(path) for path in cp_file.read_text().strip().split(os.pathsep)]]
+
+    @staticmethod
+    def _fingerprints(paths):
+        from reporting.evidence_archive import file_digest
+        files = {}
+        for path in paths:
+            if not path.exists():
+                raise RuntimeError('ZooKeeper classpath entry missing: ' + str(path))
+            entries = sorted(p for p in path.rglob('*') if p.is_file()) if path.is_dir() else [path]
+            if not entries:
+                raise RuntimeError('ZooKeeper classpath entry is empty: ' + str(path))
+            for entry in entries:
+                files[str(entry.resolve())] = file_digest(entry)
+        return files
+
+    @staticmethod
+    def default_launch_argv(java_bin: str) -> list[str]:
+        import json
+        directory = FLEXLB_DIR / 'flexlb-sync' / 'target' / 'online-eval-runtime'
+        cp_file, manifest = directory / 'classpath.txt', directory / 'manifest.json'
+        if not cp_file.is_file() or not manifest.is_file():
+            raise RuntimeError('ZooKeeper runtime is not prepared; run tools/online_eval/scripts/commands/prepare_runtime.py')
+        paths = ZkHelperOps._classpath_paths(cp_file)
+        if ZkHelperOps._fingerprints(paths) != json.loads(manifest.read_text())['files']:
+            raise RuntimeError('ZooKeeper runtime changed after preparation; run prepare_runtime.py again')
+        launcher = paths[0] / (ZK_LAUNCHER_CLASS.replace('.', '/') + '.class')
+        if not launcher.is_file():
+            raise RuntimeError('ZooKeeper launcher class missing: ' + str(launcher))
+        cp = os.pathsep.join(map(str, paths))
         # --port 0: ZK auto-allocates a free port; the ZK_READY line
         # advertises the actual connectString (no port-collision risk
         # against sibling harness processes).

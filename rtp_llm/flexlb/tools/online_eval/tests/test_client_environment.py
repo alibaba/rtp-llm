@@ -52,13 +52,18 @@ def test_subprocess_boundary_also_validates_before_creating_artifacts(tmp_path):
     ('aggregate','true','false'), ('diagnostic','false','true')])
 def test_collection_policy_is_frozen_and_matches_launch(tmp_path, profile, latency, events):
     client = mock.Mock()
-    client.run_async.return_value = (SimpleNamespace(), None)
+    process = SimpleNamespace(alive=lambda: True)
+    client.run_async.return_value = (process, None)
     flow = JavaFlowGroup(client, tmp_path / 'flow', run_id='r', group_id='g', phase_id='p',
                          poll_s=1, collection_profile=profile)
     trace = tmp_path / 'trace.jsonl'
     trace.write_text('{}\n')
-    with mock.patch.object(flow, '_wait', return_value={'state': 'SENDING'}):
-        flow.start(trace, settings(), Deadline(1), target='127.0.0.1:1234')
+    def acknowledge(*args):
+        (flow.control / 'status.json').write_text(json.dumps(dict(flow.identity, state='SENDING')))
+        return process, None
+    client.run_async.side_effect = acknowledge
+    import time
+    flow.start(trace, settings(), Deadline(time.monotonic()+1), target='127.0.0.1:1234')
     frozen = json.loads((flow.directory / 'flow-input.json').read_text())['environment']
     assert frozen == client.run_async.call_args.args[0]
     assert frozen['SKIP_SERVER_LATENCY'] == latency

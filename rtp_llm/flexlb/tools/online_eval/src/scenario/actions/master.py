@@ -115,9 +115,9 @@ def _restore(ctx, params, deadline):
         # fails; backend teardown owns any partially started replacement.
         fault.process.proc.wait(timeout=deadline.remaining())
         if fault.target == "single":
-            current = ctx.backend.manager.start_master(ctx.env)
+            current = ctx.backend.manager.start_master(ctx.env, deadline=deadline)
         else:
-            current = ctx.backend.manager.restart_master_instance(ctx.env, fault.target)
+            current = ctx.backend.manager.restart_master_instance(ctx.env, fault.target, deadline=deadline)
     fault.restored = True
     fault.restored_epoch_s = time.time()
     deadline.check()

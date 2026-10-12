@@ -14,7 +14,8 @@ from flexlb_cfg import render_env
 from runtime.environment_config import MasterSpec
 from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
 from runtime.master_artifact import configure_master
-from runtime.network import http_post_json, port_accepting, wait_for, wait_for_port
+from runtime.network import http_post_json, port_accepting
+from runtime.startup import startup_deadline, wait_ready, startup_phase
 from runtime.paths import API_JAR
 from runtime.process import ManagedProcess, ProcessOps
 
@@ -142,8 +143,10 @@ class MasterLifecycle:
         return [p for p in ports if port_accepting(p)]
 
     def start_master(
-        self, env: FlexEnv, log_name: Optional[str] = None
+        self, env: FlexEnv, log_name: Optional[str] = None, *, deadline=None
     ) -> ManagedProcess:
+        deadline = startup_deadline(deadline, 240)
+        deadline.check()
         spec = env.spec
         if not API_JAR.is_file():
             raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
@@ -153,19 +156,8 @@ class MasterLifecycle:
         # instance) holds the fixed 18080/18081/18082 ports — wait for release
         # instead of dying on BindException while the readiness probe hits the
         # *foreign* master (mis-detected as "up").
-        port_wait_s = float(os.environ.get("FLEXLB_FT_MASTER_PORT_WAIT_S", "120"))
-        port_deadline = time.monotonic() + port_wait_s
-        while True:
-            busy = self._master_ports_in_use(env)
-            if not busy:
-                break
-            if time.monotonic() >= port_deadline:
-                raise RuntimeError(
-                    f"master ports still busy after {port_wait_s:.0f}s (another "
-                    f"master running?): {busy}"
-                )
-            self._log(f"master ports {busy} busy; waiting for release ...")
-            time.sleep(5.0)
+        wait_ready(deadline, 'master ports available',
+                   lambda: not self._master_ports_in_use(env))
         java = resolve_java21()
         env.master_start_count += 1
         log_name = log_name or (
@@ -255,105 +247,47 @@ class MasterLifecycle:
             except OSError:
                 return ""
 
-        # B2 (Daniel P3-2): poll readiness AND liveness — the strict-
-        # config startup-failure variants (atpm_config_strict_reject) die
-        # within seconds of launch, so waiting the full 90s port window
-        # there only delays the failure report; the early exit mirrors
-        # the mock-start polling above.  Only the process-dead branch
-        # short-circuits — a live master keeps the full window.
-        master_up = False
-        master_deadline = time.monotonic() + 90
-        while time.monotonic() < master_deadline:
-            if port_accepting(env.master_http_port):
-                master_up = True
-                break
-            if not proc.alive():
-                break
-            time.sleep(1.0)
-        if not master_up:
+        try:
+            self._wait_master(env, proc, 'single', '127.0.0.1', env.master_http_port, deadline)
+        except Exception as exc:
             app_tail = _app_log_tail_this_start()
             extra = f"\n--- {app_log} (this start) ---\n" + app_tail if app_tail else ""
-            raise RuntimeError(f"master failed to start:\n{proc.tail_log()}{extra}")
-        # Guard against a foreign master squatting on the HTTP port: if our own
-        # JVM died on BindException, the port probe above may still succeed
-        # against the foreign process. Re-check our own pid.
-        if not proc.alive():
-            app_tail = _app_log_tail_this_start()
-            extra = f"\n--- {app_log} (this start) ---\n" + app_tail if app_tail else ""
-            raise RuntimeError(
-                f"master process exited during startup (port conflict?):\n"
-                f"{proc.tail_log()}{extra}"
-            )
-
-        def _master_info() -> Optional[dict]:
-            # /rtp_llm/master/info is a POST endpoint (GET returns 405);
-            # http_post_json returns (status, payload) tuple.
-            status, data = http_post_json(
-                f"http://127.0.0.1:{env.master_http_port}/rtp_llm/master/info",
-                {},
-            )
-            return data if status == 200 else None
-
-        if not wait_for(
-            lambda: (lambda d: bool(d and d.get("ready")))(_master_info()),
-            timeout_s=30,
-            interval_s=0.5,
-        ):
-            raise RuntimeError(
-                "master HTTP up but engine sync not ready after 30s "
-                "(check ~/ai-whale/logs/flexlb.log)"
-            )
-
-        # Stability window: hold "alive == discovered == spec topology" for
-        # master_stable_window_s (default 3s) before returning. Skips the
-        # cold-start first-connect storm; 0 disables (cold-start probe).
-        window_s = spec.master_stable_window_s
-        if window_s > 0:
-
-            def _engines_stable() -> bool:
-                data = _master_info()
-                if not data or not data.get("ready"):
-                    return False
-                summary = data.get("worker_summary", {}) or {}
-                for role, expected in (
-                    ("PREFILL", spec.n_prefill),
-                    ("DECODE", spec.n_decode),
-                ):
-                    if expected <= 0:
-                        continue
-                    entry = summary.get(role) or {}
-                    try:
-                        discovered = int(entry.get("discovered", -1))
-                        alive = int(entry.get("alive", -1))
-                    except (TypeError, ValueError):
-                        return False
-                    if discovered != expected or alive != discovered:
-                        return False
-                return True
-
-            needed = max(1, int(round(window_s / 0.5)))
-            stable_ticks = 0
-            deadline = time.monotonic() + 90
-            while time.monotonic() < deadline:
-                if _engines_stable():
-                    stable_ticks += 1
-                    if stable_ticks >= needed:
-                        break
-                else:
-                    stable_ticks = 0
-                time.sleep(0.5)
-            if stable_ticks < needed:
-                if not proc.alive():
-                    raise RuntimeError(f"master exited:\n{proc.tail_log()}")
-                raise RuntimeError(
-                    f"master engines not stable (alive == discovered for "
-                    f"{window_s:.0f}s) within 90s — check "
-                    f"~/ai-whale/logs/flexlb.log"
-                )
+            raise type(exc)(str(exc) + extra) from exc
         self._log(
             f"master up (pid={proc.pid}, profile={spec.master_profile}, log={log_name})"
         )
         return proc
+
+    def _wait_master(self, env, proc, name, host, port, deadline):
+        deadline = startup_deadline(deadline, 240)
+        with startup_phase(env.run_dir, f'master/{name}', deadline):
+            wait_ready(deadline, f'master/{name}/http',
+                       lambda: port_accepting(port, host), process=proc)
+            def info():
+                status, data = http_post_json(
+                    f'http://{host}:{port}/rtp_llm/master/info', {},
+                    timeout=min(3, deadline.remaining()))
+                return data if status == 200 and isinstance(data, dict) else None
+            wait_ready(deadline, f'master/{name}/sync',
+                       lambda: bool((info() or {}).get('ready')), process=proc)
+            if env.spec.master_stable_window_s > 0:
+                def topology():
+                    data = info()
+                    if not data or not data.get('ready'):
+                        return False
+                    summary = data.get('worker_summary', {})
+                    for role, expected in [('PREFILL', env.spec.n_prefill), ('DECODE', env.spec.n_decode)]:
+                        if expected <= 0:
+                            continue
+                        entry = summary.get(role, {})
+                        try:
+                            if int(entry.get('discovered', -1)) != expected or int(entry.get('alive', -1)) != expected:
+                                return False
+                        except (TypeError, ValueError):
+                            return False
+                    return True
+                wait_ready(deadline, f'master/{name}/topology', topology,
+                           process=proc, stable_s=env.spec.master_stable_window_s)
 
     def stop_master(self, env: FlexEnv, settle_s: float = 2.0) -> None:
         if env.master is not None:
@@ -382,7 +316,7 @@ class MasterLifecycle:
         return [p for p in ports if port_accepting(p, mspec.bind_ip)]
 
     def start_master_instance(
-        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None
+        self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str] = None, *, deadline=None
     ) -> ManagedProcess:
         """Start ONE flexlb-api JVM per MasterSpec (HA dual-master path).
 
@@ -393,6 +327,8 @@ class MasterLifecycle:
         (per-instance log dir), FLEXLB_ADVERTISED_IP and
         FLEXLB_SYNC_CONSISTENCY_CONFIG via _master_env(env, mspec).
         """
+        deadline = startup_deadline(deadline, 240)
+        deadline.check()
         spec = env.spec
         if not API_JAR.is_file():
             raise RuntimeError(f"flexlb-api jar not found: {API_JAR} (build it first)")
@@ -400,27 +336,8 @@ class MasterLifecycle:
             raise RuntimeError(
                 f"master instance '{mspec.name}' already running; stop it first"
             )
-        # Pre-flight on the instance's own addresses (mirrors the single
-        # master's sibling-instance wait; see _instance_ports_in_use).
-        port_wait_s = float(os.environ.get("FLEXLB_FT_MASTER_PORT_WAIT_S", "120"))
-        port_deadline = time.monotonic() + port_wait_s
-        while True:
-            busy = self._instance_ports_in_use(mspec)
-            if not busy:
-                break
-            if time.monotonic() >= port_deadline:
-                raise RuntimeError(
-                    f"master instance '{mspec.name}' ports still busy after "
-                    f"{port_wait_s:.0f}s on {mspec.bind_ip} (another master "
-                    f"running? the Tier-2/3 same-port layout additionally "
-                    f"needs the production-side per-address gRPC bind "
-                    f"prerequisite): {busy}"
-                )
-            self._log(
-                f"master '{mspec.name}' ports {busy} busy on {mspec.bind_ip}; "
-                f"waiting for release ..."
-            )
-            time.sleep(5.0)
+        wait_ready(deadline, f'master/{mspec.name}/ports available',
+                   lambda: not self._instance_ports_in_use(mspec))
         java = resolve_java21()
         env.masters_start_count[mspec.name] = (
             env.masters_start_count.get(mspec.name, 0) + 1
@@ -472,78 +389,7 @@ class MasterLifecycle:
         )
 
         base_url = f"http://{mspec.bind_ip}:{mspec.http_port}"
-
-        def _master_info() -> Optional[dict]:
-            # /rtp_llm/master/info is a POST endpoint (GET returns 405).
-            status, data = http_post_json(f"{base_url}/rtp_llm/master/info", {})
-            return data if status == 200 else None
-
-        if not wait_for_port(mspec.bind_ip, mspec.http_port, 90):
-            raise RuntimeError(
-                f"master instance '{mspec.name}' failed to start:\n"
-                f"{proc.tail_log()}"
-            )
-        # Foreign-squatter guard (same rationale as start_master).
-        if not proc.alive():
-            raise RuntimeError(
-                f"master instance '{mspec.name}' exited during startup "
-                f"(port conflict?):\n{proc.tail_log()}"
-            )
-        if not wait_for(
-            lambda: (lambda d: bool(d and d.get("ready")))(_master_info()),
-            timeout_s=30,
-            interval_s=0.5,
-        ):
-            raise RuntimeError(
-                f"master instance '{mspec.name}' HTTP up but engine sync not "
-                f"ready after 30s (check {log_dir})"
-            )
-        # Stability window (same semantics as start_master).
-        window_s = spec.master_stable_window_s
-        if window_s > 0:
-
-            def _engines_stable() -> bool:
-                data = _master_info()
-                if not data or not data.get("ready"):
-                    return False
-                summary = data.get("worker_summary", {}) or {}
-                for role, expected in (
-                    ("PREFILL", spec.n_prefill),
-                    ("DECODE", spec.n_decode),
-                ):
-                    if expected <= 0:
-                        continue
-                    entry = summary.get(role) or {}
-                    try:
-                        discovered = int(entry.get("discovered", -1))
-                        alive = int(entry.get("alive", -1))
-                    except (TypeError, ValueError):
-                        return False
-                    if discovered != expected or alive != discovered:
-                        return False
-                return True
-
-            needed = max(1, int(round(window_s / 0.5)))
-            stable_ticks = 0
-            deadline = time.monotonic() + 90
-            while time.monotonic() < deadline:
-                if _engines_stable():
-                    stable_ticks += 1
-                    if stable_ticks >= needed:
-                        break
-                else:
-                    stable_ticks = 0
-                time.sleep(0.5)
-            if stable_ticks < needed:
-                if not proc.alive():
-                    raise RuntimeError(
-                        f"master instance '{mspec.name}' exited:\n" f"{proc.tail_log()}"
-                    )
-                raise RuntimeError(
-                    f"master instance '{mspec.name}' engines not stable "
-                    f"(alive == discovered for {window_s:.0f}s) within 90s "
-                    f"— check {log_dir}"
-                )
+        self._wait_master(env, proc, mspec.name, mspec.bind_ip, mspec.http_port, deadline)
         self._log(
             f"master instance '{mspec.name}' up (pid={proc.pid}, "
             f"http={base_url}, grpc={mspec.bind_ip}:{mspec.grpc_port()})"
@@ -572,8 +418,8 @@ class MasterLifecycle:
         mp.kill9()
         env.masters[name] = None
 
-    def restart_master_instance(self, env: FlexEnv, name: str) -> ManagedProcess:
+    def restart_master_instance(self, env: FlexEnv, name: str, *, deadline=None) -> ManagedProcess:
         """Mode 1 recovery: fresh JVM from the SAME MasterSpec (cold start —
         in-memory state zeroed, converges from the zero-point)."""
         mspec = env.master_specs[name]
-        return self.start_master_instance(env, mspec)
+        return self.start_master_instance(env, mspec, deadline=deadline)

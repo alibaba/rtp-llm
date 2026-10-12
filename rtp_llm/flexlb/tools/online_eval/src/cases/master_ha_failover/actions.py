@@ -90,34 +90,36 @@ def _ha_start(ctx, params, deadline):
     ]
     directory = ctx.artifact_dir / f"ha-client-{ctx.resource_count}"
     directory.mkdir(parents=True, exist_ok=True)
-    client = HaReplayClient(
-        ctx.backend.manager,
-        ctx.env,
-        directory,
-        "traffic",
-        targets,
-        duration_s=params["duration_s"],
-        sampler_limits=params["capture"],
-        monitor=ctx.monitor,
-        timeout_ms=params["timeout_ms"],
-        enable_fallback=params["fallback"],
-        live_events=params["live_events"],
-        collection_profile=ctx.instance.get("collection_profile", "request"),
-        source=params["source"],
-        source_dir=(
-            Path(ctx.instance["source_path"]).parent
-        ),
-        max_requests=params.get("max_requests"),
-        loop=params["loop"],
-        **(
-            {"replay_speed": params["replay_speed"]} if "replay_speed" in params else {}
-        ),
-        **(
-            {"max_concurrency": params["max_concurrency"]}
-            if "max_concurrency" in params
-            else {}
-        ),
-    )
+    from runtime.startup import startup_phase
+    with startup_phase(ctx.artifact_dir, 'traffic/input', deadline):
+        client = HaReplayClient(
+            ctx.backend.manager,
+            ctx.env,
+            directory,
+            "traffic",
+            targets,
+            duration_s=params["duration_s"],
+            sampler_limits=params["capture"],
+            monitor=ctx.monitor,
+            timeout_ms=params["timeout_ms"],
+            enable_fallback=params["fallback"],
+            live_events=params["live_events"],
+            collection_profile=ctx.instance.get("collection_profile", "request"),
+            source=params["source"],
+            source_dir=(
+                Path(ctx.instance["source_path"]).parent
+            ),
+            max_requests=params.get("max_requests"),
+            loop=params["loop"],
+            **(
+                {"replay_speed": params["replay_speed"]} if "replay_speed" in params else {}
+            ),
+            **(
+                {"max_concurrency": params["max_concurrency"]}
+                if "max_concurrency" in params
+                else {}
+            ),
+        )
     def export_client(value, profile):
         from runtime.resource_evidence import ResourceEvidence
         snapshot = value.evidence_snapshot()
@@ -128,7 +130,7 @@ def _ha_start(ctx, params, deadline):
             errors=() if snapshot["complete"] else tuple(snapshot["errors"] or ["incomplete HA client"]))
     handle = ctx.register_resource("ha_client", client, client.cleanup, evidence=export_client)
     deadline.check()
-    client.start()
+    client.start(deadline)
     deadline.check()
     return StageOutput({"client": handle})
 

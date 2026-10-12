@@ -28,6 +28,14 @@ flexlb-mock-engine/target/flexlb-mock-engine-1.0.0-SNAPSHOT-all.jar
 
 `-am` 不能省略，它会构建所需 reactor 模块。相邻目录存在内部源码时仍显式使用 `opensource,!internal`，防止 Maven 自动激活另一套依赖。
 
+需要 ZooKeeper 的 HA 环境还须在派发实例前准备测试运行时：
+
+```bash
+python3 tools/online_eval/scripts/commands/prepare_runtime.py
+```
+
+该命令串行编译 ZooKeeper launcher、解析依赖并冻结 classpath 文件摘要。run 内只读取和校验 `flexlb-sync/target/online-eval-runtime/`，不执行 Maven；未准备或制品变化时明确失败。重新编译或清理 `target/` 后重新执行准备命令。准备和运行不能与同一 checkout 的其他 Maven 构建同时进行。显式 `FLEXLB_FT_ZK_LAUNCH_CMD` 使用调用方准备的启动命令，不触发框架编译。
+
 ## 启动模型
 
 runner 为每个实例启动并回收 Master、Mock Engine、load client 和所需采集器。不要在 runner 之前手工启动同一套进程。

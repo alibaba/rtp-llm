@@ -9,12 +9,15 @@ import time
 import urllib.error
 import urllib.request
 from typing import Callable, Optional
+from runtime.deadline import StageTimeout
 
 
 def http_get_json(url: str, timeout: float = 10.0) -> Optional[dict]:
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+    except StageTimeout:
+        raise
     except Exception:
         return None
 
@@ -39,6 +42,8 @@ def http_post_json(
             return exc.code, json.loads(payload)
         except (ValueError, json.JSONDecodeError):
             return exc.code, None
+    except StageTimeout:
+        raise
     except Exception as exc:
         return 0, {"error": repr(exc)}
 
@@ -69,6 +74,8 @@ def wait_for(
         try:
             if predicate():
                 return True
+        except StageTimeout:
+            raise
         except Exception:
             pass
         time.sleep(interval_s)

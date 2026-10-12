@@ -55,13 +55,15 @@ def _start(ctx, p, deadline):
         (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
     directory = ctx.artifact_dir / "flows" / p["group_id"]
     directory.parent.mkdir(exist_ok=True)
-    trace = materialize(
-        directory.parent / (p["group_id"] + ".jsonl"),
-        p["source"],
-        ctx.instance["id"] + ":" + p["group_id"],
-        Path(ctx.instance["source_path"]).parent,
-        max_requests=p.get("max_requests"),
-    )
+    from runtime.startup import startup_phase
+    with startup_phase(ctx.artifact_dir, 'traffic/input', deadline):
+        trace = materialize(
+            directory.parent / (p["group_id"] + ".jsonl"),
+            p["source"],
+            ctx.instance["id"] + ":" + p["group_id"],
+            Path(ctx.instance["source_path"]).parent,
+            max_requests=p.get("max_requests"),
+        )
     environment, playback = client_environment(java_client_priority(p["source"], p["client"]))
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']

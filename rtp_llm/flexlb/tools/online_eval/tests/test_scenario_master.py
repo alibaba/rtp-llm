@@ -55,6 +55,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual("true-ts", frozen["trace"]["playback"]["mode"])
         runner._client.run_async.return_value = (Mock(), runner.out_dir)
         with patch.object(runner.state_sampler, "start"), patch.object(runner.state_sampler, "stop"):
+            (runner.control / "status.json").write_text(json.dumps(dict(runner.flow_identity, state="SENDING")))
             runner.start()
         self.assertEqual(frozen["environment"], runner._client.run_async.call_args.args[0])
         runner.stop_sending()

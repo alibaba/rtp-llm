@@ -149,7 +149,9 @@ class JavaMockBackend:
                 self.owned_processes[mp.pid] = mp
 
     def setup(self, ctx, plan, deadline):
-        return self._setup(ctx, plan, deadline)
+        from runtime.startup import startup_phase
+        with startup_phase(ctx.artifact_dir, "environment", deadline):
+            return self._setup(ctx, plan, deadline)
 
     def _setup(self, ctx, plan, deadline, raw_config=None):
         if ":" in str(ctx.artifact_dir.resolve()):
@@ -172,7 +174,7 @@ class JavaMockBackend:
         owner = self
 
         class OwnedManager(EnvManager):
-            def _start_mock(self, env):
+            def _start_mock(self, env, **kwargs):
                 owner.environments.append(env)
                 master_spec = env.spec
                 try:
@@ -182,7 +184,7 @@ class JavaMockBackend:
                         # models, so feeding it the invalid document prevents
                         # the target Master from ever being launched.
                         env.spec = replace(master_spec, raw_config=None)
-                    return super()._start_mock(env)
+                    return super()._start_mock(env, **kwargs)
                 finally:
                     env.spec = master_spec
                     owner.remember_processes(env)
@@ -250,7 +252,7 @@ class JavaMockBackend:
             )
             + "\n"
         )
-        env = self.manager.ensure(spec)
+        env = self.manager.ensure(spec, deadline=deadline)
         env.master_log_dir = private_log
         env.master_sync_log_path = sync_log_path
         ctx.master_sync_log_path = sync_log_path

@@ -118,13 +118,17 @@ class HaReplayClient:
         validate_drain(read_status(self.control, self.flow_identity), self.flow_identity,
                        terminal_count=len(rows), command_id=self.stop_command)
 
-    def start(self) -> None:
+    def start(self, deadline=None) -> None:
+        from runtime.startup import startup_deadline, startup_phase, wait_flow_started
+        deadline = startup_deadline(deadline, 120)
         if self.state_sampler is not None:
-            self.state_sampler.start()
+            self.state_sampler.start(deadline=deadline)
         try:
             self.proc, self.out_dir = self._client.run_async(
                 self._overrides, self.out_dir, self.log_file, label=self.name
             )
+            with startup_phase(self.out_dir, "client/sending", deadline):
+                wait_flow_started(self.control, self.flow_identity, self.proc, deadline)
         except Exception as start_error:
             try:
                 if self.state_sampler is not None:

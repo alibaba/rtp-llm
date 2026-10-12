@@ -104,6 +104,7 @@ class StageExecutor:
                 )
                 try:
                     deadline.check()
+                    ctx.stage_deadline = deadline
                     action = spec.action
                     with interruptible(deadline, enforce_deadlines):
                         if _policy is not None:
