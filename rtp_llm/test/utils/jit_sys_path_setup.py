@@ -276,8 +276,10 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     errors. Evicting the affected ops makes FlashInfer regenerate them against the
     current package copy.
     """
-    build_files = sorted(workspace.rglob("build.ninja"))
-    for build_file in build_files:
+    build_files = []
+    for root, _dirs, files in os.walk(workspace, followlinks=False):
+        build_files.extend(Path(root) / name for name in files if name == "build.ninja")
+    for build_file in sorted(build_files):
         op_dir = build_file.parent
         try:
             rules = build_file.read_text(errors="ignore")
