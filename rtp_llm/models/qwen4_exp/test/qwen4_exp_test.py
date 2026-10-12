@@ -170,6 +170,59 @@ class Qwen4ExpTest(unittest.TestCase):
             self.assertEqual(model.load(skip_python_model=True), "loaded")
         parent_load.assert_called_once_with(skip_python_model=True)
 
+    def test_attention_fp8_requires_bf16_source_and_online_moe_fp4(self):
+        for moe_enabled, attention_enabled in (("1", "1"), ("0", "1"), ("0", "0")):
+            with self.subTest(
+                moe=moe_enabled, attention=attention_enabled
+            ), mock.patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL": moe_enabled,
+                    "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL": "0",
+                    "RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL": attention_enabled,
+                },
+            ):
+                if moe_enabled == "0" and attention_enabled == "1":
+                    with self.assertRaisesRegex(ValueError, "requires online MoE FP4"):
+                        Qwen4Exp.create_config(self._temp_dir.name)
+                else:
+                    cfg = Qwen4Exp.create_config(self._temp_dir.name)
+                    self.assertEqual(cfg._qwen4_attention_fp8, attention_enabled == "1")
+                    self.assertEqual(cfg._qwen4_moe_only_fp4, moe_enabled == "1")
+                    if moe_enabled == "1":
+                        from rtp_llm.models.qwen4_exp.qwen4_exp_mtp import Qwen4ExpMTP
+
+                        data = self._config()
+                        data["text_config"]["mtp"] = {
+                            "hybrid": True,
+                            "num_hidden_layers": 1,
+                            "layer_types": ["full_attention"],
+                            "rope_theta": 1000000,
+                            "mtp_use_hidden_state_from_layer": None,
+                        }
+                        Path(self._temp_dir.name, "config.json").write_text(
+                            json.dumps(data)
+                        )
+                        draft = Qwen4ExpMTP.create_config(self._temp_dir.name)
+                        self.assertTrue(draft._qwen4_attention_fp8)
+                        self.assertTrue(draft._qwen4_moe_only_fp4)
+                        self.assertTrue(draft.is_mtp)
+        data = self._config()
+        data["quantization_config"] = {
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "weight_block_size": [128, 128],
+        }
+        Path(self._temp_dir.name, "config.json").write_text(json.dumps(data))
+        with mock.patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL": "1",
+                "RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL": "1",
+            },
+        ), self.assertRaisesRegex(ValueError, "unquantized BF16 source"):
+            Qwen4Exp.create_config(self._temp_dir.name)
+
     def test_fp8_main_kv_requires_explicit_opt_in_before_loading(self):
         for enabled in ("0", "1"):
             model = self._qsa_enabled_model(

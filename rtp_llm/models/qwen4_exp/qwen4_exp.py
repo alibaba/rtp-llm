@@ -241,6 +241,9 @@ class Qwen4Exp(Qwen35Moe):
         config = super()._create_config(ckpt_path)
         config._qwen4_moe_only_fp8 = False
         config._qwen4_moe_only_fp4 = False
+        config._qwen4_attention_fp8 = str_to_bool(
+            os.environ.get("RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL", "false")
+        )
         if str_to_bool(os.environ.get(_MOE_FP4_ENV, "false")):
             root = Path(ckpt_path)
             config_json = json.loads((root / "config.json").read_text())
@@ -266,6 +269,10 @@ class Qwen4Exp(Qwen35Moe):
                 index = json.loads((root / "model.safetensors.index.json").read_text())
                 validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
                 config._qwen4_moe_only_fp8 = True
+        if config._qwen4_attention_fp8 and not config._qwen4_moe_only_fp4:
+            raise ValueError(
+                "Qwen4 attention FP8 requires online MoE FP4 from BF16 source"
+            )
         logging.warning(_SKELETON_WARNING)
         return config
 
