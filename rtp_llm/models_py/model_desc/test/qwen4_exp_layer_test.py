@@ -13,6 +13,8 @@ from unittest import TestCase, main
 from unittest.mock import patch
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -33,7 +35,6 @@ from rtp_llm.models_py.modules.qwen4_exp.ple import (
 )
 from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 _HC = 4
 _HIDDEN = 8
@@ -2768,6 +2769,118 @@ class Qwen4ExpCommitBlockValidationTest(TestCase):
                 resolve(current, PLE_STATE_TAG, pages, 8, device)
         with self.assertRaisesRegex(RuntimeError, "batch is inconsistent"):
             resolve(inputs, PLE_STATE_TAG, torch.tensor([0]), 8, torch.device("cpu"))
+
+
+class Qwen4ExpSharedHCStorageTest(TestCase):
+    def test_real_residual_builder_reuses_owner_and_blocks_updates(self):
+        import weakref
+
+        from rtp_llm.model_loader.model_weight_info import ModelWeights
+        from rtp_llm.model_loader.weight_manager import WeightManager
+
+        if not torch.cuda.is_available():
+            self.skipTest("requires CUDA")
+        config = ModelConfig()
+        config.hc_mult = 4
+        config.layernorm_eps = 1e-6
+        weights = ModelWeights(1, "cuda", torch.bfloat16)
+        for norm, down, up, inject in (
+            (
+                W.qwen4_hc_attn_norm,
+                W.qwen4_hc_attn_mix_down,
+                W.qwen4_hc_attn_mix_up,
+                W.qwen4_hc_attn_inject,
+            ),
+            (
+                W.qwen4_hc_mlp_norm,
+                W.qwen4_hc_mlp_mix_down,
+                W.qwen4_hc_mlp_mix_up,
+                W.qwen4_hc_mlp_inject,
+            ),
+        ):
+            for key, shape in (
+                (norm, (32,)),
+                (down, (7, 32)),
+                (up, (32, 7)),
+                (inject, (4, 32)),
+            ):
+                weights.set_layer_weight(
+                    0, key, torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+                )
+        old_refs = [
+            weakref.ref(weights.weights[0][key])
+            for key in (
+                W.qwen4_hc_attn_mix_down,
+                W.qwen4_hc_attn_inject,
+                W.qwen4_hc_mlp_mix_down,
+                W.qwen4_hc_mlp_inject,
+            )
+        ]
+        layer = qwen4_exp.Qwen4ExpDecoderLayer.__new__(qwen4_exp.Qwen4ExpDecoderLayer)
+        nn.Module.__init__(layer)
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_MERGED_DOWN_INJECT": "1",
+                "RTP_LLM_QWEN4_SHARED_HC_WEIGHTS": "1",
+            },
+        ):
+            layer._build_residual_modules(config, weights.weights[0])
+        self.assertTrue(all(ref() is None for ref in old_refs))
+        for unit, down, inject in (
+            (
+                layer.attn_hyper_connection,
+                W.qwen4_hc_attn_mix_down,
+                W.qwen4_hc_attn_inject,
+            ),
+            (
+                layer.mlp_hyper_connection,
+                W.qwen4_hc_mlp_mix_down,
+                W.qwen4_hc_mlp_inject,
+            ),
+        ):
+            self.assertEqual(
+                weights.weights[0][down].untyped_storage().data_ptr(),
+                unit.merged_down_inject.untyped_storage().data_ptr(),
+            )
+            self.assertIs(weights.weights[0][inject], unit.inject)
+            before = unit.merged_down_inject.clone()
+            with self.assertRaisesRegex(PermissionError, "restart"):
+                weights.update_layer_weight(0, down, torch.zeros_like(unit.mix_down))
+            torch.testing.assert_close(unit.merged_down_inject, before, rtol=0, atol=0)
+        manager = WeightManager.__new__(WeightManager)
+        manager._weights = weights
+        # Invalid IPC data would fail decoding if the shared-view guard were late.
+        with self.assertRaisesRegex(PermissionError, "restart"):
+            manager.update(
+                dict(
+                    name="model.layers.0." + W.qwen4_hc_attn_inject,
+                    method="shm",
+                    desc="invalid-ipc-description",
+                )
+            )
+
+    def test_shared_gate_off_and_unsupported_cpu_keep_originals(self):
+        fixture = Qwen4ExpDecoderLayerTest()
+        fixture.setUp()
+        for gate in ("0", "1"):
+            layer = qwen4_exp.Qwen4ExpDecoderLayer.__new__(
+                qwen4_exp.Qwen4ExpDecoderLayer
+            )
+            nn.Module.__init__(layer)
+            original = fixture.weights[W.qwen4_hc_attn_mix_down]
+            with patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_MERGED_DOWN_INJECT": "1",
+                    "RTP_LLM_QWEN4_SHARED_HC_WEIGHTS": gate,
+                },
+            ):
+                layer._build_residual_modules(fixture.config, fixture.weights)
+            self.assertIs(fixture.weights[W.qwen4_hc_attn_mix_down], original)
+            self.assertFalse(
+                getattr(original, "_rtp_requires_restart_for_update", False)
+            )
 
 
 if __name__ == "__main__":
