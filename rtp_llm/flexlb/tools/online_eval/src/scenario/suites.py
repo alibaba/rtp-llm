@@ -52,13 +52,15 @@ class SuiteCatalog:
             identifier(name, 'suites.name')
             if name == 'all':
                 raise ScenarioError('reserved suite name: ' + name)
-            if (not isinstance(members, list) or not members
+            if (not isinstance(members, list)
                     or any(type(member) is not str or not re.fullmatch(r'[A-Za-z0-9_-]+::[A-Za-z0-9_-]+', member) for member in members)
                     or len(set(members)) != len(members)):
                 raise ScenarioError('suite requires unique case::variant identities: ' + name)
             suites[name] = tuple(members)
         if type(data['default_suite']) is not str or data['default_suite'] not in suites:
             raise ScenarioError('default_suite must name a declared suite')
+        if not suites[data['default_suite']]:
+            raise ScenarioError('default_suite must name a nonempty suite')
         if type(data['default_profile']) is not str or data['default_profile'] not in PROFILES:
             raise ScenarioError('default_profile must name a supported profile')
         if not isinstance(data['ci_jobs'], dict):
@@ -69,6 +71,8 @@ class SuiteCatalog:
             mapping(value, 'ci_jobs.' + name, {'suite', 'profiles', 'parallel', 'workers'}, {'suite', 'profiles', 'parallel'})
             if type(value['suite']) is not str or value['suite'] not in suites:
                 raise ScenarioError('CI job must name a declared suite: ' + name)
+            if not suites[value['suite']]:
+                raise ScenarioError('CI job must name a nonempty suite: ' + name)
             names(value['profiles'], 'ci_jobs.' + name + '.profiles', PROFILES)
             if not value['profiles']:
                 raise ScenarioError('CI job profiles must be nonempty')
@@ -111,6 +115,8 @@ class Selection:
             raise ScenarioError('unknown kind: ' + str(kind))
         if suite is not None and suite not in catalog.suites:
             raise ScenarioError('unknown suite: ' + str(suite))
+        if suite is not None and not catalog.suites[suite]:
+            raise ScenarioError('suite has no members and cannot run: ' + suite)
         return cls(catalog.suites[suite] if suite is not None else None, kind)
 
     def matches(self, key, kind):

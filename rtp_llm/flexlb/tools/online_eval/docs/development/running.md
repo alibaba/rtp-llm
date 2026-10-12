@@ -14,7 +14,7 @@ python3 tools/online_eval/scripts/commands/run_cases.py \
   --instances '<case>::<variant>::<profile>' --parallel 1 --dry-run
 ```
 
-`--suite` 只选择 `config/suites.yaml` 中的固定组合：`core` 用于快速验证，`workload` 用于默认 workload 验证。`--kind functional|workload` 选择该性质的全部变体，`--all` 选择全量；这三种选择互斥。列表与执行入口共用配置中的默认 suite 和 profile。列表可用 `--profile all` 展开所有支持的 profile；执行入口一次运行一个 profile。
+`--suite` 只选择 `config/suites.yaml` 中的固定组合：`quick` 用于检查 mock 系统是否具备基本运行能力，`workload` 用于默认 workload 验证。`core` 保留为空，尚未定义核心行为验证用例；显式选择空 suite 会报错，不产生空跑成功。`--kind functional|workload` 选择该性质的全部变体，`--all` 选择全量；这三种选择互斥。列表与执行入口共用配置中的默认 suite 和 profile。列表可用 `--profile all` 展开所有支持的 profile；执行入口一次运行一个 profile。
 
 `--case-dir` 可指向一份 YAML 或目录，`--instances` 使用清单中的完整 ID，并在 suite 或 kind 的选择范围内进一步筛选。固定组合缺少成员时直接失败，不静默少跑。
 

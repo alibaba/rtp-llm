@@ -1,8 +1,9 @@
 suite_schema_version: 3
-default_suite: core
+default_suite: quick
 default_profile: batch-window
 suites:
-  core:
+  core: []
+  quick:
   - request_completion::default
   workload:
   - cache_scale_in::default
@@ -10,7 +11,7 @@ suites:
   - master_performance::default
 ci_jobs:
   quick:
-    suite: core
+    suite: quick
     profiles:
     - batch-window
     - single-nonbatch

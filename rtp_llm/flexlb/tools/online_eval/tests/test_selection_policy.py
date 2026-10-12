@@ -27,13 +27,38 @@ def parse(argv, **kwargs):
 
 def test_listing_and_execution_share_selection_defaults():
     listed, executed = parse([]), parse([], allow_all_profiles=False)
-    assert (listed.suite, listed.profile) == (executed.suite, executed.profile) == ('core', 'batch-window')
-    assert selection_arguments(executed) == ['--suite', 'core']
+    assert (listed.suite, listed.profile) == (executed.suite, executed.profile) == ('quick', 'batch-window')
+    assert selection_arguments(executed) == ['--suite', 'quick']
     assert parse(['--all', '--profile', 'all']).profile is None
 
 
+def test_quick_checks_basic_readiness_while_core_is_reserved():
+    catalog = SuiteCatalog.read()
+    assert catalog.suites['quick'] == ('request_completion::default',)
+    assert catalog.ci_jobs['quick'].suite == 'quick'
+    assert catalog.suites['core'] == ()
+    with pytest.raises(ScenarioError, match='suite has no members.*core'):
+        preselect_documents([], 'core')
+    with pytest.raises(ScenarioError, match='suite has no members.*core'):
+        classify([], 'core')
+
+
+@pytest.mark.parametrize('target', ['default', 'job'])
+def test_reserved_suite_cannot_be_default_or_ci_job(tmp_path, target):
+    import yaml
+    data = yaml.safe_load((ROOT / 'config/suites.yaml').read_text())
+    if target == 'default':
+        data['default_suite'] = 'core'
+    else:
+        data['ci_jobs']['quick']['suite'] = 'core'
+    path = tmp_path / 'suites.yaml'
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ScenarioError, match='nonempty suite'):
+        SuiteCatalog.read(path)
+
+
 @pytest.mark.parametrize('argv', [
-    ['--suite', 'core', '--kind', 'workload'], ['--all', '--suite', 'core'],
+    ['--suite', 'quick', '--kind', 'workload'], ['--all', '--suite', 'quick'],
     ['--all', '--kind', 'functional'], ['--suite', 'all'],
 ])
 def test_selectors_are_exclusive_and_suite_is_not_a_filter(argv):
@@ -50,7 +75,7 @@ def test_workload_suite_excludes_controls_but_kind_keeps_them():
     assert all(p['variant_id'] == 'default' for p in suite)
     assert {p['variant_id'] for p in classify(plans, kind='workload')} == {'default', 'affinity_disabled', 'non_rolling'}
     with pytest.raises(ScenarioError, match='mutually exclusive'):
-        preselect_documents(docs, 'core', kind='functional')
+        preselect_documents(docs, 'quick', kind='functional')
 
 
 @pytest.mark.parametrize('mutation', ['suite', 'profiles', 'parallel'])
