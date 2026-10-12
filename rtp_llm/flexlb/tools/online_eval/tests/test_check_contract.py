@@ -11,7 +11,7 @@ from monitoring.metric_store import MetricStore, MetricContractError
 def store():
     return MetricStore(dict(metrics_schema_version=1,
         definitions={"example/value": dict(unit="requests", value_kind="gauge", labels=["worker"])},
-        metrics={"example/value": [dict(source="test", epoch="1", labels=dict(worker="A"),
+        metrics={"example/value": [dict(metric_id="example/value", source="test", epoch="1", labels=dict(worker="A"),
             status="OK", points=[[10, 0], [11, 2], [12, 4]],
             provenance=dict(source_type="prometheus", expression="frozen_query"))]}))
 

@@ -38,7 +38,7 @@ class MetricStore:
         if (not isinstance(document.get("collection_gaps", {}), dict)
                 or not isinstance(document.get("errors", []), list)):
             raise MetricContractError("invalid metric artifact diagnostics")
-        for observations in document["metrics"].values():
+        for metric_id, observations in document["metrics"].items():
             if not isinstance(observations, list):
                 raise MetricContractError("metric observations must be a list")
             for row in observations:
@@ -47,6 +47,11 @@ class MetricStore:
                         or not isinstance(row.get("provenance"), dict)
                         or not isinstance(row["provenance"].get("evidence", {}), dict)):
                     raise MetricContractError("invalid metric observation metadata")
+                if (row.get("metric_id") != metric_id
+                        or any(type(row.get(key)) is not str or not row[key].strip()
+                               for key in ("source", "epoch", "status"))
+                        or not isinstance(row.get("points"), list)):
+                    raise MetricContractError("invalid metric observation identity or fields")
         self.document = document
 
     @classmethod
@@ -58,7 +63,7 @@ class MetricStore:
 
     def select(self, metric_id, *, labels=None, start=None, end=None,
                source=None, epoch=None, min_samples=1, max_gap_s=None):
-        """Select without reducing labels, filling gaps, or changing timestamps."""
+        """Select without filling gaps; max_gap_s bounds coverage, not failed samples."""
         if metric_id not in self.document["definitions"]:
             raise MetricContractError("undeclared metric id: " + metric_id)
         if self.document["definitions"][metric_id]["unit"] == "unspecified":
@@ -82,10 +87,7 @@ class MetricStore:
                 raise MetricUnavailable(metric_id + ": measurement is invalid")
             if row["status"] == "ERROR":
                 raise MetricUnavailable(metric_id + ": source query failed")
-            if any(type(t) not in (int, float) or not math.isfinite(t)
-                   for t, _ in row["points"]):
-                raise MetricUnavailable(metric_id + ": non-finite observation timestamp")
-            points = [p for p in row["points"] if start is None or start <= p[0] <= end]
+            points = [p for p in _ordered_points(row) if start is None or start <= p[0] <= end]
             if any(type(t) not in (int, float) or not math.isfinite(t)
                    or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))
                    for t, v in points):
@@ -126,11 +128,25 @@ class MetricStore:
                                     json.dumps(row["labels"], sort_keys=True)))
                 if key in series:
                     raise MetricContractError("duplicate archived series key: " + key)
-                series[key] = [[t - anchor, value] for t, value in row["points"]]
+                series[key] = [[t - anchor, value] for t, value in _ordered_points(row)]
                 sources[key] = dict(row["provenance"], metric_id=row["metric_id"],
                                     unit=self.document["definitions"][row["metric_id"]]["unit"])
         gaps = {k: [t - anchor for t in v] for k, v in self.document.get("collection_gaps", {}).items()}
         return series, sources, gaps, copy.deepcopy(self.document.get("errors", []))
+
+
+def _ordered_points(row):
+    previous = None
+    for point in row["points"]:
+        if not isinstance(point, (list, tuple)) or len(point) != 2:
+            raise MetricUnavailable(row["metric_id"] + ": malformed observation")
+        timestamp = point[0]
+        if type(timestamp) not in (int, float) or not math.isfinite(timestamp):
+            raise MetricUnavailable(row["metric_id"] + ": non-finite observation timestamp")
+        if previous is not None and timestamp <= previous:
+            raise MetricUnavailable(row["metric_id"] + ": non-increasing observation timestamps")
+        previous = timestamp
+        yield point
 
 
 def export_metrics(directory, plan=None, *, archive_directory=None):
@@ -216,8 +232,8 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     if destination.exists() and not archives:
         # A metrics-only frozen archive still carries collection validity.
         # Retaining its observations must retain gaps/errors and plan identity too.
-        gaps = copy.deepcopy(previous["collection_gaps"])
-        errors = copy.deepcopy(previous["errors"])
+        gaps = copy.deepcopy(previous.get("collection_gaps", {}))
+        errors = copy.deepcopy(previous.get("errors", []))
         plans = dict(previous.get("plans", {}), **plans)
     metadata = previous.get("run", {}) if destination.exists() else {}
     for identity in declared:

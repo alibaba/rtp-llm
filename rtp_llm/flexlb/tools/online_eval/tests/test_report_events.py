@@ -119,7 +119,7 @@ def test_frozen_inventory_includes_python_producer_metrics():
     store = MetricStore(dict(metrics_schema_version=1, definitions={
         'derived/hit': dict(unit='ratio'),
     }, metrics={'derived/hit': [dict(epoch='1', source='case', metric_id='derived/hit', labels={},
-                                       points=[[100, .8]], provenance=dict(source_type='derived'))]},
+                                       points=[[100, .8]], status='PRESENT', provenance=dict(source_type='derived'))]},
                             collection_gaps={}, errors=[]))
     series, sources, _, _ = store.series(100)
     assert series == {'1/case/derived/hit/{}': [[0, .8]]}

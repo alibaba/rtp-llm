@@ -138,25 +138,74 @@ def test_invalid_survivor_measurement_cannot_be_selected(tmp_path):
 
 @pytest.mark.parametrize("spec", [None, {"origin":None}])
 def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec):
+    from importlib.util import find_spec
     from types import SimpleNamespace
+    from cases.registry import registry
     from metric_fixtures import freeze_metrics
     from monitoring.metric_store import publish,MetricContractError
     store=freeze_metrics(tmp_path,"cache_scale_in")
-    monkeypatch.setattr("importlib.util.find_spec",lambda name: None if spec is None else SimpleNamespace(**spec))
+    module = registry().producers["cache_windows"].module
+    monkeypatch.setattr("importlib.util.find_spec",lambda name:
+        (None if spec is None else SimpleNamespace(**spec)) if name == module else find_spec(name))
     definition=store.document["definitions"]["derived/survivor_hit_ratio"]
-    with pytest.raises(MetricContractError,match="producer module"):
+    with pytest.raises(MetricContractError,match="producer module.*" + module):
         publish(store,"derived/survivor_hit_ratio",definition,[],producer="cache_windows",evidence={})
 
 
 @pytest.mark.parametrize("metrics", [{}, {"x": [dict(metric_id="x", epoch="1", source="P",
-    labels={}, points=[[10, 2], [11, None]], provenance={})]}])
-def test_minimal_metric_store_exports_without_optional_diagnostics(metrics):
-    from monitoring.metric_store import MetricStore
+    labels={}, points=[[10, 2], [11, None]], status="PRESENT", provenance={})]}])
+def test_minimal_metric_store_exports_without_optional_diagnostics(metrics, tmp_path):
+    from monitoring.metric_store import MetricStore, export_metrics
     store=MetricStore(dict(metrics_schema_version=1,definitions={"x":dict(unit="count")},metrics=metrics))
     series,sources,gaps,errors=store.series(10)
     assert gaps=={} and errors==[]
     assert list(series.values())==([[ [0,2], [1,None] ]] if metrics else [])
     assert len(sources)==len(series)
+    store.save(tmp_path)
+    exported = export_metrics(tmp_path)
+    assert exported.series(10) == (series, sources, gaps, errors)
+
+
+@pytest.fixture
+def metric_document():
+    return dict(metrics_schema_version=1, definitions={"x": dict(unit="count")},
+        metrics={"x": [dict(metric_id="x", epoch="1", source="P", status="PRESENT",
+                            labels={}, points=[[10, 2], [11, 3]], provenance={})]})
+
+
+@pytest.mark.parametrize("field", ["metric_id", "source", "epoch", "status", "points"])
+@pytest.mark.parametrize("bad", [None, "missing", 7])
+def test_metric_row_fields_are_contract_checked(metric_document, field, bad):
+    from monitoring.metric_store import MetricStore, MetricContractError
+    row = metric_document["metrics"]["x"][0]
+    if bad == "missing":
+        del row[field]
+    else:
+        row[field] = bad
+    with pytest.raises(MetricContractError):
+        MetricStore(metric_document)
+
+
+@pytest.mark.parametrize("points", [[[11, 2], [10, 3]], [[10, 2], [10, 3]], [[10]]])
+def test_metric_selection_and_projection_reject_unordered_or_malformed_points(metric_document, points):
+    from monitoring.metric_store import MetricStore, MetricUnavailable
+    metric_document["metrics"]["x"][0]["points"] = points
+    store = MetricStore(metric_document)
+    for read in (lambda: store.reduce("x", op="first"), lambda: store.series(0)):
+        with pytest.raises(MetricUnavailable):
+            read()
+
+
+def test_failed_samples_are_not_rescued_by_a_large_coverage_budget(metric_document):
+    from monitoring.metric_store import MetricStore, MetricUnavailable
+    metric_document["metrics"]["x"][0]["points"] = [[10, 2], [11, None], [12, 3]]
+    with pytest.raises(MetricUnavailable, match="missing/invalid samples"):
+        MetricStore(metric_document).select("x", start=10, end=12, max_gap_s=10)
+    metric_document["metrics"]["x"][0]["points"] = [[10, 2], [12, 3]]
+    store = MetricStore(metric_document)
+    assert store.reduce("x", op="last", start=10, end=12, max_gap_s=2) == 3
+    with pytest.raises(MetricUnavailable, match="time coverage"):
+        store.select("x", start=10, end=12, max_gap_s=1)
 
 
 def test_metric_store_preserves_and_copies_recorded_diagnostics():
