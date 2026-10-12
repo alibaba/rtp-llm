@@ -83,6 +83,7 @@ class ModelConfig(CppModelConfig):
         "is_mtp",
         "is_deepseek_v41",
         "deepseek_v41_config",
+        "atom_qwen4_exp_mtp_target",
         "dspark_noise_token_id",
         "dspark_target_layer_ids",
         "dspark_markov_rank",
