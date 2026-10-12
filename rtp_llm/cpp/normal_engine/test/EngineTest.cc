@@ -628,7 +628,7 @@ TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
 #include <execinfo.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <ucontext.h>
+#include <sys/ucontext.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -653,6 +653,16 @@ static void _probeDumpMaps(const char* tag) {
     close(fd);
     fflush(stderr);
 }
+static void* _probeCtxPc(void* ctx) {
+#if defined(__x86_64__)
+    return (void*)(((ucontext_t*)ctx)->uc_mcontext.gregs[REG_RIP]);
+#elif defined(__aarch64__)
+    return (void*)(((ucontext_t*)ctx)->uc_mcontext.pc);
+#else
+    return nullptr;
+#endif
+}
+
 
 static void _probeCrashHandler(int sig, siginfo_t* info, void* ctx) {
     char msg[256];
@@ -661,7 +671,7 @@ static void _probeCrashHandler(int sig, siginfo_t* info, void* ctx) {
                        "PROBE crash sig=%d addr=%p pc=%p\n",
                        sig,
                        info ? info->si_addr : nullptr,
-                       ctx ? (void*)(((ucontext_t*)ctx)->uc_mcontext.pc) : nullptr);
+                       ctx ? _probeCtxPc(ctx) : nullptr);
     write(STDERR_FILENO, msg, len);
     void* frames[32];
     int   n = backtrace(frames, 32);
