@@ -99,7 +99,7 @@ python3 tools/online_eval/scripts/commands/list_cases.py \
 | `FLEXLB_FT_MASTER_CONFIG_FILE` | JSON 整体替换 Master 配置，不做合并；Mock 仍使用测试配置 |
 | `FLEXLB_FT_MASTER_SOURCE_COMMIT` | 声明的完整源码 SHA；不代替 jar 的实际摘要 |
 
-外部配置按目标版本的源码或部署原文编写，由目标 jar 的解析器验证，不只替换 `schemaVersion`。发现协议、字段消费、单位与补齐默认值都须核对；不支持的组合停止测试。schema 1 的动态发现需要显式 `discovery_file` 及编入目标 jar 的 [WhaleFileDiscovery](../../../whale_mock/discovery_adapter/WhaleFileDiscovery.java)，Python 的环境桥接不会自动改造 jar。
+外部配置按目标版本的源码或部署原文编写，由目标 jar 的解析器验证，不只替换 `schemaVersion`。发现协议、字段消费、单位与补齐默认值都须核对；不支持的组合停止测试。schema 1 的动态发现需要显式 `discovery_file` 及编入目标 jar 的 [FileSnapshotDiscovery](../../../mock_bundle/discovery_adapter/FileSnapshotDiscovery.java)，Python 的环境桥接不会自动改造 jar。
 
 `actual-master-config.json` 是传入原文，不能当解析后回读。先验证目标制品能发现 worker 并完成完整请求，再开展版本对照。制品、适配代码和配置差异随运行归档；解释规则见[结果与指标](results.md)。
 

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from mode_profiles import render_shell_defaults
 
 
-START = Path(__file__).resolve().parents[3] / "flexlb-mock-engine" / "whale" / "start.sh"
+START = Path(__file__).resolve().parents[3] / "flexlb-mock-engine" / "container" / "start.sh"
 
 
 class WhaleIndependentStartTest(unittest.TestCase):

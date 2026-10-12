@@ -2,7 +2,7 @@
 
 ## 寄生 bundle
 
-默认配置在 `tools/whale_mock/bundle.yaml`。一个 Pod 内有 Master JVM 和 Mock JVM，Mock JVM 管理多个逻辑 P/D 引擎。
+默认配置在 `tools/mock_bundle/bundle.yaml`。一个 Pod 内有 Master JVM 和 Mock JVM，Mock JVM 管理多个逻辑 P/D 引擎。
 
 | 变量 | 作用 |
 |---|---|

@@ -11,7 +11,7 @@ import java.nio.file.Path;
 import java.util.Map;
 import static org.junit.jupiter.api.Assertions.*;
 
-class WhaleFileDiscoveryTest {
+class FileSnapshotDiscoveryTest {
     @TempDir Path dir;
     @Test void pinnedMasterSelectsAdapterAndReloadsAddRemoveWithoutRestart() throws Exception {
         Path file = dir.resolve("discovery.json");
@@ -19,10 +19,10 @@ class WhaleFileDiscoveryTest {
         try (var context = new AnnotationConfigApplicationContext()) {
             context.getEnvironment().getPropertySources().addFirst(new MapPropertySource("mock", Map.of(
                     "mock.discovery.file", file.toString())));
-            context.register(ServiceDiscoveryConfiguration.class, WhaleFileDiscovery.class);
+            context.register(ServiceDiscoveryConfiguration.class, FileSnapshotDiscovery.class);
             context.refresh();
             var service = context.getBean(ServiceDiscovery.class);
-            assertInstanceOf(WhaleFileDiscovery.class, service);
+            assertInstanceOf(FileSnapshotDiscovery.class, service);
             assertEquals(1, service.getHosts("p").size());
             Files.writeString(file, "{\"p\":[\"127.0.0.1:7050\",\"127.0.0.1:7051\"],\"d\":[]}");
             assertEquals(2, service.getHosts("p").size());
@@ -34,10 +34,10 @@ class WhaleFileDiscoveryTest {
     }
     @Test void disabledAdapterPreservesDefaultAndInitialBadFileFails() {
         try (var context = new AnnotationConfigApplicationContext(ServiceDiscoveryConfiguration.class,
-                WhaleFileDiscovery.class)) {
-            assertFalse(context.getBean(ServiceDiscovery.class) instanceof WhaleFileDiscovery);
+                FileSnapshotDiscovery.class)) {
+            assertFalse(context.getBean(ServiceDiscovery.class) instanceof FileSnapshotDiscovery);
         }
         assertThrows(IllegalStateException.class,
-                () -> new WhaleFileDiscovery(dir.resolve("missing").toString()).getHosts("p"));
+                () -> new FileSnapshotDiscovery(dir.resolve("missing").toString()).getHosts("p"));
     }
 }

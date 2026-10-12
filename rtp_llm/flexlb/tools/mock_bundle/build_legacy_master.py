@@ -40,10 +40,10 @@ def build(output, internal, spec_path, master_config_path):
         # Add an opt-in test Bean. Existing production Java files remain byte-for-byte unchanged.
         adapter = project / "flexlb-common/src/main/java/org/flexlb/mockdiscovery"
         adapter.mkdir(parents=True)
-        shutil.copyfile(ROOT / "discovery_adapter/WhaleFileDiscovery.java", adapter / "WhaleFileDiscovery.java")
+        shutil.copyfile(ROOT / "discovery_adapter/FileSnapshotDiscovery.java", adapter / "FileSnapshotDiscovery.java")
         adapter_tests = project / "flexlb-common/src/test/java/org/flexlb/mockdiscovery"
         adapter_tests.mkdir(parents=True)
-        shutil.copyfile(ROOT / "discovery_adapter/WhaleFileDiscoveryTest.java", adapter_tests / "WhaleFileDiscoveryTest.java")
+        shutil.copyfile(ROOT / "discovery_adapter/FileSnapshotDiscoveryTest.java", adapter_tests / "FileSnapshotDiscoveryTest.java")
         pom = project / "flexlb-api/pom.xml"
         text = pom.read_text()
         text = text.replace("<profiles>", """<profiles>
@@ -74,15 +74,15 @@ class WhaleLegacyConfigTest {
 """.replace("DISPATCHER_CLASS", dispatcher_class))
         shutil.copyfile(master_config_path, project / "flexlb-common/inner-master.json")
         run(["mvn", "-B", "-Popensource,!internal", "-pl", "flexlb-common", "-am", "install",
-             "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+             "-Dtest=WhaleLegacyConfigTest,FileSnapshotDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
         run(["mvn", "-B", "-pl", "kmonitor", "-am", "install", "-DskipTests"], internal / "java")
         run(["mvn", "-B", "-Popensource,!internal,whale-bundle", "-pl", "flexlb-api", "-am", "package",
-             "-Dtest=WhaleLegacyConfigTest,WhaleFileDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
+             "-Dtest=WhaleLegacyConfigTest,FileSnapshotDiscoveryTest", "-Dsurefire.failIfNoSpecifiedTests=false"], project)
         output.mkdir(parents=True, exist_ok=True)
         target = output / spec["jar"]
         shutil.copyfile(project / "flexlb-api/target/flexlb-api-1.0.0-SNAPSHOT.jar", target)
         spec["jar_sha256"] = hashlib.sha256(target.read_bytes()).hexdigest()
-        spec["packaging"] = "opensource plus KMonitor and opt-in WhaleFileDiscovery; original production Java sources unchanged"
+        spec["packaging"] = "opensource plus KMonitor and opt-in FileSnapshotDiscovery; original production Java sources unchanged"
         (output / "legacy-master-build.json").write_text(json.dumps(spec, indent=2))
 
 

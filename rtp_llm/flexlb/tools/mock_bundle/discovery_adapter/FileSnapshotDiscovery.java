@@ -21,12 +21,12 @@ import java.util.Map;
 @Component
 @Primary
 @ConditionalOnProperty(name = "mock.discovery.file")
-public final class WhaleFileDiscovery implements ServiceDiscovery {
+public final class FileSnapshotDiscovery implements ServiceDiscovery {
     private final Path file;
     private final ObjectMapper mapper = new ObjectMapper();
     private volatile Map<String, List<WorkerHost>> snapshot;
 
-    public WhaleFileDiscovery(@Value("${mock.discovery.file}") String path) {
+    public FileSnapshotDiscovery(@Value("${mock.discovery.file}") String path) {
         file = Path.of(path);
     }
 
