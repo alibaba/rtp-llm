@@ -39,12 +39,21 @@ def exact(actual, expected):
 
 class CollapseOwnerSM120Test(unittest.TestCase):
     component = "collapse"
+    mode_value = "ordered_fp32"
+    dispatch_module = delayed
     extra_choices = {}
     reference_context = staticmethod(mhc_collapse_reference)
 
     @property
+    def dispatch_name(self):
+        return f"{self.component}_delayed"
+
+    def additional_mutations(self, selected):
+        return 0
+
+    @property
     def policy(self):
-        return {f"mhc_{self.component}_mode": "ordered_fp32"}
+        return {f"mhc_{self.component}_mode": self.mode_value}
 
     @classmethod
     def setUpClass(cls):
@@ -123,9 +132,9 @@ class CollapseOwnerSM120Test(unittest.TestCase):
                     selected._agreement_config()["v41_config"][
                         f"mhc_{self.component}_mode"
                     ],
-                    "ordered_fp32",
+                    self.mode_value,
                 )
-                for model, mode in ((selected, "ordered_fp32"), (reference, None)):
+                for model, mode in ((selected, self.mode_value), (reference, None)):
                     self.assertEqual(
                         getattr(model, f"_mhc_{self.component}_mode"), mode
                     )
@@ -163,8 +172,8 @@ class CollapseOwnerSM120Test(unittest.TestCase):
                                 output = model.forward(request)
                         else:
                             with patch.object(
-                                delayed,
-                                f"{self.component}_delayed",
+                                self.dispatch_module,
+                                self.dispatch_name,
                                 side_effect=AssertionError(
                                     f"Selected worker used default {self.component}"
                                 ),
@@ -194,6 +203,7 @@ class CollapseOwnerSM120Test(unittest.TestCase):
                             ValueError, f"{self.component} modes disagree"
                         ):
                             selected.forward(inputs(selected.kv_cache))
+                extra_rejections = self.additional_mutations(selected)
                 for key, value in before.items():
                     exact(value, selected.kv_cache.storage[key])
                 selected._check_execution_config()
@@ -210,12 +220,19 @@ class CollapseOwnerSM120Test(unittest.TestCase):
                     decode=2,
                     hidden_exact=3,
                     cache_exact=3,
-                    mutation_rejections=3,
+                    mutation_rejections=3 + extra_rejections,
                     recovered=True,
                     **(
                         {"collapse_selected": bool(self.extra_choices)}
                         if self.component == "post"
-                        else {}
+                        else (
+                            {
+                                "combined_selected": bool(self.extra_choices),
+                                "precision_unchanged": True,
+                            }
+                            if self.component == "prenorm"
+                            else {}
+                        )
                     ),
                 )
             ),

@@ -23,6 +23,7 @@ import torch
 from rtp_llm.config.dsv41_config import (
     v41_mhc_collapse_mode,
     v41_mhc_post_mode,
+    v41_mhc_prenorm_mode,
     v41_rotary_compute_device,
     v41_sparse_attention_mode,
 )
@@ -82,6 +83,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._sparse_attention_mode = v41_sparse_attention_mode(config)
         self._mhc_collapse_mode = v41_mhc_collapse_mode(config)
         self._mhc_post_mode = v41_mhc_post_mode(config)
+        self._mhc_prenorm_mode = v41_mhc_prenorm_mode(config)
         self._v4_args.v41_config = config
         self._v4_args.n_hash_layers = 0
         self._engram_hash_state = None
@@ -147,11 +149,27 @@ class DeepSeekV41Model(DeepSeekV4Model):
                     if unit.post_mode != self._mhc_post_mode:
                         raise ValueError("V4.1 worker and mHC post modes disagree")
 
+    def _check_prenorm_config(self):
+        if v41_mhc_prenorm_mode(self._v4_args.v41_config) != self._mhc_prenorm_mode:
+            raise ValueError("V4.1 mHC prenorm mode changed; replace the worker")
+        if self._mhc_prenorm_mode is not None:
+            from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import (
+                require_fp32_prenorm_precision,
+            )
+
+            require_fp32_prenorm_precision()
+        if self.v4 is not None:
+            for layer in self.v4.layers:
+                for unit in (layer.attn_hc, layer.ffn_hc):
+                    if unit.prenorm_mode != self._mhc_prenorm_mode:
+                        raise ValueError("V4.1 worker and mHC prenorm modes disagree")
+
     def _check_execution_config(self):
         self._check_rotary_config()
         self._check_sparse_config()
         self._check_collapse_config()
         self._check_post_config()
+        self._check_prenorm_config()
 
     def _configure_dp_group(self):
         args = self._v4_args
