@@ -756,6 +756,7 @@ class KVCacheConfig:
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
     swa_pool_blocks: int
+    enable_linear_cache_reclaim: bool
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int
@@ -916,8 +917,9 @@ class LinearAttentionConfig:
     linear_value_head_dim: int
     ssm_state_dtype: DataType
     conv_state_dtype: DataType
+    supports_history_state_reclaim: bool
 
-    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16) -> None:
+    def __init__(self, linear_conv_kernel_dim: int = 0, linear_key_head_dim: int = 0, linear_num_key_heads: int = 0, linear_num_value_heads: int = 0, linear_value_head_dim: int = 0, ssm_state_dtype: DataType = DataType.TYPE_BF16, conv_state_dtype: DataType = DataType.TYPE_BF16, supports_history_state_reclaim: bool = False) -> None:
         ...
     def to_string(self) -> str:
         ...

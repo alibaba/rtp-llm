@@ -142,6 +142,7 @@ std::string KVCacheConfig::to_string() const {
         << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
         << "linear_pool_blocks: " << linear_pool_blocks << "\n"
         << "swa_pool_blocks: " << swa_pool_blocks << "\n"
+        << "enable_linear_cache_reclaim: " << enable_linear_cache_reclaim << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"
@@ -200,7 +201,8 @@ std::string LinearAttentionConfig::to_string() const {
         << "linear_num_value_heads: " << linear_num_value_heads << "\n"
         << "linear_value_head_dim: " << linear_value_head_dim << "\n"
         << "ssm_state_dtype: " << getDataTypeStr(ssm_state_dtype) << "\n"
-        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype);
+        << "conv_state_dtype: " << getDataTypeStr(conv_state_dtype) << "\n"
+        << "supports_history_state_reclaim: " << supports_history_state_reclaim;
     return oss.str();
 }
 // HybridAttentionConfig

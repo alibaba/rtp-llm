@@ -360,24 +360,56 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const KVCacheConfig&     kv_cache_config,
                                                   int                      gen_num_per_cycle) {
     auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
+    // Main #1574: reusable tail retention plus optional per-pool explicit
+    // block budgets for LINEAR/SWA pools.
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
-    auto groups                    = config.topology().groups();
-    for (auto& group : groups) {
-        const uint32_t override_blocks =
-            group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
-            group.policy.group_type == CacheGroupType::SWA    ? kv_cache_config.swa_pool_blocks :
-                                                                0;
-        RTP_LLM_CHECK_WITH_INFO(override_blocks != 1
-                                    && override_blocks <= static_cast<uint32_t>(std::numeric_limits<int>::max()),
-                                "pool blocks for tag=%s must be 0 or in [2, INT_MAX]",
-                                group.tag.c_str());
-        if (override_blocks > 0 && group.policy.explicit_block_num == 0) {
-            group.policy.explicit_block_num     = override_blocks;
-            group.policy.charge_to_paged_budget = group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+    {
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            const uint32_t override_blocks =
+                group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
+                group.policy.group_type == CacheGroupType::SWA    ? kv_cache_config.swa_pool_blocks :
+                                                                    0;
+            RTP_LLM_CHECK_WITH_INFO(override_blocks != 1
+                                        && override_blocks <= static_cast<uint32_t>(std::numeric_limits<int>::max()),
+                                    "pool blocks for tag=%s must be 0 or in [2, INT_MAX]",
+                                    group.tag.c_str());
+            if (override_blocks > 0 && group.policy.explicit_block_num == 0) {
+                group.policy.explicit_block_num     = override_blocks;
+                group.policy.charge_to_paged_budget = group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+    }
+    if (!kv_cache_config.enable_linear_cache_reclaim) {
+        return config;
+    }
+    const auto& groups     = config.topology().groups();
+    const bool  has_linear = std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::LINEAR;
+    });
+    // Target and draft models share KVCacheConfig. A FULL-only draft has no
+    // recurrent state to reclaim and must not inherit the target capability.
+    if (!has_linear) {
+        return config;
+    }
+    RTP_LLM_CHECK_WITH_INFO(model_config.linear_attention_config.supports_history_state_reclaim,
+                            "enable_linear_cache_reclaim requires model supports_history_state_reclaim");
+    for (const auto& group : groups) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group.cacheKeyTokenStride() == config.seq_size_per_block,
+                "enable_linear_cache_reclaim requires LINEAR cache-key span to match the base span: "
+                "tag=%s group_span=%zu base_span=%zu",
+                group.tag.c_str(),
+                group.cacheKeyTokenStride(),
+                config.seq_size_per_block);
         }
     }
-    config.setTopology(std::move(groups), config.topology().layers());
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
+                            "enable_linear_cache_reclaim does not support CP-sharded KV cache");
+    config.enable_linear_cache_reclaim = true;
     return config;
 }
 

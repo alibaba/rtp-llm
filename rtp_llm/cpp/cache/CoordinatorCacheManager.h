@@ -68,6 +68,7 @@ public:
 
     bool                           init();
     virtual void                   free(const FreeInfo& free_info);
+    void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
     virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;

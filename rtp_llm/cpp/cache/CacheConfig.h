@@ -56,7 +56,12 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
+    // Attention-specific configuration
+    bool enable_linear_cache_reclaim = false;
+    // Reusable tail retention (main #1574): number of trailing blocks kept
+    // reusable per group; replaces the old linear_step field.
     int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;

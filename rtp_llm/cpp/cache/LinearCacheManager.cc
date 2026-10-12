@@ -57,6 +57,24 @@ int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reser
     return std::max((seq_len + block_size - 1) / block_size + extra_blocks - current_blocks, 0);
 }
 
+// History-reclaim helpers (opt-in via enable_linear_cache_reclaim). The tail
+// counts anchor the committed-slot retirement boundary in historyReclaimEnd.
+int LinearCacheManager::materializedTailBlockCount() const {
+    return std::max(1, static_cast<int>(activeTailBlocks()));
+}
+
+int LinearCacheManager::retainedTailBlockCount() const {
+    return std::max(2, materializedTailBlockCount());
+}
+
+size_t LinearCacheManager::historyReclaimEnd(int committed_tokens) const {
+    // Keep completed tail checkpoints as well as every incomplete/reserved slot.
+    // The caller supplies committed tokens, never a speculative allocation bound.
+    return static_cast<size_t>(
+        std::max(0, std::max(0, committed_tokens) / seqSizePerBlock() - retainedTailBlockCount()));
+}
+
+
 bool LinearCacheManager::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
     (void)reserve_step;
     const int tail_blocks = prefillTailBlocks(tail_blocks_, enable_reuse_cache);
@@ -149,12 +167,34 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
                                                  int                      reserve_step,
                                                  int                      reuse_blocks_len,
                                                  bool                     reuse_enabled,
-                                                 const RequiredPositions& required_positions) const {
+                                                 const RequiredPositions& required_positions,
+                                                 size_t                   reclaimed_prefix_blocks) const {
     (void)reserve_step;
     NeedBlocksInfo info;
     const int      reuse_slots  = reuse_enabled ? reuse_blocks_len : 0;
     const int      common_slots = needBlocksNum(common_seq_len, 0);
     const int      total_slots  = needBlocksNum(seq_len, 0);
+    // History-reclaim gating: slots the runtime already retired below the
+    // committed prefix never require fresh physical blocks; explicitly
+    // required positions (pending loads / transfers) still count.
+    const auto reclaimed = [&](int pos) {
+        return static_cast<size_t>(pos) >= reclaimed_prefix_blocks;
+    };
+
+    for (int pos = 0; pos < common_slots; ++pos) {
+        if ((reclaimed(pos) && pos >= reuse_slots && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled))
+            || required_positions.count(static_cast<size_t>(pos)) != 0) {
+            ++info.common_blocks;
+        }
+    }
+    for (int pos = common_slots; pos < total_slots; ++pos) {
+        if ((reclaimed(pos) && pos >= reuse_slots && shouldMaterializeBlock(pos, seq_len, 0, reuse_enabled))
+            || required_positions.count(static_cast<size_t>(pos)) != 0) {
+            ++info.extra_blocks;
+        }
+    }
+    return info;
+}
 
     for (int pos = 0; pos < common_slots; ++pos) {
         if ((pos >= reuse_slots && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled))
@@ -203,7 +243,22 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
+    const size_t reclaimed      = block_ids.reclaimedPrefixBlocks();
+    const int    sequence_slots = needBlocksNum(seq_len, 0, 0);
+    if ((reclaimed > 0 && sequence_slots <= static_cast<int>(reclaimed))
+        || std::any_of(required_positions.begin(), required_positions.end(), [reclaimed](size_t pos) {
+               return pos < reclaimed;
+           })) {
+        // Reallocating an old read slot would expose an uninitialized state.
+        return false;
+    }
     auto should_materialize = [&](int pos) {
+    auto should_materialize = [&](int pos) {
+        // History-reclaim: slots retired below the committed prefix never
+        // re-materialize (required positions were prechecked to be above it).
+        if (static_cast<size_t>(pos) < reclaimed) {
+            return false;
+        }
         if (required_positions.count(static_cast<size_t>(pos)) != 0) {
             return true;
         }

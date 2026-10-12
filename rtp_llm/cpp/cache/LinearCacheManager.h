@@ -44,6 +44,7 @@ public:
                          std::vector<size_t>* backfilled_positions = nullptr) override;
 
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    size_t         historyReclaimEnd(int committed_tokens) const override;
     int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,
                                 const BlockIndicesType& current_block_indices,
@@ -60,8 +61,9 @@ public:
                                  int                      seq_len,
                                  int                      reserve_step,
                                  int                      reuse_blocks_len,
-                                 bool                     reuse_enabled      = false,
-                                 const RequiredPositions& required_positions = {}) const override;
+                                 bool                     reuse_enabled           = false,
+                                 const RequiredPositions& required_positions      = {},
+                                 size_t                   reclaimed_prefix_blocks = 0) const override;
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 
 private:
