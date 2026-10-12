@@ -54,6 +54,7 @@ struct CacheGroupPolicy {
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;
+    bool                 bounded_by_active_tail = false;
     CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
     uint32_t             active_tail_blocks     = 0;
     bool                 validate_tail_blocks   = true;

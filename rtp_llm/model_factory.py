@@ -24,7 +24,11 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.device.device_type import is_hip
-from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
+from rtp_llm.model_factory_register import (
+    ModelDict,
+    _model_factory,
+    ensure_model_registered,
+)
 from rtp_llm.ops import (
     ProfilingDebugLoggingConfig,
     SpeculativeType,
@@ -182,7 +186,9 @@ class ModelFactory:
             if alias_names and target_model.weight is None:
                 raise RuntimeError("speculative shared-weight owner is not loaded")
 
-            propose_hw_kernel_config = engine_config.hw_kernel_config
+            propose_hw_kernel_config = model_cls.speculative_hw_kernel_config(
+                engine_config.hw_kernel_config
+            )
             if (
                 sp_type == SpeculativeType.DSPARK
                 and propose_model_config.model_type == "qwen_3_dspark"
@@ -472,6 +478,21 @@ class ModelFactory:
                 % sp_config.type.name
             )
 
+        if not sp_config.model_type:
+            checkpoint_config = ModelFactory.get_config_json(sp_config.checkpoint_path)
+            sp_config.model_type = ModelDict.get_ft_model_type_by_config(
+                checkpoint_config
+            )
+            if not sp_config.model_type:
+                raise ValueError(
+                    "cannot infer speculative model type from checkpoint architectures"
+                )
+            logging.info(
+                "inferred speculative model type %s from %s",
+                sp_config.model_type,
+                sp_config.checkpoint_path,
+            )
+
         # Create ModelArgs for propose model (reuse main model args, but override ckpt_path)
         propose_model_args = ModelArgs()
         propose_model_args.ckpt_path = sp_config.checkpoint_path
@@ -508,6 +529,9 @@ class ModelFactory:
         )
         propose_model_cls._post_build_model_config(propose_model_config)
 
+        propose_model_cls.configure_speculative_model(
+            engine_config, model_config, propose_model_config
+        )
         if sp_config.type == SpeculativeType.DSPARK:
             ModelFactory._setup_dspark_configs(
                 sp_config, model_config, propose_model_config

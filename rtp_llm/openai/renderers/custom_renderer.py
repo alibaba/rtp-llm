@@ -475,6 +475,7 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        rendered_prompt: str = "",
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -488,6 +489,11 @@ class CustomChatRenderer:
                     generate_config=generate_config,
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
+                    rendered_prompt=(
+                        rendered_prompt
+                        if self.model_type == "gemma4" and mm_inputs
+                        else ""
+                    ),
                     headers=normalize_request_headers(headers),
                 )
             )

@@ -111,6 +111,18 @@ def _run_embedding(
         wi.complete_cache(result)
 
 
+def _work_item_image_count(work_item: MMWorkItem) -> int:
+    preprocess_result = work_item.preprocess_result
+    if (
+        isinstance(preprocess_result, tuple)
+        and len(preprocess_result) > 2
+        and isinstance(preprocess_result[2], list)
+        and all(isinstance(item, dict) for item in preprocess_result[2])
+    ):
+        return len(preprocess_result[2])
+    return len(work_item.mm_inputs)
+
+
 class _EmbeddingRequest:
     """A single caller's submission to the GPU batch scheduler.
 
@@ -146,7 +158,9 @@ class _EmbeddingRequest:
 
     def __init__(self, work_items: List[MMWorkItem]):
         self.work_items = work_items
-        self.n_images = sum(len(wi.mm_inputs) for wi in work_items)
+        self.n_images = sum(
+            _work_item_image_count(work_item) for work_item in work_items
+        )
         self.future: Future[None] = Future()
         self.chunks: List[_EmbeddingChunk] = []
         self.next_chunk_index = 0
@@ -378,7 +392,7 @@ class MMScheduler:
 
         if len(request.work_items) == 1:
             work_item = request.work_items[0]
-            n_images = len(work_item.mm_inputs)
+            n_images = _work_item_image_count(work_item)
             if n_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"single work item image count {n_images} exceeds "
@@ -417,7 +431,7 @@ class MMScheduler:
             return
 
         if self._work_budget is None:
-            n_images = sum(len(work_item.mm_inputs) for work_item in request.work_items)
+            n_images = request.n_images
             if n_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"request image count {n_images} exceeds "
@@ -458,7 +472,7 @@ class MMScheduler:
             chunk_work = MMWorkEstimate()
 
         for work_item in request.work_items:
-            item_images = len(work_item.mm_inputs)
+            item_images = _work_item_image_count(work_item)
             if item_images > self._max_batch_images:
                 raise MMSchedulerRequestTooLargeError(
                     f"single work item image count {item_images} exceeds "

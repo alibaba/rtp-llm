@@ -36,11 +36,11 @@ from rtp_llm.multimodal.mm_scheduler import (
     MMSchedulerTimeoutError,
 )
 from rtp_llm.multimodal.multimodal_util import (
-    add_multimodal_feature_hashes,
     build_multimodal_output_pb,
     trans_mm_input,
 )
 from rtp_llm.multimodal.transport import create_mm_output_transport
+from rtp_llm.multimodal.transport.base import build_output_receipt
 from rtp_llm.server.mm_cache_metadata import (
     MM_CACHE_SNAPSHOT_MAX_BYTES,
     get_mm_cache_keys,
@@ -85,14 +85,19 @@ def _rpc_timeout_ms(context, default_ms: int) -> int:
 
 
 def trans_output(res: MMEmbeddingRes):
-    return build_multimodal_output_pb(
-        res.embeddings, res.position_ids, res.extra_input, res.feature_hashes
+    return build_output_receipt(
+        res,
+        receipt=build_multimodal_output_pb(
+            res.embeddings, res.position_ids, res.extra_input
+        ),
     )
 
 
 def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
     embeddings, position_ids, extra_input = [], [], []
     hashes = [] if all(res.feature_hashes is not None for res in results) else None
+    expansion_metadata = []
+    has_expansion_metadata = any(res.expansion_metadata for res in results)
     for res in results:
         embeddings.extend(res.embeddings)
         if res.position_ids:
@@ -101,7 +106,17 @@ def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
             extra_input.extend(res.extra_input)
         if hashes is not None:
             hashes.extend(res.feature_hashes)
-    return MMEmbeddingRes(embeddings, position_ids or None, extra_input or None, hashes)
+        if has_expansion_metadata:
+            expansion_metadata.extend(
+                res.expansion_metadata or [None] * len(res.embeddings)
+            )
+    return MMEmbeddingRes(
+        embeddings,
+        position_ids or None,
+        extra_input or None,
+        feature_hashes=hashes,
+        expansion_metadata=expansion_metadata,
+    )
 
 
 def _mark_vit_error_reported(context, status_details=None) -> None:
@@ -341,7 +356,6 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
-            add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
             kmonitor.report(
                 GaugeMetrics.VIT_RPC_SERVER_HANDLER_RT_US_METRIC,
                 _now_us() - start_us,

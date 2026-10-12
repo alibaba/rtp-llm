@@ -84,16 +84,16 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
-    GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string     waitCacheStorePublication() override;
+    GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
+    void                       releaseBuffers() override;
+    torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                       hasMtpTargetHiddenBuffer() const override;
+    void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
 
@@ -115,11 +115,11 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     // Compact context rows prepared once by input gathering.
-    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
-    void                            initializeCustomOutput();
-    torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
-    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
-    bool                            shouldCaptureHiddenStates(const GptModelInputs& inputs);
+    torch::Tensor customOutputIndexes(const GptModelInputs& inputs);
+    void          initializeCustomOutput();
+    torch::Tensor runCustomOutput(const torch::Tensor& rows);
+    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -137,6 +137,7 @@ private:
     // lm_head directly (no index_select, no final layernorm — matching the existing
     // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
     // both as hidden_states and all_hidden_states.
+    torch::Tensor   computeLogits(const torch::Tensor& last_hidden);
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
     MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
     std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
@@ -341,13 +342,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // The layout carries the published per-group specs, including page geometry.
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }
-    init_resources.is_speculative         = (params.sp_config.type != SP_TYPE_NONE);
-    init_resources.is_decode_role         = (params.parallelism_config.role_type == RoleType::DECODE);
+    init_resources.speculative_target_embedding        = params.speculative_target_embedding;
+    init_resources.speculative_target_embedding_scalar = params.speculative_target_embedding_scalar;
+    init_resources.is_speculative                      = (params.sp_config.type != SP_TYPE_NONE);
+    init_resources.is_decode_role                      = (params.parallelism_config.role_type == RoleType::DECODE);
     init_resources.max_context_batch_size = params.runtime_config.fifo_scheduler_config.max_context_batch_size;
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
+    py_model_ = py_instance;
     if (int(device_props_.enable_layer_micro_batch) && !py::hasattr(py_model_, "forward_micro_batch")) {
         throw std::runtime_error(
             "PyWrappedModel: enable_layer_micro_batch requires Python model method forward_micro_batch");
@@ -363,10 +366,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.

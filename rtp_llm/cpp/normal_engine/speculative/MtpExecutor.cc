@@ -363,7 +363,7 @@ void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_ou
                                                        ModelBase&       source,
                                                        int64_t          hidden_rows) {
     if (model_output.mtp_target_hidden_states.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(hidden_rows < 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
+        RTP_LLM_CHECK_WITH_INFO(hidden_rows <= 0 || model_output.mtp_target_hidden_states.size(0) == hidden_rows,
                                 "MTP target hidden output rows mismatch: got %ld, expected %ld",
                                 model_output.mtp_target_hidden_states.size(0),
                                 hidden_rows);
@@ -707,17 +707,33 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
     dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
-    data_type_                  = params.model_config_.data_type;
-    hidden_size_                = params.model_config_.hidden_size * params.model_config_.hc_mult;
-    propose_step_               = propose_params->gen_num_per_circle;
+    data_type_    = params.model_config_.data_type;
+    hidden_size_  = params.model_config_.hidden_size * params.model_config_.hc_mult;
+    propose_step_ = propose_params->gen_num_per_circle;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
-    vocab_size_                 = params.model_config_.vocab_size;
-    draft_vocab_size_           = propose_params->getEngineInitParams().model_config_.vocab_size;
-    is_dspark_                  = propose_params->sp_type == SP_TYPE_DSPARK;
-    dspark_prefill_commit_only_ = is_dspark_ && role_type_ == RoleType::PREFILL;
+    vocab_size_                    = params.model_config_.vocab_size;
+    const auto& draft_model_config = propose_params->getEngineInitParams().model_config_;
+    draft_vocab_size_              = draft_model_config.vocab_size;
+    is_dspark_                     = propose_params->sp_type == SP_TYPE_DSPARK;
+    is_shared_kv_draft_            = draft_model_config.shares_target_kv;
+    dspark_prefill_commit_only_    = is_dspark_ && role_type_ == RoleType::PREFILL;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
+
+    if (is_shared_kv_draft_) {
+        RTP_LLM_CHECK_WITH_INFO(propose_params->sp_type == SP_TYPE_MTP,
+                                "shared-KV draft requires MTP speculative mode");
+        RTP_LLM_CHECK_WITH_INFO(
+            propose_step_ > 0, "shared-KV draft requires a positive proposal width, got %zu", propose_step_);
+        if (useAsyncPrepare()) {
+            // The shared-KV draft post-rejection input is compacted to one row per
+            // request after the async capture point, so only the target-verify
+            // prepare runs asynchronously; the draft-prefill prepare stays
+            // synchronous (see launchDraftPrefillPrepareAsync).
+            RTP_LLM_LOG_INFO("shared-KV draft uses async target-verify metadata preparation");
+        }
+    }
 
     if (is_dspark_) {
         RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.role_type == role_type_,
@@ -801,7 +817,25 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     GroupedCacheLayerLayout draft_cache_layer_layout;
     if (cache_manager) {
         target_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
-        draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
+        if (is_shared_kv_draft_) {
+            RTP_LLM_CHECK_WITH_INFO(cache_manager->getMTPModuleCacheConfig(0).shares_target_kv,
+                                    "shared-KV draft cache sub-config must be target-KV shared");
+            const auto&         target_topology = target_cache_layer_layout.topology();
+            std::vector<size_t> source_layers;
+            source_layers.reserve(draft_model_config.kv_cache_spec_descs.size());
+            for (const auto& descriptors : draft_model_config.kv_cache_spec_descs) {
+                RTP_LLM_CHECK_WITH_INFO(descriptors.size() == 1,
+                                        "shared-KV draft projection requires one cache tag per layer");
+                const auto& layers = target_topology.layerIdsForGroup(descriptors.front().tag);
+                RTP_LLM_CHECK_WITH_INFO(!layers.empty(),
+                                        "shared-KV draft cache tag %s is absent from the target",
+                                        descriptors.front().tag.c_str());
+                source_layers.push_back(static_cast<size_t>(layers.back()));
+            }
+            draft_cache_layer_layout = cache_manager->getProjectedMainModelGroupedCacheLayerLayout(source_layers);
+        } else {
+            draft_cache_layer_layout = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
+        }
     }
 
     GptModelInitParams model_init_params(
@@ -822,10 +856,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
-    model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
-    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
+    model_init_params.hidden_state_capture_dtype = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
@@ -869,7 +903,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                               params.profiling_debug_logging_config,
                                                               cache_config,
                                                               params.sp_config,
-                                                              warm_up_));
+                                                              warm_up_,
+                                                              is_shared_kv_draft_));
 
     LogitsProcessorFactory::init(params.model_config_,
                                  params.grammar_config,
@@ -887,7 +922,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager ? std::make_optional(draft_cache_layer_layout) : std::nullopt,
                                 mtp_params->model_id,
                                 mtp_params->parallelism_config,
-                                params.hw_kernel_config,
+                                mtp_params->hw_kernel_config,
                                 params.profiling_debug_logging_config,
                                 params.runtime_config,
                                 params.concurrency_config,
@@ -905,9 +940,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                              role_type_,
                                              warm_up_,
                                              mtp_params->model_config_.hidden_state_capture_layer_ids);
-        model_params.hidden_state_capture_dtype     = mtp_params->model_config_.hidden_state_capture_dtype;
+        model_params.hidden_state_capture_dtype = mtp_params->model_config_.hidden_state_capture_dtype;
+        if (mtp_params->model_config_.shares_target_kv) {
+            RTP_LLM_CHECK_WITH_INFO(params.gpt_weights.embedding != nullptr,
+                                    "shared speculative resources require a target embedding");
+            model_params.speculative_target_embedding        = params.gpt_weights.embedding->kernel;
+            model_params.speculative_target_embedding_scalar = params.model_config_.input_embedding_scalar;
+        }
 #if USING_CUDA || USING_ROCM
-        if (params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
+        if (model_params.hw_kernel_config.enable_cuda_graph && model_params.kv_cache_layer_layout.has_value()) {
             const auto& topology = model_params.kv_cache_layer_layout->topology();
             RTP_LLM_CHECK_WITH_INFO(mtp_params->model_config_.max_seq_len > 0,
                                     "draft CUDA graph max sequence length must be positive");
@@ -917,15 +958,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             // Draft prefill uses one block; draft decode uses 1 + gamma.
             RTP_LLM_CHECK_WITH_INFO(params.sp_config.gen_num_per_cycle >= 0,
                                     "draft CUDA graph speculative cycle count must be non-negative");
-            const size_t fake_count = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
-            const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
+            const size_t fake_count               = std::max<size_t>(1, size_t{1} + params.sp_config.gen_num_per_cycle);
+            const size_t fake_width               = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
             model_params.kernel_block_table_width = std::max(real_width, fake_width);
         }
 #endif
 
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            const bool enable_cuda_graph = model_params.hw_kernel_config.enable_cuda_graph;
             // A DSpARK PREFILL worker only seeds the draft feature KV through
             // the ordinary CP-capable prefill path and never runs the
             // fixed-width decode proposal or tail commit. Capturing those
@@ -944,7 +985,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             }
             // dspark use DSparkModelRole to call commit func, and token_per_bs is different
             // so another model is required
-            if (enable_cuda_graph || is_dspark_) {
+            if ((enable_cuda_graph && !is_shared_kv_draft_) || is_dspark_) {
                 RTP_LLM_LOG_INFO("[speculative decoding] creating draft prefill model");
                 // Ordinary MTP captures a prefill graph. DSpARK keeps the same
                 // runtime slot but constructs a gamma+1 decode-graph commit wrapper.
@@ -1192,9 +1233,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
-        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
+        const int64_t target_hidden_rows = cp_enabled ? -1 : model_input.combo_tokens.numel();
+        int64_t       start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, target_hidden_rows);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1664,9 +1706,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchDraftPrefillPrepareAsync(model_input);
 
     {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        model_output          = runTargetVerifyForward(model_input, stream_groups);
-        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
+        const int64_t target_hidden_rows = model_input.combo_tokens.numel();
+        int64_t       start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output                     = runTargetVerifyForward(model_input, stream_groups);
+        maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, target_hidden_rows);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -1964,8 +2007,9 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     // stream must wait before it materializes CPU mirrors.
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     input_ready_event->record(cuda_graph::graphGetCurrentStream());
+    const auto prepare_count = is_shared_kv_draft_ ? ++shared_kv_target_prepare_count_ : 0;
     target_verify_prepare_runner_.launch(
-        [this, input_ready_event, model_input_copy = std::move(model_input_copy)]() mutable {
+        [this, input_ready_event, prepare_count, batch_size, model_input_copy = std::move(model_input_copy)]() mutable {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_attention_inputs)");
             {
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_wait_input)");
@@ -1976,11 +2020,25 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
                 RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_verify_prepare_model_inputs)");
                 model_->prepareAttentionInputs(model_input_copy);
             }
+            if (prepare_count && (prepare_count & (prepare_count - 1)) == 0) {
+                RTP_LLM_LOG_INFO("shared-KV target verify async metadata prepared: batch=%zu count=%llu",
+                                 batch_size,
+                                 static_cast<unsigned long long>(prepare_count));
+            }
         });
 }
 
 void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_input) {
     if (!useAsyncPrepare()) {
+        return;
+    }
+    if (is_shared_kv_draft_) {
+        // The shared-KV draft branch of updateDecodePostDraftModelInput compacts the
+        // post-rejection input to one token per request AFTER the async
+        // capture point below. An async value-captured copy would keep the
+        // stale dense (propose_step_+1)-row layout and feed the draft forward
+        // a mismatched request layout, so the draft-prefill prepare must stay
+        // synchronous for shared-KV draft.
         return;
     }
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2204,7 +2262,9 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
     // DSpARK carries its proposal through the model-owned state buffers rather
     // than the post-rejection model input, so there is nothing to re-broadcast.
     if (parallelism_config_.tp_size > 1 && !is_dspark_) {
-        if (useStreamAsync() || useAsyncDeviceState()) {
+        if (is_shared_kv_draft_) {
+            tpSyncModelInputs(model_input, parallelism_config_);
+        } else if (useStreamAsync() || useAsyncDeviceState()) {
             // Device-state pipeline keeps the dense (propose_step + 1) layout on
             // every rank, so only the rejection-updated tensors need a
             // broadcast. They are all device-resident, so this stays NCCL-only
@@ -2865,12 +2925,20 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
-        const auto hidden_size = draft_all_hidden_full.size(1);
-        auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       accept_i32  = accept_len_all.to(torch::kInt32);
-        auto       idx_long =
-            (accept_i32.to(torch::kInt64) - 1).reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
-        last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
+        if (is_shared_kv_draft_) {
+            RTP_LLM_CHECK_WITH_INFO(draft_all_hidden_full.size(0) == batch_size,
+                                    "shared-KV draft reseed hidden rows %ld != batch %ld",
+                                    draft_all_hidden_full.size(0),
+                                    batch_size);
+            last_hidden_all = draft_all_hidden_full;
+        } else {
+            const auto hidden_size = draft_all_hidden_full.size(1);
+            auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
+            auto       accept_i32  = accept_len_all.to(torch::kInt32);
+            auto       idx_long =
+                (accept_i32.to(torch::kInt64) - 1).reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
+            last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
+        }
     }
 
     // One clone for all probs
@@ -2974,10 +3042,18 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
     if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
-        const auto hidden_size  = draft_all_hidden_full.size(1);
-        auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
-        auto       idx_expanded = hidden_idx_all.reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
-        last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
+        if (is_shared_kv_draft_) {
+            RTP_LLM_CHECK_WITH_INFO(draft_all_hidden_full.size(0) == batch_size,
+                                    "shared-KV draft async reseed hidden rows %ld != batch %ld",
+                                    draft_all_hidden_full.size(0),
+                                    batch_size);
+            last_hidden_all = draft_all_hidden_full;
+        } else {
+            const auto hidden_size  = draft_all_hidden_full.size(1);
+            auto       hidden_3d    = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
+            auto       idx_expanded = hidden_idx_all.reshape({batch_size, 1, 1}).expand({batch_size, 1, hidden_size});
+            last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
+        }
     }
 
     // 3. One clone for all probs
@@ -2987,7 +3063,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     }
     auto next_position_ids_all =
         is_dspark_ ? advanceDSparkPositionIds(
-            verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
+                         verify_position_ids, accept_len_gpu_all, batch_size, static_cast<int64_t>(propose_step_ + 1)) :
                      torch::Tensor();
 
     torch::Tensor next_kv_cache_block_id;

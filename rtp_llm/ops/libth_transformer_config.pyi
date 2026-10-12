@@ -1045,6 +1045,7 @@ class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
     charge_to_paged_budget: typing.Any
+    bounded_by_active_tail: typing.Any
     def __init__(self) -> None: ...
 
 class CacheMemoryPolicyDesc:
@@ -1069,6 +1070,8 @@ class KVCacheSpecDesc:
     cache_type: KVCacheSpecType
     dtype: DataType
     is_state_cache: bool
+    kv_head_num: int | None
+    size_per_head: int | None
     entry_elems: int
     entry_dtype: DataType
     entry_count_mode: OpaqueBlockEntryCountMode
@@ -1099,6 +1102,8 @@ class ModelConfig:
     kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     expert_num: int
     extra_data_path: str
+    final_logit_softcapping: float
+    shares_target_kv: bool
     has_lm_head: bool
     has_moe_norm: bool
     has_positional_encoding: bool

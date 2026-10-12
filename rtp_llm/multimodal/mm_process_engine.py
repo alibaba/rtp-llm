@@ -509,15 +509,30 @@ class MMEmbeddingRes:
         position_ids: Optional[List[torch.Tensor]] = None,
         extra_input: Optional[List[torch.Tensor]] = None,
         feature_hashes: Optional[List[torch.Tensor]] = None,
+        expansion_metadata: Optional[List[Any]] = None,
+        rendered_prompt: str = "",
+        expanded_token_ids: Optional[List[int]] = None,
     ):
         self.embeddings = embeddings
         self.position_ids = position_ids if position_ids is not None else []
-        # Model-specific extra input, one opaque flat 1-D tensor per image (e.g. deepstack).
         self.extra_input = extra_input if extra_input is not None else []
         self.feature_hashes = feature_hashes
+        self.expansion_metadata = (
+            expansion_metadata if expansion_metadata is not None else []
+        )
+        self.rendered_prompt = rendered_prompt
+        self.expanded_token_ids = expanded_token_ids
 
     def __str__(self) -> str:
-        return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
+        return (
+            f"MMEmbeddingRes(length={len(self.embeddings)}, "
+            f"embeddings_shape={[e.shape for e in self.embeddings]}, "
+            f"position_ids_shape={[p.shape for p in self.position_ids]}, "
+            f"extra_input_shape={[d.shape for d in self.extra_input]}, "
+            f"expansion_metadata={len(self.expansion_metadata)}, "
+            f"rendered_prompt_length={len(self.rendered_prompt)}, "
+            f"expanded_token_count={len(self.expanded_token_ids or [])})"
+        )
 
 
 class _AsyncComputeTask:
@@ -1137,6 +1152,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        rendered_prompt: str = "",
     ) -> MMEmbeddingRes:
         """Run one synchronous request and account for every failure boundary."""
         try:
@@ -1145,6 +1161,7 @@ class MMProcessEngine:
                 request_id=request_id,
                 user_id=user_id,
                 service_name=service_name,
+                rendered_prompt=rendered_prompt,
             )
         except Exception as error:
             self.report_vit_error(error)
@@ -1156,6 +1173,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        rendered_prompt: str = "",
     ) -> MMEmbeddingRes:
         """Synchronous embedding path with greennet (used by the in-process /
         cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
@@ -1177,6 +1195,7 @@ class MMProcessEngine:
                     defer_cache_complete=True,
                     request_id=request_id,
                     report_vit_error=False,
+                    rendered_prompt=rendered_prompt,
                 )
                 verdict = GreenNetVerdict(passed=True)
                 if verdict_future is not None:
@@ -1237,6 +1256,7 @@ class MMProcessEngine:
                 defer_cache_complete=state == "miss",
                 request_id=request_id,
                 report_vit_error=False,
+                rendered_prompt=rendered_prompt,
             )
 
             if state == "miss":
@@ -1375,6 +1395,7 @@ class MMProcessEngine:
         request_id: int = 0,
         user_id: str = "",
         service_name: str = "",
+        rendered_prompt: str = "",
     ) -> MMEmbeddingRes:
         """Process multimodal inputs from C++ interface."""
         try:
@@ -1390,7 +1411,11 @@ class MMProcessEngine:
             self.report_vit_error(error)
             raise
         res = self._embed_with_greennet_sync(
-            mm_inputs, request_id=request_id, user_id=user_id, service_name=service_name
+            mm_inputs,
+            request_id=request_id,
+            user_id=user_id,
+            service_name=service_name,
+            rendered_prompt=rendered_prompt,
         )
         try:
             with cuda_graph_gate.operation():
@@ -1401,10 +1426,15 @@ class MMProcessEngine:
         return res
 
     def mm_embedding_impl(
-        self, mm_inputs: List[MultimodalInput], request_id: int = 0
+        self,
+        mm_inputs: List[MultimodalInput],
+        request_id: int = 0,
+        rendered_prompt: str = "",
     ) -> MMEmbeddingRes:
         """Core implementation for multimodal embedding processing."""
-        result, _ = self._mm_embedding_impl(mm_inputs, request_id=request_id)
+        result, _ = self._mm_embedding_impl(
+            mm_inputs, request_id=request_id, rendered_prompt=rendered_prompt
+        )
         return result
 
     def _mm_embedding_impl(
@@ -1418,6 +1448,7 @@ class MMProcessEngine:
         report_vit_error: bool = True,
         defer_feature_hashes: bool = False,
         deadline: Optional[float] = None,
+        rendered_prompt: str = "",
     ) -> Tuple[MMEmbeddingRes, List[MMWorkItem]]:
         """Internal implementation that also exposes canonical work-item values.
 
@@ -1455,8 +1486,8 @@ class MMProcessEngine:
                     self._wait_for_preprocessing(work_items)
 
                 with torch.profiler.record_function("compute_embeddings"):
-                    emb_res, pos_res, extra_input_res = self._compute_embeddings(
-                        work_items, deadline=deadline
+                    emb_res, pos_res, extra_input_res, expansion_metadata = (
+                        self._compute_embeddings(work_items, deadline=deadline)
                     )
                     if report_embedding_length:
                         kmonitor.report(
@@ -1470,7 +1501,22 @@ class MMProcessEngine:
                         if defer_feature_hashes
                         else [h for wi in work_items for h in wi.feature_hashes or []]
                     )
-                    result = MMEmbeddingRes(emb_res, pos_res, extra_input_res, hashes)
+                    expanded_token_ids = None
+                    if rendered_prompt and hasattr(
+                        self.mm_part, "expand_rendered_prompt"
+                    ):
+                        expanded_token_ids = self.mm_part.expand_rendered_prompt(
+                            rendered_prompt, expansion_metadata
+                        )
+                    result = MMEmbeddingRes(
+                        emb_res,
+                        pos_res,
+                        extra_input_res,
+                        feature_hashes=hashes,
+                        expansion_metadata=expansion_metadata,
+                        rendered_prompt=rendered_prompt,
+                        expanded_token_ids=expanded_token_ids,
+                    )
 
                 if not self.vit_config.disable_access_log:
                     self._access_logger.log_success_access(
@@ -1598,7 +1644,7 @@ class MMProcessEngine:
 
     def _compute_embeddings(
         self, work_items: List[MMWorkItem], deadline: Optional[float] = None
-    ) -> Tuple[List[Any], List[Any], List[Any]]:
+    ) -> Tuple[List[Any], List[Any], List[Any], List[Any]]:
         """Compute embeddings for all work items."""
         pending_items = [
             wi
@@ -1609,7 +1655,7 @@ class MMProcessEngine:
         if pending_items:
             self._scheduler.submit_and_wait(pending_items, deadline=deadline)
 
-        emb_res, pos_res, tensor_res = [], [], []
+        emb_res, pos_res, tensor_res, expansion_metadata = [], [], [], []
         local_producers = {
             wi.cache_entry: wi
             for wi in work_items
@@ -1628,8 +1674,6 @@ class MMProcessEngine:
                         timeout=wi.remaining_timeout_s()
                     )
             result = wi.embedding_result
-            # Scheduler invariant: submit_and_wait either fills embedding_result
-            # for every pending item or raises, so it is never None here.
             if result is None:
                 raise RuntimeError(f"embedding_result not set for work item {wi}")
             if wi.feature_hashes is None and wi.cache_entry is not None:
@@ -1642,7 +1686,14 @@ class MMProcessEngine:
             pos_res.extend(maybe_tensor_to_list(result[1], ndim_threshold=2))
             if len(result) > 2:
                 tensor_res.extend(maybe_tensor_to_list(result[2], ndim_threshold=1))
-        return emb_res, pos_res, tensor_res
+            metadata = result[3] if len(result) > 3 else None
+            if isinstance(metadata, list):
+                expansion_metadata.extend(metadata)
+            else:
+                expansion_metadata.append(metadata)
+        if not any(metadata is not None for metadata in expansion_metadata):
+            expansion_metadata = []
+        return emb_res, pos_res, tensor_res, expansion_metadata
 
     @staticmethod
     def _work_item_result_to_response(
@@ -1653,7 +1704,18 @@ class MMProcessEngine:
         extra_res = (
             maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
         )
-        return MMEmbeddingRes(emb_res, pos_res, extra_res, feature_hashes)
+        metadata = result[3] if len(result) > 3 else None
+        return MMEmbeddingRes(
+            emb_res,
+            pos_res,
+            extra_res,
+            feature_hashes=feature_hashes,
+            expansion_metadata=(
+                metadata
+                if isinstance(metadata, list)
+                else [metadata] if metadata is not None else []
+            ),
+        )
 
     def async_submit(
         self,

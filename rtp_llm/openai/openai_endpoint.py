@@ -699,6 +699,7 @@ class OpenaiEndpoint(object):
             generate_config,
             self.backend_rpc_server_visitor,
             chat_request,
+            rendered_prompt=rendered_input.rendered_prompt,
             headers=request_headers,
         )
 

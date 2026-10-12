@@ -62,13 +62,38 @@ ErrorResult<MultimodalOutput> MultimodalPbConverter::inlineOutputFromPb(const Mu
                                      + std::to_string(output_pb.multimodal_extra_input_size())
                                      + " does not match image count=" + std::to_string(split_sizes.size()));
             }
-            // Extra inputs remain one tensor per image.
             std::vector<torch::Tensor> extra_inputs;
             extra_inputs.reserve(output_pb.multimodal_extra_input_size());
             for (const auto& extra_input_pb : output_pb.multimodal_extra_input()) {
                 extra_inputs.emplace_back(TensorPbConvert::pbToTorch(extra_input_pb));
             }
             mm_output.mm_extra_input = std::move(extra_inputs);
+        }
+        if (output_pb.expansion_metadata_size() > 0) {
+            if (output_pb.expansion_metadata_size() != static_cast<int>(split_sizes.size())) {
+                return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                                 "inline multimodal response is inconsistent: expansion metadata count="
+                                     + std::to_string(output_pb.expansion_metadata_size())
+                                     + " does not match image count=" + std::to_string(split_sizes.size()));
+            }
+            std::vector<MultimodalExpansionMetadata> metadata;
+            metadata.reserve(output_pb.expansion_metadata_size());
+            for (const auto& entry_pb : output_pb.expansion_metadata()) {
+                MultimodalExpansionMetadata entry;
+                entry.is_video = entry_pb.is_video();
+                entry.fps      = entry_pb.fps();
+                entry.frame_indices.assign(entry_pb.frame_indices().begin(), entry_pb.frame_indices().end());
+                entry.soft_tokens_per_frame = entry_pb.soft_tokens_per_frame();
+                entry.frame_number          = entry_pb.frame_number();
+                entry.frame_count           = entry_pb.frame_count();
+                metadata.emplace_back(std::move(entry));
+            }
+            mm_output.mm_expansion_metadata = std::move(metadata);
+        }
+        if (output_pb.expanded_token_ids_size() > 0) {
+            mm_output.expanded_token_ids = torch::tensor(
+                std::vector<int32_t>(output_pb.expanded_token_ids().begin(), output_pb.expanded_token_ids().end()),
+                torch::kInt32);
         }
         return mm_output;
     } catch (const std::exception& e) {

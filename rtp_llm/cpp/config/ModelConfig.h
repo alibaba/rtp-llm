@@ -121,7 +121,13 @@ public:
     bool   add_bias_linear            = false;
     bool   has_moe_norm               = false;
     double logit_scale                = 1.0;
-    bool   use_kvcache                = true;
+    // Final logit softcapping (Gemma2/Gemma4 style): logits = cap * tanh(logits / cap).
+    // 0 disables the transform.
+    double final_logit_softcapping = 0.0;
+    bool   use_kvcache             = true;
+    // Read-only draft: use the target embedding and the last target layer of each
+    // descriptor tag. Each request keeps one seed row and does not advance draft KV.
+    bool shares_target_kv = false;
 
     int64_t pre_seq_len       = 0;
     bool    prefix_projection = false;

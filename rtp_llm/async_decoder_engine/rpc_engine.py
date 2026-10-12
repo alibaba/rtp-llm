@@ -42,30 +42,40 @@ class LanguageCppEngine(BaseEngine):
             self.tokenizer, self.model.model_config.special_tokens
         )
         self.mm_process_engine = None
-        if (
+        self.mm_prompt_expander = None
+        owns_multimodal_ingress = (
             self.model.is_multimodal()
-            and self.model.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_LOCAL
             and engine_config.parallelism_config.tp_rank == 0
             and (
                 engine_config.pd_sep_config.role_type == RoleType.PREFILL
                 or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
             )
-        ):
-            self.mm_process_engine = (
-                MultimodalMixinFactory.create_multimodal_process_engine(
-                    model_config=self.model.model_config,
-                    engine_config=engine_config,
-                    vit_config=self.model.vit_config,
-                    device=f"cuda:{engine_config.parallelism_config.local_rank}",
+        )
+        if owns_multimodal_ingress:
+            self.mm_prompt_expander = (
+                MultimodalMixinFactory.create_multimodal_prompt_expander(
+                    self.model.model_config
                 )
             )
+            if (
+                self.model.vit_config.vit_separation
+                == VitSeparation.VIT_SEPARATION_LOCAL
+            ):
+                self.mm_process_engine = (
+                    MultimodalMixinFactory.create_multimodal_process_engine(
+                        model_config=self.model.model_config,
+                        engine_config=engine_config,
+                        vit_config=self.model.vit_config,
+                        device=f"cuda:{engine_config.parallelism_config.local_rank}",
+                    )
+                )
+        mm_processor_bridge = self.mm_process_engine or self.mm_prompt_expander
         self.rtp_llm_op_ = RtpLLMOp(
             engine_config,
             model,
             propose_model,
             self.token_processor,
-            self.mm_process_engine,
+            mm_processor_bridge,
         )
 
     @timer_wrapper(description="start async engine")

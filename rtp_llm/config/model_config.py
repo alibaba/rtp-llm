@@ -132,6 +132,8 @@ class ModelConfig(CppModelConfig):
         "pre_seq_len",
         "use_kvcache",
         "logit_scale",
+        "final_logit_softcapping",
+        "shares_target_kv",
         "qk_norm",
         "expert_num",
         "moe_n_group",

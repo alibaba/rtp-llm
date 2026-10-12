@@ -25,6 +25,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
     os << "{group_type=" << cacheGroupTypeName(policy.group_type) << ", prefix_reuse=" << policy.enable_prefix_reuse
        << ", reservable=" << policy.reservable << ", explicit_block_num=" << policy.explicit_block_num
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
+       << ", bounded_by_active_tail=" << policy.bounded_by_active_tail
        << ", memory_placement=" << static_cast<int>(policy.memory_placement)
        << ", active_tail_blocks=" << policy.active_tail_blocks
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
@@ -128,7 +129,8 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
     return lhs.group_type == rhs.group_type && lhs.enable_prefix_reuse == rhs.enable_prefix_reuse
            && lhs.reservable == rhs.reservable && lhs.explicit_block_num == rhs.explicit_block_num
-           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
+           && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
+           && lhs.bounded_by_active_tail == rhs.bounded_by_active_tail && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
            && lhs.sliding_window_size == rhs.sliding_window_size;
@@ -286,24 +288,37 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                                                == source_group.kernelSeqSizePerBlock(),
                                     "CacheConfig::mergeMTPModule incompatible block token spans for tag=%s",
                                     tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(
-                source_layer_ids.size() == static_cast<size_t>(mtp_layer_num),
-                "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every module layer, "
-                "got=%zu expected=%u",
-                source_group.tag.c_str(),
-                tag.c_str(),
-                source_layer_ids.size(),
-                mtp_layer_num);
-            for (size_t local_layer_id = 0; local_layer_id < source_layer_ids.size(); ++local_layer_id) {
-                RTP_LLM_CHECK_WITH_INFO(
-                    source_layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
-                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s source layers must be ordered 0..%u, "
-                    "index=%zu value=%d",
-                    source_group.tag.c_str(),
-                    tag.c_str(),
-                    mtp_layer_num - 1,
-                    local_layer_id,
-                    source_layer_ids[local_layer_id]);
+            RTP_LLM_CHECK_WITH_INFO(!source_layer_ids.empty(),
+                                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s has no module layers",
+                                    source_group.tag.c_str(),
+                                    tag.c_str());
+            if (uses_default_alias) {
+                RTP_LLM_CHECK_WITH_INFO(source_layer_ids.size() == static_cast<size_t>(mtp_layer_num),
+                                        "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every "
+                                        "module layer, got=%zu expected=%u",
+                                        source_group.tag.c_str(),
+                                        tag.c_str(),
+                                        source_layer_ids.size(),
+                                        mtp_layer_num);
+                for (size_t local_layer_id = 0; local_layer_id < source_layer_ids.size(); ++local_layer_id) {
+                    RTP_LLM_CHECK_WITH_INFO(source_layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
+                                            "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s source layers "
+                                            "must be ordered 0..%u, index=%zu value=%d",
+                                            source_group.tag.c_str(),
+                                            tag.c_str(),
+                                            mtp_layer_num - 1,
+                                            local_layer_id,
+                                            source_layer_ids[local_layer_id]);
+                }
+            }
+            for (int local_layer_id : source_layer_ids) {
+                RTP_LLM_CHECK_WITH_INFO(local_layer_id >= 0 && local_layer_id < static_cast<int>(mtp_layer_num),
+                                        "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s invalid module layer "
+                                        "%d for layer count %u",
+                                        source_group.tag.c_str(),
+                                        tag.c_str(),
+                                        local_layer_id,
+                                        mtp_layer_num);
             }
         }
 
@@ -381,8 +396,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }
@@ -463,8 +477,6 @@ void CacheConfig::fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
 
 void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config) {
     RTP_LLM_CHECK_WITH_INFO(global_block_num > 0, "cache configuration requires positive baseline block count");
-    // TODO: use RuntimeConfig when group-level block sizing needs runtime parallelism context.
-    (void)runtime_config;
     for (auto& sub_cfg : mtp_sub_configs) {
         if (sub_cfg != nullptr) {
             sub_cfg->finalizeBlockNums(global_block_num, runtime_config);
@@ -482,10 +494,12 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         uint32_t   rule_blocks                 = global_block_num;
         if (explicit_independent_blocks > 0) {
             rule_blocks = explicit_independent_blocks;
+        } else if (group.policy.bounded_by_active_tail) {
+            rule_blocks = boundedActiveTailPhysicalBlockCount(group.policy, runtime_config, group.tag);
         } else if (group.policy.group_type == CacheGroupType::SWA) {
             rule_blocks = global_block_num / step + (global_block_num % step != 0 ? 1u : 0u);
         }
-        group.block_num = rule_blocks;
+        group.block_num = std::max(rule_blocks, 1u);
     }
     // The published topology already owns frozen Specs; changing capacity does
     // not require cloning their immutable byte layouts again.
@@ -507,6 +521,7 @@ std::string CacheConfig::debugString(size_t indent) const {
     OUTPUT_FIELD(layer_num);
     OUTPUT_FIELD_EXPR("layer_all_num", layer_all_num());
     OUTPUT_FIELD_EXPR("use_mla", (use_mla ? "true" : "false"));
+    OUTPUT_FIELD_EXPR("shares_target_kv", (shares_target_kv ? "true" : "false"));
     os << "\n";
 
     os << indent1 << "# Block Configuration:\n";

@@ -25,6 +25,7 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
     const auto& vec  = rendered_input.input_ids;
     input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
 
+    input->rendered_prompt   = rendered_input.rendered_prompt;
     input->multimodal_inputs = std::move(rendered_input.multimodal_inputs);
     if (mm_processor_ != nullptr && input->multimodal_inputs) {
         auto mm_res = mm_processor_->updateMultimodalFeatures(input);

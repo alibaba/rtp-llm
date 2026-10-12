@@ -1105,12 +1105,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
             py::gil_scoped_acquire gil;
+            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
         }
@@ -1372,18 +1372,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
-        torch::Tensor logits;
-        {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
-#if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kBFloat16) {
-                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-            } else
-#endif
-            {
-                logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-            }
-        }
+        auto logits = computeLogits(last_hidden);
 
         GptModelOutputs outputs;
         // Internal warmup/system-prefix requests have no selected token and do not score.
@@ -1400,18 +1389,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
-        if (device_props_.tp_size > 1) {
-            RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
-            logits = tpSyncEmbeddingOrLogits(logits);
-        }
-        if (description_.output_vocab_size > 0) {
-            RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
-                                        && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
-                                    "output vocabulary gathered width mismatch: expected %zu, got %ld",
-                                    description_.output_vocab_padded_size,
-                                    logits.dim() > 1 ? logits.size(1) : -1);
-            logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
-        }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1432,6 +1409,40 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
     }
 }
 
+torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& last_hidden) {
+    const auto&   lm_head = weights_.lm_head;
+    torch::Tensor logits;
+    {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");
+#if USING_CUDA
+        if (lm_head->kernel.dtype() == torch::kBFloat16) {
+            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
+        } else
+#endif
+        {
+            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
+        }
+    }
+    if (description_.final_logit_softcapping > 0.0) {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(final_logit_softcapping)");
+        const auto cap = description_.final_logit_softcapping;
+        logits = torch::tanh(logits / cap) * cap;
+    }
+    if (device_props_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(tp_sync_logits)");
+        logits = tpSyncEmbeddingOrLogits(logits);
+    }
+    if (description_.output_vocab_size > 0) {
+        RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2
+                                    && static_cast<size_t>(logits.size(1)) == description_.output_vocab_padded_size,
+                                "output vocabulary gathered width mismatch: expected %zu, got %ld",
+                                description_.output_vocab_padded_size,
+                                logits.dim() > 1 ? logits.size(1) : -1);
+        logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
+    }
+    return logits;
+}
+
 GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs) {
     // `hidden` is already the lm_output_indexes-selected, post-final-layernorm rows
     // ([num_lm, hidden_size]) gathered by handleOutputsLastHidden. Mirror the CP
@@ -1450,23 +1461,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     printTorchTensorData(hidden, "last_hidden");
 
     torch::Tensor last_hidden = hidden;
-    torch::Tensor logits;
-    {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
-#if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kBFloat16) {
-            logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
-        } else
-#endif
-        {
-            logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
-        }
-    }
+    auto          logits      = computeLogits(last_hidden);
     printTorchTensorData(logits, "logits");
-    if (device_props_.tp_size > 1) {
-        RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
-        logits = tpSyncEmbeddingOrLogits(logits);
-    }
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1563,11 +1559,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      prefill_batch_idx      = 0;
     // TODO(async): micro-batch token slicing still computes CPU scalar sums.
     // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                        inputs.input_lengths.cpu().pin_memory() :
-                                        inputs.input_lengths;
-    const auto* input_lengths_ptr =
-        input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                         inputs.input_lengths.cpu().pin_memory() :
+                                         inputs.input_lengths;
+    const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");

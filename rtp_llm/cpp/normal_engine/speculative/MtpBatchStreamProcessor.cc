@@ -1172,7 +1172,7 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
     // here combo_tokens is a device buffer
     model_input.combo_tokens = draft_token_ids.reshape({batch_size});
 
-    if (model_input.combo_position_ids.defined()) {
+    if (!is_shared_kv_draft_ && model_input.combo_position_ids.defined()) {
         const size_t position_id_len_factor = model_input_gatherer_config_.position_id_len_factor;
         auto         next_position_ids =
             torch::empty({(int64_t)(batch_size * position_id_len_factor)}, torch::kInt32).pin_memory();
@@ -1185,6 +1185,9 @@ void MtpBatchStreamProcessor::updateDecodeDraftModelInput(GptModelInputs&       
         model_input.combo_position_ids = std::move(next_position_ids);
     }
 
+    if (is_shared_kv_draft_) {
+        return;
+    }
     if (useMtpDeviceInput() || model_input.sequence_lengths.is_cuda()) {
         auto seq_lengths_d           = model_input.sequence_lengths.is_cuda() ? model_input.sequence_lengths :
                                                                                 model_input.sequence_lengths.to(torch::kCUDA);
@@ -1211,6 +1214,52 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(const StreamGroup
     // set model_input.combo_tokens
     const size_t batch_size   = new_all_token_ids.size(0);
     const size_t token_stride = new_all_token_ids.size(1);
+    if (is_shared_kv_draft_) {
+        const auto input_lengths =
+            model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu() : model_input.input_lengths;
+        const auto prefix_lengths =
+            model_input.prefix_lengths.is_cuda() ? model_input.prefix_lengths.cpu() : model_input.prefix_lengths;
+        RTP_LLM_CHECK_WITH_INFO(batch_size == stream_groups.size() && input_lengths.numel() == (int64_t)batch_size
+                                    && prefix_lengths.numel() == (int64_t)batch_size,
+                                "shared-KV draft prefill requires one sampled row per request");
+        auto hidden_indices_cpu =
+            torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+        auto sequence_lengths =
+            torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+        const auto position_factor   = model_input_gatherer_config_.position_id_len_factor;
+        auto       next_position_ids = position_factor > 0 ?
+                                           torch::empty({(int64_t)(batch_size * position_factor)},
+                                                  torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true)) :
+                                           torch::Tensor();
+        int64_t    token_offset      = 0;
+        size_t     request_idx       = 0;
+        for (const auto& stream : stream_groups.allStreams()) {
+            const int32_t input_length  = input_lengths.data_ptr<int32_t>()[request_idx];
+            const int32_t prefix_length = prefix_lengths.data_ptr<int32_t>()[request_idx];
+            RTP_LLM_CHECK_WITH_INFO(input_length > 0, "shared-KV draft prefill input length must be positive");
+            hidden_indices_cpu.data_ptr<int64_t>()[request_idx] = token_offset + input_length - 1;
+            sequence_lengths.data_ptr<int32_t>()[request_idx]   = prefix_length + input_length - 1;
+            if (position_factor > 0) {
+                stream->generateNextPositionId(next_position_ids.data_ptr<int32_t>() + request_idx * position_factor);
+            }
+            token_offset += input_length;
+            ++request_idx;
+        }
+        auto hidden_indices            = hidden_indices_cpu.to(torch::kCUDA);
+        model_input.last_hidden_states = model_output.all_hidden_states.index_select(0, hidden_indices).contiguous();
+        model_input.combo_tokens =
+            new_all_token_ids.select(1, token_stride - 1).to(torch::kInt32).reshape({(int64_t)batch_size});
+        model_input.input_lengths =
+            torch::ones({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        model_input.sequence_lengths = toCudaInt32(sequence_lengths, host_holder);
+        model_input.prefix_lengths =
+            torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size));
+        if (next_position_ids.defined()) {
+            model_input.combo_position_ids = toCudaInt32(next_position_ids, host_holder);
+        }
+        return;
+    }
     // TODO(async): data_ptr iteration below is CPU-only; keep all .cpu()
     // conversions explicit, then republish model-bound tensors to CUDA.
     const torch::Tensor new_all_token_ids_cpu =
@@ -1451,6 +1500,36 @@ void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
     torch::Tensor&                               hidden_states_d_t,
     TensorHolder&                                host_holder) {
     model_input.is_target_verify = false;
+    if (is_shared_kv_draft_) {
+        const int64_t verify_width = propose_step_ + 1;
+        auto          accept_len =
+            toCudaInt32(speculative_sampler_output.accept_len, host_holder).reshape({(int64_t)batch_size});
+        auto accept_tokens = toCudaInt32(speculative_sampler_output.accept_tokens, host_holder)
+                                 .reshape({(int64_t)batch_size, verify_width});
+        auto row_offsets         = torch::arange(0,
+                                         static_cast<int64_t>(batch_size) * verify_width,
+                                         verify_width,
+                                         torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+        auto accepted_rows       = row_offsets + accept_len.to(torch::kInt64) - 1;
+        model_input.combo_tokens = accept_tokens.reshape({-1}).index_select(0, accepted_rows).to(torch::kInt32);
+        model_input.input_lengths =
+            torch::ones({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        auto target_prefix = toCudaInt32(model_input.prefix_lengths, host_holder).reshape({(int64_t)batch_size});
+        model_input.sequence_lengths = (target_prefix + accept_len - 1).to(torch::kInt32);
+        model_input.prefix_lengths =
+            torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        model_input.lm_output_indexes =
+            torch::arange(0, (int64_t)batch_size, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        hidden_states_d_t              = model_output.all_hidden_states.index_select(0, accepted_rows).contiguous();
+        model_input.last_hidden_states = hidden_states_d_t;
+        if (model_input.combo_position_ids.defined()) {
+            const int64_t position_factor = model_input_gatherer_config_.position_id_len_factor;
+            auto          positions       = toCudaInt32(model_input.combo_position_ids, host_holder)
+                                 .reshape({(int64_t)batch_size * verify_width, position_factor});
+            model_input.combo_position_ids = positions.index_select(0, accepted_rows).reshape({-1}).contiguous();
+        }
+        return;
+    }
     if (!useMtpDeviceState()) {
         if (speculative_sampler_output.accept_len_cpu.defined()
             && speculative_sampler_output.accept_len_cpu.is_pinned()) {
@@ -1670,8 +1749,8 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                 // rows come from the draft model's MTP last-hidden buffer.
                 last_hidden_states = cloneHiddenSlice(draft_last_hidden_states, batch_idx_out, 1);
             } else {
-                last_hidden_states =
-                    cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + token_size - 1, 1);
+                const int64_t hidden_row = is_shared_kv_draft_ ? batch_idx_out : token_offset + token_size - 1;
+                last_hidden_states       = cloneHiddenSlice(draft_model_output.all_hidden_states, hidden_row, 1);
             }
         }
 
@@ -1718,8 +1797,8 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
 
         torch::Tensor last_hidden_states;
         if (propose_step_ > 1 && !is_dspark_) {
-            last_hidden_states =
-                cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
+            const int64_t hidden_row = is_shared_kv_draft_ ? batch_idx_out : token_offset + cur_accept_len - 1;
+            last_hidden_states       = cloneHiddenSlice(draft_model_output.all_hidden_states, hidden_row, 1);
         }
 
         torch::Tensor accept_tokens_tensor =

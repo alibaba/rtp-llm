@@ -71,6 +71,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelInitResources>(m, "PyModelInitResources")
         .def(pybind11::init<>())
         .def_readonly("kv_cache", &PyModelInitResources::kv_cache, "KV cache for all layers")
+        .def_readonly("speculative_target_embedding", &PyModelInitResources::speculative_target_embedding)
+        .def_readonly("speculative_target_embedding_scalar", &PyModelInitResources::speculative_target_embedding_scalar)
         .def_readonly("is_speculative", &PyModelInitResources::is_speculative)
         .def_readonly("is_decode_role", &PyModelInitResources::is_decode_role)
         .def_readonly("max_context_batch_size", &PyModelInitResources::max_context_batch_size);

@@ -91,9 +91,13 @@ void StreamCacheResource::releaseResource() {
                       stream_->streamId(),
                       curBlocksNum(),
                       pd_kvcache_ref_.get());
-    tryReleaseKVBlock(curBlocksNum());
+    const int released_blocks = tryReleaseKVBlock(curBlocksNum());
     batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
+    if (stream_->hasErrorWithoutLock() && stream_->statusInfoWithoutLock().code() == ErrorCode::CANCELLED) {
+        RTP_LLM_LOG_INFO(
+            "request [%ld] cancellation cleanup complete: released_blocks=%d", stream_->streamId(), released_blocks);
+    }
 }
 
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {

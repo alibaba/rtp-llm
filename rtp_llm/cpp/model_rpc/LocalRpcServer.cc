@@ -186,9 +186,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         }
     }
 
+    const bool has_local_mm_engine = !mm_process_engine.is_none() && py::hasattr(mm_process_engine, "mm_embedding_cpp");
     const auto mm_decision = resolveAndLogMMProcessorKind(maga_init_params.model_config_.mm_model_config.is_multimodal,
                                                           maga_init_params.vit_config.vit_separation,
-                                                          !mm_process_engine.is_none(),
+                                                          has_local_mm_engine,
                                                           maga_init_params.pd_sep_config.role_type,
                                                           maga_init_params.parallelism_config.tp_rank,
                                                           maga_init_params.model_config_.model_type,
@@ -210,7 +211,8 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                                          maga_init_params.model_config_.mm_model_config,
                                                          maga_init_params.model_config_.max_seq_len));
     } else if (mm_kind == MMProcessorKind::REMOTE) {
-        mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
+        mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
+                                                          maga_init_params.model_config_.mm_model_config,
                                                           maga_init_params.model_config_.max_seq_len,
                                                           maga_init_params.vit_config.output_transport,
                                                           metrics_reporter_,

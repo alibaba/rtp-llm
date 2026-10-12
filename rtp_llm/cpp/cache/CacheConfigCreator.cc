@@ -51,7 +51,7 @@ void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
     total += bytes * count;
 }
 
-KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
+KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config, const RuntimeConfig& runtime_config) {
     KVCacheBlockBudget budget;
     for (size_t gid = 0; gid < config.topology().groups().size(); ++gid) {
         const auto& group          = config.topology().groups()[gid];
@@ -60,9 +60,9 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
             const auto   layer_ids = source.layerIdsForGroup(segment.tag);
             const size_t layer_count =
                 main ? std::count_if(
-                    layer_ids.begin(),
-                    layer_ids.end(),
-                    [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
+                           layer_ids.begin(),
+                           layer_ids.end(),
+                           [&source](int id) { return id >= 0 && static_cast<uint32_t>(id) < source.layer_num; }) :
                         layer_ids.size();
             addBudgetBytes(group_bytes, segment.kvBlockStrideBytes(), layer_count);
             addBudgetBytes(group_bytes, segment.kvScaleStrideBytes(), layer_count);
@@ -72,6 +72,9 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
         append_segment(config, group, true);
         for (const auto& sub : config.mtp_sub_configs) {
             RTP_LLM_CHECK_WITH_INFO(sub != nullptr, "MTP cache configuration is null for tag=%s", group.tag.c_str());
+            if (sub->shares_target_kv) {
+                continue;
+            }
             RTP_LLM_CHECK_WITH_INFO(gid < sub->topology().groups().size(),
                                     "MTP cache configuration is missing group index=%zu for tag=%s",
                                     gid,
@@ -86,6 +89,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
             if (policy.charge_to_paged_budget) {
                 addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
             }
+            continue;
+        }
+        if (policy.bounded_by_active_tail) {
+            addBudgetBytes(budget.explicit_pool_reserve_bytes,
+                           group_bytes,
+                           boundedActiveTailPhysicalBlockCount(policy, runtime_config, group.tag));
             continue;
         }
         switch (policy.group_type) {
@@ -413,11 +422,18 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        const bool shares_target_kv = draft_model_config->shares_target_kv;
+        draft.shares_target_kv      = shares_target_kv;
+        int num_mtp_modules =
+            is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK && !shares_target_kv ? gen_num_per_cycle : 1;
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        if (shares_target_kv) {
+            config.mtp_sub_configs.push_back(std::make_shared<CacheConfig>(draft));
+        } else {
+            for (int module = 0; module < num_mtp_modules; ++module) {
+                config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+            }
         }
     }
 
@@ -438,7 +454,7 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
             runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-        const auto block_budget = blockBudgetForConfig(config);
+        const auto block_budget = blockBudgetForConfig(config, runtime_config);
         if (block_budget.explicit_pool_reserve_bytes > 0) {
             RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > block_budget.explicit_pool_reserve_bytes,
                                     "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "

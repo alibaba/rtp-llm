@@ -57,6 +57,18 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
 
 inline void validateActiveMTPCacheLayout(const ModelConfig& active_module_config) {
     const auto& expected = active_module_config;
+    if (expected.shares_target_kv) {
+        RTP_LLM_CHECK_WITH_INFO(expected.num_layers > 0, "shared-KV draft model must have at least one layer");
+        RTP_LLM_CHECK_WITH_INFO(expected.kv_cache_spec_descs.size() == static_cast<size_t>(expected.num_layers),
+                                "shared-KV draft model descriptor rows %zu != layers %ld",
+                                expected.kv_cache_spec_descs.size(),
+                                expected.num_layers);
+        for (const auto& descriptors : expected.kv_cache_spec_descs) {
+            RTP_LLM_CHECK_WITH_INFO(!descriptors.empty(),
+                                    "shared-KV draft model cache descriptor rows must be non-empty");
+        }
+        return;
+    }
     RTP_LLM_CHECK_WITH_INFO(
         expected.num_layers == 1, "MTP module 0 must be a one-layer config, got %ld layers", expected.num_layers);
     RTP_LLM_CHECK_WITH_INFO(expected.kv_cache_spec_descs.size() == 1,

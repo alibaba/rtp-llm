@@ -149,6 +149,10 @@ class BaseMultiModalMixin:
         raise NotImplementedError
 
     @classmethod
+    def create_prompt_expander(cls, mm_related_params: VitParameters):
+        return None
+
+    @classmethod
     def eval_mm_model_size(
         cls,
         mm_related_params: VitParameters,

@@ -92,6 +92,7 @@ public:
     RequestInfo                     request_info;
     std::shared_ptr<GenerateConfig> generate_config;
     torch::Tensor                   input_ids;
+    std::string                     rendered_prompt;
     bool                            need_release_resource = true;
     bool                            fake_query            = false;
     // For multi-modality models
@@ -102,6 +103,7 @@ public:
     std::optional<std::vector<torch::Tensor>>   mm_position_ids;
     std::optional<std::vector<torch::Tensor>>   mm_extra_input;
     std::optional<MultimodalTokenLayout>        multimodal_token_layout;
+    std::optional<std::vector<MultimodalExpansionMetadata>> mm_expansion_metadata;
 
     int     prefix_length        = 0;
     int64_t begin_time_us        = 0;

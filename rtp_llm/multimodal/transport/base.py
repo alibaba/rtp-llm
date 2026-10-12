@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
@@ -11,8 +11,32 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
+from rtp_llm.multimodal.multimodal_util import add_multimodal_feature_hashes
 
 METRIC_SOURCE = "vit_server"
+
+
+def build_output_receipt(
+    res: MMEmbeddingRes, *, receipt: Optional[MultimodalOutputPB] = None
+) -> MultimodalOutputPB:
+    """Serialize shared metadata before a transport acquires external resources."""
+    if receipt is None:
+        receipt = MultimodalOutputPB(split_size=[e.shape[0] for e in res.embeddings])
+    add_multimodal_feature_hashes(receipt, res.embeddings, res.feature_hashes)
+    for metadata in res.expansion_metadata:
+        entry = receipt.expansion_metadata.add()
+        if metadata is None:
+            continue
+        entry.is_video = metadata["kind"] == "video"
+        entry.fps = metadata.get("fps", 0.0)
+        if entry.is_video:
+            entry.frame_indices.append(metadata["frame_index"])
+        entry.soft_tokens_per_frame = metadata["soft_tokens"]
+        entry.frame_number = metadata["frame_number"]
+        entry.frame_count = metadata["frame_count"]
+    if res.expanded_token_ids is not None:
+        receipt.expanded_token_ids.extend(res.expanded_token_ids)
+    return receipt
 
 
 @dataclass

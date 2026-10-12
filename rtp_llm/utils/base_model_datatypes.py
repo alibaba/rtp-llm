@@ -51,7 +51,7 @@ class VitParameters:
     eval_param_count: Any
     eval_model_size: Any
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.config = {}
         self.special_token_ids = {}
         self.special_tokens = {}
@@ -100,6 +100,7 @@ class GenerateInput:
     mm_token_expansion: Optional[MultimodalTokenExpansion] = field(
         default=None, init=False, repr=False
     )
+    rendered_prompt: str = ""
 
     class Config:
         arbitrary_types_allowed = True

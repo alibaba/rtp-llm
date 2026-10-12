@@ -4,6 +4,7 @@ from typing import Tuple
 import torch
 import triton
 import triton.language as tl
+import triton.language.extra.libdevice as tldevice
 
 
 @triton.jit
@@ -64,6 +65,55 @@ def silu_and_mul(
         input_tensor.stride(0),
         output_tensor.stride(0),
         BLOCK_SIZE_N=BLOCK_SIZE_N,
+    )
+    return output_tensor
+
+
+@triton.jit
+def _gelu_tanh_and_mul_kernel(
+    output_ptr,
+    input_ptr,
+    N: tl.constexpr,
+    ROWS: tl.int32,
+    input_row_stride: tl.int32,
+    output_row_stride: tl.int32,
+    BLOCK_SIZE_N: tl.constexpr,
+):
+    index = tl.program_id(0).to(tl.int64) * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    row = index // N
+    n_offsets = index % N
+    mask = row < ROWS
+    input_row = input_ptr + row * input_row_stride
+    gate = tl.load(input_row + n_offsets, mask=mask).to(tl.float32)
+    value = tl.load(input_row + N + n_offsets, mask=mask)
+    cube = (gate * gate) * gate
+    inner = 0.7978845608028654 * (gate + 0.044715 * cube)
+    activated = 0.5 * gate * (1.0 + tldevice.tanh(inner))
+    # Preserve F.gelu's intermediate rounding before the separate multiply.
+    activated = activated.to(value.dtype).to(tl.float32)
+    output_row = output_ptr + row * output_row_stride
+    tl.store(output_row + n_offsets, activated * value.to(tl.float32), mask=mask)
+
+
+def gelu_tanh_and_mul(
+    output_tensor: torch.Tensor, input_tensor: torch.Tensor
+) -> torch.Tensor:
+    B, D = input_tensor.shape
+    assert D % 2 == 0, "Last dimension must be even (2*N)"
+    N = D // 2
+    if B == 0 or N == 0:
+        return output_tensor
+    grid = (triton.cdiv(B * N, 1024),)
+    _gelu_tanh_and_mul_kernel[grid](
+        output_tensor,
+        input_tensor,
+        N,
+        B,
+        input_tensor.stride(0),
+        output_tensor.stride(0),
+        BLOCK_SIZE_N=1024,
+        num_warps=4,
+        enable_fp_fusion=True,
     )
     return output_tensor
 

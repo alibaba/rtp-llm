@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from typing import (
+    TYPE_CHECKING,
     Any,
     List,
     Optional,
@@ -62,6 +63,10 @@ class _MultiModalModel(Protocol):
         tp_rank: int,
         device: str,
     ) -> None: ...
+
+
+if TYPE_CHECKING:
+    from rtp_llm.config.engine_config import EngineConfig
 
 
 class BaseModel(object):
@@ -284,6 +289,22 @@ class BaseModel(object):
         model_config.kv_cache_spec_descs = [
             [desc] for _ in range(model_config.num_layers)
         ]
+
+    @classmethod
+    def configure_speculative_model(
+        cls,
+        engine_config: "EngineConfig",
+        target_config: ModelConfig,
+        draft_config: ModelConfig,
+    ) -> None:
+        """Validate and connect a draft model to its target during configuration."""
+
+    @classmethod
+    def speculative_hw_kernel_config(
+        cls, hw_kernel_config: HWKernelConfig
+    ) -> HWKernelConfig:
+        """Select draft execution settings without changing the target configuration."""
+        return hw_kernel_config
 
     @classmethod
     def speculative_weight_alias_names(

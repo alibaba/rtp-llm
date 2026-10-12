@@ -4,11 +4,12 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
+from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.multimodal.transport.base import (
     MMOutputResult,
     MMTerminalBackend,
+    build_output_receipt,
 )
-from rtp_llm.multimodal.mm_process_engine import MMEmbeddingRes
 from rtp_llm.utils.grpc_util import trans_from_tensor
 
 TRANSPORT_BYTES = "bytes"
@@ -50,9 +51,9 @@ class GrpcInlineOutputBackend(MMTerminalBackend):
         contain_extra_input = (res.extra_input is not None) and (
             len(res.extra_input) > 0
         )
-        receipt = MultimodalOutputPB(
-            multimodal_embedding=trans_from_tensor(torch.concat(res.embeddings)),
-            split_size=[e.shape[0] for e in res.embeddings],
+        receipt = build_output_receipt(res)
+        receipt.multimodal_embedding.CopyFrom(
+            trans_from_tensor(torch.concat(res.embeddings))
         )
         if contain_pos:
             receipt.multimodal_pos_id.CopyFrom(

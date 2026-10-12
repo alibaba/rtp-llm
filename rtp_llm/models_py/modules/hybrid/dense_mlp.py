@@ -7,16 +7,18 @@ from torch import nn
 
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.base import FusedSiluAndMul
+from rtp_llm.models_py.modules.base.common.activation import GeluAndMul
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.ops import ActivationType, HWKernelConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
 
 _ACTIVATION_FUNC_MAP: Dict[ActivationType, Type[nn.Module]] = {
     ActivationType.Swiglu: FusedSiluAndMul,
+    ActivationType.Geglu: GeluAndMul,
     ActivationType.Gelu: nn.GELU,
 }
 
-_GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu]
+_GATED_ACTIVATION_TYPE_LIST = [ActivationType.Swiglu, ActivationType.Geglu]
 
 
 class DenseMLP(nn.Module):

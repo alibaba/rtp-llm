@@ -132,11 +132,11 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
     TRANS_OPTIONAL(aux_info);
-    generate_config->timeout_ms               = config_proto->timeout_ms();
-    generate_config->sp_edit                  = config_proto->sp_edit();
-    generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
-    generate_config->force_sp_accept          = config_proto->force_sp_accept();
-    generate_config->return_cum_log_probs     = config_proto->return_cum_log_probs();
+    generate_config->timeout_ms           = config_proto->timeout_ms();
+    generate_config->sp_edit              = config_proto->sp_edit();
+    generate_config->force_disable_sp_run = config_proto->force_disable_sp_run();
+    generate_config->force_sp_accept      = config_proto->force_sp_accept();
+    generate_config->return_cum_log_probs = config_proto->return_cum_log_probs();
     if (config_proto->return_all_probs_mode() != 0) {
         // new client: explicit mode (offset 1). Clamp out-of-range values to NONE
         // so a malformed client can't synthesize an undefined ReturnAllProbsMode.
@@ -276,6 +276,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
+    generate_input->rendered_prompt = input->rendered_prompt();
     if (input->multimodal_inputs_size() > 0) {
         std::vector<MultimodalInput> mm_inputs;
         for (int i = 0; i < input->multimodal_inputs_size(); i++) {
