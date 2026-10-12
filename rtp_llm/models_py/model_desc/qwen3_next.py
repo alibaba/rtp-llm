@@ -1491,13 +1491,14 @@ class Qwen3NextDecoderLayer(nn.Module):
         self.layer_type = config.hybrid_attention_config.hybrid_attention_types[
             layer_idx
         ]
+        attention_quant_config = self._attention_quant_config(config, weights)
         if self.layer_type == HybridAttentionType.LINEAR:
             self.self_attn = Qwen3NextGatedDeltaNet(
                 config.linear_attention_config,
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
-                config.quant_config,
+                attention_quant_config,
                 hw_kernel_config=hw_kernel_config,
                 # Qwen4-Exp gates this norm with `output_gate_type` (sigmoid);
                 # Qwen3-Next checkpoints leave it unset and keep silu.
@@ -1512,7 +1513,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 parallelism_config,
                 weights,
                 config.layernorm_eps,
-                config.quant_config,
+                attention_quant_config,
                 hw_kernel_config=hw_kernel_config,
             )
 
@@ -1536,6 +1537,9 @@ class Qwen3NextDecoderLayer(nn.Module):
             )
 
         self._build_residual_modules(config, weights)
+
+    def _attention_quant_config(self, config, weights):
+        return config.quant_config
 
     def _build_residual_modules(
         self, config: ModelConfig, weights: Dict[str, torch.Tensor]

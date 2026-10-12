@@ -61,3 +61,10 @@ py_test(
     srcs = ["moe_fp4_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "attention_fp8_runtime_test",
+    srcs = ["attention_fp8_runtime_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
+)

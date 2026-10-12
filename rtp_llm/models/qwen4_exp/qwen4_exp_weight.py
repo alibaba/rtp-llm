@@ -325,7 +325,13 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         if self._moe_only_fp4:
             from rtp_llm.models.qwen4_exp.moe_fp4 import Qwen4MoeFp4WeightInfo
 
-            return Qwen4MoeFp4WeightInfo(info.weights, info.layer_weights)
+            return Qwen4MoeFp4WeightInfo(
+                info.weights,
+                info.layer_weights,
+                attention_fp8=bool(
+                    getattr(self.model_config, "_qwen4_attention_fp8", False)
+                ),
+            )
         if self._moe_only_fp8:
             from rtp_llm.models.qwen4_exp.moe_fp8 import Qwen4MoeFp8WeightInfo
 
