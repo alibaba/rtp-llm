@@ -98,7 +98,8 @@ class LineageProjector:
         if max_requests is not None:
             transformations.append(dict(kind='request_limit', limit=max_requests,
                 selected=selected, excluded_after_limit=max(0, len(model.events)-selected-excluded)))
-        result = dict(realism=metadata.realism, tail=metadata.tail.value, arrival=metadata.arrival,
+        result = dict(source_codec=dict(name="prefix_lineage", version=metadata.version),
+            realism=metadata.realism, tail=metadata.tail.value, arrival=metadata.arrival,
             model_sha256=parameters.sha256, provenance=metadata.provenance,
             transformations=dict(source_sha256=parameters.sha256, applied=transformations,
                 source_requests=len(model.events), selected_requests=selected))

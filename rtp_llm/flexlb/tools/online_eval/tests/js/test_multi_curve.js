@@ -32,7 +32,7 @@ const root=new Element('root');
 const points=[{x:0,y:70},{x:1,y:null},{x:3,y:20}];
 const chart=FlexMultiCurve.mount(root,{title:'test',caption:'test',axes:{pct:{title:'%'},queue:{title:'requests'}},
  series:[{name:'hit',axis:'pct',unit:'%',points,color:'#123456',dash:[6,4]},
-         {name:'queue',axis:'queue',unit:'requests',points:[{x:0,y:1000}],hidden:true,color:'#654321'}],
+         {name:'queue',axis:'queue',unit:'requests',points:[{x:0,y:1000}],hidden:true,color:'#65432180'}],
  presets:{Queue:['queue']}},{timeAxis:{min:0,max:10},events:[]});
 assert.equal(chart.options.scales.pct.display,true);
 assert.equal(chart.options.scales.queue.display,false);
@@ -71,6 +71,10 @@ assert.deepEqual(chart.visible,[false,true]);
 assert.match(pickerButton.textContent,/1\/2/);
 assert.equal(legend.children[0].hidden,true);
 assert.equal(legend.children[1].hidden,false);
+legend.children[0].onmouseenter();
+assert.equal(chart.data.datasets[1].borderColor,'#65432133');
+legend.children[0].onmouseleave();
+assert.equal(chart.data.datasets[1].borderColor,'#65432180');
 assert.equal(chart.options.scales.pct.display,false);
 assert.equal(chart.options.scales.queue.display,true);
 choices.children.filter(c=>c.tag==='label')[0].children[1].checked=true;

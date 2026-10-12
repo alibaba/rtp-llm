@@ -55,6 +55,7 @@ class MasterActionsTest(unittest.TestCase):
         self.assertEqual("true-ts", frozen["trace"]["playback"]["mode"])
         runner._client.run_async.return_value = (Mock(), runner.out_dir)
         with patch.object(runner.state_sampler, "start"), patch.object(runner.state_sampler, "stop"):
+            (runner.control / "status.json").write_text(json.dumps(dict(runner.flow_identity, state="SENDING")))
             runner.start()
         self.assertEqual(frozen["environment"], runner._client.run_async.call_args.args[0])
         runner.stop_sending()
@@ -317,7 +318,7 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_fails_compilation_for_wrong_environment(self):
         plan = SimpleNamespace(path="stage", environment={})
-        with self.assertRaisesRegex(ValueError, "dual_standalone"):
+        with self.assertRaisesRegex(ValueError, "dual-master"):
             ha._ha_validate(dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000)), plan)
         plan.environment = {
             "master_layout": "dual_standalone",
@@ -466,14 +467,14 @@ class MasterActionsTest(unittest.TestCase):
                     h.name: h for h in master.HANDLERS + ha.HANDLERS + controls + faults
                 },
             )
-        self.assertEqual(6, len(plans))
+        self.assertEqual(4, len(plans))
         self.assertEqual(1, len({p["scenario_id"] for p in plans}))
         self.assertTrue(all(any(s["check_ids"] for s in p["stages"]) for p in plans))
         for plan in plans:
             self.assertEqual(0, plan["resource_budget"]["max_dynamic_additions"])
             if plan["scenario_id"] == "master_ha_failover":
                 self.assertEqual(
-                    "dual_standalone", plan["environment"]["master_layout"]
+                    "dual_zookeeper", plan["environment"]["master_layout"]
                 )
                 ids = [stage["id"] for stage in plan["stages"]]
                 self.assertLess(ids.index("kill_a"), ids.index("kill_b"))

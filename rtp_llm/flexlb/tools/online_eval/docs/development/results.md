@@ -12,7 +12,7 @@
 | `BLOCKED` | 前置阶段失败，依赖步骤未执行 |
 | `runtime_validity=INVALID` | 证据不足以发布成功结论，即使局部检查为 PASS |
 
-实例 `execution_status` 保存阶段与清理结果，`finalization` 记录证据与报告两段收尾的状态、预算、耗时和错误。`status: FINALIZING` 是未完成检查点；报告交付失败不能改写门禁文件中的既定结论，调用方同时检查整体 status、runtime validity 和 report status。
+实例 `execution_status` 保存阶段与清理结果，`finalization` 记录取证、报告与归档收尾的状态、预算、耗时和错误。`status: FINALIZING` 是未完成检查点；报告或归档交付失败不能改写门禁文件中的既定结论，调用方同时检查整体 status、runtime validity 和各交付阶段的状态。
 
 性能门禁的 `INVALID` 映射为执行器 `ERROR`。专属门禁 PASS 不能代替整轮采集与清理通过。故障窗口的预期业务错误由阶段合同解释，采集缺失仍是证据错误。
 
@@ -22,6 +22,8 @@ workload 默认交付一份主报告。专属视图包含门禁、有效性、�
 
 | 产物 | 用途 |
 |---|---|
+| `experiment.eval.zip` | 单实例主工件：完整定义、执行、判定依据与可重绘视图；位置见 `result.json.artifacts.experiment` |
+| `experiment-<sha256>.raw.zip` | 完整原始附件；位置见 `result.json.artifacts.raw`，与主工件中的摘要核对 |
 | `aggregate.json`、实例 `result.json` | 汇总、阶段与检查状态 |
 | `<gate>-gate-result.json`、对应 evidence / manifest | 独立门禁细项、判定与输入摘要；报告未生成时仍可读取 |
 | `workload-evidence.json`、原始 journal | 请求、资源身份、进程代次与阶段证据 |
@@ -30,6 +32,19 @@ workload 默认交付一份主报告。专属视图包含门禁、有效性、�
 | `reports/run/<report-identity-slug>/` | 每个视图独立的 HTML、分析、spec 和 manifest |
 
 每个报告目录内都叫 `report.html`，专属 identity 带视图后缀；不能按文件名去重。省略全量 HTML 不减少原始指标和证据。已存在但校验失败的 bundle 必须报错，不能被精简报告掩盖。
+
+离线查看只需要主工件；原始日志排查再取附件。工作目录中的 JSON、journal 与报告目录保留供即时诊断；独立搬迁主工件即可读取和重绘，无需保留原目录。完整性说明包含缺失证据、遗漏文件和不可用视图，不能从 ZIP 成功产生推断业务 PASS。容器协议见[报告架构](../architecture/reporting.md)。
+
+在 online_eval 目录执行：
+
+```bash
+PYTHONPATH=src:. python3 -m artifacts.experiment /path/to/experiment.eval.zip --verify
+PYTHONPATH=src:. python3 -m artifacts.experiment /path/to/experiment.eval.zip --out /path/to/report.html
+PYTHONPATH=src:. python3 -m artifacts.experiment /path/to/experiment.eval.zip \
+  --view default.yaml --out /path/to/default.html
+```
+
+未指定 `--view` 时优先选择实验声明的、已冻结的专属视图；索引列出其他可用视图。重绘不重新运行 case，不读取当前视图配置，不重判门禁。功能实例或失败实例可能没有可渲染视图，仍可读取其主工件与完整性说明。
 
 ## 指标与门禁口径
 

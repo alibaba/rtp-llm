@@ -7,7 +7,7 @@ cases/<case>/program.py   步骤、分支、检查与能力声明
         ↓
 scenario compiler        校验并生成有类型的执行计划
         ↓
-parallel runner          冻结执行计划，分配 lane 与租约
+parallel runner          冻结候选执行计划，固定 lane 租约，动态领取实例
         ↓
 stage executor           执行固定步骤并清理 Master / Mock
         ↓
@@ -25,7 +25,7 @@ case analysis/report     明确判定后装配 HTML bundle
 | case YAML | `case_schema_version` | 2 |
 | 指标集合 | `metric_plan_schema_version` | 5 |
 | 报告视图 YAML | `report_view_schema_version` | 1 |
-| CI suite | `suite_schema_version` | 2 |
+| Suite 与 CI 策略 | `suite_schema_version` | 3 |
 | mode profile | `mode_profiles_schema_version` | 1 |
 | Python 内部 program document | `program_schema_version` | 1 |
 | 冻结执行计划 | `execution_plan_schema_version` | 1 |
@@ -95,13 +95,13 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 `run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`runtime.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
 
-停止发流和排空由 program 显式编排；门禁 handler 保存判定，最终归档后投影指标，再由注册 renderer 生成报告。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或判定保存异常成为 stage ERROR，报告交付错误单独记录。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
+停止发流和排空由 program 显式编排；门禁仅读取所声明的测量证据，全量 Prometheus 查询归档由采集器清理统一完成，公共 finalize 物化指标一次；门禁 handler 保存判定，最终归档后投影指标，再由注册 renderer 生成报告。采集或归档失败保留为 errors，产生 INVALID/ERROR；分析或判定保存异常成为 stage ERROR，报告交付错误单独记录。门禁证据句柄使用 `gate_evidence`，与基础快照分开；historical 表示可以显式读取旧环境证据，默认读取仍拒绝环境换代。功能程序没有持续采样需求时不创建空观测组件。
 
 跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `runtime.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
 
 ## 收尾与持久化
 
-`execution.timeout_s` 约束阶段执行，`cleanup_timeout_s` 单独保留资源清理预算。workload 清理后，证据导出与分析受 `finalize_timeout_s` 约束，报告生成受 `report_timeout_s` 约束；父 runner 的进程预算包含这两段时间。同步工作受主线程中断式期限保护，资源导出同时检查合作式 deadline。
+`execution.timeout_s` 约束阶段执行，`cleanup_timeout_s` 单独保留资源清理预算。workload 清理后，证据导出与分析受 `finalize_timeout_s` 约束，报告生成受 `report_timeout_s` 约束；所有实例的压缩工件交付受 `archive_timeout_s` 约束，父 runner 的进程预算包含这些收尾时间。执行、取证或报告失败后仍尝试归档已有证据；归档失败只影响交付状态，不修改门禁与运行有效性。同步工作受主线程中断式期限保护，资源导出同时检查合作式 deadline。
 
 清理结束后立即原子保存 `result.json`，每段收尾前后保存检查点。未完成的检查点使用 `status: FINALIZING`，不能作为终态 PASS；`execution_status` 保留阶段与清理的结果，`finalization` 保存各段预算、状态、耗时和错误。最终 `duration_ms` 包含执行、清理、证据和报告。证据阶段失败使 runtime validity 为 INVALID，并阻止报告阶段；报告失败记录 report status，保留已有 runtime validity 和独立门禁结果。整体执行器结果仍报告交付失败，调用方不能把未完成的交付当成成功。
 
@@ -132,3 +132,5 @@ case action 保留自身参数和输出的所有权。公共 core action 使用�
 流量强度由 `RateCurve`、两种 retention schedule 和 `PlaybackIntensity` 表达，环境变量由 `PlaybackEnvCodec` 解码。时间积分与带 seed 的事件计数保持确定性，发送与循环仍由 Java 客户端控制。
 
 lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，返回 `LineageModel`。`LineageEvent` 明确区分 token 长度、共享完整块和额外标签预留；`LineageExpander` 管理父路径及标签预算，`LineageProjector` 校验固定输入并生成请求文件。过滤作用于展开后的事件，保留原始索引和父路径，不改变请求身份或随机采样索引。压缩格式中的版本号描述数据语义，不表示 Python 类的代次。
+
+启动等待共用 stage 的 `Deadline`，不会在端口、服务、拓扑和首采样之间重置预算。单/双 Master 共用进程存活、HTTP、同步与连续拓扑稳定检查；客户端创建进程后必须收到同一 run/group/phase 的发送状态确认，才能进入后续观测。`startup.json` 记录环境、流量输入、监控及发送确认的分项成本；各 case 的固定预热、条件预热和故障稳定期仍由其 YAML 与 program 决定。

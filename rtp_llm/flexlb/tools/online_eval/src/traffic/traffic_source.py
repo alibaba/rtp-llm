@@ -1,5 +1,8 @@
 """Versioned offline traffic sources. No source participates in live sending."""
 
+from __future__ import annotations
+
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
@@ -7,8 +10,6 @@ from pathlib import Path
 from traffic.contracts import PRIORITY, JAVA_LENGTH
 
 from traffic.synthetic.generator import write_trace as write_realistic
-from traffic.prefix_lineage import write_trace as write_lineage
-from traffic.prefix_lineage_v3 import write_trace as write_lineage_v3
 
 
 def sha256_file(path):
@@ -19,11 +20,9 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-# Only these versioned sources participate in scenario materialization.
+# Generator versions describe algorithms; capture codecs come from their data.
 SOURCES = {
     ("synthetic", "realistic", "1"): write_realistic,
-    ("trace", "prefix_lineage", "2"): write_lineage,
-    ("trace", "prefix_lineage", "3"): write_lineage_v3,
 }
 
 
@@ -101,17 +100,50 @@ def validate_plan(path, namespace=None):
     return count
 
 
+@dataclass(frozen=True)
+class SourceSpecification:
+    kind: str
+    model: str
+    parameters: dict
+    version: str | None = None
+
+    @classmethod
+    def read(cls, value):
+        required = {"kind", "model", "parameters"}
+        if (not isinstance(value, dict) or not required <= set(value)
+                or set(value) - required - {"version"}):
+            raise ValueError("source requires kind, model and parameters; version is an optional pin")
+        result = cls(**value)
+        if (type(result.kind) is not str or type(result.model) is not str
+                or not isinstance(result.parameters, dict)
+                or ("version" in value and type(result.version) is not str)):
+            raise ValueError("invalid source specification")
+        if result.is_lineage:
+            if result.version is not None:
+                from traffic.codecs import codec_for_version
+                if not result.version.isdecimal():
+                    raise ValueError("unknown source model/version")
+                codec_for_version(int(result.version))
+        elif (result.kind, result.model, result.version) not in SOURCES:
+            raise ValueError("unknown source model/version")
+        return result
+
+    @property
+    def is_lineage(self):
+        return (self.kind, self.model) == ("trace", "prefix_lineage")
+
+    def write_trace(self, path, namespace, base_dir, *, max_requests=None):
+        if self.is_lineage:
+            from traffic.codecs import decode_model
+            from traffic.lineage_transforms import LineageProjector
+            return LineageProjector(lambda raw: decode_model(raw, expected_version=self.version)).write_trace(
+                path, self.parameters, namespace, base_dir, max_requests=max_requests)
+        return SOURCES[(self.kind, self.model, self.version)](
+            path, self.parameters, namespace, base_dir, max_requests=max_requests)
+
+
 def materialize(path, specification, namespace, base_dir, *, max_requests=None):
-    if not isinstance(specification, dict) or set(specification) != {
-        "kind",
-        "model",
-        "version",
-        "parameters",
-    }:
-        raise ValueError("source requires kind, model, version and parameters")
-    identity = tuple(specification[k] for k in ("kind", "model", "version"))
-    if not all(isinstance(v, str) for v in identity) or identity not in SOURCES:
-        raise ValueError("unknown source model/version")
+    source = SourceSpecification.read(specification)
     if max_requests is not None and (type(max_requests) is not int or max_requests < 1):
         raise ValueError("max_requests must be a positive integer")
     path = Path(path)
@@ -119,14 +151,17 @@ def materialize(path, specification, namespace, base_dir, *, max_requests=None):
         raise ValueError("request plan destination must be fresh")
     temporary = path.with_suffix(path.suffix + ".pending")
     try:
-        semantics = SOURCES[identity](temporary, specification["parameters"], namespace, base_dir,
-                                      max_requests=max_requests)
+        semantics = source.write_trace(temporary, namespace, base_dir, max_requests=max_requests)
+        resolved_source = dict(specification)
+        if source.is_lineage:
+            resolved_source["version"] = str(semantics["source_codec"]["version"])
         count = validate_plan(temporary, namespace)
         digest = sha256_file(temporary)
         temporary.replace(path)
         manifest = dict(
             request_plan_manifest_schema_version=1,
-            source=specification,
+            source=resolved_source,
+            requested_source=specification,
             base_dir=str(Path(base_dir).resolve()),
             namespace=namespace,
             sha256=digest,

@@ -29,7 +29,3 @@ def request_evidence(value, profile):
     return ResourceEvidence(requests=dict(records=rows), producer="python",
         errors=() if integrity["complete"] else (dict(
             error="request consumers did not all finish", detail=integrity),))
-
-
-def row_evidence(value, profile):
-    return ResourceEvidence(requests=dict(records=value))

@@ -30,7 +30,7 @@ def main(argv=None):
     else:
         model = args.lineage_model.resolve()
         manifest = read_manifest(model)
-        spec = dict(kind="trace", model="prefix_lineage", version=str(manifest["codec"]["version"]), parameters=dict(
+        spec = dict(kind="trace", model="prefix_lineage", parameters=dict(
             path=model.name, sha256=manifest["sha256"], count=manifest["count"],
             output_tokens=args.output_tokens, priority=args.priority,
         ))

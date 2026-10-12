@@ -1,0 +1,68 @@
+# Case 插件结构
+
+新增 case 是组合已有能力并补充业务差异，不是重新实现采集、归档、判定发布和 HTML 系统。YAML 表达运行输入、指标与窗口选择、检查门槛和视图；Python 声明流程和业务算法。唯一必需的代码入口是 `program.py` 导出的 `CASE: CaseDefinition`。
+
+## 两种执行模型
+
+单窗口或整窗测量在观测和请求收尾后收集完整证据，再计算测量值与检查。分阶段检查在每个所需阶段取窗口证据并判定，随后由执行器汇总。两者均使用 `CheckResult`，观测不足返回 ERROR/INVALID，阈值越界返回 FAIL。不能为了统一目录强迫分阶段检查等待整个 run 结束，也不能将整体测量的窗口、cohort 或归约拆成不等价的局部判定。
+
+编译期构建固定计划；现场 handler 操作服务并输出证据；测量函数读取显式证据；发布和报告消费已冻结判定。测量不足、操作失败与报告交付失败是不同结果，不互相覆盖。
+
+## 文件职责与依赖
+
+| 文件 | 职责 | 何时需要 |
+|---|---|---|
+| `program.py` | 读取经校验输入、组合阶段、注册 `CASE` | 必需 |
+| `inputs.py` | 输入字段、数值规则、窗口与指标绑定约束；不访问现场 | 有业务输入对象时 |
+| `actions.py` | 专属操作、等待、取证和资源登记 | 基础 action 不足时 |
+| `analysis.py` | 纯业务测量与检查；接收显式证据，不读目录、不启动采集 | 通用比较或测量不足时 |
+| `observation.py`、`client.py` | 专属现场协议的解释与客户端会话 | 特殊数据源或协议需要时 |
+| `metrics.py` | 业务证据到指标的投影与口径声明 | PromQL 或已有计算能力不足时 |
+| `report.py`、`panels.py` | 业务面板、门槛线或诊断附录；复用公共曲线与发布 | view YAML 和公共报告不足时 |
+| `replay.py` | 特殊证据补充和显式离线重判的命令入口 | 确有重判需求时 |
+
+不创建空的层次。小型 case 可以只写 program；大型协议实现可拆文件，但必须归属一个明确能力。公共能力只有跨 case 的合同相同才抽取，不能仅因函数名字相同就合并算法。
+
+依赖方向是输入与纯测量 → 现场能力 → program 的能力组合。现场能力需要使用 program 声明的门禁插件时，在执行函数内读取，不能在模块导入时反向导入 program。输入模块不得混入监控查询；分析器不得调用报告；报告不得触发重判。所有模块导入无网络、进程或运行产物副作用。
+
+## 整窗门禁能力
+
+`cases.gate_plugin.GatePlugin` 组合三种业务函数：
+
+```python
+GATE = GatePlugin(
+    name="gate",
+    analyze=analyze,
+    project_metrics=project_metrics,
+    write_report=write_report,
+)
+```
+
+| 业务函数 | 输入 | 输出与边界 |
+|---|---|---|
+| `analyze(evidence)` | 已收齐的显式证据 | 结果 dict，含 `verdict` 和 `checks`；业务解释字段可以附加，判定必须与 `CheckResult` 汇总一致 |
+| `project_metrics(directory, evidence, result)` | 已校验的冻结证据与判定 | 发布所声明指标；不决定 PASS/FAIL、不改写门禁文件 |
+| `write_report(directory, evidence, result, *, run=None, presentation=None)` | 冻结判定、可选 run 与已选择的 view | 返回 bundle 目录；只负责展示，不分析或发布指标 |
+
+插件名决定既有门禁证据、结果和 manifest 的文件身份。公共 `freeze_gate/load_gate` 负责原子 JSON 写入与校验；业务内容保持所属测量的证据格式，不伪装成通用指标。回调签名在构造时检查，返回内容、覆盖与清理仍需测试。
+
+### 生命周期
+
+1. 现场 handler 收齐原始证据，并在可能失败的分析前保存已获得证据。
+2. `GATE.commit(directory, evidence)` 调用分析一次，校验检查与判定的一致性，冻结门禁文件，返回 `GateCommit(result, path)`。它不发布指标、不生成报告。
+3. `GATE.project(directory)` 读取并校验已提交的门禁，再调用指标投影。该方法可作为 `MetricProducer` 的 GATE 阶段执行函数。中断的 run 可能尚未提交门禁，此时不伪造指标；已存在 manifest 的损坏必须报错。
+4. `GATE.render(directory, run, presentation)` 读取并校验冻结判定，传递已选择的 view，返回 HTML 路径。该方法可作为 `ReportView` 的 renderer。缺少门禁不能生成一份假定通过的报告。
+
+普通现场门禁不调用 `publish()`。它用于已经明确得到判定的离线发布：冻结 → 指标投影 → 校验冻结文件 → 展示。该方法从不隐式调用分析。显式离线重判先经 `load_reinterpretation` 检查源证据与新输出目录，再调用 `evaluate()`，随后发布。报告错误或指标发布错误不会将已冻结 PASS 改写为 FAIL，也不能把已冻结 FAIL 改成 PASS。
+
+报告的共用时间轴、运行信息补充和 bundle 写入由 `reporting.gate_report.write_gate_report` 承担。case 提供业务 spec 与已有来源信息，调用公共发布函数；不复制 run/离线两个分支。报告时间轴与门禁窗口的职责见[报告契约](reporting.md)。
+
+分阶段检查直接使用 `StageHandler` 和 `analysis.checks` 的测量/比较接口，不必额外构造一个整体 `GatePlugin`。专属协议来源通过 `CASE.sources` 注册；数据来源与指标合同见[指标契约](metrics.md)。
+
+## 新作者的接入路径
+
+先确认是否能复用已有 program、action 和测量，再创建 YAML。需要新流程时新增 program；需要新业务算法时新增纯测量；需要特殊协议时新增 adapter。只有实际出现特殊展示或重判需求才增加对应模块。
+
+输入和证据合同必须说明字段、单位、身份标签、时间基准、窗口与缺失行为。测量须说明统计对象及归约，不能靠指标名推断算法。协议输出使用阶段引用，不要求转换为指标。请求 cohort、survivor 筛选等算法保留 Python，公共层只统一可验证的调用边界。
+
+可执行的最小例子、注册参数与测试矩阵见[新增 case](../development/adding-cases.md)。静态校验使用 `validate_case.py`；真实取证、缺采、超时和清理需额外验证。`tests/test_gate_plugin.py` 验证公共生命周期：判定和交付分离、损坏证据拒绝、已选择视图传递，以及交付失败保留原判定。

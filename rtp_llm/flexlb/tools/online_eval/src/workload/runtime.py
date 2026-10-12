@@ -79,7 +79,7 @@ class WorkloadPolicy:
     def before_stage(self, ctx, spec):
         if spec["action"] == "teardown" and ctx.env_epoch in self.monitors:
             # Stop the monitoring interval before intentional target teardown.
-            self.monitors[ctx.env_epoch].stop(self.options["collector_shutdown_s"])
+            self.monitors[ctx.env_epoch].stop(self.options["collector_shutdown_s"], materialize=False)
         if (
             spec["action"] == "teardown"
             and ctx.env is not None
@@ -173,13 +173,16 @@ class WorkloadPolicy:
         # Register cleanup before startup so a failed start cannot leak a process.
         def stop_source(deadline):
             window["ended_epoch_s"] = time.time()
+            remaining = max(0, deadline.expires_at - ctx.clock())
             source.stop(
-                min(self.options["collector_shutdown_s"], max(0, deadline.remaining())),
-                materialize=False,
+                min(self.options["collector_shutdown_s"], remaining),
+                export=remaining > 0, materialize=False,
             )
 
         ctx.add_cleanup("prometheus-" + str(ctx.env_epoch), stop_source)
-        source.start()
+        from runtime.startup import startup_phase
+        with startup_phase(ctx.artifact_dir, "monitoring", ctx.stage_deadline):
+            source.start(deadline=ctx.stage_deadline)
         self.monitors[ctx.env_epoch] = source
         ctx.monitor = source
         epoch = ctx.env_epoch

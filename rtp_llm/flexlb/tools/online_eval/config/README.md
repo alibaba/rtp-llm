@@ -5,7 +5,7 @@
 | 位置 | 内容 |
 |---|---|
 | `scenarios/` | case 的身份、环境、参数、变体和视图选择，见[场景配置](scenarios/README.md) |
-| `suites.yaml` | 默认 suite 与 CI 的 `case::variant` 清单 |
+| `suites.yaml` | 默认 suite/profile、固定 `case::variant` 组合与 CI 执行策略 |
 | `monitoring/` | 指标集合、PromQL 与 Python 输出声明，见[指标配置](monitoring/README.md) |
 | `report_views/` | 指标绑定、面板和展示属性 |
 | `performance_presets.json` | 引用 `data/performance/` 采集档案的登记表 |

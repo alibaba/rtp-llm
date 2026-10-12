@@ -9,7 +9,9 @@
 | `--master-mode sb\|sn\|wb\|wn` | Master 形态缩写，映射在 `config/mode_profiles.yaml` |
 | `--profile` | 完整 profile 名，和显式 mode 不一致时失败 |
 | `--grade strict\|normal\|loose` | 配置门槛档位，传递给实际实例执行器 |
-| `--suite core\|functional\|workload\|all` | CI suite 或实例性质筛选，默认值来自 `config/suites.yaml` |
+| `--suite` | 配置中的固定组合，与 `--kind`、`--all` 互斥；默认值来自 `config/suites.yaml` |
+| `--kind functional\|workload` | 选择该性质的全部变体 |
+| `--all` | 全部 case 与变体 |
 | `--case-dir` | 场景 YAML 文件或目录 |
 | `--instances` | 精确的编译实例 ID；可先用 `list_cases.py --list-json` 获取 |
 | `--categories` | 按 category 选择实例 |
@@ -26,6 +28,8 @@
 | `--out-dir` | 本次运行独占的实例与 lane 产物目录 |
 | `--json` | 完整汇总 JSON 路径 |
 | `--archive` | 可选的实验归档 ZIP |
+| `--scheduling` | `dynamic`（默认）由空闲航道领取；`static` 固定实例分配 |
+| `--retain-tsdb` | 在已验证原始归档之外保留解压状态的 TSDB |
 | `--timing-json` | 按既有耗时计划 lane 分配，不改变 case 的预算或判定 |
 
 采集档位、采样周期和缺采预算由 YAML 的 `execution` 声明；指标定义由 `execution.monitoring.query_plan` 选择。`reports` 选择报告视图，完整指标仍落在 `metrics.json`，见[指标配置](../../config/monitoring/README.md)和[运行产物](results.md#收取产物)。

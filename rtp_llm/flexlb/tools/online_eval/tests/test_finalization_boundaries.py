@@ -144,7 +144,7 @@ def test_report_budget_is_separate_and_included_in_elapsed_time(tmp_path):
     assert result["execution_status"] == "PASS"
     assert result["workload"]["runtime_validity"] == "VALID"
     assert result["workload"]["report_status"] == "TIMEOUT"
-    assert [row["status"] for row in result["finalization"]] == ["PASS", "TIMEOUT"]
+    assert [row["status"] for row in result["finalization"]] == ["PASS", "TIMEOUT", "PASS"]
 
 
 @pytest.mark.parametrize("damage", ["modified", "missing"])

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -56,6 +57,9 @@ class InstanceRunnerTest(unittest.TestCase):
     def args(self, **kwargs):
         values = dict(
             source="yaml",
+            suite=None,
+            kind=None,
+            all=True,
             case_dir=str(self.root / "config/scenarios"),
             instances=None,
             categories=None,
@@ -518,7 +522,126 @@ program: default
             listing.assert_not_called()
 
 
+    def test_dynamic_idle_lane_claims_work_before_slow_lane_finishes(self):
+        instances = parse_catalog(self.data, source="yaml", profile="batch-window")
+        slow, fast, third = runner.order_instances(instances)[:3]
+        third_started = threading.Event()
+        assignments = {}
+        mutex = threading.Lock()
+
+        def spawn(command, env, log, **kwargs):
+            identity = command[command.index("--instances") + 1]
+            with mutex:
+                assignments[identity] = env["FLEXLB_FT_MASTER_HTTP_PORT"]
+            if identity == slow.id:
+                self.assertTrue(third_started.wait(5), "idle lane did not claim another run")
+            elif identity == third.id:
+                third_started.set()
+            return self.fixture_child(command, env, log, **kwargs)
+
+        rc, _, child = self.run_fixture(self.args(), spawn=spawn)
+        self.assertEqual(0, rc)
+        self.assertEqual(len(instances), child.call_count)
+        self.assertEqual(assignments[fast.id], assignments[third.id])
+        self.assertNotEqual(assignments[slow.id], assignments[third.id])
+        manifest = json.loads((self.root / "output/manifest.json").read_text())
+        self.assertEqual("dynamic", manifest["scheduling"])
+        self.assertTrue(all(not lane["instance_ids"] for lane in manifest["lanes"]))
+        self.assertEqual([row.id for row in runner.order_instances(instances)], manifest["dispatch_queue"])
+        for lane in manifest["lanes"]:
+            self.assertEqual(max(row.budget.worker_capacity for row in instances), lane["worker_capacity"])
+
+    def test_all_failed_cleanup_lanes_retire_and_account_for_every_pending_run(self):
+        def spawn(command, env, log, **kwargs):
+            self.fixture_child(command, env, log, **kwargs)
+            path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
+            result = json.loads(path.read_text())
+            result["instances"][0]["cleanup"] = [dict(id="environment", status="ERROR", error="leaked")]
+            path.write_text(json.dumps(result))
+            return 1
+        rc, _, child = self.run_fixture(self.args(), spawn=spawn)
+        self.assertEqual(1, rc)
+        self.assertEqual(2, child.call_count)
+        result = json.loads((self.root / "output/aggregate.json").read_text())
+        self.assertEqual(7, result["summary"]["total"])
+        self.assertEqual(5, result["summary"]["blocked"])
+        self.assertTrue(all(not lane["reusable"] for lane in result["lanes"]))
+
+    def test_static_lane_stops_on_occupied_port_after_completed_run(self):
+        occupied = set()
+        def probe(port, host=None):
+            return port in occupied
+        def spawn(command, env, log, **kwargs):
+            rc = self.fixture_child(command, env, log, **kwargs)
+            occupied.add(int(env["FLEXLB_FT_MASTER_HTTP_PORT"]))
+            return rc
+        with mock.patch.object(ports, "port_in_use", side_effect=probe):
+            rc, _, child = self.run_fixture(self.args(parallel=1, scheduling="static"), spawn=spawn)
+        self.assertEqual(1, rc)
+        self.assertEqual(1, child.call_count)
+        result = json.loads((self.root / "output/aggregate.json").read_text())
+        self.assertEqual(6, result["summary"]["blocked"])
+        self.assertIn("ports not released", result["lanes"][0]["retirement_reason"])
+
+    def test_retiring_after_last_run_is_still_an_infrastructure_failure(self):
+        occupied = set()
+        def spawn(command, env, log, **kwargs):
+            rc = self.fixture_child(command, env, log, **kwargs)
+            occupied.add(int(env["FLEXLB_FT_MASTER_HTTP_PORT"]))
+            return rc
+        with mock.patch.object(ports, "port_in_use", side_effect=lambda port, host=None: port in occupied):
+            rc, _, child = self.run_fixture(self.args(parallel=1, instances=self.data["instances"][0]["id"]), spawn=spawn)
+        self.assertEqual(1, rc)
+        self.assertEqual(1, child.call_count)
+        result = json.loads((self.root / "output/aggregate.json").read_text())
+        self.assertEqual(1, result["summary"]["retired_lanes"])
+        self.assertEqual(0, result["summary"]["blocked"])
+        self.assertEqual("PASS", result["instances"][0]["status"])
+
+    def test_failed_gate_with_clean_resources_does_not_retire_lane(self):
+        def spawn(command, env, log, **kwargs):
+            self.fixture_child(command, env, log, **kwargs)
+            path = Path(command[command.index("--out-dir") + 1]) / "scenarios.json"
+            result = json.loads(path.read_text())
+            row = result["instances"][0]
+            row["status"] = "FAIL"
+            row["stages"][0]["checks"][0]["status"] = "FAIL"
+            path.write_text(json.dumps(result))
+            return 1
+        rc, _, child = self.run_fixture(self.args(parallel=1, scheduling="static"), spawn=spawn)
+        self.assertEqual(1, rc)
+        self.assertEqual(7, child.call_count)
+        result = json.loads((self.root / "output/aggregate.json").read_text())
+        self.assertEqual(0, result["summary"]["blocked"])
+        self.assertTrue(result["lanes"][0]["reusable"])
+
+
 class ChildProcessesTest(unittest.TestCase):
+    def test_exited_runner_cannot_leave_a_live_descendant(self):
+        import socket
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            ready = root / "descendant-port"
+            descendant = ("import socket,time;from pathlib import Path;"
+                          "s=socket.socket();s.bind(('127.0.0.1',0));s.listen();"
+                          "Path(" + repr(str(ready)) + ").write_text(str(s.getsockname()[1]));time.sleep(60)")
+            parent = ("import subprocess,sys,time;from pathlib import Path;"
+                      "subprocess.Popen([sys.executable,'-c'," + repr(descendant) + "]);"
+                      "p=Path(" + repr(str(ready)) + ")\nwhile not p.exists(): time.sleep(.01)")
+            children = runner.ChildProcesses()
+            with self.assertRaisesRegex(RuntimeError, "live descendant"):
+                children.run([sys.executable, "-c", parent], dict(os.environ), root / "runner.log", timeout=5)
+            port = int(ready.read_text())
+            end = time.monotonic() + 2
+            while time.monotonic() < end:
+                with socket.socket() as client:
+                    if client.connect_ex(("127.0.0.1", port)) != 0:
+                        break
+                time.sleep(.01)
+            else:
+                self.fail("owned descendant socket remained live")
+            self.assertFalse(children.processes)
+
     def test_watchdog_returns_timeout_and_reaps_owned_child(self):
         children = runner.ChildProcesses()
         with tempfile.TemporaryDirectory() as tmp:

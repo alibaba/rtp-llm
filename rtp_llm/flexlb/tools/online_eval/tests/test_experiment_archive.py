@@ -11,7 +11,7 @@ from artifacts.archive import create_archive
 
 
 class ArchiveTest(unittest.TestCase):
-    def test_structured_full_raw_bounded_and_manifest(self):
+    def test_structured_and_raw_full_with_manifest(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             run = root / "run"
@@ -24,13 +24,12 @@ class ArchiveTest(unittest.TestCase):
             manifest = create_archive(out, {"run": run}, kind="case")
             with zipfile.ZipFile(out) as archive:
                 self.assertEqual(json.loads(archive.read("run/aggregate.json"))["success"], 2)
-                self.assertIn("run/engine.log.head", archive.namelist())
-                self.assertIn("run/engine.log.tail", archive.namelist())
+                self.assertEqual(archive.read("run/engine.log"), (run / "engine.log").read_bytes())
                 self.assertNotIn("run/api_token.txt", archive.namelist())
                 self.assertIn("run/input_token_length.json", archive.namelist())
                 self.assertEqual(json.loads(archive.read("manifest.json")), manifest)
             self.assertEqual(next(e for e in manifest["files"] if e["path"] == "run/engine.log")
-                             ["completeness"], "head_tail")
+                             ["completeness"], "full")
 
     def test_archive_inside_source_does_not_include_its_temporary_zip(self):
         with tempfile.TemporaryDirectory() as tmp:

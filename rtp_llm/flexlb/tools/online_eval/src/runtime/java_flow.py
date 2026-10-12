@@ -57,6 +57,7 @@ class JavaFlowGroup:
     def start(self, trace, environment, deadline, *, target):
         if self.proc is not None or self.directory.exists():
             raise ValueError("flow output directory must be fresh")
+        deadline.check()
         env, playback = client_environment(environment)
         trace = Path(trace).resolve()
         self.trace_manifest = dict(path=str(trace), sha256=sha256_file(trace))
@@ -82,6 +83,7 @@ class JavaFlowGroup:
                 indent=2,
             )
         )
+        deadline.check()
         self.proc, _ = self.client.run_async(
             env, self.directory, self.directory / "client.log"
         )
@@ -93,17 +95,14 @@ class JavaFlowGroup:
                 "client monitor endpoint absent",
             )
             self.monitor.add_target(
-                self.monitor_target, json.loads(target_path.read_text())["url"]
+                self.monitor_target, json.loads(target_path.read_text())["url"], deadline=deadline
             )
             (self.directory / "metrics-ready").write_text(
                 str(int(time.time() * 1000) + 500)
             )
-        return self._wait(
-            lambda s: s.get("state")
-            in {"SENDING", "DRAINING", "DRAINED", "INCOMPLETE"},
-            deadline,
-            "flow did not acknowledge startup",
-        )
+        from runtime.startup import startup_phase, wait_flow_started
+        with startup_phase(self.directory, 'client/sending', deadline):
+            return wait_flow_started(self.control, self.identity, self.proc, deadline)
 
     def control_status(self):
         """Cheap process/control observation; request accounting remains in status()."""

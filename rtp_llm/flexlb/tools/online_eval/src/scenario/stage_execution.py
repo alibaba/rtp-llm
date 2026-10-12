@@ -104,10 +104,12 @@ class StageExecutor:
                 )
                 try:
                     deadline.check()
+                    ctx.stage_deadline = deadline
                     action = spec.action
-                    if _policy is not None:
-                        _policy.before_stage(ctx, spec.to_dict())
                     with interruptible(deadline, enforce_deadlines):
+                        if _policy is not None:
+                            _policy.before_stage(ctx, spec.to_dict())
+                        deadline.check()
                         if action in handlers:
                             descriptor = handlers[action]
                             result = descriptor.execute(ctx, spec.parameters.to_dict(), deadline)
@@ -148,7 +150,9 @@ class StageExecutor:
                                     and _policy.continue_after_failure(spec.to_dict())
                                 )
                     if _policy is not None:
-                        _policy.after_stage(ctx, spec.to_dict(), row.to_dict())
+                        with interruptible(deadline, enforce_deadlines):
+                            _policy.after_stage(ctx, spec.to_dict(), row.to_dict())
+                            deadline.check()
                     # Known findings do not prevent additional independent checks.
                 except Exception as exc:
                     terminal_status = (

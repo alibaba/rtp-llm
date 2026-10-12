@@ -9,8 +9,8 @@ from traffic.playback.configuration import normalize
 
 
 class TrafficSourceTest(unittest.TestCase):
-    def test_registered_source_versions(self):
-        self.assertEqual(set(SOURCES),{('synthetic','realistic','1'),('trace','prefix_lineage','2'),('trace','prefix_lineage','3')})
+    def test_generator_versions_are_separate_from_capture_codecs(self):
+        self.assertEqual(set(SOURCES),{('synthetic','realistic','1')})
 
     def test_lineage_true_timestamps_and_old_label_allocation(self):
         events=[[0,1537,-1,0],[51,2050,0,2],[999,1025,1,1],[1000,100,-1,0]]

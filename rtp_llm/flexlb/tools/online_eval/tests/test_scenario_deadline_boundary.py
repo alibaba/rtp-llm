@@ -33,3 +33,24 @@ class DeadlineBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_policy_hook_cannot_consume_budget_and_still_start_operation(tmp_path):
+    from types import SimpleNamespace
+    from scenario import compile_scenarios
+    from scenario.plan import CompiledInstance
+    from scenario.context import RuntimeContext
+    from scenario.stage_execution import StageExecutor
+    from test_scenario_runtime import source, Clock, Backend
+    clock = Clock()
+    backend = Backend(clock)
+    doc = source()
+    compiled = compile_scenarios([(str(tmp_path / "case.yaml"), doc)])[0]
+    ctx = RuntimeContext(compiled, backend, tmp_path, clock, clock.sleep, False)
+    ctx.plan = CompiledInstance.read(compiled)
+    policy = SimpleNamespace(attach=lambda ctx: None,
+        before_stage=lambda ctx, spec: clock.sleep(100000),
+        after_stage=lambda ctx, spec, row: None)
+    summary = StageExecutor().run(ctx, {}, clock(), clock() + 1000, None, policy)
+    assert summary.status == "TIMEOUT"
+    assert not backend.calls

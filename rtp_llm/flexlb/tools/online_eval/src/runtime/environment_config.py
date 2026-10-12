@@ -46,65 +46,24 @@ def default_perf() -> dict:
     return load_preset("default")[0]
 
 
+from runtime.zookeeper_config import ZooKeeperConfig
+
+
 @dataclass
 class MasterSpec:
-    """One flexlb master entry in the (optional) dual-master registry.
+    """One Master address and port group.
 
-    Port-plan ruling (verified against the v2 Java code, 2026-09 HA case
-    test task):
-
-    * Tier-1 dual standalone — needConsistency stays OFF (the mock-line
-      default).  Each master gets its OWN port group (A: HTTP 18080 /
-      mgmt 18081 / gRPC 18082, B: HTTP 18083 / mgmt 18084 / gRPC 18085).
-      With consistency disabled the three same-host assumptions are inert:
-      ZookeeperMasterElectService.init() returns before touching ZK,
-      LBStatusConsistencyService.getMasterHostIpPort() returns null (no
-      forwarding, LOCAL_STANDALONE routing) and
-      FlexlbGrpcForwarder.sameHost(ip, null) is false (no SELF_TARGET), so
-      distinct ports are the zero-risk layout.  No FLEXLB_ADVERTISED_IP.
-
-    * Tier-2/3 ZK-activated — FLEXLB_SYNC_CONSISTENCY_CONFIG set by the
-      harness (EnvSpec.zk_consistency).  The layout MUST switch to
-      same-port / different-IP (bind_ip 127.0.0.1 vs 127.0.0.2 +
-      FLEXLB_ADVERTISED_IP): the ZK LeaderSelector id is the BARE local IP
-      (ZookeeperMasterElectService.initializeIpAndPort), the forwarded
-      master address stitches the LOCAL server.port onto the leader IP
-      (LBStatusConsistencyService.getMasterHostIpPort) and SELF_TARGET
-      compares bare IPs (FlexlbGrpcForwarder.sameHost) — a distinct-port
-      same-IP pair breaks on all three.  Both instances share ONE
-      HIPPO_ROLE: the ZK lock path is /master_lb_leader/{HIPPO_ROLE}, so
-      the same roleId is what makes them mutual master/follower.
-
-    RULING (2026-09-02): the same-host distinct-IP Tier-3 layout is
-    DEAD — the election localIp comes only from InetAddress.getLocalHost()
-    hostname resolution (ZookeeperMasterElectService L106-111 +
-    LBStatusConsistencyService L52, two independent sites, no env
-    override channel), the gRPC wildcard bind (forPort) cannot start a
-    second same-port instance, and same-IP distinct-port makes
-    SELF_TARGET permanently true, blocking all forwarding; the
-    production-side prerequisites (FLEXLB_ADVERTISED_IP consumer /
-    per-address bind) will NOT land.  Tier-3 moves to a dual-container
-    topology (one network stack + hostname per container -> naturally
-    distinct IPs on the same port, replicating production's
-    one-IP-per-pod) — phase 2.  The 127.0.0.1/.2 wiring is kept only as
-    the env-injection contract reference.
-
-    Tier-2 forwarding semantics (four-state matrix, 8511, ForwardGuard)
-    are covered by the JUnit layer (master_forward_matrix) — this harness
-    only orchestrates processes/env; Tier-3 is deferred to the phase-2
-    dual-container topology per the RULING above.
+    Standalone peers use different port groups on loopback. Elected peers
+    use distinct loopback addresses with identical ports, advertised to ZK
+    and bound by HTTP, management and gRPC. Both share one election role.
     """
 
     name: str  # registry key ("A" / "B" — brief p5/p6 scenario notation)
     http_port: int
     management_port: Optional[int] = None  # default http+1
-    # Spring --server.address; Tier-1 stays 127.0.0.1 (distinct ports),
-    # Tier-2/3 uses 127.0.0.1 vs 127.0.0.2 (same ports, distinct IPs).
+    # Address shared by HTTP, management and gRPC listeners.
     bind_ip: str = "127.0.0.1"
-    # FLEXLB_ADVERTISED_IP (Tier-2/3): overrides the ZK-advertised localIp.
-    # Has NO consumer in the flexlb Java code and none will land (see the
-    # RULING in the docstring above) — kept as the env-injection contract
-    # reference for the phase-2 dual-container Tier-3.
+    # Explicit IP identity consumed by election and status consistency.
     advertised_ip: Optional[str] = None
     # Default: BOTH instances share spec.label's role (mutual backup).
     hippo_role: Optional[str] = None
@@ -214,15 +173,9 @@ class EnvSpec:
     # single shared master; both masters share the SAME mock cluster and
     # discovery file and poll it independently (brief p1).
     masters: list = field(default_factory=list)  # list[MasterSpec]
-    # Tier-2/3 only: non-None starts the ZK helper JVM (Mark's contract —
-    # org.flexlb.consistency.ZkTestingServerLauncher, "ZK_READY
-    # <connectString>" on stdout) BEFORE the masters and injects
-    # FLEXLB_SYNC_CONSISTENCY_CONFIG (needConsistency=true, zkHost=<helper
-    # connectString>, zkTimeoutMs from this dict) into every master env.
-    # Tier-1 dual-standalone specs leave this None: no ZK, no election, no
-    # forwarding (needConsistency=false → LOCAL_STANDALONE, the mock line's
-    # existing state).
-    zk_consistency: Optional[dict] = None  # e.g. {"zkTimeoutMs": 30000}
+    # Elected groups use an owned helper or an explicitly external dependency.
+    # None selects standalone scheduling without election or forwarding.
+    zk_consistency: Optional[ZooKeeperConfig] = None
 
     def fingerprint(self) -> str:
         return json.dumps(
@@ -256,7 +209,7 @@ class EnvSpec:
                 # stable within a process, so ensure() reuse semantics are
                 # unchanged and the legacy path never takes the new branch.
                 "masters": [m.fingerprint() for m in self.masters],
-                "zk_consistency": self.zk_consistency,
+                "zk_consistency": self.zk_consistency.to_dict() if self.zk_consistency is not None else None,
             },
             sort_keys=True,
         )

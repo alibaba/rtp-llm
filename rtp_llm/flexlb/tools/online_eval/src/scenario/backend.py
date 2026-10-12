@@ -69,6 +69,8 @@ def make_env_spec(plan, profile, lease):
     from scenario.environment_snapshot import EnvironmentSnapshot
     snapshot = EnvironmentSnapshot.read(plan["rendered"])
     preset_perf, preset_runtime = snapshot.performance, snapshot.runtime
+    from runtime.zookeeper_config import ZooKeeperConfig
+    elected = plan.get('master_layout') == 'dual_zookeeper'
     spec = EnvSpec(
         label="scenario",
         runtime_mode="scenario",
@@ -81,12 +83,15 @@ def make_env_spec(plan, profile, lease):
         master_stable_window_s=plan.get("master_stable_window_s", 3),
         masters=(
             [
-                MasterSpec(name="A", http_port=lease["master_base"]),
-                MasterSpec(name="B", http_port=lease["master_base"] + 3),
+                MasterSpec(name="A", http_port=lease["master_base"], advertised_ip="127.0.0.1" if elected else None),
+                MasterSpec(name="B", http_port=lease["master_base"] if elected else lease["master_base"] + 3,
+                           bind_ip="127.0.0.2" if elected else "127.0.0.1",
+                           advertised_ip="127.0.0.2" if elected else None),
             ]
-            if plan.get("master_layout", "single") == "dual_standalone"
+            if plan.get("master_layout", "single") in ("dual_standalone", "dual_zookeeper")
             else []
         ),
+        zk_consistency=ZooKeeperConfig.read(plan["zookeeper"]) if elected else None,
         perf=preset_perf,
         master_env=({"FLEXLB_DEBUG_ENABLED": "true"} if plan["debug_enabled"] else {}),
         master_debug_log=plan.get("master_debug_log", False),
@@ -149,7 +154,9 @@ class JavaMockBackend:
                 self.owned_processes[mp.pid] = mp
 
     def setup(self, ctx, plan, deadline):
-        return self._setup(ctx, plan, deadline)
+        from runtime.startup import startup_phase
+        with startup_phase(ctx.artifact_dir, "environment", deadline):
+            return self._setup(ctx, plan, deadline)
 
     def _setup(self, ctx, plan, deadline, raw_config=None):
         if ":" in str(ctx.artifact_dir.resolve()):
@@ -172,7 +179,7 @@ class JavaMockBackend:
         owner = self
 
         class OwnedManager(EnvManager):
-            def _start_mock(self, env):
+            def _start_mock(self, env, **kwargs):
                 owner.environments.append(env)
                 master_spec = env.spec
                 try:
@@ -182,7 +189,7 @@ class JavaMockBackend:
                         # models, so feeding it the invalid document prevents
                         # the target Master from ever being launched.
                         env.spec = replace(master_spec, raw_config=None)
-                    return super()._start_mock(env)
+                    return super()._start_mock(env, **kwargs)
                 finally:
                     env.spec = master_spec
                     owner.remember_processes(env)
@@ -250,7 +257,7 @@ class JavaMockBackend:
             )
             + "\n"
         )
-        env = self.manager.ensure(spec)
+        env = self.manager.ensure(spec, deadline=deadline)
         env.master_log_dir = private_log
         env.master_sync_log_path = sync_log_path
         ctx.master_sync_log_path = sync_log_path

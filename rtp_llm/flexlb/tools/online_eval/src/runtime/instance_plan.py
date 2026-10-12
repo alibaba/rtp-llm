@@ -91,7 +91,7 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             )
         if source == "yaml":
             budget = JavaMockBudget.from_metadata(row.get("resource_budget"))
-            from scenario.suites import (
+            from scenario.execution_policy import (
                 EXECUTION_BUDGETS, normalize_execution, normalize_metadata,
             )
             from scenario.loader import ScenarioError
@@ -197,15 +197,11 @@ def plan_instances(
         raise InstancePlanError("cannot plan zero instances")
     if len({row.id for row in instances}) != len(instances):
         raise InstancePlanError("duplicate instance id in plan")
-    costs = {}
-    for row in instances:
-        cost = (timings or {}).get(row.id, row.duration_s)
-        if type(cost) not in (int, float) or not math.isfinite(cost) or cost <= 0:
-            raise InstancePlanError(f"invalid timing for {row.id}")
-        costs[row.id] = cost
+    ordered = order_instances(instances, timings)
+    costs = {row.id: (timings or {}).get(row.id, row.duration_s) for row in instances}
     lanes: list[list[Instance]] = [[] for _ in range(min(parallel, len(instances)))]
     loads = [0.0] * len(lanes)
-    for row in sorted(instances, key=lambda row: (-costs[row.id], row.id)):
+    for row in ordered:
         lane = min(range(len(lanes)), key=lambda i: (loads[i], i))
         lanes[lane].append(row)
         loads[lane] += costs[row.id]
@@ -213,3 +209,14 @@ def plan_instances(
     for lane in lanes:
         lane.sort(key=lambda row: order[row.id])
     return lanes
+
+
+def order_instances(instances, timings=None):
+    """Stable longest-estimated-run-first queue, fixed before execution."""
+    costs = {}
+    for row in instances:
+        cost = (timings or {}).get(row.id, row.duration_s)
+        if type(cost) not in (int, float) or not math.isfinite(cost) or cost <= 0:
+            raise InstancePlanError(f"invalid timing for {row.id}")
+        costs[row.id] = cost
+    return sorted(instances, key=lambda row: (-costs[row.id], row.id))

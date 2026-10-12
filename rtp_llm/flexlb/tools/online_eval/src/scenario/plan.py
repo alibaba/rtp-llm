@@ -28,11 +28,12 @@ class ExecutionBudgets:
     cleanup_timeout_s: float
     finalize_timeout_s: float
     report_timeout_s: float
+    archive_timeout_s: float
     collection: Optional[str] = None
     monitoring: Optional[MonitoringPolicy] = None
 
     def __post_init__(self):
-        for name in ("timeout_s", "stage_timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s"):
+        for name in ("timeout_s", "stage_timeout_s", "cleanup_timeout_s", "finalize_timeout_s", "report_timeout_s", "archive_timeout_s"):
             number(getattr(self, name), "execution." + name, minimum=.001)
 
     @classmethod

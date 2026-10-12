@@ -118,13 +118,17 @@ class HaReplayClient:
         validate_drain(read_status(self.control, self.flow_identity), self.flow_identity,
                        terminal_count=len(rows), command_id=self.stop_command)
 
-    def start(self) -> None:
+    def start(self, deadline=None) -> None:
+        from runtime.startup import startup_deadline, startup_phase, wait_flow_started
+        deadline = startup_deadline(deadline, 120)
         if self.state_sampler is not None:
-            self.state_sampler.start()
+            self.state_sampler.start(deadline=deadline)
         try:
             self.proc, self.out_dir = self._client.run_async(
                 self._overrides, self.out_dir, self.log_file, label=self.name
             )
+            with startup_phase(self.out_dir, "client/sending", deadline):
+                wait_flow_started(self.control, self.flow_identity, self.proc, deadline)
         except Exception as start_error:
             try:
                 if self.state_sampler is not None:
@@ -137,7 +141,13 @@ class HaReplayClient:
         """Persist partial rows even when a failed prerequisite skips finish."""
         path = self.out_dir / "client_events.jsonl"
         rows, errors = [], []
-        if path.is_file():
+        frozen = getattr(self, "_finished_rows", None)
+        if frozen is not None:
+            stat = path.stat()
+            if (stat.st_size, stat.st_mtime_ns) != frozen[:2]:
+                raise ValueError("finished HA request evidence changed")
+            rows = frozen[2]
+        elif path.is_file():
             for number, line in enumerate(path.read_text().splitlines(), 1):
                 if not line.strip():
                     continue
@@ -229,4 +239,6 @@ class HaReplayClient:
         if stop_sending:
             self.validate_drain(rows)
         self.finished = True
+        stat = path.stat()
+        self._finished_rows = (stat.st_size, stat.st_mtime_ns, rows)
         return rows, path

@@ -17,7 +17,8 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.suites import classify, preselect_documents, suite_names
+from scenario.suites import classify, preselect_documents
+from scripts.pipeline.selection import add_selection_arguments, resolve_selection
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease
@@ -99,11 +100,7 @@ def summarize(rows):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="scenario file or directory")
-    parser.add_argument("--profile")
-    parser.add_argument("--master-mode", choices=("sb", "sn", "wb", "wn"))
-    parser.add_argument(
-        "--suite", choices=suite_names(), default="all"
-    )
+    add_selection_arguments(parser)
     parser.add_argument(
         "--grade", choices=("strict", "normal", "loose"), default="normal"
     )
@@ -114,20 +111,18 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--archive", type=Path,
                         help="optional single-file scenario experiment archive")
+    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving")
     parser.add_argument("--lease-json", type=Path)
+    parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args(argv)
-    if args.master_mode:
-        from mode_profiles import resolve_mode
-
-        selected = resolve_mode("scenario", args.master_mode)["master_profile"]
-        if args.profile and args.profile != selected:
-            parser.error("--profile disagrees with --master-mode")
-        args.profile = selected
+    resolve_selection(args, parser)
     try:
         from scenario.execution_plan import dependency_files
         dependencies = dependency_files()
         registry = handlers()
         if args.plan:
+            if args.experiment_params:
+                raise ScenarioError("frozen plans already contain effective experiment parameters")
             if args.list_json or not args.plan_sha256:
                 raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
             from scenario.execution_plan import load_plan
@@ -140,12 +135,12 @@ def main(argv=None):
             plans = select(
                 classify(
                     compile_scenarios(
-                        preselect_documents(load_scenarios(args.source), args.suite),
+                        preselect_documents(load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind),
                         args.profile,
                         registry,
                         grade=args.grade,
                     ),
-                    args.suite,
+                    args.suite, kind=args.kind,
                 ),
                 args.instances,
             )
@@ -187,22 +182,37 @@ def main(argv=None):
     }
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
+    retirement = None
     try:
         for index, (plan, lease) in enumerate(zip(plans, leases)):
-            rows.append(
-                (
-                    execute_workload
-                    if plan["test_kind"] == "workload"
-                    else execute_instance
-                )(
-                    plan,
-                    JavaMockBackend(lease),
-                    registry,
-                    args.out_dir / "instances" / instance_directory(plan["id"]),
-                    cancelled=cancelled,
-                    enforce_deadlines=True,
+            if retirement is not None:
+                rows.append(dict({key: plan[key] for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind") if key in plan},
+                                 status="ERROR", duration_ms=0,
+                                 not_started=True, stages=[], cleanup=[], error=retirement))
+            else:
+                backend = JavaMockBackend(lease)
+                backend.retain_tsdb = args.retain_tsdb
+                rows.append(
+                    (
+                        execute_workload
+                        if plan["test_kind"] == "workload"
+                        else execute_instance
+                    )(
+                        plan,
+                        backend,
+                        registry,
+                        args.out_dir / "instances" / instance_directory(plan["id"]),
+                        cancelled=cancelled,
+                        enforce_deadlines=True,
+                    )
                 )
-            )
+                from runtime.lane_safety import cleanup_failure
+                retirement = cleanup_failure(rows[-1])
+                from runtime.lane_safety import occupied_ports
+                from runtime.environment import port_in_use
+                busy = occupied_ports(lease["intervals"], lambda port: port_in_use(port, "0.0.0.0"))
+                if busy:
+                    retirement = "lane ports not released: " + str(busy)
             payload = dict(scenario_results_schema_version=1, summary=summarize(rows), instances=rows)
             target = args.out_dir / "scenarios.json"
             temporary = args.out_dir / "scenarios.json.tmp"

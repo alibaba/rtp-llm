@@ -9,12 +9,13 @@ from traffic.traffic_source import materialize
 from analysis.workload_profile import profile
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
-from cases.cache_scale_in.publication import publish_cache
+from cases.cache_scale_in.program import GATE as CACHE_GATE
+publish_cache = CACHE_GATE.publish
 from metric_fixtures import freeze_metrics
 
 def write_report(directory, evidence, result, prepared=None):
     freeze_metrics(directory, "cache_scale_in")
-    bundle = publish_cache(directory, evidence, result, prepared)
+    bundle = publish_cache(directory, evidence, result, report_options={"prepared": prepared})
     return json.loads((bundle / "report-spec.json").read_text())
 from reporting.view_config import view
 from scenario import compile_scenarios, load_scenarios

@@ -2,11 +2,10 @@
 
 from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from cases.master_performance.analysis import analyze
 from cases.master_performance.inputs import validate, for_profile
 from artifacts.json_io import write_json
 from workload.gate_evidence import compact_flow, new_evidence
-from workload.gate_result import freeze_gate, gate_check
+from workload.gate_result import gate_check
 from cases.master_performance.inputs import engine_roles
 from traffic.traffic_source import sha256_file
 from runtime.observation import ObservationClock, SampleBudget, poll_samples
@@ -60,6 +59,7 @@ def observe(ctx, p, deadline):
             evidence["samples"].append(row)
             return row
         end = clock.origin_monotonic_s + c["warmup_s"] + c["measure_s"]
+        measurement_started = False
         for row in poll_samples(deadline, c["sample_s"], sample, until=end, immediate=True):
             state = row
             epoch = row["epoch_ms"]
@@ -68,7 +68,13 @@ def observe(ctx, p, deadline):
                 or state.get("process_returncode") is not None
             ):
                 raise ValueError("traffic ended before measurement completed")
+            if epoch >= lo and not measurement_started:
+                ctx.record_event("measurement_started", timestamp=dict(
+                    epoch_s=lo / 1000, monotonic_s=clock.origin_monotonic_s + c["warmup_s"]))
+                measurement_started = True
             if epoch >= hi:
+                ctx.record_event("measurement_ended", timestamp=dict(
+                    epoch_s=hi / 1000, monotonic_s=end))
                 break
         ctx.record_event("observation_end")
     except Exception as exc:
@@ -106,14 +112,11 @@ def finish(ctx, p, deadline):
                     end=e["window"]["end_epoch_ms"] / 1000))
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))
-    try:
-        ctx.monitor.archive()
-    except Exception as exc:
-        e["errors"].append("monitor archive: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
     write_json(ctx.artifact_dir / "performance-gate-evidence.json", e)
-    result = analyze(e)
-    path = freeze_gate(ctx.artifact_dir, "performance", e, result)
+    from cases.master_performance.program import GATE
+    committed = GATE.commit(ctx.artifact_dir, e)
+    result, path = committed.result, committed.path
     return StageOutput(
         checks=[
             gate_check("absolute_performance", result, path,

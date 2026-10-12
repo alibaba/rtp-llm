@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+import queue
 from concurrent.futures import ThreadPoolExecutor
 from artifacts.json_io import write_json
 from pathlib import Path
@@ -28,6 +29,7 @@ from runtime.instance_plan import (
     InstancePlanError,
     parse_catalog,
     plan_instances,
+    order_instances,
     select_instances,
 )
 from runtime.resource_plan import ResourcePlanError, plan_lane_leases
@@ -58,9 +60,12 @@ class ChildProcesses:
                     start_new_session=True,
                 )
             self.processes[child] = cleanup_timeout
+        settled = False
         try:
             try:
-                return child.wait(timeout=timeout)
+                code = child.wait(timeout=timeout)
+                settled = code >= 0
+                return code
             except subprocess.TimeoutExpired:
                 self._signal(child, signal.SIGTERM)
                 self._wait_or_kill(child, cleanup_timeout)
@@ -68,6 +73,14 @@ class ChildProcesses:
         finally:
             with self.lock:
                 self.processes.pop(child, None)
+            if settled and not self.stopping:
+                try:
+                    os.killpg(child.pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    self._signal(child, signal.SIGKILL)
+                    raise RuntimeError("runner exited with live descendant processes")
 
     @staticmethod
     def _signal(child, sig):
@@ -95,6 +108,7 @@ class ChildProcesses:
 
 
 def _catalog(args):
+    from scripts.pipeline.selection import selection_arguments
     instances = []
     if not SCENARIO_RUNNER.is_file():
         raise InstancePlanError(
@@ -110,8 +124,8 @@ def _catalog(args):
             args.profile,
             "--grade",
             args.grade,
-            "--suite",
-            getattr(args, "suite", "all"),
+            *selection_arguments(args),
+            *(["--experiment-params", args.experiment_params] if getattr(args, "experiment_params", None) else []),
             "--list-json",
         ],
         capture_output=True,
@@ -343,15 +357,14 @@ def _read_results(path, group):
         ]
 
 
-def _run_lane(index, lane, lease, args, out, children):
+def _run_segment(index, part, group, lease, args, out, children):
     directory = out / f"lane{index}"
     directory.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update(lease.child_env())
     results = []
     segments = []
-    group = list(lane)
-    segment = directory / "part0-yaml"
+    segment = directory / f"part{part}-yaml"
     segment.mkdir(parents=True, exist_ok=True)
     result_path = segment / "scenarios.json"
     lease_path = segment / "lease.json"
@@ -378,10 +391,13 @@ def _run_lane(index, lane, lease, args, out, children):
             "--lease-json",
             str(lease_path),
         ]
+        if getattr(args, "retain_tsdb", False):
+            command.append("--retain-tsdb")
         execution = [instance.metadata["execution"] for instance in group]
         timeout = (
             sum((item["timeout_s"] + item["cleanup_timeout_s"]
-                 + item["finalize_timeout_s"] + item["report_timeout_s"] for item in execution))
+                 + item["finalize_timeout_s"] + item["report_timeout_s"]
+                 + item["archive_timeout_s"] for item in execution))
             + 30
             if execution
             else None
@@ -414,6 +430,48 @@ def _run_lane(index, lane, lease, args, out, children):
     return {"lane": index, "segments": segments, "instances": results}
 
 
+
+def _run_lane(index, lane, lease, args, out, children, dispatch=None):
+    """One lease, one child per instance; failed cleanup retires this lane."""
+    from runtime.lane_safety import cleanup_failure
+    from scripts.pipeline.execute_cases import _busy_ports
+    results, segments = [], []
+    pending = iter(lane)
+    failure = None
+    while True:
+        if children.stopping:
+            failure = "suite interrupted before dispatch"
+            break
+        try:
+            instance = dispatch.get_nowait() if dispatch is not None else next(pending)
+        except (queue.Empty, StopIteration):
+            break
+        busy = _busy_ports(lease.ports())
+        if busy:
+            failure = "lane ports still occupied: " + str(busy)
+            results.append(dict(_error(instance, failure), not_started=True, lane=index))
+            break
+        part = _run_segment(index, len(segments), [instance], lease, args, out, children)
+        results.extend(part["instances"])
+        segments.extend(part["segments"])
+        row = part["instances"][0]
+        failure = cleanup_failure(row)
+        if part["segments"][0]["exit_code"] and row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}:
+            failure = "child exit code disagrees with successful execution result"
+        if part["segments"][0]["watchdog_timeout"]:
+            failure = "child watchdog expired; lane cannot be reused"
+        busy = _busy_ports(lease.ports())
+        if busy:
+            failure = "lane ports not released: " + str(busy)
+        if failure:
+            break
+    if failure and dispatch is None:
+        results.extend(dict(_error(instance, failure), not_started=True, lane=index)
+                       for instance in pending)
+    return {"lane": index, "segments": segments, "instances": results,
+            "reusable": failure is None, "retirement_reason": failure}
+
+
 def _aggregate(lanes, instances, args, elapsed):
     rows = [row for lane in lanes for row in lane["instances"]]
     order = {instance.id: i for (i, instance) in enumerate(instances)}
@@ -425,6 +483,7 @@ def _aggregate(lanes, instances, args, elapsed):
     rc = int(
         bool(
             failed
+            or any(lane.get("retirement_reason") for lane in lanes)
             or any((part["exit_code"] for lane in lanes for part in lane["segments"]))
         )
     )
@@ -437,12 +496,14 @@ def _aggregate(lanes, instances, args, elapsed):
             "failed": failed,
             "errors": counts["ERROR"],
             "timeouts": counts["TIMEOUT"],
+            "blocked": sum(bool(row.get("not_started")) for row in rows),
             "finding_confirmed": counts["FINDING-CONFIRMED"],
             "finding_resolved": counts["FINDING-RESOLVED"],
             "exit_code": rc,
             "profile": args.profile,
             "grade": args.grade,
             "parallel": len(lanes),
+            "retired_lanes": sum(bool(lane.get("retirement_reason")) for lane in lanes),
             "wall_time_s": round(elapsed, 3),
         },
         "instances": rows,
@@ -465,6 +526,9 @@ def _print_planned_reports(instances):
 
 def _print_generated_reports(rows):
     for row in rows:
+        if row.get('artifacts'):
+            print('experiment artifacts: ' + json.dumps(dict(instance=row['id'],
+                artifacts=row['artifacts']), ensure_ascii=False))
         if row.get("test_kind") != "workload":
             continue
         workload = row.get("workload")
@@ -495,8 +559,15 @@ def run_structured(args: argparse.Namespace, ports) -> int:
             Path(args.timing_json) if args.timing_json else _timing_path()
         )
         lanes = plan_instances(instances, args.parallel, timings)
+        scheduling = getattr(args, "scheduling", "dynamic")
+        if scheduling not in {"static", "dynamic"}:
+            raise InstancePlanError("unknown scheduling policy")
+        ordered = order_instances(instances, timings)
+        budgets = ([[instance.budget for instance in instances]] * len(lanes)
+                   if scheduling == "dynamic" else
+                   [[instance.budget for instance in lane] for lane in lanes])
         leases = plan_lane_leases(
-            [[instance.budget for instance in lane] for lane in lanes],
+            budgets,
             master_base=ports._master_base(),
             mock_base=ports._mock_base(),
             mock_stride=args.mock_stride,
@@ -514,8 +585,12 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         runtime_plan = resolve_mode("scenario", master_mode_for_profile(args.profile))
         manifest = {
             "runner_plan_schema_version": 1,
+            "experiment_params": json.loads(getattr(args, "experiment_params", None) or "{}"),
             "source": args.source,
             "profile": args.profile,
+            "scheduling": scheduling,
+            "retain_tsdb": bool(getattr(args, "retain_tsdb", False)),
+            "dispatch_queue": [instance.id for instance in ordered] if scheduling == "dynamic" else [],
             "runtime_plan": runtime_plan,
             "grade": args.grade,
             "port_provenance": args.port_provenance,
@@ -523,7 +598,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
             "lanes": [
                 {
                     **lease.to_manifest(),
-                    "instance_ids": [instance.id for instance in lane],
+                    "instance_ids": [instance.id for instance in lane] if scheduling == "static" else [],
                 }
                 for (lease, lane) in zip(leases, lanes)
             ],
@@ -534,8 +609,12 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     print(
         f"instance plan: source={args.source} profile={args.profile} instances={len(instances)} lanes={len(lanes)} out_dir={out}"
     )
-    for i, lane in enumerate(lanes):
-        print(f"  lane {i}: " + ", ".join((instance.id for instance in lane)))
+    print("  scheduling: " + scheduling)
+    if scheduling == "dynamic":
+        print("  dispatch queue: " + ", ".join(instance.id for instance in ordered))
+    else:
+        for i, lane in enumerate(lanes):
+            print(f"  lane {i}: " + ", ".join((instance.id for instance in lane)))
     _print_planned_reports(instances)
     print(json.dumps(manifest, indent=2))
     if args.dry_run:
@@ -544,8 +623,12 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     started = time.monotonic()
     children = ChildProcesses()
     pool = ThreadPoolExecutor(max_workers=len(lanes))
+    dispatch = queue.Queue() if scheduling == "dynamic" else None
+    if dispatch is not None:
+        for instance in ordered:
+            dispatch.put(instance)
     futures = [
-        pool.submit(_run_lane, i, lane, leases[i], args, out, children)
+        pool.submit(_run_lane, i, lane, leases[i], args, out, children, dispatch)
         for (i, lane) in enumerate(lanes)
     ]
     interrupted = False
@@ -557,7 +640,18 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         results = [future.result() for future in futures]
     finally:
         pool.shutdown(wait=True)
+    if dispatch is not None:
+        reasons = "; ".join(row["retirement_reason"] for row in results
+                            if row.get("retirement_reason"))
+        while True:
+            try:
+                instance = dispatch.get_nowait()
+            except queue.Empty:
+                break
+            blocked = _error(instance, "no reusable lane remains: " + reasons)
+            results[0]["instances"].append(dict(blocked, not_started=True, lane=None))
     payload = _aggregate(results, instances, args, time.monotonic() - started)
+    payload["scheduling"] = scheduling
     payload["runtime_plan"] = runtime_plan
     if interrupted:
         payload["summary"]["exit_code"] = 130

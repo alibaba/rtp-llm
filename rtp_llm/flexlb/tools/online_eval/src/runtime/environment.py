@@ -20,6 +20,7 @@ from runtime.environment_config import (
     MasterSpec,
 )
 from runtime.java_runtime import resolve_java21
+from runtime.startup import startup_deadline, wait_ready, startup_phase
 from runtime.master_lifecycle import MasterLifecycle
 from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use, wait_for, wait_for_port
 from runtime.paths import FLEXLB_DIR, MOCK_JAR
@@ -27,7 +28,6 @@ from runtime.process import ManagedProcess, ProcessOps
 from runtime.resource_plan import VICTIM_OFFSETS
 from runtime.zk_helper import (
     ZK_LAUNCH_CMD_ENV,
-    ZK_READY_PREFIX,
     ZK_READY_TIMEOUT_S,
     ZkHelperOps,
 )
@@ -157,7 +157,7 @@ class EnvManager:
 
     # -- public API --------------------------------------------------------
 
-    def ensure(self, spec: EnvSpec) -> FlexEnv:
+    def ensure(self, spec: EnvSpec, *, deadline=None) -> FlexEnv:
         """Return a live env for *spec*; rebuild only when the spec changed."""
         if (
             self.current is not None
@@ -166,7 +166,7 @@ class EnvManager:
             return self.current
         if self.current is not None:
             self.teardown()
-        return self._build(spec)
+        return self._build(spec, deadline=deadline)
 
     def teardown(self) -> None:
         """Stop master → victims → load clients → mock cluster."""
@@ -231,7 +231,9 @@ class EnvManager:
             base += 100
         raise RuntimeError("no free mock port range found")
 
-    def _build(self, spec: EnvSpec) -> FlexEnv:
+    def _build(self, spec: EnvSpec, *, deadline=None) -> FlexEnv:
+        deadline = startup_deadline(deadline, 600)
+        deadline.check()
         self._env_seq += 1
         run_dir = spec.run_dir or self.run_root / f"env{self._env_seq}_{spec.label}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -243,12 +245,19 @@ class EnvManager:
             f"({env.master_port_note}), dir={run_dir.name})"
         )
 
+        # Resolve all required ZK artifacts before launching the mock cluster.
+        if spec.masters and spec.zk_consistency is not None and spec.zk_consistency.mode == 'helper':
+            with startup_phase(env.run_dir, 'zookeeper/artifacts', deadline):
+                override = os.environ.get(ZK_LAUNCH_CMD_ENV)
+                env.zk_launch_argv = (shlex.split(override) if override else
+                                     ZkHelperOps.default_launch_argv(resolve_java21()))
+
         # perf config
         env.perf_file.write_text(json.dumps(spec.perf, indent=2))
 
         try:
             # mock cluster
-            self._start_mock(env)
+            self._start_mock(env, deadline=deadline)
             if spec.masters:
                 # HA dual-master path (gated on the registry being
                 # non-empty — the single-master legacy branch below is
@@ -256,12 +265,15 @@ class EnvManager:
                 # masters can grab the election lock at startup; Tier-1
                 # (zk_consistency=None) skips it entirely.
                 if spec.zk_consistency is not None:
-                    self.start_zk_helper(env)
+                    if spec.zk_consistency.mode == 'helper':
+                        self.start_zk_helper(env, deadline=deadline)
+                    else:
+                        env.zk_connect_string = spec.zk_consistency.address
                 for mspec in spec.masters:
-                    self.start_master_instance(env, mspec)
+                    self.start_master_instance(env, mspec, deadline=deadline)
             elif spec.master_profile != "none":
                 # master
-                self.start_master(env, log_name=spec.master_log_name)
+                self.start_master(env, log_name=spec.master_log_name, deadline=deadline)
         except Exception:
             # Build failed before self.current was assigned: teardown()
             # would see None and leak the mock/master JVMs already started.
@@ -272,7 +284,7 @@ class EnvManager:
         self.current = env
         return env
 
-    def _start_mock(self, env: FlexEnv) -> None:
+    def _start_mock(self, env: FlexEnv, *, deadline=None) -> None:
         spec = env.spec
         if not MOCK_JAR.is_file():
             raise RuntimeError(
@@ -332,35 +344,19 @@ class EnvManager:
         argv += ["--discovery-file", str(env.discovery_file)]
         proc = ProcessOps.start(argv, dict(os.environ), env.run_dir / "mock_engine.log")
         env.mock = proc
-        if not wait_for_port("127.0.0.1", env.mock_http_port, 60):
-            raise RuntimeError(f"mock cluster failed to start:\n{proc.tail_log()}")
-        # Wait for the discovery file (max 10s).
-        if not wait_for(
-            lambda: env.endpoint_file.exists() and env.endpoint_file.stat().st_size > 0,
-            10,
-            0.1,
-        ):
-            if not proc.alive():
-                raise RuntimeError(f"mock engine exited:\n{proc.tail_log()}")
-            raise RuntimeError(
-                f"mock engine did not write endpoint file: {env.endpoint_file}"
-            )
-        if not wait_for(
-            lambda: env.discovery_file.exists()
-            and env.discovery_file.stat().st_size > 0,
-            10,
-            0.1,
-        ):
-            raise RuntimeError(
-                f"mock engine did not write discovery file: {env.discovery_file}"
-            )
+        deadline = startup_deadline(deadline, 80)
+        with startup_phase(env.run_dir, 'mock', deadline):
+            wait_ready(deadline, 'mock/http', lambda: port_accepting(env.mock_http_port), process=proc)
+            for label, path in [('endpoints', env.endpoint_file), ('discovery', env.discovery_file)]:
+                wait_ready(deadline, 'mock/' + label,
+                           lambda: path.exists() and path.stat().st_size > 0, process=proc, interval_s=0.1)
         self._log(f"mock cluster up (pid={proc.pid}, http={env.mock_http_port})")
 
     # -- master ------------------------------------------------------------
 
 
-    def start_master(self, env: FlexEnv, log_name: Optional[str]=None) -> ManagedProcess:
-        return self.master_lifecycle.start_master(env, log_name)
+    def start_master(self, env: FlexEnv, log_name: Optional[str]=None, *, deadline=None) -> ManagedProcess:
+        return self.master_lifecycle.start_master(env, log_name, deadline=deadline)
 
     def stop_master(self, env: FlexEnv, settle_s: float=2.0) -> None:
         return self.master_lifecycle.stop_master(env, settle_s)
@@ -371,8 +367,8 @@ class EnvManager:
     # -- HA dual-master orchestration (gated on spec.masters) --------------
 
 
-    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str]=None) -> ManagedProcess:
-        return self.master_lifecycle.start_master_instance(env, mspec, log_name)
+    def start_master_instance(self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str]=None, *, deadline=None) -> ManagedProcess:
+        return self.master_lifecycle.start_master_instance(env, mspec, log_name, deadline=deadline)
 
 
     def master_instance_target(self, env: FlexEnv, name: str) -> str:
@@ -381,12 +377,12 @@ class EnvManager:
     def kill_master9_instance(self, env: FlexEnv, name: str) -> None:
         return self.master_lifecycle.kill_master9_instance(env, name)
 
-    def restart_master_instance(self, env: FlexEnv, name: str) -> ManagedProcess:
-        return self.master_lifecycle.restart_master_instance(env, name)
+    def restart_master_instance(self, env: FlexEnv, name: str, *, deadline=None) -> ManagedProcess:
+        return self.master_lifecycle.restart_master_instance(env, name, deadline=deadline)
 
     # -- ZK helper (Tier-2/3, gated on spec.zk_consistency) ----------------
 
-    def start_zk_helper(self, env: FlexEnv) -> None:
+    def start_zk_helper(self, env: FlexEnv, *, deadline=None) -> None:
         """Boot the ZK helper JVM and wait for 'ZK_READY <connectString>'.
 
         Fail-closed by design: ANY startup failure raises here, and the
@@ -395,33 +391,19 @@ class EnvManager:
         """
         if env.zk_helper is not None:
             raise RuntimeError("ZK helper already running")
-        java = resolve_java21()
-        override = os.environ.get(ZK_LAUNCH_CMD_ENV)
-        if override:
-            argv = shlex.split(override)
-        else:
-            argv = ZkHelperOps.default_launch_argv(java, env.run_dir)
+        deadline = startup_deadline(deadline, ZK_READY_TIMEOUT_S)
+        deadline.check()
+        argv = getattr(env, 'zk_launch_argv', None)
+        if argv is None:
+            override = os.environ.get(ZK_LAUNCH_CMD_ENV)
+            argv = shlex.split(override) if override else ZkHelperOps.default_launch_argv(resolve_java21())
         log_file = env.run_dir / "zk_helper.log"
-        proc = ProcessOps.start(argv, dict(os.environ), log_file, cwd=FLEXLB_DIR)
+        proc = ProcessOps.start(argv, dict(os.environ), log_file, cwd=FLEXLB_DIR, keep_stdin=True)
         env.zk_helper = proc
-        connect: Optional[str] = None
-        deadline = time.monotonic() + ZK_READY_TIMEOUT_S
-        while time.monotonic() < deadline:
-            if not proc.alive():
-                raise RuntimeError(
-                    f"ZK helper exited during startup (fail-closed):\n"
-                    f"{proc.tail_log()}"
-                )
-            connect = ZkHelperOps.find_ready_connect_string(log_file)
-            if connect:
-                break
-            time.sleep(0.2)
-        if not connect:
-            raise RuntimeError(
-                f"ZK helper did not print '{ZK_READY_PREFIX} <connectString>' "
-                f"within {ZK_READY_TIMEOUT_S:.0f}s (fail-closed):\n"
-                f"{proc.tail_log()}"
-            )
+        deadline = startup_deadline(deadline, ZK_READY_TIMEOUT_S)
+        with startup_phase(env.run_dir, 'zookeeper', deadline):
+            connect = wait_ready(deadline, 'zookeeper/ready',
+                lambda: ZkHelperOps.find_ready_connect_string(log_file), process=proc, interval_s=0.2)
         env.zk_connect_string = connect
         self._log(f"ZK helper up (pid={proc.pid}, connectString={connect})")
 
@@ -430,6 +412,8 @@ class EnvManager:
             self._log(f"stopping ZK helper (pid={env.zk_helper.pid})")
             # Contract exit path: SIGTERM (launcher also exits on stdin EOF).
             env.zk_helper.terminate()
+            if env.zk_helper.proc.stdin is not None:
+                env.zk_helper.proc.stdin.close()
             env.zk_helper = None
         env.zk_connect_string = None
 

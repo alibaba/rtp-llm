@@ -14,7 +14,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from typing import IO
 
 from runtime.network import PROBE_BIND_HOST, port_in_use
-from scenario.suites import default_suite, suite_names
+from scripts.pipeline.selection import add_selection_arguments, resolve_selection
 from runtime.resource_plan import (
     MOCK_WINDOW_LAST,
     child_port_env,
@@ -585,13 +585,10 @@ def main() -> int:
             "2000)"
         ),
     )
-    parser.add_argument(
-        "--profile", default=None, help="existing full profile name (default batch-window)"
-    )
-    parser.add_argument(
-        "--master-mode", choices=("sb", "sn", "wb", "wn"),
-        help="select the master settings table; compatible with --profile",
-    )
+    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB after verified experiment archiving")
+    parser.add_argument("--scheduling", choices=("dynamic", "static"), default="dynamic",
+                        help="dynamic: idle lanes claim the next run; static: fixed lane lists")
+    add_selection_arguments(parser, allow_all_profiles=False)
     parser.add_argument(
         "--grade",
         default="normal",
@@ -672,22 +669,9 @@ def main() -> int:
         default=None,
         help="exact compiled instance IDs for compiled Python cases",
     )
-    parser.add_argument(
-        "--suite",
-        choices=suite_names(),
-        default=default_suite(),
-        help="select a declared CI suite, an instance kind, or all; defaults to config/suites.yaml",
-    )
+    parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args()
-    if args.master_mode:
-        from mode_profiles import resolve_mode
-
-        selected = resolve_mode("scenario", args.master_mode)["master_profile"]
-        if args.profile and args.profile != selected:
-            parser.error("--profile disagrees with --master-mode")
-        args.profile = selected
-    else:
-        args.profile = args.profile or "batch-window"
+    resolve_selection(args, parser)
     if args.case_dir is None:
         args.case_dir = str(Path(__file__).resolve().parents[2] / "config/scenarios")
     elif not args.case_dir:

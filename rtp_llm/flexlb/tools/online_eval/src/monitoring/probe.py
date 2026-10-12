@@ -65,7 +65,7 @@ class PrometheusEvidence:
                 self.error = exc
                 raise
 
-    def start(self):
+    def start(self, *, deadline=None):
         if self.started is not None or self.closed or self.path.exists():
             raise ValueError('probe requires a fresh resource and artifact')
         from prometheus_client import CollectorRegistry, start_http_server
@@ -76,7 +76,7 @@ class PrometheusEvidence:
         self.started = time.time()
         try:
             self.url = f'http://127.0.0.1:{self.server.server_port}/metrics'
-            self.session.add_probe(self, self.url)
+            self.session.add_probe(self, self.url, deadline=deadline)
         except BaseException as exc:
             self.error = self.error or exc
             self.closed = True

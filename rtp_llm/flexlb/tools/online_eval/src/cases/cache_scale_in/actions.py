@@ -15,13 +15,12 @@ from runtime.mock_control import mock_json
 from cases.cache_scale_in.analysis import (
     MEASUREMENT_POLICY,
     align_send_counters,
-    analyze,
     attribute_client,
     scope_contract,
     topology_ready,
     window,
 )
-from workload.gate_result import freeze_gate, gate_check
+from workload.gate_result import gate_check
 
 from cases.cache_scale_in.inputs import validate_criteria
 
@@ -99,7 +98,7 @@ def observe(ctx, p, deadline):
 
     def sample():
         deadline.check()
-        from cases.cache_scale_in.inputs import engine_metric_snapshot
+        from cases.cache_scale_in.observation import engine_metric_snapshot
         engines = engine_metric_snapshot(ctx.monitor, p["gate_input"]["fields"],
                                   timeout=min(3, deadline.remaining()))
         state = flow.status()
@@ -258,14 +257,11 @@ def check(ctx, p, deadline):
     lags = [r.get("pacing_lag_ms") for r in issued]
     if lags and all(type(v) in (int, float) and math.isfinite(v) for v in lags):
         evidence["max_pacing_lag_ms"] = max(lags)
-    try:
-        ctx.monitor.archive()
-    except Exception as exc:
-        evidence["errors"].append("monitor archive: " + str(exc))
     write_json(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
     evidence["curve_source"] = "prometheus"
-    result = analyze(evidence)
-    path = freeze_gate(ctx.artifact_dir, "cache", evidence, result)
+    from cases.cache_scale_in.program import GATE
+    committed = GATE.commit(ctx.artifact_dir, evidence)
+    result, path = committed.result, committed.path
     return StageOutput(
         checks=[
             gate_check("cache_stability", result, path,

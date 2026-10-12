@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
-        documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "core")
+        documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "quick")
         self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
-        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 1)
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1)
 
     def run_plan(
         self, workload, observation=True, setup_error=False, cleanup_error=False
@@ -90,24 +90,24 @@ class WorkloadRuntimeTests(unittest.TestCase):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
-        f = {p["id"] for p in classify(plans, "functional")}
-        w = {p["id"] for p in classify(plans, "workload")}
+        f = {p["id"] for p in classify(plans, kind="functional")}
+        w = {p["id"] for p in classify(plans, kind="workload")}
         self.assertFalse(f & w)
         self.assertEqual(f | w, {p["id"] for p in plans})
         self.assertIn("master_ha_failover::default::batch-window", w)
         self.assertEqual(
             {
                 plan["scenario_id"] + "::" + plan["variant_id"]
-                for plan in classify(plans, "functional")
+                for plan in classify(plans, kind="functional")
             },
             {
                 "request_completion::default",
             },
         )
-        self.assertEqual(len(plans), 16)
+        self.assertEqual(len(plans), 14)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
-    def test_core_suite_is_request_completion_for_every_master_profile(self):
+    def test_quick_suite_is_request_completion_for_every_master_profile(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
              mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
@@ -123,7 +123,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
             "window-nonbatch",
         ):
             selected = classify(
-                [plan for plan in plans if plan["profile"] == profile], "core"
+                [plan for plan in plans if plan["profile"] == profile], "quick"
             )
             self.assertEqual(len(selected), 1)
             self.assertEqual(
@@ -133,3 +133,16 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 },
                 expected,
             )
+
+
+def test_teardown_collects_queries_without_materializing_metrics():
+    from types import SimpleNamespace
+    from workload.runtime import WorkloadPolicy
+    policy = WorkloadPolicy()
+    monitor = mock.Mock()
+    policy.monitors = {1: monitor}
+    policy.options = {"capture_metrics": False, "collector_shutdown_s": 5}
+    policy.events = []
+    ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0)
+    policy.before_stage(ctx, {"id": "stop", "action": "teardown"})
+    monitor.stop.assert_called_once_with(5, materialize=False)

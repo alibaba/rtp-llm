@@ -134,10 +134,12 @@ class PrometheusSession:
             )
             cursor = right
 
-    def add_target(self, name, url):
-        self.add_targets({name: url})
+    def add_target(self, name, url, *, deadline=None):
+        self.add_targets({name: url}, deadline=deadline)
 
-    def add_targets(self, targets):
+    def add_targets(self, targets, *, deadline=None):
+        from runtime.startup import startup_deadline
+        deadline = startup_deadline(deadline, 20)
         if set(targets) & set(self.targets):
             raise ValueError("duplicate monitor target")
         selected = {name: url for name, url in targets.items() if self.collects("client")}
@@ -154,23 +156,16 @@ class PrometheusSession:
         request = urllib.request.Request(
             self.url + "/-/reload", data=b"", method="POST"
         )
-        with urllib.request.urlopen(request, timeout=5):
+        with urllib.request.urlopen(request, timeout=min(5, deadline.remaining())):
             pass
-        deadline = time.monotonic() + 15
-        while True:
-            try:
-                for name in targets:
-                    self.instant(name)
-                break
-            except (OSError, RuntimeError):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("client monitor targets not ready")
-                time.sleep(0.1)
+        self._wait_targets(targets, deadline, 'client metrics')
         for name in targets:
             self.target_bounds[name] = [time.time(), None]
 
-    def add_probe(self, probe, url):
+    def add_probe(self, probe, url, *, deadline=None):
         """A registered on-demand adapter shares this run's scheduler and TSDB."""
+        from runtime.startup import startup_deadline
+        deadline = startup_deadline(deadline, 20)
         if not self.url or self.closed or probe.job in self.probes:
             raise ValueError("probe requires a live Prometheus and a unique source")
         parsed = urllib.parse.urlsplit(url)
@@ -184,24 +179,38 @@ class PrometheusSession:
             metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",
                 regex="(" + "|".join(probe.names.values()) + ")")]))
         path.write_text(json.dumps(config))
-        with urllib.request.urlopen(urllib.request.Request(self.url + "/-/reload", data=b"", method="POST"), timeout=5):
+        with urllib.request.urlopen(urllib.request.Request(self.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())):
             pass
         self._write_session()
-        deadline = time.monotonic() + 15
-        while True:
+        from runtime.startup import wait_ready
+        def ready():
             if probe.error is not None:
-                raise RuntimeError("probe startup failed: " + str(probe.error)) from probe.error
-            health = self.query('up{job=' + json.dumps(probe.job) + '}')
-            if len(health) == 1 and float(health[0]["value"][1]) == 1:
-                break
-            if time.monotonic() >= deadline:
-                raise TimeoutError("probe scrape not ready")
-            time.sleep(.05)
+                raise RuntimeError('probe startup failed: ' + str(probe.error)) from probe.error
+            health = self.query('up{job=' + json.dumps(probe.job) + '}', timeout=min(5, deadline.remaining()))
+            return len(health) == 1 and float(health[0]['value'][1]) == 1
+        wait_ready(deadline, 'probe/first scrape', ready, interval_s=0.05)
 
     def end_target(self, name, ended=None):
         self.target_bounds[name][1] = ended or time.time()
 
-    def start(self):
+    def _wait_targets(self, targets, deadline, phase):
+        from runtime.startup import startup_deadline, wait_ready
+        deadline = startup_deadline(deadline, 15)
+        def ready():
+            try:
+                for name in targets:
+                    self.instant(name, timeout=min(5, deadline.remaining()))
+                return True
+            except TimeoutError:
+                raise
+            except (OSError, RuntimeError):
+                return False
+        wait_ready(deadline, phase, ready, interval_s=0.1)
+
+    def start(self, *, deadline=None):
+        from runtime.startup import startup_deadline
+        deadline = startup_deadline(deadline, 30)
+        deadline.check()
         if self.started is not None:
             raise ValueError("monitor session already started")
         if not any(self.query_plan["sources"].values()) and not self.collection_plan["evidence"]:
@@ -246,20 +255,19 @@ class PrometheusSession:
             stderr=subprocess.STDOUT,
         )
         try:
-            end = time.monotonic() + 15
-            while True:
+            from runtime.startup import startup_deadline, wait_ready
+            deadline = startup_deadline(deadline, 30)
+            def ready():
                 if self.process.poll() is not None:
-                    raise RuntimeError(
-                        "Prometheus exited; inspect "
-                        + str(self.directory / "prometheus.log")
-                    )
+                    raise RuntimeError('Prometheus exited; inspect ' + str(self.directory / 'prometheus.log'))
                 try:
-                    with urllib.request.urlopen(self.url + "/-/ready", timeout=1):
-                        break
+                    with urllib.request.urlopen(self.url + '/-/ready', timeout=min(1, deadline.remaining())):
+                        return True
+                except TimeoutError:
+                    raise
                 except OSError:
-                    if time.monotonic() >= end:
-                        raise TimeoutError("Prometheus not ready")
-                    time.sleep(0.05)
+                    return False
+            wait_ready(deadline, 'prometheus/http', ready, interval_s=0.05)
             with telemetry._REGISTRY_LOCK:
                 if any(url in telemetry._REGISTRY for url in self.targets.values()):
                     raise RuntimeError("monitor endpoint already has an owner")
@@ -267,17 +275,7 @@ class PrometheusSession:
                     view = PrometheusSource(self, name, url)
                     telemetry._REGISTRY[url] = view
                     self.views.append(view)
-            # Discovery/scrape startup is preflight, before experiment traffic.
-            end = time.monotonic() + 15
-            while True:
-                try:
-                    for name in self.targets:
-                        self.instant(name)
-                    break
-                except (OSError, RuntimeError):
-                    if time.monotonic() >= end:
-                        raise TimeoutError("Prometheus targets not ready")
-                    time.sleep(0.1)
+            self._wait_targets(self.targets, deadline, 'prometheus/first scrape')
             self.started, self.monotonic = time.time(), time.monotonic()
             self._write_session()
         except BaseException:

@@ -124,13 +124,13 @@ python3 tools/online_eval/scripts/commands/format_configs.py
 
 唯一的字段排序表在 `scripts/pipeline/config_order.py`。命令只移动已有字段块，不补默认值、改标量或重排列表，并在写入前检查解析值不变。新业务参数按其输入含义组织，不为了格式工具另建 YAML schema。
 
-每个 case 顶层必须声明 `program: default`，Python 必须提供 `default(case)`。`variants` 只追加额外测试点，不能占用 `id: default`。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
+每个 case 顶层必须声明 `program: default`，Python 必须注册 `default` builder。`variants` 只追加额外测试点，不能占用 `id: default`。`metadata.kind` 为 functional 或 workload，`execution.collection` 为 aggregate、request 或 diagnostic；性质、说明和采集档位必须完整。CI 必跑项显式登记到 `config/suites.yaml`，不从 category 或目录位置推断。
 
 ## 数据、运行策略与参数约束
 
 | 段 | 负责什么 | 主要消费者 |
 |---|---|---|
-| `metadata` | 测试性质、目标、分类与标签；`kind` 参与 CI 筛选和执行器选择 | suite 选择、实例清单、执行器与报告 |
+| `metadata` | 测试性质、目标、分类与标签；`kind` 参与性质筛选和执行器选择 | suite 选择、实例清单、执行器与报告 |
 | `environment` | Master / Mock 的配置、模型和拓扑，如 worker 数量、性能档案、缓存容量 | 环境渲染与启动、端口和资源预算 |
 | `execution` | 实例、阶段和清理预算，以及 `collection` 和 `monitoring` 取证策略 | runner、阶段执行器、客户端与采集器 |
 | `parameters` | 按流量、流程、观测、分析与检查分组的 program 输入 | `CaseBuilder.inputs/number`、业务输入校验 |
@@ -189,6 +189,8 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 ## Python 的归属与注册
 
+先阅读[case 插件结构](../architecture/case-plugins.md)，理解编译、取证、测量、判定和交付的生命周期。目录按职责拆分，不要求每个 case 搭齐所有模块。
+
 `src/cases/config.py` 和 `registry.py` 是公共构建、能力注册接口；业务代码集中在 `src/cases/<case>/`：
 
 | 文件 | 职责 |
@@ -200,7 +202,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 | `report.py`、`panels.py`、`view.py` | 业务结果展示、面板装配与专属视图校验；HTML 交互和 bundle 协议复用 `reporting/` |
 | `client.py`、`observation.py` 等现场模块 | 专属客户端会话或数据源协议解释；HTTP 观测注册适配器，由公共标准 exporter 与 Prometheus 管理调度、预算和收尾 |
 | `comparison.py` | 业务声明的对齐策略校验，不重算跨 run 门禁 |
-| `publication.py`、`replay.py` | 产物发布与显式离线重判 |
+| `replay.py` | 专属证据补充与显式离线重判；整窗门禁复用 `GatePlugin` 发布 |
 
 按实际需要建文件，小型 case 只需 `program.py`，不创建空的层次。这里的归属表示业务合同由谁维护，不表示代码永远不可复用：同类 program 可显式注册同一实现；跨业务一致的统计、协议、采集或渲染功能才提到公共组件。不能因文件名同为 `analysis.py` 或 `metrics.py` 就把不同业务口径合并。
 

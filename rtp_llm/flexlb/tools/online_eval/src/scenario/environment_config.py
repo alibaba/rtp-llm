@@ -14,6 +14,8 @@ from runtime.perf_presets import load_preset_bundle, preset_names
 from scenario.loader import ScenarioError
 from scenario.validation import fail, mapping, number, names
 
+from runtime.zookeeper_config import ZooKeeperConfig
+
 MASTER_PATCH_FIELDS = {field.name for field in fields(ConfigOverride)} - {"strip_preemption"}
 
 _ABSENT = object()
@@ -295,6 +297,7 @@ class EnvironmentDeclaration:
     prefill_max_waiting_batches: int | None = field(default=None, metadata={"scalar": (int, _ABSENT, 0)})
     master_test_control: bool | None = field(default=None, metadata={"scalar": (bool, _ABSENT, None)})
     metric_whitelist: str | None = None
+    zookeeper: ZooKeeperConfig | None = None
     model_override: ModelDeviation | None = None
     prefill_perf: PrefillPerformance | None = None
     prefill_cache_policy: PrefillCachePolicy | None = None
@@ -302,8 +305,10 @@ class EnvironmentDeclaration:
     def __post_init__(self):
         if self.backend != "java_mock" or self.discovery not in {"file", "discovery_file"}:
             raise ValueError("invalid environment backend/discovery")
-        if self.master_layout not in {"single", "dual_standalone"}:
+        if self.master_layout not in {"single", "dual_standalone", "dual_zookeeper"}:
             raise ValueError("invalid environment master layout")
+        if (self.master_layout == 'dual_zookeeper') != (self.zookeeper is not None):
+            raise ValueError('zookeeper configuration requires dual_zookeeper layout')
         for name in ("n_prefill", "n_decode", "prefill_cache_blocks", "decode_cache_blocks"):
             value = getattr(self, name)
             if value is not None:
@@ -327,10 +332,11 @@ class EnvironmentDeclaration:
     @classmethod
     def read_normalized(cls, value):
         options = copy.deepcopy(value)
+        zk = options.pop("zookeeper", None)
         policy = options.pop("prefill_cache_policy", None)
         performance = options.pop("prefill_perf", None)
         deviation = options.pop("model_override", None)
-        return cls(**options,
+        return cls(**options, zookeeper=ZooKeeperConfig.read(zk) if zk is not None else None,
                    prefill_cache_policy=PrefillCachePolicy(**policy) if policy is not None else None,
                    prefill_perf=PrefillPerformance(**performance) if performance is not None else None,
                    model_override=ModelDeviation(**deviation) if deviation is not None else None)
@@ -339,7 +345,7 @@ class EnvironmentDeclaration:
     def to_dict(self):
         result = {field.name: copy.deepcopy(getattr(self, field.name)) for field in fields(self)
                   if getattr(self, field.name) is not None}
-        for name in ("prefill_perf", "model_override"):
+        for name in ("prefill_perf", "model_override", "zookeeper"):
             value = getattr(self, name)
             if value is not None:
                 result[name] = asdict(value)
@@ -395,12 +401,19 @@ def read_environment(value, path):
     for key, default, allowed in (
         ("discovery", "file", ("file", "discovery_file")),
         ("perf_preset", "default", preset_names()),
-        ("master_layout", "single", ("single", "dual_standalone")),
+        ("master_layout", "single", ("single", "dual_standalone", "dual_zookeeper")),
     ):
         val = value.get(key, default)
         if val not in allowed:
             fail(path + "." + key, f"invalid value {val!r}; expected one of {allowed}")
         result[key] = val
+    if result['master_layout'] == 'dual_zookeeper':
+        try:
+            result['zookeeper'] = ZooKeeperConfig.read(value.get('zookeeper', {})).to_dict()
+        except ValueError as exc:
+            fail(path + '.zookeeper', str(exc))
+    elif 'zookeeper' in value:
+        fail(path + '.zookeeper', 'requires dual_zookeeper layout')
     resolver = EnvironmentResolver.read(value, path, result["perf_preset"])
     captured = resolver.captured
     for field, capture_field in (
