@@ -271,22 +271,32 @@ def _flashinfer_op_is_stale(op_dir: Path) -> bool:
         rules = rules_path.read_text(errors="ignore")
     except OSError:
         return False
-    if any(not Path(path).exists() for path in re.findall(r"-I(/\S+)", rules)):
+    # FlashInfer embeds the absolute include paths of the package instance that
+    # generated the rules (both -I and -isystem forms). A bazel action's runfiles
+    # tree only lives for that action, so rules anchored there dangle for every
+    # later consumer of the shared workspace -- whether or not the tree still
+    # exists at eviction time -- and only rules anchored to stable locations
+    # (package-copy cache, toolkit dirs) are safe to keep.
+    include_paths = re.findall(r"(?:-I|-isystem\s+)(/\S+)", rules)
+    if any(".runfiles" in path for path in include_paths):
+        return True
+    if any(not Path(path).exists() for path in include_paths):
         return True
     src_link = op_dir / "src"
     return src_link.is_symlink() and not src_link.exists()
 
 
 def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
-    """Drop cached FlashInfer ops whose build rules reference include paths that no
-    longer resolve.
+    """Drop cached FlashInfer ops whose build rules anchor to include paths that
+    are not stable for later consumers of the shared workspace.
 
     FlashInfer's generated FMHA ninja rules embed the absolute include paths of the
     flashinfer package instance that generated them. A bazel test action's runfiles
     sandbox is per-action, so rules generated from a runfiles import dangle for every
     later action that reuses the shared workspace and fail with missing-header
-    errors. Evicting the affected ops makes FlashInfer regenerate them against the
-    current package copy.
+    errors -- including when the generating action is still alive at eviction time,
+    because its sandbox disappears when the action completes. Evicting the affected
+    ops makes FlashInfer regenerate them against the current stable package copy.
 
     FlashInfer serializes each op's build and load with a FileLock at
     ``cached_ops/tmp/<op_name>.lock``; eviction takes that same lock and re-judges
