@@ -1546,13 +1546,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // Proposal and target verification are two model phases with different
         // token widths and cache roles. Keep the target gather output intact;
         // both inputs are derived from one immutable round state on rank 0.
-        GptModelInputs proposal_input;
+        // TP broadcasts numeric cache payloads, while group identities stay
+        // rank-local. Preserve each rank's gathered tags for the proposal too.
+        GptModelInputs proposal_input = model_input;
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_proposal_and_tp_sync)");
             if (isTpRank0()) {
                 dspark_round_state =
                     batch_stream_processor_->buildDSparkRoundState(stream_groups, model_input, buffer_holder_);
-                proposal_input = model_input;
                 batch_stream_processor_->prepareDSparkProposeModelInput(
                     dspark_round_state, proposal_input, buffer_holder_);
                 ensureModelInputsOnCuda(proposal_input, "decode.prepare_dspark_proposal");
