@@ -116,8 +116,8 @@ bool shouldInterleaveRegisteredHostBlockPool() {
                                 + "', expected 'interleave' or 'none'");
 }
 
-// Number of threads used to fault in the host block pool arena while it is
-// being registered. 1 (the default) disables prefaulting and keeps the historical
+// Number of threads used to fault in the host block pool arena before it is
+// registered. 1 (the default) disables prefaulting and keeps the historical
 // code path, where cudaHostRegister faults every page itself, single threaded.
 //
 // Measured on this 2-socket/256-CPU/4TiB host with 4 ranks x 48GiB, slowest rank,
@@ -155,19 +155,9 @@ size_t hostBlockPoolPrefaultThreads() {
     return threads;
 }
 
-// Faults the arena in from several threads while cudaHostRegister pins it.
-//
-// The driver walks the range sequentially and, whenever a page is not resident
-// yet, faults it inline on that one thread. Chunks are handed out from a single
-// shared cursor, so residency advances strictly front-to-back and, with enough
-// threads, stays ahead of the driver's cursor; the driver then only pays for
-// pinning. Nothing about the result changes: MADV_POPULATE_WRITE allocates
-// exactly the zero pages the driver would have allocated anyway, page placement
-// stays offset-determined under MPOL_INTERLEAVE, and the registered range is
-// still the single full arena.
-//
-// The threads must be joined before the arena may be unmapped, so ownership is
-// RAII: the destructor joins, which also covers the cudaHostRegister error path.
+// Faults the arena in from several threads. Join before cudaHostRegister so
+// prefaulting and GUP do not compete on the same address space.
+// The destructor also joins to keep the arena alive until all workers finish.
 class HostArenaPrefaulter {
 public:
     HostArenaPrefaulter(void* base, size_t size_bytes, size_t threads):
@@ -198,8 +188,8 @@ public:
             worker.join();
         }
         workers_.clear();
-        // prefault_ms is when the arena became fully resident; window_ms also
-        // contains the cudaHostRegister that ran concurrently with it.
+        // prefault_ms ends at the last worker; window_ms includes joining them.
+        // Registration starts afterwards and is timed separately.
         RTP_LLM_LOG_INFO("host block pool prefaulted: threads=%zu chunk_bytes=%zu total_size=%zu "
                          "madvise_fallbacks=%zu prefault_ms=%.3f window_ms=%.3f",
                          thread_num_,
@@ -285,15 +275,18 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes,
     }
     cudaError_t err = cudaSuccess;
     {
-        // Prefaulting runs concurrently with the registration below; the scope
-        // guarantees the threads are joined before any munmap of the arena.
+        const auto          prepare_begin_us = currentTimeUs();
         HostArenaPrefaulter prefaulter(ptr, size_bytes, prefault_threads);
-        const auto          register_begin_us = currentTimeUs();
-        err = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
+        prefaulter.join();
+        const auto register_begin_us = currentTimeUs();
+        err                          = cudaHostRegister(ptr, size_bytes, cudaHostRegisterDefault);
         RTP_LLM_LOG_INFO("host pool cudaHostRegister: bytes=%zu cost_ms=%.3f status=%d",
                          size_bytes,
                          (currentTimeUs() - register_begin_us) / 1000.0,
                          static_cast<int>(err));
+        RTP_LLM_LOG_INFO("host pool preparation: order=prefault_then_register bytes=%zu total_ms=%.3f",
+                         size_bytes,
+                         (currentTimeUs() - prepare_begin_us) / 1000.0);
     }
     if (err != cudaSuccess) {
         (void)munmap(ptr, size_bytes);
@@ -758,17 +751,23 @@ void BlockPool::restoreMlaHostCacheAfterCheckpoint() {
     const auto restore_begin_us = currentTimeUs();
     RTP_LLM_LOG_INFO("SCR MLA host KV restore begin: bytes=%zu", config_.total_size_bytes);
     RTP_LLM_CHECK_WITH_INFO(mprotect(cache_base_ptr_, config_.total_size_bytes, PROT_READ | PROT_WRITE) == 0,
-                           "unprotect MLA host KV: %s",
-                           std::strerror(errno));
+                            "unprotect MLA host KV: %s",
+                            std::strerror(errno));
     if (shouldInterleaveRegisteredHostBlockPool()) {
         const auto policy = applyAllowedNumaInterleavePolicy(cache_base_ptr_, config_.total_size_bytes);
         RTP_LLM_CHECK_WITH_INFO(policy.success, "restore MLA host KV NUMA policy: %s", policy.error_message.c_str());
     }
     {
         HostArenaPrefaulter prefaulter(cache_base_ptr_, config_.total_size_bytes, hostBlockPoolPrefaultThreads());
-        RTP_LLM_CHECK_WITH_INFO(cudaHostRegister(cache_base_ptr_, config_.total_size_bytes, cudaHostRegisterDefault)
-                                   == cudaSuccess,
-                               "restore MLA host KV registration");
+        prefaulter.join();
+        const auto register_begin_us = currentTimeUs();
+        const auto err = cudaHostRegister(cache_base_ptr_, config_.total_size_bytes, cudaHostRegisterDefault);
+        RTP_LLM_LOG_INFO(
+            "SCR MLA host KV cudaHostRegister: order=prefault_then_register bytes=%zu cost_ms=%.3f status=%d",
+            config_.total_size_bytes,
+            (currentTimeUs() - register_begin_us) / 1000.0,
+            static_cast<int>(err));
+        RTP_LLM_CHECK_WITH_INFO(err == cudaSuccess, "restore MLA host KV registration");
     }
     *mla_host_registered_ = true;
     void* device_ptr = nullptr;
