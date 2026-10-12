@@ -6,7 +6,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
@@ -625,6 +624,14 @@ class BackendRPCServerVisitor:
                 await self.route_ips(attempt_input)
             return self.model_rpc_client.enqueue(attempt_input)
 
+        def observe_backend_output(output, output_attempt):
+            observer = getattr(input, "frontend_metric_observer", None)
+            if observer is not None:
+                try:
+                    observer(output, output_attempt)
+                except Exception:
+                    route_logger.exception("frontend metric observer failed")
+
         async def stream_with_aux_info():
             attempt = 0
             attempt_input = input
@@ -636,11 +643,17 @@ class BackendRPCServerVisitor:
                     stream = await route_and_enqueue(attempt_input)
                     if is_streaming:
                         async for output in stream:
+                            observe_backend_output(output, attempt)
+                            if bool(getattr(output, "frontend_metric_only", False)):
+                                continue
                             yielded_output = True
                             yield output
                     else:
                         buffered_outputs = []
                         async for output in stream:
+                            observe_backend_output(output, attempt)
+                            if bool(getattr(output, "frontend_metric_only", False)):
+                                continue
                             buffered_outputs.append(output)
                         yielded_output = True
                         for output in buffered_outputs:

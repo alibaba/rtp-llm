@@ -105,3 +105,16 @@ cc_test(
     exec_properties = {"gpu": "A10_CU13"},
     tags = ["A10_CU13"],
 )
+
+cc_test(
+    name = "frontend_sp_tpot_samples_test",
+    srcs = ["FrontendSpTpotSamplesTest.cc"],
+    deps = ["//rtp_llm/cpp/engine_base/stream:frontend_sp_tpot_samples", "@com_google_googletest//:gtest", "@com_google_googletest//:gtest_main"],
+)
+
+cc_test(
+    name = "complete_token_ids_test",
+    srcs = ["CompleteTokenIdsTest.cc"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/engine_base/stream:complete_token_ids", "@com_google_googletest//:gtest", "@com_google_googletest//:gtest_main"] + torch_deps() + cuda13_torch_link_deps,
+)

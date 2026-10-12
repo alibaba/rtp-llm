@@ -23,6 +23,9 @@ public:
     int maxBatchSize();
     int batchSize();
 
+    bool
+    matchThinkEndToken(int batch_id, const std::vector<int>& end_think_token_ids, int input_length, int max_new_tokens);
+
     bool matchEosToken(int batch_id, int token_id);
     bool matchStopWordsList(int batch_id, const std::vector<int>& stop_words);
 

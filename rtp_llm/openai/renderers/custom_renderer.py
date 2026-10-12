@@ -18,6 +18,10 @@ from rtp_llm.config.generate_config import (
 from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.config.response_format import normalize_think_tag
 from rtp_llm.config.response_format_compiler import ReasoningFormat
+from rtp_llm.frontend.backend_metric_observer import (
+    make_backend_metric_observer,
+    metric_backend_generate_config,
+)
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
     ChatCompletionExtraOutputs,
@@ -112,6 +116,10 @@ class StreamStatus:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.pending_logprobs = []
+        self.pending_logprob_positions = []
+        self.compact_logprobs = False
+        self.seen_logprob_positions = set()
         self.has_real_aux_info = True
         self._fallback_aux_info: Optional[AuxInfo] = None
 
@@ -199,6 +207,10 @@ class StreamStatusSync:
 
     def __init__(self, request: ChatCompletionRequest):
         self.request = request
+        self.pending_logprobs = []
+        self.pending_logprob_positions = []
+        self.compact_logprobs = False
+        self.seen_logprob_positions = set()
 
     def update_output_sync(
         self,
@@ -208,7 +220,7 @@ class StreamStatusSync:
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
@@ -266,7 +278,9 @@ class RendererParams:
 @dataclass
 class OutputDelta:
     output_str: Union[str, DeltaMessage]
-    logprobs: Optional[ChatCompletionTokenLogprob]
+    logprobs: Optional[
+        Union[ChatCompletionTokenLogprob, List[ChatCompletionTokenLogprob]]
+    ]
     input_length: int
     output_length: int
     reuse_length: int
@@ -475,6 +489,8 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -485,10 +501,16 @@ class CustomChatRenderer:
                     request_id=request_id,
                     token_ids=input_id_tensor,
                     mm_inputs=mm_inputs,
-                    generate_config=generate_config,
+                    generate_config=metric_backend_generate_config(
+                        generate_config, frontend_metric_observer is not None
+                    ),
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    frontend_metric_tags=dict(frontend_metric_tags or {}),
+                    frontend_metric_observer=make_backend_metric_observer(
+                        frontend_metric_observer, unit_id=request_id
+                    ),
                 )
             )
         )
@@ -611,6 +633,44 @@ class CustomChatRenderer:
             merged_output = copy.deepcopy(final_output)
             merged_output.output_ids = merged_output_ids
 
+            chunks = [
+                outputs.generate_outputs[i]
+                for outputs in collected_outputs_list
+                if i < len(outputs.generate_outputs)
+            ]
+            if all(chunk.logprobs_count is None for chunk in chunks):
+                # Absent compact metadata preserves the legacy response contract.
+                merged_generate_outputs.append(merged_output)
+                continue
+            cursor = 0
+            first_offset = None
+            for chunk in chunks:
+                if (chunk.logprobs_count or 0) > 0 and first_offset is None:
+                    first_offset = cursor + chunk.logprobs_offset
+                cursor += chunk.output_ids.numel()
+            if first_offset is not None:
+                merged_output.logprobs_offset = first_offset
+                merged_output.logprobs_count = sum(
+                    (chunk.logprobs_count or 0) for chunk in chunks
+                )
+                for payload_field in (
+                    "token_logprobs",
+                    "top_logprob_token_ids",
+                    "top_logprobs",
+                ):
+                    values = [
+                        getattr(chunk, payload_field)
+                        for chunk in chunks
+                        if (chunk.logprobs_count or 0) > 0
+                    ]
+                    setattr(merged_output, payload_field, torch.cat(values, dim=0))
+            else:
+                merged_output.logprobs_offset = (
+                    sum(chunk.output_ids.numel() for chunk in chunks)
+                    if any(chunk.logprobs_offset for chunk in chunks)
+                    else 0
+                )
+                merged_output.logprobs_count = 0
             merged_generate_outputs.append(merged_output)
 
         return GenerateOutputs(generate_outputs=merged_generate_outputs)
@@ -625,12 +685,427 @@ class CustomChatRenderer:
             multimodal_lengths=aux_info.multimodal_lengths,
         )
 
+    def _token_id_to_bytes(
+        self, token_id: int, decoded_token: str
+    ) -> Optional[List[int]]:
+        """Return exact token bytes when the tokenizer exposes them.
+
+        Byte-level tokenizers can decode an individual, incomplete UTF-8 token as
+        U+FFFD (or as an empty string). Encoding that display string would invent
+        replacement bytes which were never sampled. Prefer raw-token APIs and
+        decoder tables; only fall back to UTF-8 encoding when the decoded token is
+        complete. ``None`` means the original bytes cannot be recovered safely.
+        """
+
+        # A complete per-token decode already identifies the exact UTF-8 bytes
+        # represented by the API's token string. Raw-backend discovery is only
+        # needed for byte fragments that decode to U+FFFD or an empty string.
+        if decoded_token and "\ufffd" not in decoded_token:
+            try:
+                return list(decoded_token.encode("utf-8"))
+            except UnicodeEncodeError:
+                return None
+
+        def normalize_raw_bytes(value: Any) -> Optional[List[int]]:
+            if isinstance(value, (bytes, bytearray, memoryview)):
+                return list(bytes(value))
+            if (
+                isinstance(value, (list, tuple))
+                and value
+                and all(
+                    isinstance(item, int)
+                    and not isinstance(item, bool)
+                    and 0 <= item <= 255
+                    for item in value
+                )
+            ):
+                return list(value)
+            return None
+
+        # BaseTokenizer wraps a HuggingFace tokenizer, which may itself wrap a
+        # tiktoken/tokenizers/SentencePiece backend. Walk the small adapter graph
+        # so decode_single_token_bytes(), byte decoder tables, and byte-fallback
+        # pieces remain usable without requiring one tokenizer implementation.
+        candidates = getattr(self, "_tokenizer_byte_candidates", None)
+        if candidates is None:
+            candidates = []
+            pending: List[Any] = [self.tokenizer]
+            seen: set[int] = set()
+            while pending and len(candidates) < 16:
+                candidate = pending.pop(0)
+                if candidate is None or id(candidate) in seen:
+                    continue
+                seen.add(id(candidate))
+                candidates.append(candidate)
+
+                get_real_tokenizer = getattr(candidate, "get_real_tokenizer", None)
+                if callable(get_real_tokenizer):
+                    try:
+                        pending.append(get_real_tokenizer())
+                    except Exception:
+                        pass
+                for attribute in (
+                    "tokenizer",
+                    "_tokenizer",
+                    "backend_tokenizer",
+                    "model",
+                    "sp_model",
+                ):
+                    try:
+                        pending.append(getattr(candidate, attribute, None))
+                    except Exception:
+                        pass
+            self._tokenizer_byte_candidates = candidates
+
+        token_pieces: List[str] = []
+        for candidate in candidates:
+            for method_name in ("token_id_to_bytes", "decode_single_token_bytes"):
+                method = getattr(candidate, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    value = method(token_id)
+                except Exception:
+                    continue
+                raw_bytes = normalize_raw_bytes(value)
+                if raw_bytes is not None:
+                    return raw_bytes
+                if isinstance(value, str):
+                    token_pieces.append(value)
+
+            decoder = getattr(candidate, "decoder", None)
+            decoder_get = getattr(decoder, "get", None)
+            if callable(decoder_get):
+                try:
+                    value = decoder_get(token_id)
+                except Exception:
+                    value = None
+                raw_bytes = normalize_raw_bytes(value)
+                if raw_bytes is not None:
+                    return raw_bytes
+                if isinstance(value, str):
+                    token_pieces.append(value)
+
+            for method_name in (
+                "convert_ids_to_tokens",
+                "_convert_id_to_token",
+                "id_to_token",
+                "id_to_piece",
+                "IdToPiece",
+            ):
+                method = getattr(candidate, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    value = method(token_id)
+                except Exception:
+                    continue
+                if isinstance(value, list) and len(value) == 1:
+                    value = value[0]
+                raw_bytes = normalize_raw_bytes(value)
+                if raw_bytes is not None:
+                    return raw_bytes
+                if isinstance(value, str):
+                    token_pieces.append(value)
+
+        for piece in token_pieces:
+            if (
+                len(piece) == 6
+                and piece.startswith(("<0x", "<0X"))
+                and piece.endswith(">")
+            ):
+                try:
+                    return [int(piece[3:5], 16)]
+                except ValueError:
+                    pass
+
+            if not piece:
+                continue
+            for candidate in candidates:
+                byte_decoder = getattr(candidate, "byte_decoder", None)
+                decoder_get = getattr(byte_decoder, "get", None)
+                if not callable(decoder_get):
+                    continue
+                try:
+                    values = [decoder_get(char) for char in piece]
+                except Exception:
+                    continue
+                if all(
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and 0 <= value <= 255
+                    for value in values
+                ):
+                    return list(values)
+
+        return None
+
+    def _generate_log_probs_from_tensors(
+        self,
+        request: ChatCompletionRequest,
+        output_ids: Optional[torch.Tensor],
+        token_logprobs: Optional[torch.Tensor],
+        top_logprob_token_ids: Optional[torch.Tensor],
+        top_logprobs: Optional[torch.Tensor],
+        token_count: Optional[int] = None,
+    ) -> Optional[List[ChatCompletionTokenLogprob]]:
+        if not request.logprobs:
+            return None
+        if output_ids is None:
+            return None
+        if token_logprobs is None:
+            raise RuntimeError(
+                "token_logprobs is None when logprobs is true; this is an internal bug"
+            )
+
+        if output_ids.dtype == torch.bool or output_ids.is_floating_point():
+            raise RuntimeError("output_ids must use an integer dtype")
+        if not token_logprobs.is_floating_point():
+            raise RuntimeError("token_logprobs must use a floating-point dtype")
+
+        output_id_values = output_ids.detach().cpu().reshape(-1)
+        raw_token_count = output_id_values.numel()
+        if token_count is not None:
+            if token_count < 0 or token_count > raw_token_count:
+                raise RuntimeError(
+                    f"invalid logprob token_count={token_count}, output token count={raw_token_count}"
+                )
+            output_id_values = output_id_values[:token_count]
+
+        num_tokens = output_id_values.numel()
+        if num_tokens == 0:
+            return None
+
+        token_logprob_values = token_logprobs.detach().cpu().reshape(-1)
+        if token_logprob_values.numel() != raw_token_count:
+            raise RuntimeError(
+                "token_logprobs must align one-to-one with output_ids: "
+                f"got {token_logprob_values.numel()} values for {raw_token_count} tokens"
+            )
+        token_logprob_values = token_logprob_values[:num_tokens]
+
+        requested_k = request.top_logprobs if request.top_logprobs is not None else 0
+        actual_k = 0
+        top_token_values: Optional[torch.Tensor] = None
+        top_logprob_values: Optional[torch.Tensor] = None
+        if requested_k > 0:
+            if top_logprob_token_ids is None or top_logprobs is None:
+                raise RuntimeError(
+                    "top-logprob tensors are missing when top_logprobs is positive"
+                )
+            if (
+                top_logprob_token_ids.dtype == torch.bool
+                or top_logprob_token_ids.is_floating_point()
+            ):
+                raise RuntimeError("top_logprob_token_ids must use an integer dtype")
+            if not top_logprobs.is_floating_point():
+                raise RuntimeError("top_logprobs must use a floating-point dtype")
+            if top_logprob_token_ids.shape != top_logprobs.shape:
+                raise RuntimeError(
+                    "top-logprob token ids and values must have the same shape"
+                )
+            if top_logprob_token_ids.dim() < 2:
+                raise RuntimeError(
+                    "top-logprob tensors must have shape [num_output_tokens, top_logprobs]"
+                )
+            actual_k = top_logprob_token_ids.shape[-1]
+            if actual_k > requested_k:
+                raise RuntimeError(
+                    f"backend returned top_logprobs={actual_k}, exceeding requested {requested_k}"
+                )
+            leading_token_count = top_logprob_token_ids.numel() // max(actual_k, 1)
+            if actual_k == 0:
+                leading_token_count = 1
+                for dimension in top_logprob_token_ids.shape[:-1]:
+                    leading_token_count *= dimension
+            if leading_token_count != raw_token_count:
+                raise RuntimeError(
+                    "top-logprob tensors must align with the output token dimension"
+                )
+            top_token_values = (
+                top_logprob_token_ids.detach()
+                .cpu()
+                .reshape(raw_token_count, actual_k)[:num_tokens]
+            )
+            top_logprob_values = (
+                top_logprobs.detach()
+                .cpu()
+                .reshape(raw_token_count, actual_k)[:num_tokens]
+            )
+
+        result: List[ChatCompletionTokenLogprob] = []
+        for token_index, (token_id_tensor, token_logprob_tensor) in enumerate(
+            zip(output_id_values, token_logprob_values)
+        ):
+            token_id = token_id_tensor.item()
+            token = self.tokenizer.decode([token_id])
+            token_result = ChatCompletionTokenLogprob(
+                token=token,
+                bytes=self._token_id_to_bytes(token_id, token),
+                logprob=token_logprob_tensor.item(),
+                top_logprobs=[],
+            )
+            if actual_k > 0:
+                assert top_token_values is not None
+                assert top_logprob_values is not None
+                for top_token_id, top_logprob in zip(
+                    top_token_values[token_index], top_logprob_values[token_index]
+                ):
+                    top_token = self.tokenizer.decode([top_token_id.item()])
+                    token_result.top_logprobs.append(
+                        TopLogprob(
+                            token=top_token,
+                            logprob=top_logprob.item(),
+                            bytes=self._token_id_to_bytes(
+                                top_token_id.item(), top_token
+                            ),
+                        )
+                    )
+            result.append(token_result)
+
+        logging.debug("chat_logprobs: %s", result)
+        return result
+
+    @staticmethod
+    def _prepare_decoded_string_for_emit(
+        status: Union[StreamStatus, StreamStatusSync],
+        decoded_string: str,
+        is_streaming: bool,
+    ) -> Tuple[Optional[str], bool]:
+        """Handle an incomplete decoded UTF-8 suffix before emitting a chunk.
+
+        Without logprobs, preserve the renderer's historical behavior: streaming
+        waits for a trailing replacement character, while non-streaming removes
+        it and emits the valid prefix.  With logprobs, tokens must stay pending
+        until they either become decodable or generation ends.  At termination,
+        emit the valid prefix and report that the invisible suffix was removed so
+        its pending logprob records can be trimmed as well.
+
+        Returns ``(None, False)`` when the caller should keep buffering.  The
+        boolean is true only when a terminal invisible suffix was removed.
+        """
+        if not status.request.logprobs:
+            if is_streaming and decoded_string.endswith("\ufffd"):
+                return None, False
+            if not is_streaming:
+                decoded_string = decoded_string.rstrip("\ufffd")
+            return decoded_string, False
+
+        has_uncommitted_tokens = len(status.output_ids) > len(status.last_output_ids)
+        if not has_uncommitted_tokens:
+            return decoded_string, False
+
+        has_incomplete_suffix = not decoded_string or decoded_string.endswith("\ufffd")
+        if not has_incomplete_suffix:
+            return decoded_string, False
+        if status.finish_reason is None:
+            return None, False
+        return decoded_string.rstrip("\ufffd"), True
+
+    def _accumulate_compact_logprobs(self, status, output_ids, payload):
+        if not status.request.logprobs or payload is None:
+            return
+        token_logprobs, top_ids, top_values, offset, count = payload
+        status.compact_logprobs = True
+        total = output_ids.numel()
+        if offset < 0 or count < 0 or offset + count != total:
+            raise RuntimeError(
+                "compact logprobs must cover a suffix of the output chunk"
+            )
+        # Reasoning-only chunks intentionally have no probability tensors.
+        if count == 0:
+            return
+        compact_ids = output_ids.reshape(-1)[offset:]
+        records = (
+            self._generate_log_probs_from_tensors(
+                status.request, compact_ids, token_logprobs, top_ids, top_values
+            )
+            or []
+        )
+        chunk_start = len(status.output_ids_list) - total
+        for index, record in enumerate(records):
+            position = chunk_start + offset + index
+            if (
+                position < len(status.output_ids)
+                and position not in status.seen_logprob_positions
+            ):
+                status.pending_logprobs.append(record)
+                status.pending_logprob_positions.append(position)
+                status.seen_logprob_positions.add(position)
+        retained = len(status.output_ids)
+        kept = [
+            (p, r)
+            for p, r in zip(status.pending_logprob_positions, status.pending_logprobs)
+            if p < retained
+        ]
+        status.pending_logprob_positions = [p for p, _ in kept]
+        status.pending_logprobs = [r for _, r in kept]
+
+    def _trim_compact_logprobs(self, status, visible_delta):
+        if not status.compact_logprobs or not status.pending_logprobs:
+            return
+        context = list(status.last_output_ids)
+        suffix = status.output_ids[len(context) :]
+        context_text = self.tokenizer.decode(context)
+        token_limit = len(context)
+        if visible_delta:
+            stable = False
+            for count in range(1, len(suffix) + 1):
+                decoded = self.tokenizer.decode(context + suffix[:count])
+                if not decoded.startswith(context_text):
+                    continue
+                stable = True
+                delta = decoded[len(context_text) :]
+                if delta == visible_delta or delta.startswith(visible_delta):
+                    token_limit = len(context) + count
+                    break
+                if visible_delta.startswith(delta):
+                    token_limit = len(context) + count
+            if not stable:
+                return
+        kept = [
+            (p, r)
+            for p, r in zip(status.pending_logprob_positions, status.pending_logprobs)
+            if p < token_limit
+        ]
+        status.pending_logprob_positions = [p for p, _ in kept]
+        status.pending_logprobs = [r for _, r in kept]
+
+    @staticmethod
+    def _take_compact_logprobs(status):
+        records = status.pending_logprobs
+        status.pending_logprobs = []
+        status.pending_logprob_positions = []
+        return records or None
+
+    @staticmethod
+    def _compact_payload(output):
+        if output.logprobs_count is None and output.logprobs_offset is None:
+            return None
+        if output.logprobs_count is None or output.logprobs_offset is None:
+            raise RuntimeError("compact logprobs require both offset and count")
+        if (
+            output.token_logprobs is None
+            and output.logprobs_count == 0
+            and output.logprobs_offset == 0
+        ):
+            return None
+        return (
+            output.token_logprobs,
+            output.top_logprob_token_ids,
+            output.top_logprobs,
+            output.logprobs_offset,
+            output.logprobs_count,
+        )
+
     async def _generate_log_probs(
         self, status: StreamStatus, output: Optional[GenerateOutput]
-    ) -> Optional[ChatCompletionTokenLogprob]:
+    ) -> Optional[Union[ChatCompletionTokenLogprob, List[ChatCompletionTokenLogprob]]]:
         assert output is not None
         if not status.request.logprobs:
             return None
+        if status.compact_logprobs:
+            return self._take_compact_logprobs(status)
         prob_return_num = status.request.top_logprobs or 1
         all_probs = output.all_probs
         output_id = output.output_ids
@@ -766,6 +1241,14 @@ class CustomChatRenderer:
 
         return truncated, should_buffer
 
+    def _update_status_output(
+        self, status, output, check_finish_func, remove_stop_word_ids_func
+    ):
+        status.update_output(output, check_finish_func, remove_stop_word_ids_func)
+        self._accumulate_compact_logprobs(
+            status, output.output_ids, self._compact_payload(output)
+        )
+
     async def _update_single_status(
         self,
         status: StreamStatus,
@@ -777,20 +1260,19 @@ class CustomChatRenderer:
     ) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(
+        self._update_status_output(
+            status,
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
-        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if is_streaming:
-            if len(decoded_string) > 0 and "\ufffd" == decoded_string[-1]:
-                return await self._create_empty_delta(output.aux_info)
-        else:
-            while (len(decoded_string) > 0) and ("\ufffd" == decoded_string[-1]):
-                decoded_string = decoded_string[:-1]
+        decoded_string, trimmed_utf8 = self._prepare_decoded_string_for_emit(
+            status, decoded_string, is_streaming
+        )
+        if decoded_string is None:
+            return await self._create_empty_delta(output.aux_info)
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
 
         # Process stop words: truncate complete stop words, detect partial stop words
@@ -802,6 +1284,8 @@ class CustomChatRenderer:
             status,
         )
 
+        if not should_buffer:
+            self._trim_compact_logprobs(status, status.delta_output_string)
         if should_buffer:
             return await self._create_empty_delta(output.aux_info)
 
@@ -811,7 +1295,11 @@ class CustomChatRenderer:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
-                logprobs=await self._generate_log_probs(status, output),
+                logprobs=(
+                    self._take_compact_logprobs(status)
+                    if status.compact_logprobs
+                    else await self._generate_log_probs(status, output)
+                ),
                 input_length=output.aux_info.input_len,
                 output_length=output.aux_info.output_len,
                 reuse_length=output.aux_info.reuse_len,
@@ -990,7 +1478,15 @@ class CustomChatRenderer:
                     delta=delta,
                     logprobs=(
                         ChoiceLogprobs(
-                            content=[item.logprobs] if item.logprobs != None else None,
+                            content=(
+                                (
+                                    item.logprobs
+                                    if isinstance(item.logprobs, list)
+                                    else [item.logprobs]
+                                )
+                                if item.logprobs is not None
+                                else None
+                            ),
                             refusal=None,
                         )
                         if item.logprobs != None
@@ -1049,10 +1545,15 @@ class CustomChatRenderer:
             trunc_string = truncate_response_with_stop_words(
                 pending_output, stop_words_str, is_streaming
             )
+            self._trim_compact_logprobs(buffer, trunc_string)
             output_items.append(
                 OutputDelta(
                     trunc_string,
-                    await self._generate_log_probs(buffer, buffer.output),
+                    (
+                        self._take_compact_logprobs(buffer)
+                        if buffer.compact_logprobs
+                        else await self._generate_log_probs(buffer, buffer.output)
+                    ),
                     aux_info.input_len,
                     aux_info.output_len,
                     aux_info.reuse_len,
@@ -1312,6 +1813,7 @@ class CustomChatRenderer:
         stop_words_str: List[str],
         stop_word_slice_list: List[str],
         is_streaming: bool,
+        compact_payload=None,
     ) -> OutputDelta:
         if status.finish_reason != None:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
@@ -1321,15 +1823,14 @@ class CustomChatRenderer:
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
         )
+        self._accumulate_compact_logprobs(status, output_ids, compact_payload)
         decoded_prev_token = self.tokenizer.decode(status.prev_token_id)
         decoded_string = self.tokenizer.decode(status.tokens_to_decode)
-        # For some tokenizers (e.g. ChatGLM), decode a single token differs from decode a list of tokens.
-        if is_streaming:
-            if len(decoded_string) > 0 and "\ufffd" == decoded_string[-1]:
-                return self._create_empty_delta_sync(input_len, output_len, reuse_len)
-        else:
-            while (len(decoded_string) > 0) and ("\ufffd" == decoded_string[-1]):
-                decoded_string = decoded_string[:-1]
+        decoded_string, trimmed_utf8 = self._prepare_decoded_string_for_emit(
+            status, decoded_string, is_streaming
+        )
+        if decoded_string is None:
+            return self._create_empty_delta_sync(input_len, output_len, reuse_len)
         status.delta_output_string = decoded_string[len(decoded_prev_token) :]
 
         # Process stop words: truncate complete stop words, detect partial stop words
@@ -1341,6 +1842,8 @@ class CustomChatRenderer:
             status,
         )
 
+        if not should_buffer:
+            self._trim_compact_logprobs(status, status.delta_output_string)
         if should_buffer:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)
 
@@ -1349,7 +1852,11 @@ class CustomChatRenderer:
             status.update_result()
             delta = OutputDelta(
                 output_str=status.delta_output_string,
-                logprobs=self._generate_log_probs_sync(status, all_probs, output_ids),
+                logprobs=(
+                    self._take_compact_logprobs(status)
+                    if status.compact_logprobs
+                    else self._generate_log_probs_sync(status, all_probs, output_ids)
+                ),
                 input_length=input_len,
                 output_length=output_len,
                 reuse_length=reuse_len,
@@ -1394,7 +1901,15 @@ class CustomChatRenderer:
                     ),
                     logprobs=(
                         ChoiceLogprobs(
-                            content=[item.logprobs] if item.logprobs != None else None,
+                            content=(
+                                (
+                                    item.logprobs
+                                    if isinstance(item.logprobs, list)
+                                    else [item.logprobs]
+                                )
+                                if item.logprobs is not None
+                                else None
+                            ),
                             refusal=None,
                         )
                         if item.logprobs != None
@@ -1436,10 +1951,17 @@ class CustomChatRenderer:
             trunc_string = truncate_response_with_stop_words(
                 buffer.delta_output_string, stop_words_str, is_streaming
             )
+            self._trim_compact_logprobs(buffer, trunc_string)
             output_items.append(
                 OutputDelta(
                     trunc_string,
-                    self._generate_log_probs_sync(buffer, all_probs, output_ids),
+                    (
+                        self._take_compact_logprobs(buffer)
+                        if buffer.compact_logprobs
+                        else self._generate_log_probs_sync(
+                            buffer, all_probs, output_ids
+                        )
+                    ),
                     input_len,
                     output_len,
                     reuse_len,
@@ -1522,18 +2044,28 @@ class CustomChatRenderer:
         max_new_tokens,  # GenerateConfig
         stop_words_str,  # GenerateConfig
         is_streaming,
+        compact_logprobs=None,
     ):
         stop_word_slice_list = get_stop_word_slices(
             stop_words_str
         )  # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
-        for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
-            status_list,
-            input_len_list,
-            output_len_list,
-            reuse_len_list,  # AuxInfo
-            all_probs_list,
-            output_ids_list,  # GenerateOutput
+        for choice_index, (
+            status,
+            input_len,
+            output_len,
+            reuse_len,
+            all_probs,
+            output_ids,
+        ) in enumerate(
+            zip(
+                status_list,
+                input_len_list,
+                output_len_list,
+                reuse_len_list,  # AuxInfo
+                all_probs_list,
+                output_ids_list,  # GenerateOutput
+            )
         ):
             delta_list.append(
                 self._update_single_status_sync(
@@ -1547,6 +2079,11 @@ class CustomChatRenderer:
                     stop_words_str,
                     stop_word_slice_list,
                     is_streaming,
+                    compact_payload=(
+                        compact_logprobs[choice_index]
+                        if compact_logprobs is not None
+                        else None
+                    ),
                 )
             )
         stream_response = self._generate_stream_response_sync(delta_list)
@@ -1619,18 +2156,28 @@ class CustomChatRenderer:
         max_new_tokens,  # GenerateConfig
         stop_words_str,  # GenerateConfig
         is_streaming,
+        compact_logprobs=None,
     ):
         stop_word_slice_list = get_stop_word_slices(
             stop_words_str
         )  # move into cpp, then pass in
         delta_list: List[OutputDelta] = []
-        for status, input_len, output_len, reuse_len, all_probs, output_ids in zip(
-            status_list,
-            input_len_list,
-            output_len_list,
-            reuse_len_list,  # AuxInfo
-            all_probs_list,
-            output_ids_list,  # GenerateOutput
+        for choice_index, (
+            status,
+            input_len,
+            output_len,
+            reuse_len,
+            all_probs,
+            output_ids,
+        ) in enumerate(
+            zip(
+                status_list,
+                input_len_list,
+                output_len_list,
+                reuse_len_list,  # AuxInfo
+                all_probs_list,
+                output_ids_list,  # GenerateOutput
+            )
         ):
             delta_list.append(
                 self._update_single_status_sync(
@@ -1644,6 +2191,11 @@ class CustomChatRenderer:
                     stop_words_str,
                     stop_word_slice_list,
                     is_streaming,
+                    compact_payload=(
+                        compact_logprobs[choice_index]
+                        if compact_logprobs is not None
+                        else None
+                    ),
                 )
             )
         stream_response = self._generate_stream_response_sync(delta_list)
@@ -1763,7 +2315,7 @@ class CustomChatRenderer:
             extra_outputs = response.extra_outputs or extra_outputs
 
         if usage == None:
-            logging.warning(f"No usage returned from stream response. use empty value.")
+            logging.warning("No usage returned from stream response. use empty value.")
             usage = UsageInfo(prompt_tokens=0, total_tokens=0, completion_tokens=0)
         chat_response = ChatCompletionResponse(
             choices=all_choices,

@@ -100,14 +100,13 @@ public:
                 }
             }
             const int    snapshot_seq_len = mtp_state.next_seq_len_upper_bound;
-            const size_t seq_len          = use_mtp_snapshot && snapshot_seq_len > 0 ?
-                                                static_cast<size_t>(snapshot_seq_len) :
-                                                static_cast<size_t>(stream->seqLength());
-            max_seq_len_                  = std::max(max_seq_len_, seq_len);
+            const size_t seq_len = use_mtp_snapshot && snapshot_seq_len > 0 ? static_cast<size_t>(snapshot_seq_len) :
+                                                                              static_cast<size_t>(stream->seqLength());
+            max_seq_len_         = std::max(max_seq_len_, seq_len);
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
-            gen_timeline_ |= use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) :
-                                                stream->genTimeline();
+            gen_timeline_ |=
+                use_mtp_snapshot ? stream->genTimelineAtSeqLength(static_cast<int>(seq_len)) : stream->genTimeline();
         }
     }
 
@@ -204,6 +203,66 @@ public:
         return decode_streams_;
     }
 
+    void addContextExecuteTimeUs(int64_t execute_time_us) const {
+        addAllocatedExecuteTime(
+            context_streams_,
+            execute_time_us,
+            [](const GenerateStreamPtr& stream) { return static_cast<int64_t>(stream->currentExecuteTokenSize()); },
+            [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
+                stream->addContextExecuteTimeUs(allocated_time_us);
+            });
+        addAllocatedExecuteTime(
+            context_streams_,
+            execute_time_us,
+            [](const GenerateStreamPtr& stream) {
+                return static_cast<int64_t>(stream->currentExecuteTokenSize()
+                                            + stream->reuseLength() * stream->currentBatchSize());
+            },
+            [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
+                stream->addContextExecuteTimeWithCacheUs(allocated_time_us);
+            });
+    }
+
+    void addGenerateExecuteTimeUs(int64_t execute_time_us) const {
+        addAllocatedExecuteTime(
+            decode_streams_,
+            execute_time_us,
+            [](const GenerateStreamPtr& stream) { return static_cast<int64_t>(stream->currentBatchSize()); },
+            [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
+                stream->addGenerateExecuteTimeUs(allocated_time_us);
+            });
+    }
+
+    void addFrontendContextExecuteMetrics(int64_t execute_time_us) const {
+        auto owner = frontendMetricOwner(context_streams_);
+        if (owner != nullptr) {
+            owner->addFrontendContextExecuteMetrics(execute_time_us,
+                                                    static_cast<int64_t>(contextExecuteTokenSize()),
+                                                    static_cast<int64_t>(contextExecuteTokenSizeWithCache()));
+        }
+    }
+
+    void addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num) const {
+        auto owner = frontendMetricOwner(decode_streams_);
+        if (owner != nullptr) {
+            owner->addFrontendGenerateExecuteMetrics(execute_time_us, generate_token_num);
+        }
+    }
+
+    bool needFrontendMetricStreaming() const {
+        for (const auto& stream : context_streams_) {
+            if (stream->generateConfig()->frontend_metric_streaming) {
+                return true;
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            if (stream->generateConfig()->frontend_metric_streaming) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool hasMMExtraInput() const {
         for (auto& stream : context_streams_) {
             if (stream->hasMultimodalExtraInput()) {
@@ -283,6 +342,35 @@ public:
         return false;
     }
 
+    bool needReturnLogProbs() const {
+        for (const auto& stream : context_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                return true;
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    int maxTopLogProbs() const {
+        int max_top_logprobs = 0;
+        for (const auto& stream : context_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                max_top_logprobs = std::max(max_top_logprobs, stream->generateConfig()->top_logprobs);
+            }
+        }
+        for (const auto& stream : decode_streams_) {
+            if (stream->generateConfig()->return_logprobs) {
+                max_top_logprobs = std::max(max_top_logprobs, stream->generateConfig()->top_logprobs);
+            }
+        }
+        return max_top_logprobs;
+    }
+
     std::list<GenerateStreamPtr> allStreams() const {
         std::list<GenerateStreamPtr> all_streams = decode_streams_;
         all_streams.splice(all_streams.end(), std::list<GenerateStreamPtr>(context_streams_));
@@ -343,6 +431,53 @@ public:
     }
 
 private:
+    static GenerateStreamPtr frontendMetricOwner(const std::list<GenerateStreamPtr>& streams) {
+        for (const auto& stream : streams) {
+            if (!stream->isFakeStream() && !stream->isFinished() && !stream->hasError()
+                && stream->generateConfig()->frontend_metric_streaming) {
+                return stream;
+            }
+        }
+        return nullptr;
+    }
+
+    template<typename WeightFn, typename AddFn>
+    static void addAllocatedExecuteTime(const std::list<GenerateStreamPtr>& streams,
+                                        int64_t                             execute_time_us,
+                                        WeightFn                            weight_fn,
+                                        AddFn                               add_fn) {
+        if (execute_time_us <= 0 || streams.empty()) {
+            return;
+        }
+        int64_t total_weight  = 0;
+        auto    last_weighted = streams.end();
+        for (auto stream_it = streams.begin(); stream_it != streams.end(); ++stream_it) {
+            const auto weight = std::max<int64_t>(weight_fn(*stream_it), 0);
+            total_weight += weight;
+            if (weight > 0) {
+                last_weighted = stream_it;
+            }
+        }
+        if (total_weight <= 0) {
+            return;
+        }
+
+        int64_t allocated_time_us = 0;
+        auto    stream_it         = streams.begin();
+        for (; stream_it != streams.end(); ++stream_it) {
+            const auto weight = std::max<int64_t>(weight_fn(*stream_it), 0);
+            if (weight == 0) {
+                continue;
+            }
+            const bool is_last = stream_it == last_weighted;
+            int64_t    stream_time_us =
+                is_last ? execute_time_us - allocated_time_us : execute_time_us * weight / total_weight;
+            stream_time_us = std::max<int64_t>(stream_time_us, 0);
+            add_fn(*stream_it, stream_time_us);
+            allocated_time_us += stream_time_us;
+        }
+    }
+
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
     size_t                       total_sampler_batch_size_in_           = 0;

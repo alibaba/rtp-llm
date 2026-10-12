@@ -55,7 +55,6 @@ public:
         return std::nullopt;
     }
 
-
     // --- async decode extensions (stream-async / grpc device-state pipelines) ---
     // Stateful processors advance internal state per committed token; the async
     // pipelines use these hooks to keep bookkeeping off the hot path.
@@ -71,6 +70,10 @@ public:
     }
     virtual int64_t acceptedTokenLen() const {
         return 0;
+    }
+
+    virtual int64_t finishedThinkOutputLen() const {
+        return -1;
     }
 
     void          memFill(const torch::Tensor& new_tokens_logits, size_t vocab_size, size_t index);

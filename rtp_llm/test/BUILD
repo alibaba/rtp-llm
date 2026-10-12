@@ -461,3 +461,9 @@ py_test(
     exec_properties = {"gpu": "A10_CU13"},
     tags = ["A10_CU13"],
 )
+
+py_test(
+    name = "compact_logprobs_renderer_test",
+    srcs = ["compact_logprobs_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

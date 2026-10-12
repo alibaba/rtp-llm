@@ -171,8 +171,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         const auto& model_cache_config =
             is_propose_ ? cache_manager->getMTPModuleCacheConfig(propose_model_index_) : cache_manager->cacheConfig();
         const size_t runtime_tokens_per_block = model_cache_config.seq_size_per_block;
-        const size_t max_reserved_step = params.sp_config.speculativeReserveStep();
-        const auto& topology = model_init_params.kv_cache_layer_layout->topology();
+        const size_t max_reserved_step        = params.sp_config.speculativeReserveStep();
+        const auto&  topology                 = model_init_params.kv_cache_layer_layout->topology();
         RTP_LLM_CHECK_WITH_INFO(params.model_config_.max_seq_len > 0,
                                 "CUDA graph max sequence length must be positive");
         const size_t max_seq_len = static_cast<size_t>(params.model_config_.max_seq_len);
@@ -185,15 +185,14 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
         const size_t warmup_span = params.model_config_.attn_config.tokens_per_block;
         RTP_LLM_CHECK_WITH_INFO(warmup_span > 0 && runtime_tokens_per_block > 0,
                                 "CUDA graph fake block spans must be positive");
-        const size_t warmup_len = warmUpInputLength(max_seq_len, max_reserved_step);
-        const size_t decode_tokens = warmup_len + max_reserved_step;
+        const size_t warmup_len           = warmUpInputLength(max_seq_len, max_reserved_step);
+        const size_t decode_tokens        = warmup_len + max_reserved_step;
         const size_t decode_warmup_blocks = decode_tokens / warmup_span + (decode_tokens % warmup_span != 0);
-        const size_t prefill_warmup_blocks = warmup_len / runtime_tokens_per_block
-                                             + (warmup_len % runtime_tokens_per_block != 0);
+        const size_t prefill_warmup_blocks =
+            warmup_len / runtime_tokens_per_block + (warmup_len % runtime_tokens_per_block != 0);
         const size_t fake_count = std::max<size_t>({1, decode_warmup_blocks, prefill_warmup_blocks});
         const size_t fake_width = CudaGraphRunner::captureKernelBlockTableWidth(topology, fake_count);
-        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width)
-                                    <= std::numeric_limits<int64_t>::max(),
+        RTP_LLM_CHECK_WITH_INFO(std::max(real_width, fake_width) <= std::numeric_limits<int64_t>::max(),
                                 "CUDA graph kernel block table width exceeds int64 range");
         model_init_params.kernel_block_table_width = std::max(real_width, fake_width);
     }
@@ -389,6 +388,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
+    int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+    if (tps_execute_time_us <= 0)
+        tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+    stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
+    stream_groups.addGenerateExecuteTimeUs(tps_execute_time_us);
+    stream_groups.addFrontendContextExecuteMetrics(tps_execute_time_us);
+    stream_groups.addFrontendGenerateExecuteMetrics(tps_execute_time_us,
+                                                    static_cast<int64_t>(stream_groups.totalDecodeBatchSize()));
     if (useStreamAsync() && is_decode_only) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -401,10 +408,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         return dispatchOutputAsync(stream_groups,
@@ -423,10 +426,6 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
         if (profile_step_finish_) {

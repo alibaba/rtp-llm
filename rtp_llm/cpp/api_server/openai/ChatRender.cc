@@ -37,6 +37,21 @@ getArgs(const GenerateOutputs& outputs) {
     return std::make_tuple(input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list);
 }
 
+py::list getCompactLogprobs(const GenerateOutputs& outputs) {
+    py::list payloads;
+    for (const auto& output : outputs.generate_outputs) {
+        auto tensor_or_none = [](const std::optional<th::Tensor>& tensor) -> py::object {
+            return tensor.has_value() && tensor->defined() ? py::cast(*tensor) : py::none();
+        };
+        payloads.append(py::make_tuple(tensor_or_none(output.token_logprobs),
+                                       tensor_or_none(output.top_logprob_token_ids),
+                                       tensor_or_none(output.top_logprobs),
+                                       output.logprobs_offset,
+                                       output.logprobs_count));
+    }
+    return payloads;
+}
+
 std::optional<th::Tensor> getCustomOutput(const GenerateOutputs& outputs) {
     // Match the Python renderer's request-level extra_outputs (last choice).
     return outputs.generate_outputs.empty() ? std::nullopt : outputs.generate_outputs.back().custom_output;
@@ -53,15 +68,17 @@ void RenderContext::render_stream_response_blocking(const GenerateOutputs&      
                                                     bool                                   is_streaming) {
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
-    auto response = render_->attr("render_stream_response_blocking")(*status_list_,
-                                                                     input_len_list,
-                                                                     output_len_list,
-                                                                     reuse_len_list,
-                                                                     all_probs_list,
-                                                                     output_ids_list,
-                                                                     config->max_new_tokens,
-                                                                     config->stop_words_str,
-                                                                     is_streaming);
+    auto response = render_->attr("render_stream_response_blocking")(
+        *status_list_,
+        input_len_list,
+        output_len_list,
+        reuse_len_list,
+        all_probs_list,
+        output_ids_list,
+        config->max_new_tokens,
+        config->stop_words_str,
+        is_streaming,
+        py::arg("compact_logprobs") = config->return_logprobs ? py::object(getCompactLogprobs(outputs)) : py::none());
     complete_responses_->append(response);
 }
 
@@ -102,16 +119,18 @@ std::string RenderContext::render_common_response(const GenerateOutputs&        
                                                   bool                                   is_streaming) {
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
-    auto json_response = render_->attr(function_name)(*status_list_,
-                                                      input_len_list,
-                                                      output_len_list,
-                                                      reuse_len_list,
-                                                      all_probs_list,
-                                                      output_ids_list,
-                                                      config->max_new_tokens,
-                                                      config->stop_words_str,
-                                                      is_streaming);
-    auto res           = py::cast<std::string>(json_response);
+    auto json_response = render_->attr(function_name)(
+        *status_list_,
+        input_len_list,
+        output_len_list,
+        reuse_len_list,
+        all_probs_list,
+        output_ids_list,
+        config->max_new_tokens,
+        config->stop_words_str,
+        is_streaming,
+        py::arg("compact_logprobs") = config->return_logprobs ? py::object(getCompactLogprobs(outputs)) : py::none());
+    auto res = py::cast<std::string>(json_response);
     return res;
 }
 

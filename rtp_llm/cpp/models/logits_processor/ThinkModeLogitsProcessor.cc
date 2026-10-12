@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/models/logits_processor/ThinkModeLogitsProcessor.h"
 #include <algorithm>
+#include "autil/EnvUtil.h"
 
 using namespace std;
 
@@ -31,7 +32,7 @@ bool transitionToAfterThinkIfClosed(StreamThinkInfo& info) {
     if (!info.dfa_ptr || !info.dfa_ptr->isFinished()) {
         return false;
     }
-    info.process_state = ThinkProcessState::AFTER_THINK;
+    info.markAfterThink();
     return true;
 }
 
@@ -47,7 +48,7 @@ bool thinkBudgetExhausted(const SamplerInputs& inputs, size_t batch_idx, const S
     }
 
     const int observed_output_tokens = std::max(generatedTokens(inputs, batch_idx), info.current_output_length);
-    return observed_output_tokens >= info.max_thinking_tokens;
+    return observed_output_tokens >= info.bodyTokenBudget();
 }
 
 bool thinkEndCloseInProgress(const StreamThinkInfo& info) {
@@ -101,7 +102,7 @@ bool bitmaskAllowsToken(const int32_t* row, size_t words, int32_t token_id) {
 
 bool specThinkBudgetExhausted(const StreamThinkInfo& info) {
     return info.dfa_ptr && !info.end_think_token_ids.empty() && info.max_thinking_tokens > 0
-           && info.current_output_length >= info.max_thinking_tokens;
+           && info.current_output_length >= info.bodyTokenBudget();
 }
 
 bool forceThinkEndTokenInBitmask(int32_t* row, size_t words, const StreamThinkInfo& info) {
@@ -164,7 +165,7 @@ void advanceThinkStateForSpec(StreamThinkInfo& info, int32_t token_id) {
 
     info.dfa_ptr->next(token_id);
     if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
+        info.markAfterThink();
     } else if (thinkEndCloseInProgress(info)) {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -265,7 +266,7 @@ bool ThinkModeLogitsProcessor::forceThinkEndToken(const torch::Tensor& new_token
     info.pending_forced_think_end_token_ids.push_back(token_id);
     info.current_output_length += 1;
     if (info.dfa_ptr->isFinished()) {
-        info.process_state = ThinkProcessState::AFTER_THINK;
+        info.markAfterThink();
     } else {
         info.process_state = ThinkProcessState::CLOSING_THINK;
     }
@@ -283,7 +284,7 @@ void ThinkModeLogitsProcessor::updateMultiSeqStatus(const std::vector<int>& src_
 }
 
 std::optional<ErrorInfo> ThinkModeLogitsProcessor::updateStatus(const torch::Tensor& new_tokens,
-                                                               int32_t              num_new_tokens) {
+                                                                int32_t              num_new_tokens) {
     RTP_LLM_CHECK(2 == new_tokens.dim());
     std::lock_guard<std::mutex> lock(mutex_);
     RTP_LLM_CHECK(think_infos_.size() == (size_t)new_tokens.size(0));
@@ -326,7 +327,7 @@ std::optional<ErrorInfo> ThinkModeLogitsProcessor::updateStatus(const torch::Ten
 
             info.dfa_ptr->next(current_token_id);
             if (info.dfa_ptr->isFinished()) {
-                info.process_state = ThinkProcessState::AFTER_THINK;
+                info.markAfterThink();
             } else if (thinkEndCloseInProgress(info)) {
                 info.process_state = ThinkProcessState::CLOSING_THINK;
             } else if (info.process_state == ThinkProcessState::CLOSING_THINK) {
@@ -353,6 +354,14 @@ int64_t ThinkModeLogitsProcessor::acceptedTokenLen() const {
         return 0;
     }
     return snapshot->info.current_output_length;
+}
+
+int64_t ThinkModeLogitsProcessor::finishedThinkOutputLen() const {
+    auto snapshot = std::atomic_load_explicit(&spec_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->eligible) {
+        return -1;
+    }
+    return snapshot->info.finishedThinkOutputLen();
 }
 
 MtpProcessorCapability ThinkModeLogitsProcessor::mtpCapability() const {
@@ -399,15 +408,18 @@ int ThinkModeLogitsProcessor::tryAcceptAndFillBitmask(const SpecLogitsProcessorR
 
 ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> generate_input,
                                                                         int32_t                        num) {
-    auto generate_config         = generate_input->generate_config;
-    auto end_think_token_ids     = generate_config->end_think_token_ids;
+    auto       generate_config     = generate_input->generate_config;
+    auto       end_think_token_ids = generate_config->end_think_token_ids;
+    const bool separate_budget     = autil::EnvUtil::getEnv("RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING", false);
+    const int  max_thinking_tokens = separate_budget && generate_config->max_thinking_tokens < 1 ?
+                                         generate_config->max_new_tokens :
+                                         generate_config->max_thinking_tokens;
     // Match main's admission gate: only think-mode requests with a budget get a
     // processor, so non-think requests never mask the think boundary tokens.
-    if (!generate_config->in_think_mode || generate_config->max_thinking_tokens == 0) {
+    if (!generate_config->in_think_mode || max_thinking_tokens == 0) {
         return nullptr;
     }
-    bool has_think_budget =
-        generate_config->in_think_mode && generate_config->max_thinking_tokens > 0 && !end_think_token_ids.empty();
+    bool has_think_budget = generate_config->in_think_mode && max_thinking_tokens > 0 && !end_think_token_ids.empty();
 
     auto processor_ptr = std::make_shared<ThinkModeLogitsProcessor>();
     for (size_t i = 0; i < num; i++) {
@@ -415,14 +427,15 @@ ThinkModeLogitsProcessorPtr ThinkModeLogitsProcessor::fromGenerateInput(std::sha
         if (has_think_budget) {
             dfa_ptr = std::make_shared<StringContainDFA<size_t, int>>(end_think_token_ids);
         }
-        StreamThinkInfo              think_info(generate_config->in_think_mode,
-                                   generate_config->max_thinking_tokens,
+        StreamThinkInfo think_info(generate_config->in_think_mode,
+                                   max_thinking_tokens,
                                    generate_config->begin_think_token_ids,
                                    end_think_token_ids,
                                    generate_input->inputLength(),
                                    0,
                                    generate_config->hasNumBeams() || generate_config->num_return_sequences > 1,
                                    dfa_ptr);
+        think_info.budget_includes_boundary_tags = separate_budget;
         std::vector<StreamThinkInfo> think_infos = {think_info};
         auto                         ptr         = std::make_shared<ThinkModeLogitsProcessor>(think_infos);
 

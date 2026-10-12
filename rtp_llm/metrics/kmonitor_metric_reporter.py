@@ -23,6 +23,11 @@ def qos_priority_tag(qos_level: Any) -> str:
         return "0"
 
 
+SERVICE_STATUS_TAG = "is_serving"
+SERVICE_STATUS_METRIC = "rtp_llm_service_status"
+STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+
+
 class AccMetrics(Enum):
     CANCEL_QPS_METRIC = "py_rtp_cancal_qps_metric"
     SUCCESS_QPS_METRIC = "py_rtp_success_qps_metric"
@@ -79,6 +84,7 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    SERVICE_STATUS_METRIC = SERVICE_STATUS_METRIC
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"
@@ -154,6 +160,32 @@ class GaugeMetrics(Enum):
     OUTPUT_REPETITION_REPEAT_COUNT_METRIC = "py_rtp_output_repetition_repeat_count"
     OUTPUT_REPETITION_DUPLICATE_TOKENS_METRIC = (
         "py_rtp_output_repetition_duplicate_tokens"
+    )
+
+    # Request-lifecycle metrics emitted by the Python frontend after rendering.
+    FRONTEND_INPUT_LENGTH_METRIC = "py_rtp_frontend_input_length"
+    FRONTEND_OUTPUT_LENGTH_METRIC = "py_rtp_frontend_output_length"
+    FRONTEND_CACHED_TOKEN_LENGTH_METRIC = "py_rtp_frontend_cached_token_length"
+    FRONTEND_CACHE_HIT_RATIO_METRIC = "py_rtp_frontend_cache_hit_ratio"
+    FRONTEND_CONCURRENCY_METRIC = "py_rtp_frontend_concurrency"
+    FRONTEND_TTFT_MS_METRIC = "py_rtp_frontend_ttft_ms"
+    FRONTEND_TPOT_MS_METRIC = "py_rtp_frontend_tpot_ms"
+    FRONTEND_REQUEST_RT_MS_METRIC = "py_rtp_frontend_request_rt_ms"
+    FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC = "py_rtp_frontend_speculative_accept_rate"
+    FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC = (
+        "py_rtp_frontend_speculative_avg_accept_length"
+    )
+    FRONTEND_STREAM_FIRST_OUTPUT_TOKEN_LENGTH_METRIC = (
+        "py_rtp_frontend_stream_first_output_token_length"
+    )
+    # Backend execution-time-normalized token throughput.
+    FRONTEND_INPUT_TOKEN_TPS_METRIC = "py_rtp_frontend_input_token_tps"
+    FRONTEND_OUTPUT_TOKEN_TPS_METRIC = "py_rtp_frontend_output_token_tps"
+    FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC = (
+        "py_rtp_frontend_noncache_input_token_tps"
+    )
+    FRONTEND_NONCACHE_OUTPUT_TOKEN_TPS_METRIC = (
+        "py_rtp_frontend_noncache_output_token_tps"
     )
 
 

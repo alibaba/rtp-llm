@@ -20,6 +20,7 @@ cc_library(
         "GenerateTypes.h",
     ],
     deps = [
+        ":frontend_sp_tpot_samples",
         "//rtp_llm/cpp/models:position_ids_generator",
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
         "//:rtp_compute_ops",
@@ -35,6 +36,7 @@ cc_library(
         ":generate_types",
         ":generate_config",
         "//rtp_llm/cpp/utils:error_code",
+        "//rtp_llm/cpp/utils:core_utils",
         "//:rtp_compute_ops",
     ],
     visibility = ["//visibility:public"],
@@ -44,7 +46,7 @@ cc_library(
     name = "stream",
     hdrs = glob([
         "*.h",
-    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h"]),
+    ], exclude = ["GenerateTypes.h", "CompleteTokenIds.h", "FrontendSpTpotSamples.h"]),
     srcs = glob([
         "*.cc",
     ], exclude = ["CompleteTokenIds.cc"]),
@@ -63,5 +65,11 @@ cc_library(
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/utils:linear_blocks_util",
     ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "frontend_sp_tpot_samples",
+    hdrs = ["FrontendSpTpotSamples.h"],
     visibility = ["//visibility:public"],
 )

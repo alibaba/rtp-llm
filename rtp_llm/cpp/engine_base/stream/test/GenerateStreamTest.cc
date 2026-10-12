@@ -111,6 +111,24 @@ class GenerateStreamTest: public DeviceTestBase {
 protected:
 };
 
+TEST_F(GenerateStreamTest, CompactLogprobsAcceptDefaultAndExplicitSingleSequence) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 8;
+    model_config.vocab_size  = 10;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    for (const int sequences : {0, 1}) {
+        auto input                                   = std::make_shared<GenerateInput>();
+        input->input_ids                             = torch::tensor({2}, torch::kInt32);
+        input->generate_config                       = std::make_shared<GenerateConfig>();
+        input->generate_config->num_return_sequences = sequences;
+        input->generate_config->return_logprobs      = true;
+        auto stream =
+            std::make_shared<NormalGenerateStream>(input, model_config, runtime_config, resource_context, nullptr);
+        EXPECT_EQ(stream->maxBatchSize(), 1);
+    }
+}
+
 template<typename T>
 void waitForConsumer(std::future<T>& future, const std::shared_ptr<NormalGenerateStream>& stream) {
     const auto status = future.wait_for(std::chrono::seconds(5));

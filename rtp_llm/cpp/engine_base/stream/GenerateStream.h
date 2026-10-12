@@ -50,6 +50,11 @@ struct StreamUpdateInfo {
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     // Appended to preserve existing aggregate initializers. CPU context rows.
     const torch::Tensor custom_output{};
+    const torch::Tensor token_logprobs{};
+    const torch::Tensor top_logprob_token_ids{};
+    const torch::Tensor top_logprobs{};
+    int32_t             old_seq_length  = -1;
+    int32_t             logprobs_offset = 0;
 };
 
 struct StreamSpecUpdateInfo {
@@ -72,8 +77,12 @@ struct StreamSpecUpdateInfo {
 
     // Rejection-sampling result for this speculative decode round. Prefill
     // updates leave speculative_propose_step at zero and are not counted.
-    int speculative_propose_step = 0;
-    int accepted_draft_tokens    = 0;
+    int           speculative_propose_step = 0;
+    int           accepted_draft_tokens    = 0;
+    torch::Tensor token_logprobs;
+    torch::Tensor top_logprob_token_ids;
+    torch::Tensor top_logprobs;
+    int32_t       logprobs_offset = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -266,8 +275,17 @@ public:
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
-    void step();
-    void spStep();
+    void    step();
+    void    spStep();
+    void    addContextExecuteTimeUs(int64_t execute_time_us);
+    void    addContextExecuteTimeWithCacheUs(int64_t execute_time_us);
+    void    addGenerateExecuteTimeUs(int64_t execute_time_us);
+    void    addFrontendContextExecuteMetrics(int64_t execute_time_us,
+                                             int64_t context_token_num,
+                                             int64_t context_token_num_with_cache);
+    void    addFrontendGenerateExecuteMetrics(int64_t execute_time_us, int64_t generate_token_num);
+    int64_t contextExecuteTimeUs() const;
+    int64_t contextExecuteTimeWithCacheUs() const;
 
     // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
     // Stream is a pure data holder; NormalModelInputGatherer omits fully reused images
@@ -342,8 +360,8 @@ public:
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is finished
     // Complete a Decode stream owned by the RPC handler, before scheduler enqueue.
-    bool                finishWithoutGenerate();
-    bool                isActive() const;    // Returns true if stream is active (no error and not finished)
+    bool finishWithoutGenerate();
+    bool isActive() const;  // Returns true if stream is active (no error and not finished)
 
     // A response consumer may observe GenerateDone before the scheduler has
     // committed RUNNING -> FINISHED. Preserve that successful completion and
@@ -360,12 +378,22 @@ public:
         return speculative_accepted_tokens_per_pos_;
     }
 
-    const ResourceContext&      resourceContext() const;
-    void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
-    void                        setLoss(const torch::Tensor& loss);
-    void                        setSoftmaxProbs(const torch::Tensor& softmax_probs,
-                                                int                  start_pos,
-                                                const torch::Tensor& src_batch_indices = torch::Tensor());
+    void setLogProbs(const torch::Tensor& token_logprobs,
+                     const torch::Tensor& top_logprob_token_ids,
+                     const torch::Tensor& top_logprobs,
+                     const torch::Tensor& src_batch_indices,
+                     int                  start_pos);
+    bool hasLogprobsContentStarted() const;
+    bool shouldComputeLogprobs() const {
+        return generate_input_->generate_config->return_logprobs && hasLogprobsContentStarted();
+    }
+    int32_t                logprobsContentOffset(const torch::Tensor& candidate_tokens, int32_t num_new_tokens) const;
+    const ResourceContext& resourceContext() const;
+    void                   setKVCache(const BatchKVCacheResource& kv_cache_resource);
+    void                   setLoss(const torch::Tensor& loss);
+    void                   setSoftmaxProbs(const torch::Tensor& softmax_probs,
+                                           int                  start_pos,
+                                           const torch::Tensor& src_batch_indices = torch::Tensor());
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
     BatchKVCacheResourcePtr     kvCachePtr();
@@ -893,14 +921,27 @@ protected:
     size_t                             iter_count_    = 0;
     size_t                             sp_iter_count_ = 0;
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
-    size_t                             last_output_pos_      = 0;
-    int                                initial_reuse_length_ = 0;
-    int                                reuse_length_         = 0;
-    int                                local_reuse_length_   = 0;
-    int                                device_reuse_length_  = 0;
-    int                                remote_reuse_length_  = 0;
-    int                                host_reuse_length_    = 0;
-    int                                disk_reuse_length_    = 0;
+    int64_t                            speculative_verify_rounds_                   = 0;
+    int64_t                            speculative_accepted_token_num_              = 0;
+    int64_t                            speculative_proposed_draft_tokens_           = 0;
+    int64_t                            context_execute_time_us_                     = 0;
+    int64_t                            context_execute_time_with_cache_us_          = 0;
+    int64_t                            generate_execute_time_us_                    = 0;
+    int64_t                            frontend_context_token_num_                  = 0;
+    int64_t                            frontend_context_token_num_with_cache_       = 0;
+    int64_t                            frontend_context_execute_time_us_            = 0;
+    int64_t                            frontend_context_execute_time_with_cache_us_ = 0;
+    int64_t                            frontend_generate_token_num_                 = 0;
+    int64_t                            frontend_generate_execute_time_us_           = 0;
+    size_t                             last_frontend_metric_output_pos_             = 0;
+    size_t                             last_output_pos_                             = 0;
+    int                                initial_reuse_length_                        = 0;
+    int                                reuse_length_                                = 0;
+    int                                local_reuse_length_                          = 0;
+    int                                device_reuse_length_                         = 0;
+    int                                remote_reuse_length_                         = 0;
+    int                                host_reuse_length_                           = 0;
+    int                                disk_reuse_length_                           = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
@@ -929,6 +970,12 @@ protected:
     // ownership cycle is created.
 
     torch::Tensor                            cum_log_probs_;
+    torch::Tensor                            token_logprobs_;
+    torch::Tensor                            top_logprob_token_ids_;
+    torch::Tensor                            top_logprobs_;
+    int64_t                                  logprobs_history_size_    = 0;
+    std::shared_ptr<std::atomic<bool>>       logprobs_content_started_ = std::make_shared<std::atomic<bool>>(false);
+    void                                     updateLogprobsContentStarted(int old_seq_length);
     torch::Tensor                            all_probs_;
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;

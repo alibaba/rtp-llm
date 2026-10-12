@@ -7,9 +7,12 @@ from dataclasses import asdict
 from typing import Any, AsyncGenerator, Dict, Iterator, List, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
+from rtp_llm.frontend.backend_metric_observer import (
+    make_backend_metric_observer,
+    metric_backend_generate_config,
+)
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
     DecodingState,
@@ -520,6 +523,13 @@ class Pipeline(object):
         generate_config: GenerateConfig,
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
+        frontend_metric_observer = kwargs.pop("frontend_metric_observer", None)
+        frontend_metric_unit_id = int(kwargs.pop("frontend_metric_unit_id", request_id))
+        context_batch_size = (
+            1
+            if generate_config.has_num_beams()
+            else max(generate_config.num_return_sequences, 1)
+        )
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))
 
@@ -529,12 +539,18 @@ class Pipeline(object):
             request_id=request_id,
             token_ids=token_ids,
             mm_inputs=mm_inputs,
-            generate_config=generate_config,
+            generate_config=metric_backend_generate_config(
+                generate_config, frontend_metric_observer is not None
+            ),
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
             group_size=kwargs.get("group_size", 1),
             group_id=kwargs.get("group_id", -1),
             headers=request_headers,
+            frontend_metric_tags=dict(kwargs.get("frontend_metric_tags", {})),
+            frontend_metric_observer=make_backend_metric_observer(
+                frontend_metric_observer, context_batch_size, frontend_metric_unit_id
+            ),
         )
 
         stop_word_strs = generate_config.stop_words_str

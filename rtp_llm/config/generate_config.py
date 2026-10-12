@@ -1,6 +1,8 @@
 import copy
 import hashlib
+import json
 import logging
+import os
 import time
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -14,8 +16,6 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.grammar_constraint import parse_json_grammar_value
 from rtp_llm.config.response_format import (
@@ -32,6 +32,7 @@ from rtp_llm.config.thinking_mode import (
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
+from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 if TYPE_CHECKING:
     from rtp_llm.config.grammar_constraint import GrammarConstraint
@@ -114,6 +115,17 @@ def _reset_sanitize_warn_state():
     _last_downgrade_warn_time = 0.0
 
 
+def _env_int(env_name: str, default: int) -> int:
+    """Read an integer from environment variable, fallback to default."""
+    val = os.environ.get(env_name)
+    if val is not None:
+        try:
+            return int(val)
+        except ValueError:
+            pass
+    return default
+
+
 class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
@@ -121,10 +133,10 @@ class GenerateConfig(BaseModel):
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
 
-    max_new_tokens: int = 32000
+    max_new_tokens: int = _env_int("MAX_NEW_TOKENS", 32000)
     # only for qwen agent fncall check max input tokens
-    max_input_tokens: int = 32000
-    max_thinking_tokens: int = 32000
+    max_input_tokens: int = _env_int("MAX_INPUT_TOKENS", 32000)
+    max_thinking_tokens: int = _env_int("MAX_THINKING_TOKENS", 131072)
     in_think_mode: bool = (
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
@@ -227,6 +239,8 @@ class GenerateConfig(BaseModel):
     force_sp_accept: bool = False
     return_cum_log_probs: bool = False
     return_all_probs: int = ReturnAllProbsMode.NONE
+    return_logprobs: bool = False
+    top_logprobs: int = Field(default=0, strict=True)
     return_softmax_probs: bool = False
     aux_info: bool = True
     can_use_pd_separation: bool = True
@@ -243,6 +257,9 @@ class GenerateConfig(BaseModel):
     # lora
     adapter_name: Optional[Union[str, List[str]]] = None
     is_streaming: bool = False
+    # Internal backend side-channel: emit AuxInfo-only progress frames for
+    # frontend TPS accounting without changing public streaming semantics.
+    frontend_metric_streaming: bool = Field(default=False, exclude=True)
 
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
@@ -758,6 +775,26 @@ class GenerateConfig(BaseModel):
                 f"num_return_sequences {self.num_return_sequences} is wrong data type",
             )
             check_with_info(
+                isinstance(self.return_logprobs, bool),
+                f"return_logprobs {self.return_logprobs} is wrong data type",
+            )
+            check_with_info(
+                isinstance(self.top_logprobs, int)
+                and not isinstance(self.top_logprobs, bool)
+                and 0 <= self.top_logprobs <= 20,
+                f"top_logprobs {self.top_logprobs} must be an integer between 0 and 20",
+            )
+            if not self.return_logprobs and self.top_logprobs > 0:
+                raise ValueError("top_logprobs requires return_logprobs=true")
+            if self.return_logprobs and self.thinking_mode == ThinkingMode.ADAPTIVE:
+                raise ValueError("compact logprobs requires a fixed thinking mode")
+            if self.return_logprobs and (
+                self.has_num_beams() or self.num_return_sequences > 1
+            ):
+                raise ValueError(
+                    "logprobs does not support beam search or num_return_sequences > 1"
+                )
+            check_with_info(
                 is_union_positive_number(self.temperature),
                 f"temperature {self.temperature} is wrong data type",
             )
@@ -833,7 +870,7 @@ class GenerateConfig(BaseModel):
                 ThinkingMode.ENABLED,
             ):
                 check_with_info(
-                    is_positive_integer(self.max_thinking_tokens),
+                    isinstance(self.max_thinking_tokens, int),
                     f"max_thinking_tokens {self.max_thinking_tokens} is wrong data type",
                 )
                 check_with_info(

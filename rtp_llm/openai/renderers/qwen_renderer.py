@@ -454,7 +454,8 @@ class QwenRenderer(CustomChatRenderer):
             )
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(
+        self._update_status_output(
+            status,
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,
@@ -592,6 +593,7 @@ class QwenRenderer(CustomChatRenderer):
         stop_words_str: List[str],
         stop_word_slice_list: List[str],
         is_streaming: bool,
+        compact_payload=None,
     ) -> OutputDelta:
         # function call is disabled when logprobs is required.
         if not isinstance(status, QwenStreamStatusSync):
@@ -606,6 +608,7 @@ class QwenRenderer(CustomChatRenderer):
                 stop_words_str,
                 stop_word_slice_list,
                 is_streaming,
+                compact_payload=compact_payload,
             )
         if status.finish_reason != None:
             return self._create_empty_delta_sync(input_len, output_len, reuse_len)

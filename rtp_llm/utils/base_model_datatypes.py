@@ -1,9 +1,8 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Dict, List, NamedTuple, Optional, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Union
 
 import torch
-
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.ops import MultimodalInput
 
@@ -75,6 +74,10 @@ class GenerateInput:
     group_id: int = -1  # Batch group ID for force batch grouping, -1 means not set
     enqueued_by_master: bool = False
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_tags: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_observer: Optional[Callable[[Any, int], None]] = field(
+        default=None, repr=False, compare=False
+    )
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
     class Config:
@@ -133,6 +136,12 @@ class AuxInfo:
         GENERATION_PREFILL_CUDA_GRAPH_STATUS_NOT_REQUESTED
     )
 
+    speculative_verify_rounds: int = 0
+    speculative_accepted_token_num: int = 0
+    speculative_proposed_draft_tokens: int = 0
+    context_execute_time_us: int = 0
+    context_execute_time_with_cache_us: int = 0
+    generate_execute_time_us: int = 0
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
 
@@ -151,6 +160,14 @@ class GenerateOutput:
     prompt_logits: Optional[Dict[str, Any]] = None
     # output of the deployment-registered post-layers CustomHandler
     custom_output: Optional[torch.Tensor] = None
+    token_logprobs: Optional[torch.Tensor] = None
+    top_logprob_token_ids: Optional[torch.Tensor] = None
+    top_logprobs: Optional[torch.Tensor] = None
+    # Compact logprob tensors cover
+    # output_ids[logprobs_offset:logprobs_offset + logprobs_count].  ``None``
+    # denotes the legacy one-row-per-output-token contract.
+    logprobs_offset: Optional[int] = None
+    logprobs_count: Optional[int] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -159,6 +176,31 @@ class GenerateOutput:
 @dataclass
 class GenerateOutputs:
     generate_outputs: List[GenerateOutput] = field(default_factory=list)
+    # Internal transport marker. Unlike AuxInfo fields, this wrapper-level
+    # value is consumed by BackendRPCServerVisitor and is never serialized in
+    # an outward inference response.
+    frontend_metric_only: bool = field(default=False, repr=False, compare=False)
+    frontend_sp_tpot_samples: List[tuple[int, float]] = field(
+        default_factory=list, repr=False, compare=False
+    )
+    frontend_context_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_token_num_with_cache: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_context_execute_time_with_cache_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_token_num: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
+    frontend_generate_execute_time_us: Optional[int] = field(
+        default=None, repr=False, compare=False
+    )
 
 
 @dataclass

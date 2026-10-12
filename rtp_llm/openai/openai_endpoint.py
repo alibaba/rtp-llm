@@ -292,14 +292,27 @@ class OpenaiEndpoint(object):
             config.chat_id = request.chat_id
         if request.seed != None:
             config.random_seed = request.seed
-        if request.logprobs != None:
+        if request.logprobs is not None:
+            config.return_logprobs = (
+                bool(request.logprobs)
+                and request.logprobs_mode != "default"
+                and config.return_all_probs == ReturnAllProbsMode.NONE
+                and not config.has_num_beams()
+                and config.num_return_sequences <= 1
+                and self.chat_renderer.resolve_thinking_mode(request)
+                != ThinkingMode.ADAPTIVE
+            )
+            config.top_logprobs = (
+                (request.top_logprobs or 0) if config.return_logprobs else 0
+            )
             if not request.logprobs:
                 config.return_all_probs = ReturnAllProbsMode.NONE
-            # Priority: if extra_configs.return_all_probs is already set to
-            # something non-NONE (typically ORIGINAL), honor that — caller has
-            # explicitly opted into a specific mode. Only fall through to
-            # logprobs_mode when no extra_configs override is present.
-            elif config.return_all_probs == ReturnAllProbsMode.NONE:
+            # Compact logprobs need no full-vocabulary probabilities. Keep
+            # explicit legacy requests and unsupported compact cases intact.
+            elif (
+                not config.return_logprobs
+                and config.return_all_probs == ReturnAllProbsMode.NONE
+            ):
                 if request.logprobs_mode == "original":
                     config.return_all_probs = ReturnAllProbsMode.ORIGINAL
                 else:
@@ -646,7 +659,12 @@ class OpenaiEndpoint(object):
         return rendered_input
 
     def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        frontend_metric_tags=None,
+        frontend_metric_observer=None,
     ) -> CompleteResponseAsyncGenerator:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
@@ -701,6 +719,8 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             headers=request_headers,
+            frontend_metric_tags=frontend_metric_tags,
+            frontend_metric_observer=frontend_metric_observer,
         )
 
         return self._complete_stream_response(

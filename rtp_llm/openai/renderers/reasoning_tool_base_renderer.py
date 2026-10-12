@@ -115,7 +115,7 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
         self, n: int, request: ChatCompletionRequest
     ) -> List[StreamStatus]:
         """创建状态列表"""
-        if (request.tools or self.in_think_mode(request)) and not request.logprobs:
+        if request.tools or self.in_think_mode(request):
             return [
                 ReasoningToolStreamStatus(
                     request,
@@ -125,7 +125,6 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
                 for _ in range(n)
             ]
         else:
-            # logprobs模式下使用普通StreamStatus
             return [StreamStatus(request) for _ in range(n)]
 
     @override
@@ -387,7 +386,8 @@ class ReasoningToolBaseRenderer(CustomChatRenderer, ABC):
     ) -> OutputDelta:
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(
+        self._update_status_output(
+            status,
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,

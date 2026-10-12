@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 
 #include "autil/Log.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -377,16 +378,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* compile_qps_metric                  = nullptr;
-    kmonitor::MutableMetric* compile_invalid_qps_metric          = nullptr;
-    kmonitor::MutableMetric* cache_hit_qps_metric                = nullptr;
-    kmonitor::MutableMetric* overload_qps_metric                 = nullptr;
-    kmonitor::MutableMetric* compile_latency_us_metric           = nullptr;
-    kmonitor::MutableMetric* compile_inflight_metric             = nullptr;
-    kmonitor::MutableMetric* verdict_cache_bytes_metric          = nullptr;
-    kmonitor::MutableMetric* total_cache_budget_bytes_metric     = nullptr;
-    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric  = nullptr;
-    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric   = nullptr;
+    kmonitor::MutableMetric* compile_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* compile_invalid_qps_metric         = nullptr;
+    kmonitor::MutableMetric* cache_hit_qps_metric               = nullptr;
+    kmonitor::MutableMetric* overload_qps_metric                = nullptr;
+    kmonitor::MutableMetric* compile_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* compile_inflight_metric            = nullptr;
+    kmonitor::MutableMetric* verdict_cache_bytes_metric         = nullptr;
+    kmonitor::MutableMetric* total_cache_budget_bytes_metric    = nullptr;
+    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric = nullptr;
+    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -557,14 +558,14 @@ private:
     }
 
 private:
-    int64_t                                       context_token_num_            = 0;
-    int64_t                                       context_time_us_              = 0;
-    int64_t                                       context_token_num_with_cache_ = 0;
-    int64_t                                       context_time_us_with_cache_   = 0;
-    int64_t                                       generate_token_num_           = 0;
-    int64_t                                       total_token_num_              = 0;
-    int64_t                                       report_window_us_             = 0;
-    bool                                          report_zero_tps_              = false;
+    int64_t                                          context_token_num_            = 0;
+    int64_t                                          context_time_us_              = 0;
+    int64_t                                          context_token_num_with_cache_ = 0;
+    int64_t                                          context_time_us_with_cache_   = 0;
+    int64_t                                          generate_token_num_           = 0;
+    int64_t                                          total_token_num_              = 0;
+    int64_t                                          report_window_us_             = 0;
+    bool                                             report_zero_tps_              = false;
     std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
@@ -654,10 +655,12 @@ public:
     };
 
     ActiveGuard makeActiveGuard(bool active = true) {
-        return ActiveGuard(active ? this : nullptr);
+        return ActiveGuard(active && isKmonMetricReportingEnabled() ? this : nullptr);
     }
 
     void report(const CollectType* collector) {
+        if (!isKmonMetricReportingEnabled())
+            return;
         std::lock_guard<std::mutex> lock(mutex_);
         collector_.merge(collector);
     }
@@ -677,6 +680,10 @@ private:
 
     void reportLoop() {
         while (metrics_reporter_ && !stop_) {
+            if (!isKmonMetricReportingEnabled()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms_));
+                continue;
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (collector_.hasMetrics()) {
@@ -774,10 +781,12 @@ public:
     };
 
     ActiveGuard makeActiveGuard(bool active = true) {
-        return ActiveGuard(active ? this : nullptr);
+        return ActiveGuard(active && isKmonMetricReportingEnabled() ? this : nullptr);
     }
 
     void report(const CollectType* collector) {
+        if (!isKmonMetricReportingEnabled())
+            return;
         std::lock_guard<std::mutex> lock(mutex_);
         collector_.merge(collector);
     }
@@ -796,8 +805,9 @@ private:
     }
 
     bool takeReportCollector(const std::chrono::steady_clock::time_point& now, CollectType& report_collector) {
-        auto window_us   = std::chrono::duration_cast<std::chrono::microseconds>(now - last_report_time_).count();
-        report_collector = collector_;
+        last_report_time_ = std::max(last_report_time_, kmonMetricReportingStartTime());
+        auto window_us    = std::chrono::duration_cast<std::chrono::microseconds>(now - last_report_time_).count();
+        report_collector  = collector_;
         report_collector.setReportWindowUs(window_us);
         collector_        = CollectType();
         last_report_time_ = now;

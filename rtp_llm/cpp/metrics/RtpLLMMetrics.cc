@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/metrics/ServiceStatus.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -36,12 +37,12 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 
 #define REPORT_QPS(name)                                                                                               \
     if (collector->name) {                                                                                             \
-        REPORT_MUTABLE_QPS(name##_metric);                                                                             \
+        RTP_REPORT_MUTABLE_QPS(name##_metric);                                                                         \
     }
 
 #define REPORT_GAUGE(name)                                                                                             \
     if (collector->name) {                                                                                             \
-        REPORT_MUTABLE_METRIC(name##_metric, collector->name);                                                         \
+        RTP_REPORT_MUTABLE_METRIC(name##_metric, collector->name);                                                     \
     }
 
 bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -129,26 +130,26 @@ bool PrefillRecentCacheKeyMetrics::init(kmonitor::MetricsGroupManager* manager) 
 void PrefillRecentCacheKeyMetrics::report(const kmonitor::MetricsTags*           tags,
                                           PrefillRecentCacheKeyMetricsCollector* collector) {
     if (collector->request_count) {
-        REPORT_MUTABLE_QPS(request_count_metric);
+        RTP_REPORT_MUTABLE_QPS(request_count_metric);
     }
     if (collector->empty_request_count) {
-        REPORT_MUTABLE_QPS(empty_request_count_metric);
+        RTP_REPORT_MUTABLE_QPS(empty_request_count_metric);
     }
     if (!collector->has_value) {
         return;
     }
-    REPORT_MUTABLE_METRIC(hit_count_metric, collector->hit_count);
-    REPORT_MUTABLE_METRIC(total_count_metric, collector->total_count);
-    REPORT_MUTABLE_METRIC(hit_ratio_metric, collector->hit_ratio);
-    REPORT_MUTABLE_METRIC(retained_occurrences_metric, collector->retained_occurrences);
-    REPORT_MUTABLE_METRIC(retained_unique_cache_keys_metric, collector->retained_unique_cache_keys);
-    REPORT_MUTABLE_METRIC(time_window_ms_metric, collector->time_window_ms);
+    RTP_REPORT_MUTABLE_METRIC(hit_count_metric, collector->hit_count);
+    RTP_REPORT_MUTABLE_METRIC(total_count_metric, collector->total_count);
+    RTP_REPORT_MUTABLE_METRIC(hit_ratio_metric, collector->hit_ratio);
+    RTP_REPORT_MUTABLE_METRIC(retained_occurrences_metric, collector->retained_occurrences);
+    RTP_REPORT_MUTABLE_METRIC(retained_unique_cache_keys_metric, collector->retained_unique_cache_keys);
+    RTP_REPORT_MUTABLE_METRIC(time_window_ms_metric, collector->time_window_ms);
     if (!collector->theory_has_value) {
         return;
     }
-    REPORT_MUTABLE_METRIC(theory_all_hit_count_metric, collector->theory_all_hit_count);
-    REPORT_MUTABLE_METRIC(theory_all_total_count_metric, collector->theory_all_total_count);
-    REPORT_MUTABLE_METRIC(theory_all_hit_ratio_metric, collector->theory_all_hit_ratio);
+    RTP_REPORT_MUTABLE_METRIC(theory_all_hit_count_metric, collector->theory_all_hit_count);
+    RTP_REPORT_MUTABLE_METRIC(theory_all_total_count_metric, collector->theory_all_total_count);
+    RTP_REPORT_MUTABLE_METRIC(theory_all_hit_ratio_metric, collector->theory_all_hit_ratio);
 }
 
 void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* collector) {
@@ -274,11 +275,11 @@ void RtpEmbeddingGlobalMetrics::report(const kmonitor::MetricsTags*        tags,
     }
     priority_tags.AddTag("priority", "0");
     tags = &priority_tags;
-    REPORT_MUTABLE_QPS(qps_metric);
+    RTP_REPORT_MUTABLE_QPS(qps_metric);
     if (collector->error) {
-        REPORT_MUTABLE_QPS(error_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(error_qps_metric);
     } else {
-        REPORT_MUTABLE_QPS(success_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(success_qps_metric);
         REPORT_GAUGE(total_latency_us);
     }
 }
@@ -313,17 +314,17 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(wait_stream_size_metric, collector->wait_stream_size);
-    REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
-    REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
-    REPORT_MUTABLE_METRIC(loading_cache_stream_size_metric, collector->loading_cache_stream_size);
-    REPORT_MUTABLE_METRIC(pending_decode_stream_size_metric, collector->pending_decode_stream_size);
-    REPORT_MUTABLE_METRIC(decode_since_prefill_metric, collector->decode_since_prefill);
-    REPORT_MUTABLE_METRIC(admitted_context_batch_size_metric, collector->admitted_context_batch_size);
-    REPORT_MUTABLE_METRIC(admitted_context_token_size_metric, collector->admitted_context_token_size);
-    REPORT_MUTABLE_METRIC(waiting_oldest_age_us_metric, collector->waiting_oldest_age_us);
+    RTP_REPORT_MUTABLE_METRIC(wait_stream_size_metric, collector->wait_stream_size);
+    RTP_REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
+    RTP_REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
+    RTP_REPORT_MUTABLE_METRIC(loading_cache_stream_size_metric, collector->loading_cache_stream_size);
+    RTP_REPORT_MUTABLE_METRIC(pending_decode_stream_size_metric, collector->pending_decode_stream_size);
+    RTP_REPORT_MUTABLE_METRIC(decode_since_prefill_metric, collector->decode_since_prefill);
+    RTP_REPORT_MUTABLE_METRIC(admitted_context_batch_size_metric, collector->admitted_context_batch_size);
+    RTP_REPORT_MUTABLE_METRIC(admitted_context_token_size_metric, collector->admitted_context_token_size);
+    RTP_REPORT_MUTABLE_METRIC(waiting_oldest_age_us_metric, collector->waiting_oldest_age_us);
     if (collector->group_fallback_count > 0) {
-        REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
+        RTP_REPORT_MUTABLE_METRIC(group_fallback_acc_metric, collector->group_fallback_count);
     }
 }
 
@@ -345,10 +346,8 @@ bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(compile_inflight_metric, "rtp_llm_grammar_compile_inflight");
     REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_bytes_metric, "rtp_llm_grammar_verdict_cache_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(total_cache_budget_bytes_metric, "rtp_llm_grammar_total_cache_budget_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric,
-                                  "rtp_llm_grammar_compiler_cache_budget_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric,
-                                  "rtp_llm_grammar_verdict_cache_budget_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, "rtp_llm_grammar_compiler_cache_budget_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, "rtp_llm_grammar_verdict_cache_budget_bytes");
     return true;
 }
 
@@ -359,11 +358,11 @@ void RtpLLMGrammarMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMGramm
     REPORT_QPS(overload_qps);
     REPORT_GAUGE(compile_latency_us);
     // These are live state/configuration gauges, so zero is meaningful and must be emitted.
-    REPORT_MUTABLE_METRIC(compile_inflight_metric, collector->compile_inflight);
-    REPORT_MUTABLE_METRIC(verdict_cache_bytes_metric, collector->verdict_cache_bytes);
-    REPORT_MUTABLE_METRIC(total_cache_budget_bytes_metric, collector->total_cache_budget_bytes);
-    REPORT_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, collector->compiler_cache_budget_bytes);
-    REPORT_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, collector->verdict_cache_budget_bytes);
+    RTP_REPORT_MUTABLE_METRIC(compile_inflight_metric, collector->compile_inflight);
+    RTP_REPORT_MUTABLE_METRIC(verdict_cache_bytes_metric, collector->verdict_cache_bytes);
+    RTP_REPORT_MUTABLE_METRIC(total_cache_budget_bytes_metric, collector->total_cache_budget_bytes);
+    RTP_REPORT_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, collector->compiler_cache_budget_bytes);
+    RTP_REPORT_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, collector->verdict_cache_budget_bytes);
 }
 
 bool RtpLLMExecutorMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -426,22 +425,22 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
 
 void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*             tags,
                                             RtpLLMSpeculativeEngineMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
-    REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
-    REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
-    REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
+    RTP_REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
+    RTP_REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
+    RTP_REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
+    RTP_REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
     if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
-        REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
-        REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
+        RTP_REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
+        RTP_REPORT_MUTABLE_METRIC(total_accepted_token_num_metric, collector->total_accepted_token_num);
         double avg_accept_num = (double)collector->total_accepted_token_num / collector->total_stream_num;
-        REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
-        REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
+        RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_token_num_metric, avg_accept_num);
+        RTP_REPORT_MUTABLE_METRIC(sp_avg_accept_rate_metric, avg_accept_num / (collector->spec_steps + 1));
         if (collector->spec_steps > 0) {
-            REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
+            RTP_REPORT_MUTABLE_METRIC(sp_avg_fix_accept_rate_metric, (avg_accept_num - 1) / collector->spec_steps);
         }
         if (avg_accept_num > 0) {
-            REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);
+            RTP_REPORT_MUTABLE_METRIC(sp_estimate_tpot_us_metric, (double)collector->step_latency_us / avg_accept_num);
         }
     }
 }
@@ -458,27 +457,27 @@ bool RtpLLMTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
     if (collector->reportZeroTPS()) {
-        REPORT_MUTABLE_METRIC(context_tokens_metric, 0.0);
-        REPORT_MUTABLE_METRIC(context_tokens_with_cache_metric, 0.0);
-        REPORT_MUTABLE_METRIC(context_tps_metric, 0.0);
-        REPORT_MUTABLE_METRIC(context_tps_with_cache_metric, 0.0);
-        REPORT_MUTABLE_METRIC(generate_tps_metric, 0.0);
-        REPORT_MUTABLE_METRIC(total_tps_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(context_tokens_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(context_tokens_with_cache_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(context_tps_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(context_tps_with_cache_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(generate_tps_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(total_tps_metric, 0.0);
         return;
     }
     if (collector->hasContextTPS()) {
-        REPORT_MUTABLE_METRIC(context_tokens_metric, collector->contextTokens());
-        REPORT_MUTABLE_METRIC(context_tps_metric, collector->contextTPS());
+        RTP_REPORT_MUTABLE_METRIC(context_tokens_metric, collector->contextTokens());
+        RTP_REPORT_MUTABLE_METRIC(context_tps_metric, collector->contextTPS());
     }
     if (collector->hasContextTPSWithCache()) {
-        REPORT_MUTABLE_METRIC(context_tokens_with_cache_metric, collector->contextTokensWithCache());
-        REPORT_MUTABLE_METRIC(context_tps_with_cache_metric, collector->contextTPSWithCache());
+        RTP_REPORT_MUTABLE_METRIC(context_tokens_with_cache_metric, collector->contextTokensWithCache());
+        RTP_REPORT_MUTABLE_METRIC(context_tps_with_cache_metric, collector->contextTPSWithCache());
     }
     if (collector->hasGenerateTPS()) {
-        REPORT_MUTABLE_METRIC(generate_tps_metric, collector->generateTPS());
+        RTP_REPORT_MUTABLE_METRIC(generate_tps_metric, collector->generateTPS());
     }
     if (collector->hasTotalTPS()) {
-        REPORT_MUTABLE_METRIC(total_tps_metric, collector->totalTPS());
+        RTP_REPORT_MUTABLE_METRIC(total_tps_metric, collector->totalTPS());
     }
 }
 
@@ -491,14 +490,14 @@ bool RtpLLMWallClockTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager)
 
 void RtpLLMWallClockTokenPSMetrics::report(const kmonitor::MetricsTags*   tags,
                                            RtpLLMTokenPSMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
+    RTP_REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
     if (collector->reportZeroTPS()) {
-        REPORT_MUTABLE_METRIC(context_wall_tps_metric, 0.0);
-        REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, 0.0);
+        RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, 0.0);
         return;
     }
-    REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextWallTPS());
-    REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextWallTPSWithCache());
+    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextWallTPS());
+    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextWallTPSWithCache());
 }
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -510,9 +509,9 @@ bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCacheMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(kv_cache_item_num_metric, collector->kv_cache_item_num);
-    REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
-    REPORT_MUTABLE_METRIC(mr_cost_time_ms_metric, collector->mr_cost_time_ms);
+    RTP_REPORT_MUTABLE_METRIC(kv_cache_item_num_metric, collector->kv_cache_item_num);
+    RTP_REPORT_MUTABLE_METRIC(kv_cache_left_seq_metric, collector->kv_cache_left_seq);
+    RTP_REPORT_MUTABLE_METRIC(mr_cost_time_ms_metric, collector->mr_cost_time_ms);
 }
 
 bool RtpLLMCacheOperationMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -530,15 +529,15 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
                                          RtpLLMCacheOperationMetricsCollector* collector) {
     if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::MALLOC) {
         malloc_qps_metric->Report(tags, 1);
-        REPORT_MUTABLE_METRIC(malloc_latency_us_metric, collector->latency_us);
+        RTP_REPORT_MUTABLE_METRIC(malloc_latency_us_metric, collector->latency_us);
     } else if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::MALLOC_RETRY) {
         malloc_retry_qps_metric->Report(tags, 1);
     } else if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::INSERT) {
         insert_qps_metric->Report(tags, 1);
-        REPORT_MUTABLE_METRIC(insert_latency_us_metric, collector->latency_us);
+        RTP_REPORT_MUTABLE_METRIC(insert_latency_us_metric, collector->latency_us);
     } else if (collector->operation_type == RtpLLMCacheOperationMetricsCollector::OpType::FREE) {
         free_qps_metric->Report(tags, 1);
-        REPORT_MUTABLE_METRIC(free_latency_us_metric, collector->latency_us);
+        RTP_REPORT_MUTABLE_METRIC(free_latency_us_metric, collector->latency_us);
     }
 }
 
@@ -562,22 +561,22 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(block_size_bytes_metric, collector->block_size_bytes);
-    REPORT_MUTABLE_METRIC(free_blocks_metric, collector->free_blocks);
-    REPORT_MUTABLE_METRIC(used_blocks_metric, collector->used_blocks);
-    REPORT_MUTABLE_METRIC(available_blocks_metric, collector->available_blocks);
-    REPORT_MUTABLE_METRIC(active_blocks_metric, collector->active_blocks);
-    REPORT_MUTABLE_METRIC(total_blocks_metric, collector->total_blocks);
-    REPORT_MUTABLE_METRIC(reserve_blocks_metric, collector->reserve_blocks);
-    REPORT_MUTABLE_METRIC(request_ref_blocks_metric, collector->request_ref_blocks);
-    REPORT_MUTABLE_METRIC(block_cache_ref_blocks_metric, collector->block_cache_ref_blocks);
-    REPORT_MUTABLE_METRIC(load_ref_blocks_metric, collector->load_ref_blocks);
+    RTP_REPORT_MUTABLE_METRIC(block_size_bytes_metric, collector->block_size_bytes);
+    RTP_REPORT_MUTABLE_METRIC(free_blocks_metric, collector->free_blocks);
+    RTP_REPORT_MUTABLE_METRIC(used_blocks_metric, collector->used_blocks);
+    RTP_REPORT_MUTABLE_METRIC(available_blocks_metric, collector->available_blocks);
+    RTP_REPORT_MUTABLE_METRIC(active_blocks_metric, collector->active_blocks);
+    RTP_REPORT_MUTABLE_METRIC(total_blocks_metric, collector->total_blocks);
+    RTP_REPORT_MUTABLE_METRIC(reserve_blocks_metric, collector->reserve_blocks);
+    RTP_REPORT_MUTABLE_METRIC(request_ref_blocks_metric, collector->request_ref_blocks);
+    RTP_REPORT_MUTABLE_METRIC(block_cache_ref_blocks_metric, collector->block_cache_ref_blocks);
+    RTP_REPORT_MUTABLE_METRIC(load_ref_blocks_metric, collector->load_ref_blocks);
     if (collector->report_eviction_target_ref_blocks) {
-        REPORT_MUTABLE_METRIC(eviction_target_ref_blocks_metric, collector->eviction_target_ref_blocks);
-        REPORT_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, collector->eviction_target_ref_blocks);
+        RTP_REPORT_MUTABLE_METRIC(eviction_target_ref_blocks_metric, collector->eviction_target_ref_blocks);
+        RTP_REPORT_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, collector->eviction_target_ref_blocks);
     }
-    REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
-    REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
+    RTP_REPORT_MUTABLE_METRIC(store_ref_blocks_metric, collector->store_ref_blocks);
+    RTP_REPORT_MUTABLE_METRIC(used_ratio_metric, collector->used_ratio);
 }
 
 bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -733,10 +732,10 @@ void RtpLLMRemoteCacheMatchMetrics::report(const kmonitor::MetricsTags*         
     REPORT_QPS(remote_match_qps);
     REPORT_QPS(remote_match_fail_qps);
     if (collector->remote_valid_hit_ratio > 0) {
-        REPORT_MUTABLE_METRIC(remote_valid_hit_ratio_metric, collector->remote_valid_hit_ratio);
+        RTP_REPORT_MUTABLE_METRIC(remote_valid_hit_ratio_metric, collector->remote_valid_hit_ratio);
     }
-    REPORT_MUTABLE_METRIC(remote_match_reuse_block_num_metric, collector->remote_match_reuse_block_num);
-    REPORT_MUTABLE_METRIC(remote_match_time_us_metric, collector->remote_match_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_match_reuse_block_num_metric, collector->remote_match_reuse_block_num);
+    RTP_REPORT_MUTABLE_METRIC(remote_match_time_us_metric, collector->remote_match_time_us);
 }
 
 bool RtpLLMRemoteCacheReadMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -751,8 +750,8 @@ void RtpLLMRemoteCacheReadMetrics::report(const kmonitor::MetricsTags*          
                                           RtpLLMRemoteCacheReadMetricsCollector* collector) {
     REPORT_QPS(remote_read_qps);
     REPORT_QPS(remote_read_fail_qps);
-    REPORT_MUTABLE_METRIC(remote_read_task_cost_time_us_metric, collector->remote_read_task_cost_time_us);
-    REPORT_MUTABLE_METRIC(remote_read_token_num_metric, collector->remote_read_token_num);
+    RTP_REPORT_MUTABLE_METRIC(remote_read_task_cost_time_us_metric, collector->remote_read_task_cost_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_read_token_num_metric, collector->remote_read_token_num);
 }
 
 bool RtpLLMRemoteCacheWriteMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -771,11 +770,11 @@ void RtpLLMRemoteCacheWriteMetrics::report(const kmonitor::MetricsTags*         
                                            RtpLLMRemoteCacheWriteMetricsCollector* collector) {
     REPORT_QPS(remote_write_qps);
     REPORT_QPS(remote_write_fail_qps);
-    REPORT_MUTABLE_METRIC(remote_write_cache_block_num_metric, collector->remote_write_cache_block_num);
-    REPORT_MUTABLE_METRIC(remote_write_task_cost_time_us_metric, collector->remote_write_task_cost_time_us);
-    REPORT_MUTABLE_METRIC(remote_get_write_location_time_us_metric, collector->remote_get_write_location_time_us);
-    REPORT_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, collector->remote_write_broadcast_time_us);
-    REPORT_MUTABLE_METRIC(remote_finish_write_time_us_metric, collector->remote_finish_write_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_write_cache_block_num_metric, collector->remote_write_cache_block_num);
+    RTP_REPORT_MUTABLE_METRIC(remote_write_task_cost_time_us_metric, collector->remote_write_task_cost_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_get_write_location_time_us_metric, collector->remote_get_write_location_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, collector->remote_write_broadcast_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_finish_write_time_us_metric, collector->remote_finish_write_time_us);
 }
 
 bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -788,8 +787,8 @@ bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMRemoteCacheSDKMetrics::report(const kmonitor::MetricsTags*          tags,
                                          RtpLLMRemoteCacheSDKMetricsCollector* collector) {
     REPORT_QPS(remote_sdk_fail_qps);
-    REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
-    REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
+    RTP_REPORT_MUTABLE_METRIC(remote_sdk_block_num_metric, collector->remote_sdk_block_num);
+    RTP_REPORT_MUTABLE_METRIC(remote_sdk_cost_time_us_metric, collector->remote_sdk_cost_time_us);
 }
 
 bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -821,34 +820,34 @@ bool RtpLLMCacheReuseMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheReuseMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector) {
     if (collector->report_reuse_metrics) {
-        REPORT_MUTABLE_METRIC(block_aligned_input_length_metric, collector->block_aligned_input_length);
-        REPORT_MUTABLE_METRIC(kv_cache_reuse_length_metric, collector->kv_cache_reuse_length);
-        REPORT_MUTABLE_METRIC(device_reuse_length_metric, collector->device_reuse_length);
-        REPORT_MUTABLE_METRIC(host_reuse_length_metric, collector->host_reuse_length);
-        REPORT_MUTABLE_METRIC(disk_reuse_length_metric, collector->disk_reuse_length);
-        REPORT_MUTABLE_METRIC(remote_reuse_length_metric, collector->remote_reuse_length);
+        RTP_REPORT_MUTABLE_METRIC(block_aligned_input_length_metric, collector->block_aligned_input_length);
+        RTP_REPORT_MUTABLE_METRIC(kv_cache_reuse_length_metric, collector->kv_cache_reuse_length);
+        RTP_REPORT_MUTABLE_METRIC(device_reuse_length_metric, collector->device_reuse_length);
+        RTP_REPORT_MUTABLE_METRIC(host_reuse_length_metric, collector->host_reuse_length);
+        RTP_REPORT_MUTABLE_METRIC(disk_reuse_length_metric, collector->disk_reuse_length);
+        RTP_REPORT_MUTABLE_METRIC(remote_reuse_length_metric, collector->remote_reuse_length);
         if (collector->report_match_latency) {
-            REPORT_MUTABLE_METRIC(match_latency_us_metric, collector->match_latency_us);
+            RTP_REPORT_MUTABLE_METRIC(match_latency_us_metric, collector->match_latency_us);
         }
     }
     if (collector->report_hit_rates) {
-        REPORT_MUTABLE_METRIC(kv_cache_hit_rate_metric, collector->kv_cache_hit_rate);
-        REPORT_MUTABLE_METRIC(device_hit_rate_metric, collector->device_hit_rate);
-        REPORT_MUTABLE_METRIC(host_hit_rate_metric, collector->host_hit_rate);
-        REPORT_MUTABLE_METRIC(disk_hit_rate_metric, collector->disk_hit_rate);
+        RTP_REPORT_MUTABLE_METRIC(kv_cache_hit_rate_metric, collector->kv_cache_hit_rate);
+        RTP_REPORT_MUTABLE_METRIC(device_hit_rate_metric, collector->device_hit_rate);
+        RTP_REPORT_MUTABLE_METRIC(host_hit_rate_metric, collector->host_hit_rate);
+        RTP_REPORT_MUTABLE_METRIC(disk_hit_rate_metric, collector->disk_hit_rate);
     }
     if (collector->report_reuse_time_metrics) {
-        REPORT_MUTABLE_METRIC(reuse_interval_avg_ms_metric, collector->reuse_interval_avg_ms);
-        REPORT_MUTABLE_METRIC(reuse_interval_max_ms_metric, collector->reuse_interval_max_ms);
-        REPORT_MUTABLE_METRIC(hit_entry_age_avg_ms_metric, collector->hit_entry_age_avg_ms);
-        REPORT_MUTABLE_METRIC(hit_entry_age_max_ms_metric, collector->hit_entry_age_max_ms);
+        RTP_REPORT_MUTABLE_METRIC(reuse_interval_avg_ms_metric, collector->reuse_interval_avg_ms);
+        RTP_REPORT_MUTABLE_METRIC(reuse_interval_max_ms_metric, collector->reuse_interval_max_ms);
+        RTP_REPORT_MUTABLE_METRIC(hit_entry_age_avg_ms_metric, collector->hit_entry_age_avg_ms);
+        RTP_REPORT_MUTABLE_METRIC(hit_entry_age_max_ms_metric, collector->hit_entry_age_max_ms);
     }
     if (collector->report_load_metrics) {
         load_qps_metric->Report(tags, 1);
         load_fail_qps_metric->Report(tags, collector->load_success ? 0 : 1);
-        REPORT_MUTABLE_METRIC(load_prepare_latency_us_metric, collector->load_prepare_latency_us);
+        RTP_REPORT_MUTABLE_METRIC(load_prepare_latency_us_metric, collector->load_prepare_latency_us);
         if (collector->report_load_wait_latency) {
-            REPORT_MUTABLE_METRIC(load_wait_latency_us_metric, collector->load_wait_latency_us);
+            RTP_REPORT_MUTABLE_METRIC(load_wait_latency_us_metric, collector->load_wait_latency_us);
         }
     }
     if (collector->report_load_join) {
@@ -888,8 +887,8 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
 
     // update weights metrics
     if (collector->update_weights_qps) {
-        REPORT_MUTABLE_QPS(update_weights_qps_metric);
-        REPORT_MUTABLE_METRIC(update_weights_latency_ms_metric, collector->update_weights_latency_ms);
+        RTP_REPORT_MUTABLE_QPS(update_weights_qps_metric);
+        RTP_REPORT_MUTABLE_METRIC(update_weights_latency_ms_metric, collector->update_weights_latency_ms);
 
         // report layer qps
         auto layer_tag = kmonitor::MetricsTags("layer", std::to_string(collector->update_layer_id));
@@ -971,14 +970,14 @@ bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 #define REPORT_NON_ZERO_MUTABLE_METRIC(metric_name, value)                                                             \
     if (value > 0) {                                                                                                   \
-        REPORT_MUTABLE_METRIC(metric_name, value);                                                                     \
+        RTP_REPORT_MUTABLE_METRIC(metric_name, value);                                                                 \
     }
 
 void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*                tags,
                                      RtpLLMCacheStoreLoadClientMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(load_client_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(load_client_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(load_client_error_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(load_client_error_qps_metric);
     }
     REPORT_NON_ZERO_MUTABLE_METRIC(load_client_block_count_metric, collector->block_count);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_client_total_block_size_metric, collector->total_block_size);
@@ -991,9 +990,9 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
 
 void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*                tags,
                                      RtpLLMCacheStoreLoadServerMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(load_server_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(load_server_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(load_server_error_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(load_server_error_qps_metric);
     }
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_block_count_metric, collector->block_count);
     REPORT_NON_ZERO_MUTABLE_METRIC(load_server_total_block_size_metric, collector->total_block_size);
@@ -1011,9 +1010,9 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
 
 void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*           tags,
                                      RtpLLMCacheStoreStoreMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(store_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(store_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(store_error_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(store_error_qps_metric);
     }
     REPORT_NON_ZERO_MUTABLE_METRIC(store_block_count_metric, collector->block_count);
     REPORT_NON_ZERO_MUTABLE_METRIC(store_total_block_size_metric, collector->total_block_size);
@@ -1024,9 +1023,9 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*           tags
 
 void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*                 tags,
                                      RtpLLMCacheStoreRemoteStoreMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(remote_store_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(remote_store_qps_metric);
     if (!collector->success) {
-        REPORT_MUTABLE_QPS(remote_store_error_qps_metric);
+        RTP_REPORT_MUTABLE_QPS(remote_store_error_qps_metric);
     }
     REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_block_count_metric, collector->block_count);
     REPORT_NON_ZERO_MUTABLE_METRIC(remote_store_total_block_size_metric, collector->total_block_size);
@@ -1040,7 +1039,7 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*               
 
 void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              tags,
                                      RtpLLMCacheStoreTransferMetricsCollector* collector) {
-    REPORT_MUTABLE_QPS(transfer_qps_metric);
+    RTP_REPORT_MUTABLE_QPS(transfer_qps_metric);
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_block_count_metric, collector->block_count);
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_total_block_size_metric, collector->total_block_size);
     REPORT_NON_ZERO_MUTABLE_METRIC(transfer_latency_us_metric, collector->latency_us);
@@ -1100,6 +1099,7 @@ bool initKmonitorFactory() {
 }
 
 void stopKmonitorFactory() {
+    stopKmonServiceStatus();
     kmonitor::KMonitorFactory::Shutdown();
 }
 

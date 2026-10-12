@@ -70,10 +70,57 @@ bool NormalGenerateStream::consumerReadyWithoutLock() const {
     return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
 }
 
+void NormalGenerateStream::fillFrontendMetricCounters(GenerateOutputs& generate_results) {
+    if (!generate_input_->generate_config->frontend_metric_streaming) {
+        return;
+    }
+    generate_results.frontend_sp_tpot_samples                    = frontend_sp_tpot_samples_;
+    generate_results.frontend_context_token_num                  = frontend_context_token_num_;
+    generate_results.frontend_context_token_num_with_cache       = frontend_context_token_num_with_cache_;
+    generate_results.frontend_context_execute_time_us            = frontend_context_execute_time_us_;
+    generate_results.frontend_context_execute_time_with_cache_us = frontend_context_execute_time_with_cache_us_;
+    generate_results.frontend_generate_token_num                 = frontend_generate_token_num_;
+    generate_results.frontend_generate_execute_time_us           = frontend_generate_execute_time_us_;
+}
+
+GenerateOutputs NormalGenerateStream::prepareFrontendMetricOutput() {
+    const size_t    step_output_len = seqLength() - last_frontend_metric_output_pos_;
+    GenerateOutputs generate_results;
+    generate_results.request_id           = request_id_;
+    generate_results.frontend_metric_only = true;
+    fillFrontendMetricCounters(generate_results);
+
+    for (int i = 0; i < nextBatchSize(); ++i) {
+        GenerateOutput generate_output;
+        generate_output.finished = false;
+        if (generate_input_->generate_config->aux_info) {
+            generate_output.aux_info.iter_count   = iter_count_;
+            generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            generate_output.aux_info.first_token_cost_time_us           = complete_token_ids_->firstTokenLatencyUs();
+            generate_output.aux_info.wait_time_us                       = wait_time_us_;
+            generate_output.aux_info.input_len                          = generate_input_->inputLength();
+            generate_output.aux_info.prefix_len                         = generate_input_->prefix_length;
+            generate_output.aux_info.output_len                         = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.step_output_len                    = step_output_len;
+            generate_output.aux_info.reuse_len                          = initial_reuse_length_;
+            generate_output.aux_info.pd_sep                             = queryPdSep();
+            generate_output.aux_info.speculative_verify_rounds          = speculative_verify_rounds_;
+            generate_output.aux_info.speculative_accepted_token_num     = speculative_accepted_token_num_;
+            generate_output.aux_info.speculative_proposed_draft_tokens  = speculative_proposed_draft_tokens_;
+            generate_output.aux_info.context_execute_time_us            = context_execute_time_us_;
+            generate_output.aux_info.context_execute_time_with_cache_us = context_execute_time_with_cache_us_;
+            generate_output.aux_info.generate_execute_time_us           = generate_execute_time_us_;
+        }
+        generate_results.generate_outputs.emplace_back(std::move(generate_output));
+    }
+    return generate_results;
+}
+
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
     size_t          output_len = seqLength() - last_output_pos_;
     GenerateOutputs generate_results;
     generate_results.request_id = request_id_;
+    fillFrontendMetricCounters(generate_results);
 
     // CompleteTokenIds has already applied this step, so currentBatchSize is the output row count.
     for (int i = 0; i < currentBatchSize(); i++) {
@@ -111,6 +158,34 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.logits = logits_result.cpu().clone();
             } else {
                 generate_output.logits = logits_result.narrow(0, i, 1).cpu().clone();
+            }
+        }
+
+        if (generate_input_->generate_config->return_logprobs) {
+            RTP_LLM_CHECK(last_output_pos_ >= (size_t)inputLength());
+            const int64_t total_output_len   = seqLength() - inputLength();
+            const int64_t chunk_output_start = last_output_pos_ - inputLength();
+            RTP_LLM_CHECK(logprobs_history_size_ <= total_output_len);
+            const int64_t content_output_start = total_output_len - logprobs_history_size_;
+            const int64_t compact_output_start = std::max<int64_t>(chunk_output_start, content_output_start);
+            const int64_t logprobs_offset      = compact_output_start - chunk_output_start;
+            const int64_t logprobs_count       = total_output_len - compact_output_start;
+            RTP_LLM_CHECK(logprobs_offset >= 0 && logprobs_offset <= static_cast<int64_t>(output_len));
+            RTP_LLM_CHECK(logprobs_count >= 0 && logprobs_offset + logprobs_count == static_cast<int64_t>(output_len));
+            generate_output.logprobs_offset = static_cast<int32_t>(logprobs_offset);
+            generate_output.logprobs_count  = static_cast<int32_t>(logprobs_count);
+
+            if (logprobs_count > 0) {
+                RTP_LLM_CHECK(token_logprobs_.defined());
+                RTP_LLM_CHECK(top_logprob_token_ids_.defined());
+                RTP_LLM_CHECK(top_logprobs_.defined());
+                const int64_t history_start = compact_output_start - content_output_start;
+                RTP_LLM_CHECK(history_start + logprobs_count <= logprobs_history_size_);
+                RTP_LLM_CHECK(logprobs_history_size_ <= token_logprobs_.size(1));
+                generate_output.token_logprobs = token_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+                generate_output.top_logprob_token_ids =
+                    top_logprob_token_ids_[i].narrow(0, history_start, logprobs_count).clone();
+                generate_output.top_logprobs = top_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
             }
         }
 
@@ -165,6 +240,12 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 
             generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
 
+            generate_output.aux_info.speculative_verify_rounds           = speculative_verify_rounds_;
+            generate_output.aux_info.speculative_accepted_token_num      = speculative_accepted_token_num_;
+            generate_output.aux_info.speculative_proposed_draft_tokens   = speculative_proposed_draft_tokens_;
+            generate_output.aux_info.context_execute_time_us             = context_execute_time_us_;
+            generate_output.aux_info.context_execute_time_with_cache_us  = context_execute_time_with_cache_us_;
+            generate_output.aux_info.generate_execute_time_us            = generate_execute_time_us_;
             generate_output.aux_info.speculative_draft_rounds            = sp_iter_count_;
             generate_output.aux_info.speculative_accepted_tokens_per_pos = speculative_accepted_tokens_per_pos_;
             generate_output.aux_info.generation_prefill_cuda_graph_status =
@@ -205,6 +286,20 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         generate_results.generate_outputs.emplace_back(std::move(generate_output));
     }
     return generate_results;
+}
+
+void NormalGenerateStream::enqueueFrontendMetricOutput(GenerateOutputs&& output) {
+    for (auto it = generate_outputs_.rbegin(); it != generate_outputs_.rend(); ++it) {
+        if (it->frontend_metric_only) {
+            *it = std::move(output);
+            consumer_cv_->notify_all();
+            return;
+        }
+    }
+    if (generate_outputs_.size() + 1 < kOutputCapacity) {
+        generate_outputs_.push_back(std::move(output));
+        consumer_cv_->notify_all();
+    }
 }
 
 void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
@@ -286,6 +381,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     bool pd_sep_first_token = queryPdSep();
     bool need_update        = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
+        if (generate_input_->generate_config->frontend_metric_streaming) {
+            enqueueFrontendMetricOutput(prepareFrontendMetricOutput());
+        }
         return;
     }
 
@@ -300,7 +398,8 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    last_output_pos_ = seqLength();
+    last_output_pos_                 = seqLength();
+    last_frontend_metric_output_pos_ = last_output_pos_;
 }
 
 GenerationPrefillCudaGraphStatus NormalGenerateStream::generationPrefillCudaGraphStatus() const {

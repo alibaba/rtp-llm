@@ -3,7 +3,6 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
 from rtp_llm.config.grammar_constraint import GRAMMAR_FIELD_NAMES
 from rtp_llm.config.response_format import ResponseFormat, parse_response_format
@@ -176,7 +175,7 @@ class ChatCompletionRequest(BaseModel):
     n: Optional[int] = None
     logprobs: Optional[bool] = None
     logprobs_mode: Optional[Literal["original", "default"]] = None
-    top_logprobs: Optional[int] = None
+    top_logprobs: Optional[int] = Field(default=None, strict=True)
     prompt_logprobs: Optional[int] = None
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
@@ -225,6 +224,20 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_tool_choice(self) -> "ChatCompletionRequest":
+        if self.extra_configs is not None and self.extra_configs.return_logprobs:
+            if self.logprobs is None:
+                self.logprobs = True
+            if self.top_logprobs is None:
+                self.top_logprobs = self.extra_configs.top_logprobs
+        if self.top_logprobs is not None:
+            if isinstance(self.top_logprobs, bool) or not isinstance(
+                self.top_logprobs, int
+            ):
+                raise ValueError("top_logprobs must be an integer between 0 and 20")
+            if not 0 <= self.top_logprobs <= 20:
+                raise ValueError("top_logprobs must be between 0 and 20")
+            if self.logprobs is not True:
+                raise ValueError("top_logprobs requires logprobs=true")
         if self.tool_choice == "required" and not self.tools:
             raise ValueError("tool_choice='required' requires non-empty tools")
 

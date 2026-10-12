@@ -138,6 +138,38 @@ bool CompleteTokenIds::matchStopWordsList(int batch_id, const std::vector<int>& 
     return false;
 }
 
+bool CompleteTokenIds::matchThinkEndToken(int                     batch_id,
+                                          const std::vector<int>& end_think_token_ids,
+                                          int                     input_length,
+                                          int                     max_new_tokens) {
+    if (end_think_token_ids.empty() || max_new_tokens < 0) {
+        return false;
+    }
+
+    int*      token_ids     = data(batch_id);
+    const int end_token_num = static_cast<int>(end_think_token_ids.size());
+    const int search_begin  = std::max(start_check_seq_length_, input_length + end_token_num);
+
+    for (int i = search_begin; i <= seq_length_; ++i) {
+        const int begin_index = i - end_token_num;
+        bool      match       = begin_index >= input_length;
+        for (int j = 0; match && j < end_token_num; ++j) {
+            match = token_ids[begin_index + j] == end_think_token_ids[j];
+        }
+        if (!match) {
+            continue;
+        }
+
+        const int64_t max_seq_length_after_think = static_cast<int64_t>(i) + max_new_tokens;
+        if (seq_length_ >= max_seq_length_after_think) {
+            setSeqLength(static_cast<int>(max_seq_length_after_think));
+            return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
                               int64_t              begin_time_us,
                               int                  num_new_tokens,
@@ -154,7 +186,10 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
     if (seq_length_ + num_new_tokens > max_token_num) {
         num_new_tokens = max_token_num - seq_length_;
     }
-    const bool commits_first_token = seq_length_ == input_length && num_new_tokens > 0;
+    if (num_new_tokens <= 0) {
+        return true;
+    }
+    const bool commits_first_token = seq_length_ == input_length;
 
     // # NOTE: new tokens indicate num of newly genearted tokens
     // # typically 1 but can be > 1 under speculative decoding
@@ -168,7 +203,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
         if (is_beam_search) {
             return (new_tokens_ptr + max_num_new_tokens * batch_idx)[seq_length_ + token_idx];
         } else {
-            return (new_tokens_ptr + num_new_tokens * batch_idx)[token_idx];
+            return (new_tokens_ptr + max_num_new_tokens * batch_idx)[token_idx];
         }
     };
 
@@ -186,7 +221,7 @@ bool CompleteTokenIds::update(const torch::Tensor& new_tokens,
             if (batch_size_ != new_batch_size && i > 0) {
                 memcpy(data(i), data(0), sizeof(int) * seq_length_);
             }
-            memcpy(data(i) + seq_length_, new_tokens_ptr + i * num_new_tokens, sizeof(int) * num_new_tokens);
+            memcpy(data(i) + seq_length_, new_tokens_ptr + i * max_num_new_tokens, sizeof(int) * num_new_tokens);
         }
     }
     batch_size_ = new_batch_size;

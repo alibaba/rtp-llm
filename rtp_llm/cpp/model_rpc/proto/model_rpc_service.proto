@@ -155,6 +155,11 @@ message GenerateConfigPB {
     ThinkingModePB thinking_mode = 73;
     // 请求级 L3 写入开关；RPC 缺失时为 false。
     bool enable_disk_cache = 74;
+    reserved 75;
+    reserved "response_format";
+    bool return_logprobs = 76;
+    uint32 top_logprobs = 77;
+    bool frontend_metric_streaming = 78;
 }
 
 message MMPreprocessConfigPB {
@@ -300,6 +305,12 @@ message AuxInfoPB {
     int32 disk_reuse_len = 31;
     int32 prefill_disk_reuse_len = 32;
     int32 decode_disk_reuse_len = 33;
+    int64 speculative_verify_rounds = 34;
+    int64 speculative_accepted_token_num = 35;
+    int64 speculative_proposed_draft_tokens = 36;
+    int64 context_execute_time_us = 37;
+    int64 generate_execute_time_us = 38;
+    int64 context_execute_time_with_cache_us = 39;
 }
 
 message PromptLogitsOutputPB {
@@ -322,6 +333,11 @@ message FlattenOutputPB {
     PromptLogitsOutputPB prompt_logits = 9;
     // Output of the deployment-registered post-layers CustomHandler.
     TensorPB custom_output = 10;
+    TensorPB token_logprobs = 11;
+    TensorPB top_logprob_token_ids = 12;
+    TensorPB top_logprobs = 13;
+    repeated int32 logprobs_offsets = 14;
+    repeated int32 logprobs_counts = 15;
 }
 
 message GenerateOutputsPB {
@@ -336,6 +352,14 @@ message GenerateOutputsPB {
     RpcErrorPB error_info = 9;
     // Advertised only by the Decode ALLOCATE response.
     bool supports_prefill_completion = 10;
+    bool frontend_metric_only = 11;
+    google.protobuf.Int64Value frontend_generate_token_num = 12;
+    google.protobuf.Int64Value frontend_context_token_num = 13;
+    google.protobuf.Int64Value frontend_context_token_num_with_cache = 14;
+    google.protobuf.Int64Value frontend_context_execute_time_us = 15;
+    google.protobuf.Int64Value frontend_context_execute_time_with_cache_us = 16;
+    google.protobuf.Int64Value frontend_generate_execute_time_us = 17;
+    repeated FrontendSpTpotSamplePB frontend_sp_tpot_samples = 18;
 }
 
 // return to python client
@@ -945,4 +969,9 @@ service MultimodalRpcService {
     rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
     // Best-effort release after the LLM finishes reading remote slots.
     rpc ReleaseRdmaLease(ReleaseLeasePB) returns (EmptyPB);
+}
+
+message FrontendSpTpotSamplePB {
+    uint64 sequence_id = 1;
+    double tpot_us = 2;
 }
