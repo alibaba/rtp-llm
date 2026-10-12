@@ -126,6 +126,34 @@ class PerformanceGateTest(unittest.TestCase):
         shuffled["flow"] = compact_flow(shuffled["flow"])
         self.assertEqual(analyze(shuffled), actual)
 
+    def test_measurement_events_use_gate_boundaries_not_late_poll_times(self):
+        from types import SimpleNamespace
+        from cases.master_performance.actions import observe
+        recorded = []
+        def record(identity, *, timestamp=None):
+            event = dict(id=identity, **(timestamp or dict(epoch_s=100, monotonic_s=1)))
+            recorded.append(event)
+            return event
+        with tempfile.TemporaryDirectory() as d:
+            ctx = SimpleNamespace(
+                artifact_dir=Path(d), env_epoch=1,
+                instance=dict(id="master_performance::default::batch-window", profile="batch-window"),
+                record_event=record, resource=lambda *args: mock.Mock(),
+                register_resource=lambda kind, value, **kwargs: value,
+            )
+            c = dict(evidence()["criteria"], warmup_s=5, measure_s=30)
+            rows = [dict(epoch_ms=t, state="SENDING", process_returncode=None)
+                    for t in (100000, 106000, 135100)]
+            with mock.patch("cases.master_performance.actions.provenance", return_value={}), \
+                    mock.patch("cases.master_performance.actions.poll_samples", return_value=iter(rows)):
+                observe(ctx, dict(flow="flow", criteria=c, gate_input=None,
+                    observation=dict(capture=dict(max_samples=10, max_bytes=10000), windows={})), mock.Mock())
+            events = {event["id"]: event for event in recorded}
+            self.assertEqual(events["measurement_started"]["epoch_s"], 105)
+            self.assertEqual(events["measurement_ended"]["epoch_s"], 135)
+            self.assertEqual(events["measurement_started"]["monotonic_s"], 6)
+            self.assertEqual(events["measurement_ended"]["monotonic_s"], 36)
+
     def test_observe_freezes_run_identity_even_when_provenance_collection_fails(self):
         from types import SimpleNamespace
         from cases.master_performance.actions import observe
