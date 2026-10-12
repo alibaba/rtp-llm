@@ -20,6 +20,10 @@ from typing import Any
 
 import torch
 
+from rtp_llm.config.dsv41_config import (
+    v41_rotary_compute_device,
+    v41_sparse_attention_mode,
+)
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.model_desc.v41_errors import V41InputRejected
 from rtp_llm.models_py.modules.dsv4.engram import Engram, EngramLayout, NgramHashState
@@ -72,6 +76,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
         config = dict(getattr(model_config, "deepseek_v41_config", None) or {})
         if not config:
             raise ValueError("DeepSeek V4.1 requires deepseek_v41_config")
+        self._rotary_compute_device = v41_rotary_compute_device(config)
+        self._sparse_attention_mode = v41_sparse_attention_mode(config)
         self._v4_args.v41_config = config
         self._v4_args.n_hash_layers = 0
         self._engram_hash_state = None
@@ -90,6 +96,38 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._native_pp_owner = object()
         self._native_pp_contract = None
         self._native_pp_receiver = None
+
+    def _check_rotary_config(self):
+        if (
+            v41_rotary_compute_device(self._v4_args.v41_config)
+            != self._rotary_compute_device
+        ):
+            raise ValueError("V4.1 rotary origin changed; replace the worker")
+        if self.v4 is not None:
+            for layer in self.v4.layers:
+                layer.attn._check_rotary_config()
+                if layer.attn._rotary_compute_device != self._rotary_compute_device:
+                    raise ValueError(
+                        "V4.1 worker and attention rotary origins disagree"
+                    )
+
+    def _check_sparse_config(self):
+        if (
+            v41_sparse_attention_mode(self._v4_args.v41_config)
+            != self._sparse_attention_mode
+        ):
+            raise ValueError("V4.1 sparse attention mode changed; replace the worker")
+        if self._sparse_attention_mode is not None and self._v4_args.pp_size != 1:
+            raise NotImplementedError("V4.1 short sparse worker requires PP1/CP1")
+        if self.v4 is not None:
+            for layer in self.v4.layers:
+                layer.attn._check_sparse_config()
+                if layer.attn._sparse_attention_mode != self._sparse_attention_mode:
+                    raise ValueError("V4.1 worker and attention sparse modes disagree")
+
+    def _check_execution_config(self):
+        self._check_rotary_config()
+        self._check_sparse_config()
 
     def _configure_dp_group(self):
         args = self._v4_args
@@ -373,6 +411,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 )
             self._configure_dp_group()
             if self._materialized:
+                self._check_execution_config()
                 return super()._initialize_impl(init_resource)
             device = next(iter(self.weight.global_weights.values())).device
             if device.type != "cuda" or torch.cuda.get_device_capability(device) != (
@@ -384,6 +423,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 )
             error = None
             try:
+                self._check_execution_config()
                 self._engram_sources = self._plan_engram()
                 self._check_engram_capacity()
             except Exception as exc:
@@ -393,6 +433,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 error = None
                 try:
                     result = super()._initialize_impl(init_resource)
+                    self._check_execution_config()
                 except Exception as exc:
                     error = exc
                 self._agree_dp(error, "initialize-ready", device)
@@ -505,6 +546,16 @@ class DeepSeekV41Model(DeepSeekV4Model):
         ):
             raise ValueError("V4.1 prefill requires matching integer request lengths")
         lengths, prefixes = lengths.cpu(), prefixes.cpu()
+        if (
+            self._sparse_attention_mode is not None
+            and not idle
+            and (
+                lengths.numel() != 1 or bool(((lengths > 128) | (prefixes != 0)).any())
+            )
+        ):
+            raise NotImplementedError(
+                "V4.1 short sparse worker requires one initial prefill"
+            )
         if idle and lengths.numel():
             raise ValueError("V4.1 idle DP rank must have no requests")
         if (
@@ -561,6 +612,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 raise NotImplementedError("V4.1 native PP preflight requires CEP4PP2")
             dispatch = error = None
             try:
+                self._check_execution_config()
                 dispatch = prepare_native_pp_prefill_dispatch(self, inputs)
             except Exception as exc:
                 error = exc
@@ -600,6 +652,8 @@ class DeepSeekV41Model(DeepSeekV4Model):
             ):
                 raise ValueError("Native V4.1 PP requires one initialized contract")
             if self._native_pp_contract is None:
+                self._check_execution_config()
+                contract.require_attention_config(self._v4_args.v41_config)
                 self._native_pp_contract = contract
                 if self._v4_args.pp_rank == 1:
                     self._native_pp_receiver = NativeL20ReplicaReceiver(
@@ -749,6 +803,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 layer.attn._require_qualified_decode(probe, metadata)
 
     def _validate_forward(self, inputs, fmha_impl):
+        self._check_execution_config()
         if self._v4_args.pp_size != 1:
             raise NotImplementedError(
                 "V4.1 PP worker forward requires qualified native frame transport"

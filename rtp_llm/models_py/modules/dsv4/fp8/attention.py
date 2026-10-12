@@ -32,7 +32,6 @@ import torch.nn.functional as F
 from deep_gemm.utils.layout import (  # noqa: E402
     get_mn_major_tma_aligned_packed_ue8m0_tensor,
 )
-
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
@@ -1972,13 +1971,15 @@ class AttentionFP8(nn.Module):
             return None
         return torch.cat([swa_dense, cmp_dense], dim=1)
 
-    def reset_rope_cache(self, device=None):
+    def reset_rope_cache(self, device=None, *, compute_device=None):
         """Recompute `freqs_cis` on the actual device — MUST be called after
         `model.to_empty(device=...)` since meta-tensor construction leaves the
         cached freqs as zeros. Pass ``device`` so the memoized
         ``precompute_freqs_cis`` returns the shared (params, device) tensor;
         all layers with identical rope params now point at the same object,
-        which lets the downstream cos_sin_cache dedupe by ``id()``."""
+        which lets the downstream cos_sin_cache dedupe by ``id()``.
+        ``compute_device`` optionally selects the arithmetic device separately
+        from the destination; prepare this before forward or graph capture."""
         freqs_cis = precompute_freqs_cis(
             self._rope_dim,
             self._rope_max_seq_len,
@@ -1988,6 +1989,7 @@ class AttentionFP8(nn.Module):
             self._rope_beta_fast,
             self._rope_beta_slow,
             device=device,
+            compute_device=compute_device,
         )
         self.freqs_cis = freqs_cis
 
@@ -3959,7 +3961,6 @@ class AttentionFP8(nn.Module):
             qkv.q is not None
         ), "_attn_via_workspace_cp_raw_q_merge: prefill Q not materialized"
         from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 

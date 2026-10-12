@@ -61,6 +61,8 @@ def _validate_execution(worker, dispatch, contract, transfer_round, receiver, te
         raise ValueError(
             "Native V4.1 PP execution requires its admitted worker descriptor"
         )
+    worker._check_execution_config()
+    contract.require_attention_config(worker._v4_args.v41_config)
     current = prepare_native_pp_prefill_dispatch(worker, dispatch.native_inputs)
     if (
         current.schedule != dispatch.schedule
