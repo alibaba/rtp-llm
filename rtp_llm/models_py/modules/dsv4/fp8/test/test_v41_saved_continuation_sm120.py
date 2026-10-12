@@ -9,9 +9,11 @@ import subprocess
 import time
 import traceback
 import unittest
+from contextlib import nullcontext
 from dataclasses import asdict
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -32,6 +34,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     resources,
     tagged_cache,
 )
+from rtp_llm.models_py.modules.dsv4.hc import delayed as delayed_hc
 from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache
 from rtp_llm.utils.model_weight import W
 
@@ -49,6 +52,14 @@ SOURCE_PAGES = {
 DESTINATION_PAGE = 3
 SENTINEL = 211
 ROUNDS = 12
+
+
+def worker_choices(model):
+    choices = dict(CHOICES)
+    mode = model._v4_args.v41_config.get("mhc_collapse_mode")
+    if mode is not None:
+        choices["mhc_collapse_mode"] = mode
+    return choices
 
 
 def emit(marker, **values):
@@ -165,7 +176,7 @@ def metadata(model, generation, rank, identity, prompt, hidden, head, packed):
         "rank": rank,
         "weight_sha256": identity,
         "config": model._v4_args.v41_config,
-        "choices": CHOICES,
+        "choices": worker_choices(model),
         "bindings": [asdict(b) for b in binding],
         "layouts": {
             tag: asdict(layout) for tag, layout in model.kv_cache.layouts.items()
@@ -189,7 +200,8 @@ def sample(hidden, head):
 
 
 def validate_saved(state, admitted, model, generation, rank, identity):
-    # This test-only fixture binds externally admitted metadata before scatter.
+    # Bind externally admitted metadata before scatter.
+    model._check_execution_config()
     if set(state) != {"metadata", "packed"} or state["metadata"] != admitted:
         raise ValueError("saved metadata differs from the admitted producer")
     if (
@@ -198,7 +210,8 @@ def validate_saved(state, admitted, model, generation, rank, identity):
         or admitted["rank"] != rank
         or admitted["weight_sha256"] != identity
         or admitted["config"] != model._v4_args.v41_config
-        or admitted["choices"] != CHOICES
+        or admitted["choices"] != worker_choices(model)
+        or model._mhc_collapse_mode != admitted["choices"].get("mhc_collapse_mode")
         or model._rotary_compute_device != "cuda"
         or model._sparse_attention_mode != "short_preserved"
     ):
@@ -343,8 +356,23 @@ def continue_worker(model, head, generation, rank, admitted, pages, phase):
     }
 
 
-@torch.inference_mode()
 def run_rank(rank, port, config, generation, phase, directory):
+    with (
+        patch.object(
+            delayed_hc,
+            "collapse_delayed",
+            side_effect=AssertionError(
+                "Selected continuation reached default collapse"
+            ),
+        )
+        if config.get("mhc_collapse_mode") == "ordered_fp32"
+        else nullcontext()
+    ):
+        run_rank_impl(rank, port, config, generation, phase, directory)
+
+
+@torch.inference_mode()
+def run_rank_impl(rank, port, config, generation, phase, directory):
     torch.cuda.set_device(rank)
     assert torch.cuda.get_device_capability() == (12, 0)
     torch.set_num_threads(1)
@@ -387,6 +415,19 @@ def run_rank(rank, port, config, generation, phase, directory):
         for layer in model.v4.layers:
             layer.attn._check_execution_config()
             assert layer.attn.freqs_cis.device == torch.device("cuda", rank)
+            mode = config.get("mhc_collapse_mode")
+            assert layer.attn_hc.collapse_mode == mode
+            assert layer.ffn_hc.collapse_mode == mode
+        if config.get("mhc_collapse_mode") is not None:
+            emit(
+                "DSV41_SAVED_COLLAPSE_OWNER",
+                generation=generation,
+                rank=rank,
+                phase=phase,
+                layers=len(model.v4.layers),
+                mhc_collapse_mode="ordered_fp32",
+                diagnostic_collapse_hook=False,
+            )
         state_path = directory / f"rank{rank}.state.pt"
         manifest_path = directory / f"rank{rank}.state.json"
         if phase == "source":
@@ -445,7 +486,12 @@ def run_rank(rank, port, config, generation, phase, directory):
                     if variant == "generation":
                         mutated["metadata"]["generation"] = 1 - generation
                     elif variant == "policy":
-                        mutated["metadata"]["choices"]["sparse_attention_mode"] = None
+                        policy = (
+                            "mhc_collapse_mode"
+                            if config.get("mhc_collapse_mode") is not None
+                            else "sparse_attention_mode"
+                        )
+                        mutated["metadata"]["choices"][policy] = None
                     elif variant == "history":
                         mutated["metadata"]["history"][0] += 1
                     elif variant == "missing_pool":
@@ -549,9 +595,10 @@ def run_rank(rank, port, config, generation, phase, directory):
 
 
 class SavedContinuationSM120Test(unittest.TestCase):
-    def run_case(self, generation):
+    def run_case(self, generation, *, collapse_mode=None):
         self.assertEqual(torch.cuda.device_count(), 8)
-        root = Path(os.environ["DSV41_TEST_HANDOFF_ROOT"]) / f"gen{generation}"
+        suffix = "-collapse" if collapse_mode is not None else ""
+        root = Path(os.environ["DSV41_TEST_HANDOFF_ROOT"]) / f"gen{generation}{suffix}"
         root.mkdir()
         checkpoint_root = root / "checkpoint"
         checkpoint_root.mkdir()
@@ -559,6 +606,8 @@ class SavedContinuationSM120Test(unittest.TestCase):
         torch.manual_seed(41993)
         config = checkpoint(checkpoint_root, full_schedule=True)
         config.update(CHOICES)
+        if collapse_mode is not None:
+            config["mhc_collapse_mode"] = collapse_mode
         save_json(root / "fixture.json", config)
         for phase in ("source", "resume"):
             baseline = gpu_observation()
@@ -598,6 +647,7 @@ class SavedContinuationSM120Test(unittest.TestCase):
             cold_receivers=8,
             completed=True,
             standalone_decode_role=False,
+            **({} if collapse_mode is None else {"mhc_collapse_mode": collapse_mode}),
         )
 
     def test_generation_zero(self):
@@ -605,6 +655,12 @@ class SavedContinuationSM120Test(unittest.TestCase):
 
     def test_generation_one(self):
         self.run_case(1)
+
+    def test_ordered_collapse_generation_zero(self):
+        self.run_case(0, collapse_mode="ordered_fp32")
+
+    def test_ordered_collapse_generation_one(self):
+        self.run_case(1, collapse_mode="ordered_fp32")
 
 
 if __name__ == "__main__":
