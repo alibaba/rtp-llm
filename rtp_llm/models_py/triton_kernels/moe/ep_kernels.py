@@ -55,8 +55,13 @@ def _fwd_kernel_ep_scatter_1(
     )
     tokens_per_expert = ((tokens_per_expert + ALIGN_M - 1) // ALIGN_M) * ALIGN_M
     cumsum = tl.cumsum(tokens_per_expert) - tokens_per_expert
-    tl.store(expert_start_loc + offset_cumsum, cumsum, mask=offset_cumsum < num_experts)
-    cur_expert_start = tl.load(expert_start_loc + cur_expert).to(tl.int64)
+    # Keep the prefix in registers: a vector store followed by a scalar
+    # reload can cross warps without a barrier. Each program owns just its
+    # expert's output slot, avoiding redundant cross-program writes too.
+    cur_expert_start = tl.sum(tl.where(offset_cumsum == cur_expert, cumsum, 0)).to(
+        tl.int64
+    )
+    tl.store(expert_start_loc + cur_expert, cur_expert_start.to(tl.int32))
     cur_expert_token_num = tl.load(num_recv_tokens_per_expert + cur_expert)
     m_indices_start_ptr = m_indices + cur_expert_start
     off_expert = tl.arange(0, BLOCK_E).to(tl.int64)
