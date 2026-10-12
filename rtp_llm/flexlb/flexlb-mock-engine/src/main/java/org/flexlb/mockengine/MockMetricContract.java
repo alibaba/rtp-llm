@@ -66,6 +66,7 @@ final class MockMetricContract {
         metric("mock_memory_cache_pending_write_blocks", null, "Whale engine observation", Type.GAUGE, Unit.BLOCKS, Role.BOTH, Aggregation.NONE, Sampling.SNAPSHOT),
         metric("mock_memory_cache_pinned_blocks", null, "Whale engine observation", Type.GAUGE, Unit.BLOCKS, Role.BOTH, Aggregation.NONE, Sampling.SNAPSHOT),
         metric("mock_memory_cache_consumed_blocks_total", "memory_consumed_blocks", "H2D source deletion (not capacity eviction)", Type.COUNTER, Unit.BLOCKS, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
+        metric("mock_h2d_device_published_blocks_total", "h2d_device_published_blocks", "H2D copied prefix blocks published to shared Device index", Type.COUNTER, Unit.BLOCKS, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("mock_memory_cache_read_blocks_total", "memory_read_blocks", "Whale engine observation", Type.COUNTER, Unit.BLOCKS, Role.PREFILL, Aggregation.SUM, Sampling.SNAPSHOT),
         metric("mock_memory_cache_total_tokens", null, "Whale engine observation", Type.GAUGE, Unit.TOKENS, Role.BOTH, Aggregation.NONE, Sampling.SNAPSHOT),
         metric("mock_memory_cache_write_rejected_total", null, "Whale engine observation", Type.COUNTER, Unit.COUNT, Role.BOTH, Aggregation.NONE, Sampling.SNAPSHOT),

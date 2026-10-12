@@ -736,6 +736,7 @@ public final class JavaMockEngineCluster {
         }
 
         private final java.util.concurrent.atomic.LongAdder memoryReadBlocks = new java.util.concurrent.atomic.LongAdder();
+        private final java.util.concurrent.atomic.LongAdder h2dPublishedBlocks = new java.util.concurrent.atomic.LongAdder();
         private final java.util.concurrent.atomic.LongAdder memoryConsumedBlocks = new java.util.concurrent.atomic.LongAdder();
         private java.util.function.BiConsumer<String, Double> cacheEvictionReporter;
 
@@ -3793,20 +3794,36 @@ public final class JavaMockEngineCluster {
                     // Pins last until the existing execution lane starts; copying adds no delay.
                     long readDelay = startDelayNanos;
                     Runnable release = () -> {
-                        if (read != null && memoryReads.remove(id, read)) {
+                        synchronized (completionLock) {
+                            if (read == null || !memoryReads.remove(id, read)) return;
+                            // H2D is instantaneous in this model at lane start. Publish
+                            // only copied prefix blocks, before consuming their source.
+                            // Cancellation/crash cannot race this ownership handover.
+                            var lease = activeBlockLeases.get(id);
+                            if (epoch != crashEpoch.get() || lease == null
+                                    || cancelledRequests.containsKey(id) || shuttingDown) {
+                                read.close();
+                                return;
+                            }
+                            var shape = member.shape();
+                            if (performance.h2dPublishDevice && read.blocks() > 0
+                                    && storePrefillDevice(shape)) {
+                                var copiedPrefix = shape.blockKeys().subList(0, shape.hitBlocks());
+                                activeBlockLeases.put(id, cache.retainComputed(lease, copiedPrefix));
+                                h2dPublishedBlocks.add(read.blocks());
+                                cacheVersion.incrementAndGet();
+                            }
                             if (performance.memoryConsumeOnRead) {
                                 int consumed = read.consume();
                                 memoryConsumedBlocks.add(consumed);
                                 if (consumed > 0) cacheVersion.incrementAndGet();
-                            } else {
-                                read.close();
-                            }
+                            } else read.close();
                         }
                     };
                     if (readDelay == 0) release.run();
                     else {
                         try { scheduler.schedule(release, readDelay, TimeUnit.NANOSECONDS); }
-                        catch (java.util.concurrent.RejectedExecutionException stopped) { release.run(); }
+                        catch (java.util.concurrent.RejectedExecutionException stopped) { releaseMemoryRead(id); }
                     }
                 }
             }
@@ -6072,6 +6089,7 @@ public final class JavaMockEngineCluster {
                 metrics.put("mock_memory_cache_evicted_blocks_total", memoryCache.evictions());
                 metrics.put("mock_memory_cache_read_blocks_total", memoryReadBlocks.sum());
                 metrics.put("mock_memory_cache_consumed_blocks_total", memoryConsumedBlocks.sum());
+                metrics.put("mock_h2d_device_published_blocks_total", h2dPublishedBlocks.sum());
                 metrics.put("mock_memory_cache_pinned_blocks", memoryCache.pinnedBlocks());
                 metrics.put("mock_memory_cache_pending_write_blocks", memoryCache.pendingBlocks());
                 metrics.put("mock_memory_cache_write_rejected_total", memoryCache.writeRejected());
@@ -6620,6 +6638,7 @@ public final class JavaMockEngineCluster {
             if (isDiagnosticPrefill()) {
                 snap.put("memory_evicted_blocks", memoryCache == null ? 0L : memoryCache.evictions());
                 snap.put("memory_consumed_blocks", memoryConsumedBlocks.sum());
+                snap.put("h2d_device_published_blocks", h2dPublishedBlocks.sum());
                 snap.put("memory_read_blocks", memoryReadBlocks.sum());
                 snap.put("memory_total_blocks", memoryCache == null ? 0 : memoryCache.capacity());
                 snap.put("memory_allocated_blocks", memoryCache == null ? 0 : memoryCache.size() + memoryCache.pendingBlocks());

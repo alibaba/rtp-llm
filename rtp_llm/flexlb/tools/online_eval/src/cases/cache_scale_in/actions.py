@@ -171,13 +171,18 @@ def observe(ctx, p, deadline):
         expected_engines = set(initial)
         if set(policy.get("engines", {})) != expected_engines or not all(
             value is True for value in policy["engines"].values()
+        ) or set(policy.get("device_publication", {})) != expected_engines or any(
+            value is not False for value in policy["device_publication"].values()
         ):
             raise ValueError("shared warmup requires consuming Memory reads on every P")
         policy = mock_json(ctx.ops, "memory_cache_policy", deadline,
-                           {"consume_on_read": p["post_memory_consume_on_read"]})
+                           {"consume_on_read": p["post_memory_consume_on_read"],
+                            "publish_device_on_read": p["post_h2d_publish_device"]})
         readback = mock_json(ctx.ops, "memory_cache_policy", deadline)
         if set(readback.get("engines", {})) != expected_engines or any(
             value is not p["post_memory_consume_on_read"] for value in readback["engines"].values()
+        ) or set(readback.get("device_publication", {})) != expected_engines or any(
+            value is not p["post_h2d_publish_device"] for value in readback["device_publication"].values()
         ):
             raise ValueError("Memory cache policy readback mismatch")
         evidence["memory_policy_transition"] = dict(update=policy, readback=readback)

@@ -53,6 +53,7 @@ metrics:
   - mock/memory_evicted_blocks_total
   - mock/memory_consumed_blocks_total
   - mock/memory_read_blocks_total
+  - mock/h2d_device_published_blocks_total
   - mock/memory_total_blocks
   - mock/memory_allocated_blocks
 charts:
@@ -279,6 +280,15 @@ charts:
       axis: blocks
       color: '#722ed1'
       hidden: false
+    mock/h2d_device_published_blocks_rate:
+      metric_id: mock/h2d_device_published_blocks_rate
+      labels: {}
+      name: H2D Device 共享登记
+      group: 缓存周转
+      unit: blocks/s
+      axis: blocks
+      color: '#13c2c2'
+      hidden: false
     mock/memory_read_blocks_rate:
       metric_id: mock/memory_read_blocks_rate
       labels: {}
@@ -453,6 +463,7 @@ charts:
     - mock/memory_evicted_blocks_rate
     - mock/memory_consumed_blocks_rate
     - mock/memory_read_blocks_rate
+    - mock/h2d_device_published_blocks_rate
     - mock/memory_occupancy_ratio
     axes:
       blocks:

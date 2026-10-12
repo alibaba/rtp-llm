@@ -293,6 +293,14 @@ class CacheEvictionControlTest {
         var state = MAPPER.readTree(httpGet(controlServer.getPort(), "/memory_cache_policy"));
         assertEquals(prefillServices.size(), state.path("engines").size());
         assertFalse(state.path("engines").path("prefill-0").asBoolean(true));
+        assertEquals(400, httpPostResponse(controlServer.getPort(), "/memory_cache_policy",
+                "{\"consume_on_read\":true,\"publish_device_on_read\":\"yes\"}").statusCode());
+        assertEquals(400, httpPostResponse(controlServer.getPort(), "/memory_cache_policy",
+                "{\"consume_on_read\":true,\"unknown\":false}").statusCode());
+        assertEquals(200, httpPostResponse(controlServer.getPort(), "/memory_cache_policy",
+                "{\"consume_on_read\":true,\"publish_device_on_read\":true}").statusCode());
+        assertTrue(prefillServices.stream().allMatch(s -> s.getPerformance().h2dPublishDevice));
+        assertTrue(decodeServices.stream().noneMatch(s -> s.getPerformance().h2dPublishDevice));
     }
 
     private void startCluster() throws Exception {

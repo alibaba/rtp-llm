@@ -275,6 +275,22 @@ sources:
         requires_request_identity: false
       exported_metrics:
       - mock_memory_cache_read_blocks_total
+    h2d_device_published_blocks_total:
+      promql: mock_h2d_device_published_blocks_total${selector}
+      mode: scrape
+      unit: blocks
+      value_kind: counter
+      labels:
+      - role
+      - engine_name
+      - engine_incarnation
+      measurement:
+        method: raw_scrape
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_h2d_device_published_blocks_total
     memory_total_blocks:
       promql: mock_memory_cache_total_blocks${selector}
       mode: scrape
@@ -359,6 +375,19 @@ sources:
         requires_request_identity: false
       exported_metrics:
       - mock_memory_cache_read_blocks_total
+    h2d_device_published_blocks_rate:
+      promql: sum by (role) (rate(mock_h2d_device_published_blocks_total${selector}[${window_ms}ms]))
+      unit: blocks/s
+      value_kind: gauge
+      labels:
+      - role
+      measurement:
+        method: promql_evaluation
+        population: mock_selector
+        accuracy: sampled
+        requires_request_identity: false
+      exported_metrics:
+      - mock_h2d_device_published_blocks_total
     memory_occupancy_ratio:
       promql: sum by (role) (mock_memory_cache_allocated_blocks${selector}) / sum
         by (role) (mock_memory_cache_total_blocks${selector})

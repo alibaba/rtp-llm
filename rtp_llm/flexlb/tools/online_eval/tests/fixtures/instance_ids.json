@@ -1,6 +1,8 @@
 [
   "cache_scale_in::affinity_disabled::batch-window",
   "cache_scale_in::affinity_disabled::single-nonbatch",
+  "cache_scale_in::affinity_disabled_h2d_published::batch-window",
+  "cache_scale_in::affinity_disabled_h2d_published::single-nonbatch",
   "cache_scale_in::affinity_disabled_mem_retained::batch-window",
   "cache_scale_in::affinity_disabled_mem_retained::single-nonbatch",
   "cache_scale_in::default::batch-window",

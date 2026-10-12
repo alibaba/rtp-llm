@@ -5,6 +5,39 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PrefillConnectorCacheTest {
+    @Test void copiedPrefixSurvivesProducerCancellationAndBecomesEvictableAfterLastReader() {
+        var cache = new MockLruBlockCache(10, 0);
+        var producer = cache.acquire(3, List.of(1L, 2L, 3L));
+        producer = cache.retainComputed(producer, List.of(1L, 2L));
+        assertEquals(2, cache.prefixHitBlocks(List.of(1L, 2L, 3L)));
+        assertEquals(1, cache.heldBlocks(), "uncomputed suffix remains private");
+        var consumer = cache.acquire(3, List.of(1L, 2L, 3L));
+        assertEquals(2, consumer.hitKeys.size());
+        assertEquals(2, cache.heldBlocks(), "two private suffixes, one shared prefix");
+        cache.release(producer);
+        assertEquals(2, cache.referencedKeyBlocks());
+        assertFalse(cache.evict(List.of(1L, 2L)));
+        cache.release(consumer);
+        assertEquals(0, cache.heldBlocks());
+        assertEquals(0, cache.referencedKeyBlocks());
+        assertEquals(10, cache.availableBlocks());
+        assertTrue(cache.evict(List.of(1L, 2L)));
+        assertEquals(10, cache.freeBlocks());
+    }
+
+    @Test void finalPublicationExtendsPrefixWithoutDoubleReferences() {
+        var cache = new MockLruBlockCache(10, 0);
+        var producer = cache.acquire(3, List.of(1L, 2L, 3L));
+        producer = cache.retainComputed(producer, List.of(1L, 2L));
+        var consumer = cache.acquire(2, List.of(1L, 2L));
+        producer = cache.retainComputed(producer, List.of(1L, 2L, 3L));
+        cache.release(producer);
+        assertEquals(2, cache.referencedKeyBlocks());
+        cache.release(consumer);
+        assertEquals(0, cache.referencedKeyBlocks());
+        assertEquals(0, cache.heldBlocks());
+        assertEquals(10, cache.availableBlocks());
+    }
     @Test void computedKeysStayPinnedUntilConnectorReleases() {
         var cache = new MockLruBlockCache(10);
         var lease = cache.acquire(3, List.of(1L, 2L, 3L));

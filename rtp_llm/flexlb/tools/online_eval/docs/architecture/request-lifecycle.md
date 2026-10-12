@@ -90,6 +90,11 @@ Mock 的 Memory 命中在执行 lane 开始时消费源条目，Device 共享键
 两者之间，相同 prefix 可能失去共享命中。`/memory_cache_policy` 的 `consume_on_read`
 布尔控制只用于机理对照：关闭消费保留 Memory 条目并释放读 pin，不增加容量，也不把
 请求私有的 Device 副本登记为共享缓存。它不是生产修复或 Device 加载去重的模拟。
+同一诊断接口的 `publish_device_on_read` 可在 lane 开始时，把成功搬入的前缀先
+登记到 Device 共享索引，再消费 Memory 来源；未计算后缀保持私有。Mock 不模拟复制
+时延，这个时点表示复制完成。登记沿用请求引用计数：多个请求共享同一物理 block，
+各自释放自己的引用，最后一个请求释放后才可驱逐。取消与复制结算互斥，过期进程
+回调不登记数据；这仍不模拟真实异步复制中的加载任务 join。
 当前真实 block-tree 路径在 Device cache 启用时，于 H2D 成功结算中先登记 Device
 CACHE 引用再撤销源层引用；加载中的相同 prefix 可以 join。判断 mock/real 对齐必须
 检查实际采用的代码和缓存配置，不能只比较最终命中率。

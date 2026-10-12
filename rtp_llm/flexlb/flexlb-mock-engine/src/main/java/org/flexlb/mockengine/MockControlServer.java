@@ -564,16 +564,25 @@ final class MockControlServer {
                 byte[] bytes = exchange.getRequestBody().readNBytes(65537);
                 if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
                 JsonNode body = MAPPER.readTree(bytes);
-                if (body == null || !body.isObject() || body.size() != 1
-                        || !body.path("consume_on_read").isBoolean())
-                    throw new IllegalArgumentException("consume_on_read boolean required; no extra fields");
+                if (body == null || !body.isObject() || (body.size() != 1 && body.size() != 2)
+                        || !body.path("consume_on_read").isBoolean()
+                        || (body.size() == 2 && !body.path("publish_device_on_read").isBoolean()))
+                    throw new IllegalArgumentException("consume_on_read and optional publish_device_on_read must be boolean; no extra fields");
                 boolean consume = body.path("consume_on_read").asBoolean();
-                for (var service : targets) service.getPerformance().memoryConsumeOnRead = consume;
+                for (var service : targets) {
+                    service.getPerformance().memoryConsumeOnRead = consume;
+                    if (body.has("publish_device_on_read"))
+                        service.getPerformance().h2dPublishDevice = body.get("publish_device_on_read").asBoolean();
+                }
             }
             Map<String, Boolean> after = new LinkedHashMap<>();
             for (var service : targets)
                 after.put(service.getEngineName(), service.getPerformance().memoryConsumeOnRead);
+            Map<String, Boolean> publication = new LinkedHashMap<>();
+            for (var service : targets)
+                publication.put(service.getEngineName(), service.getPerformance().h2dPublishDevice);
             sendJson(exchange, 200, Map.of("before", before, "engines", after,
+                    "device_publication", publication,
                     "scope", "subsequent H2D source releases; diagnostic only; volatile until restart"));
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
             sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));

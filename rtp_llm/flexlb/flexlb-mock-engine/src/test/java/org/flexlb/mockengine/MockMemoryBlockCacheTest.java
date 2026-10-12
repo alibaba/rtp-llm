@@ -143,6 +143,54 @@ class MockMemoryBlockCacheTest {
         }
     }
 
+    @Test void publishedH2dPrefixSharesPhysicalBlocksBeforeForwardCompletes() throws Exception {
+        for (boolean consume : List.of(true)) {
+            var model = model("{\"enabled\":true,\"capacity_blocks\":10}");
+            model.memoryConsumeOnRead = consume;
+            model.h2dPublishDevice = true;
+            model.setOverrideFixedPrefillMs(500.0);
+            try (var cluster = MockEngineTestCluster.create(model, 61300, 1, 0)) {
+                var p = cluster.prefill(0);
+                var mem = (MockMemoryBlockCache) field(p, "memoryCache");
+                mem.write(List.of(1L, 2L));
+                var request = EngineRpcService.GenerateInputPB.newBuilder().setRequestId(700)
+                        .addAllTokenIds(java.util.Collections.nCopies(192, 123))
+                        .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().setMaxNewTokens(1)
+                                .setUniqueKey("{\"input_len\":192,\"output_len\":1,\"block_cache_keys\":[1,2,3]}"))
+                        .build();
+                var done = new java.util.concurrent.CountDownLatch(1);
+                var error = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+                p.generateStreamCall(request, new io.grpc.stub.StreamObserver<EngineRpcService.GenerateOutputsPB>() {
+                    public void onNext(EngineRpcService.GenerateOutputsPB x) {
+                        if (x.hasErrorInfo()) error.set(new AssertionError(x.getErrorInfo().toString()));
+                    }
+                    public void onError(Throwable t) { error.set(t); done.countDown(); }
+                    public void onCompleted() { done.countDown(); }
+                });
+                Thread.sleep(100);
+                assertEquals(1, done.getCount(), "inspect sharing before forward completes");
+                assertEquals(consume ? 0 : 2, mem.match(List.of(1L, 2L), 0));
+                assertEquals(consume ? 2 : 0,
+                        p.whaleMetrics().get("mock_memory_cache_consumed_blocks_total").longValue());
+                assertEquals(0, mem.evictions(), "source deletion is not a capacity eviction");
+                assertEquals(0, mem.pinnedBlocks(), "retaining entries must release read pins");
+                var gpu = (MockLruBlockCache) field(p, "cache");
+                assertEquals(2, gpu.prefixHitBlocks(List.of(1L, 2L, 3L)), "only H2D prefix is valid");
+                assertEquals(1, gpu.heldBlocks(), "uncomputed suffix stays private");
+                var other = gpu.acquire(2, List.of(1L, 2L));
+                assertEquals(2, other.hitKeys.size());
+                assertTrue(done.await(3, java.util.concurrent.TimeUnit.SECONDS));
+                assertFalse(gpu.evict(List.of(1L, 2L)), "other request protects prefix after producer completes");
+                gpu.release(other);
+                assertEquals(0, gpu.referencedKeyBlocks());
+                assertEquals(0, gpu.heldBlocks());
+                assertEquals(gpu.totalBlocks(), gpu.availableBlocks());
+                assertTrue(gpu.evict(List.of(1L, 2L)));
+                assertNull(error.get());
+            }
+        }
+    }
+
     @Test void optInAndConfigurationValidation() throws Exception {
         assertEquals(0, model("{}").memoryCacheBlocks);
         var copy = model("{\"enabled\":true,\"capacity_blocks\":10}").forEngine();
