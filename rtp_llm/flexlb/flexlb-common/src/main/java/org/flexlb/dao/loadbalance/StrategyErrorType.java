@@ -5,17 +5,13 @@ import lombok.Getter;
 @Getter
 public enum StrategyErrorType {
 
-    CONNECT_FAILED(8202, false),
-    CONNECT_TIMEOUT(8203, false),
-
     // master schedule error
-    NO_AVAILABLE_WORKER(8400, true),
     NO_PREFILL_WORKER(8402, true),
     NO_DECODE_WORKER(8403, true),
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
     NO_FRONTEND_WORKER(8407, true),
-    NO_ENCODER_WORKER(8408, true),
+    NO_ENCODER_WORKER(8409, true),
     INVALID_REQUEST(8406, false),
     VIT_ROUTE_STALE(8408, false),
 

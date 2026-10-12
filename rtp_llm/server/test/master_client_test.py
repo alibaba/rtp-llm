@@ -274,6 +274,22 @@ class MasterClientBatchPayloadTest(unittest.IsolatedAsyncioTestCase):
                     raised.exception.message,
                 )
 
+    async def test_encoder_worker_error_preserves_8409(self):
+        client = _RejectingMasterClient(8409, AdmissionRejectReason.UNSPECIFIED)
+
+        with self.assertRaises(FtRuntimeException) as raised:
+            await client.get_backend_role_addrs(
+                block_cache_keys=[1],
+                cache_key_block_size=1024,
+                input=_FakeInput(),
+                request_id=107,
+                input_pb=_FakeInputPB(),
+            )
+
+        self.assertEqual(
+            ExceptionType.MASTER_NO_ENCODER_WORKER, raised.exception.exception_type
+        )
+
     async def test_missing_reason_field_falls_back_to_unspecified(self):
         client = _RejectingMasterClient(
             ExceptionType.ADMISSION_UNAVAILABLE,

@@ -9,6 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class StrategyErrorTypeTest {
 
     @Test
+    void encoderWorkerAndStaleVitRouteHaveDistinctCodes() {
+        assertEquals(8409, StrategyErrorType.NO_ENCODER_WORKER.getErrorCode());
+        assertEquals(8408, StrategyErrorType.VIT_ROUTE_STALE.getErrorCode());
+    }
+
+    @Test
     void responseFactoryEnforcesAllCodeReasonPairs() {
         for (StrategyErrorType type : StrategyErrorType.values()) {
             for (AdmissionRejectReason reason : AdmissionRejectReason.values()) {

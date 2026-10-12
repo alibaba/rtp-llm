@@ -13,6 +13,7 @@ import io.opentelemetry.context.Context;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.context.propagation.TextMapPropagator;
 import io.opentelemetry.context.propagation.TextMapSetter;
+import lombok.Getter;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.enums.StatusEnum;
 
@@ -75,6 +76,7 @@ public final class FlexlbTrace {
     // strongly here would retain it forever.
     private static final Map<Span, BusinessError> BUSINESS_ERRORS =
             Collections.synchronizedMap(new WeakHashMap<>());
+    @Getter
     private static volatile boolean enabled;
     private static volatile Tracer tracer = OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME);
 
@@ -89,10 +91,6 @@ public final class FlexlbTrace {
         enabled = sdk != null;
     }
 
-    public static boolean isEnabled() {
-        return enabled;
-    }
-
     /** Only explicit admission/validation codes imply a business rejection. */
     public static String scheduleFailureType(int code) {
         if (code == StatusEnum.INTERNAL_ERROR.getCode()) {
@@ -101,7 +99,6 @@ public final class FlexlbTrace {
         if (code == StrategyErrorType.QUEUE_FULL.getErrorCode()
                 || code == StrategyErrorType.PRIORITY_PREEMPTED.getErrorCode()
                 || code == StrategyErrorType.INVALID_REQUEST.getErrorCode()
-                || code == StrategyErrorType.BATCH_TOKEN_CAPACITY_EXCEEDED.getErrorCode()
                 || code == StrategyErrorType.PRIORITY_ADMISSION_REJECTED.getErrorCode()
                 || code == StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode()
                 || code == StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode()) {

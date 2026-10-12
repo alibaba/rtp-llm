@@ -128,7 +128,7 @@ class FlexlbServiceImplTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
-                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+                Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId(Long.toString(requestId))
@@ -148,7 +148,7 @@ class FlexlbServiceImplTest {
         when(configService.loadBalanceConfig()).thenReturn(config);
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
-                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+                Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("encoder-request")
@@ -229,7 +229,7 @@ class FlexlbServiceImplTest {
     void schedulePassesDistinctRequestedRolesAndEncoderPhaseToRouter() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
-                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+                Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("encoder-request")
@@ -247,7 +247,7 @@ class FlexlbServiceImplTest {
     void schedulePassesEncoderCacheHitLengthWithoutChangingSequenceLength() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
-                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+                Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("partial-hit")
@@ -288,7 +288,7 @@ class FlexlbServiceImplTest {
         when(modelRoute.getAllRoleTypes()).thenReturn(List.of(RoleType.ENCODER));
         when(configService.modelServiceConfig()).thenReturn(modelRoute);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
-                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+                Response.buildErrorResponse(StrategyErrorType.NO_ENCODER_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("encoder-only-model")
@@ -1822,7 +1822,7 @@ class FlexlbServiceImplTest {
     void scheduleWithoutClientKeysRoutesWithoutDerivingBlockSize() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
         when(routeService.route(any())).thenReturn(CompletableFuture.completedFuture(
-                Response.buildErrorResponse(StrategyErrorType.NO_AVAILABLE_WORKER, null)));
+                Response.buildErrorResponse(StrategyErrorType.NO_PREFILL_WORKER, null)));
 
         service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                 .setRequestId("no-client-keys").setSeqLen(4096).build(), mock(StreamObserver.class));
