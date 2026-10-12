@@ -1,7 +1,6 @@
 """CED bounded replay over main P/D routing with CP2 prefill and TP2 decode."""
 
 import logging
-import os
 import re
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -16,13 +15,16 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     pd_separation = True
     compare_generation_logits = True
+    prefill_cp_size = 2
+    decode_dp_size = 1
     # Decode reuse includes the freshly transferred prefill cache. Only the
     # prefill's initial reuse measures a hit from an earlier request.
     reuse_field = "prefill_total_reuse_len"
 
     def start_servers(self):
         gpu_ids = list(get_gpu_ids())
-        self.assertGreaterEqual(len(gpu_ids), 4)
+        role_size = self.prefill_cp_size
+        self.assertGreaterEqual(len(gpu_ids), 2 * role_size)
         prefill_port = MagaServerManager.get_free_port()
         decode_port = MagaServerManager.get_free_port()
         route = ServiceRoute(
@@ -55,27 +57,28 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
             "DSV4_USE_MEGA_MOE_FUSED": "0",
             "DSV41_CED": "1",
             "DSV41_SWA_BOUNDED_REPLAY": "1",
-            "WORLD_SIZE": "2",
+            "WORLD_SIZE": str(role_size),
             "REMOTE_RPC_SERVER_IP": "localhost",
         }
-        # The macro reserves four cards; each role owns two disjoint cards.
-        common_args = os.environ["SMOKE_ARGS"].replace(
-            "--world_size 4", "--world_size 2"
+        # Each role owns half of the cards reserved by the smoke macro.
+        common_args = self.server_args().replace(
+            f"--world_size {2 * role_size}", f"--world_size {role_size}"
         )
         for role, port, peer, devices, args in (
             (
                 "prefill",
                 prefill_port,
                 decode_port,
-                gpu_ids[:2],
+                gpu_ids[:role_size],
                 "--role_type PREFILL --enable_cuda_graph 0 --cp_rotate_method ALL_GATHER",
             ),
             (
                 "decode",
                 decode_port,
                 prefill_port,
-                gpu_ids[2:4],
-                "--role_type DECODE --enable_cuda_graph 1 --decode_capture_config 1,2,4 --cp_rotate_method PREFILL_CP",
+                gpu_ids[role_size : 2 * role_size],
+                "--role_type DECODE --enable_cuda_graph 1 --decode_capture_config 1,2,4 --cp_rotate_method PREFILL_CP"
+                f" --tp_size {role_size // self.decode_dp_size} --dp_size {self.decode_dp_size}",
             ),
         ):
             manager = MagaServerManager(
@@ -137,12 +140,12 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
         super().test_graph_engram_and_prefix_reuse()
         prefill_log = Path(self.server.log_file_path).read_text(errors="replace")
         compactions = re.findall(
-            r"V4.1 CED compacted: bounded=True cp=2 rows=(\d+)->(\d+)",
+            rf"V4.1 CED compacted: bounded=True cp={self.prefill_cp_size} rows=(\d+)->(\d+)",
             prefill_log,
         )
         self.assertTrue(
             any(int(before) > int(after) for before, after in compactions),
-            "No actual bounded CED row reduction observed on CP2 prefill",
+            f"No actual bounded CED row reduction observed on CP{self.prefill_cp_size} prefill",
         )
 
 

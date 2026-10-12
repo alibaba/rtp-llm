@@ -19,6 +19,7 @@ from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
 
 class DeepSeekV41ContractTest(unittest.TestCase):
+    short_prompt = "The capital of France is"
     pd_separation = False
     reuse_field = "reuse_len"
     graph_target_verify = 0
@@ -212,7 +213,7 @@ class DeepSeekV41ContractTest(unittest.TestCase):
         self.assertEqual(generated["output_ids"][0][: len(expected)], expected)
 
     def test_graph_engram_and_prefix_reuse(self):
-        short = "The capital of France is"
+        short = self.short_prompt
         first = self.request("short_uncached", short, False)
         self.assert_decode_matches_full_prefill(first)
         self.assert_same(first, self.request("short_repeat_uncached", short, False))
