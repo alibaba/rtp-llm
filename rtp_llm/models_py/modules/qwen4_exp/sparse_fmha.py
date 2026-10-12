@@ -220,6 +220,7 @@ def _sparse_prefill_grouped_kernel(
     BLK_K: tl.constexpr,
     BLK_H: tl.constexpr,
     SKIP_EMPTY: tl.constexpr = False,
+    BF16_PAIR_PV: tl.constexpr = False,
 ):
     """Share selected K/V across GQA heads and use tensor-core reductions."""
     pid_b = tl.program_id(0)
@@ -266,9 +267,19 @@ def _sparse_prefill_grouped_kernel(
             )
             # Keep softmax probabilities in FP32. tf32x3 avoids the BF16
             # probability rounding of a single BF16 tensor-core PV product.
-            acc = acc * rescale[:, None] + tl.dot(
-                weights, v.to(tl.float32), input_precision="tf32x3"
-            )
+            if BF16_PAIR_PV:
+                # A second BF16 probability component retains the rounding
+                # residual (approximately 14 mantissa bits). Both products
+                # accumulate in FP32; this is an opt-in approximation.
+                high = weights.to(tl.bfloat16)
+                low = (weights - high.to(tl.float32)).to(tl.bfloat16)
+                acc = acc * rescale[:, None]
+                acc = tl.dot(high, v, acc)
+                acc = tl.dot(low, v, acc)
+            else:
+                acc = acc * rescale[:, None] + tl.dot(
+                    weights, v.to(tl.float32), input_precision="tf32x3"
+                )
             sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
             max_score = next_max
     out = tl.where(sum_exp[:, None] > 0, acc / sum_exp[:, None], 0.0)
@@ -406,9 +417,19 @@ def sparse_prefill_attn(
         .lower()
         in ("1", "true", "on")
     )
+    pair_pv = (
+        grouped
+        and D == 256
+        and q_per_kv in (6, 12)
+        and S >= 128
+        and K >= 256
+        and os.environ.get("RTP_LLM_QWEN4_SPARSE_PREFILL_PV_PAIR", "0") == "1"
+    )
     grouped_options = {"BLK_H": 16} if grouped else {}
     if skip_empty:
         grouped_options.update(SKIP_EMPTY=True, num_stages=1)
+    if pair_pv:
+        grouped_options.update(BF16_PAIR_PV=True, num_stages=1)
     kernel[grid](
         q,
         k,
