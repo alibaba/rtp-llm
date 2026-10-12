@@ -299,7 +299,7 @@ public class CostBasedPrefillStrategy {
             affinityCutoffMs = saturatingAdd(
                     minProjectedTtftMs,
                     Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
-            affinityReason = "NO_CACHE_LEAD";
+            affinityReason = maxHitTokens > 0L ? "FASTEST_IS_CACHE_BEST" : "NO_CACHE_ANYWHERE";
             for (int i = 0; i < survivors.size(); i++) {
                 if (survivors.ttftRank(i)
                         == minProjectedTtftMs) {

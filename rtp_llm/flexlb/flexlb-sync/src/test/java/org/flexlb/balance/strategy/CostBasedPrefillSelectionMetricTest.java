@@ -306,7 +306,22 @@ class CostBasedPrefillSelectionMetricTest {
         verify(reporter).reportCacheAffinityDecision(
                 RoleType.PREFILL,
                 "10.1.0." + (selectedIndex + 1) + ":8080",
-                "NO_CACHE_LEAD");
+                "FASTEST_IS_CACHE_BEST");
+    }
+
+    @Test
+    void zeroCacheHitEverywhereReportsNoCacheAnywhere() {
+        configureFocusedAffinity();
+        PrefillCandidateSet candidates = candidates(
+                new long[] {100L, 105L, 1_000L},
+                new long[] {0L, 0L, 0L});
+
+        int selectedIndex = strategy.selectBestCandidate(
+                candidates, 100L, RoleType.PREFILL, null, 1_000L, config);
+
+        assertEquals(0, selectedIndex);
+        verify(reporter).reportCacheAffinityDecision(
+                RoleType.PREFILL, "10.1.0.1:8080", "NO_CACHE_ANYWHERE");
     }
 
     @Test
