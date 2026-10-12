@@ -1486,6 +1486,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
                   torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
+    // Accepted tokens and both speculative cache swaps are now committed.
+    // The scheduler will reclaim history before its next allocation.
+    stream_cache_resource_->reclaimLinearHistory(nxt_cached_len);
 
     // Freeze TTFT after output update while holding the stream lock; mirrors
     // update(). Later speculative steps re-freeze the same first-token value.
@@ -1569,6 +1572,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info,
             return;
         }
     }
+    // The sampled final token has not been executed yet. Publish only the
+    // completed KV prefix, after any batch/cache-layout update succeeds.
+    stream_cache_resource_->reclaimLinearHistory(seqLength() - 1);
 }
 
 // src_batch_indices: [batch_size] int, the element must less than the batch_size of last step.

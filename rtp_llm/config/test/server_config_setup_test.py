@@ -650,8 +650,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 79)
-        self.assertEqual(state[:2], ("KVCacheConfig", 23))
+        self.assertEqual(len(state), 80)
+        self.assertEqual(state[:2], ("KVCacheConfig", 24))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -688,7 +688,7 @@ class GenerateConfigTest(TestCase):
         # Legacy payloads share the load deadline for eviction and omit later fields.
         legacy_defaults = KVCacheConfig()
         legacy_defaults.disk_cache_evict_timeout_ms = -1
-        event_state = (*state[:63], *legacy_defaults.__getstate__()[63:])
+        event_state = (*state[:63], *legacy_defaults.__getstate__()[:79][63:])
         # Version 6 carried the retired host-placement flag at index 53.
         state = (state[0], 6, *state[2:53], True, *state[53:63])
         self.assertEqual(restore(state).__getstate__(), event_state)
@@ -769,6 +769,7 @@ class GenerateConfigTest(TestCase):
 
         expected_fields = {
             "enable_crc": "bool",
+            "enable_linear_cache_reclaim": "bool",
             "block_tree_task_pool_size": "int",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",

@@ -517,6 +517,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
+        .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -585,7 +586,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      23,
+                                      24,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -662,9 +663,41 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_evict_timeout_ms,
                                       self.disk_cache_evict_max_pending_bytes,
                                       self.block_tree_task_pool_size,
-                                      self.block_tree_frozen_force_release_timeout_ms);
+                                      self.block_tree_frozen_force_release_timeout_ms,
+                                      // v24 appends the linear history reclaim flag at the
+                                      // tail so indices 0-78 stay identical to main's v23.
+                                      self.enable_linear_cache_reclaim);
             },
-            [](const py::tuple& t) {
+            [](py::tuple t) {
+                // Pickle version ladder after merging main #1643 (dsv41 btc):
+                // v9  = ours enable_linear_cache_reclaim (size 71);
+                // v10 = ours reclaim merged with main's pool budgets (size 73);
+                // v24 = main's v23 (79 fields) + enable_linear_cache_reclaim appended
+                //       at the tail (size 80), keeping main's indices untouched.
+                // Each step strips its tail fields and steps the version down so
+                // both families' older states keep decoding through main's ladder.
+                const py::tuple reclaim_pool_state = t;
+                const bool      has_reclaim_pool_fields =
+                    t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_reclaim_pool_fields) {
+                    t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
+                const py::tuple reclaim_state = t;
+                const bool      has_reclaim_field =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                if (has_reclaim_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
+                const py::tuple reclaim_v24_state = t;
+                const bool      has_v24_reclaim_field =
+                    t.size() == 80 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 24;
+                if (has_v24_reclaim_field) {
+                    // Drop the tail reclaim flag; indices 0-78 become main's v23.
+                    t    = t[py::slice(0, 79, 1)].cast<py::tuple>();
+                    t[1] = py::int_(23);
+                }
                 constexpr size_t kLegacyFieldCount               = 55;
                 constexpr size_t kQueueConfigFieldCount          = 64;
                 constexpr size_t kWriteSyncFieldCount            = 56;
@@ -821,6 +854,27 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (version >= 8) {
                     c.enable_crc = field(69).cast<bool>();
+                }
+                if (has_reclaim_field) {
+                    c.enable_linear_cache_reclaim = reclaim_state[70].cast<bool>();
+                }
+                if (has_v24_reclaim_field) {
+                    // v24 appended the reclaim flag at index 79 after main's v23 fields.
+                    c.enable_linear_cache_reclaim = reclaim_v24_state[79].cast<bool>();
+                }
+                if (has_reclaim_pool_fields) {
+                    // Merged v10 state: our reclaim at 70, main's per-pool
+                    // budgets at 71/72; reuse_cache_tail_blocks keeps its
+                    // shared mid-tuple slot (index 10).
+                    c.reuse_cache_tail_blocks     = reclaim_pool_state[10].cast<int>();
+                    c.enable_linear_cache_reclaim = reclaim_pool_state[70].cast<bool>();
+                    c.linear_pool_blocks          = reclaim_pool_state[71].cast<uint32_t>();
+                    c.swa_pool_blocks             = reclaim_pool_state[72].cast<uint32_t>();
+                    if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
+                        || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
+                        || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {
+                        throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
+                    }
                 }
                 return c;
             }));
@@ -1694,14 +1748,15 @@ PYBIND11_MODULE(libth_transformer_config, m) {
 
     // LinearAttentionConfig
     pybind11::class_<LinearAttentionConfig>(m, "LinearAttentionConfig")
-        .def(pybind11::init<int, int, int, int, int, DataType, DataType>(),
-             pybind11::arg("linear_conv_kernel_dim") = 0,
-             pybind11::arg("linear_key_head_dim")    = 0,
-             pybind11::arg("linear_num_key_heads")   = 0,
-             pybind11::arg("linear_num_value_heads") = 0,
-             pybind11::arg("linear_value_head_dim")  = 0,
-             pybind11::arg("ssm_state_dtype")        = DataType::TYPE_BF16,
-             pybind11::arg("conv_state_dtype")       = DataType::TYPE_BF16)
+        .def(pybind11::init<int, int, int, int, int, DataType, DataType, bool>(),
+             pybind11::arg("linear_conv_kernel_dim")         = 0,
+             pybind11::arg("linear_key_head_dim")            = 0,
+             pybind11::arg("linear_num_key_heads")           = 0,
+             pybind11::arg("linear_num_value_heads")         = 0,
+             pybind11::arg("linear_value_head_dim")          = 0,
+             pybind11::arg("ssm_state_dtype")                = DataType::TYPE_BF16,
+             pybind11::arg("conv_state_dtype")               = DataType::TYPE_BF16,
+             pybind11::arg("supports_history_state_reclaim") = false)
         .def("to_string", &LinearAttentionConfig::to_string)
         .def_readwrite("linear_conv_kernel_dim", &LinearAttentionConfig::linear_conv_kernel_dim)
         .def_readwrite("linear_key_head_dim", &LinearAttentionConfig::linear_key_head_dim)
@@ -1709,7 +1764,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_num_value_heads", &LinearAttentionConfig::linear_num_value_heads)
         .def_readwrite("linear_value_head_dim", &LinearAttentionConfig::linear_value_head_dim)
         .def_readwrite("ssm_state_dtype", &LinearAttentionConfig::ssm_state_dtype)
-        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype);
+        .def_readwrite("conv_state_dtype", &LinearAttentionConfig::conv_state_dtype)
+        .def_readwrite("supports_history_state_reclaim", &LinearAttentionConfig::supports_history_state_reclaim);
 
     // Register KvCacheDataType enum
     py::enum_<KvCacheDataType>(m, "KvCacheDataType")

@@ -41,6 +41,10 @@ public:
     // Empty while pending; a terminal status preserves retryable materialization failures.
     std::optional<absl::Status> pollAllocatorLoad();
     absl::Status                incrKVBlock(int seq_len_override = -1);
+    // Called under the owning stream's mutex after token/cache-layout commit.
+    // Record only; the scheduler drains this watermark from incrKVBlock so an
+    // async output worker never mutates the host block table during gather.
+    void                        reclaimLinearHistory(int committed_tokens);
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
@@ -140,6 +144,7 @@ public:
     }
 
 private:
+    void         drainLinearHistory();
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
@@ -158,6 +163,9 @@ private:
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
     bool                             skip_remote_cache_     = false;
+    // Linear history reclaim: tokens committed to the reclaimable prefix
+    // while the request keeps streaming; released once the prefix is marked.
+    int                              pending_linear_history_committed_tokens_ = 0;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
