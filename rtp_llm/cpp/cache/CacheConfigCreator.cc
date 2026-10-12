@@ -597,7 +597,8 @@ uint32_t CacheConfigCreator::computeLocalBlockNum(const CacheConfig&            
                          kv_cache_config.test_block_num);
         block_num = static_cast<uint32_t>(kv_cache_config.test_block_num);
     } else {
-        const auto block_budget       = blockBudgetForConfig(config);
+        auto block_budget = blockBudgetForConfig(config);
+        addBudgetBytes(block_budget.paged_block_bytes, model_config.auxiliary_paged_cache_bytes_per_block);
         const bool explicit_kv_budget = kv_cache_config.kv_cache_mem_mb > 0;
         const auto default_crc_bytes =
             explicit_kv_budget && !crc_plan ? 0 : blockTreeTransferDeviceMemory(config, kv_cache_config);
