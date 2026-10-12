@@ -35,6 +35,18 @@ class MetricStore:
                 or not isinstance(document.get("metrics"), dict)
                 or set(document["metrics"]) - set(document["definitions"])):
             raise MetricContractError("invalid metric artifact inventory")
+        if (not isinstance(document.get("collection_gaps", {}), dict)
+                or not isinstance(document.get("errors", []), list)):
+            raise MetricContractError("invalid metric artifact diagnostics")
+        for observations in document["metrics"].values():
+            if not isinstance(observations, list):
+                raise MetricContractError("metric observations must be a list")
+            for row in observations:
+                if (not isinstance(row, dict)
+                        or not isinstance(row.get("labels"), dict)
+                        or not isinstance(row.get("provenance"), dict)
+                        or not isinstance(row["provenance"].get("evidence", {}), dict)):
+                    raise MetricContractError("invalid metric observation metadata")
         self.document = document
 
     @classmethod
@@ -70,6 +82,9 @@ class MetricStore:
                 raise MetricUnavailable(metric_id + ": measurement is invalid")
             if row["status"] == "ERROR":
                 raise MetricUnavailable(metric_id + ": source query failed")
+            if any(type(t) not in (int, float) or not math.isfinite(t)
+                   for t, _ in row["points"]):
+                raise MetricUnavailable(metric_id + ": non-finite observation timestamp")
             points = [p for p in row["points"] if start is None or start <= p[0] <= end]
             if any(type(t) not in (int, float) or not math.isfinite(t)
                    or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))

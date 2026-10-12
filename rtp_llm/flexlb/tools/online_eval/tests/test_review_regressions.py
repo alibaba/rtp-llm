@@ -28,9 +28,40 @@ def test_invalid_decision_lifetime_rejected_before_rendering(value):
 
 
 @pytest.mark.parametrize("values,p,expected", [([10, 20], .5, 10),
+    ([10, 20, 30, 40], .2, 10),
     (list(range(1, 101)), .95, 95), ([], .99, None)])
-def test_percentiles_agree_at_rank_boundaries(values, p, expected):
+def test_percentile_uses_nearest_rank(values, p, expected):
     assert report_percentile(values, p) == expected
+
+
+@pytest.mark.parametrize("timestamp", ["bad", None, True, float("nan"),
+                                      float("inf"), -float("inf")])
+def test_metric_timestamp_is_validated_before_window_filter(timestamp):
+    from monitoring.metric_store import MetricStore, MetricUnavailable
+    row = dict(metric_id="x", source="P", epoch="1", status="PASS",
+               labels={}, provenance={}, points=[[10, 2], [timestamp, 3]])
+    store = MetricStore(dict(metrics_schema_version=1,
+                            definitions={"x": dict(unit="count")}, metrics={"x": [row]}))
+    with pytest.raises(MetricUnavailable, match="timestamp"):
+        store.select("x", start=9, end=11)
+
+
+@pytest.mark.parametrize("field", ["labels", "provenance", "evidence",
+                                  "collection_gaps", "errors"])
+def test_metric_artifact_rejects_null_metadata(field):
+    from monitoring.metric_store import MetricStore, MetricContractError
+    row = dict(metric_id="x", source="P", epoch="1", status="PASS",
+               labels={}, provenance={}, points=[[10, 2]])
+    document = dict(metrics_schema_version=1, definitions={"x": dict(unit="count")},
+                    metrics={"x": [row]})
+    if field == "evidence":
+        row["provenance"][field] = None
+    elif field in {"labels", "provenance"}:
+        row[field] = None
+    else:
+        document[field] = None
+    with pytest.raises(MetricContractError):
+        MetricStore(document)
 
 
 @pytest.mark.parametrize("data", [{}, {"id": "a", "checks": [{}]},
