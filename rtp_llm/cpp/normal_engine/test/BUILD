@@ -91,6 +91,9 @@ cc_test(
     ]),
     data = [],
     copts = test_copts,
+    # The selector suite embeds Python/Torch. Its hashlib extension must use
+    # OpenSSL, not the BoringSSL archives pulled into this executable by gRPC.
+    linkopts = ["-Wl,--exclude-libs,libcrypto.a:libcrypto.pic.a:libssl.a:libssl.pic.a"],
     deps = [
         ":mock_engine",
         "//rtp_llm/cpp/cache",
