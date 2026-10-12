@@ -30,6 +30,7 @@ def default(case):
                 **{k: data.observation[k] for k in OBSERVATION_FIELDS},
                 **observation_contract(data.observation),
                 **compile_checks(case, data.checks, data.analysis["collapse"]))
+    gate.setdefault("post_memory_consume_on_read", True)
     if not isinstance(inputs, dict) or set(inputs) != {"engine_counters"}:
         raise ValueError("cache gate requires engine_counters input")
     engine_counters(inputs["engine_counters"])

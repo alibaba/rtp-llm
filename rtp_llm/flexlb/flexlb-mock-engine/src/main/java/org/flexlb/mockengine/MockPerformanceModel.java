@@ -301,6 +301,7 @@ final class MockPerformanceModel {
         copy.prefillGpuPrefixTree = prefillGpuPrefixTree;
         copy.decodeGpuPrefixTree = decodeGpuPrefixTree;
         copy.memoryCacheBlocks = memoryCacheBlocks;
+        copy.memoryConsumeOnRead = memoryConsumeOnRead;
         copy.memoryPrefixTree = memoryPrefixTree;
         copy.decodeReserveBlockRatio = decodeReserveBlockRatio;
         copy.prefillReserveBlockRatio = prefillReserveBlockRatio;
@@ -853,6 +854,8 @@ final class MockPerformanceModel {
     }
 
     int memoryCacheBlocks;
+    // Diagnostic intervention; default models the existing H2D source-consumption path.
+    volatile boolean memoryConsumeOnRead = true;
     boolean memoryPrefixTree = true;
 
     record RequestShape(EngineRpcService.GenerateInputPB input,

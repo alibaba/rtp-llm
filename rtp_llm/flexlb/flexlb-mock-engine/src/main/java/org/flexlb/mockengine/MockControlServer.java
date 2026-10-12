@@ -86,6 +86,7 @@ final class MockControlServer {
         httpServer.createContext("/requests", this::handleRequests);
         httpServer.createContext("/cache_diagnostics", this::handleCacheDiagnostics);
         httpServer.createContext("/set_perf", this::handleSetPerf);
+        httpServer.createContext("/memory_cache_policy", this::handleMemoryCachePolicy);
         httpServer.createContext("/prefill_formula", this::handlePrefillFormula);
         httpServer.createContext("/decode_model", this::handleDecodeModel);
         httpServer.createContext("/output_length", this::handleOutputLength);
@@ -542,6 +543,38 @@ final class MockControlServer {
                 states.put(service.getEngineName(), service.getPerformance().outputLengthState());
             sendJson(exchange, 200, Map.of("engines", states,
                     "scope", "new request shapes only; existing targets unchanged; volatile until restart"));
+        } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
+            sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
+        }
+    }
+
+    /** Diagnostic control: preserve H2D source keys to isolate the publication gap. */
+    private synchronized void handleMemoryCachePolicy(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod()) && !"POST".equals(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, Map.of("error", "Method Not Allowed"));
+            return;
+        }
+        try {
+            var targets = orderedServices().stream().filter(s -> s.isDiagnosticPrefill()).toList();
+            if (targets.isEmpty()) throw new IllegalArgumentException("no prefill engines");
+            Map<String, Boolean> before = new LinkedHashMap<>();
+            for (var service : targets)
+                before.put(service.getEngineName(), service.getPerformance().memoryConsumeOnRead);
+            if ("POST".equals(exchange.getRequestMethod())) {
+                byte[] bytes = exchange.getRequestBody().readNBytes(65537);
+                if (bytes.length > 65536) throw new IllegalArgumentException("body too large");
+                JsonNode body = MAPPER.readTree(bytes);
+                if (body == null || !body.isObject() || body.size() != 1
+                        || !body.path("consume_on_read").isBoolean())
+                    throw new IllegalArgumentException("consume_on_read boolean required; no extra fields");
+                boolean consume = body.path("consume_on_read").asBoolean();
+                for (var service : targets) service.getPerformance().memoryConsumeOnRead = consume;
+            }
+            Map<String, Boolean> after = new LinkedHashMap<>();
+            for (var service : targets)
+                after.put(service.getEngineName(), service.getPerformance().memoryConsumeOnRead);
+            sendJson(exchange, 200, Map.of("before", before, "engines", after,
+                    "scope", "subsequent H2D source releases; diagnostic only; volatile until restart"));
         } catch (IllegalArgumentException | com.fasterxml.jackson.core.JsonProcessingException error) {
             sendJson(exchange, 400, Map.of("error", String.valueOf(error.getMessage())));
         }

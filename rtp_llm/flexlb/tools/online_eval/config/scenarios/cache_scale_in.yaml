@@ -73,6 +73,8 @@ parameters:
     warmup_min_s: 900
     # 正向保留预热策略作为对照；反向变体仅在缩容前把此值改为 0。
     post_affinity_ms: 1000000000
+    # 干预前所有变体都消费 H2D 源；保留 Memory 的诊断对照只在缩容前切换。
+    post_memory_consume_on_read: true
     startup_timeout_s: 900
   observation:
     warmup_timeout_s: 1050
@@ -204,6 +206,7 @@ variant_axis:
   kind: data
   fields:
   - parameters.procedure.post_affinity_ms
+  - parameters.procedure.post_memory_consume_on_read
   - parameters.checks.collapse.expected
 variants:
 - id: affinity_disabled
@@ -213,6 +216,14 @@ variants:
     checks:
       collapse:
         expected: 1
+- id: affinity_disabled_mem_retained
+  parameters:
+    procedure:
+      post_affinity_ms: 0
+      post_memory_consume_on_read: false
+    checks:
+      collapse:
+        expected: 0
 reporting:
   time_axis:
     origin:

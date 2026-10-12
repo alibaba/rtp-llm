@@ -280,6 +280,21 @@ class CacheEvictionControlTest {
 
     // ──────────── Cluster setup (PythonCompatControlApiTest pattern) ────────────
 
+    @Test
+    void memoryPolicyControlIsValidatedAndLeavesDecodeUntouched() throws Exception {
+        startCluster();
+        var invalid = httpPostResponse(controlServer.getPort(), "/memory_cache_policy", "{\"consume_on_read\":\"false\"}");
+        assertEquals(400, invalid.statusCode());
+        assertTrue(prefillServices.stream().allMatch(s -> s.getPerformance().memoryConsumeOnRead));
+        var update = httpPostResponse(controlServer.getPort(), "/memory_cache_policy", "{\"consume_on_read\":false}");
+        assertEquals(200, update.statusCode());
+        assertTrue(prefillServices.stream().noneMatch(s -> s.getPerformance().memoryConsumeOnRead));
+        assertTrue(decodeServices.stream().allMatch(s -> s.getPerformance().memoryConsumeOnRead));
+        var state = MAPPER.readTree(httpGet(controlServer.getPort(), "/memory_cache_policy"));
+        assertEquals(prefillServices.size(), state.path("engines").size());
+        assertFalse(state.path("engines").path("prefill-0").asBoolean(true));
+    }
+
     private void startCluster() throws Exception {
         MockPerformanceModel model = MockEngineTestSupport.performanceModel(tempDir, "10", 0.1);
         scheduler = Executors.newScheduledThreadPool(4, runnable -> {

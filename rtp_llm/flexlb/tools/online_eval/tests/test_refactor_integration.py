@@ -25,14 +25,15 @@ def test_cache_controls_share_inputs_and_keep_independent_gap_budgets():
     plans = compile_case(load_document(ROOT/'config/scenarios/cache_scale_in.yaml'))
     for profile in ['single-nonbatch','batch-window']:
         pair = [p for p in plans if p['profile']==profile]
-        assert len(pair)==2
-        assert pair[0]['environment']['rendered']==pair[1]['environment']['rendered']
-        assert pair[0]['stages'][1]==pair[1]['stages'][1]
+        assert len(pair)==3
+        assert all(p['environment']['rendered']==pair[0]['environment']['rendered'] for p in pair)
+        assert all(p['stages'][1]==pair[0]['stages'][1] for p in pair)
         for p in pair:
             criteria=next(s for s in p['stages'] if s['id']=='scale_in')['params']['criteria']
             assert (criteria['warmup_min_s'],criteria['warmup_timeout_s'],criteria['observe_s'],criteria['qps'],criteria['max_gap_s'])==(900,1050,240,240,5)
             assert criteria['expected_behavior']==('collapse' if p['variant_id']=='affinity_disabled' else 'stable')
-            assert criteria['post_affinity_ms']==(0 if p['variant_id']=='affinity_disabled' else 1000000000)
+            assert criteria['post_affinity_ms']==(1000000000 if p['variant_id']=='default' else 0)
+            assert criteria['post_memory_consume_on_read'] is (p['variant_id']!='affinity_disabled_mem_retained')
             assert p['execution']['monitoring']['max_sample_gap_s']==10
             assert p['environment']['master_test_control'] is True
 

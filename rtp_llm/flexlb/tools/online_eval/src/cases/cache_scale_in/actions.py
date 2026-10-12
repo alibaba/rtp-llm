@@ -167,6 +167,20 @@ def observe(ctx, p, deadline):
             if t >= p["warmup_timeout_s"]:
                 raise ValueError("stable warm baseline not reached")
         removed = initial[p["target_p"] :]
+        policy = mock_json(ctx.ops, "memory_cache_policy", deadline)
+        expected_engines = set(initial)
+        if set(policy.get("engines", {})) != expected_engines or not all(
+            value is True for value in policy["engines"].values()
+        ):
+            raise ValueError("shared warmup requires consuming Memory reads on every P")
+        policy = mock_json(ctx.ops, "memory_cache_policy", deadline,
+                           {"consume_on_read": p["post_memory_consume_on_read"]})
+        readback = mock_json(ctx.ops, "memory_cache_policy", deadline)
+        if set(readback.get("engines", {})) != expected_engines or any(
+            value is not p["post_memory_consume_on_read"] for value in readback["engines"].values()
+        ):
+            raise ValueError("Memory cache policy readback mismatch")
+        evidence["memory_policy_transition"] = dict(update=policy, readback=readback)
         evidence["affinity_transition"] = _affinity_transition(ctx, p["post_affinity_ms"], deadline)
         event("withdraw_start")
         # Every removal withdraws discovery before waiting. Parallel requests do

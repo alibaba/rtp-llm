@@ -736,6 +736,7 @@ public final class JavaMockEngineCluster {
         }
 
         private final java.util.concurrent.atomic.LongAdder memoryReadBlocks = new java.util.concurrent.atomic.LongAdder();
+        private final java.util.concurrent.atomic.LongAdder memoryConsumedBlocks = new java.util.concurrent.atomic.LongAdder();
         private java.util.function.BiConsumer<String, Double> cacheEvictionReporter;
 
         private void reportCacheEviction(String scope, double ms) {
@@ -3793,7 +3794,13 @@ public final class JavaMockEngineCluster {
                     long readDelay = startDelayNanos;
                     Runnable release = () -> {
                         if (read != null && memoryReads.remove(id, read)) {
-                            if (read.consume() > 0) cacheVersion.incrementAndGet();
+                            if (performance.memoryConsumeOnRead) {
+                                int consumed = read.consume();
+                                memoryConsumedBlocks.add(consumed);
+                                if (consumed > 0) cacheVersion.incrementAndGet();
+                            } else {
+                                read.close();
+                            }
                         }
                     };
                     if (readDelay == 0) release.run();
@@ -6064,6 +6071,7 @@ public final class JavaMockEngineCluster {
                 metrics.put("mock_memory_cache_total_tokens", (long) memoryCache.capacity() * seqSizePerBlock);
                 metrics.put("mock_memory_cache_evicted_blocks_total", memoryCache.evictions());
                 metrics.put("mock_memory_cache_read_blocks_total", memoryReadBlocks.sum());
+                metrics.put("mock_memory_cache_consumed_blocks_total", memoryConsumedBlocks.sum());
                 metrics.put("mock_memory_cache_pinned_blocks", memoryCache.pinnedBlocks());
                 metrics.put("mock_memory_cache_pending_write_blocks", memoryCache.pendingBlocks());
                 metrics.put("mock_memory_cache_write_rejected_total", memoryCache.writeRejected());

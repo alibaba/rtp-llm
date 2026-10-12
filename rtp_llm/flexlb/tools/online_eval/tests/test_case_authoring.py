@@ -131,7 +131,7 @@ def test_full_inventory_explains_metric_consumers_and_profile_contracts(tmp_path
         capture_output=True, text=True)
     assert completed.returncode == 0, completed.stderr
     report = json.loads(completed.stdout)
-    assert len(report['instances']) == 14
+    assert len(report['instances']) == 16
     for instance in report['instances']:
         metrics = instance['metrics']
         assert set().union(*map(set, metrics['consumers'].values())) == set(metrics['definitions'])

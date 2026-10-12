@@ -100,7 +100,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertEqual([s["name"] for s in spec["panels"][0]["series"]], ["Renamed engine count"])
         self.assertEqual([p["id"] for p in spec["panels"]], [
             "cache-hit", "client-qps", "prefill-queue", "prefill-forward",
-            "prefill-tps", "prefill-qps", "client-latency",
+            "prefill-tps", "prefill-qps", "client-latency", "cache-turnover",
         ])
         self.assertTrue(all("presets" not in p for p in spec["panels"]))
 
@@ -369,7 +369,7 @@ class CacheGateTest(unittest.TestCase):
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
             )
-        self.assertEqual(len(plans), 4)
+        self.assertEqual(len(plans), 6)
         self.assertEqual(
             plans[0]["environment"]["prefill_cache_policy"]["memory_tree"], False
         )
@@ -385,7 +385,7 @@ class CacheGateTest(unittest.TestCase):
             with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
                  mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
-            self.assertEqual(len(plans), 4)
+            self.assertEqual(len(plans), 6)
         changed["parameters"]["procedure"]["removal_mode"] = "silent"
         with self.assertRaisesRegex(Exception, "separate case"):
             compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())

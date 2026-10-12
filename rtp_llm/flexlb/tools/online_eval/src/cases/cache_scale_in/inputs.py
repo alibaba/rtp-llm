@@ -11,7 +11,7 @@ from cases.numeric_parameters import (
 from scenario.parameters import validate_fields
 from cases.metric_inputs import metric_fields
 
-PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s", "warmup_min_s", "post_affinity_ms"})
+PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s", "warmup_min_s", "post_affinity_ms", "post_memory_consume_on_read"})
 OBSERVATION_FIELDS = frozenset({"warmup_timeout_s", "sample_s",
                                "window_s", "step_s", "max_gap_s"})
 
@@ -137,7 +137,9 @@ def validate_criteria(params, plan):
     plan.reference(p["flow"], "java_flow")
     if plan.environment.get("discovery") != "discovery_file":
         raise ValueError("scale-in requires dynamic discovery_file")
-    for k in FIELDS - {"flow", "removal_mode", "expected_behavior"}:
+    if type(p["post_memory_consume_on_read"]) is not bool:
+        raise ValueError("post_memory_consume_on_read must be boolean")
+    for k in FIELDS - {"flow", "removal_mode", "expected_behavior", "post_memory_consume_on_read"}:
         if not finite_number(p[k]) or p[k] < 0:
             raise ValueError(k + " must be finite and nonnegative")
     if not 0 <= p["warmup_min_s"] <= p["warmup_timeout_s"]:

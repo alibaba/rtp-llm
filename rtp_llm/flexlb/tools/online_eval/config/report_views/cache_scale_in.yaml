@@ -50,6 +50,11 @@ metrics:
   - master/flexlb_auto_tpm_decode_reserved_count
   - master/flexlb_auto_tpm_decode_running_count
   - master/dispatch_qps
+  - mock/memory_evicted_blocks_total
+  - mock/memory_consumed_blocks_total
+  - mock/memory_read_blocks_total
+  - mock/memory_total_blocks
+  - mock/memory_allocated_blocks
 charts:
   events:
     warmup_start:
@@ -247,6 +252,51 @@ charts:
       axis: ratio
       color: '#1677ff'
       hidden: false
+    mock/device_evicted_blocks_rate:
+      metric_id: mock/device_evicted_blocks_rate
+      labels: {}
+      name: Device 容量驱逐
+      group: 缓存周转
+      unit: blocks/s
+      axis: blocks
+      color: '#f5222d'
+      hidden: false
+    mock/memory_evicted_blocks_rate:
+      metric_id: mock/memory_evicted_blocks_rate
+      labels: {}
+      name: Memory 容量驱逐
+      group: 缓存周转
+      unit: blocks/s
+      axis: blocks
+      color: '#fa8c16'
+      hidden: false
+    mock/memory_consumed_blocks_rate:
+      metric_id: mock/memory_consumed_blocks_rate
+      labels: {}
+      name: Memory H2D 主动删除
+      group: 缓存周转
+      unit: blocks/s
+      axis: blocks
+      color: '#722ed1'
+      hidden: false
+    mock/memory_read_blocks_rate:
+      metric_id: mock/memory_read_blocks_rate
+      labels: {}
+      name: Memory H2D 读取
+      group: 缓存周转
+      unit: blocks/s
+      axis: blocks
+      color: '#1677ff'
+      hidden: false
+    mock/memory_occupancy_ratio:
+      metric_id: mock/memory_occupancy_ratio
+      labels: {}
+      name: Memory cache occupancy
+      group: 缓存周转
+      unit: ''
+      axis: ratio
+      color: '#13c2c2'
+      hidden: false
   panels:
   - id: cache-hit
     title: Prefill 缓存命中率 · P 数量
@@ -360,6 +410,24 @@ charts:
     - client/schedule_p99_seconds
     - client/total_p99_seconds
     - mock/engine_count
+  - id: cache-turnover
+    title: 缓存驱逐 / H2D 源删除 / H2D 读取 · Memory 占用
+    curve_ids:
+    - mock/device_evicted_blocks_rate
+    - mock/memory_evicted_blocks_rate
+    - mock/memory_consumed_blocks_rate
+    - mock/memory_read_blocks_rate
+    - mock/memory_occupancy_ratio
+    axes:
+      blocks:
+        title: Prefill 合计 blocks / 秒
+        position: left
+      ratio:
+        title: Memory 缓存占用率（0–1）
+        position: right
+    caption: 容量驱逐与 H2D 主动删除分别计数，主动删除不算驱逐。速率按 Prometheus 窗口计算；统计仍上报的全部 P，过渡期包含被摘机。Memory
+      占用率按总块数加权。保留 Memory 对照只在基线就绪后切换，不增加物理容量。缺采不补零。
+    empty_caption: 缺少监控数据；不从日志或 snapshot 补算。
 sections:
   audit:
     title: 监控曲线审计
