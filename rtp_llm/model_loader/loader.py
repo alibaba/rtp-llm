@@ -96,7 +96,10 @@ class ModelLoader:
         global_weight_aliases: Optional[Mapping[str, torch.Tensor]] = None,
     ):
         self._global_weight_aliases = dict(global_weight_aliases or {})
-        descriptor_names = {weight.name for weight in self._model_weights_info.weights}
+        descriptors = {
+            weight.name: weight for weight in self._model_weights_info.weights
+        }
+        descriptor_names = set(descriptors)
         unknown_aliases = set(self._global_weight_aliases) - descriptor_names
         if unknown_aliases:
             raise KeyError(
@@ -105,9 +108,15 @@ class ModelLoader:
         for name, tensor in self._global_weight_aliases.items():
             if not isinstance(tensor, torch.Tensor):
                 raise TypeError(f"global weight alias {name!r} is not a torch.Tensor")
-            if tensor.device != torch.device(device):
+            descriptor = descriptors[name]
+            expected_device = torch.device(descriptor.resident_device or device)
+            if tensor.device != expected_device:
                 raise ValueError(
-                    f"global weight alias {name!r} is on {tensor.device}, expected {torch.device(device)}"
+                    f"global weight alias {name!r} is on {tensor.device}, expected {expected_device}"
+                )
+            if descriptor.pinned_memory and not tensor.is_pinned():
+                raise ValueError(
+                    f"global weight alias {name!r} requires pinned CPU storage"
                 )
         if self._load_config.is_ft_style_weight:
             weights = self._load_from_ft_style(device)
@@ -230,6 +239,11 @@ class ModelLoader:
         weights = [{} for _ in range(num_layers)]
         global_weights = dict(self._global_weight_aliases)
         resident_devices = self._resident_weight_devices()
+        descriptors = (
+            {weight.name: weight for weight in self._model_weights_info.weights}
+            if self._model_weights_info is not None
+            else {}
+        )
         source_device = "cpu" if resident_devices else device
         # 重新构建权重
         all_tensors = self._load_config.database.load_tensors_by_prefix(
@@ -255,9 +269,15 @@ class ModelLoader:
                 if name in self._global_weight_aliases:
                     continue
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                global_weights[name] = tensor[0].to(
+                value = tensor[0].to(
                     self._resident_weight_device(resident_devices, None, name, device)
                 )
+                descriptor = descriptors.get(name)
+                if descriptor is not None and descriptor.pinned_memory:
+                    if value.device.type != "cpu":
+                        raise ValueError("pinned weight residency requires CPU storage")
+                    value = value if value.is_pinned() else value.pin_memory()
+                global_weights[name] = value
         model_weights.weights = weights
         model_weights.global_weights = global_weights
         return model_weights

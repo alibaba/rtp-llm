@@ -25,6 +25,7 @@ from rtp_llm.ops import (
     RoleType,
     RopeStyle,
 )
+from rtp_llm.utils.model_weight import W
 
 _NUM_LAYERS = 48
 
@@ -769,6 +770,22 @@ class Qwen4ExpTest(unittest.TestCase):
         # The Qwen3.5 anchor (layers.0.input_layernorm.weight) does not exist here.
         self.assertEqual(self._weight().prefix, "model.language_model.")
         self.assertTrue(self._weight()._has_stacked_ckpt)
+
+    def test_vocab_cpu_residency_preserves_other_global_weights(self):
+        self.config._qwen4_vocab_cpu_offload = False
+        baseline = self._weight()._get_weight_info()
+        self.assertIsNone(
+            next(w for w in baseline.weights if w.name == W.embedding).resident_device
+        )
+        self.config._qwen4_vocab_cpu_offload = True
+        info = self._weight()._get_weight_info()
+        self.assertEqual(
+            next(w for w in info.weights if w.name == W.embedding).resident_device,
+            "cpu",
+        )
+        for weight in info.weights:
+            if weight.name != W.embedding:
+                self.assertIsNone(weight.resident_device)
 
     def test_prefix_detection_rejects_a_checkpoint_without_the_anchor(self):
         weight = Qwen4ExpWeight(
