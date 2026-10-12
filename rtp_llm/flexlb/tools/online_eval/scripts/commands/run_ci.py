@@ -25,6 +25,11 @@ def commands(plan, out_dir, *, worker=None, mock_stride=None, dry_run=False):
         command = [sys.executable, str(ROOT / 'scripts/commands/run_cases.py'),
                    '--all', '--instances', ','.join(selected), '--profile', profile, '--parallel', str(plan.parallel),
                    '--grade', plan.grade, '--out-dir', str(directory), '--json', str(directory / 'aggregate.json')]
+        from scenario.experiment_params import ExperimentParams
+        cases = {identity.split('::')[0] for identity in selected}
+        overrides = ExperimentParams.read(plan.experiment_params).for_cases(cases)
+        if overrides.values:
+            command += ['--experiment-params', overrides.to_json()]
         if mock_stride is not None:
             command += ['--mock-stride', str(mock_stride)]
         if dry_run:

@@ -71,3 +71,8 @@ node tests/js/test_legend_interaction.js
 ```
 
 这些测试覆盖选区统计、缺失样本、刷选和图例交互，不需要启动服务或运行 workload。
+
+
+临时实验通过 `--experiment-params` 传入 JSON，格式为 `{"<case>": {"parameters.<字段路径>": <值>}}`。CI 页面对应 `experiment_params`，留空使用入库配置。路径与 YAML 一致，可替换 `parameters`、`environment`、`execution` 下已存在的标量字段；字符串字段仍需 JSON 字符串，不能替换整个对象、列表或修改 case/program 身份。未知字段、错误类型、未选中的 case 和不满足原有配置约束的值在执行前报错。覆盖作用于该 case 的所有已选变体和 profile，再由原有程序解析和校验；变体专属覆盖仍按 YAML 规则生效。
+
+CI 记录填写的参数，`ci-plan.json` 和运行计划记录覆盖项；编译后的最终配置参与配置哈希并进入冻结执行计划与实验工件。临时参数不改写仓库 YAML。`instances` 选择少量实例时，覆盖配置中的 case 也必须属于本次选择。

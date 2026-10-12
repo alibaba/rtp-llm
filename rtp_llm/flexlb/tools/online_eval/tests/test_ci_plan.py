@@ -86,3 +86,44 @@ def test_unknown_or_empty_worker_cannot_be_a_successful_run(tmp_path):
     with pytest.raises(SystemExit):
         run_ci.main(['--job', 'workload', '--worker', 'workload_cache_single', '--profiles', 'batch-window', '--out-dir', str(tmp_path)])
     assert not (tmp_path / 'ci-results.json').exists()
+
+
+def test_experiment_parameters_reach_compilation_and_execution(tmp_path):
+    raw = json.dumps({'master_performance': {'parameters.traffic.client.playback.qps': 1600.0}})
+    plan = CiPlanner().build('workload', instances='master_performance::default::batch-window', experiment_params=raw)
+    assert plan.to_dict()['experiment_params'] == json.loads(raw)
+    command = list(run_ci.commands(plan, tmp_path))[0][1]
+    assert json.loads(command[command.index('--experiment-params') + 1]) == json.loads(raw)
+    from scenario import load_scenarios, compile_scenarios
+    from scenario.catalog import handlers
+    docs = load_scenarios(ROOT / 'config/scenarios', experiment_params=raw)
+    baseline = compile_scenarios(load_scenarios(ROOT / 'config/scenarios/master_performance.yaml'), 'batch-window', handlers())[0]
+    actual = next(p for p in compile_scenarios(docs, 'batch-window', handlers()) if p['id'] == baseline['id'])
+    assert actual['implementation']['configuration_sha256'] != baseline['implementation']['configuration_sha256']
+    assert actual['implementation']['configuration']['parameters']['traffic']['client']['playback']['qps'] == 1600.0
+    from scenario.execution_plan import freeze_plan, load_plan
+    frozen = tmp_path / 'execution-plan.json'
+    sha = freeze_plan(frozen, [actual])
+    assert load_plan(frozen, sha)[0]['implementation']['configuration'] == actual['implementation']['configuration']
+
+
+@pytest.mark.parametrize('params', [
+    '[]', '{"master_performance": {"parameters.missing": 1}}',
+    '{"master_performance": {"parameters.traffic.client.playback.qps": "1200"}}',
+    '{"master_performance": {"parameters.traffic.client.playback.qps": -1}}',
+    '{"master_performance": {"parameters.traffic.client.playback.qps": 1200}}',
+    '{"master_performance": {"program": "other"}}',
+    '{"master_performance": {"parameters.traffic": {}}}',
+    '{"unknown": {"execution.timeout_s": 1000}}',
+    '{"master_performance": {"execution.timeout_s": NaN}}',
+    '{"master_performance": {"execution.timeout_s": 10, "execution.timeout_s": 20}}',
+])
+def test_invalid_experiment_parameters_fail_before_execution(params):
+    with pytest.raises(ScenarioError):
+        CiPlanner().build('workload', experiment_params=params)
+
+
+def test_experiment_parameter_target_must_be_selected():
+    with pytest.raises(ScenarioError, match='unselected'):
+        CiPlanner().build('workload', instances='cache_scale_in::default::batch-window',
+                          experiment_params='{"master_performance":{"execution.timeout_s":1000}}')

@@ -125,6 +125,7 @@ def _catalog(args):
             "--grade",
             args.grade,
             *selection_arguments(args),
+            *(["--experiment-params", args.experiment_params] if getattr(args, "experiment_params", None) else []),
             "--list-json",
         ],
         capture_output=True,
@@ -584,6 +585,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         runtime_plan = resolve_mode("scenario", master_mode_for_profile(args.profile))
         manifest = {
             "runner_plan_schema_version": 1,
+            "experiment_params": json.loads(getattr(args, "experiment_params", None) or "{}"),
             "source": args.source,
             "profile": args.profile,
             "scheduling": scheduling,

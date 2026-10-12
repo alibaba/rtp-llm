@@ -113,6 +113,7 @@ def main(argv=None):
                         help="optional single-file scenario experiment archive")
     parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving")
     parser.add_argument("--lease-json", type=Path)
+    parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args(argv)
     resolve_selection(args, parser)
     try:
@@ -120,6 +121,8 @@ def main(argv=None):
         dependencies = dependency_files()
         registry = handlers()
         if args.plan:
+            if args.experiment_params:
+                raise ScenarioError("frozen plans already contain effective experiment parameters")
             if args.list_json or not args.plan_sha256:
                 raise ScenarioError("frozen execution requires --plan-sha256 and cannot list")
             from scenario.execution_plan import load_plan
@@ -132,7 +135,7 @@ def main(argv=None):
             plans = select(
                 classify(
                     compile_scenarios(
-                        preselect_documents(load_scenarios(args.source), args.suite, kind=args.kind),
+                        preselect_documents(load_scenarios(args.source, experiment_params=args.experiment_params), args.suite, kind=args.kind),
                         args.profile,
                         registry,
                         grade=args.grade,

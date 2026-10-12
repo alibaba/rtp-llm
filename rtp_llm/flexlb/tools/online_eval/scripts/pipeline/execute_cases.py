@@ -669,6 +669,7 @@ def main() -> int:
         default=None,
         help="exact compiled instance IDs for compiled Python cases",
     )
+    parser.add_argument("--experiment-params", help="JSON: case -> dotted YAML field -> scalar value")
     args = parser.parse_args()
     resolve_selection(args, parser)
     if args.case_dir is None:

@@ -1,4 +1,5 @@
 """One compiler-backed selection and worker assignment for local and hosted CI."""
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ class CiPlan:
     instances: tuple[CiInstance, ...]
     groups: dict[str, tuple[str, ...]]
     grade: str
+    experiment_params: str = "{}"
 
     def identities(self, worker=None):
         if worker is not None:
@@ -36,7 +38,7 @@ class CiPlan:
         selected = self.identities(worker)
         selected_profiles = [profile for profile in self.profiles if any(identity.endswith("::" + profile) for identity in selected)]
         return {'ci_partition_schema_version': 2, 'job': self.job, 'suite': self.suite,
-                'profiles': list(self.profiles), 'parallel': self.parallel, 'grade': self.grade,
+                'experiment_params': json.loads(self.experiment_params), 'profiles': list(self.profiles), 'parallel': self.parallel, 'grade': self.grade,
                 'instances': list(self.identities()), 'worker': worker,
                 'selected_instances': list(selected), 'selected_profiles': selected_profiles,
                 'groups': {worker: list(ids) for worker, ids in self.groups.items()}}
@@ -48,7 +50,7 @@ class CiPlanner:
         self.catalog = SuiteCatalog.read(catalog)
         self.source = source or Path(catalog).parent / 'scenarios'
 
-    def build(self, job_name, *, suite=None, profiles=None, instances=None, grade='normal'):
+    def build(self, job_name, *, suite=None, profiles=None, instances=None, grade='normal', experiment_params=None):
         if job_name not in self.catalog.ci_jobs:
             raise ScenarioError('unknown CI job: ' + job_name)
         job = self.catalog.ci_jobs[job_name]
@@ -65,7 +67,9 @@ class CiPlanner:
             selected_profiles = job.profiles if profiles is None else tuple(profiles)
             if not selected_profiles or len(set(selected_profiles)) != len(selected_profiles) or set(selected_profiles) - set(job.profiles):
                 raise ScenarioError('profiles requires unique profiles supported by the CI job')
-        documents = preselect_documents(load_scenarios(self.source), None if exact is not None else suite, catalog=self.catalog_path)
+        from scenario.experiment_params import ExperimentParams
+        overrides = ExperimentParams.read(experiment_params)
+        documents = preselect_documents(load_scenarios(self.source, experiment_params=overrides.to_json()), None if exact is not None else suite, catalog=self.catalog_path)
         selected = []
         registry = handlers()
         for profile in selected_profiles:
@@ -77,6 +81,7 @@ class CiPlanner:
             raise ScenarioError('unknown exact instance IDs: ' + ', '.join(sorted(set(exact) - actual)))
         if not selected or len(actual) != len(selected):
             raise ScenarioError('empty or duplicate CI selection')
+        overrides.require_cases(instance.case for instance in selected)
         groups = {worker: [] for worker in job.workers}
         for instance in selected:
             owners = [worker for worker, policy in job.workers.items() if policy.matches(instance.case, instance.profile)]
@@ -84,4 +89,4 @@ class CiPlanner:
                 raise ScenarioError(f'CI instance must have exactly one worker: {instance.identity}; matches={owners}')
             groups[owners[0]].append(instance.identity)
         return CiPlan(job_name, suite, selected_profiles, job.parallel, tuple(selected),
-                      {worker: tuple(ids) for worker, ids in groups.items()}, grade)
+                      {worker: tuple(ids) for worker, ids in groups.items()}, grade, overrides.to_json())
