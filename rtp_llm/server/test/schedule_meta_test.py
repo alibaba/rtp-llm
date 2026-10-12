@@ -3,6 +3,7 @@ Unit tests for worker_status.py models, focusing on ScheduleMeta type conversion
 Tests the validate_role method that converts string to RoleType enum.
 """
 
+import json
 import unittest
 
 from rtp_llm.config.generate_config import RoleType
@@ -156,6 +157,32 @@ class TestScheduleMetaRoleConversion(unittest.TestCase):
 
         # Verify role is preserved in serialization
         self.assertEqual(meta_dict["server_status"][0]["role"], RoleType.PREFILL)
+
+    def test_schedule_meta_does_not_mutate_raw_role_for_followup_json(self):
+        """Validation must not put a pybind enum into the raw response dict.
+
+        The frontend forwards one selected server-status object in a subsequent
+        schedule request. Keeping the wire response as JSON-native data makes
+        that follow-up payload serializable.
+        """
+        raw = {
+            "server_status": [
+                {
+                    "role": "VIT",
+                    "server_ip": "127.0.0.1",
+                    "http_port": 8000,
+                    "grpc_port": 9000,
+                    "group": "g0",
+                }
+            ],
+            "code": 200,
+        }
+
+        ScheduleMeta.model_validate(raw)
+
+        self.assertEqual(raw["server_status"][0]["role"], "VIT")
+        # This is the exact shape eventually nested under selected_vit.
+        json.dumps({"selected_vit": raw["server_status"][0]})
 
     def test_schedule_meta_with_empty_server_status(self):
         """Test ScheduleMeta with empty server_status list."""

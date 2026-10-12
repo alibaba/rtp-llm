@@ -6,7 +6,10 @@
 namespace rtp_llm {
 namespace {
 
-constexpr std::array<ErrorCode, 7> kMultimodalErrorCodes = {{
+// ExceptionType.CANCELLED_ERROR in rtp_llm/config/exceptions.py.
+constexpr int kPythonCancelledErrorCode = 499;
+
+constexpr std::array<ErrorCode, 12> kMultimodalErrorCodes = {{
     ErrorCode::MM_LONG_PROMPT_ERROR,
     ErrorCode::MM_WRONG_FORMAT_ERROR,
     ErrorCode::MM_PROCESS_ERROR,
@@ -14,11 +17,19 @@ constexpr std::array<ErrorCode, 7> kMultimodalErrorCodes = {{
     ErrorCode::MM_NOT_SUPPORTED_ERROR,
     ErrorCode::MM_DOWNLOAD_FAILED,
     ErrorCode::MM_REMOTE_RPC_FAILED,
+    ErrorCode::UNSAFE_INPUT_CONTENT,
+    ErrorCode::UNSAFE_OUTPUT_CONTENT,
+    ErrorCode::CONCURRENCY_LIMIT_ERROR,
+    ErrorCode::GENERATE_TIMEOUT,
+    ErrorCode::CANCELLED,
 }};
 
 }  // namespace
 
 std::optional<ErrorCode> parseMultimodalErrorCode(int error_code) {
+    if (error_code == kPythonCancelledErrorCode) {
+        return ErrorCode::CANCELLED;
+    }
     for (const auto code : kMultimodalErrorCodes) {
         if (static_cast<int>(code) == error_code) {
             return code;

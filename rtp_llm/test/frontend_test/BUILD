@@ -8,6 +8,7 @@ py_test(
         "//rtp_llm:testlib",
     ],
     exec_properties = {"gpu": "L20_CU13"},
+    env = {"GPU_COUNT": "0"},
     tags = [
         "L20_CU13",
         "frontend",

@@ -92,6 +92,7 @@ class BindBarrierTest(TestCase):
         app.py_env_configs = SimpleNamespace(
             profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1)
         )
+        app.dash_sc_grpc_config = Mock()
         app._grpc_server = Mock()
         app._shutdown_manager = Mock()
         app._shutdown_event = Mock()
@@ -168,16 +169,25 @@ class CreateProxyServicerOnLoopTest(TestCase):
     def test_constructs_inside_running_loop(self) -> None:
         created_loops = []
         sentinel = object()
+        grpc_config = object()
 
         def fake_servicer(**kwargs):
             created_loops.append(asyncio.get_running_loop())
-            self.assertEqual(kwargs, {"rank_id": 7, "server_id": "42"})
+            self.assertEqual(
+                kwargs,
+                {
+                    "dash_sc_grpc_config": grpc_config,
+                    "rank_id": 7,
+                    "server_id": "42",
+                },
+            )
             return sentinel
 
         async def run():
             with patch.object(bg_app, "DashScProxyServicer", side_effect=fake_servicer):
                 loop = asyncio.get_running_loop()
                 servicer = await _create_proxy_servicer_on_loop(
+                    dash_sc_grpc_config=grpc_config,
                     rank_id=7,
                     server_id="42",
                 )

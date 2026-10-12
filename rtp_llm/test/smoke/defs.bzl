@@ -148,7 +148,8 @@ def custom_smoke_test(name, main, smoke_args="", args=[], gpu_type=[], tags=[], 
     return name
 
 def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_args="",
-               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False):
+               kvcm_envs=[], sleep_time_qr=0, kill_remote=False, concurrency_test=False,
+               test_envs={}):
     gpu = _require_single_gpu_type("smoke_test", name, gpu_type)
     path = '/'.join(task_info.split('/')[:-1])
     data = data + native.glob([path + '/*.pt',
@@ -166,7 +167,8 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             v = envs.get(k, []) if type(envs) == "dict" else []
             world_size = get_world_size_from_smoke_args(role_args)
             v = v + ['WORLD_SIZE=' + str(world_size)]
-            gpu_count += world_size
+            if k != "frontend":
+                gpu_count += world_size
             part_env_list.append("\"" + k + "\": " + "[" + ",".join(["\"" + x + "\"" for x in v]) +  "]")
             data.extend(extract_data(v))
         env_str = "'{" + ','.join(part_env_list) + "}'"
@@ -204,6 +206,9 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         extra_deps = []
         data = data + ["//rtp_llm/test/smoke:smoke_framework_srcs"]
 
+    test_env = {"GPU_COUNT": str(gpu_count)}
+    test_env.update(test_envs)
+
     native.py_test(
         name = name,
         main = entry_main,
@@ -235,8 +240,6 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             'gpu':gpu,
             'gpu_count': str(gpu_count),
         },
-        env = {
-            "GPU_COUNT": str(gpu_count),
-        },
+        env = test_env,
     )
     return name

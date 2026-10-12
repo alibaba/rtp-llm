@@ -24,6 +24,7 @@ from rtp_llm.config.response_format import (
     parse_response_format,
 )
 from rtp_llm.config.thinking_mode import (
+    INT32_MAX,
     THINK_MODE_ADAPTIVE,
     THINK_MODE_DISABLED,
     THINK_MODE_ENABLED,
@@ -247,6 +248,7 @@ class GenerateConfig(BaseModel):
     # multimodal preprocess
     resized_shape: Optional[List[int]] = None
     max_pixels: Optional[int] = None
+    max_long_side_pixel: int = -1
     min_pixels: Optional[int] = None
     fps: Optional[int] = None
     min_frames: Optional[int] = None
@@ -295,7 +297,6 @@ class GenerateConfig(BaseModel):
         避免畸形客户端高 QPS 下无界日志刷屏。
         """
         global _last_sanitize_warn_time
-        _INT32_MAX = 2**31 - 1
         if v is None:
             return 0
         try:
@@ -318,16 +319,16 @@ class GenerateConfig(BaseModel):
                 )
                 _last_sanitize_warn_time = now
             return 0
-        if val > _INT32_MAX:
+        if val > INT32_MAX:
             now = time.monotonic()
             if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
                 logging.getLogger(__name__).warning(
                     "cross_seq_diverge_start_combo exceeds int32 max (%d), clamped to %d",
                     val,
-                    _INT32_MAX,
+                    INT32_MAX,
                 )
                 _last_sanitize_warn_time = now
-            return _INT32_MAX
+            return INT32_MAX
         # "过大" 告警已移至 _check_cross_seq_ban_compatibility，仅在特性启用时触发，
         # 与 C++ 侧 (enable_cross_seq_ban && diverge_start_combo > threshold) 行为一致。
         return val
@@ -617,6 +618,14 @@ class GenerateConfig(BaseModel):
         later request enrichment may only update grammar-independent fields.
         """
 
+        env_budget = getattr(generate_env_config, "max_thinking_tokens", None)
+        if (
+            env_budget is not None
+            and "max_thinking_tokens" not in self.model_fields_set
+        ):
+            self.max_thinking_tokens = (
+                INT32_MAX if int(env_budget) < 0 else int(env_budget)
+            )
         requested_mode = self.thinking_mode
         if requested_mode == ThinkingMode.UNSPECIFIED and enable_thinking is None:
             requested_mode = thinking_mode_from_value(generate_env_config.think_mode)

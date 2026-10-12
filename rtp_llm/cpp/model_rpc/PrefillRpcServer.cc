@@ -358,7 +358,8 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
     auto result = updateMultimodalFeaturesWithTrace(input,
                                                     prefill_context.trace_span_guard ?
                                                         prefill_context.trace_span_guard->sharedSpan() :
-                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{});
+                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                                    prefill_context.server_context);
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);
@@ -658,7 +659,8 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
             setContextError(prefill_context, ErrorInfo(ErrorCode::CANCELLED, status.error_message()), status);
             return;
         }
-        if (response.flatten_output().aux_info_size() == 0) {
+        // Auxiliary metadata is optional; completion flags identify output rows.
+        if (response.flatten_output().finished_size() == 0) {
             RTP_LLM_LOG_ERROR("request [%ld] generate output size is 0", request_id);
             break;
         }

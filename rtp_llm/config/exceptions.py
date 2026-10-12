@@ -160,6 +160,8 @@ class ExceptionType(IntEnum):
     MM_NOT_SUPPORTED_ERROR = 905, ExceptionCategory.UNSUPPORTED
     MM_DOWNLOAD_FAILED = 906
     MM_REMOTE_RPC_FAILED = 907
+    UNSAFE_INPUT_CONTENT = 908, ExceptionCategory.BAD_REQUEST
+    UNSAFE_OUTPUT_CONTENT = 909, ExceptionCategory.INVALID_OUTPUT
 
     @classmethod
     def from_value(cls, value):

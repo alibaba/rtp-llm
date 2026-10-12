@@ -87,6 +87,7 @@ public:
         if (read_calls != 1) {
             return false;
         }
+        response->mutable_flatten_output()->add_finished(false);
         response->mutable_flatten_output()->add_aux_info();
         return true;
     }

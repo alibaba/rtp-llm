@@ -111,6 +111,33 @@ class FlexlbServiceImplTest {
     }
 
     @Test
+    void vitRouteDoesNotOwnOrCancelGenerationLifecycle() {
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        CompletableFuture<Response> pending = new CompletableFuture<>();
+        when(routeService.route(any())).thenReturn(pending);
+        var request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12345L)
+                .addCacheAffinityKeys("image")
+                .setVitRouteOnly(true)
+                .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+        Context.CancellableContext inbound = Context.current().withCancellation();
+        inbound.run(() -> service.schedule(request, observer));
+        ArgumentCaptor<BalanceContext> captured = ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(captured.capture());
+        assertTrue(captured.getValue().getRequest().isVitRouteOnly());
+        assertEquals(java.util.List.of("image"), captured.getValue().getRequest().getCacheAffinityKeys());
+        inbound.cancel(null);
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setCode(200);
+        pending.complete(response);
+        verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
+        verify(routeService, never()).getRequestState(anyLong(), anyLong());
+        verifyNoInteractions(observer);
+    }
+
+    @Test
     void testSchedule_localRouting() {
         FlexlbConfig requestConfig = org.flexlb.mock.TestFlexlbConfigs.create();
         when(configService.loadBalanceConfig()).thenReturn(requestConfig)

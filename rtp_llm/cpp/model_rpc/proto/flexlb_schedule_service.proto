@@ -64,6 +64,12 @@ message FlexlbScheduleRequestPB {
     // metadata) preserves the guard through a rolling upgrade because older
     // protobuf runtimes retain unknown fields when they relay the request.
     uint32 forward_hop = 15;
+    // Opaque cache affinity keys for ViT cache routing.
+    repeated string cache_affinity_keys = 16;
+    // Reuse the selected ViT for the subsequent full PD route.
+    FlexlbServerStatusPB selected_vit = 17;
+    // Select ViT before media hashes are ready; this query owns no generation lifecycle.
+    bool vit_route_only = 18;
 }
 
 message FlexlbServerStatusPB {
@@ -71,7 +77,11 @@ message FlexlbServerStatusPB {
     string server_ip = 2;
     int32 http_port = 3;
     int32 grpc_port = 4;
-    reserved 5;
+    reserved 5, 7;
+    // Group of the selected ViT, revalidated against the full route policy.
+    string group = 6;
+    // FlexLB endpoint generation: reject a pin after worker replacement at the same address.
+    int64 worker_generation = 8;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is
