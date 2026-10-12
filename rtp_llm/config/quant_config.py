@@ -844,7 +844,11 @@ class ModelOptFp4Config(QuantizationConfig):
 
     def __init__(self, bits: int, group_size: int, is_quanted: bool, **kwargs: Any):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        self.mixed_attention = kwargs.get('mixed_attention', False)
+        self.mixed_attention = kwargs.get("mixed_attention", False)
+        self.activation_amax = kwargs.get("activation_amax", None)
+        self.require_contiguous_experts = kwargs.get(
+            "require_contiguous_experts", False
+        )
         self.exclude_modules = set(kwargs.get("exclude_modules", []))
 
     @classmethod

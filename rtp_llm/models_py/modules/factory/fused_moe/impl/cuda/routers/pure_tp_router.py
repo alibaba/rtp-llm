@@ -278,3 +278,10 @@ class PureTpRouterFp4PerGroup(PureTpRouterBase):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """FP4 per-group quantization"""
         return a1, None
+
+
+class PureTpRouterNvfp4Cutlass(PureTpRouterFp4PerGroup):
+    """Replicated tokens and global expert IDs for CUTLASS expert parallelism."""
+
+    def __init__(self, config, quant_config):
+        PureTpRouterBase.__init__(self, config, quant_config, do_recompute_topk=False)
