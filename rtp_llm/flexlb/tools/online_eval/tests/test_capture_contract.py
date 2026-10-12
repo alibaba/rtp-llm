@@ -241,7 +241,7 @@ class CaptureContractTest(unittest.TestCase):
                 '--out', str(root/'fit'), '--expected-shards', '1', '--output-tokens', '10'],
                 check=True, capture_output=True)
             manifest = json.loads((root/'fit/lineage-model.manifest.json').read_text())
-            self.assertEqual(1024, manifest['block_size'])
+            self.assertEqual(1024, manifest['artifact']['metadata']['block_size'])
             from traffic.datasets import read_manifest
             with self.assertRaisesRegex(ValueError, 'header'):
                 read_manifest(root/'fit/lineage-model.xz')

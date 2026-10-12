@@ -17,6 +17,8 @@ def codec_for_version(version):
 
 def decode_model(raw: bytes, manifest=None, *, expected_version: str | None = None) -> LineageModel:
     if manifest is not None:
+        from traffic.manifest_contract import normalize
+        manifest = normalize(manifest)
         codec = manifest.get("codec", {})
         if codec.get("name") != "prefix_lineage":
             raise ValueError("manifest codec.name must be prefix_lineage")

@@ -28,14 +28,14 @@ codec 版本与 SHA 放在元数据中，不作为统一文件名前缀。`front
 
 ## Manifest
 
-每份真实流量旁有同名 `.manifest.json`：
+每份真实流量旁有同名 `.manifest.json`。新输出使用 `traffic_manifest_schema_version: 1`，顶层固定为：
 
-- `source.capture`：采集层；来源身份由调用方提供的 `source.attribution` 承载，不能从采集层推断模型。
-- `source.attribution`：调用方提供的不透明来源身份、确认状态和依据；历史 sidecar 中的 `source.spectrum` 原样保留，不参与新文件的字段推断。
-- `source.model`：真实服务模型名称、确认状态、信息依据。未知时 `name: null, status: unconfirmed`，不从部署名或 mock 性能配置推断。
-- `capture_window`、`provenance`：可读时间窗，以及文件内保留的分片覆盖和来源校验信息。
-- `statistics`：请求数、平均 QPS、含空闲桶的每秒请求数分位数、输入长度分布及总量（v3 精确长度，v2 块对齐）、prefix 共享分布。
-- `codec`、`bytes`、`sha256`：解码格式和文件完整性；原始请求文本不入库。
+- `artifact`：压缩字节数与 SHA、codec 名称与版本、编码元数据（block、长度、tail、arrival 语义）。codec 版本只在一处声明，读取时与数据 envelope 核对。
+- `capture`：来源归属、申请窗口 `requested_window`、保留样本首末时间 `observed_window`、分片覆盖与限制。`execution` 独立保存执行时间、工具、问题和原始归档引用；开始/结束不能从请求首末时间推断，未知历史事实标 `unavailable`。
+- `transformation`：拟合工具内容 SHA、原始分片 SHA 与 summary。只能在原始证据存在时标 `recorded`；旧数据重算统计不能升级为已核验采集。
+- `statistics`：选择数据所用的分布与统计口径，不参与补齐编码信息。block 统计读取当前数据的 block 大小。
+
+历史 `manifest_schema_version: 2` sidecar 保持字节不变；读取边界校验后投影为统一运行字段。这里的版本表示两种不同的存储格式，不是回放 codec 代际。拒绝未知版本及文件/sidecar 不一致，不猜测缺失字段。新拟合和统计描述入口写分层格式，重算同一 SHA 时保留来源、人工限制与已有转换证据。
 
 统计范围仅是捕获请求。分位数采用 nearest-rank；每秒桶从首个事件开始，包含最后一个可能不足一秒的桶。
 共享比例是 prefix DAG 的理论结构共享，不能当真实缓存命中率。当前编码未保留输出长度和成功/失败状态，
@@ -47,7 +47,7 @@ codec 版本与 SHA 放在元数据中，不作为统一文件名前缀。`front
 python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 ```
 
-也可通过 `--source-info /path/to/source.json` 提供完整 `source` 对象。
+也可通过 `--source-info /path/to/source.json` 提供完整 `source` 对象，通过 `--capture-info /path/to/capture-execution.json` 提供独立采集执行事实。
 确认后填写来源 `identity`、模型 `name`、`status: confirmed` 及各自的 `evidence`；
 未确认字段保持 `null/unconfirmed`。这一步描述已存在的文件，不自动授权提交新数据。
 `fit_frontend_prefix.py` 拟合时同时写出这份 sidecar。
@@ -83,6 +83,28 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 但 summary 必须标记 `complete: false`、`truncated: true` 和 `budget_exceeded`。
 fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采集，再分别拟合；
 不实现基于文件偏移的续采，以免轮转后的偏移被误认作同一日志。
+
+## 性能采集包
+
+原始配置、测量证据和 Mock 参数分开保存。现有 `performance/` 参数文件保持不变，继续由 preset 加载；缺少历史来源的文件保持 `legacy_unverified`，不得将当前 Whale 配置回填为历史现场。新采集包在仓库外构建，通过 `performance_capture_schema_version: 1` 的 manifest 关联已有文件：
+
+- `identity`：采集包 ID、模型、硬件、不透明 `deployment_ref`。真实 ID 映射和未脱敏响应放受控归档；入仓副本须先完成脱敏。SHA 不承担加密作用。
+- `collection`：带时区的采集执行时间、工具版本、`complete/partial/legacy_unverified` 状态及问题清单。完整性不等于拟合准确性。
+- `configuration`：`template/biz/deployment/carbon_target/process_readback` 各层分别声明可用性、证据文件与 SHA；各层明确四个 role 的可用性、镜像、可得的 commit 与版本依据。不存在的层或角色用 `unavailable/not_applicable` 和理由表示，不复制其他层补齐。
+- `measurements`：Prefill/Decode/EOS 等测量引用证据文件、实际采用的配置层、方法及单位。新增测量种类可追加条目，不改加载器；EOS 实测分布和模拟的 geometric/seed 分属测量与派生层。
+- `derived`：拟合结果或 Mock 参数文件，绑定测量 ID 与推导方法。运行 preset 只读取显式选中的 Mock 参数，不自动读取整包或改变参数。
+
+Whale MCP 只读顺序为：部署详情与 `deployment_images` → 部署实际 `biz_version` 的快照 → 对应 template version → 各 zone 的 Carbon target。服务最新版本不能代替部署版本；镜像卡型候选不能自动归属到角色。Carbon target 是调度目标，不是进程实际配置；只有真实进程回读才能标 `process_readback`。
+
+`plan_whale_capture.py` 从 MCP 的部署 data 与镜像返回对象产生固定版本 GET 计划，不执行网络请求、不推断角色 commit。平台读取与脱敏由调用方负责；本地接口校验引用文件、SHA、角色来源和测量依赖，不自动采集、不存储在线凭据、不加密身份。
+
+```bash
+python3 scripts/pipeline/plan_whale_capture.py --deployment /path/to/deployment-data.json --images /path/to/deployed-images.json
+python3 scripts/pipeline/validate_performance_capture.py /path/to/bundle/manifest.json
+python3 scripts/pipeline/validate_performance_capture.py /path/to/record-spec.json --publish /path/to/bundle/manifest.json
+```
+
+发布前所有证据文件必须已位于 bundle 内，拒绝路径逃逸、SHA 不符、伪造运行时版本依据与覆盖已有 manifest。只校验已有数据不会授权采集或入库新样本。
 
 ## 模型采集档案与口径
 

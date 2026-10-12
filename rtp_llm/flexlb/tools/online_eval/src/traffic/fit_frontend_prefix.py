@@ -10,6 +10,7 @@ if __package__ in (None, ""):
 from traffic.capture_contract import BLOCK_SIZE, validate_metadata, validate_row
 from traffic.codecs import codec_for_version
 from traffic.datasets import build_manifest
+from traffic.manifest_contract import layered
 
 
 def main():
@@ -143,7 +144,9 @@ def fit(a):
     model_path.write_bytes(raw)
     source = json.loads(a.source_info.read_text()) if a.source_info else None
     model_path.with_suffix('.manifest.json').write_text(
-        json.dumps(build_manifest(model_path, source), indent=2) + '\n')
+        json.dumps(layered(build_manifest(model_path, source), transformation=dict(
+            status="recorded", tool=dict(name="fit_frontend_prefix", sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest()),
+            inputs=[dict(path=name, sha256=summary["sha256"], summary=summary) for name, summary in sorted(sources.items())])), indent=2) + '\n')
     write_trace(plan, dict(path=str(model_path.resolve()),sha256=hashlib.sha256(raw).hexdigest(),
         count=len(model),output_tokens=a.output_tokens,priority=50),a.namespace,a.out)
     digest = hashlib.sha256()
