@@ -33,6 +33,9 @@ def get_package_info(package_name):
         meta_package_name = package_name
         if package_name == "tvm_ffi":
             meta_package_name = "apache-tvm-ffi"
+        elif package_name == "flashinfer":
+            # the wheel that provides the flashinfer module is flashinfer-python
+            meta_package_name = "flashinfer-python"
 
         saved_path = list(sys.path)
         try:
@@ -344,12 +347,17 @@ def _evict_managed_flashinfer_workspaces(default_workspace: Path) -> None:
     try:
         from rtp_llm.utils import jit_cache_manager as manager
 
-        override = os.environ.get("TEST_JIT_LOCAL_DIR", "").strip()
-        local_root = Path(override) if override else manager.LOCAL_JIT_ROOT
-        scopes_root = local_root / manager.RTP_JIT_VERSION
-    except Exception:
-        logging.warning("[Package Setup] managed JIT root unavailable", exc_info=True)
-        return
+        local_root = Path(manager.LOCAL_JIT_ROOT)
+        version_dir = manager.RTP_JIT_VERSION
+    except ImportError:
+        # Some test wrappers' deps do not include the manager's watchdog tree;
+        # its roots are fixed paths, so fall back to the literals.
+        local_root = Path("/tmp/rtp-llm/.jit_cache")
+        version_dir = "v2"
+    override = os.environ.get("TEST_JIT_LOCAL_DIR", "").strip()
+    if override:
+        local_root = Path(override)
+    scopes_root = local_root / version_dir
     if not scopes_root.is_dir():
         return
     seen = {default_workspace.resolve()}
