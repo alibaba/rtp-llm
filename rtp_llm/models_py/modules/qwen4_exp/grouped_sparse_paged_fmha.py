@@ -26,6 +26,14 @@ def is_supported(
     if kv_heads not in (1, 2) or heads % kv_heads:
         return False
     group_heads = heads // kv_heads
+    # Smaller decode batches benefit only for the larger GQA head group.
+    # Single-query batches below four keep the lower-latency online path.
+    if (
+        allow_extended
+        and q.shape[0] < 8
+        and (group_heads != 12 or (q.shape[0] < 4 and q.shape[2] == 1))
+    ):
+        return False
     fp8 = cache.dtype == torch.float8_e4m3fn
     if not allow_extended and (heads != 3 or kv_heads != 1 or fp8):
         return False
@@ -46,7 +54,7 @@ def is_supported(
         and cache.dtype in (torch.bfloat16, torch.float8_e4m3fn)
         and group_heads in (3, 6, 12)
         and q.ndim == 4
-        and q.shape[0] == 8
+        and (1 <= q.shape[0] <= 8 if allow_extended else q.shape[0] == 8)
         and heads in (3, 6, 12, 24)
         and 1 <= q.shape[2] <= 4
         and q.shape[3] == 256
@@ -54,13 +62,13 @@ def is_supported(
         and tuple(cache.shape[1:]) == (2, kv_heads, 128, 256)
         and cache.stride(-1) == 1
         and table.ndim == 2
-        and table.shape[0] == 8
+        and table.shape[0] == q.shape[0]
         and table.dtype == torch.int32
-        and lengths.shape == (8, q.shape[2])
+        and lengths.shape == (q.shape[0], q.shape[2])
         and lengths.dtype == torch.int32
-        and selected.shape == (8, q.shape[2], 2051)
+        and selected.shape == (q.shape[0], q.shape[2], 2051)
         and selected.dtype == torch.int32
-        and partial.shape == (8, heads, q.shape[2], 8, 258)
+        and partial.shape == (q.shape[0], heads, q.shape[2], 8, 258)
         and partial.dtype == torch.float32
         and all(t.is_contiguous() for t in (q, table, lengths, selected, partial))
         and page_size == 128
