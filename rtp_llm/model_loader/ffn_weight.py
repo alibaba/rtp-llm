@@ -169,6 +169,9 @@ def fix_merge_w13(sub_weight_dict: Dict[str, FfnAtomicWeight]):
         process_fun=functools.partial(
             w13_func_wrap, origin_w1=origin_w1, origin_w3=origin_w3
         ),
+        # peft adapters ship per-projection [r, hidden] A tensors; the base
+        # merge_fun (transpose_pad over the full FFN width) would mangle them
+        lora_raw_projection_list=True,
         lora_a_process_func=lora_a_process_func,
         lora_b_process_func=lora_b_process_func,
         lora_a_split_func=lora_a_split_func,

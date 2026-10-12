@@ -210,7 +210,6 @@ class DecisionHandler(CustomHandler):
 
         if self.head_type == HEAD_TYPE_LINEAR:
             self.weight_key = settings["head_weight"]
-            self.bias_key = settings.get("head_bias")
             # JEV native layout: the head is lm_head rows of the verbalizer
             # token ids plus inline bias values; no head tensor is
             # materialized in the checkpoint.
@@ -223,6 +222,10 @@ class DecisionHandler(CustomHandler):
                 torch.tensor(settings["head_bias"], dtype=torch.float32)
                 if isinstance(settings.get("head_bias"), list)
                 else None
+            )
+            # an inline bias list is not a checkpoint tensor name
+            self.bias_key = (
+                None if self.inline_bias is not None else settings.get("head_bias")
             )
             effective_bias = self.bias_key or self.inline_bias is not None
             self.num_labels = int(

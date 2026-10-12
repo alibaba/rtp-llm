@@ -192,10 +192,66 @@ def transpose_gate_up(ts: List[torch.Tensor]):
     return torch.cat([up, gate], dim=1)
 
 
+def qkv_lora_a_func_wrap(ts):
+    """peft per-projection q/k/v LoRA A tensors -> [hidden, 3r] concatenation.
+
+    The merged qkv weight is concat([q.T, k.T, v.T], dim=1), so the rank
+    axis concatenates on the column side of A.T.
+    """
+    assert isinstance(ts, (list, tuple)) and len(ts) == 3
+    return torch.concat([t.t() for t in ts], dim=1).contiguous()
+
+
+def _split_gated_q_lora_b(ts, head_num: int, head_dim: int, part: int):
+    """Split the peft q_proj LoRA B rows exactly like split_q_gate.
+
+    The gated-attention q_proj is one checkpoint tensor whose rows interleave
+    the q and gate halves per head ([head_num, 2, head_dim/2, r]); peft
+    trains one LoRA pair over the whole tensor. The qkv weight consumes the q
+    half and attn_gate_w the gate half, so each splits the same B rows with
+    the same reshape.
+    """
+    t = ts[0]
+    dim0, r = t.shape
+    new_head_dim = dim0 // (head_num * 2)
+    t = t.reshape(head_num, 2, new_head_dim, r)
+    return t[:, part, :, :].reshape(-1, r)
+
+
+def qkv_lora_b_func_wrap(ts, head_num: int, head_dim: int):
+    """peft per-projection q/k/v LoRA B tensors -> block-diagonal [3r, 3proj].
+
+    A' @ B' then equals concat([qA.T@qB.T, kA.T@kB.T, vA.T@vB.T], dim=1),
+    the transpose of the per-projection deltas, matching merge_qkv_hf. The
+    gated q_proj B rows are split to the q half first (the gate half belongs
+    to attn_gate_w).
+    """
+    assert isinstance(ts, (list, tuple)) and len(ts) == 3
+    q_b, k_b, v_b = ts
+    q_b = _split_gated_q_lora_b([q_b], head_num, head_dim, part=0)
+    return torch.block_diag(q_b.t(), k_b.t(), v_b.t()).contiguous()
+
+
+def gated_q_lora_a_func_wrap(ts):
+    """attn_gate_w LoRA A: the q_proj adapter A shared with the qkv weight."""
+    assert isinstance(ts, (list, tuple)) and len(ts) == 1
+    return ts[0].t().contiguous()
+
+
+def gated_q_lora_b_func_wrap(ts, head_num: int, head_dim: int):
+    """attn_gate_w LoRA B: the gate half of the gated q_proj adapter rows."""
+    gate_b = _split_gated_q_lora_b(ts, head_num, head_dim, part=1)
+    return gate_b.t().contiguous()
+
+
 class Qwen3NextBaseWeight(ModelDeployWeightInfo):
     def __init__(self, *args: List[Any], **kwargs: Dict[str, Any]):
         super().__init__(*args, **kwargs)
         self.prefix = "model."
+
+    @property
+    def support_lora(self):
+        return True
 
     def _get_weight_info(self):
         weights: List[WeightModule] = [
@@ -277,6 +333,13 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 ],
                 process_fun=merge_qkv_hf,
                 config=self.attn_config,
+                lora_raw_projection_list=True,
+                lora_a_process_func=qkv_lora_a_func_wrap,
+                lora_b_process_func=functools.partial(
+                    qkv_lora_b_func_wrap,
+                    head_num=self.model_config.attn_config.head_num,
+                    head_dim=self.model_config.attn_config.size_per_head,
+                ),
             ),
             AttnAtomicWeight(
                 W.attn_o_w,
@@ -288,6 +351,8 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 ],
                 process_fun=transpose,
                 config=self.attn_config,
+                lora_a_process_func=transpose,
+                lora_b_process_func=transpose,
             ),
             AttnAtomicWeight(
                 W.attn_gate_w,
@@ -304,6 +369,13 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 ],
                 process_fun=transpose,
                 config=self.attn_config,
+                lora_raw_projection_list=True,
+                lora_a_process_func=gated_q_lora_a_func_wrap,
+                lora_b_process_func=functools.partial(
+                    gated_q_lora_b_func_wrap,
+                    head_num=self.model_config.attn_config.head_num,
+                    head_dim=self.model_config.attn_config.size_per_head,
+                ),
             ),
             AtomicWeight(
                 W.q_ln_gamma,
@@ -708,6 +780,7 @@ def build_qwen35_dense_ffn_weights(
                     ],
                     functools.partial(transpose_pad, align_size=align_size, dim=1),
                     config=ffn_config,
+                    lora_raw_projection_list=True,
                     lora_a_process_func=functools.partial(
                         transpose_pad, align_size=align_size, dim=1
                     ),

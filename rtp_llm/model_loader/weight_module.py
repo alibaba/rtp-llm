@@ -38,6 +38,11 @@ class WeightModule(ABC):
         self.lora_b_process_func: Optional[Callable] = lora_b_process_func
         self.lora_a_split_func: Optional[Callable] = lora_a_split_func
         self.lora_b_split_func: Optional[Callable] = lora_b_split_func
+        # peft adapters ship one LoRA pair per projection; merged weights
+        # (qkv) whose per-checkpoint merge_fun would mangle a raw adapter
+        # tensor (e.g. split_q_gate) set this to receive the untouched
+        # per-projection tensor list in lora_a/b_process_func.
+        self.lora_raw_projection_list = kwargs.pop("lora_raw_projection_list", False)
         self.lora_a: Optional["WeightModule"] = None
         self.lora_b: Optional["WeightModule"] = None
         self.is_lora = kwargs.pop("is_lora", False)
@@ -511,16 +516,19 @@ class AtomicWeight(WeightModule):
                 lora_name,
             )
             try:
-                before_merge_tensors.append(
-                    ckpt_weight.merge_fun(
-                        [
-                            x
-                            for x in database.load_lora_tensor(
-                                lora_name, tensor_name, data_type
-                            )
-                        ]
+                tensors = [
+                    x
+                    for x in database.load_lora_tensor(
+                        lora_name, tensor_name, data_type
                     )
-                )
+                ]
+                if self.lora_raw_projection_list:
+                    # peft per-projection layout: hand the raw adapter tensor
+                    # to the process func; the per-checkpoint merge_fun is for
+                    # base weights and would mangle the [r, hidden] adapter.
+                    before_merge_tensors.append(tensors[0])
+                else:
+                    before_merge_tensors.append(ckpt_weight.merge_fun(tensors))
             except:
                 logging.warning(
                     f"load {self.name} lora A failed: {tensor_name}, {traceback.format_exc()}"
@@ -554,16 +562,16 @@ class AtomicWeight(WeightModule):
                 lora_name,
             )
             try:
-                before_merge_tensors.append(
-                    ckpt_weight.merge_fun(
-                        [
-                            x
-                            for x in database.load_lora_tensor(
-                                lora_name, tensor_name, data_type
-                            )
-                        ]
+                tensors = [
+                    x
+                    for x in database.load_lora_tensor(
+                        lora_name, tensor_name, data_type
                     )
-                )
+                ]
+                if self.lora_raw_projection_list:
+                    before_merge_tensors.append(tensors[0])
+                else:
+                    before_merge_tensors.append(ckpt_weight.merge_fun(tensors))
             except:
                 logging.warning(
                     f"load {self.name} lora B failed: {tensor_name}, {traceback.format_exc()}"
@@ -654,6 +662,12 @@ class AtomicWeight(WeightModule):
             )
 
         shape = raw_tensor.shape
+        if merge_tensor.nelement() != raw_tensor.nelement():
+            raise RuntimeError(
+                f"lora merge shape mismatch for weight {self.name}: "
+                f"raw {list(raw_tensor.shape)} ({raw_tensor.nelement()}) vs "
+                f"merge {list(merge_tensor.shape)} ({merge_tensor.nelement()})"
+            )
         raw_tensor = raw_tensor.reshape(raw_tensor.nelement()) + merge_tensor.reshape(
             raw_tensor.nelement()
         )
