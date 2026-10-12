@@ -215,3 +215,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'A10'},
 )
+
+py_test(
+    name = "fp8_kv_test",
+    srcs = ["fp8_kv_test.py", "sparse_paged_fmha_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
+)
