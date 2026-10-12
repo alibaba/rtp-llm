@@ -195,6 +195,31 @@ class V41L20TransferTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mhc_post_mode"):
                 dataclasses.replace(self.contract, mhc_post_mode=value)
 
+    def test_mhc_prenorm_binds_contract_and_rejects_before_writes(self):
+        legacy = self.contract.canonical_bytes()
+        self.assertNotIn("mhc_prenorm_mode", json.loads(legacy))
+        omitted = dataclasses.replace(self.contract, mhc_prenorm_mode=None)
+        selected = dataclasses.replace(self.contract, mhc_prenorm_mode="fp32")
+        self.assertEqual(omitted.canonical_bytes(), legacy)
+        self.assertNotEqual(selected.fingerprint, self.contract.fingerprint)
+        selected.require_attention_config({"mhc_prenorm_mode": "fp32"})
+        for contract, config in (
+            (selected, {}),
+            (omitted, {"mhc_prenorm_mode": "fp32"}),
+        ):
+            with self.assertRaisesRegex(ValueError, "mHC prenorm mode"):
+                contract.require_attention_config(config)
+        span = Span(self.identity, 0, 0, 3)
+        self.seed(self.producer_blocks, 0, 3)
+        before = self.snapshots()
+        with self.assertRaisesRegex(ValueError, "fingerprint mismatch"):
+            self.receiver.apply(self.export([span], contract=selected), [span])
+        self.assert_unchanged(before)
+        self.receiver.apply(self.export([span]), [span])
+        for value in (False, True, 0, "", "native", "ordered_fp32", [], {}):
+            with self.assertRaisesRegex(ValueError, "mhc_prenorm_mode"):
+                dataclasses.replace(self.contract, mhc_prenorm_mode=value)
+
     def test_relocated_two_chunk_roundtrip_and_exact_readiness(self):
         first = Span(self.identity, 0, 0, 257)
         rows = self.seed(self.producer_blocks, 0, first.count)

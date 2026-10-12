@@ -112,6 +112,7 @@ class Block(nn.Module):
             from rtp_llm.config.dsv41_config import (
                 v41_mhc_collapse_mode,
                 v41_mhc_post_mode,
+                v41_mhc_prenorm_mode,
             )
             from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
             from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
@@ -121,6 +122,7 @@ class Block(nn.Module):
             attn_cls = AttentionV41FP8
             hc_extra["collapse_mode"] = v41_mhc_collapse_mode(v41_config)
             hc_extra["post_mode"] = v41_mhc_post_mode(v41_config)
+            hc_extra["prenorm_mode"] = v41_mhc_prenorm_mode(v41_config)
             attn_extra = dict(
                 v41_config=v41_config,
                 shared_attention=shared_attention,

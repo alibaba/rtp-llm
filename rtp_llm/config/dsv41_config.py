@@ -39,6 +39,14 @@ def v41_mhc_post_mode(text: Mapping[str, Any]) -> Optional[str]:
     return value
 
 
+def v41_mhc_prenorm_mode(text: Mapping[str, Any]) -> Optional[str]:
+    """Read the immutable delayed-mHC coefficient projection selection."""
+    value = text.get("mhc_prenorm_mode")
+    if value is not None and (type(value) is not str or value != "fp32"):
+        raise ValueError("V4.1 mhc_prenorm_mode must be fp32 or None")
+    return value
+
+
 @dataclass(frozen=True)
 class V41LayerSources:
     layer_id: int
@@ -115,6 +123,7 @@ class V41Config:
         v41_sparse_attention_mode(text)
         v41_mhc_collapse_mode(text)
         v41_mhc_post_mode(text)
+        v41_mhc_prenorm_mode(text)
         for key in (
             "num_hidden_layers",
             "hidden_size",
