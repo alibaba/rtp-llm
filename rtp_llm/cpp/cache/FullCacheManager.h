@@ -42,8 +42,9 @@ public:
                                  int                      seq_len,
                                  int                      reserve_step,
                                  int                      reuse_blocks_len,
-                                 bool                     reuse_enabled      = false,
-                                 const RequiredPositions& required_positions = {}) const override;
+                                 bool                     reuse_enabled           = false,
+                                 const RequiredPositions& required_positions      = {},
+                                 size_t                   reclaimed_prefix_blocks = 0) const override;
 
 private:
 };
