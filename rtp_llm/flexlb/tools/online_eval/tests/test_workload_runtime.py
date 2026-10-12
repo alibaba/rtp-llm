@@ -18,9 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorkloadRuntimeTests(unittest.TestCase):
     def test_core_inventory_does_not_compile_large_workload(self):
-        documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "core")
+        documents = preselect_documents(load_scenarios(ROOT / "config/scenarios"), "quick")
         self.assertNotIn("cache_scale_in", {doc["id"] for _, doc in documents})
-        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "core")), 1)
+        self.assertEqual(len(classify(compile_scenarios(documents, "single-nonbatch", handlers=handlers()), "quick")), 1)
 
     def run_plan(
         self, workload, observation=True, setup_error=False, cleanup_error=False
@@ -107,7 +107,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
         self.assertEqual(len(plans), 14)
         self.assertIn("cache_scale_in::default::single-nonbatch", w)
 
-    def test_core_suite_is_request_completion_for_every_master_profile(self):
+    def test_quick_suite_is_request_completion_for_every_master_profile(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
              mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
@@ -123,7 +123,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
             "window-nonbatch",
         ):
             selected = classify(
-                [plan for plan in plans if plan["profile"] == profile], "core"
+                [plan for plan in plans if plan["profile"] == profile], "quick"
             )
             self.assertEqual(len(selected), 1)
             self.assertEqual(
