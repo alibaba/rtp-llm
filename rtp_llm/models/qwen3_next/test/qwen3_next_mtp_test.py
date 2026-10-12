@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.model_args import ModelArgs
-from rtp_llm.config.model_config import resolve_ssm_state_dtype
+from rtp_llm.config.model_config import ModelConfig, resolve_ssm_state_dtype
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_factory_register import _model_factory
 from rtp_llm.model_loader.ffn_weight import FfnWeight, MoeWeight
-from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Dense
+from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Dense, Qwen35Moe
 from rtp_llm.models.qwen3_next.qwen3_next_mtp import (
     Qwen35DenseMTP,
     Qwen35DenseMTPWeight,
@@ -32,6 +32,22 @@ from rtp_llm.ops import (
 
 
 class Qwen35DenseMTPTest(unittest.TestCase):
+    def test_history_state_reclaim_is_a_qwen35_target_capability(self):
+        for model, expected in (
+            (Qwen3Next, False),
+            (Qwen35Moe, True),
+            (Qwen35Dense, True),
+        ):
+            with self.subTest(model=model.__name__):
+                config = ModelConfig()
+                model._parse_linear_attention_config(
+                    self._config()["text_config"], config
+                )
+                self.assertEqual(
+                    config.linear_attention_config.supports_history_state_reclaim,
+                    expected,
+                )
+
     def test_auto_ssm_state_dtype_preserves_model_value_without_remote_cache(self):
         self.assertEqual(
             resolve_ssm_state_dtype("auto", DataType.TYPE_FP32, False),
@@ -122,6 +138,9 @@ class Qwen35DenseMTPTest(unittest.TestCase):
         self.assertIs(_model_factory["qwen35_dense_mtp"], Qwen35DenseMTP)
         self.assertEqual(config.num_layers, 1)
         self.assertTrue(config.is_mtp)
+        self.assertFalse(
+            config.linear_attention_config.supports_history_state_reclaim
+        )
         self.assertEqual(config.moe_style, 0)
         self.assertEqual(list(config.moe_layer_index), [])
         self.assertTrue(config.hybrid_attention_config.enable_hybrid_attention)

@@ -193,7 +193,10 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
                                               int                      reserve_step,
                                               int                      reuse_blocks_len,
                                               bool                     reuse_enabled,
-                                              const RequiredPositions& required_positions) const {
+                                              const RequiredPositions& required_positions,
+                                              size_t /*reclaimed_prefix_blocks*/) const {
+    // SWA pools never adopt committed-history reclaim; the parameter exists
+    // to match the SingleTypeCacheManager virtual signature.
     (void)reserve_step;
     const int      tail_blocks  = prefillTailBlocks(tail_blocks_, reuse_enabled);
     const int      reuse_slots  = reuse_enabled ? reuse_blocks_len : 0;
