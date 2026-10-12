@@ -1073,11 +1073,11 @@ class ModelRpcClient(object):
             max_rpc_timeout_ms: Maximum RPC timeout in milliseconds. <= 0 disables
                 the gRPC deadline. Callers normally pass pd_sep_config.max_rpc_timeout_ms
                 (args: --max_rpc_timeout_ms / env: MAX_RPC_TIMEOUT_MS).
-            decode_entrance: Whether this is a decode entrance
+            decode_entrance: Retained for caller compatibility; generation RPCs
+                always target PREFILL or PDFUSION endpoints.
         """
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
-        self._decode_entrance = decode_entrance
         self._options = []
         for key, value in client_config.items():
             self._options.append((key, value))
@@ -1192,13 +1192,10 @@ class ModelRpcClient(object):
         else:
             address_list = self._addresses
             for role_addr in input_py.generate_config.role_addrs:
-                if (
-                    (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                    or role_addr.role == RoleType.PDFUSION
-                    or (
-                        not self._decode_entrance and role_addr.role == RoleType.PREFILL
-                    )
-                ):
+                # GenerateStreamCall starts at PREFILL/PDFUSION. The prefill
+                # server hands off to DECODE through RemoteGenerate; selecting
+                # DECODE here would send this RPC to its control endpoint.
+                if role_addr.role in (RoleType.PREFILL, RoleType.PDFUSION):
                     if role_addr.ip != "":
                         address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
                         selected_role = role_addr.role
