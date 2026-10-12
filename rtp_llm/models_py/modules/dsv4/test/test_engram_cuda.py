@@ -186,6 +186,47 @@ class EngramCudaTest(unittest.TestCase):
         self.assertTrue(torch.equal(result[0], hidden[0]))
         self.assertTrue(torch.all(result[1] > hidden[1]).item())
 
+    @torch.inference_mode()
+    def test_dead_gate_rows_preserve_bits_in_reference_native_and_graph(self):
+        for dim in (32, 5120):
+            hidden = torch.ones(3, 4, dim, device="cuda", dtype=torch.bfloat16)
+            hidden.view(torch.int16)[0, :, 0] = -32768
+            hidden.view(torch.int16)[2, :, 0] = 32705
+            original = hidden.clone()
+            kv = torch.ones(3, 5 * dim, device="cuda", dtype=torch.bfloat16)
+            q = k = torch.ones(4, dim, device="cuda", dtype=torch.bfloat16)
+            mask = torch.tensor([False, True, False], device="cuda")
+            kv[~mask] = float("nan")
+
+            def assert_rows(actual, expected):
+                self.assertTrue(
+                    torch.equal(
+                        actual[~mask].view(torch.uint8),
+                        expected[~mask].view(torch.uint8),
+                    )
+                )
+                self.assertTrue(bool(torch.isfinite(actual[mask]).all()))
+                self.assertTrue(bool((actual[mask] > expected[mask]).all()))
+
+            for out in (None, torch.empty_like(hidden), hidden):
+                actual = gated_engram_residual(hidden, kv, q, k, 1e-20, mask, out=out)
+                assert_rows(actual, original)
+                if out is not None:
+                    self.assertIs(actual, out)
+                hidden.copy_(original)
+
+            if dim == 5120:
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = gated_engram_residual(
+                        hidden, kv, q, k, 1e-20, mask, out=hidden
+                    )
+                for live_mask in ([False, False, False], [False, True, False]):
+                    hidden.copy_(original)
+                    mask.copy_(torch.tensor(live_mask, device="cuda"))
+                    graph.replay()
+                    assert_rows(captured, original)
+
     def test_gated_engram_residual_native_capture_replay(self):
         # The fused kernel is captured by the decode CUDA graph: replay must
         # track input changes exactly like the eager kernel path.

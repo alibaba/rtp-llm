@@ -33,10 +33,12 @@ def engram_inject_kernel(
     # Each CTA owns one complete (token, head) row. It reads all hidden
     # values before storing that same row; exact Hidden/Output aliasing
     # is safe because no other CTA reads it. Other inputs must not alias.
-    hidden = tl.load(Hidden + offset, live, 0).to(tl.float32)
-    key = tl.load(Projected + token * (HC + 1) * DIM + head * DIM + col, live, 0).to(
-        tl.float32
-    )
+    original = tl.load(Hidden + offset, live, 0)
+    hidden = original.to(tl.float32)
+    enabled = tl.load(Mask + token) if HAS_MASK else True
+    key = tl.load(
+        Projected + token * (HC + 1) * DIM + head * DIM + col, live & enabled, 0
+    ).to(tl.float32)
     q = tl.load(Q + head * DIM + col, live, 0).to(tl.float32)
     k = tl.load(K + head * DIM + col, live, 0).to(tl.float32)
     rstd = tl.rsqrt(tl.sum(hidden * hidden, 0) / DIM + EPS)
@@ -45,9 +47,12 @@ def engram_inject_kernel(
     gate_input = tl.sqrt(tl.maximum(tl.abs(dot), 1.0e-6))
     gate_input = tl.extra.cuda.libdevice.copysign(gate_input, dot)
     gate = tl.sigmoid(gate_input)
+    value = tl.load(
+        Projected + token * (HC + 1) * DIM + HC * DIM + col, live & enabled, 0
+    ).to(tl.float32)
+    result = (hidden + gate * value).to(original.dtype)
     if HAS_MASK:
-        gate = tl.where(tl.load(Mask + token), gate, 0)
-    value = tl.load(Projected + token * (HC + 1) * DIM + HC * DIM + col, live, 0).to(
-        tl.float32
-    )
-    tl.store(Output + offset, hidden + gate * value, live)
+        # Select the original bits: zero multiplication can change signed zeros
+        # or propagate a nonfinite projection into a masked residual row.
+        result = tl.where(enabled, result, original)
+    tl.store(Output + offset, result, live)

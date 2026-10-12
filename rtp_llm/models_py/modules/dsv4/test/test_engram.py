@@ -144,6 +144,32 @@ class EngramTest(unittest.TestCase):
             output, torch.full_like(hidden, torch.sigmoid(torch.tensor(0.001)))
         )
 
+    @torch.inference_mode()
+    def test_dead_gate_rows_preserve_signed_zero_and_nan_payloads(self):
+        hidden = torch.ones(3, 4, 32, dtype=torch.bfloat16)
+        hidden.view(torch.int16)[0, :, 0] = -32768
+        hidden.view(torch.int16)[2, :, 0] = 32705
+        original = hidden.clone()
+        mask = torch.tensor([False, True, False])
+        kv = torch.ones(3, 5 * 32, dtype=torch.bfloat16)
+        kv[~mask] = float("nan")
+        q = k = torch.ones(4, 32, dtype=torch.bfloat16)
+        for out in (None, torch.empty_like(hidden), hidden):
+            actual = engram.gated_engram_residual(
+                hidden, kv, q, k, 1e-20, mask, out=out
+            )
+            self.assertTrue(
+                torch.equal(
+                    actual[~mask].view(torch.uint8),
+                    original[~mask].view(torch.uint8),
+                )
+            )
+            self.assertTrue(bool(torch.isfinite(actual[mask]).all()))
+            self.assertTrue(bool((actual[mask] > original[mask]).all()))
+            if out is not None:
+                self.assertIs(actual, out)
+            hidden.copy_(original)
+
     def test_long_packed_forward_bounds_temporaries_and_preserves_mask(self):
         torch.manual_seed(7)
         table = torch.randn(1000, 32).to(torch.float8_e4m3fn)
