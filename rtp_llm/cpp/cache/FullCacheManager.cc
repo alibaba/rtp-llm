@@ -37,7 +37,8 @@ NeedBlocksInfo FullCacheManager::getNeedBlocks(int                      common_s
                                                int                      reserve_step,
                                                int                      reuse_blocks_len,
                                                bool                     reuse_enabled,
-                                               const RequiredPositions& required_positions) const {
+                                               const RequiredPositions& required_positions,
+                                               size_t /*reclaimed_prefix_blocks*/) const {
     NeedBlocksInfo info;
     const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
     const int      total_slots         = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);

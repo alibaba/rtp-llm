@@ -66,6 +66,13 @@ int LinearCacheManager::retainedTailBlockCount() const {
     return std::max(2, materializedTailBlockCount());
 }
 
+size_t LinearCacheManager::historyReclaimEnd(int committed_tokens) const {
+    // Keep completed tail checkpoints as well as every incomplete/reserved slot.
+    // The caller supplies committed tokens, never a speculative allocation bound.
+    return static_cast<size_t>(
+        std::max(0, std::max(0, committed_tokens) / seqSizePerBlock() - retainedTailBlockCount()));
+}
+
 bool LinearCacheManager::shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const {
     if (pos < 0) {
         return false;
@@ -156,14 +163,21 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
                                                  int                      reserve_step,
                                                  int                      reuse_blocks_len,
                                                  bool                     reuse_enabled,
-                                                 const RequiredPositions& required_positions) const {
+                                                 const RequiredPositions& required_positions,
+                                                 size_t                   reclaimed_prefix_blocks) const {
     NeedBlocksInfo info;
 
     const int common_slots = needBlocksNum(common_seq_len, 0);
     const int total_slots  = needBlocksNum(seq_len, 0, reserve_step);
 
-    auto common_required = [&](int pos) { return shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled); };
-    auto final_required  = [&](int pos) { return shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled); };
+    auto common_required = [&](int pos) {
+        return static_cast<size_t>(pos) >= reclaimed_prefix_blocks
+               && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled);
+    };
+    auto final_required = [&](int pos) {
+        return static_cast<size_t>(pos) >= reclaimed_prefix_blocks
+               && shouldMaterializeBlock(pos, seq_len, reserve_step, reuse_enabled);
+    };
 
     for (int pos = 0; pos < common_slots; ++pos) {
         if (common_required(pos)) {
@@ -212,7 +226,19 @@ bool LinearCacheManager::malloc(BlockIds&                block_ids,
     const int total_slots        = needBlocksNum(seq_len, 0, reserve_step);
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
+    const size_t reclaimed      = block_ids.reclaimedPrefixBlocks();
+    const int    sequence_slots = needBlocksNum(seq_len, 0, 0);
+    if ((reclaimed > 0 && sequence_slots <= static_cast<int>(reclaimed))
+        || std::any_of(required_positions.begin(), required_positions.end(), [reclaimed](size_t pos) {
+               return pos < reclaimed;
+           })) {
+        // Reallocating an old read slot would expose an uninitialized state.
+        return false;
+    }
     auto should_materialize = [&](int pos) {
+        if (static_cast<size_t>(pos) < reclaimed) {
+            return false;
+        }
         return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache)
                || required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
     };
