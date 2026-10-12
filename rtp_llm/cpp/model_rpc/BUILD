@@ -60,6 +60,13 @@ cc_library(
 
 
 cc_library(
+    name = "linear_tp_cache_layout",
+    hdrs = ["LinearTpCacheLayout.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
