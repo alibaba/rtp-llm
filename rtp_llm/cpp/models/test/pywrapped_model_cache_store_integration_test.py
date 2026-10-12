@@ -2080,6 +2080,19 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
 
+    @unittest.skipUnless(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM", "ROCm unsupported-backend contract"
+    )
+    def test_capture_context_parallel_is_rejected_on_rocm(self) -> None:
+        # Keep the backend's fail-closed contract covered rather than running
+        # CUDA-only restore/layout expectations against an unsupported path.
+        model = CacheStoreForwardModel()
+        with self.assertRaisesRegex(RuntimeError, "Context parallel not supported on ROCm"):
+            run_scenario(model, "capture_cp")
+        self.assertEqual(model.forward_calls, 0)
+        for store in _FakeEagleMooncakeStore.instances:
+            self.assertEqual(store.puts, [])
+
     def test_capture_context_parallel_and_micro_batch_is_explicitly_unsupported(
         self,
     ) -> None:
