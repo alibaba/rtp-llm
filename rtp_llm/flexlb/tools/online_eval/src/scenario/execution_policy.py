@@ -54,4 +54,3 @@ def normalize_execution(value, *, kind):
 
         load_plan(monitoring["query_plan"])
     return {**copy.deepcopy(value), "monitoring": monitoring}
-
