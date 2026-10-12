@@ -12,7 +12,7 @@ import threading
 import time
 import traceback
 import unittest
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,6 +88,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_prefill_reference import
     sparse_prefill_reference,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
+from rtp_llm.models_py.modules.dsv4.hc import delayed as delayed_hc
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     _live_leases,
     _locked,
@@ -107,8 +108,24 @@ MAINTAINED_ATTENTION_CHOICES = {
 def canonical_attention_profile(profile):
     # Compact aliases keep the longest checkpoint trace name within 255 bytes.
     return (
-        profile[:-2] + "_j" if profile.endswith(("_s", "_f", "_c", "_m")) else profile
+        profile[:-2] + "_j"
+        if profile.endswith(("_s", "_f", "_c", "_m", "_n"))
+        else profile
     )
+
+
+@contextmanager
+def checkpoint_collapse(collapse, maintained):
+    with mhc_collapse_reference(collapse and not maintained), (
+        patch.object(
+            delayed_hc,
+            "collapse_delayed",
+            side_effect=AssertionError("Maintained collapse reached default dispatch"),
+        )
+        if maintained
+        else nullcontext()
+    ):
+        yield
 
 
 def run_rank(
@@ -121,6 +138,7 @@ def run_rank(
     new_tokens,
     context=256,
     maintained_attention=False,
+    maintained_collapse=False,
 ):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
@@ -177,6 +195,10 @@ def run_rank(
         maintained_attention and not compare_attention
     ):
         raise ValueError("Maintained attention comparison requires qualified controls")
+    if type(maintained_collapse) is not bool or (
+        maintained_collapse and not (maintained_attention and compare_collapse)
+    ):
+        raise ValueError("Maintained collapse requires qualified composed controls")
     if compare_attention and not (compare_projection and compare_block_norm):
         raise ValueError("Attention comparison requires the qualified W13 composition")
     if compare_projection and not compare_router:
@@ -336,7 +358,7 @@ def run_rank(
             raise ValueError("Attention recipes require the final eager W13 profile")
         profiles.extend(base[:-2] + suffix for suffix in ("_s", "_f", "_c"))
         if maintained_attention:
-            profiles = [base[:-2] + "_m"]
+            profiles = [base[:-2] + ("_n" if maintained_collapse else "_m")]
         if any(len(profile.encode()) > 255 for profile in profiles):
             raise ValueError(
                 "Attention trace profile exceeds the filesystem name limit"
@@ -429,6 +451,8 @@ def run_rank(
             )
             if maintained_attention:
                 config.deepseek_v41_config.update(MAINTAINED_ATTENTION_CHOICES)
+            if maintained_collapse:
+                config.deepseek_v41_config["mhc_collapse_mode"] = "ordered_fp32"
             parallelism, loader = make_loader(config, kv_config, 8, rank)
             started = time.monotonic()
             weights = loader.load_weights(f"cuda:{rank}")
@@ -503,6 +527,25 @@ def run_rank(
                                 device=rank,
                                 component_sha256=maintained_short_sparse_source_hash,
                                 **MAINTAINED_ATTENTION_CHOICES,
+                            )
+                        ),
+                        flush=True,
+                    )
+                if maintained_collapse:
+                    assert model._mhc_collapse_mode == "ordered_fp32"
+                    for layer in model.v4.layers:
+                        assert layer.attn_hc.collapse_mode == "ordered_fp32"
+                        assert layer.ffn_hc.collapse_mode == "ordered_fp32"
+                    model._check_execution_config()
+                    print(
+                        "DSV41_MAINTAINED_COLLAPSE_OWNER "
+                        + json.dumps(
+                            dict(
+                                rank=rank,
+                                layers=len(model.v4.layers),
+                                full_nas=full,
+                                mhc_collapse_mode="ordered_fp32",
+                                diagnostic_collapse_hook=False,
                             )
                         ),
                         flush=True,
@@ -641,7 +684,13 @@ def run_rank(
                                 if sparse_prefill
                                 else {}
                             ),
-                            **({"mhc_collapse_reference": True} if collapse else {}),
+                            **(
+                                {"mhc_collapse_mode": "ordered_fp32"}
+                                if maintained_collapse
+                                else (
+                                    {"mhc_collapse_reference": True} if collapse else {}
+                                )
+                            ),
                             **(
                                 {
                                     "short_sparse_plan_reference": True,
@@ -755,8 +804,8 @@ def run_rank(
                     kernel=reference_kernel,
                 ), sparse_prefill_reference(
                     sparse_prefill,
-                ), mhc_collapse_reference(
-                    collapse,
+                ), checkpoint_collapse(
+                    collapse, maintained_collapse
                 ), decode_tilelang_reference(
                     tilelang_decode,
                 ), block_norm_provider.block_norm_reference(
@@ -1068,6 +1117,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         new_tokens=1,
         context=256,
         maintained_attention=False,
+        maintained_collapse=False,
     ):
         self.assertEqual(torch.cuda.device_count(), 8)
         with socket.socket() as sock:
@@ -1084,13 +1134,19 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 new_tokens,
                 context,
                 maintained_attention,
+                maintained_collapse,
             ),
             nprocs=8,
             join=True,
         )
 
     def run_bounded_checkpoint(
-        self, new_tokens, context=256, *, maintained_attention=False
+        self,
+        new_tokens,
+        context=256,
+        *,
+        maintained_attention=False,
+        maintained_collapse=False,
     ):
         torch.manual_seed(41990)
         with tempfile.TemporaryDirectory() as temporary:
@@ -1122,6 +1178,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 new_tokens=new_tokens,
                 context=context,
                 maintained_attention=maintained_attention,
+                maintained_collapse=maintained_collapse,
             )
 
     def test_bounded_checkpoint_cold_engine(self):
@@ -1136,6 +1193,16 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
     )
     def test_bounded_checkpoint_maintained_attention(self):
         self.run_bounded_checkpoint(9, maintained_attention=True)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1",
+        "maintained collapse requires the qualified composed controls",
+    )
+    def test_bounded_checkpoint_maintained_collapse(self):
+        self.run_bounded_checkpoint(
+            9, maintained_attention=True, maintained_collapse=True
+        )
 
     def test_two_page_bounded_checkpoint_cold_decode(self):
         self.run_bounded_checkpoint(9, context=512)
@@ -1164,13 +1231,24 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
 
     @unittest.skipUnless(
         os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1",
+        "full maintained collapse requires admission and qualified controls",
+    )
+    def test_full_nas_checkpoint_maintained_collapse(self):
+        self.run_full_checkpoint(9, maintained_attention=True, maintained_collapse=True)
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_FULL_ENGINE") == "1"
         and os.environ.get("DSV41_TEST_TRACE_DIR"),
         "full checkpoint trace requires explicit admission and a trace directory",
     )
     def test_full_nas_checkpoint_accuracy_trace(self):
         self.run_full_checkpoint(3)
 
-    def run_full_checkpoint(self, new_tokens, *, maintained_attention=False):
+    def run_full_checkpoint(
+        self, new_tokens, *, maintained_attention=False, maintained_collapse=False
+    ):
         from transformers import AutoTokenizer
 
         root = Path(os.environ["DSV41_TEST_CHECKPOINT"]).resolve()
@@ -1275,6 +1353,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 full=True,
                 new_tokens=new_tokens,
                 maintained_attention=maintained_attention,
+                maintained_collapse=maintained_collapse,
             )
 
 
