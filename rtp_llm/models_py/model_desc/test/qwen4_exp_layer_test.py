@@ -13,8 +13,6 @@ from unittest import TestCase, main
 from unittest.mock import patch
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3NextBase
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -35,6 +33,7 @@ from rtp_llm.models_py.modules.qwen4_exp.ple import (
 )
 from rtp_llm.ops import HybridAttentionType, MoeConfig, ParallelismConfig
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 _HC = 4
 _HIDDEN = 8
@@ -2682,6 +2681,93 @@ class Qwen4ExpPLERuntimeTest(TestCase):
                         torch.ones(2, dtype=torch.long),
                         inputs,
                     )
+
+
+class Qwen4ExpCommitBlockValidationTest(TestCase):
+    def test_fused_verdict_tail_strides_and_dynamic_graph(self):
+        from rtp_llm.models_py.modules.qwen4_exp.ple_commit_triton import (
+            resolve_commit_blocks,
+        )
+
+        if not torch.cuda.is_available():
+            self.skipTest("requires CUDA")
+        for batch in (1, 8, 31, 257, 1024):
+            table = (
+                torch.arange(batch * 8, device="cuda", dtype=torch.int32).reshape(
+                    batch, 8
+                )
+                + 1
+            )[:, ::2]
+            pages = torch.full((batch,), 2, dtype=torch.int64, device="cuda")
+            pool_rows = batch * 8 + 2
+            result = resolve_commit_blocks(table, pages, pool_rows)
+            expected = torch.cat(
+                [
+                    torch.zeros(4, dtype=torch.int64, device="cuda"),
+                    table[:, 2].to(torch.int64),
+                ]
+            )
+            torch.testing.assert_close(result, expected, rtol=0, atol=0)
+            for _ in range(3):
+                resolve_commit_blocks(table, pages, pool_rows)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                got = resolve_commit_blocks(table, pages, pool_rows)
+            pages.fill_(-1)
+            graph.replay()
+            torch.cuda.synchronize()
+            self.assertEqual(got[:4].tolist(), [1, 0, 0, 0])
+            torch.testing.assert_close(got[4:], table[:, 0].long(), rtol=0, atol=0)
+            pages.fill_(3)
+            table[0, 3] = 0
+            table[-1, 3] = pool_rows + 1
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(
+                got, resolve_commit_blocks(table, pages, pool_rows), rtol=0, atol=0
+            )
+            self.assertEqual(got[3].item(), 1)
+        self.assertIsNone(
+            resolve_commit_blocks(
+                torch.ones(1, 2, dtype=torch.int32), torch.zeros(1, dtype=torch.long), 2
+            )
+        )
+
+    def test_bulk_validation_preserves_destinations_and_error_priority(self):
+        table = torch.tensor([[1, 2, 3], [4, 5, 6]], dtype=torch.int32)
+        inputs = SimpleNamespace(kv_cache_block_id_device=table)
+        resolve = qwen4_exp.Qwen4ExpModel._commit_physical_blocks
+        for device in [torch.device("cpu")] + (
+            [torch.device("cuda")] if torch.cuda.is_available() else []
+        ):
+            current = SimpleNamespace(kv_cache_block_id_device=table.to(device))
+            pages = torch.tensor([1, 2], device=device)
+            blocks, host = resolve(current, PLE_STATE_TAG, pages, 8, device)
+            torch.testing.assert_close(blocks, torch.tensor([2, 6], device=device))
+            self.assertEqual(host, [2, 6])
+            for values, error in [
+                ([-1, 4], "invalid logical"),
+                ([0, 3], "exceeds its block"),
+            ]:
+                with self.assertRaisesRegex(RuntimeError, error):
+                    resolve(
+                        current,
+                        PLE_STATE_TAG,
+                        torch.tensor(values, device=device),
+                        8,
+                        device,
+                    )
+            bad = table.to(device).clone()
+            bad[0, 1] = 0
+            bad[1, 2] = 99
+            current.kv_cache_block_id_device = bad
+            with self.assertRaisesRegex(RuntimeError, "unallocated logical"):
+                resolve(current, PLE_STATE_TAG, pages, 8, device)
+            bad[0, 1] = 2
+            with self.assertRaisesRegex(RuntimeError, "exceeds its pool"):
+                resolve(current, PLE_STATE_TAG, pages, 8, device)
+        with self.assertRaisesRegex(RuntimeError, "batch is inconsistent"):
+            resolve(inputs, PLE_STATE_TAG, torch.tensor([0]), 8, torch.device("cpu"))
 
 
 if __name__ == "__main__":
