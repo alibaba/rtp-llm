@@ -93,6 +93,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
         }
 
         // Stage 5: Output Assembly
+        response->set_actual_input_length(embedding_input->total_length);
         if (embedding_output->output.isTensor) {
             response->set_output_is_tensor(true);
             QueryConverter::transTensorPB(response->mutable_output_t(), embedding_output->output.t.value());

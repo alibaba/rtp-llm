@@ -222,7 +222,7 @@ class EmbeddingEndpoint(object):
                         tensor_map[key] = torch_tensor
                     result.append(tensor_map)
             output.outputs = result
-            output.input_length = input.input_length
+            output.input_length = response.actual_input_length or input.input_length
             return result
         except grpc.RpcError as e:
             logging.warning(f"RPC failed: {e.code()}: {e.details()}")
