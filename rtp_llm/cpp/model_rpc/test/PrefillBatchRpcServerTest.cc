@@ -1521,7 +1521,8 @@ TEST_F(PrefillBatchTraceTest, VitCoversFusionPreparationIncludingTokenExpansion)
     server.mm_processor_                  = processor;
     auto                           parent = telemetry::startRpcServerSpan("rtp_llm.generate_stream_call", nullptr);
     std::shared_ptr<GenerateInput> input;
-    ASSERT_TRUE(server.prepareInput(makeVitRequest(4101), input, parent).ok());
+    const auto status = server.prepareInput(makeVitRequest(4101), input, parent);
+    ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_EQ(processor->calls, 1);
     ASSERT_TRUE(input->multimodal_features);
     EXPECT_EQ(input->multimodal_features->size(), 2u);
@@ -1558,7 +1559,7 @@ TEST_F(PrefillBatchTraceTest, VitUsesEachBatchRequestParentAndDoesNotRepeatProce
         auto& context          = *slot.deferred->context;
         context.generate_input = QueryConverter::transQuery(slot.input.get());
         server.multimodalProcess(context);
-        ASSERT_TRUE(context.error_status.ok());
+        ASSERT_TRUE(context.error_status.ok()) << context.error_status.error_message();
         EXPECT_TRUE(context.multimodalProcessed());
         server.multimodalProcess(context);
         slot.deferred->finishLogicalTrace();
@@ -1630,7 +1631,8 @@ TEST_F(PrefillBatchTraceTest, VitSkipsTextMissingParentAndDisabledTelemetry) {
     std::shared_ptr<GenerateInput> input;
     ASSERT_TRUE(server.prepareInput(text, input, parent).ok());
     EXPECT_EQ(processor->calls, 0);
-    ASSERT_TRUE(server.prepareInput(makeVitRequest(4402), input).ok());
+    const auto status = server.prepareInput(makeVitRequest(4402), input);
+    ASSERT_TRUE(status.ok()) << status.ToString();
     EXPECT_EQ(processor->calls, 1);
     parent->End();
     auto spans = finishTelemetry();
