@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <atomic>
+#include <thread>
 #include <cstdlib>
 #include <iostream>
 
@@ -33,6 +35,41 @@ void putOne(SharedBlockCache& cache,
 }
 
 }  // namespace
+
+TEST(SharedBlockCacheTest, CacheKeysSnapshotKeepsVersionConsistentDuringConcurrentPuts) {
+    SharedBlockCache  cache;
+    const auto        initial_version = cache.version();
+    std::atomic<bool> start{false};
+    std::atomic<bool> done{false};
+    constexpr int     kKeyCount = 2000;
+    std::thread       writer([&] {
+        while (!start.load()) {
+            std::this_thread::yield();
+        }
+        for (int key = 1; key <= kKeyCount; ++key) {
+            putOne(cache, key, key, rootDep());
+            std::this_thread::yield();
+        }
+        done.store(true);
+    });
+
+    start.store(true);
+    bool consistent = true;
+    do {
+        const auto snapshot = cache.snapshotCacheKeys();
+        if (snapshot.version - initial_version != static_cast<int64_t>(snapshot.keys.size())) {
+            consistent = false;
+            break;
+        }
+        std::this_thread::yield();
+    } while (!done.load());
+    writer.join();
+
+    EXPECT_TRUE(consistent);
+    const auto snapshot = cache.snapshotCacheKeys();
+    EXPECT_EQ(snapshot.keys.size(), kKeyCount);
+    EXPECT_EQ(snapshot.version, initial_version + kKeyCount);
+}
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
     SharedBlockCache cache;

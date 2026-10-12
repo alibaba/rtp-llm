@@ -1699,11 +1699,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         model_output                        = std::move(model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
-    // The target model's CPU dispatch is complete, but its CUDA work has not yet been consumed by
-    // the sampler. Refresh the cache snapshot in this otherwise idle CPU window instead of after
-    // the full MTP target+draft process, where small models may already have synchronized the GPU.
     if (cache_status_snapshot_refresh_callback_) {
-        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(refresh_cache_status_snapshot)");
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(request_cache_status_snapshot)");
         cache_status_snapshot_refresh_callback_(streams);
     }
     model_input.need_all_hidden_states = saved_need_all_hidden_states;
