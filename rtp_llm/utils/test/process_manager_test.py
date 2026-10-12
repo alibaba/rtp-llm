@@ -47,7 +47,10 @@ def dummy_worker(duration=1, should_crash=False):
 
 
 def forever_worker(queue):
-    # Signal that we are ready
+    # Exercise the forced-kill path: an ordinary worker exits on SIGTERM and
+    # would correctly be classified as a graceful shutdown instead.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Signal that the handler is installed before the parent requests stop.
     queue.put("ready")
 
     while True:
@@ -499,6 +502,7 @@ class TestProcessManager(unittest.TestCase):
 
         self.manager.shutdown_timeout = 2
         # Wait for process to be ready
+        self.assertEqual(queue.get(timeout=5), "ready")
         self.assertEqual(queue.get(timeout=5), "ready")
 
         # Ensure it's running

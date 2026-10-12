@@ -328,6 +328,7 @@ class TestBuildStackedKeyConfig(unittest.TestCase):
 
         loader = object.__new__(ModelLoader)
         loader._load_config = types.SimpleNamespace(database=database)
+        loader._weights_info = types.SimpleNamespace(_quant_config=None)
         loader._generate_weight_info = MagicMock(
             return_value=({"needed.tensor": weight_info}, [weight_info])
         )

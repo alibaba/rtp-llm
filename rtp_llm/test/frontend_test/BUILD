@@ -9,6 +9,7 @@ py_test(
         ":httpx",
         "//rtp_llm:fastapi",
         "//rtp_llm:frontend_sleep_routes",
+        "//rtp_llm:orjson",
         "//rtp_llm:utils",
         "//rtp_llm/cpp/model_rpc:grpcio",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",

@@ -823,13 +823,10 @@ TEST(PrefillBatchRpcServerTest, CancelBeforeRegisterInstallsTombstoneAndRejectsE
     ASSERT_TRUE(server.Cancel(nullptr, &request, &retry_response).ok());
     EXPECT_EQ(retry_response.status(), CancelStatusPB::CANCEL_STATUS_TOMBSTONED);
 
-    std::vector<PrefillBatchRpcServer::BatchSlot> slots;
-    PrefillBatchRpcServer::BatchSlot              slot;
-    slot.input = std::make_shared<GenerateInputPB>();
-    slot.input->set_request_id(3011);
-    slots.push_back(std::move(slot));
+    EnqueueGroupRequestPB group_request;
+    group_request.add_requests()->mutable_input()->set_request_id(3011);
     EnqueueBatchResponsePB enqueue_response;
-    ASSERT_TRUE(server.acceptGroup(std::move(slots), &enqueue_response).ok());
+    ASSERT_TRUE(server.EnqueueGroup(nullptr, &group_request, &enqueue_response).ok());
 
     EXPECT_EQ(engine->enqueue_multiple_calls, 0);
     ASSERT_EQ(enqueue_response.errors_size(), 1);

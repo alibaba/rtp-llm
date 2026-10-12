@@ -567,6 +567,7 @@ class Dsv4MoeConfigTest(unittest.TestCase):
         class DummyMoe(DummyModule):
             def __init__(self, *args, **kwargs):
                 super().__init__()
+                self._moe = DummyModule()
                 self.strategy_name = kwargs["strategy"]
                 self.received_kwargs = kwargs
 

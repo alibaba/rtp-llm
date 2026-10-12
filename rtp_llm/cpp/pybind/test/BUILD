@@ -8,7 +8,11 @@ cc_test_wrapper(
     # library. Keep it after the test objects so --as-needed does not drop it,
     # and declare it as a linker input for remote execution.
     additional_linker_inputs = ["//:rtp_compute_ops"],
+    # The wrapper runs this binary from its package directory, whereas
+    # librtp_compute_ops.so lives at the runfiles repository root.
+    data = ["//:rtp_compute_ops"],
     linkopts = [
+        "-Wl,-rpath='$$ORIGIN/../../../..'",
         "-Wl,--no-as-needed",
         "$(location //:rtp_compute_ops)",
         "-Wl,--as-needed",
