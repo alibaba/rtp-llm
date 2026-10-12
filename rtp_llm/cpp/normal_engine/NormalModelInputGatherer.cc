@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
@@ -796,7 +797,50 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
-    auto model_input = allocateModelInputBuffers(stream_groups);
+    const auto& decode_streams  = stream_groups.decodeStreams();
+    const auto& context_streams = stream_groups.contextStreams();
+
+    // Only schedulable streams define the model execution mode. In particular,
+    // an errored stream may be the first entry (or the only entry on a rank),
+    // while its input is still retained below to keep TP collectives aligned.
+    bool       has_execution_mode     = false;
+    bool       prefill_only           = false;
+    bool       mixed_execution_modes  = false;
+    const auto capture_execution_mode = [&](const auto& streams) {
+        for (const auto& stream : streams) {
+            if (stream->hasError()) {
+                continue;
+            }
+            const bool stream_prefill_only = isPrefillOnly(stream);
+            if (!has_execution_mode) {
+                has_execution_mode = true;
+                prefill_only       = stream_prefill_only;
+            } else if (prefill_only != stream_prefill_only) {
+                mixed_execution_modes = true;
+            }
+        }
+    };
+    capture_execution_mode(decode_streams);
+    capture_execution_mode(context_streams);
+    if (mixed_execution_modes) {
+        // Do not return before the executor's TP sync: non-root ranks can own an empty
+        // stream list, so a rank-local early return would fork the collective sequence.
+        // Mark every affected request instead; the gathered batch remains shape-valid
+        // and any model output is ignored by the errored streams.
+        const auto report_mixed_mode_error = [](const auto& streams) {
+            for (const auto& stream : streams) {
+                if (!stream->hasError()) {
+                    stream->reportError(ErrorCode::INVALID_PARAMS, kMixedExecutionModeBatchError);
+                }
+            }
+        };
+        report_mixed_mode_error(decode_streams);
+        report_mixed_mode_error(context_streams);
+    }
+
+    auto model_input                  = allocateModelInputBuffers(stream_groups);
+    model_input.skip_lm_head          = prefill_only;
+    model_input.capture_hidden_states = prefill_only;
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
