@@ -201,3 +201,10 @@ py_test(
     srcs = ["pd_cache_store_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
+
+py_test(
+    name = "gdn_post_conv_test",
+    srcs = ["gdn_post_conv_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'A10'},
+)

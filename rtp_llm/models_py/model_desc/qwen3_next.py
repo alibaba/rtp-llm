@@ -1,12 +1,11 @@
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
@@ -85,8 +84,23 @@ from rtp_llm.utils.swizzle_utils import (
     should_swizzle_linear_attn_ba,
 )
 from rtp_llm.utils.util import to_torch_dtype
+from torch import nn
 
 logger = logging.getLogger(__name__)
+_GDN_OUTPUT_NORM_FORWARD = RmsNormGated.forward
+
+
+def _can_fuse_gdn_output_norm(norm: RmsNormGated) -> bool:
+    module_hooks = torch.nn.modules.module
+    return (
+        type(norm) is RmsNormGated
+        and RmsNormGated.forward is _GDN_OUTPUT_NORM_FORWARD
+        and "forward" not in norm.__dict__
+        and not norm._forward_pre_hooks
+        and not norm._forward_hooks
+        and not module_hooks._global_forward_pre_hooks
+        and not module_hooks._global_forward_hooks
+    )
 
 
 @lru_cache(maxsize=None)
@@ -921,6 +935,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
+        output_norm: Optional[RmsNormGated] = None,
+        output_gate: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert kv_cache is not None, "kv_cache is required for decode"
         assert (
@@ -937,6 +953,55 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             is_target_verify,
         )
+        if (
+            output_norm is not None
+            and output_gate is not None
+            and _can_fuse_gdn_output_norm(output_norm)
+            and output_norm.bias is None
+            and output_norm.group_size == self.head_v_dim
+            and self.head_k_dim == self.head_v_dim == 128
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.gdn_post_conv_triton import (
+                try_gdn_post_conv,
+            )
+
+            batch, steps = self._get_bs_from_attenion_input(
+                mixed_qkv, attn_inputs, is_target_verify
+            )
+            qkv = mixed_qkv.reshape(
+                batch,
+                steps,
+                self.local_num_k_heads * 2 + self.local_num_v_heads,
+                self.head_k_dim,
+            )
+            query, key, value = torch.split(
+                qkv,
+                [
+                    self.local_num_k_heads,
+                    self.local_num_k_heads,
+                    self.local_num_v_heads,
+                ],
+                dim=2,
+            )
+            fused = try_gdn_post_conv(
+                query,
+                key,
+                value,
+                a,
+                b,
+                self.alog,
+                self.dt_bias,
+                output_gate,
+                output_norm.weight,
+                self._get_ssm_states(kv_cache_tensor),
+                self._get_fla_block_map(attn_inputs),
+                attn_inputs.sequence_lengths_plus_1_device,
+                page_size=kv_cache.seq_size_per_block,
+                eps=output_norm.eps,
+                activation=output_norm.activation,
+            )
+            if fused is not None:
+                return fused
         attn_out = self._fla(
             mixed_qkv,
             b,
@@ -946,7 +1011,11 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             attn_inputs,
             attn_meta,
         )
-
+        if output_norm is not None:
+            return output_norm(
+                attn_out.reshape(-1, self.local_num_v_heads * self.head_v_dim),
+                output_gate,
+            )
         return attn_out
 
     def _get_bs_from_attenion_input(
@@ -1368,6 +1437,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
+        fused_decode_norm = (
+            getattr(self, "_qwen4_fused_post_conv", False)
+            and os.environ.get("RTP_LLM_QWEN4_FUSED_GDN_POST_CONV", "0") == "1"
+            and not (attention_inputs.is_prefill and not attn_meta.is_target_verify)
+        )
         if attention_inputs.is_prefill and not attn_meta.is_target_verify:
             if attn_meta.is_cp_linear_attn:
                 return self._forward_cp_prefill(
@@ -1378,11 +1452,22 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
         else:
             attn_output = self.decode_gdn(
-                mixed_qkv, b, a, attention_inputs, kv_cache, attn_meta
+                mixed_qkv,
+                b,
+                a,
+                attention_inputs,
+                kv_cache,
+                attn_meta,
+                **(
+                    dict(output_norm=self.norm, output_gate=z)
+                    if fused_decode_norm
+                    else {}
+                ),
             )
-        attn_output = self.norm(
-            attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
-        )
+        if not fused_decode_norm:
+            attn_output = self.norm(
+                attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim), z
+            )
         attn_output = self.out_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
