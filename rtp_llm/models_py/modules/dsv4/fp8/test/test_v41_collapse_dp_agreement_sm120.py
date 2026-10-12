@@ -37,7 +37,9 @@ def emit(marker, **values):
 
 
 @torch.inference_mode()
-def run_rank(rank, port, config):
+def run_rank(rank, port, config, component="collapse"):
+    assert component in ("collapse", "post")
+    policy_key = f"mhc_{component}_mode"
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     torch.set_default_dtype(torch.float32)
@@ -65,7 +67,7 @@ def run_rank(rank, port, config):
     try:
         mode = None if rank == 0 else "ordered_fp32"
         model, reference = make_workers(
-            rank, dict(config, mhc_collapse_mode=mode), initialize_model=False
+            rank, dict(config, **{policy_key: mode}), initialize_model=False
         )
         before = weight_snapshot(model)
         wrapper = model.weight
@@ -74,13 +76,13 @@ def run_rank(rank, port, config):
         except RuntimeError as error:
             assert "peer rejected request or model schedule" in str(error)
         else:
-            raise AssertionError("Mixed collapse modes entered materialization")
+            raise AssertionError(f"Mixed {component} modes entered materialization")
         assert model.weight is wrapper and model.v4 is None
         assert model._worker_state == "new" and not model._materialized
         assert not model._engram_tables
         require_weights(model, before)
         emit(
-            "DSV41_COLLAPSE_DP_COLD_REJECT",
+            f"DSV41_{component.upper()}_DP_COLD_REJECT",
             rank=rank,
             mode=mode,
             weights_exact=True,
@@ -94,16 +96,16 @@ def run_rank(rank, port, config):
 
         model, reference = make_workers(
             rank,
-            dict(config, mhc_collapse_mode="ordered_fp32"),
+            dict(config, **{policy_key: "ordered_fp32"}),
             initialize_model=False,
         )
         assert model.initialize(resources())
         assert model.initialize(resources(tagged_cache(model)))
         for worker in (model, reference):
-            assert worker._mhc_collapse_mode == "ordered_fp32"
+            assert getattr(worker, "_" + policy_key) == "ordered_fp32"
             for layer in worker.v4.layers:
-                assert layer.attn_hc.collapse_mode == "ordered_fp32"
-                assert layer.ffn_hc.collapse_mode == "ordered_fp32"
+                assert getattr(layer.attn_hc, component + "_mode") == "ordered_fp32"
+                assert getattr(layer.ffn_hc, component + "_mode") == "ordered_fp32"
         for phase, lengths in enumerate(
             ((3, 2) if rank == 0 else (), (rank + 1,), (2, 1) if rank % 2 else ())
         ):
@@ -112,7 +114,7 @@ def run_rank(rank, port, config):
             )
             check_round(model, reference, rank, lengths, phase)
             emit(
-                "DSV41_COLLAPSE_DP_ROUND",
+                f"DSV41_{component.upper()}_DP_ROUND",
                 rank=rank,
                 phase=phase,
                 rows=sum(lengths),
@@ -133,9 +135,9 @@ def run_rank(rank, port, config):
                 else model.v4.layers[-1].ffn_hc
             )
             context = (
-                patch.dict(target, mhc_collapse_mode=None)
+                patch.dict(target, {policy_key: None})
                 if mutation == "config"
-                else patch.object(target, "_collapse_mode", None)
+                else patch.object(target, "_" + component + "_mode", None)
             )
             if rank == 0:
                 context.start()
@@ -144,12 +146,14 @@ def run_rank(rank, port, config):
                     model.forward(request)
                 except (ValueError, RuntimeError) as error:
                     assert (
-                        "collapse mode" in str(error)
+                        component + " mode" in str(error)
                         if rank == 0
                         else "peer rejected" in str(error)
                     )
                 else:
-                    raise AssertionError("One-rank collapse mutation entered layers")
+                    raise AssertionError(
+                        f"One-rank {component} mutation entered layers"
+                    )
             finally:
                 if rank == 0:
                     context.stop()
@@ -161,7 +165,7 @@ def run_rank(rank, port, config):
                     model.kv_cache.storage[key].view(torch.uint8),
                 )
             emit(
-                "DSV41_COLLAPSE_DP_MUTATION_REJECT",
+                f"DSV41_{component.upper()}_DP_MUTATION_REJECT",
                 rank=rank,
                 mutation=mutation,
                 cache_exact=True,
@@ -172,13 +176,18 @@ def run_rank(rank, port, config):
             reference
         )
         check_round(model, reference, rank, (2,) if rank == 7 else (), 3)
-        emit("DSV41_COLLAPSE_DP_RESUME", rank=rank, active=rank == 7, ready=True)
+        emit(
+            f"DSV41_{component.upper()}_DP_RESUME",
+            rank=rank,
+            active=rank == 7,
+            ready=True,
+        )
         del before, request
         reference.close()
         model.close()
         assert not model._engram_tables and not reference._engram_tables
         dist.barrier()
-        emit("DSV41_COLLAPSE_DP_RELEASE", rank=rank, tables_empty=True)
+        emit(f"DSV41_{component.upper()}_DP_RELEASE", rank=rank, tables_empty=True)
     finally:
         if reference is not None:
             reference.close()
