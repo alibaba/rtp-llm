@@ -20,6 +20,48 @@ _DEV = "cuda"
 
 
 class SparseFmhaTest(unittest.TestCase):
+    def test_skip_empty_preserves_sparse_tails_duplicates_and_empty_rows(self):
+        torch.manual_seed(73)
+        for gqa in (6, 12):
+            with self.subTest(gqa=gqa):
+                q = torch.randn(2, 2 * gqa, 131, _D, device=_DEV).bfloat16()
+                k = torch.randn(2, 2, 257, _D, device=_DEV).bfloat16()
+                v = torch.randn_like(k)
+                selected = torch.randint(
+                    0, 257, (2, 131, 257), device=_DEV, dtype=torch.int32
+                )
+                selected[..., 32:224] = -1
+                selected[:, 0] = -1
+                selected[:, 1] = -1
+                selected[:, 1, -1] = 256
+                selected[:, 2, :2] = 31  # Multiplicity must be retained.
+                selected[:, 3, :32] = -7  # All negative IDs are padding.
+                settings = {
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "0",
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1",
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY": "0",
+                }
+                with patch.dict("os.environ", settings):
+                    baseline = sparse_prefill_attn(q, k, v, selected)
+                settings["RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY"] = "1"
+                with patch.dict("os.environ", settings):
+                    candidate = sparse_prefill_attn(q, k, v, selected)
+                old_tf32 = torch.backends.cuda.matmul.allow_tf32
+                try:
+                    torch.backends.cuda.matmul.allow_tf32 = False
+                    expected = sparse_prefill_attn_torch_reference(
+                        q.float(), k.float(), v.float(), selected
+                    ).to(q.dtype)
+                finally:
+                    torch.backends.cuda.matmul.allow_tf32 = old_tf32
+                torch.testing.assert_close(
+                    candidate, expected, atol=0.0078125, rtol=0.008
+                )
+                torch.testing.assert_close(
+                    candidate, baseline, atol=0.0078125, rtol=0.008
+                )
+                self.assertTrue((candidate[:, :, 0] == 0).all())
+
     def test_grouped_tensor_core_matches_reference_with_head_padding(self):
         torch.manual_seed(18)
         # TP8 uses three Q heads per local KV head. Also cover two local KV
