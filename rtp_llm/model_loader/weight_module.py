@@ -26,6 +26,7 @@ class WeightModule(ABC):
     # Descriptors may keep their output on a fixed device independently of the
     # loader's temporary conversion device and the model's execution device.
     resident_device: Optional[str] = None
+    pinned_memory = False
     lora_base_name = "base_model.model.{}.{}.weight"
     lora_A_suffix = "lora_A"
     lora_B_suffix = "lora_B"
@@ -179,6 +180,8 @@ class WeightModule(ABC):
         # Resolve placement before materializing tensors and use it through the
         # final flattening step, so offloaded tables never stage on the GPU.
         device = self.resident_device or device
+        if self.pinned_memory and torch.device(device).type != "cpu":
+            raise ValueError("pinned weight residency requires CPU storage")
         raw_tensors = self._load_raw_tensor(
             tensor_source, layer_id, device, load_config
         )
@@ -200,7 +203,14 @@ class WeightModule(ABC):
                 if isinstance(v, dict):
                     __extract_tensor(v)
                 else:
-                    flat_res.update({k: v.to(device)})
+                    tensor = v.to(device)
+                    if self.pinned_memory:
+                        if tensor.device.type != "cpu":
+                            raise ValueError(
+                                "pinned weight residency requires CPU storage"
+                            )
+                        tensor = tensor if tensor.is_pinned() else tensor.pin_memory()
+                    flat_res.update({k: tensor})
 
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}

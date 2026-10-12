@@ -320,6 +320,12 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
         method set -- so the extras are appended per layer here.
         """
         info = super()._get_weight_info()
+        if getattr(self.model_config, "_qwen4_vocab_cpu_offload", False):
+            for weight in info.weights:
+                if weight.name == W.embedding:
+                    weight.resident_device = "cpu"
+                    weight.pinned_memory = True
+                    weight.supports_fastsafetensors_iteration = False
         self._append_indexer_weights(info.layer_weights)
         self._append_ple_weights(info.layer_weights)
         if self._moe_only_fp4:

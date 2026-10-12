@@ -186,6 +186,13 @@ class WeightManager:
                 "Update request is missing the 'method' field. "
                 "It must specify the IPC method (e.g., 'cuda_ipc' or 'shm')."
             )
+        if "layers" not in req["name"]:
+            name = rename_function(req["name"])
+            for weight in self._weight_module.weights:
+                if weight.name == name and weight.pinned_memory:
+                    raise PermissionError(
+                        f"pinned host weight {name!r} requires a service restart to update"
+                    )
         method: str = req["method"]
         desc: str = req["desc"]
         name: str = req["name"]
