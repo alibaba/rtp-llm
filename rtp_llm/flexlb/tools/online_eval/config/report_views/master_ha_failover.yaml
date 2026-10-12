@@ -101,7 +101,7 @@ charts:
       group: '{master}'
       unit: boolean
       axis: up
-      color: '#1677ff'
+      color: '#1677ff80'
       hidden: false
     ha/http_up/B:
       metric_id: ha/http_up
@@ -111,7 +111,7 @@ charts:
       group: '{master}'
       unit: boolean
       axis: up
-      color: '#722ed1'
+      color: '#722ed180'
       hidden: false
     ha/scheduler_inflight/A:
       metric_id: ha/scheduler_inflight

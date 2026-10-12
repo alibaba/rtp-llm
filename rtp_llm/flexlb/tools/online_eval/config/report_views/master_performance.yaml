@@ -38,15 +38,13 @@ metrics:
 charts:
   events:
     measure_start:
-      label: 测量阶段开始
-      source: stage
-      stage: measure
-      boundary: start
+      label: 门禁窗口开始（预热结束）
+      source: case
+      event: measurement_started
     measure_end:
-      label: 测量阶段结束
-      source: stage
-      stage: measure
-      boundary: end
+      label: 门禁窗口结束
+      source: case
+      event: measurement_ended
   event_ids:
   - measure_start
   - measure_end
@@ -241,7 +239,7 @@ charts:
       forward:
         title: 单引擎平均 tokens/s
         position: left
-    caption: 三项均为同一采样点按引擎等权平均的执行 TPS；虚线为各自的绝对下界，不是集群 TPS。
+    caption: 三项均为同一采样点按引擎等权平均的执行 TPS；虚线仅覆盖门禁判定窗口，竖线标出预热结束与门禁结束；虚线为各自的绝对下界，不是集群 TPS。
     empty_caption: 缺少引擎 TPS 采样；门禁结果仍以原始证据判定。
   - id: client-qps
     title: 发送 / 成功 / 失败 QPS

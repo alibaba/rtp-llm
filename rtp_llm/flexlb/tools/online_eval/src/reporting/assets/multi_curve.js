@@ -97,7 +97,7 @@
       if(open) {document.addEventListener('click',closePicker);search.focus();}}
     pickerButton.onclick=()=>setPickerOpen(dropdown.hidden);
     picker.onkeydown=event=>{if(event.key==='Escape') {setPickerOpen(false);pickerButton.focus();}};
-    function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor+'33';});[legendLabels,plottedLabels].forEach(labels=>labels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';}));chart.update('none');}
+    function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor.slice(0,7)+'33';});[legendLabels,plottedLabels].forEach(labels=>labels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';}));chart.update('none');}
     function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);plottedLabels[i].hidden=!input.checked;});legend.hidden=!inputs.some(input=>input.checked);pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';if(focused!==null) focus(focused);else chart.update('none');fillHover(lastHover);}
     function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}
     Object.entries(panel.presets || {}).forEach(([name,selected])=>button(name,()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,selected.includes(d.label)));refresh();}));

@@ -59,6 +59,7 @@ def observe(ctx, p, deadline):
             evidence["samples"].append(row)
             return row
         end = clock.origin_monotonic_s + c["warmup_s"] + c["measure_s"]
+        measurement_started = False
         for row in poll_samples(deadline, c["sample_s"], sample, until=end, immediate=True):
             state = row
             epoch = row["epoch_ms"]
@@ -67,7 +68,13 @@ def observe(ctx, p, deadline):
                 or state.get("process_returncode") is not None
             ):
                 raise ValueError("traffic ended before measurement completed")
+            if epoch >= lo and not measurement_started:
+                ctx.record_event("measurement_started", timestamp=dict(
+                    epoch_s=lo / 1000, monotonic_s=clock.origin_monotonic_s + c["warmup_s"]))
+                measurement_started = True
             if epoch >= hi:
+                ctx.record_event("measurement_ended", timestamp=dict(
+                    epoch_s=hi / 1000, monotonic_s=end))
                 break
         ctx.record_event("observation_end")
     except Exception as exc:
