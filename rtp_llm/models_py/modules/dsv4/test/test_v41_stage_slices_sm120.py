@@ -39,9 +39,7 @@ from rtp_llm.models_py.modules.dsv4.test.test_native_l20_transfer import (
     native_fixture,
 )
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
-from rtp_llm.models_py.modules.dsv4.v41_cache import (
-    logical_to_physical_slots,
-)
+from rtp_llm.models_py.modules.dsv4.v41_cache import logical_to_physical_slots
 from rtp_llm.models_py.modules.dsv4.v41_cache_transfer import (
     V41CacheIdentity,
     V41L20Span,
@@ -60,9 +58,9 @@ def repeated(value, *sizes):
     return value.repeat(*sizes)
 
 
-def wide_fixture():
+def wide_fixture(experts=4):
     """Widen synthetic hidden dimensions; keep 512/128 KV/index latents."""
-    args, weights = fixture(full_schedule=True)
+    args, weights = fixture(experts=experts, full_schedule=True)
     for layer in weights.weights:
         for prefix in ("v4_attn_wq_a", "v4_attn_wkv", "v4_shared_w13"):
             for suffix in ("w", "s"):

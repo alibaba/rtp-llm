@@ -795,6 +795,45 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_pp_dp_loader_sm120",
+    srcs = [
+        "test_v41_pp_dp_loader_sm120.py",
+        "v41_checkpoint_test_support.py",
+        "test_v41_pp_checkpoint_engine_sm120.py",
+        "test_v41_pp_loader_sm120.py",
+        "test_v41_native_pp_engine_sm120.py",
+        "test_v41_native_pp_execution_sm120.py",
+        "test_v41_native_pp_admission_sm120.py",
+        "test_v41_native_pp_preflight_sm120.py",
+        "test_v41_native_pp_local_cache_sm120.py",
+        "test_v41_native_pp_transport_sm120.py",
+        "test_native_l20_transfer.py",
+        "test_v41_pp_delayed_state.py",
+        "test_v41_cp_stage_worker_sm120.py",
+        "test_v41_cp_stage_slices_sm120.py",
+        "test_v41_stage_slices_sm120.py",
+        "test_native_l20_prefill.py",
+    ],
+    data = [
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test",
+        "//rtp_llm/cpp/normal_engine/test:th_v41_native_pp_transport_test",
+        "//rtp_llm/config/test:testdata/deepseek_v41_flash.json",
+    ],
+    deps = _DSV4_TEST_DEPS + [
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_loader_worker_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
+        "//rtp_llm/tools:dsv41_pp_smoke",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_precision_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
+    ],
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "eternal",
+)
+
+py_test(
     name = "test_strategy_select",
     srcs = ["test_strategy_select.py"],
     deps = [
