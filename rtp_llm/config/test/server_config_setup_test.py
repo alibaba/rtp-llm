@@ -503,8 +503,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 69)
-        self.assertEqual(state[:2], ("KVCacheConfig", 7))
+        self.assertEqual(len(state), 70)
+        self.assertEqual(state[:2], ("KVCacheConfig", 8))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -539,7 +539,7 @@ class GenerateConfigTest(TestCase):
             return value
 
         event_state = state
-        state = (state[0], 6, *state[2:-5])
+        state = (state[0], 6, *state[2:-6])
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
@@ -604,6 +604,7 @@ class GenerateConfigTest(TestCase):
         from rtp_llm.ops import KVCacheConfig
 
         expected_fields = {
+            "enable_linear_cache_reclaim": "bool",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",
             "block_tree_transfer_queue_max_size": "int",

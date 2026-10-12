@@ -1094,6 +1094,98 @@ TEST(CacheConfigCreatorTest, HybridAttentionIndependentPoolBackingFitsBudgetExac
     EXPECT_GT(backing_bytes(block_num + 1u), budget_bytes);
 }
 
+TEST(CacheConfigCreatorTest, LinearCacheReclaimDefaultsOffRegardlessOfModelCapability) {
+    ParallelismConfig pc;
+    KVCacheConfig     options;
+    options.linear_step = 3;
+    for (bool supported : {false, true}) {
+        auto mc                                                   = makeHybridAttentionModelConfig();
+        mc.linear_attention_config.supports_history_state_reclaim = supported;
+        const auto config                                         = CacheConfigCreator::createConfig(mc, pc, options);
+        EXPECT_FALSE(config.enable_linear_cache_reclaim);
+        EXPECT_EQ(config.linear_step, 3);
+        EXPECT_EQ(config.group("linear").spec->cacheKeyTokenStride(), config.seq_size_per_block);
+    }
+}
+
+TEST(CacheConfigCreatorTest, LinearCacheReclaimRequiresOptInAndModelCapability) {
+    auto mc                                                   = makeHybridAttentionModelConfig();
+    mc.model_type                                             = "test_recurrent_model";
+    mc.linear_attention_config.supports_history_state_reclaim = true;
+    ParallelismConfig pc;
+    KVCacheConfig     options;
+    options.enable_linear_cache_reclaim = true;
+
+    EXPECT_TRUE(CacheConfigCreator::createConfig(mc, pc, options).enable_linear_cache_reclaim);
+    EXPECT_TRUE(CacheConfigCreator::createWarmupConfig(mc, pc, options, 0).enable_linear_cache_reclaim);
+
+    mc.linear_attention_config.supports_history_state_reclaim = false;
+    EXPECT_THROW((void)CacheConfigCreator::createConfig(mc, pc, options), std::exception);
+}
+
+TEST(CacheConfigCreatorTest, LinearCacheReclaimIsInactiveForFullOnlyDraft) {
+    auto mc = makeHybridAttentionModelConfig();
+    mc.hybrid_attention_config.hybrid_attention_types.assign(mc.num_layers, HybridAttentionType::NONE);
+    mc.linear_attention_config.supports_history_state_reclaim = false;
+    setHybridAttentionKvCacheSpecs(mc);
+    ParallelismConfig pc;
+    pc.tp_size                            = 2;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig options;
+    options.enable_linear_cache_reclaim = true;
+
+    const auto config = CacheConfigCreator::createConfig(mc, pc, options);
+    EXPECT_FALSE(config.enable_linear_cache_reclaim);
+    ASSERT_EQ(config.groupNums(), 1);
+    EXPECT_EQ(config.group("full").policy.group_type, CacheGroupType::FULL);
+}
+
+TEST(CacheConfigCreatorTest, LinearCacheReclaimRejectsCpShardingOnlyWhenEnabled) {
+    auto mc                                                   = makeHybridAttentionModelConfig();
+    mc.linear_attention_config.supports_history_state_reclaim = true;
+    ParallelismConfig pc;
+    pc.tp_size                            = 2;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig options;
+
+    EXPECT_FALSE(CacheConfigCreator::createConfig(mc, pc, options).enable_linear_cache_reclaim);
+    options.enable_linear_cache_reclaim = true;
+    EXPECT_THROW((void)CacheConfigCreator::createConfig(mc, pc, options), std::exception);
+}
+
+TEST(CacheConfigCreatorTest, LinearCacheReclaimRejectsProjectedKeySpan) {
+    ModelConfig mc;
+    mc.num_layers                                             = 1;
+    mc.attn_config.tokens_per_block                           = 8;
+    mc.linear_attention_config.supports_history_state_reclaim = true;
+    KVCacheSpecDesc desc;
+    desc.tag                  = "projected_state";
+    desc.cache_type           = KVCacheSpecType::OpaqueState;
+    desc.group_type           = CacheGroupType::LINEAR;
+    desc.entry_elems          = 4;
+    desc.entry_dtype          = DataType::TYPE_FP32;
+    desc.explicit_entry_count = 1;
+    desc.cp                   = CacheCpPolicyDesc{};
+    desc.cp->scale_seq_size   = true;
+    mc.kv_cache_spec_descs    = {{desc}};
+    ParallelismConfig pc;
+    pc.tp_size                            = 2;
+    pc.role_type                          = RoleType::PREFILL;
+    pc.prefill_cp_config.kv_cache_sharded = true;
+    KVCacheConfig options;
+
+    const auto original = CacheConfigCreator::createConfig(mc, pc, options);
+    EXPECT_FALSE(original.enable_linear_cache_reclaim);
+    ASSERT_EQ(original.group("projected_state").spec->cacheKeyTokenStride(), 2 * original.seq_size_per_block);
+    options.enable_linear_cache_reclaim = true;
+    try {
+        (void)CacheConfigCreator::createConfig(mc, pc, options);
+        FAIL() << "reclaim accepted a LINEAR group with a different cache-key span";
+    } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what()).find("cache-key span"), std::string::npos);
+    }
+}
+
 TEST(CacheConfigCreatorTest, LinearValueHeadsMustDivideAttentionTp) {
     auto mc                                           = makeHybridAttentionModelConfig();
     mc.linear_attention_config.linear_num_value_heads = 3;

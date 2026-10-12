@@ -38,6 +38,21 @@ class CustomAllReduceArgumentsTest(TestCase):
 
 
 class CacheConfigArgumentsTest(TestCase):
+    def test_linear_cache_reclaim_is_opt_in_and_cli_overrides_environment(self):
+        for args, env, expected in (
+            ([], {}, False),
+            (["--enable_linear_cache_reclaim", "1"], {}, True),
+            ([], {"ENABLE_LINEAR_CACHE_RECLAIM": "1"}, True),
+            (
+                ["--enable_linear_cache_reclaim", "0"],
+                {"ENABLE_LINEAR_CACHE_RECLAIM": "1"},
+                False,
+            ),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(config.enable_linear_cache_reclaim, expected)
+
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {
         "enable_vipserver": True,

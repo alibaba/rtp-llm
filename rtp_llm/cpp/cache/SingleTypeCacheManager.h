@@ -56,6 +56,11 @@ public:
                         std::vector<size_t>*     backfilled_positions = nullptr,
                         const RequiredPositions& required_positions   = {})                                        = 0;
     virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    // Exclusive checkpoint position safe to retire after committed GPU work.
+    virtual size_t historyReclaimEnd(int committed_tokens) const {
+        return 0;
+    }
+    void         reclaimHistory(BlockIds& block_ids, size_t end);
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,
@@ -76,7 +81,8 @@ public:
                                                          int                      reserve_step,
                                                          int                      reuse_blocks_len,
                                                          bool                     reuse_enabled      = false,
-                                                         const RequiredPositions& required_positions = {}) const = 0;
+                                                         const RequiredPositions& required_positions = {},
+                                                         size_t                   reclaimed_prefix_blocks = 0) const                = 0;
     void                                   reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices);
     void                                   reference(const BlockIndicesType& block_indices);
     void                                   unreference(const BlockIndicesType& block_indices);

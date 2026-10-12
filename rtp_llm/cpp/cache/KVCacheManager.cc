@@ -493,6 +493,14 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
     };
 }
 
+void KVCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr& resource,
+                                          int                            committed_tokens,
+                                          bool                           reuse_cache) {
+    if (config_.enable_linear_cache_reclaim && coordinator_manager_) {
+        coordinator_manager_->reclaimLinearHistory(resource, committed_tokens, reuse_cache);
+    }
+}
+
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     RTP_LLM_PROFILE_FUNCTION();
     const int64_t begin_time_us = metrics_reporter_ == nullptr ? 0 : currentTimeUs();

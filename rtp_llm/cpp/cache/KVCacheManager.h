@@ -62,6 +62,7 @@ public:
     void         free(const FreeInfo& free_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
     // Outputs the resident key-prefix count; ordinary inserts report zero.
+    void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are

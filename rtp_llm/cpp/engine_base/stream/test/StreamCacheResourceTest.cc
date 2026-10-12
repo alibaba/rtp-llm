@@ -35,6 +35,7 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <optional>
 #include <thread>
 
 using namespace std;
@@ -242,7 +243,9 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {}) {
+                                        const KVCacheConfig&    kv_cache_config      = {},
+                                        int                     num_return_sequences = 2,
+                                        std::optional<int>      max_new_tokens       = std::nullopt) {
         cache_manager_ = std::make_shared<KVCacheManager>(
             cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
@@ -258,7 +261,10 @@ protected:
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        generate_config->num_return_sequences = 2;
+        generate_config->num_return_sequences = num_return_sequences;
+        if (max_new_tokens.has_value()) {
+            generate_config->max_new_tokens = *max_new_tokens;
+        }
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
@@ -331,6 +337,35 @@ protected:
         }
     };
 
+    void prepareLinearHistoryResource(bool enable_reclaim = true) {
+        auto config = test::makeSimpleHybridMhaCacheConfig(
+            /*layer_num=*/4, /*block_num=*/32, /*tokens_per_block=*/2, DataType::TYPE_FP16);
+        config.linear_step                 = 1;
+        config.enable_linear_cache_reclaim = enable_reclaim;
+        prepareResourceWithCacheConfig(
+            config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
+        // PERF_TEST emits zero tokens, which is also the model's default EOS.
+        // These ownership tests need every accepted speculative token committed.
+        stream_->generateConfig()->ignore_eos  = true;
+        stream_->generateConfig()->reuse_cache = true;
+        stream_->vocab_size_                   = 1024;
+        ASSERT_TRUE(stream_->streamCacheResource().initKVBlock().ok());
+    }
+
+    void commitLinearHistoryToken() {
+        stream_->update({torch::tensor({{13}}, torch::kInt32),
+                         1,
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor(),
+                         torch::Tensor()});
+        ASSERT_FALSE(stream_->hasError());
+    }
+
 #define CHECK_BLOCK(block_vec, outter_size, inner_size)                                                                \
     do {                                                                                                               \
         SCOPED_TRACE("checkBlockFunc");                                                                                \
@@ -342,6 +377,168 @@ protected:
     GenerateStreamPtr               stream_;
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimedAfterCommittedPrefillAndNotBackfilled) {
+    prepareLinearHistoryResource();
+    auto&      resource    = stream_->streamCacheResource();
+    const auto before      = resource.kvCache().blocks(0, "linear");
+    const auto full_before = resource.kvCache().blocks(0, "full1");
+    ASSERT_EQ(before.size(), 6u);
+    EXPECT_TRUE(std::all_of(before.begin(), before.end(), [](int block) { return !isNullBlockIdx(block); }));
+
+    commitLinearHistoryToken();
+    // Output commit publishes only a watermark. The scheduler owns block-table
+    // mutation and drains it before allocating the next execution's blocks.
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+
+    const auto& after = resource.kvCache().blocks(0, "linear");
+    ASSERT_EQ(after.size(), before.size() + 1);
+    for (size_t i = 0; i < 4; ++i) {
+        EXPECT_EQ(after[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(after[4], before[4]);
+    EXPECT_EQ(after[5], before[5]);
+    const auto& full_after = resource.kvCache().blocks(0, "full1");
+    ASSERT_GE(full_after.size(), full_before.size());
+    EXPECT_TRUE(std::equal(full_before.begin(), full_before.end(), full_after.begin()));
+    auto prefix_keys = resource.cacheKeys(0);
+    prefix_keys.resize(4);
+    auto match = cache_manager_->block_tree_cache_->match(prefix_keys);
+    EXPECT_EQ(match.matched_device_blocks, 4u);
+    for (const auto& matched_resource : match.matched_device_resources) {
+        cache_manager_->block_tree_cache_->groupSets()[matched_resource.group_set_id]->unreferenceBlocks(
+            matched_resource);
+    }
+
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    for (size_t i = 0; i < 4; ++i) {
+        EXPECT_EQ(resource.kvCache().blocks(0, "linear")[i], NULL_BLOCK_IDX);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDefersAsyncWorkerMutationUntilSchedulerAllocation) {
+    prepareLinearHistoryResource();
+    auto&      resource    = stream_->streamCacheResource();
+    const auto before      = resource.kvCache().blocks(0, "linear");
+    const auto keys_before = resource.cacheKeys(0);
+    // The next normal async gather may read the host block table while its
+    // predecessor commits. The worker must only publish the committed watermark.
+    stream_->incPendingAsyncBookkeeping();
+    commitLinearHistoryToken();
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+    EXPECT_EQ(resource.cacheKeys(0), keys_before);
+    stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+
+    // An allocation upper bound is not a committed-token watermark.
+    ASSERT_TRUE(resource.incrKVBlock(/*seq_len_override=*/17).ok());
+    for (size_t i = 0; i < 4; ++i) {
+        EXPECT_EQ(resource.kvCache().blocks(0, "linear")[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear")[4], before[4]);
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear")[5], before[5]);
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDisabledPreservesRequestReferences) {
+    prepareLinearHistoryResource(/*enable_reclaim=*/false);
+    auto&      resource = stream_->streamCacheResource();
+    const auto before   = resource.kvCache().blocks(0, "linear");
+    commitLinearHistoryToken();
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto& after = resource.kvCache().blocks(0, "linear");
+    ASSERT_GE(after.size(), before.size());
+    EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDefersForPdTransferAndLowerTierOnlyCache) {
+    for (bool pd_transfer : {true, false}) {
+        SCOPED_TRACE(pd_transfer ? "PD transfer" : "asynchronous lower tier publication");
+        prepareLinearHistoryResource();
+        auto&      resource                            = stream_->streamCacheResource();
+        const auto before                              = resource.kvCache().blocks(0, "linear");
+        stream_->generateConfig()->pd_separation       = pd_transfer;
+        resource.resource_context_.enable_device_cache = pd_transfer;
+        resource.resource_context_.enable_memory_cache = !pd_transfer;
+        commitLinearHistoryToken();
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        const auto& after = resource.kvCache().blocks(0, "linear");
+        ASSERT_GE(after.size(), before.size());
+        EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
+        // Restore the configured storage tier before ordinary end-of-request cleanup.
+        resource.resource_context_.enable_device_cache = true;
+        resource.resource_context_.enable_memory_cache = false;
+        stream_->releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimUsesAcceptedSpecTokensAndPreservesSwappedTail) {
+    prepareLinearHistoryResource();
+    auto& resource = stream_->streamCacheResource();
+    // Set up a completed prefill without invoking the normal-update reclaim hook.
+    stream_->completeTokenIdsPtr()->data(0)[12] = 13;
+    stream_->setSeqLength(13);
+    stream_->setIsContextStream(false);
+    stream_->setReserveStep(4);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto before = resource.kvCache().blocks(0, "linear");
+    ASSERT_EQ(before.size(), 10u);
+    auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+    output->tokens = torch::zeros({1, 2}, torch::kInt32);
+    stream_->setSPOutputBuffer(output);
+
+    StreamSpecUpdateInfo update_info{
+        .new_tokens          = torch::tensor({{14, 15, 16}}, torch::kInt32),
+        .num_new_tokens      = 3,
+        .draft_token         = -1,
+        .draft_hidden_states = torch::Tensor(),
+        .draft_token_probs   = torch::Tensor(),
+        .draft_token_gpu     = std::nullopt,
+    };
+    stream_->specUpdate(update_info);
+    ASSERT_FALSE(stream_->hasError());
+    ASSERT_EQ(stream_->seqLength(), 16);
+    const auto committed = resource.kvCache().blocks(0, "linear");
+    EXPECT_TRUE(std::equal(before.begin(), before.begin() + 6, committed.begin()));
+    EXPECT_EQ(committed[6], before[7]);
+    EXPECT_EQ(committed[7], before[8]);
+    EXPECT_EQ(committed[8], before[6]);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    const auto& after = resource.kvCache().blocks(0, "linear");
+    ASSERT_EQ(after.size(), before.size() + 1);
+    for (size_t i = 0; i < 5; ++i) {
+        EXPECT_EQ(after[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(after[5], before[5]);
+    EXPECT_EQ(after[6], before[7]);
+    EXPECT_EQ(after[7], before[8]);
+    EXPECT_EQ(after[8], before[6]);
+    EXPECT_EQ(after[9], before[9]);
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimPreservesBorrowedResourcesAndPendingCopies) {
+    for (int guard = 0; guard < 3; ++guard) {
+        SCOPED_TRACE(guard);
+        prepareLinearHistoryResource();
+        auto&      resource = stream_->streamCacheResource();
+        const auto before   = resource.kvCache().blocks(0, "linear");
+        commitLinearHistoryToken();
+        if (guard == 0) {
+            stream_->setNeedReleaseResource(false);
+        } else if (guard == 1) {
+            resource.block_update_mapping_ = {{"linear", before.back(), before.back()}};
+        } else {
+            resource.holdKVCacheForPDSep();
+        }
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        const auto& after = resource.kvCache().blocks(0, "linear");
+        ASSERT_GE(after.size(), before.size());
+        EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
+        stream_->setNeedReleaseResource(true);
+        resource.clearKVBlockUpdateMapping();
+        resource.releaseKVCacheForPDSep();
+        stream_->releaseResource();
+    }
+}
 
 TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitchesEnv) {
     {
