@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <mutex>
 #include <memory>
@@ -1574,16 +1575,51 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
 
     if (!pending_linear_copies.empty()) {
         c10::DeviceGuard guard(torch::Device(torch::kCUDA, maga_init_params_.parallelism_config.local_rank));
-        for (const auto& copy : pending_linear_copies) {
+        std::unordered_map<void*, std::vector<size_t>> destination_groups;
+        size_t                                         scratch_bytes = 0;
+        for (size_t index = 0; index < pending_linear_copies.size(); ++index) {
+            const auto& copy = pending_linear_copies[index];
             requireTypedTp(copy.destination.device_index == maga_init_params_.parallelism_config.local_rank,
                            "typed TP cache destination belongs to another CUDA device");
-            auto destination = torch::from_blob(copy.destination.addr,
-                                                {static_cast<int64_t>(copy.destination.size_bytes)},
-                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-            for (const auto& slice : copy.slices) {
-                destination.narrow(0, slice.destination_offset, slice.bytes)
-                    .copy_(copy.source->tensor.narrow(0, slice.source_offset, slice.bytes), false);
+            destination_groups[copy.destination.addr].push_back(index);
+            scratch_bytes = std::max(scratch_bytes, copy.destination.size_bytes);
+        }
+        auto scratch =
+            torch::empty({static_cast<int64_t>(scratch_bytes)},
+                         torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
+        // Assemble one complete state on host and upload it once. A blocking
+        // bulk copy makes the same scratch safe for the next layer and avoids
+        // a stream synchronization for every small Q/K/V history segment.
+        for (const auto& [address, indices] : destination_groups) {
+            const auto&       destination_info = pending_linear_copies[indices.front()].destination;
+            std::vector<bool> received_parts(static_cast<size_t>(peer_cnt), false);
+            for (size_t index : indices) {
+                const auto& copy = pending_linear_copies[index];
+                requireTypedTp(copy.destination.size_bytes == destination_info.size_bytes,
+                               "inconsistent typed TP destination payload");
+                requireTypedTp(!copy.slices.empty() && copy.slices.front().bytes > 0,
+                               "typed TP frame has no state shard");
+                const auto part_id = copy.slices.front().destination_offset / copy.slices.front().bytes;
+                requireTypedTp(part_id < received_parts.size(), "typed TP frame has an invalid shard id");
+                received_parts[part_id] = true;
+                const auto* source      = static_cast<const uint8_t*>(copy.source->tensor.data_ptr());
+                auto*       output      = static_cast<uint8_t*>(scratch.data_ptr());
+                for (const auto& slice : copy.slices) {
+                    requireTypedTp(slice.source_offset <= static_cast<size_t>(copy.source->tensor.numel())
+                                       && slice.bytes
+                                              <= static_cast<size_t>(copy.source->tensor.numel()) - slice.source_offset
+                                       && slice.destination_offset <= destination_info.size_bytes
+                                       && slice.bytes <= destination_info.size_bytes - slice.destination_offset,
+                                   "typed TP reassembly slice exceeds its payload");
+                    std::memcpy(output + slice.destination_offset, source + slice.source_offset, slice.bytes);
+                }
             }
+            requireTypedTp(std::all_of(received_parts.begin(), received_parts.end(), [](bool seen) { return seen; }),
+                           "typed TP state is missing a prefill shard");
+            auto destination = torch::from_blob(address,
+                                                {static_cast<int64_t>(destination_info.size_bytes)},
+                                                torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+            destination.copy_(scratch.narrow(0, 0, destination_info.size_bytes), false);
         }
     }
 
