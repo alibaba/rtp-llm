@@ -185,6 +185,13 @@ def try_gdn_post_conv(
     ):
         return None
     batch, steps, heads, dim = q.shape
+    # Keep low-traffic singleton requests on the established model path.
+    # Explicitly set one to reproduce the unrestricted experimental variant.
+    min_batch = int(os.environ.get("RTP_LLM_QWEN4_GDN_POST_CONV_MIN_BATCH", "2"))
+    if min_batch < 1:
+        raise ValueError("Qwen4 GDN post-conv minimum batch must be positive")
+    if batch < min_batch:
+        return None
     value_heads = v.shape[2]
     layout = os.environ.get("RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT", "split")
     if layout not in ("fused", "split"):

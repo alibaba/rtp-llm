@@ -48,7 +48,10 @@ class GdnPostConvTest(unittest.TestCase):
                         for layout in ("fused", "split"):
                             with patch.dict(
                                 os.environ,
-                                {"RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT": layout},
+                                {
+                                    "RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT": layout,
+                                    "RTP_LLM_QWEN4_GDN_POST_CONV_MIN_BATCH": "1",
+                                },
                             ):
                                 self._run_case(
                                     batch, steps, state_dtype, activation, h, hv
@@ -74,7 +77,11 @@ class GdnPostConvTest(unittest.TestCase):
         lengths = torch.full((batch,), 129, device="cuda", dtype=torch.int32)
         for layout in ("fused", "split"):
             with self.subTest(layout=layout), patch.dict(
-                os.environ, {"RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT": layout}
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT": layout,
+                    "RTP_LLM_QWEN4_GDN_POST_CONV_MIN_BATCH": "1",
+                },
             ):
                 actual = try_gdn_post_conv(
                     q,
@@ -95,6 +102,52 @@ class GdnPostConvTest(unittest.TestCase):
                 )
                 self.assertIsNone(actual)
                 self.assertTrue(torch.equal(state, before))
+
+    def test_singleton_multi_step_falls_back_without_touching_state(self):
+        batch, steps, heads, value_heads, dim = 1, 3, 2, 6, 128
+        qkv = torch.randn(
+            batch,
+            steps,
+            heads * 2 + value_heads,
+            dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        q, k, v = torch.split(qkv, [heads, heads, value_heads], dim=2)
+        a = torch.randn(batch * steps, value_heads, device="cuda", dtype=torch.bfloat16)
+        b = torch.randn_like(a)
+        a_log = torch.randn(value_heads, device="cuda")
+        dt = torch.randn_like(a_log)
+        z = torch.randn(
+            batch * steps, value_heads * dim, device="cuda", dtype=torch.bfloat16
+        )
+        weight = torch.ones(dim, device="cuda", dtype=torch.bfloat16)
+        state = torch.randn(steps + 3, value_heads, dim, dim, device="cuda")
+        before = state.clone()
+        block_map = torch.arange(
+            1, state.shape[0], device="cuda", dtype=torch.int32
+        ).reshape(batch, steps + 2)
+        lengths = torch.full((batch,), 129, device="cuda", dtype=torch.int32)
+        with patch.dict(os.environ, {"RTP_LLM_QWEN4_GDN_POST_CONV_MIN_BATCH": "2"}):
+            result = try_gdn_post_conv(
+                q,
+                k,
+                v,
+                a,
+                b,
+                a_log,
+                dt,
+                z,
+                weight,
+                state,
+                block_map,
+                lengths,
+                page_size=128,
+                eps=1e-6,
+                activation="sigmoid",
+            )
+        self.assertIsNone(result)
+        self.assertTrue(torch.equal(state, before))
 
     def test_model_norm_route_matches_legacy_and_preserves_hooks(self):
         from rtp_llm.models_py.model_desc.qwen3_next import (
@@ -284,7 +337,11 @@ class GdnPostConvTest(unittest.TestCase):
         for layout in ("fused", "split"):
             for steps in (2, 4):
                 with self.subTest(layout=layout, steps=steps), patch.dict(
-                    os.environ, {"RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT": layout}
+                    os.environ,
+                    {
+                        "RTP_LLM_QWEN4_GDN_POST_CONV_LAYOUT": layout,
+                        "RTP_LLM_QWEN4_GDN_POST_CONV_MIN_BATCH": "1",
+                    },
                 ):
                     self._run_case(
                         8, steps, torch.float32, "sigmoid", 2, 6, shared_weight=True
