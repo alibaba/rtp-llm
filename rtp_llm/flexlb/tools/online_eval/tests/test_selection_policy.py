@@ -12,6 +12,7 @@ from scenario.suites import SuiteCatalog, preselect_documents, classify
 from scenario import load_scenarios, compile_scenarios
 from scenario.catalog import handlers
 from scenario.loader import ScenarioError
+from scenario.ci_plan import CiPlan, CiInstance, CiPlanner
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,19 +65,24 @@ def test_ci_policy_rejects_bad_reference_profile_and_lane_count(tmp_path, mutati
 
 
 def test_ci_job_commands_use_frozen_policy_and_separate_profile_outputs(tmp_path):
-    job = SuiteCatalog.read().ci_jobs['workload']
-    calls = list(run_ci.commands(job, tmp_path, mock_stride=2100, dry_run=True))
+    profiles = ('batch-window', 'single-nonbatch')
+    ids = tuple(CiInstance('case::default::' + p, 'case', p) for p in profiles)
+    plan = CiPlan('workload', 'workload', profiles, 1, ids, {'worker': tuple(x.identity for x in ids)}, 'normal')
+    calls = list(run_ci.commands(plan, tmp_path, mock_stride=2100, dry_run=True))
     assert [profile for profile, _ in calls] == ['batch-window', 'single-nonbatch']
     for profile, command in calls:
         assert command[command.index('--parallel') + 1] == '1'
-        assert command[command.index('--suite') + 1] == 'workload'
+        assert '--all' in command
+        assert command[command.index('--instances') + 1] == 'case::default::' + profile
         assert command[command.index('--out-dir') + 1] == str(tmp_path / profile)
         assert '--dry-run' in command
 
 
 def test_ci_failure_stops_remaining_profiles_and_records_partial_run(tmp_path):
     from types import SimpleNamespace
-    with patch('scenario.compile_scenarios', return_value=[]), patch('scenario.suites.classify'), \
+    ids = tuple(CiInstance('case::default::' + p, 'case', p) for p in ('batch-window', 'single-nonbatch'))
+    plan = CiPlan('quick', 'core', tuple(x.profile for x in ids), 1, ids, {'quick': tuple(x.identity for x in ids)}, 'normal')
+    with patch('scripts.commands.run_ci.resolve_ci_selection', return_value=plan), \
          patch('scripts.commands.run_ci.subprocess.run', return_value=SimpleNamespace(returncode=1)) as run:
         assert run_ci.main(['--job', 'quick', '--out-dir', str(tmp_path)]) == 1
     assert run.call_count == 1
@@ -86,8 +92,8 @@ def test_ci_failure_stops_remaining_profiles_and_records_partial_run(tmp_path):
 
 
 def test_ci_invalid_later_profile_cannot_start_first_profile(tmp_path):
-    with patch('scenario.compile_scenarios', side_effect=[[], ScenarioError('bad profile')]), \
-         patch('scenario.suites.classify'), patch('scripts.commands.run_ci.subprocess.run') as run:
+    with patch('scenario.ci_plan.compile_scenarios', side_effect=[[], ScenarioError('bad profile')]), \
+         patch('scenario.ci_plan.classify', return_value=[]), patch('scripts.commands.run_ci.subprocess.run') as run:
         with pytest.raises(SystemExit):
             run_ci.main(['--job', 'quick', '--out-dir', str(tmp_path)])
     run.assert_not_called()

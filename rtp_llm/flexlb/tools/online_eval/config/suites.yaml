@@ -23,3 +23,17 @@ ci_jobs:
     - batch-window
     - single-nonbatch
     parallel: 1
+    workers:
+      workload_cache_single:
+        cases:
+        - cache_scale_in
+        profiles:
+        - single-nonbatch
+      workload_cache_batch:
+        cases:
+        - cache_scale_in
+        profiles:
+        - batch-window
+      workload_other:
+        exclude_cases:
+        - cache_scale_in
