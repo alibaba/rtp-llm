@@ -622,21 +622,242 @@ TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
     EXPECT_EQ(engine->getScheduler().onflightStreams(), 1);
 }
 
+// TEMPORARY CI PROBE helpers (probe branch only).
+#include <cstring>
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/ucontext.h>
+#include <unistd.h>
+
+#include <cstdio>
+
+static void _probeDumpMaps(const char* tag, int filtered) {
+    fprintf(stderr, "%s\n", tag);
+    int fd = open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+    char buf[8192];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+        buf[n] = '\0';
+        for (char* line = strtok(buf, "\n"); line; line = strtok(nullptr, "\n")) {
+            if (!filtered || strstr(line, "torch") || strstr(line, "nccl") || strstr(line, "python")
+                || strstr(line, "libcuda.so")) {
+                fprintf(stderr, "PROBEMAP %s\n", line);
+            }
+        }
+    }
+    close(fd);
+    fflush(stderr);
+}
+static void* _probeCtxReg(void* ctx, int which) {
+#if defined(__x86_64__)
+    if (!ctx) {
+        return nullptr;
+    }
+    ucontext_t* u = (ucontext_t*)ctx;
+    if (which == 1) {
+        return (void*)u->uc_mcontext.gregs[REG_RSP];
+    }
+    if (which == 2) {
+        return (void*)u->uc_mcontext.gregs[REG_RBP];
+    }
+    return (void*)u->uc_mcontext.gregs[REG_RIP];
+#elif defined(__aarch64__)
+    if (!ctx) {
+        return nullptr;
+    }
+    ucontext_t* u = (ucontext_t*)ctx;
+    if (which == 1) {
+        return (void*)u->uc_mcontext.sp;
+    }
+    if (which == 2) {
+        return (void*)u->uc_mcontext.regs[29];
+    }
+    return (void*)u->uc_mcontext.pc;
+#else
+    (void)ctx;
+    (void)which;
+    return nullptr;
+#endif
+}
+
+static void* _probeCtxPc(void* ctx) {
+    return _probeCtxReg(ctx, 0);
+}
+
+
+static void _probeCrashHandler(int sig, siginfo_t* info, void* ctx) {
+    char msg[512];
+    int  len = snprintf(msg,
+                       sizeof(msg),
+                       "PROBE crash sig=%d addr=%p pc=%p rsp=%p rbp=%p\n",
+                       sig,
+                       info ? info->si_addr : nullptr,
+                       ctx ? _probeCtxPc(ctx) : nullptr,
+                       ctx ? _probeCtxReg(ctx, 1) : nullptr,
+                       ctx ? _probeCtxReg(ctx, 2) : nullptr);
+    write(STDERR_FILENO, msg, len);
+    void* frames[32];
+    int   n = backtrace(frames, 32);
+    // Symbolize each frame via dladdr before raw backtrace output.
+    for (int i = 0; i < n; ++i) {
+        Dl_info dli;
+        memset(&dli, 0, sizeof(dli));
+        if (dladdr(frames[i], &dli) && dli.dli_fname) {
+            unsigned long off = (unsigned long)frames[i] - (unsigned long)dli.dli_fbase;
+            char sym[512];
+            int  l = snprintf(sym,
+                              sizeof(sym),
+                              "PROBEFRAME %d %s+0x%lx (%s)\n",
+                              i,
+                              dli.dli_sname ? dli.dli_sname : "?",
+                              off,
+                              dli.dli_fname);
+            write(STDERR_FILENO, sym, l);
+        }
+    }
+    // Hexdump code bytes around the crashing call site for manual disassembly.
+    if (n > 0) {
+        unsigned char* site = (unsigned char*)frames[0];
+        unsigned char* start = site - 64;
+        char hd[64 * 3 + 64];
+        int  pos = snprintf(hd, sizeof(hd), "PROBE code bytes before return addr %p:\n", (void*)site);
+        for (int b = 0; b < 80; ++b) {
+            pos += snprintf(hd + pos, sizeof(hd) - pos, "%02x ", start[b]);
+        }
+        pos += snprintf(hd + pos, sizeof(hd) - pos, "\n");
+        write(STDERR_FILENO, hd, pos);
+    }
+    // Dump stack qwords from the crash frame's return address for provenance.
+    if (n > 0) {
+        unsigned long* sp = (unsigned long*)frames[0];
+        char sd[32 * 20 + 64];
+        int  pos = snprintf(sd, sizeof(sd), "PROBE stack words above %p:\n", (void*)sp);
+        for (int w = 0; w < 32; ++w) {
+            pos += snprintf(sd + pos, sizeof(sd) - pos, "[%p] %016lx\n", (void*)(sp + w), sp[w]);
+        }
+        write(STDERR_FILENO, sd, pos);
+    }
+    // Full unfiltered maps at crash time (second-copy library evidence).
+    _probeDumpMaps("PROBE crash maps", 0);
+    _exit(128 + sig);
+}
+
+static void _probeInstallCrashHandler() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = _probeCrashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+}
 class NormalEngineCustomOutputTest: public NormalEngineTest {
 protected:
     static void SetUpTestSuite() {
-        // PROBE v7 (exact PR fixture candidate + faulthandler only): the binary
-        // links 3rdparty/3fs's libcrypto.so.1.1 before the embedded interpreter
-        // starts; conda lib-dynload _hashlib then binds to that copy instead of
-        // the conda OpenSSL it was built against and crashes on the first
-        // digest call. Block _hashlib so hashlib falls back to builtin digests.
+        // TEMPORARY CI PROBE (branch probe/dsv41-engine-test-crash only; never merged):
+        // capture loaded library identity and crash context around interpreter + torch import.
+        _probeDumpMaps("PROBE before interpreter", 1);
+        // v5: keep our native handler as fallback only; faulthandler below becomes primary.
+        fprintf(stderr,
+                "PROBE env PYTHONPATH=%s LD_LIBRARY_PATH=%s\n",
+                getenv("PYTHONPATH") ? getenv("PYTHONPATH") : "(unset)",
+                getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "(unset)");
         interpreter_ = std::make_unique<py::scoped_interpreter>();
-        py::exec(R"(import faulthandler, sys; faulthandler.enable(file=sys.stderr, all_threads=True))");
-        py::exec(R"(
+        _probeDumpMaps("PROBE after interpreter", 1);
+        try {
+            py::exec(R"(import sys; print("PROBE sys.path:", sys.path, file=sys.stderr); import os;
+print("PROBE cwd:", os.getcwd(), file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE sys.path exec exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        // PROBE v4: apply the candidate FIX (drop nvidia sys.path entries) and
+        // split the import into phases to locate the remaining crash point.
+        try {
+            py::exec(R"(
+import os, sys
+sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "nvidia"))]
+print("PROBE filtered sys.path:", sys.path, file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE filter exec exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::exec(R"(
+import ctypes, os, sys
+_tp = None
+for p in sys.path:
+    c = os.path.join(p, "torch")
+    if os.path.isfile(os.path.join(c, "__init__.py")):
+        _tp = c
+        break
+print("PROBE torch pkg dir:", _tp, file=sys.stderr)
+ctypes.CDLL(os.path.join(_tp, "lib", "libtorch_global_deps.so"), mode=ctypes.RTLD_GLOBAL)
+print("PROBE global_deps loaded", file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE global_deps phase exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::exec(R"(
+import ctypes, glob, os, sys
+_tp = None
+for p in sys.path:
+    c = os.path.join(p, "torch")
+    if os.path.isfile(os.path.join(c, "__init__.py")):
+        _tp = c
+        break
+_ext = glob.glob(os.path.join(_tp, "_C.cpython-*.so"))
+print("PROBE _C ext:", _ext, file=sys.stderr)
+ctypes.CDLL(_ext[0])
+print("PROBE _C dlopen-only loaded, constructors ran, no PyInit", file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE _C dlopen phase exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        // v5: faulthandler becomes the primary crash handler (Python stacks of all threads)
+        // for the full import; our native handler stays installed only as a fallback.
+        try {
+            py::exec(R"(import faulthandler, sys; faulthandler.enable(file=sys.stderr, all_threads=True); print("PROBE faulthandler enabled", file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE faulthandler enable exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        // v6 candidate fix under test: the binary links 3rdparty/3fs's
+        // libcrypto.so.1.1 (runfiles _solib) before the embedded interpreter
+        // starts; conda lib-dynload _hashlib then binds to that copy instead of
+        // the conda OpenSSL it was built against, and the first digest call
+        // crashes. Make hashlib use its builtin digest modules instead.
+        try {
+            py::exec(R"(
 import sys
 sys.modules['_hashlib'] = None
-import torch
-print("PROBE v7 torch import ok", file=sys.stderr))");
+import hashlib
+print("PROBE hashlib fallback ok, sha256:", hashlib.sha256(b'probe').hexdigest()[:8], file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE hashlib fallback exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::exec(R"(import torch.version; print("PROBE torch.version ok:", torch.version.__version__, file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE torch.version exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        try {
+            py::module_::import("torch");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE torch import exception: %s\n", e.what());
+            fflush(stderr);
+            throw;
+        }
+        py::exec(R"(import sys; print("PROBE torch at:", sys.modules['torch'].__file__, file=sys.stderr))");
+        _probeDumpMaps("PROBE after torch import", 1);
     }
 
     static void TearDownTestSuite() {
