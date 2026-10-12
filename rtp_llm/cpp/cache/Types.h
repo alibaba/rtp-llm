@@ -72,6 +72,10 @@ struct MallocInfo {
     // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
     // Lets the state machine feed the publish-time value instead of racing with the async worker.
     int incr_seq_len_override = -1;
+    // Verified PD decode handoff: keep FULL prefix reuse, but do not match,
+    // materialize, or publish LINEAR checkpoint blocks.  Keep this field after
+    // the legacy aggregate fields above for positional initialization safety.
+    bool pd_decode_linear_tail_only = false;
 
     int incrSeqLen() const;
 };
@@ -136,6 +140,9 @@ struct InsertInfo {
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
     Tier                    target_tier{Tier::DEVICE};
+    // Keep FULL insertion while excluding LINEAR blocks for a PD decode
+    // handoff whose linear state is supplied by the prefill side.
+    bool pd_decode_linear_tail_only = false;
 };
 
 }  // namespace rtp_llm

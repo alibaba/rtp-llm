@@ -760,6 +760,64 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
     ASSERT_FALSE(resource.asyncLoadCache());
 }
 
+TEST_F(StreamCacheResourceTest, PDLinearTailPolicyPersistsThroughAllocationAndRelease) {
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = true;
+    resource.setPDDecodeLinearTailOnly(true);
+    // PD handoff allocation happens before the stream becomes a decode stream.
+    ASSERT_TRUE(stream_->isContextStream());
+
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_TRUE(info.pd_decode_linear_tail_only);
+            EXPECT_TRUE(info.reuse_cache);
+            EXPECT_TRUE(info.enable_cache_lookup);
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .Times(2)
+        .WillRepeatedly(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_TRUE(info.pd_decode_linear_tail_only);
+            EXPECT_TRUE(info.reuse_cache);
+            for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
+                info.batch_kv_cache_resource->mutableBlockIds(b, "linear").assign({NULL_BLOCK_IDX, 1});
+            }
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
+        .WillOnce(testing::Invoke([](const InsertInfo& info, size_t&) {
+            EXPECT_TRUE(info.pd_decode_linear_tail_only);
+            EXPECT_EQ(info.target_tier, Tier::DEVICE);
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    stream_->generate_status_->status = StreamState::FINISHED;
+    resource.releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, DecodeRoleAloneDoesNotEnableLinearTailPolicy) {
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource  = stream_->streamCacheResource();
+    auto  allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.pd_decode_linear_tail_only);
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.pd_decode_linear_tail_only);
+            return {true, 0};
+        }));
+    ASSERT_TRUE(resource.initKVBlock().ok());
+}
+
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();

@@ -93,7 +93,8 @@ public:
                                     int                            remaining_tokens,
                                     int                            reserve_step,
                                     bool                           enable_reuse_cache,
-                                    int                            target_batch_size) const;
+                                    int                            target_batch_size,
+                                    bool                           pd_decode_linear_tail_only = false) const;
 
     MallocResult malloc(const MallocInfo& malloc_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
@@ -183,19 +184,22 @@ protected:
     static size_t heldRequestBlocks(const MallocInfo& malloc_info, std::string_view tag);
     // Reuse-aware interpretation of planner output: reuse planners report
     // additional demand; no-reuse planners report the full footprint.
-    static InitBlockDemand initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag);
+    static InitBlockDemand
+    initBlockDemand(const MallocInfo& malloc_info, size_t planned_blocks, std::string_view tag, bool reuse_enabled);
     // Estimate peak additional blocks for one sequence resource.
     virtual int   estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
                                          int                    seq_len,
                                          int                    remaining_tokens,
                                          int                    reserve_step,
-                                         bool                   enable_reuse_cache) const;
+                                         bool                   enable_reuse_cache,
+                                         bool                   pd_decode_linear_tail_only = false) const;
     virtual int   estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                      int  common_seq_len,
                                                      int  remaining_tokens,
                                                      int  reserve_step,
                                                      bool enable_reuse_cache,
-                                                     int  target_batch_size) const;
+                                                     int  target_batch_size,
+                                                     bool pd_decode_linear_tail_only = false) const;
     virtual void  checkCPShardedMallocResult(const MallocInfo&) const;
     virtual void  decrKVCacheRef(const KVCacheResource& kvcache_resource);
     size_t        logicalSeqSizePerBlockForCapacity(const std::string& tag) const;
@@ -237,7 +241,8 @@ protected:
     std::shared_ptr<LoadAsyncContext> prepareKVCache(const CacheKeysType&                 cache_keys,
                                                      BatchKVCacheResource&                kv_resource,
                                                      const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                                     PreparedKVCache&                     prepared);
+                                                     PreparedKVCache&                     prepared,
+                                                     bool                                 skip_linear);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,

@@ -538,6 +538,8 @@ struct PDSepConfig {
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
     bool     decode_entrance                 = false;
+    // Only PD handoff streams may omit historical linear states; ordinary prefill still needs them.
+    bool decode_linear_tail_only = false;
     // ========== Prefill Thread Pool Configuration ==========
     // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
     int64_t prefill_prepare_resource_pool_size = 0;

@@ -123,6 +123,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+                insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -156,7 +157,8 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    remaining_tokens,
                                                                    reserve_step,
                                                                    reuseCache(),
-                                                                   target_batch_size);
+                                                                   target_batch_size,
+                                                                   pd_decode_linear_tail_only_);
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -197,6 +199,7 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -390,6 +393,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

@@ -47,7 +47,8 @@ public:
                  int                    seq_len,
                  int                    remaining_tokens,
                  int                    reserve_step,
-                 bool                   enable_reuse_cache),
+                 bool                   enable_reuse_cache,
+                 bool                   pd_decode_linear_tail_only),
                 (const, override));
     MOCK_METHOD(size_t, availableBlocksNum, (), (const, override));
     MOCK_METHOD(size_t, totalBlocksNum, (), (const, override));
@@ -65,7 +66,8 @@ protected:
                  int  remaining_tokens,
                  int  reserve_step,
                  bool enable_reuse_cache,
-                 int  target_batch_size),
+                 int  target_batch_size,
+                 bool pd_decode_linear_tail_only),
                 (const, override));
 };
 

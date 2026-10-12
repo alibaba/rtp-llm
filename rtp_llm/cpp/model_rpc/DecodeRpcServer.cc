@@ -384,6 +384,8 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     auto input                  = QueryConverter::transQuery(&decode_context.allocate_request.input());
     decode_context.request_info = input->request_info;
     auto generate_stream        = engine_->makeStream(input);
+    generate_stream->streamCacheResource().setPDDecodeLinearTailOnly(
+        maga_init_params_.pd_sep_config.decode_linear_tail_only);
     decode_context.setRequestTimeoutMs(generate_stream->getTimeoutMs());
     decode_context.setStream(generate_stream);
 
