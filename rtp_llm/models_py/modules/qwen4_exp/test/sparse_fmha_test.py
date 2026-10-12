@@ -20,6 +20,47 @@ _DEV = "cuda"
 
 
 class SparseFmhaTest(unittest.TestCase):
+    def test_pair_pv_matches_fp64_with_repeated_keys_and_empty_tiles(self):
+        torch.manual_seed(88)
+        for gqa in (6, 12):
+            with self.subTest(gqa=gqa):
+                q = torch.randn(2, 2 * gqa, 131, _D, device=_DEV).bfloat16()
+                k = torch.randn(2, 2, 257, _D, device=_DEV).bfloat16()
+                v = torch.randn_like(k)
+                selected = torch.randint(
+                    0, 257, (2, 131, 257), device=_DEV, dtype=torch.int32
+                )
+                selected[..., 32:224] = -1
+                selected[:, 0] = -1
+                selected[:, 1, :2] = 31
+                selected[:, 2] = -1
+                selected[:, 2, -1] = 256
+                settings = {
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_BITMAP": "0",
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_GROUPED": "1",
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY": "1",
+                    "RTP_LLM_QWEN4_SPARSE_PREFILL_PV_PAIR": "0",
+                }
+                with patch.dict("os.environ", settings):
+                    baseline = sparse_prefill_attn(q, k, v, selected)
+                expected = sparse_prefill_attn_torch_reference(
+                    q.double(), k.double(), v.double(), selected
+                ).to(q.dtype)
+                for skip_empty in ("0", "1"):
+                    settings.update(
+                        RTP_LLM_QWEN4_SPARSE_PREFILL_PV_PAIR="1",
+                        RTP_LLM_QWEN4_SPARSE_PREFILL_SKIP_EMPTY=skip_empty,
+                    )
+                    with patch.dict("os.environ", settings):
+                        candidate = sparse_prefill_attn(q, k, v, selected)
+                    torch.testing.assert_close(
+                        candidate, expected, atol=0.0078125, rtol=0.008
+                    )
+                    torch.testing.assert_close(
+                        candidate, baseline, atol=0.0078125, rtol=0.008
+                    )
+                    self.assertTrue((candidate[:, :, 0] == 0).all())
+
     def test_skip_empty_preserves_sparse_tails_duplicates_and_empty_rows(self):
         torch.manual_seed(73)
         for gqa in (6, 12):
