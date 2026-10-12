@@ -95,11 +95,10 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         shard_count = len(self.weights)
         tp_size = load_config.tp_size
         tp_rank = load_config.tp_rank
-        if tp_size <= 1:
-            raise ValueError(
-                "qwen4_exp PLE requires TP > 1: refusing to load all "
-                f"{shard_count} n-gram shards on one rank"
-            )
+        if tp_size < 1:
+            raise ValueError(f"qwen4_exp PLE requires positive TP, got {tp_size}")
+        if tp_size == 1 and not self.cpu_offload:
+            raise ValueError("qwen4_exp TP1 PLE requires CPU table residency")
         if tp_rank < 0 or tp_rank >= tp_size:
             raise ValueError(
                 f"qwen4_exp PLE tp_rank must be in [0, {tp_size}), got {tp_rank}"

@@ -559,7 +559,7 @@ class Qwen4ExpModel(Qwen35Model):
         tp_rank = int(self.parallelism_config.get_attn_tp_rank())
         if not layer_ids or total_shards <= 0 or ngram_size <= 1:
             raise RuntimeError("qwen4_exp PLE configuration is incomplete")
-        if tp_size <= 1 or total_shards % tp_size:
+        if tp_size < 1 or total_shards % tp_size:
             raise RuntimeError(
                 "qwen4_exp PLE requires an even TP shard split, got "
                 f"total_shards={total_shards}, tp_size={tp_size}"
@@ -612,7 +612,7 @@ class Qwen4ExpModel(Qwen35Model):
                 eos_token_id=int(self.config.special_tokens.eos_token_id),
                 shard_indices=shard_indices,
                 total_shards=total_shards,
-                distributed_reduce=True,
+                distributed_reduce=tp_size > 1,
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.
