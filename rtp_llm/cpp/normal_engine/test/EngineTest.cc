@@ -622,11 +622,79 @@ TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
     EXPECT_EQ(engine->getScheduler().onflightStreams(), 1);
 }
 
+// TEMPORARY CI PROBE helpers (probe branch only).
+#include <cstring>
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+#include <cstdio>
+
+static void _probeDumpMaps(const char* tag) {
+    fprintf(stderr, "%s\n", tag);
+    int fd = open("/proc/self/maps", O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
+        buf[n] = '\0';
+        for (char* line = strtok(buf, "\n"); line; line = strtok(nullptr, "\n")) {
+            if (strstr(line, "torch") || strstr(line, "nccl") || strstr(line, "python")
+                || strstr(line, "libcuda.so")) {
+                fprintf(stderr, "PROBEMAP %s\n", line);
+            }
+        }
+    }
+    close(fd);
+    fflush(stderr);
+}
+
+static void _probeCrashHandler(int sig, siginfo_t* info, void* ctx) {
+    char msg[256];
+    int  len = snprintf(msg,
+                       sizeof(msg),
+                       "PROBE crash sig=%d addr=%p pc=%p\n",
+                       sig,
+                       info ? info->si_addr : nullptr,
+                       ctx ? (void*)(((ucontext_t*)ctx)->uc_mcontext.pc) : nullptr);
+    write(STDERR_FILENO, msg, len);
+    void* frames[32];
+    int   n = backtrace(frames, 32);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    _exit(128 + sig);
+}
+
+static void _probeInstallCrashHandler() {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = _probeCrashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
+}
 class NormalEngineCustomOutputTest: public NormalEngineTest {
 protected:
     static void SetUpTestSuite() {
+        // TEMPORARY CI PROBE (branch probe/dsv41-engine-test-crash only; never merged):
+        // capture loaded library identity and crash context around interpreter + torch import.
+        _probeDumpMaps("PROBE before interpreter");
+        _probeInstallCrashHandler();
         interpreter_ = std::make_unique<py::scoped_interpreter>();
-        py::module_::import("torch");
+        _probeDumpMaps("PROBE after interpreter");
+        try {
+            py::module_::import("torch");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE torch import exception: %s\n", e.what());
+            fflush(stderr);
+            throw;
+        }
+        _probeDumpMaps("PROBE after torch import");
     }
 
     static void TearDownTestSuite() {
