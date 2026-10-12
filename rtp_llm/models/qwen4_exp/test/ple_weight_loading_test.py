@@ -257,12 +257,32 @@ class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
                 shard_id,
             )
 
-    def test_tp_one_is_rejected_instead_of_loading_the_full_table(self):
+    def test_tp_one_cpu_loads_all_shards_without_gpu_staging_or_collective(self):
         source = _RecordingTensorSource()
+        with mock.patch.object(torch, "stack", side_effect=AssertionError("no stack")):
+            loaded = _ngram_weight().load(source, 1, "cuda:0", _load_config(1, 0))
+        self.assertEqual(len(source.requests), 128)
+        self.assertEqual(len(loaded), 128)
+        self.assertTrue(all(t.device.type == "cpu" for t in loaded.values()))
+        embedding = Qwen4ExpNGramEmbedding(
+            [loaded[f"{W.qwen4_ple_ngram_shards}.{i}"] for i in range(128)],
+            torch.tensor([256]),
+            torch.tensor([0]),
+            torch.tensor([1, 3]),
+            ngram_size=2,
+            eos_token_id=0,
+            total_shards=128,
+            distributed_reduce=False,
+        )
+        ids = torch.tensor([[0, 127, 128, 255]])
+        self.assertTrue(
+            torch.equal(embedding.gather(ids), torch.tensor([[0.0, 63.0, 64.0, 127.0]]))
+        )
 
-        with self.assertRaisesRegex(ValueError, "refusing to load all 128"):
-            _ngram_weight().load(source, 1, "cpu", _load_config(1, 0))
-
+    def test_tp_one_gpu_table_rejected_before_io(self):
+        source = _RecordingTensorSource()
+        with self.assertRaisesRegex(ValueError, "requires CPU table residency"):
+            _ngram_weight(cpu_offload=False).load(source, 1, "cpu", _load_config(1, 0))
         self.assertEqual(source.requests, [])
 
     def test_shard_count_must_be_divisible_by_tp_size(self):

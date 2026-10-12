@@ -200,12 +200,16 @@ class Qwen4Exp(Qwen35Moe):
                 int(parallelism.get_attn_tp_size()) if parallelism is not None else 0
             )
             shard_count = int(getattr(config, "_qwen4_split_ngram_parts", 0))
-            if tp_size <= 1 or shard_count <= 0 or shard_count % tp_size:
+            if tp_size < 1 or shard_count <= 0 or shard_count % tp_size:
                 raise RuntimeError(
-                    "qwen4_exp PLE requires effective attention TP > 1 and an "
+                    "qwen4_exp PLE requires effective attention TP >= 1 and an "
                     "even rank-local shard split, got "
                     f"split_ngram_parts={shard_count}, attn_tp_size={tp_size}"
                 )
+            if tp_size == 1 and not bool(
+                getattr(config, "qwen4_ple_cpu_offload", True)
+            ):
+                raise RuntimeError("qwen4_exp TP1 PLE requires CPU table residency")
         logging.warning(
             "%s=true bypasses the qwen4_exp incomplete-model safety gate",
             _EXPERIMENTAL_SERVING_ENV,

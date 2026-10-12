@@ -293,6 +293,28 @@ class Qwen4ExpTest(unittest.TestCase):
             _qwen4_split_ngram_parts=128,
         )
         model.parallelism_config = SimpleNamespace(
+            get_attn_tp_size=lambda: 3,
+            prefill_cp_config=SimpleNamespace(
+                is_enabled=lambda: False,
+                is_prefill_enabled=lambda: False,
+            ),
+        )
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"}
+        ), mock.patch.object(Qwen35Moe, "load") as parent_load:
+            with self.assertRaisesRegex(RuntimeError, "attention TP >= 1"):
+                model.load()
+        parent_load.assert_not_called()
+
+    def test_ple_tp_one_cpu_reaches_weight_loader(self):
+        model = Qwen4Exp.__new__(Qwen4Exp)
+        model.model_config = mock.Mock(
+            enable_qwen4_qsa=False,
+            enable_qwen4_ple=True,
+            data_type=DataType.TYPE_BF16,
+            _qwen4_split_ngram_parts=128,
+        )
+        model.parallelism_config = SimpleNamespace(
             get_attn_tp_size=lambda: 1,
             prefill_cp_config=SimpleNamespace(
                 is_enabled=lambda: False,
@@ -302,9 +324,8 @@ class Qwen4ExpTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {"RTP_LLM_ENABLE_QWEN4_EXP_EXPERIMENTAL": "true"}
         ), mock.patch.object(Qwen35Moe, "load") as parent_load:
-            with self.assertRaisesRegex(RuntimeError, "attention TP > 1"):
-                model.load()
-        parent_load.assert_not_called()
+            model.load()
+        parent_load.assert_called_once()
 
     def test_ple_rejects_cp_before_weight_loading(self):
         model = Qwen4Exp.__new__(Qwen4Exp)
