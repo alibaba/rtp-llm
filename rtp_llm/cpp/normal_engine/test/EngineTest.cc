@@ -828,6 +828,21 @@ print("PROBE _C dlopen-only loaded, constructors ran, no PyInit", file=sys.stder
             fprintf(stderr, "PROBE faulthandler enable exception: %s\n", e.what());
             fflush(stderr);
         }
+        // v6 candidate fix under test: the binary links 3rdparty/3fs's
+        // libcrypto.so.1.1 (runfiles _solib) before the embedded interpreter
+        // starts; conda lib-dynload _hashlib then binds to that copy instead of
+        // the conda OpenSSL it was built against, and the first digest call
+        // crashes. Make hashlib use its builtin digest modules instead.
+        try {
+            py::exec(R"(
+import sys
+sys.modules['_hashlib'] = None
+import hashlib
+print("PROBE hashlib fallback ok, sha256:", hashlib.sha256(b'probe').hexdigest()[:8], file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE hashlib fallback exception: %s\n", e.what());
+            fflush(stderr);
+        }
         try {
             py::exec(R"(import torch.version; print("PROBE torch.version ok:", torch.version.__version__, file=sys.stderr))");
         } catch (const std::exception& e) {
