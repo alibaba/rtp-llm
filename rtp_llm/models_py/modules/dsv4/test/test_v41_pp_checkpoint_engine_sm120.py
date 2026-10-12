@@ -5,11 +5,11 @@ import hashlib
 import json
 import os
 import shutil
-import socket
 import sys
 import tempfile
 import traceback
 import unittest
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +28,15 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_loader_worker_sm120 import
     load_configuration,
     save_checkpoint,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_collapse_reference import (
+    reference_collapse,
+)
+from rtp_llm.models_py.modules.dsv4.fp8.test.v41_mhc_precision import (
+    fp32_mhc_prenorm,
+    reference_mhc_post,
+)
+from rtp_llm.models_py.modules.dsv4.hc import delayed as delayed_hc
+from rtp_llm.models_py.modules.dsv4.hc import v41_prenorm
 from rtp_llm.models_py.modules.dsv4.test.test_v41_cp_stage_worker_sm120 import (
     parallelism_for,
 )
@@ -36,6 +45,7 @@ from rtp_llm.models_py.modules.dsv4.test.test_v41_native_pp_engine_sm120 import 
     verify_outputs,
 )
 from rtp_llm.models_py.modules.dsv4.test.test_v41_native_pp_execution_sm120 import (
+    raw_snapshot,
     world_check,
 )
 from rtp_llm.models_py.modules.dsv4.test.test_v41_native_pp_preflight_sm120 import (
@@ -50,11 +60,88 @@ from rtp_llm.ops.compute_ops import PyModelInitResources
 from rtp_llm.tools.dsv41_pp_smoke import checkpoint_identities
 from rtp_llm.utils.model_weight import W
 
+MHC_MODES = {"collapse": "ordered_fp32", "post": "ordered_fp32", "prenorm": "fp32"}
 
-def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
+
+@contextmanager
+def pp_mhc_equations(choices, diagnostic):
+    with ExitStack() as stack:
+        for component, module, method, equation in (
+            ("collapse", delayed_hc, "collapse_delayed", reference_collapse),
+            ("post", delayed_hc, "post_delayed", reference_mhc_post),
+            ("prenorm", v41_prenorm, "prenorm", fp32_mhc_prenorm),
+        ):
+            if f"mhc_{component}_mode" not in choices:
+                continue
+            if diagnostic:
+                if component == "post":
+                    module, method = delayed_hc.DelayedHCUnit, "_post_impl"
+                stack.enter_context(patch.object(module, method, equation))
+            else:
+                stack.enter_context(
+                    patch.object(
+                        module,
+                        method,
+                        side_effect=AssertionError(
+                            f"Selected PP mHC {component} reached default dispatch"
+                        ),
+                    )
+                )
+        yield
+
+
+def save_tensors(path, values):
+    with path.open("xb") as stream:
+        torch.save(values, stream)
+
+
+def require_exact_tree(expected, actual):
+    if isinstance(expected, torch.Tensor):
+        assert isinstance(actual, torch.Tensor)
+        assert expected.shape == actual.shape and expected.dtype == actual.dtype
+        torch.testing.assert_close(
+            expected.contiguous().view(torch.uint8),
+            actual.contiguous().view(torch.uint8),
+            rtol=0,
+            atol=0,
+        )
+        return 1
+    assert type(expected) is type(actual)
+    if isinstance(expected, dict):
+        assert expected.keys() == actual.keys()
+        return sum(
+            require_exact_tree(value, actual[key]) for key, value in expected.items()
+        )
+    if isinstance(expected, (list, tuple)):
+        assert len(expected) == len(actual)
+        return sum(
+            require_exact_tree(left, right) for left, right in zip(expected, actual)
+        )
+    assert expected == actual, (expected, actual)
+    return 0
+
+
+def run_rank(
+    rank,
+    rendezvous,
+    checkpoint,
+    directory,
+    prompts,
+    full,
+    first_ids,
+    mhc_choices=None,
+    diagnostic_mhc=False,
+    artifact_directory=None,
+):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
     torch.backends.cuda.matmul.allow_tf32 = False
+    mhc_choices = dict(mhc_choices or {})
+    if "mhc_prenorm_mode" in mhc_choices:
+        torch.set_float32_matmul_precision("highest")
+    artifact_directory = (
+        Path(artifact_directory) if artifact_directory is not None else None
+    )
     os.environ.update(
         {
             "NCCL_P2P_DISABLE": "1",
@@ -74,7 +161,7 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
     timeout = timedelta(seconds=3600 if full else 180)
     dist.init_process_group(
         "nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
+        init_method=rendezvous,
         rank=rank,
         world_size=8,
         timeout=timeout,
@@ -91,16 +178,18 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
         return new_group(*args, **kwargs)
 
     worker = engine = None
-    with patch.dict(sys.modules, {"librtp_compute_ops": ops}), patch.object(
-        dist, "new_group", side_effect=bounded_group
-    ):
+    with pp_mhc_equations(mhc_choices, diagnostic_mhc), patch.dict(
+        sys.modules, {"librtp_compute_ops": ops}
+    ), patch.object(dist, "new_group", side_effect=bounded_group):
         try:
             collective.init_distributed_environment(
-                parallelism_for(rank), NcclCommConfig(nccl_ip="127.0.0.1"), port
+                parallelism_for(rank), NcclCommConfig(nccl_ip="127.0.0.1"), 0
             )
             cp_group = collective._get_group(collective.Group.TP)
             with torch.inference_mode():
                 config, kv_config = load_configuration(Path(checkpoint))
+                owner_choices = {} if diagnostic_mhc else mhc_choices
+                config.deepseek_v41_config.update(owner_choices)
                 parallelism, hw, loader = make_pp_loader(config, kv_config, rank)
                 loaded = loader.load_weights(f"cuda:{rank}")
                 head = loaded.global_weights[W.lm_head] if rank >= 4 else torch.empty(0)
@@ -111,7 +200,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                 )
                 del loaded, loader
                 identities = checkpoint_identities(Path(checkpoint))
-                contract = V41L20Contract(**identities, max_sequence_length=256)
+                contract = V41L20Contract(
+                    **identities, max_sequence_length=256, **owner_choices
+                )
                 initialize = worker.initialize
                 original_execute = worker._execute_native_pp_engine
                 initialization_calls = []
@@ -125,6 +216,39 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                     assert resource.kv_cache is not None and not worker._materialized
                     initialization_calls.append(worker._materialized)
                     assert initialize(resource)
+                    assert len(worker.v4.layers) == (21 if rank < 4 else 19)
+                    for layer in worker.v4.layers:
+                        for unit in (layer.attn_hc, layer.ffn_hc):
+                            for component in MHC_MODES:
+                                assert getattr(
+                                    unit, f"{component}_mode"
+                                ) == owner_choices.get(f"mhc_{component}_mode")
+                    if artifact_directory is not None:
+                        # Initialize unused pages and padding for complete byte comparisons.
+                        for layer_id in range(resource.kv_cache.layer_count):
+                            for group in resource.kv_cache.get_layer_cache_groups(
+                                layer_id
+                            ):
+                                group.kv_cache_base.view(torch.uint8).fill_(37)
+                        print(
+                            "DSV41_PP_MHC_OWNER "
+                            + json.dumps(
+                                {
+                                    "rank": rank,
+                                    "stage": rank // 4,
+                                    "layers": len(worker.v4.layers),
+                                    "choices": mhc_choices,
+                                    "owner_choices": owner_choices,
+                                    "diagnostic_mhc": diagnostic_mhc,
+                                    "default_dispatch_guarded": not diagnostic_mhc,
+                                    "contract_fingerprint": contract.fingerprint.hex(),
+                                    "identities": identities,
+                                    "float32_matmul_precision": torch.get_float32_matmul_precision(),
+                                    "initial_cache_byte": 37,
+                                }
+                            ),
+                            flush=True,
+                        )
                     worker._configure_native_pp_engine(contract)
                     dist.barrier(group=startup)
                     return True
@@ -174,6 +298,33 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                                         "logits": selected,
                                         "all_hidden": restored[begin:end].cpu(),
                                     }
+                        if artifact_directory is not None:
+                            frame = output.pp_intermediates if rank < 4 else tensors
+                            assert frame[
+                                "v41_cache_fingerprint"
+                            ].cpu().tolist() == list(contract.fingerprint)
+                            snapshot = {
+                                "rank": rank,
+                                "stage": rank // 4,
+                                "phase": phase[0],
+                                "round": transfer_round,
+                                "spans": [
+                                    span.wire_values() for span in dispatch.spans
+                                ],
+                                "hidden": value.cpu().clone(),
+                                "cache": raw_snapshot(worker.kv_cache),
+                                "frame": {
+                                    key: tensor.cpu().clone()
+                                    for key, tensor in frame.items()
+                                    if key != "v41_cache_fingerprint"
+                                },
+                            }
+                            if rank >= 4:
+                                snapshot["logits"] = logits.cpu().clone()
+                            save_tensors(
+                                artifact_directory / f"rank{rank}-phase{phase[0]}.pt",
+                                snapshot,
+                            )
                         if phase[0] == 0:
                             previous_stage_hashes.update(hashes)
                         if phase[0] == 1:
@@ -189,7 +340,9 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                             "identities": identities,
                             "hashes": hashes,
                             "full_prompt": phase[0] < 2,
-                            "maintained_arithmetic": True,
+                            "maintained_arithmetic": not diagnostic_mhc,
+                            "mhc_choices": mhc_choices,
+                            "diagnostic_mhc": diagnostic_mhc,
                         }
                         records.append(record)
                         print(
@@ -258,6 +411,10 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                     )
                     if rank == 0:
                         actual = result["outputs"]
+                        if artifact_directory is not None:
+                            save_tensors(
+                                artifact_directory / f"outputs-phase{step}.pt", actual
+                            )
                         if step == 0:
                             previous_outputs = actual
                         print(
@@ -284,6 +441,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                                         )
                                         for row in actual
                                     ],
+                                    "mhc_choices": mhc_choices,
+                                    "diagnostic_mhc": diagnostic_mhc,
                                     "native_argmax_exact": True,
                                     "native_delivery_exact": True,
                                 }
@@ -326,6 +485,8 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
                     + json.dumps(
                         {
                             "rank": rank,
+                            "mhc_choices": mhc_choices,
+                            "diagnostic_mhc": diagnostic_mhc,
                             "cold_initializations": len(initialization_calls),
                             "executions": len(records),
                             "receiver_empty": True,
@@ -356,17 +517,146 @@ def run_rank(rank, port, checkpoint, directory, prompts, full, first_ids):
 
 
 class V41PPCheckpointEngineSM120Test(unittest.TestCase):
-    def run_checkpoint(self, root, directory, prompts, *, full, first_ids=None):
+    def run_checkpoint(
+        self,
+        root,
+        directory,
+        prompts,
+        *,
+        full,
+        first_ids=None,
+        mhc_choices=None,
+        diagnostic_mhc=False,
+        artifact_directory=None,
+    ):
         self.assertEqual(torch.cuda.device_count(), 8)
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
+        rendezvous = Path(directory).resolve() / "world.rendezvous"
+        self.assertFalse(rendezvous.exists())
         mp.spawn(
             run_rank,
-            args=(port, str(root), str(directory), prompts, full, first_ids),
+            args=(
+                rendezvous.as_uri(),
+                str(root),
+                str(directory),
+                prompts,
+                full,
+                first_ids,
+                mhc_choices,
+                diagnostic_mhc,
+                str(artifact_directory) if artifact_directory is not None else None,
+            ),
             nprocs=8,
             join=True,
         )
+        # FileStore removal is best effort; all ranks have exited before cleanup.
+        rendezvous.unlink(missing_ok=True)
+        self.assertFalse(rendezvous.exists())
+        print(
+            "DSV41_PP_CHECKPOINT_RENDEZVOUS "
+            + json.dumps(
+                {
+                    "choices": mhc_choices or {},
+                    "diagnostic_mhc": diagnostic_mhc,
+                    "scheme": "file",
+                    "removed": True,
+                }
+            ),
+            flush=True,
+        )
+
+    def run_mhc_case(self, *components):
+        choices = {f"mhc_{key}_mode": MHC_MODES[key] for key in components}
+        label = "-".join(components) or "default"
+        root = Path(os.environ["DSV41_TEST_PP_MHC_ROOT"]).resolve() / label
+        root.mkdir(parents=True)
+        checkpoint_root = root / "checkpoint"
+        checkpoint_root.mkdir()
+        torch.manual_seed(41701)
+        args, weights = wide_fixture()
+        save_checkpoint(checkpoint_root, args, weights)
+        del weights
+        gc.collect()
+        torch.cuda.empty_cache()
+        for kind in ("reference", "maintained"):
+            directory = root / kind
+            directory.mkdir()
+            cache = directory / "tables"
+            cache.mkdir()
+            self.run_checkpoint(
+                checkpoint_root,
+                cache,
+                [[3, 4, 5, 6, 7], [8, 9, 10, 11, 12]],
+                full=False,
+                mhc_choices=choices,
+                diagnostic_mhc=kind == "reference",
+                artifact_directory=directory,
+            )
+            self.assertTrue(
+                all(path.name.endswith(".lock") for path in cache.iterdir())
+            )
+        tensors = cache_pools = 0
+        for rank in range(8):
+            for phase in range(4):
+                filename = f"rank{rank}-phase{phase}.pt"
+                reference = torch.load(
+                    root / "reference" / filename, map_location="cpu", weights_only=True
+                )
+                actual = torch.load(
+                    root / "maintained" / filename,
+                    map_location="cpu",
+                    weights_only=True,
+                )
+                tensors += require_exact_tree(reference, actual)
+                cache_pools += len(actual["cache"])
+        for phase in range(4):
+            filename = f"outputs-phase{phase}.pt"
+            reference = torch.load(
+                root / "reference" / filename, map_location="cpu", weights_only=True
+            )
+            actual = torch.load(
+                root / "maintained" / filename, map_location="cpu", weights_only=True
+            )
+            tensors += require_exact_tree(reference, actual)
+        print(
+            "DSV41_PP_MHC_COMPARISON "
+            + json.dumps(
+                {
+                    "policy": label,
+                    "choices": choices,
+                    "rank_phase_checks_exact": 32,
+                    "delivered_phase_checks_exact": 4,
+                    "tensors_exact": tensors,
+                    "cache_pools_exact": cache_pools,
+                    "full_nas": False,
+                    "standalone_decode_role": False,
+                }
+            ),
+            flush=True,
+        )
+
+    def test_bounded_default_mhc_equations(self):
+        self.run_mhc_case()
+
+    def test_bounded_collapse_mhc_equations(self):
+        self.run_mhc_case("collapse")
+
+    def test_bounded_post_mhc_equations(self):
+        self.run_mhc_case("post")
+
+    def test_bounded_prenorm_mhc_equations(self):
+        self.run_mhc_case("prenorm")
+
+    def test_bounded_collapse_post_mhc_equations(self):
+        self.run_mhc_case("collapse", "post")
+
+    def test_bounded_collapse_prenorm_mhc_equations(self):
+        self.run_mhc_case("collapse", "prenorm")
+
+    def test_bounded_post_prenorm_mhc_equations(self):
+        self.run_mhc_case("post", "prenorm")
+
+    def test_bounded_collapse_post_prenorm_mhc_equations(self):
+        self.run_mhc_case("collapse", "post", "prenorm")
 
     def test_bounded_named_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
