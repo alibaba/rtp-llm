@@ -423,6 +423,85 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaisesRegex(ValueError, "valid HTTP header"):
             config.validate_allocator_dump_config()
 
+    def test_graph_capture_bootstrap_pickle_and_trace_json_round_trip(self):
+        from rtp_llm.config.model_config import ModelConfig, _apply_model_override_args
+        from rtp_llm.ops import HiddenStateCaptureDtype
+        from rtp_llm.server.server_args import server_args
+        from rtp_llm.telemetry.config import CONFIG_ENV, parse_trace_config
+
+        trace_json = json.dumps(
+            {
+                "enabled": True,
+                "endpoint": "http://127.0.0.1:4318/v1/traces",
+                "headers": {"x-test": "round-trip"},
+                "sampler_ratio": 0.25,
+            }
+        )
+        for dtype_name in ("bf16", "fp8_e4m3"):
+            with self.subTest(dtype=dtype_name), patch.dict(
+                os.environ,
+                {
+                    CONFIG_ENV: trace_json,
+                    "JSON_MODEL_OVERRIDE_ARGS": json.dumps(
+                        {
+                            "hidden_state_capture_layer_ids": [1],
+                            "hidden_state_capture_dtype": (
+                                "fp8_e4m3" if dtype_name == "bf16" else "bf16"
+                            ),
+                        }
+                    ),
+                },
+            ):
+                configs = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_cuda_graph_max_requests",
+                        "3",
+                        "--max_context_batch_size",
+                        "3",
+                        "--generation_prefill_capture_config",
+                        "32,64",
+                        "--json_model_override_args",
+                        json.dumps(
+                            {
+                                "hidden_state_capture_layer_ids": [2, 0],
+                                "hidden_state_capture_dtype": dtype_name,
+                            }
+                        ),
+                    ]
+                )
+                # ModelConfig has no pickle contract; transport the existing
+                # bootstrap inputs and apply them through the production path.
+                hw_config, model_args, restored_trace_json = pickle.loads(
+                    pickle.dumps(
+                        (
+                            configs.py_hw_kernel_config,
+                            configs.model_args,
+                            os.environ[CONFIG_ENV],
+                        )
+                    )
+                )
+                model_config = ModelConfig()
+                model_config.num_layers = 4
+                _apply_model_override_args(model_config, model_args)
+                self.assertEqual(model_config.hidden_state_capture_layer_ids, [2, 0])
+                self.assertEqual(
+                    model_config.hidden_state_capture_dtype,
+                    HiddenStateCaptureDtype.__members__[dtype_name.upper()],
+                )
+                self.assertTrue(hw_config.enable_cuda_graph)
+                self.assertEqual(
+                    hw_config.generation_prefill_cuda_graph_max_requests, 3
+                )
+                self.assertEqual(
+                    hw_config.generation_prefill_capture_token_buckets, [32, 64]
+                )
+                trace_config = parse_trace_config(restored_trace_json)
+                self.assertEqual(trace_config, parse_trace_config(trace_json))
+                self.assertTrue(trace_config.enabled)
+                self.assertEqual(trace_config.sampler_ratio, 0.25)
+
     def test_env_vars_set_to_py_env_configs(self):
         """Test that environment variables are correctly set to py_env_configs."""
         # Set environment variables
@@ -1538,8 +1617,7 @@ class ServerArgsSetTest(TestCase):
             config["client_config"]["grpc.max_receive_message_length"], expected
         )
         self.assertEqual(
-            config["server_config"]["grpc.max_receive_message_length"],
-            64 * 1024 * 1024,
+            config["server_config"]["grpc.max_receive_message_length"], expected
         )
 
 

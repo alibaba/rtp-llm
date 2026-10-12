@@ -12,6 +12,7 @@ py_test_deps = [
 flashinfer_deps = [
     "//rtp_llm:apache-tvm-ffi",
     "//rtp_llm:flashinfer-python",
+    "//rtp_llm:flashinfer-cubin",
 ]
 
 CUDA13_X86_ONLY = select({

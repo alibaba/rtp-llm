@@ -4,11 +4,13 @@
 #include <optional>
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -77,10 +79,32 @@ RoleType transRoleAddrType(const RoleAddrPB& role_addr) {
 
 }  // namespace
 
+int QueryConverter::resolveMaxNewTokens(const GenerateConfigPB& config_proto) {
+    const int wire_max_new_tokens = config_proto.max_new_tokens();
+    if (config_proto.prefill_only()) {
+        if (wire_max_new_tokens != 0) {
+            throw std::invalid_argument("prefill_only requires max_new_tokens to be 0, got "
+                                        + std::to_string(wire_max_new_tokens));
+        }
+        if (config_proto.return_prompt_logits()) {
+            throw std::invalid_argument("prefill_only cannot be combined with return_prompt_logits");
+        }
+    }
+    if (wire_max_new_tokens < 0) {
+        throw std::invalid_argument("max_new_tokens must be greater than or equal to 0, got "
+                                    + std::to_string(wire_max_new_tokens));
+    }
+    if (config_proto.return_prompt_logits()) {
+        return 1;
+    }
+    return wire_max_new_tokens;
+}
+
 std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const GenerateConfigPB* config_proto) {
     std::shared_ptr<GenerateConfig> generate_config = std::make_shared<GenerateConfig>();
     generate_config->global_request_id              = config_proto->global_request_id();
-    generate_config->max_new_tokens                 = config_proto->max_new_tokens();
+    const int resolved_max_new_tokens               = resolveMaxNewTokens(*config_proto);
+    generate_config->max_new_tokens                 = resolved_max_new_tokens;
     generate_config->min_new_tokens                 = config_proto->min_new_tokens();
     generate_config->num_beams                      = config_proto->num_beams();
     generate_config->variable_num_beams.resize(config_proto->variable_num_beams_size());
@@ -107,6 +131,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     generate_config->normalized_hidden_states = config_proto->normalized_hidden_states();
     generate_config->calculate_loss           = config_proto->calculate_loss();
     generate_config->is_streaming             = config_proto->is_streaming();
+    TRANS_OPTIONAL(aux_info);
     generate_config->timeout_ms               = config_proto->timeout_ms();
     generate_config->sp_edit                  = config_proto->sp_edit();
     generate_config->force_disable_sp_run     = config_proto->force_disable_sp_run();
@@ -216,6 +241,7 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
         generate_config->banned_combo_token_ids.push_back(std::move(combo));
     }
 
+    generate_config->validatePrefillOnly();
     return generate_config;
 }
 
@@ -259,20 +285,29 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
             for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
-            mm_inputs.emplace_back(mm_input->multimodal_url(),
-                                   torch::empty(1),
-                                   mm_input->multimodal_type(),
-                                   mm_preprocess_config->width(),
-                                   mm_preprocess_config->height(),
-                                   mm_preprocess_config->min_pixels(),
-                                   mm_preprocess_config->max_pixels(),
-                                   mm_preprocess_config->fps(),
-                                   mm_preprocess_config->min_frames(),
-                                   mm_preprocess_config->max_frames(),
-                                   crop_positions,
-                                   mm_preprocess_config->mm_timeout_ms());
+            mm_inputs.emplace_back(
+                mm_input->multimodal_url(),
+                torch::empty(1),
+                mm_input->multimodal_type(),
+                mm_preprocess_config->width(),
+                mm_preprocess_config->height(),
+                mm_preprocess_config->min_pixels(),
+                mm_preprocess_config->max_pixels(),
+                mm_preprocess_config->fps(),
+                mm_preprocess_config->min_frames(),
+                mm_preprocess_config->max_frames(),
+                crop_positions,
+                mm_preprocess_config->mm_timeout_ms(),
+                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
+    }
+    if (input->has_multimodal_token_layout()) {
+        MultimodalTokenLayout layout;
+        for (const auto& span : input->multimodal_token_layout().spans()) {
+            layout.spans.emplace_back(span.offset(), span.length());
+        }
+        generate_input->multimodal_token_layout = std::move(layout);
     }
     generate_input->group_size = input->group_size() > 0 ? input->group_size() : 1;
     if (input->has_group_id()) {

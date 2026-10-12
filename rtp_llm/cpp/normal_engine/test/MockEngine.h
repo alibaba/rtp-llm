@@ -36,6 +36,9 @@ public:
             forward_hook_(inputs);
         }
         GptModelOutputs outputs;
+        if (inputs.skip_lm_head) {
+            return outputs;
+        }
         // lm_output_indexes tells us how many logits rows to produce
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
         outputs.logits     = torch::randn({num_tokens, (int64_t)vocab_size_},
@@ -52,12 +55,14 @@ struct CustomConfig {
     bool                                    reuse_cache         = false;
     bool                                    enable_device_cache = true;
     DataType                                kv_cache_data_type  = DataType::TYPE_FP16;
+    RoleType                                role_type           = RoleType::PDFUSION;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
     std::vector<int64_t>                    output_vocab_ids;  // non-empty enables output-vocab pruning
     bool                                    prefill_cp_enabled             = false;
     bool                                    speculative_enabled            = false;
     bool                                    warm_up_with_loss              = false;
     int                                     output_dispatcher_worker_count = 0;
+    int                                     tokens_per_block               = 2;
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
@@ -91,9 +96,10 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
 
     const size_t inter_size = 512;
     // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
-    model_config.attn_config.tokens_per_block = 2;
-    kv_cache_config.seq_size_per_block        = model_config.attn_config.tokens_per_block;
-    kv_cache_config.kernel_seq_size_per_block = model_config.attn_config.tokens_per_block;
+    model_config.attn_config.tokens_per_block        = config.tokens_per_block;
+    model_config.attn_config.kernel_tokens_per_block = config.tokens_per_block;
+    kv_cache_config.seq_size_per_block               = model_config.attn_config.tokens_per_block;
+    kv_cache_config.kernel_seq_size_per_block        = model_config.attn_config.kernel_tokens_per_block;
     runtime_config.reserve_runtime_mem_mb     = 1024;
     const size_t hidden_units                 = 128;
 
@@ -166,6 +172,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::FfnDisAggregateConfig ffn_disaggregate_config;
     rtp_llm::VitConfig             vit_config;
     runtime_config.output_dispatcher_worker_count = config.output_dispatcher_worker_count;
+    pd_sep_config.role_type                       = config.role_type;
 
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,

@@ -77,6 +77,12 @@ py_test(
 )
 
 py_test(
+    name = "test_fp4_exclude_modules",
+    srcs = ["test_fp4_exclude_modules.py"],
+    deps = py_test_deps,
+)
+
+py_test(
     name = "weight_module_region_test",
     srcs = ["weight_module_region_test.py"],
     deps = py_test_deps + [

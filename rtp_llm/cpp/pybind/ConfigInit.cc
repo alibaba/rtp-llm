@@ -1,5 +1,6 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
+#include "rtp_llm/cpp/multimodal_processor/MultimodalTokenUtils.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -20,7 +21,12 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
-void registerMultimodal(const py::module& m) {
+void registerMultimodal(py::module& m) {
+    m.def("get_multimodal_token_spans",
+          &getMultimodalTokenSpans,
+          py::arg("token_ids"),
+          py::arg("separators"),
+          py::arg("include_separators"));
     pybind11::class_<MultimodalInput>(m, "MultimodalInput")
         .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig>(),
              py::arg("url"),
@@ -44,17 +50,26 @@ void registerMultimodal(const py::module& m) {
                                        t[3].cast<MMPreprocessConfig>());
             }));
     pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
-        .def(pybind11::
-                 init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
-             py::arg("width")          = -1,
-             py::arg("height")         = -1,
-             py::arg("min_pixels")     = -1,
-             py::arg("max_pixels")     = -1,
-             py::arg("fps")            = -1,
-             py::arg("min_frames")     = -1,
-             py::arg("max_frames")     = -1,
-             py::arg("crop_positions") = std::vector<float>{},
-             py::arg("mm_timeout_ms")  = -1)
+        .def(pybind11::init<int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            int32_t,
+                            std::vector<float>,
+                            int32_t,
+                            int32_t>(),
+             py::arg("width")               = -1,
+             py::arg("height")              = -1,
+             py::arg("min_pixels")          = -1,
+             py::arg("max_pixels")          = -1,
+             py::arg("fps")                 = -1,
+             py::arg("min_frames")          = -1,
+             py::arg("max_frames")          = -1,
+             py::arg("crop_positions")      = std::vector<float>{},
+             py::arg("mm_timeout_ms")       = -1,
+             py::arg("max_long_side_pixel") = -1)
         .def_readwrite("width", &MMPreprocessConfig::width)
         .def_readwrite("height", &MMPreprocessConfig::height)
         .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
@@ -64,6 +79,7 @@ void registerMultimodal(const py::module& m) {
         .def_readwrite("max_frames", &MMPreprocessConfig::max_frames)
         .def_readwrite("crop_positions", &MMPreprocessConfig::crop_positions)
         .def_readwrite("mm_timeout_ms", &MMPreprocessConfig::mm_timeout_ms)
+        .def_readwrite("max_long_side_pixel", &MMPreprocessConfig::max_long_side_pixel)
         .def("to_string", &MMPreprocessConfig::to_string)
         .def(pybind11::pickle(
             [](const MMPreprocessConfig& m) {  // __getstate__
@@ -75,7 +91,8 @@ void registerMultimodal(const py::module& m) {
                                       m.min_frames,
                                       m.max_frames,
                                       m.crop_positions,
-                                      m.mm_timeout_ms);
+                                      m.mm_timeout_ms,
+                                      m.max_long_side_pixel);
             },
             [](py::tuple t) {  // __setstate__
                 return MMPreprocessConfig(t[0].cast<int32_t>(),
@@ -86,7 +103,8 @@ void registerMultimodal(const py::module& m) {
                                           t[5].cast<int32_t>(),
                                           t[6].cast<int32_t>(),
                                           t[7].cast<std::vector<float>>(),
-                                          t[8].cast<int32_t>());
+                                          t[8].cast<int32_t>(),
+                                          t.size() > 9 ? t[9].cast<int32_t>() : -1);
             }));
 }
 
@@ -96,6 +114,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     registerMultimodal(m);
 
     // Register enums
+    py::enum_<HiddenStateCaptureDtype>(m, "HiddenStateCaptureDtype")
+        .value("BF16", HiddenStateCaptureDtype::BF16)
+        .value("FP8_E4M3", HiddenStateCaptureDtype::FP8_E4M3);
+
     py::enum_<RoleType>(m, "RoleType")
         .value("PDFUSION", RoleType::PDFUSION)
         .value("PREFILL", RoleType::PREFILL)
@@ -957,10 +979,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.masked_max_token_num,
                                       self.use_all_gather,
                                       self.ll_num_max_token,
-                                      self.moe_strategy);
+                                      self.moe_strategy,
+                                      self.fp4_moe_op);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 13)
                     throw std::runtime_error("Invalid state!");
                 MoeConfig c;
                 try {
@@ -976,6 +999,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_all_gather             = t[9].cast<bool>();
                     c.ll_num_max_token           = t[10].cast<int>();
                     c.moe_strategy               = t[11].cast<std::string>();
+                    if (t.size() == 13)
+                        c.fp4_moe_op = t[12].cast<std::string>();
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("MoeConfig unpickle error: ") + e.what());
                 }
@@ -2035,6 +2060,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("output_vocab_ids", &ModelConfig::output_vocab_ids)
         .def_readwrite("output_vocab_padded_size", &ModelConfig::output_vocab_padded_size)
         .def_readwrite("hidden_size", &ModelConfig::hidden_size)
+        .def_readwrite("hidden_state_capture_layer_ids", &ModelConfig::hidden_state_capture_layer_ids)
+        .def_readwrite("hidden_state_capture_dtype", &ModelConfig::hidden_state_capture_dtype)
         .def_readwrite("attn_config", &ModelConfig::attn_config)
         .def_readwrite("linear_attention_config", &ModelConfig::linear_attention_config)
         .def_readwrite("hybrid_attention_config", &ModelConfig::hybrid_attention_config)

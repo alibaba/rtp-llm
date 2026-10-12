@@ -7,6 +7,7 @@ namespace rtp_llm {
 
 enum class ErrorCode {
     NONE_ERROR                   = 0,
+    CONCURRENCY_LIMIT_ERROR      = 409,
     LONG_PROMPT_ERROR            = 511,
     UNKNOWN_ERROR                = 514,
     MALLOC_FAILED                = 602,
@@ -32,6 +33,8 @@ enum class ErrorCode {
     MM_NOT_SUPPORTED_ERROR = 905,
     MM_DOWNLOAD_FAILED     = 906,
     MM_REMOTE_RPC_FAILED   = 907,
+    UNSAFE_INPUT_CONTENT   = 908,
+    UNSAFE_OUTPUT_CONTENT  = 909,
 
     // Codes starting from 8000 are historically retry-oriented. Individual
     // domains may explicitly classify lower codes through their retry policy.
@@ -107,6 +110,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
     switch (code) {
         case ErrorCode::NONE_ERROR:
             return "NONE_ERROR";
+        case ErrorCode::CONCURRENCY_LIMIT_ERROR:
+            return "CONCURRENCY_LIMIT_ERROR";
         case ErrorCode::LONG_PROMPT_ERROR:
             return "LONG_PROMPT_ERROR";
         case ErrorCode::UNKNOWN_ERROR:
@@ -243,6 +248,10 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "MM_NOT_SUPPORTED_ERROR";
         case ErrorCode::MM_DOWNLOAD_FAILED:
             return "MM_DOWNLOAD_FAILED";
+        case ErrorCode::UNSAFE_INPUT_CONTENT:
+            return "UNSAFE_INPUT_CONTENT";
+        case ErrorCode::UNSAFE_OUTPUT_CONTENT:
+            return "UNSAFE_OUTPUT_CONTENT";
         case ErrorCode::MM_REMOTE_RPC_FAILED:
             return "MM_REMOTE_RPC_FAILED";
         case ErrorCode::GET_PART_NODE_STATUS_FAILED:

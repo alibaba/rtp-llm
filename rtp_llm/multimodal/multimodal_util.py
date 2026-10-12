@@ -2,41 +2,94 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import contextvars
 import json
 import logging
 import re
 import threading
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum
 from io import BytesIO
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import requests
+import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
+    MultimodalOutputPB,
 )
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.grpc_util import trans_tensor
+from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
+from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
 from rtp_llm.utils.lru_dict import LruDict
 
 download_executor = concurrent.futures.ThreadPoolExecutor()
 
 logger = logging.getLogger(__name__)
 
+
+class _DownloadTiming:
+    """Mutable timing carrier used while one preprocess call is running."""
+
+    __slots__ = ("elapsed_ms",)
+
+    def __init__(self):
+        self.elapsed_ms = 0.0
+
+
+_download_timing: contextvars.ContextVar[Optional[_DownloadTiming]] = (
+    contextvars.ContextVar("multimodal_download_timing", default=None)
+)
+
+
+@contextmanager
+def collect_download_timing():
+    """Collect media-loading time for the enclosing preprocess call.
+
+    The timer is context-local so concurrent preprocess calls cannot add their
+    download durations to one another. A cache hit does not enter the timed
+    load section and therefore contributes zero download time.
+    """
+    timing = _DownloadTiming()
+    token = _download_timing.set(timing)
+    try:
+        yield timing
+    finally:
+        _download_timing.reset(token)
+
+
+def _record_download_time(start_time: float) -> None:
+    timing = _download_timing.get()
+    if timing is not None:
+        timing.elapsed_ms += max(0.0, time.monotonic() - start_time) * 1000.0
+
+
 REQUEST_GET = None
+CONNECT_TIMEOUT_RETRIES = 2
 
 
-def _default_request_get(url, headers):
-    return requests.get(url, stream=True, headers=headers, timeout=10)
+def _default_request_get(url, headers, timeout=10):
+    import requests
+
+    return requests.get(url, stream=True, headers=headers, timeout=timeout)
 
 
-def request_get(url, headers):
+def _check_download(deadline, cancellation_event):
+    if cancellation_event is not None and cancellation_event.is_set():
+        raise concurrent.futures.CancelledError("Media download cancelled")
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Media download deadline expired")
+
+
+def request_get(url, headers, *, deadline=None, cancellation_event=None):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
@@ -45,7 +98,27 @@ def request_get(url, headers):
             REQUEST_GET = safe_request_get
         except ImportError:
             REQUEST_GET = _default_request_get
-    return REQUEST_GET(url, headers)
+
+    import requests
+
+    for retry_count in range(CONNECT_TIMEOUT_RETRIES + 1):
+        _check_download(deadline, cancellation_event)
+        try:
+            if deadline is not None:
+                return REQUEST_GET(
+                    url,
+                    headers,
+                    timeout=max(0.001, min(10, deadline - time.monotonic())),
+                )
+            return REQUEST_GET(url, headers)
+        except requests.exceptions.ConnectTimeout:
+            if retry_count == CONNECT_TIMEOUT_RETRIES:
+                raise
+            logger.warning(
+                "multimodal download connect timeout; retrying request (%d/%d)",
+                retry_count + 1,
+                CONNECT_TIMEOUT_RETRIES,
+            )
 
 
 def _get_http_heads(download_headers: str = ""):
@@ -69,6 +142,82 @@ def get_base64_prefix(s):
         return 0
     return match.end()
 
+
+FRAMES_PACK_URL_PREFIX = "frames-pack:base64,"
+
+
+def is_frames_pack_url(url: str) -> bool:
+    return isinstance(url, str) and url.startswith(FRAMES_PACK_URL_PREFIX)
+
+
+def encode_frames_pack_url(
+    frames_jpeg_bytes: list, sampled_fps: float = 0.0, extras: Optional[dict] = None
+) -> str:
+    """Pack a list of raw JPEG byte payloads into a ``frames-pack:base64,...`` URL.
+
+    The output URL stays inside ``MultimodalInput.url`` (a single string) so the
+    proto wire stays unchanged. Each frame is inlined as
+    ``data:image/jpeg;base64,...`` inside a JSON envelope so callers can also
+    parse the body opaquely if needed.
+
+    The packed format intentionally uses a custom URI scheme rather than
+    ``data:application/json;base64,...`` so the open-source ``load_video``
+    path (which feeds the URL to decord) never accidentally tries to decode
+    a JSON blob as MPEG.
+    """
+    frames_data_urls = [
+        "data:image/jpeg;base64," + base64.b64encode(b).decode("ascii")
+        for b in frames_jpeg_bytes
+    ]
+    envelope = {
+        "version": 1,
+        "sampled_fps": float(sampled_fps),
+        "frames": frames_data_urls,
+    }
+    if extras:
+        envelope.update(extras)
+    payload = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+    return FRAMES_PACK_URL_PREFIX + base64.b64encode(payload).decode("ascii")
+
+
+def parse_frames_pack_url(url: str):
+    """Decode a ``frames-pack:base64,...`` URL into a list of PIL Images + metadata.
+
+    Returns ``(images, envelope)`` where ``images`` is a ``List[PIL.Image.Image]``
+    and ``envelope`` is the JSON dict (so callers can read ``sampled_fps`` etc.).
+
+    Raises ``ValueError`` if the URL doesn't have the expected prefix or the
+    payload is malformed. This is a pure helper — does NOT touch network or
+    filesystem.
+    """
+    if not is_frames_pack_url(url):
+        raise ValueError(f"not a frames-pack url: {url[:64]!r}...")
+    body = url[len(FRAMES_PACK_URL_PREFIX) :]
+    try:
+        envelope_bytes = base64.b64decode(body)
+        envelope = json.loads(envelope_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"frames-pack envelope decode failed: {e}") from e
+    frames = envelope.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("frames-pack envelope missing non-empty 'frames' list")
+    from PIL import Image  # local import keeps top-level deps unchanged
+
+    images = []
+    for i, frame_url in enumerate(frames):
+        if not isinstance(frame_url, str):
+            raise ValueError(f"frames-pack frame[{i}] is not a string")
+        prefix_len = get_base64_prefix(frame_url)
+        if prefix_len == 0:
+            raise ValueError(
+                f"frames-pack frame[{i}] missing 'data:image/jpeg;base64,' prefix"
+            )
+        try:
+            raw = base64.b64decode(frame_url[prefix_len:])
+            images.append(Image.open(BytesIO(raw)).convert("RGB"))
+        except Exception as e:
+            raise ValueError(f"frames-pack frame[{i}] decode failed: {e}") from e
+    return images, envelope
 
 
 class IgraphItemKeyCountMismatchError(Exception):
@@ -115,6 +264,7 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
     """
     headers = _get_http_heads(download_headers)
+    load_start = time.monotonic()
     try:
         if url.startswith("http") or url.startswith("https"):
             import requests
@@ -134,6 +284,8 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
             res = buf
     except Exception as e:
         raise Exception(f"download and load {url} error, exception {e}")
+    finally:
+        _record_download_time(load_start)
     return res
 
 
@@ -145,11 +297,23 @@ def _validate_file_size(size_bytes: int, max_file_size_kb: Optional[int]) -> Non
 
 
 def _download_http_content(
-    url: str, headers: dict, max_file_size_kb: Optional[int]
+    url: str,
+    headers: dict,
+    max_file_size_kb: Optional[int],
+    *,
+    deadline=None,
+    cancellation_event=None,
 ) -> BytesIO:
+    import requests
+
     response = None
     try:
-        response = request_get(url, headers)
+        if deadline is None and cancellation_event is None:
+            response = request_get(url, headers)
+        else:
+            response = request_get(
+                url, headers, deadline=deadline, cancellation_event=cancellation_event
+            )
         if response.status_code != 200:
             raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
 
@@ -166,14 +330,18 @@ def _download_http_content(
         content = BytesIO()
         downloaded_bytes = 0
         for chunk in response.iter_content(chunk_size=1024 * 1024):
+            _check_download(deadline, cancellation_event)
             if not chunk:
                 continue
             downloaded_bytes += len(chunk)
             _validate_file_size(downloaded_bytes, max_file_size_kb)
             content.write(chunk)
+        _check_download(deadline, cancellation_event)
         content.seek(0)
         return content
     except FtRuntimeException:
+        raise
+    except concurrent.futures.CancelledError:
         raise
     except (requests.exceptions.Timeout, TimeoutError):
         raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_DOWNLOAD_FAILED)
@@ -198,6 +366,9 @@ def get_bytes_io_from_url(
     url: str,
     download_headers: str = "",
     max_file_size_kb: Optional[int] = VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+    *,
+    deadline=None,
+    cancellation_event=None,
 ):
     """Get BytesIO from URL.
 
@@ -208,12 +379,23 @@ def get_bytes_io_from_url(
             available, and the limit is also enforced while streaming the body.
     """
 
+    _check_download(deadline, cancellation_event)
     cached_res = url_data_cache_.check_cache(url)
     if cached_res is None:
         headers = _get_http_heads(download_headers)
+        load_start = time.monotonic()
         try:
             if url.startswith("http") or url.startswith("https"):
-                res = _download_http_content(url, headers, max_file_size_kb)
+                if deadline is None and cancellation_event is None:
+                    res = _download_http_content(url, headers, max_file_size_kb)
+                else:
+                    res = _download_http_content(
+                        url,
+                        headers,
+                        max_file_size_kb,
+                        deadline=deadline,
+                        cancellation_event=cancellation_event,
+                    )
             elif url.startswith("oss"):
                 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -225,12 +407,15 @@ def get_bytes_io_from_url(
                 with open(url, "rb") as fh:
                     buf = BytesIO(fh.read())
                 res = buf
+            _check_download(deadline, cancellation_event)
             _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
-        except FtRuntimeException:
+        except (FtRuntimeException, concurrent.futures.CancelledError, TimeoutError):
             raise
         except Exception:
             logger.exception("failed to load multimodal content")
             raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+        finally:
+            _record_download_time(load_start)
         url_data_cache_.insert_cache(url, res)
         return res
     else:
@@ -274,7 +459,6 @@ class MMDataCache(object):
                 self.mm_data_cache.set_size(cache_size)
 
 
-
 # Global cache instance for VIT embeddings
 vit_emb_cache_ = MMDataCache(cache_size=10)
 url_data_cache_ = MMDataCache(cache_size=10)
@@ -291,6 +475,11 @@ def trans_config(mm_process_config_pb: MMPreprocessConfigPB):
         max_frames=mm_process_config_pb.max_frames,
         crop_positions=list(mm_process_config_pb.crop_positions),
         mm_timeout_ms=mm_process_config_pb.mm_timeout_ms,
+        max_long_side_pixel=(
+            mm_process_config_pb.max_long_side_pixel
+            if mm_process_config_pb.max_long_side_pixel > 0
+            else -1
+        ),
     )
 
 
@@ -320,4 +509,66 @@ def trans_mm_input(multimodal_inputs):
     else:
         raise ValueError(
             f"Unsupported multimodal input type: {type(multimodal_inputs)}"
+        )
+
+
+def maybe_tensor_to_list(tensor: Any, ndim_threshold: int = 2) -> Any:
+    """Split a stacked tensor into a per-image list, or wrap a single tensor.
+
+    `ndim_threshold` is a number-of-dimensions threshold (NOT a dim to operate
+    on): a tensor with more than `ndim_threshold` dims is treated as stacked and
+    split along its leading dim; otherwise it is wrapped in a single-element list.
+    Non-tensor input is returned unchanged (hence the `Any` return type); None
+    becomes [].
+    """
+    if tensor is None:
+        return []
+    if not isinstance(tensor, torch.Tensor):
+        return tensor
+    if len(tensor.shape) > ndim_threshold:
+        return list(tensor)
+    return [tensor]
+
+
+@cuda_graph_gate.operation()
+def build_multimodal_output_pb(
+    embeddings: Optional[List[torch.Tensor]],
+    position_ids: Optional[List[torch.Tensor]],
+    extra_input: Optional[List[torch.Tensor]],
+    feature_hashes: Optional[List[torch.Tensor]] = None,
+) -> MultimodalOutputPB:
+    """Serialize embedding tensors into a MultimodalOutputPB."""
+    embeddings = embeddings or []
+    position_ids = position_ids or []
+    extra_input = extra_input or []
+    if not embeddings:
+        return MultimodalOutputPB()
+    output_pb = MultimodalOutputPB(
+        multimodal_embedding=trans_from_tensor(torch.concat(embeddings)),
+        split_size=[e.shape[0] for e in embeddings],
+    )
+    add_multimodal_feature_hashes(output_pb, embeddings, feature_hashes)
+    if position_ids:
+        output_pb.multimodal_pos_id.CopyFrom(
+            trans_from_tensor(torch.concat(position_ids))
+        )
+    for extra in extra_input:
+        output_pb.multimodal_extra_input.append(trans_from_tensor(extra))
+    return output_pb
+
+
+def add_multimodal_feature_hashes(output_pb, embeddings, feature_hashes):
+    if feature_hashes is None:
+        return
+    if len(feature_hashes) != len(embeddings) or any(
+        h.device.type != "cpu"
+        or h.dtype != torch.int32
+        or h.ndim != 1
+        or h.numel() != e.shape[0]
+        for e, h in zip(embeddings, feature_hashes)
+    ):
+        raise ValueError("invalid multimodal feature hashes")
+    if feature_hashes:
+        output_pb.multimodal_feature_hash.CopyFrom(
+            trans_from_tensor(torch.cat(feature_hashes))
         )

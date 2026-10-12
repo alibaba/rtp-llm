@@ -301,6 +301,7 @@ def _args_from_model_config(
         o_groups=attn_config.o_groups,
         o_lora_rank=attn_config.o_lora_rank,
         window_size=attn_config.sliding_window,
+        kernel_tokens_per_block=attn_config.kernel_tokens_per_block,
         compress_ratios=list(attn_config.layer_compress_ratios)[
             : model_config.num_layers
         ],
@@ -516,6 +517,21 @@ class DeepSeekV4Model(GptModelBase):
                 self._profile_trigger,
                 self._profile_path,
             )
+        self._init_capture_context(
+            self._capture_canonical_layer,
+            self._capture_canonical_final,
+        )
+
+    def _capture_canonical_layer(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        return hidden_states.mean(dim=-2)
+
+    def _capture_canonical_final(
+        self, hidden_states: torch.Tensor, residual: torch.Tensor | None
+    ) -> torch.Tensor:
+        # Prefill forward owns HC reduction and final normalization.
+        return hidden_states
 
     def initialize(self, init_resource: PyModelInitResources) -> bool:
         try:
@@ -1410,6 +1426,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.parallelism_config,
                 inputs,
                 prepare_hidden_fn=prep_prefill,
+                capture_context=self.capture_context(inputs.capture_hidden_states),
             )
         else:
             return forward_decode(

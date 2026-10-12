@@ -160,10 +160,12 @@ protected:
     // Shared helpers for single and batch paths
     ErrorInfo prepareInput(const GenerateInputPB&                                              input_pb,
                            std::shared_ptr<GenerateInput>&                                     output,
-                           const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span = {});
+                           const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span = {},
+                           grpc::ServerContext* server_context                                             = nullptr);
     ErrorInfo
                  updateMultimodalFeaturesWithTrace(std::shared_ptr<GenerateInput>&                                     input,
-                                                   const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span);
+                                                   const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
+                                                   grpc::ServerContext* server_context = nullptr);
     ErrorInfo    collectStreamOutput(grpc::ServerContext*                  context,
                                      std::shared_ptr<GenerateStream>&      stream,
                                      const std::shared_ptr<GenerateInput>& input,
@@ -200,7 +202,7 @@ protected:
     std::shared_ptr<AbortableStreamRegistry> abortable_streams_ = std::make_shared<AbortableStreamRegistry>();
     std::shared_ptr<MultimodalProcessor>     mm_processor_;
     EngineInitParams                         maga_init_params_;
-    ProposeModelEngineInitParams*            propose_maga_init_params_;
+    ProposeModelEngineInitParams*            propose_maga_init_params_{nullptr};
     kmonitor::MetricsReporterPtr             metrics_reporter_;
     std::atomic<size_t>                      onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta>    meta_;

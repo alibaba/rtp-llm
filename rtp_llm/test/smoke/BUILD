@@ -1,3 +1,4 @@
+load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -131,4 +132,33 @@ test_suite(
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
     ],
+)
+
+# Frontend, a real FlexLB master, separate prefill/decode, and two ViT workers.
+# Five real requests with the same image check that FlexLB keeps sending
+# image computation to the ViT that already owns the cached embeddings.
+smoke_test(
+    name = "qwen3_vl_pd_multi_vit_cache_affinity",
+    task_info = "data/model/qwen_vl/q_r_pd_multi_vit_cache_affinity.json",
+    smoke_args = {
+        "frontend": "--act_type BF16 --role_type FRONTEND --max_seq_len 4096 --use_local 1 --warm_up 0",
+        "prefill": "--act_type BF16 --role_type PREFILL --tp_size 1 --world_size 1 --max_seq_len 4096 --kv_cache_mem_mb 1024 --load_cache_timeout_ms 120000 --cache_store_rdma_mode 0 --use_local 1 --warm_up 0 --enable_cuda_graph 0",
+        "decode": "--act_type BF16 --role_type DECODE --tp_size 1 --world_size 1 --max_seq_len 4096 --kv_cache_mem_mb 1024 --load_cache_timeout_ms 120000 --cache_store_rdma_mode 0 --use_local 1 --warm_up 0 --enable_cuda_graph 0",
+        "vit_0": "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --use_local_preprocess 1 --warm_up 0",
+        "vit_1": "--act_type BF16 --tp_size 1 --world_size 1 --use_local 1 --use_local_preprocess 1 --warm_up 0",
+    },
+    envs = {
+        "vit_0": ["MM_CACHE_GPU_MAX_BYTES=2147483648", "MM_CACHE_CPU_MAX_BYTES=2147483648"],
+        "vit_1": ["MM_CACHE_GPU_MAX_BYTES=2147483648", "MM_CACHE_CPU_MAX_BYTES=2147483648"],
+    },
+    data = [
+        ":flexlb_runtime_bundle",
+    ],
+    gpu_type = ["L20D_TEST"],
+    sleep_time_qr = 2,
+    test_envs = {
+        "SMOKE_START_FLEXLB_MASTER": "1",
+        "SMOKE_ASSERT_VIT_CACHE_AFFINITY": "1",
+        "SMOKE_AFFINITY_RECHECK_DELAY_SECONDS": "125",
+    },
 )

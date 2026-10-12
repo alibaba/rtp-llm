@@ -86,6 +86,7 @@ py_test(
     srcs = [
         "mm_scheduler_test.py",
     ],
+    env = {"GPU_COUNT": "0"},
     deps = [
         "//rtp_llm:testlib",
     ],
@@ -118,4 +119,64 @@ py_test(
     ],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
+)
+
+py_test(
+    name = "mm_embedding_cache_test",
+    srcs = ["mm_embedding_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_library(
+    name = "process_engine_test_helpers",
+    testonly = True,
+    srcs = ["multimodal_process_engine_test.py"],
+    data = [":testdata"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_remote_embedding_cache_test",
+    srcs = ["mm_remote_embedding_cache_test.py"],
+    deps = [":process_engine_test_helpers"],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_client_test",
+    srcs = ["mm_kvcm_emb_client_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_emb_config_test",
+    srcs = ["mm_kvcm_emb_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_kvcm_tensor_object_test",
+    srcs = ["mm_kvcm_tensor_object_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "mm_cancellation_test",
+    srcs = ["mm_cancellation_test.py"],
+    deps = [":process_engine_test_helpers"],
+    exec_properties = {"gpu": "A10_CU13"},
+    tags = ["A10_CU13"],
+)
+
+py_test(
+    name = "cuda_graph_gate_test",
+    srcs = ["cuda_graph_gate_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "qwen3_vl_embedding_test",
+    srcs = ["qwen3_vl_embedding_test.py"],
+    deps = ["//rtp_llm:testlib"],
 )

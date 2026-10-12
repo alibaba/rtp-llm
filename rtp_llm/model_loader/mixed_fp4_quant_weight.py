@@ -1,16 +1,17 @@
-import functools
 import copy
-from typing import Any, List, Dict, Union
+import functools
+from typing import Any, Dict, List, Union
 import torch
 
 from rtp_llm.config.quant_config import ModelOptFp4Config, MXFp4QuarkQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
-from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     _linear_attn_split_stratey,
 )
+from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.per_group_fp4_quant_weight import _is_fp4_weight_excluded
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
     CompositeWeight,
@@ -21,22 +22,22 @@ from rtp_llm.model_loader.weight_module import (
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
+    identity,
+    max_scalar,
+    merge_ba_transpose_reorder,
+    merge_qkv_hf,
+    merge_qkvz_transpose_reorder,
     pad,
     pad_w13,
     sp_0,
     sp_0_w13,
     sp_id,
     sp_neg1,
+    split_q_gate,
     stack_,
     stack_moe_w1,
-    max_scalar,
     stack_moe_w1_s2,
-    merge_qkv_hf,
-    identity,
-    merge_qkvz_transpose_reorder,
-    merge_ba_transpose_reorder,
     transpose,
-    split_q_gate,
 )
 
 from rtp_llm.utils.util import check_with_info
@@ -173,8 +174,13 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
                 return False
             quark_quantized = {W.moe_w1, W.moe_w2}
             return name in cls.unquantized_weight_list or name in quark_quantized
-        return (name in cls.unquantized_weight_list or name in cls.w4a4_weight_list) and quant_config.mixed_attention
-                
+        if (
+            not (name in cls.unquantized_weight_list or name in cls.w4a4_weight_list)
+            or not quant_config.mixed_attention
+        ):
+            return False
+        return not _is_fp4_weight_excluded(quant_config, src_weight_info)
+
 
     def __init__(
         self,
@@ -188,7 +194,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         scale: WeightModule = None
         scale_2: WeightModule = None
         input_scale: WeightModule = None
-        
+
         if src_weight_info.name == W.linear_attn_qkvz_w:
             kernel = self._get_linear_attn_qkvz_weight(src_weight_info)
         elif src_weight_info.name == W.linear_attn_ba_w:
@@ -257,7 +263,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
                         ),
                    )
         qkv_list = [q_weight, k_weight, v_weight]
-        
+
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.attn_qkv_w,
@@ -284,7 +290,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
                             part=1,
                         ),
                    )]
-        
+
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.attn_gate_w,
@@ -302,7 +308,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         assert src_weight_info.name in (W.q_ln_gamma, W.k_ln_gamma)
         weights: List[CkptWeightInfo] = src_weight_info.weights
         assert len(weights) == 1
-        
+
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             src_weight_info.name,
@@ -347,7 +353,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             raise ValueError("Missing required weights: in_proj_qkv or in_proj_z")
 
         merge_weights = [qkv_weight, z_weight]
-            
+
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             src_weight_info.name,
@@ -368,7 +374,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             raise ValueError("Missing required weights: in_proj_a or in_proj_b")
 
         merge_weights = [b_weight, a_weight]
-            
+
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             src_weight_info.name,
@@ -382,7 +388,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         assert src_weight_info.name == W.linear_attn_out_w
         weights: List[CkptWeightInfo] = src_weight_info.weights
         assert len(weights) == 1
-            
+
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             src_weight_info.name,
@@ -391,7 +397,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             config=src_weight_info.config,
         )
         return kernel
-    
+
     def _get_linear_attn_common_weight(self, src_weight_info: LinearAttnAtomicWeight):
         assert src_weight_info.name in self.unquantized_weight_list
         weights: List[CkptWeightInfo] = src_weight_info.weights
@@ -553,6 +559,11 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
         assert src_weight_info.name in [W.moe_w2]
         w_name = src_weight_info.weights[0].name[: -len(W_SUFFIX)]
         scale_dtype = self._get_moe_scale_dtype()
+        preshard = (
+            src_weight_info.enable_pure_tp_preshard
+            and not src_weight_info.stacked_ckpt_keys
+            and not self._is_quark_fp4
+        )
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w2,
@@ -560,6 +571,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             stack_,
             data_type=torch.uint8,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
@@ -568,6 +580,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             stack_,
             data_type=scale_dtype,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale_2 = create_mixed_fp4_per_group_weight(
             src_weight_info,
@@ -590,6 +603,11 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
     def _get_moe_w1_quant_weight(self, src_weight_info: MoeAtomicWeight):
         assert src_weight_info.name in [W.moe_w1]
         scale_dtype = self._get_moe_scale_dtype()
+        preshard = (
+            src_weight_info.enable_pure_tp_preshard
+            and not src_weight_info.stacked_ckpt_keys
+            and not self._is_quark_fp4
+        )
         kernel = create_mixed_fp4_per_group_weight(
             src_weight_info,
             W.moe_w1,
@@ -600,6 +618,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             stack_moe_w1,
             data_type=torch.uint8,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale = create_mixed_fp4_per_group_weight(
             src_weight_info,
@@ -611,6 +630,7 @@ class MixedFp4Weight(CompositeWeight, QuantWeight):
             stack_moe_w1,
             data_type=scale_dtype,
             config=src_weight_info.config,
+            enable_pure_tp_preshard=preshard,
         )
         scale_2 = create_mixed_fp4_per_group_weight(
             src_weight_info,

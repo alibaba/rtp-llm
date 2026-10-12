@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -7,7 +8,6 @@
 #include <limits>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
@@ -27,30 +27,6 @@ namespace rtp_llm {
 
 namespace {
 
-std::vector<TaggedBlockIdPair> decodeCacheUpdateMapping(const torch::Tensor&            copy_mapping,
-                                                        const std::vector<std::string>& group_tags) {
-    RTP_LLM_CHECK_WITH_INFO(copy_mapping.defined() && copy_mapping.device().is_cpu()
-                                && copy_mapping.scalar_type() == torch::kInt32 && copy_mapping.is_contiguous()
-                                && copy_mapping.dim() == 2 && copy_mapping.size(1) == 3,
-                            "cache update mapping must be a contiguous CPU int32 [N,3] tensor");
-    std::unordered_set<std::string> seen;
-    for (const auto& tag : group_tags) {
-        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && seen.insert(tag).second,
-                                "cache update mapping tags must be non-empty and unique: tag=%s",
-                                tag.c_str());
-    }
-    std::vector<TaggedBlockIdPair> mappings;
-    mappings.reserve(static_cast<size_t>(copy_mapping.size(0)));
-    const auto* rows = copy_mapping.data_ptr<int32_t>();
-    for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
-        const auto row = rows[3 * i];
-        RTP_LLM_CHECK_WITH_INFO(row >= 0 && static_cast<size_t>(row) < group_tags.size(),
-                                "cache update mapping payload row is out of range: row=%d",
-                                row);
-        mappings.push_back({group_tags[row], rows[3 * i + 1], rows[3 * i + 2]});
-    }
-    return mappings;
-}
 
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
@@ -170,6 +146,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          is_propose_ ? std::make_optional(propose_model_index_) : std::nullopt,
          params.model_config_.hc_mult});
     model_init_params.metrics_reporter = metrics_reporter_;
+    model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
+        is_propose_ ? HiddenStateCaptureModelRole::DRAFT : HiddenStateCaptureModelRole::TARGET,
+        role_type_,
+        warm_up_,
+        params.model_config_.hidden_state_capture_layer_ids);
+    model_init_params.hidden_state_capture_dtype     = params.model_config_.hidden_state_capture_dtype;
 #if USING_CUDA || USING_ROCM
     if (params.hw_kernel_config.enable_cuda_graph && model_init_params.kv_cache_layer_layout.has_value()) {
         const auto& model_cache_config =
@@ -345,8 +327,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (model_input.kv_cache_update_mapping.defined() && model_input.kv_cache_update_mapping.numel() > 0) {
             RTP_LLM_PROFILE_SCOPE("executor.kv_cache_update");
             RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "cache update mapping requires a cache manager");
-            cache_manager_->blockBatchCopyByGroup(
-                decodeCacheUpdateMapping(model_input.kv_cache_update_mapping, model_input.kv_cache_group_tags));
+            cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
+                                                     model_input.kv_cache_group_tags);
         }
     }
     {
@@ -375,6 +357,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    if (auto capture_error = model_->takeDeferredHiddenStateCaptureError(); capture_error.has_value()) {
+        cudaSyncAndCheck();
+        model_->releaseBuffers();
+        for (const auto& stream : streams) {
+            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *capture_error);
+        }
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
+        return absl::OkStatus();
+    }
+
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
@@ -384,7 +378,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         return absl::OkStatus();
     }
 
-    {
+    // Gather selects the execution mode from non-errored streams in model order.
+    // Use that same decision: streams.front() may already have failed or be reordered.
+    const bool zero_token_batch = model_input.skip_lm_head;
+    if (!zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.sampler_forward");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -416,7 +413,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_ && tp_rank_ == 0) {
         token_counts_by_priority = stream_groups.tokenCountsByPriority();
     }
-    if (useStreamAsync() && is_decode_only) {
+    if (useStreamAsync() && is_decode_only && !zero_token_batch) {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output(stream_async)");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -444,11 +441,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
-        if (useDeviceInput()) {
-            publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+        absl::Status result;
+        if (zero_token_batch) {
+            cudaSyncAndCheck();
+            result = batch_stream_processor_->dispatchPrefillOnly(stream_groups,
+                                                                  model_output.generation_prefill_cuda_graph_status);
+        } else {
+            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
+            if (useDeviceInput()) {
+                publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
+            }
+            result = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         }
-        auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (tps_execute_time_us <= 0) {

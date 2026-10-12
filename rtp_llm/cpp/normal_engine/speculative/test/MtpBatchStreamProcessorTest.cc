@@ -1895,4 +1895,47 @@ TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelP
     too_narrow.kv_cache_kernel_block_id = torch::zeros({1, 2, 3}, pinned_i32);
     EXPECT_ANY_THROW(processor.overlayMtpCacheSnapshots(StreamGroups({steady, fresh}), too_narrow, holder));
 }
+
+TEST_F(MtpBatchStreamProcessorTest, testPrefillShiftsMultimodalMaskAndPackedLocations) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 64;
+    model_config.num_layers  = 1;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {10, 11, 12}, 1);
+    auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {20, 21}, 2);
+    auto            groups  = StreamGroups({stream1, stream2});
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 1;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), speculative, false);
+    for (bool starts_at_boundary : {false, true}) {
+        GptModelInputs input;
+        input.combo_tokens          = torch::tensor({10, 11, 12, 20, 21}, torch::kInt32);
+        input.input_lengths         = torch::tensor({3, 2}, torch::kInt32);
+        input.text_tokens_mask      = torch::tensor({1, 0, 1, 1, 0}, torch::kInt32);
+        input.combo_tokens_type_ids = torch::tensor({0, 1, 0, 0, 1}, torch::kInt32);
+        input.mm_features_locs =
+            torch::tensor(starts_at_boundary ? std::vector<int>{0, 3} : std::vector<int>{1, 4}, torch::kInt32);
+        int rows                  = starts_at_boundary ? 2 : 1;
+        input.multimodal_features = std::vector<torch::Tensor>{torch::ones({rows, 4}), torch::ones({rows, 4})};
+        input.mm_extra_input      = std::vector<torch::Tensor>{torch::arange(rows * 8), torch::arange(rows * 8)};
+        GptModelOutputs output;
+        SamplerOutput   sampled;
+        sampled.token_ids = torch::tensor({{30}, {40}}, torch::kInt32);
+        TensorHolder holder;
+        processor.updatePrefillPostDraftModelInput(groups, input, output, sampled, holder);
+        EXPECT_EQ((std::vector<int>{11, 12, 30, 21, 40}), toVec<int>(input.combo_tokens));
+        EXPECT_EQ((std::vector<int>{0, 1, 1, 0, 1}), toVec<int>(input.text_tokens_mask));
+        EXPECT_EQ((std::vector<int>{1, 0, 0, 1, 0}), toVec<int>(input.combo_tokens_type_ids));
+        EXPECT_EQ((std::vector<int>{0, 3}), toVec<int>(input.mm_features_locs));
+        ASSERT_EQ(input.multimodal_features->size(), 2);
+        EXPECT_EQ(input.multimodal_features->at(0).size(0), 1);
+        EXPECT_EQ(input.multimodal_features->at(1).size(0), 1);
+        EXPECT_EQ(input.mm_extra_input->at(0).numel(), 8);
+        EXPECT_EQ(input.mm_extra_input->at(1).numel(), 8);
+    }
+}
+
 }  // namespace rtp_llm
