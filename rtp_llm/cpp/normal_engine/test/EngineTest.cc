@@ -626,16 +626,15 @@ class NormalEngineCustomOutputTest: public NormalEngineTest {
 protected:
     static void SetUpTestSuite() {
         interpreter_ = std::make_unique<py::scoped_interpreter>();
-        // The test binary links 3rdparty/3fs's libcrypto.so.1.1 (runfiles _solib)
-        // before this embedded interpreter starts, so the conda-built _hashlib
-        // module would bind to that copy instead of the conda OpenSSL it was
-        // built against and crash on the first digest call; block the module
-        // import so hashlib falls back to its builtin digests. The CI test
-        // sandbox also puts nvidia pip repos on sys.path; torch's
-        // _load_global_deps() would dlopen that second CUDA/NCCL stack (pip
-        // libnccl 2.29.7 next to the system 2.30.4 this binary links) and
-        // corrupt the heap at process teardown, so drop those entries before
-        // importing torch.
+        // Observed on the CI ut-sm8x lane: without these two lines the process
+        // segfaults during "import torch" (deepest frame: hashlib.py
+        // __get_openssl_constructor) or aborts at teardown with glibc heap
+        // corruption (corrupted size vs. prev_size) after the tests pass.
+        // The binary links 3rdparty/3fs's libcrypto.so.1.1 and the sandbox puts
+        // nvidia pip repos on sys.path; blocking the _hashlib import (hashlib
+        // falls back to builtin digests) and dropping those sys.path entries
+        // before importing torch makes the suite run to a clean exit. Exact
+        // in-library corruption mechanics were not traced further.
         py::exec(R"(
 import os, sys
 sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "nvidia"))]

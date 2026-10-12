@@ -19,7 +19,7 @@ from contextlib import suppress
 from pathlib import Path
 from urllib.parse import urlparse
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from rtp_llm.utils import jit_cache_env as cache_env
 
@@ -265,6 +265,18 @@ def bootstrap_remote_jit_dir():
         logging.warning(f"[JIT] REMOTE_JIT_DIR refused ({e}); cold start later")
 
 
+def _flashinfer_op_is_stale(op_dir: Path) -> bool:
+    rules_path = op_dir / "build.ninja"
+    try:
+        rules = rules_path.read_text(errors="ignore")
+    except OSError:
+        return False
+    if any(not Path(path).exists() for path in re.findall(r"-I(/\S+)", rules)):
+        return True
+    src_link = op_dir / "src"
+    return src_link.is_symlink() and not src_link.exists()
+
+
 def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     """Drop cached FlashInfer ops whose build rules reference include paths that no
     longer resolve.
@@ -275,24 +287,37 @@ def _evict_dangling_flashinfer_ops(workspace: Path) -> None:
     later action that reuses the shared workspace and fail with missing-header
     errors. Evicting the affected ops makes FlashInfer regenerate them against the
     current package copy.
+
+    FlashInfer serializes each op's build and load with a FileLock at
+    ``cached_ops/tmp/<op_name>.lock``; eviction takes that same lock and re-judges
+    staleness only inside it, so it cannot delete an op directory that a concurrent
+    compile or load is using or has just refreshed.
     """
-    build_files = []
+    stale_candidates = []
     for root, _dirs, files in os.walk(workspace, followlinks=False):
-        build_files.extend(Path(root) / name for name in files if name == "build.ninja")
-    for build_file in sorted(build_files):
-        op_dir = build_file.parent
-        try:
-            rules = build_file.read_text(errors="ignore")
-        except OSError:
+        op_dir = Path(root)
+        # FlashInfer layout only: cached_ops/<op_name>/build.ninja (never trust an
+        # unrelated build.ninja deeper in the tree).
+        if op_dir.parent.name != "cached_ops" or "build.ninja" not in files:
             continue
-        include_paths = re.findall(r"-I(/\S+)", rules)
-        stale = any(not Path(path).exists() for path in include_paths)
-        src_link = op_dir / "src"
-        if not stale and src_link.is_symlink() and not src_link.exists():
-            stale = True
-        if stale:
-            shutil.rmtree(op_dir, ignore_errors=True)
-            logging.info(f"[Package Setup] Evicted stale FlashInfer cache op: {op_dir}")
+        if _flashinfer_op_is_stale(op_dir):
+            stale_candidates.append(op_dir)
+    for op_dir in sorted(stale_candidates):
+        lock_dir = op_dir.parent / "tmp"
+        try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock = FileLock(str(lock_dir / f"{op_dir.name}.lock"), timeout=300)
+            with lock:
+                # Re-read the rules under the op's own lock: a compile that ran
+                # since the first pass may have replaced the stale rules already.
+                if _flashinfer_op_is_stale(op_dir):
+                    shutil.rmtree(op_dir, ignore_errors=True)
+                    logging.info(
+                        f"[Package Setup] Evicted stale FlashInfer cache op: {op_dir}"
+                    )
+        except Timeout:
+            # Somebody else owns the op (likely recompiling it); leave it alone.
+            logging.info(f"[Package Setup] Skipped eviction of {op_dir}: lock busy")
 
 
 def setup_jit_cache(cache_dir=None, packages=None):
