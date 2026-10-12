@@ -50,6 +50,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
         self._engram_layers = ()
         self._image_plan = None
         self._engram_forward_active = False
+        self._engram_cpu_runtime = None
 
     def cuda_graph_engram_window_size(self) -> int:
         return 4
@@ -195,7 +196,9 @@ class DeepSeekV41Model(DeepSeekV4Model):
     @torch.inference_mode()
     def forward(self, inputs, fmha_impl: Any = None):
         from rtp_llm.models_py.modules.dsv4.engram import (
+            EngramCPULookupPrefetch,
             EngramLookupPrefetch,
+            engram_cpu_lookup_enabled,
             engram_lookup_prefetch_enabled,
         )
 
@@ -209,19 +212,26 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 self._prepare_engram(inputs)
                 attn = inputs.attention_inputs
                 if (
-                    engram_lookup_prefetch_enabled()
+                    (engram_cpu_lookup_enabled() or engram_lookup_prefetch_enabled())
                     and bool(attn.is_prefill)
                     and not bool(getattr(attn, "is_target_verify", False))
                     and not _is_decode_fmha(fmha_impl)
                     and self.v4.embed.weight.is_cuda
                     and not torch.cuda.is_current_stream_capturing()
                 ):
-                    prefetch = EngramLookupPrefetch(
-                        (layer_id, self.v4.layers[layer_id])
-                        for layer_id, _ in self._engram_layers
-                    )
-                    # Start at the layer loop, after metadata and embedding.
-                    # Lookup must not delay their host-visible synchronization.
+                    if engram_cpu_lookup_enabled():
+                        prefetch = EngramCPULookupPrefetch(
+                            self,
+                            getattr(inputs, "engram_token_windows_host", None),
+                            int(self._v4_args.v41_config.get("image_token_id", 129264)),
+                        )
+                    else:
+                        prefetch = EngramLookupPrefetch(
+                            (layer_id, self.v4.layers[layer_id])
+                            for layer_id, _ in self._engram_layers
+                        )
+                        # GPU lookup starts after metadata and embedding; CPU
+                        # lookup can safely run during those preceding steps.
             self.v4._engram_lookup_prefetch = prefetch
             self._prepare_image_features(inputs)
             return super().forward(inputs, fmha_impl)

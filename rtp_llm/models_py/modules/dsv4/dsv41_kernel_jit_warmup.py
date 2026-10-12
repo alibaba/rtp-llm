@@ -246,6 +246,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     from rtp_llm.models_py.modules.dsv4.engram import (
         engram_lookup_prefetch_enabled,
         gated_engram_residual,
+        prepare_engram_cpu_lookup,
     )
 
     layers = [layer.engram for layer in model.v4.layers if layer.engram is not None]
@@ -290,6 +291,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         for layer in layers:
             layer.prepare_lookup_prefetch()
         common._sync_cuda(device)
+        prepare_engram_cpu_lookup(model, max_m=max_m)
         return
     # The UVA lookup uses GRID=min(ceil(tokens*heads/16),SMs) as constexpr.
     # Every reachable grid is represented, including the saturated grid and
@@ -363,6 +365,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     for layer in layers:
         layer.prepare_lookup_prefetch()
     common._sync_cuda(device)
+    prepare_engram_cpu_lookup(model, max_m=max_m)
     _ENGRAM_WARMED.add(key)
     logging.info(
         "[DSV41 Engram] JIT warmup done; lookup grid covered through %d tokens; "

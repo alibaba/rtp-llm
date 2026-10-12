@@ -46,6 +46,7 @@ py_library(
         ":cutlass_moe_config",
         "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_jit_headers",
     ] + glob([
+        "modules/dsv4/engram_cpu.cpp",
         "modules/dsv4/fp8/_v41_wo_a_*.cu",
         "modules/dsv4/fp8/_v41_wo_a_*.cuh",
         "modules/dsv4/fp8/_v41_wo_a_driver.cc",

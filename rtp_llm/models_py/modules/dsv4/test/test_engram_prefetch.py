@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 import weakref
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -535,6 +536,401 @@ class EngramPrefetchTest(unittest.TestCase):
         model._prepare_engram.assert_not_called()
         self.assertIs(self.layer.engram_hashes, outer_hashes)
         self.assertTrue(model._engram_forward_active)
+
+    def test_cpu_mode_submits_before_image_prepare_and_cleans_prepare_failure(self):
+        model, inputs = self._model()
+        model._v4_args = SimpleNamespace(v41_config={})
+        inputs.engram_token_windows_host = torch.zeros(16, 4, dtype=torch.int32)
+        plan = Mock()
+        model._prepare_image_features.side_effect = RuntimeError("image failed")
+        with (
+            patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "1"}),
+            patch.object(
+                engram, "EngramCPULookupPrefetch", return_value=plan
+            ) as prepare,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "image failed"):
+                model(inputs)
+        prepare.assert_called_once_with(model, inputs.engram_token_windows_host, 129264)
+        plan.clear.assert_called_once()
+        self.assertFalse(model._engram_forward_active)
+        self.assertIsNone(self.layer.engram_hashes)
+
+
+class EngramCPUPrefetchTest(unittest.TestCase):
+    def setUp(self):
+        self.current = Mock()
+        context = patch.object(torch.cuda, "current_stream", return_value=self.current)
+        context.start()
+        self.addCleanup(context.stop)
+        layout = engram.EngramLayout(
+            dict(
+                engram_layer_ids=[1, 14],
+                engram_num_embeddings=[1000, 1000],
+                engram_max_ngram_size=4,
+                engram_n_heads=2,
+                engram_head_dim=32,
+                engram_compressed_vocab_size=32,
+                engram_pad_token_id=2,
+                engram_vocab_size=13,
+            )
+        )
+        self.state = engram.NgramHashState(layout, token_map=list(range(32)))
+        context = patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        )
+        context.start()
+        self.addCleanup(context.stop)
+        for name in ("_lazy_init", "init"):
+            context = patch.object(
+                torch.cuda, name, side_effect=AssertionError("CUDA in CPU test")
+            )
+            context.start()
+            self.addCleanup(context.stop)
+
+    def test_cpu_hash_matches_existing_hash_with_strides_padding_and_image(self):
+        for rows in (0, 1, 17, 16384):
+            windows = torch.randint(-1, 32, (rows, 8), dtype=torch.int32)[:, ::2]
+            expected = self.state.hash_token_windows(windows, windows == 9)
+            torch.testing.assert_close(
+                engram._hash_token_windows_cpu(self.state, windows, 9), expected
+            )
+
+    def test_cpu_hash_out_of_vocab_matches_cuda_padding_contract(self):
+        windows = torch.tensor(
+            [[32, 2, 1, 0], [9, 33, 4, 3], [7, 6, 2**63 - 1, 4], [-1, -1, -1, -1]],
+            dtype=torch.int64,
+        )
+        sanitized = windows.clone()
+        sanitized[sanitized >= 32] = -1
+        torch.testing.assert_close(
+            engram._hash_token_windows_cpu(self.state, windows, 9),
+            self.state.hash_token_windows(sanitized, sanitized == 9),
+        )
+
+    def test_cpu_flag_has_priority_over_gpu_flag(self):
+        with patch.dict(
+            os.environ,
+            {"DSV41_CPU_ENGRAM_LOOKUP": "1", "DSV41_ASYNC_ENGRAM_LOOKUP": "1"},
+        ):
+            self.assertTrue(engram.engram_cpu_lookup_enabled())
+            self.assertFalse(engram.engram_lookup_prefetch_enabled())
+
+    def _work(self):
+        rows = torch.empty(16, 192, dtype=torch.bfloat16)
+        future = Future()
+        future.set_result(rows)
+        slot = SimpleNamespace(
+            device=torch.device("cuda:0"),
+            copied=Mock(),
+            collect_timing=False,
+            last_timing=None,
+        )
+        ids = Tensor()
+        work = engram._EngramCPULookupWork(slot, ids)
+        work.future, work.allocation_stream = future, self.current
+        return work, ids, rows
+
+    def test_consumer_joins_copy_and_drops_future_without_record_stream(self):
+        work, ids, rows = self._work()
+        self.assertIs(work.consume(ids, Tensor()), rows)
+        self.current.wait_event.assert_called_once_with(work.slot.copied)
+        self.assertIsNone(work.future)
+        work.clear()
+        work.slot.copied.synchronize.assert_not_called()
+        ids.record_stream.assert_not_called()
+
+    def test_consumed_output_is_not_retained_until_plan_cleanup(self):
+        work, ids, rows = self._work()
+        reference = weakref.ref(rows)
+        del rows
+        consumed = work.consume(ids, Tensor())
+        self.assertIsNotNone(reference())
+        del consumed
+        self.assertIsNone(reference())
+        work.clear()
+
+    def test_forward_releases_lookup_rows_before_gate(self):
+        work, ids, rows = self._work()
+        reference = weakref.ref(rows)
+        del rows
+        module = SimpleNamespace(
+            _cpu_lookup_work=work,
+            _lookup_work=None,
+            wkv=lambda value: value.new_empty((value.shape[0], 32)),
+            q_weight=None,
+            k_weight=None,
+            eps=1e-20,
+        )
+
+        def gate(hidden, *args, **kwargs):
+            self.assertIsNone(reference())
+            return hidden
+
+        with patch.object(engram, "gated_engram_residual", side_effect=gate):
+            hidden = Tensor()
+            self.assertIs(
+                engram.Engram._forward_rows(module, hidden, ids, None), hidden
+            )
+        work.clear()
+
+    def test_abandoned_output_remains_owned_until_copy_is_drained(self):
+        work, _, rows = self._work()
+        reference = weakref.ref(rows)
+        del rows
+        work.slot.copied.synchronize.side_effect = lambda: self.assertIsNotNone(
+            reference()
+        )
+        work.clear()
+        work.slot.copied.synchronize.assert_called_once()
+        self.assertIsNone(reference())
+
+    def test_cross_stream_consumer_drains_before_fallback(self):
+        work, ids, _ = self._work()
+        with patch.object(torch.cuda, "current_stream", return_value=Mock()):
+            self.assertIsNone(work.consume(ids, Tensor()))
+        work.slot.copied.synchronize.assert_called_once()
+        self.current.wait_event.assert_not_called()
+
+    def test_mismatch_and_mutation_drain_before_fallback(self):
+        for reason in ("identity", "version", "stride", "rows", "device"):
+            work, ids, _ = self._work()
+            hidden = Tensor()
+            other = ids
+            if reason == "identity":
+                other = Tensor()
+            if reason == "version":
+                ids._version += 1
+            if reason == "stride":
+                ids._stride = (48, 2)
+            if reason == "rows":
+                hidden.shape = (8, 24)
+            if reason == "device":
+                hidden.device = torch.device("cuda:1")
+            self.assertIsNone(work.consume(other, hidden))
+            work.slot.copied.synchronize.assert_called_once()
+            self.assertIsNone(work.ids)
+
+    def test_worker_exception_is_propagated_and_future_references_cleared(self):
+        work, _, _ = self._work()
+        work.future = Future()
+        work.future.set_exception(RuntimeError("native failed"))
+        with self.assertRaisesRegex(RuntimeError, "native failed"):
+            work.clear()
+        self.assertIsNone(work.future)
+        self.assertIsNone(work.ids)
+
+    def test_wkv_failure_has_joined_copy_and_does_not_pin_output_in_future(self):
+        work, ids, _ = self._work()
+        module = SimpleNamespace(
+            _cpu_lookup_work=work,
+            _lookup_work=None,
+            wkv=Mock(side_effect=RuntimeError("WKV failed")),
+        )
+        with self.assertRaisesRegex(RuntimeError, "WKV failed"):
+            engram.Engram._forward_rows(module, Tensor(), ids, None)
+        self.current.wait_event.assert_called_once_with(work.slot.copied)
+        self.assertIsNone(work.future)
+        work.clear()
+        work.slot.copied.synchronize.assert_not_called()
+        self.assertIsNone(module._cpu_lookup_work)
+
+    def test_slot_waits_before_host_overwrite_and_copy_to_new_allocation(self):
+        order = []
+        slot = engram._EngramCPULookupSlot.__new__(engram._EngramCPULookupSlot)
+        slot.device, slot.hash_index = torch.device("cuda:0"), 0
+        slot.collect_timing = False
+        slot.num_threads = 8
+        slot.embedding = SimpleNamespace(weight=object(), scales=object())
+        slot.host = torch.empty(4, 192, dtype=torch.bfloat16)
+        output = Mock()
+        output.shape = (4, 192)
+        output.copy_.side_effect = lambda *a, **kw: order.append("copy")
+        slot.copied = Mock()
+        slot.copied.synchronize.side_effect = lambda: order.append("host_wait")
+        slot.copied.record.side_effect = lambda stream: order.append("copied")
+        slot.stream, slot.allocated = Mock(), Mock()
+        slot.stream.wait_event.side_effect = lambda event: order.append("device_wait")
+        hashes = Future()
+        hashes.set_result(
+            self.state.hash_token_windows(torch.zeros(4, 4, dtype=torch.int32))
+        )
+        native = Mock(side_effect=lambda *a, **kw: order.append("native"))
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv4.engram_cpu": SimpleNamespace(
+                        lookup_host_rows_cpu=native
+                    )
+                },
+            ),
+            patch.object(torch.cuda, "device", lambda device: nullcontext()),
+            patch.object(torch.cuda, "stream", lambda stream: nullcontext()),
+        ):
+            self.assertIs(slot.run(hashes, output), output)
+        self.assertEqual(
+            order, ["host_wait", "native", "device_wait", "copy", "copied"]
+        )
+        self.assertTrue(native.call_args.args[2].is_contiguous())
+        self.assertEqual(native.call_args.kwargs, {"num_threads": 8})
+        slot.stream.wait_event.assert_called_once_with(slot.allocated)
+        slot.stream.synchronize.assert_not_called()
+
+    def test_exact_request_allocation_and_ready_event_precede_worker_submit(self):
+        slot = engram._EngramCPULookupSlot.__new__(engram._EngramCPULookupSlot)
+        slot.device, slot.width, slot.capacity = torch.device("cuda:0"), 6144, 32768
+        slot.allocated = Mock()
+        slot.run = Mock()
+        order = []
+        slot.allocated.record.side_effect = lambda stream: order.append("allocated")
+        executor = Mock()
+        allocations = []
+        real_empty = torch.empty
+
+        def allocate(shape, **kwargs):
+            self.assertEqual(kwargs, dict(dtype=torch.bfloat16, device=slot.device))
+            output = real_empty(shape, dtype=kwargs["dtype"], device="meta")
+            allocations.append(output)
+            order.append("allocate")
+            return output
+
+        def submit(fn, hashes, output, timing):
+            self.assertEqual(order[-2:], ["allocate", "allocated"])
+            order.append("submit")
+            future = Future()
+            future.set_result(output)
+            return future
+
+        executor.submit.side_effect = submit
+        with patch.object(torch, "empty", side_effect=allocate):
+            for count in (1, 16384, 32768, 7):
+                work = engram._EngramCPULookupWork(slot, Tensor(count))
+                work.submit(executor, object(), count, None)
+                self.assertEqual(work.future.result().shape, (count, 6144))
+                self.assertIs(work.allocation_stream, self.current)
+        target_bytes = allocations[1].numel() * allocations[1].element_size()
+        self.assertEqual(target_bytes, 192 * 1024**2)
+        self.assertEqual(2 * target_bytes, 384 * 1024**2)
+        self.assertFalse(hasattr(slot, "output"))
+
+    def test_runtime_warmup_does_not_retain_outputs_or_completed_futures(self):
+        references = []
+
+        class Slot:
+            def __init__(self, module, capacity):
+                self.copied = Mock()
+                self.close = Mock()
+
+            def allocate_output(self, count):
+                output = torch.empty(count, 192)
+                references.append(weakref.ref(output))
+                return output, None
+
+            def run(self, hashes, output):
+                hashes.result()
+                return output
+
+        model = SimpleNamespace(
+            _engram_hash_state=self.state,
+            _engram_layers=((1, 0), (14, 1)),
+            v4=SimpleNamespace(
+                layers={
+                    index: SimpleNamespace(engram=SimpleNamespace(q_weight=Tensor()))
+                    for index in (1, 14)
+                }
+            ),
+        )
+        with (
+            patch.object(engram, "_EngramCPULookupSlot", Slot),
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv4.engram_cpu": SimpleNamespace(
+                        prepare_cpu_lookup=Mock()
+                    )
+                },
+            ),
+        ):
+            runtime = engram.EngramCPULookupRuntime(model, 8)
+        try:
+            # A completed executor WorkItem can briefly retain its arguments;
+            # drain that frame as well as the user-visible startup Futures.
+            runtime.executor.submit(lambda: None).result()
+            self.assertEqual(len(references), 2)
+            self.assertTrue(all(reference() is None for reference in references))
+            for slot in runtime.slots.values():
+                slot.copied.synchronize.assert_called_once()
+        finally:
+            runtime.close()
+
+    def test_plan_queues_layers_in_order_and_recomputes_same_inputs(self):
+        order = []
+        windows = torch.zeros(4, 4, dtype=torch.int32)
+        slots = {
+            index: SimpleNamespace(
+                device=torch.device("cuda:0"),
+                heads=6,
+                collect_timing=False,
+                copied=Mock(),
+                allocate_output=lambda count: (torch.empty(count, 192), self.current),
+                run=lambda hashes, output, timing, index=index: (
+                    hashes.result(),
+                    order.append(index),
+                    output,
+                )[-1],
+            )
+            for index in (1, 14)
+        }
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            model = SimpleNamespace(
+                _engram_hash_state=self.state,
+                _engram_cpu_runtime=SimpleNamespace(
+                    capacity=8, executor=executor, slots=slots
+                ),
+                v4=SimpleNamespace(
+                    layers={
+                        index: SimpleNamespace(
+                            engram=SimpleNamespace(_cpu_lookup_work=None),
+                            engram_hashes=Tensor(4, 6),
+                        )
+                        for index in slots
+                    }
+                ),
+            )
+            for _ in range(2):
+                plan = engram.EngramCPULookupPrefetch(model, windows, 9)
+                plan.clear()
+                self.assertFalse(plan.work)
+                self.assertIsNone(plan.hashes)
+                for layer in model.v4.layers.values():
+                    self.assertIsNone(layer.engram._cpu_lookup_work)
+            self.assertEqual(order, [1, 14, 1, 14])
+            model.v4.layers[1].engram_hashes = Tensor(3, 6)
+            plan = engram.EngramCPULookupPrefetch(model, windows, 9)
+            plan.clear()
+            self.assertEqual(order[-1], 14)
+            self.assertEqual(order.count(1), 2)
+
+    def test_cold_or_cuda_windows_fall_back_without_submission(self):
+        executor = Mock()
+        model = SimpleNamespace(
+            _engram_hash_state=self.state,
+            _engram_cpu_runtime=SimpleNamespace(
+                capacity=8, executor=executor, slots={}
+            ),
+        )
+        for windows in (
+            None,
+            Tensor(),
+            torch.zeros(9, 4),
+            torch.zeros(9, 4, dtype=torch.int32),
+            torch.zeros(4, 3, dtype=torch.int32),
+            torch.zeros(0, 4, dtype=torch.int32),
+        ):
+            plan = engram.EngramCPULookupPrefetch(model, windows, 9)
+            plan.clear()
+        executor.submit.assert_not_called()
 
 
 if __name__ == "__main__":

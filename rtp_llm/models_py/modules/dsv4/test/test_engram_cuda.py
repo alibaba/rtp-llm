@@ -3,6 +3,7 @@
 import os
 import unittest
 import uuid
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -318,6 +319,257 @@ class EngramCudaTest(unittest.TestCase):
         torch.cuda.synchronize()
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
         torch.testing.assert_close(output[1], hidden[1], rtol=0, atol=0)
+
+    def _cpu_prefetch_model(self, capacity=128):
+        from rtp_llm.models_py.modules.dsv4.engram import prepare_engram_cpu_lookup
+
+        layers = [SimpleNamespace(engram=None) for _ in range(15)]
+        for index, layer_id in enumerate((1, 14)):
+            layers[layer_id] = SimpleNamespace(
+                engram=Engram(
+                    self.layout,
+                    index,
+                    self.embedding,
+                    torch.nn.Linear(
+                        384, 640, bias=False, device="cuda", dtype=torch.bfloat16
+                    ),
+                    torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
+                    torch.randn(4, 128, dtype=torch.bfloat16, device="cuda"),
+                    1e-20,
+                ),
+                engram_hashes=None,
+            )
+        model = SimpleNamespace(
+            _engram_hash_state=self.hash,
+            _engram_layers=((1, 0), (14, 1)),
+            _engram_cpu_runtime=None,
+            v4=SimpleNamespace(layers=layers),
+        )
+        with patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "1"}):
+            prepare_engram_cpu_lookup(model, max_m=capacity)
+        self.addCleanup(model._engram_cpu_runtime.close)
+        return model
+
+    def test_cpu_prefetch_hash_boundaries_and_full_engram_match_gpu(self):
+        from rtp_llm.models_py.modules.dsv4.engram import (
+            EngramCPULookupPrefetch,
+            _hash_token_windows_cpu,
+        )
+
+        model = self._cpu_prefetch_model()
+        for count in (1, 16, 128):
+            windows = torch.randint(-1, 32, (count, 8), dtype=torch.int32)[:, ::2]
+            windows[::7, 1] = 2**31 - 1
+            windows[::3, 0] = 9
+            gpu_windows = windows.cuda()
+            hashes = self.hash(gpu_windows, gpu_windows == 9)
+            torch.testing.assert_close(
+                _hash_token_windows_cpu(self.hash, windows, 9),
+                hashes.cpu(),
+                rtol=0,
+                atol=0,
+            )
+            hidden = torch.randn(count, 4, 128, dtype=torch.bfloat16, device="cuda")
+            mask = (gpu_windows[:, 0] >= 0) & (gpu_windows[:, 0] != 9)
+            expected = []
+            for layer_id, index in model._engram_layers:
+                layer = model.v4.layers[layer_id]
+                layer.engram_hashes = hashes[:, index].contiguous()
+                expected.append(layer.engram(hidden, layer.engram_hashes, mask))
+            plan = EngramCPULookupPrefetch(model, windows, 9)
+            self.assertEqual(len(plan.work), 2)
+            actual = [
+                model.v4.layers[layer_id].engram(
+                    hidden, model.v4.layers[layer_id].engram_hashes, mask
+                )
+                for layer_id, _ in model._engram_layers
+            ]
+            plan.clear()
+            for result, reference in zip(actual, expected):
+                torch.testing.assert_close(result, reference, rtol=0, atol=0)
+                torch.testing.assert_close(result[~mask], hidden[~mask], rtol=0, atol=0)
+
+    def test_cpu_prefetch_dynamic_outputs_reuse_without_cpu_synchronization(self):
+        from rtp_llm.models_py.modules.dsv4.engram import EngramCPULookupPrefetch
+
+        model = self._cpu_prefetch_model(16)
+        runtime = model._engram_cpu_runtime
+        pointers = [slot.host.data_ptr() for slot in runtime.slots.values()]
+        self.assertTrue(
+            all(not hasattr(slot, "output") for slot in runtime.slots.values())
+        )
+        consumers = [torch.cuda.Stream(), torch.cuda.Stream()]
+        hidden = torch.randn(16, 4, 128, dtype=torch.bfloat16, device="cuda")
+        references, actual = [], []
+        for iteration, token in enumerate((7, 11, 3, 7)):
+            windows = torch.full((16, 4), token, dtype=torch.int32)
+            hashes = self.hash(windows.cuda())
+            expected = []
+            for layer_id, index in model._engram_layers:
+                layer = model.v4.layers[layer_id]
+                layer.engram_hashes = hashes[:, index].contiguous()
+                expected.append(layer.engram(hidden, layer.engram_hashes))
+            references.append(expected)
+            consumer = consumers[iteration % 2]
+            consumer.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(consumer):
+                plan = EngramCPULookupPrefetch(model, windows, 9)
+                torch.cuda._sleep(2_000_000)
+                actual.append(
+                    [
+                        model.v4.layers[layer_id].engram(
+                            hidden, model.v4.layers[layer_id].engram_hashes
+                        )
+                        for layer_id, _ in model._engram_layers
+                    ]
+                )
+                # Pressure the owning stream's allocator after WKV released
+                # the lookup outputs, while the kernels may still be running.
+                pressure = torch.empty((16, 384), device="cuda", dtype=torch.bfloat16)
+                pressure.fill_(float(iteration))
+                del pressure
+            # Deliberately no device synchronization between requests. Host
+            # reuse waits for H2D; device reuse follows its allocation stream.
+            plan.clear()
+        torch.cuda.synchronize()
+        for outputs, expected in zip(actual, references):
+            for output, reference in zip(outputs, expected):
+                torch.testing.assert_close(output, reference, rtol=0, atol=0)
+        self.assertEqual(
+            pointers,
+            [slot.host.data_ptr() for slot in runtime.slots.values()],
+        )
+
+    @torch.inference_mode()
+    def test_cpu_prefetch_outputs_release_after_each_consumer_and_cross_stream_fallback(
+        self,
+    ):
+        from rtp_llm.models_py.modules.dsv4.engram import EngramCPULookupPrefetch
+
+        model = self._cpu_prefetch_model(128)
+        for count in (16, 128, 1, 7):
+            windows = torch.full((count, 4), 7, dtype=torch.int32)
+            hashes = self.hash(windows.cuda())
+            hidden = torch.randn(count, 4, 128, dtype=torch.bfloat16, device="cuda")
+            for layer_id, index in model._engram_layers:
+                model.v4.layers[layer_id].engram_hashes = hashes[:, index].contiguous()
+            plan = EngramCPULookupPrefetch(model, windows, 9)
+            references = []
+            for module, work in plan.work:
+                rows = work.future.result()
+                self.assertEqual(rows.shape, (count, 384))
+                references.append(weakref.ref(rows))
+                del rows
+            # Ensure the executor has also dropped the last completed WorkItem
+            # argument; the request plan must be the remaining output owner.
+            model._engram_cpu_runtime.executor.submit(lambda: None).result()
+            for index, (layer_id, _) in enumerate(model._engram_layers):
+                layer = model.v4.layers[layer_id]
+                result = layer.engram(hidden, layer.engram_hashes)
+                self.assertIsNone(plan.work[index][1].future)
+                self.assertIsNone(references[index]())
+                del result
+            plan.clear()
+
+        # A different consumer stream cannot use stream-local allocator reuse.
+        # It drains the prefetched copy and falls back to the original lookup.
+        expected = model.v4.layers[1].engram(hidden, model.v4.layers[1].engram_hashes)
+        plan = EngramCPULookupPrefetch(model, windows, 9)
+        consumer = torch.cuda.Stream()
+        consumer.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(consumer):
+            actual = model.v4.layers[1].engram(hidden, model.v4.layers[1].engram_hashes)
+        self.assertFalse(plan.work[0][1].consumed)
+        plan.clear()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_cpu_prefetch_target_shape_allocates_only_actual_rows(self):
+        from rtp_llm.models_py.modules.dsv4.engram import _EngramCPULookupSlot
+
+        # Exercise the real allocation method at production H=24, D=256
+        # without loading its 94 GiB host table or running a lookup benchmark.
+        slots = []
+        for _ in range(2):
+            slot = _EngramCPULookupSlot.__new__(_EngramCPULookupSlot)
+            slot.device, slot.width, slot.capacity = torch.device("cuda:0"), 6144, 32768
+            slot.allocated = torch.cuda.Event()
+            slot.allocated.record(torch.cuda.current_stream())
+            slots.append(slot)
+        before = torch.cuda.memory_allocated()
+        outputs = [slot.allocate_output(16384)[0] for slot in slots]
+        self.assertEqual(torch.cuda.memory_allocated() - before, 384 * 1024**2)
+        self.assertEqual([row.shape for row in outputs], [(16384, 6144)] * 2)
+        del outputs
+        self.assertEqual(torch.cuda.memory_allocated(), before)
+
+    @torch.inference_mode()
+    def test_cpu_prefetch_wkv_partial_failure_preserves_queued_reads(self):
+        from rtp_llm.models_py.modules.dsv4.engram import EngramCPULookupPrefetch
+
+        model = self._cpu_prefetch_model(16)
+        windows = torch.full((16, 4), 7, dtype=torch.int32)
+        hashes = self.hash(windows.cuda())
+        hidden = torch.randn(16, 4, 128, dtype=torch.bfloat16, device="cuda")
+        for layer_id, index in model._engram_layers:
+            model.v4.layers[layer_id].engram_hashes = hashes[:, index].contiguous()
+        layer = model.v4.layers[1]
+        expected = self.embedding(layer.engram_hashes, hidden.device).flatten(-2)
+        reads = []
+
+        def failing_wkv(rows):
+            torch.cuda._sleep(2_000_000)
+            reads.append(rows.clone())
+            raise RuntimeError("partial WKV submission")
+
+        plan = EngramCPULookupPrefetch(model, windows, 9)
+        with patch.object(layer.engram.wkv, "forward", side_effect=failing_wkv):
+            with self.assertRaisesRegex(RuntimeError, "partial WKV submission"):
+                layer.engram(hidden, layer.engram_hashes)
+        self.assertIsNone(plan.work[0][1].future)
+        plan.clear()
+        pressure = torch.empty_like(expected)
+        pressure.zero_()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(reads[0], expected, rtol=0, atol=0)
+
+    def test_cpu_prefetch_abandonment_and_capacity_capture_fallback(self):
+        from rtp_llm.models_py.modules.dsv4.engram import EngramCPULookupPrefetch
+
+        model = self._cpu_prefetch_model(16)
+        for token in (7, 11):
+            windows = torch.full((16, 4), token, dtype=torch.int32)
+            hashes = self.hash(windows.cuda())
+            for layer_id, index in model._engram_layers:
+                model.v4.layers[layer_id].engram_hashes = hashes[:, index].contiguous()
+            plan = EngramCPULookupPrefetch(model, windows, 9)
+            plan.clear()
+            self.assertTrue(
+                all(
+                    model.v4.layers[i].engram._cpu_lookup_work is None
+                    for i, _ in model._engram_layers
+                )
+            )
+        for windows in (
+            windows.cuda(),
+            torch.zeros(0, 4, dtype=torch.int32),
+            torch.zeros(17, 4, dtype=torch.int32),
+        ):
+            plan = EngramCPULookupPrefetch(model, windows, 9)
+            self.assertFalse(plan.work)
+            plan.clear()
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            plan = EngramCPULookupPrefetch(
+                model, torch.zeros(16, 4, dtype=torch.int32), 9
+            )
+            self.assertFalse(plan.work)
+            plan.clear()
+            sentinel = torch.ones(1, device="cuda")
+        graph.replay()
+        self.assertEqual(sentinel.item(), 1)
 
     def _prefetch_model(self):
         model = Engram(

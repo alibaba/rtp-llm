@@ -798,6 +798,16 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
             hidden_states = py_model_outputs.hidden_states.clone();
         } else {
+            // Preserve the already gathered/CP-shuffled CPU storage for an
+            // optional CPU lookup, without a CUDA-to-host round trip. This
+            // fresh PyModelInputs is request-local; graph, decode and target
+            // verify paths leave the sidecar undefined. Keep the CUDA history
+            // above unchanged for the normal GPU path and graph contract.
+            if (py_model_inputs.attention_inputs.is_prefill && !py_model_inputs.attention_inputs.is_target_verify
+                && !py_model_inputs.attention_inputs.is_cuda_graph && inputs.engram_token_windows.defined()
+                && inputs.engram_token_windows.device().is_cpu()) {
+                py_model_inputs.engram_token_windows_host = inputs.engram_token_windows;
+            }
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");

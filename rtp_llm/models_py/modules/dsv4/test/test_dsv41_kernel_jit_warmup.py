@@ -434,6 +434,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                     name: fake_module(
                         name,
                         gated_engram_residual=gate,
+                        prepare_engram_cpu_lookup=mock.Mock(),
                         engram_lookup_prefetch_enabled=lambda: os.getenv(
                             "DSV41_ASYNC_ENGRAM_LOOKUP", "0"
                         )

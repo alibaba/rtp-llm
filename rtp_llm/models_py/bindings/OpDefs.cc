@@ -208,6 +208,9 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("bert_embedding_inputs") = BertEmbeddingInputs())
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows, "Engram token history windows")
+        .def_readwrite("engram_token_windows_host",
+                       &PyModelInputs::engram_token_windows_host,
+                       "CP-local host history retained only for normal prefill")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits, "Whether all input rows need logits")
         .def_readwrite("need_all_hidden_states",

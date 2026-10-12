@@ -361,8 +361,11 @@ struct BertEmbeddingInputs {
 };
 
 struct PyModelInputs {
-    torch::Tensor                             input_ids;
-    torch::Tensor                             engram_token_windows;
+    torch::Tensor input_ids;
+    torch::Tensor engram_token_windows;
+    // Original CP-local host rows for normal prefill CPU lookup. Undefined for
+    // decode, target verify and CUDA graph inputs; owns the source storage.
+    torch::Tensor                             engram_token_windows_host;
     torch::Tensor                             input_hiddens;
     PyAttentionInputs                         attention_inputs;
     BertEmbeddingInputs                       bert_embedding_inputs;
