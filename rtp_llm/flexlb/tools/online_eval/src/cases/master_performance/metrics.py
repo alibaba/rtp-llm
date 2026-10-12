@@ -63,7 +63,9 @@ def values(evidence, definitions=None):
 
 def produce(directory, evidence, result):
     from monitoring.metric_store import MetricContractError, MetricStore, export_metrics, publish
-    export_metrics(directory)
+    from pathlib import Path
+    if not (Path(directory) / "metrics.json").is_file():
+        export_metrics(directory)
     store = MetricStore.read(directory)
     epoch = evidence["provenance"]["env_epoch"]
     request_values = ({identity: [] for identity, spec in store.document['definitions'].items()

@@ -137,7 +137,13 @@ class HaReplayClient:
         """Persist partial rows even when a failed prerequisite skips finish."""
         path = self.out_dir / "client_events.jsonl"
         rows, errors = [], []
-        if path.is_file():
+        frozen = getattr(self, "_finished_rows", None)
+        if frozen is not None:
+            stat = path.stat()
+            if (stat.st_size, stat.st_mtime_ns) != frozen[:2]:
+                raise ValueError("finished HA request evidence changed")
+            rows = frozen[2]
+        elif path.is_file():
             for number, line in enumerate(path.read_text().splitlines(), 1):
                 if not line.strip():
                     continue
@@ -229,4 +235,6 @@ class HaReplayClient:
         if stop_sending:
             self.validate_drain(rows)
         self.finished = True
+        stat = path.stat()
+        self._finished_rows = (stat.st_size, stat.st_mtime_ns, rows)
         return rows, path

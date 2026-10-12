@@ -257,10 +257,6 @@ def check(ctx, p, deadline):
     lags = [r.get("pacing_lag_ms") for r in issued]
     if lags and all(type(v) in (int, float) and math.isfinite(v) for v in lags):
         evidence["max_pacing_lag_ms"] = max(lags)
-    try:
-        ctx.monitor.archive()
-    except Exception as exc:
-        evidence["errors"].append("monitor archive: " + str(exc))
     write_json(ctx.artifact_dir / "cache-gate-evidence.json", evidence)
     evidence["curve_source"] = "prometheus"
     from cases.cache_scale_in.program import GATE

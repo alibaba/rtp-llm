@@ -47,6 +47,10 @@ class RunFinalizer:
                                     if row['phase'] != FinalizationPhase.ARCHIVE.value]
         result.artifacts = publish_run(ctx.artifact_dir, ctx.experiment_definition, document,
                                       analysis=analysis, deadline=deadline)
+        if (not getattr(ctx.backend, "retain_tsdb", True)
+                and all(row["status"] == "PASS" for row in document["cleanup"])):
+            from runtime.storage_retention import prune_tsdb
+            prune_tsdb(ctx.artifact_dir, result.artifacts, deadline)
 
     @staticmethod
     def _render(policy, ctx, document, evidence, deadline):

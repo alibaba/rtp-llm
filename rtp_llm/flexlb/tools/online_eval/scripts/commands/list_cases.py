@@ -111,6 +111,7 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--archive", type=Path,
                         help="optional single-file scenario experiment archive")
+    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB directories after verified archiving")
     parser.add_argument("--lease-json", type=Path)
     args = parser.parse_args(argv)
     resolve_selection(args, parser)
@@ -178,22 +179,37 @@ def main(argv=None):
     }
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
+    retirement = None
     try:
         for index, (plan, lease) in enumerate(zip(plans, leases)):
-            rows.append(
-                (
-                    execute_workload
-                    if plan["test_kind"] == "workload"
-                    else execute_instance
-                )(
-                    plan,
-                    JavaMockBackend(lease),
-                    registry,
-                    args.out_dir / "instances" / instance_directory(plan["id"]),
-                    cancelled=cancelled,
-                    enforce_deadlines=True,
+            if retirement is not None:
+                rows.append(dict({key: plan[key] for key in ("id", "scenario_id", "variant_id", "profile", "grade", "test_kind") if key in plan},
+                                 status="ERROR", duration_ms=0,
+                                 not_started=True, stages=[], cleanup=[], error=retirement))
+            else:
+                backend = JavaMockBackend(lease)
+                backend.retain_tsdb = args.retain_tsdb
+                rows.append(
+                    (
+                        execute_workload
+                        if plan["test_kind"] == "workload"
+                        else execute_instance
+                    )(
+                        plan,
+                        backend,
+                        registry,
+                        args.out_dir / "instances" / instance_directory(plan["id"]),
+                        cancelled=cancelled,
+                        enforce_deadlines=True,
+                    )
                 )
-            )
+                from runtime.lane_safety import cleanup_failure
+                retirement = cleanup_failure(rows[-1])
+                from runtime.lane_safety import occupied_ports
+                from runtime.environment import port_in_use
+                busy = occupied_ports(lease["intervals"], lambda port: port_in_use(port, "0.0.0.0"))
+                if busy:
+                    retirement = "lane ports not released: " + str(busy)
             payload = dict(scenario_results_schema_version=1, summary=summarize(rows), instances=rows)
             target = args.out_dir / "scenarios.json"
             temporary = args.out_dir / "scenarios.json.tmp"

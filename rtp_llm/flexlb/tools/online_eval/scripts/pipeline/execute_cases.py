@@ -585,6 +585,9 @@ def main() -> int:
             "2000)"
         ),
     )
+    parser.add_argument("--retain-tsdb", action="store_true", help="keep stopped TSDB after verified experiment archiving")
+    parser.add_argument("--scheduling", choices=("dynamic", "static"), default="dynamic",
+                        help="dynamic: idle lanes claim the next run; static: fixed lane lists")
     add_selection_arguments(parser, allow_all_profiles=False)
     parser.add_argument(
         "--grade",

@@ -105,10 +105,6 @@ def finish(ctx, p, deadline):
                     end=e["window"]["end_epoch_ms"] / 1000))
         except Exception as exc:
             e["errors"].append("engine TPS collection: " + str(exc))
-    try:
-        ctx.monitor.archive()
-    except Exception as exc:
-        e["errors"].append("monitor archive: " + str(exc))
     # Preserve terminal evidence even if analysis or presentation later times out.
     write_json(ctx.artifact_dir / "performance-gate-evidence.json", e)
     from cases.master_performance.program import GATE

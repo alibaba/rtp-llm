@@ -174,6 +174,7 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(len(archived["flow"]["journal"]["sha256"]), 64)
             self.assertEqual(archived["engine_tps_samples"], raw)
             self.assertEqual([call.args[0] for call in monitor.metric_rows.call_args_list], [b["metric"] for b in e["gate_input"]["fields"].values()])
+            monitor.archive.assert_not_called()
             monitor.query.assert_not_called()
             monitor.raw.assert_not_called()
 

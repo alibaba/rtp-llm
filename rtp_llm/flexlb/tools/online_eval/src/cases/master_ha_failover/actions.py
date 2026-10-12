@@ -7,7 +7,6 @@ from cases.master_ha_failover.analysis import measure_client_metric, row_ts_ms
 from cases.master_ha_failover.inputs import validate_client_criterion, validate_wait
 from runtime.master_control import require_process
 from scenario.parameters import validate_fields
-from runtime.resource_evidence import row_evidence
 from scenario.contracts import StageHandler, StageOutput
 
 
@@ -148,7 +147,7 @@ def _ha_finish(ctx, params, deadline):
     rows, path = client.finish(deadline, stop_sending=params.get("stop_sending", False))
     sampler = getattr(client, "state_sampler", None)
     return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", rows, historical=True, evidence=row_evidence)},
+        {"rows": ctx.register_resource("ha_rows", rows, historical=True)},
         artifacts=[str(path)] + ([str(sampler.path), str(sampler.path.with_suffix(".prometheus.json"))] if sampler is not None else []),
     )
 
@@ -235,7 +234,7 @@ def _window(ctx, params, deadline):
         if param in params:
             selected = [r for r in selected if r[field] == params[param]]
     return StageOutput(
-        {"rows": ctx.register_resource("ha_rows", selected, historical=True, evidence=row_evidence)}
+        {"rows": ctx.register_resource("ha_rows", selected, historical=True)}
     )
 
 

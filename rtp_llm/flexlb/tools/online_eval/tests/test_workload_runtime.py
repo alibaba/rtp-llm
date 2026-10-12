@@ -133,3 +133,16 @@ class WorkloadRuntimeTests(unittest.TestCase):
                 },
                 expected,
             )
+
+
+def test_teardown_collects_queries_without_materializing_metrics():
+    from types import SimpleNamespace
+    from workload.runtime import WorkloadPolicy
+    policy = WorkloadPolicy()
+    monitor = mock.Mock()
+    policy.monitors = {1: monitor}
+    policy.options = {"capture_metrics": False, "collector_shutdown_s": 5}
+    policy.events = []
+    ctx = SimpleNamespace(env_epoch=1, env=None, clock=lambda: 0)
+    policy.before_stage(ctx, {"id": "stop", "action": "teardown"})
+    monitor.stop.assert_called_once_with(5, materialize=False)
