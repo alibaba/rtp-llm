@@ -71,6 +71,9 @@ if device_type == DeviceType.ROCm:
         registry.register(RocmMXFp4PureTPStrategy())
 else:
     # ========== CUDA Registry ==========
+    from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+    setup_cutlass_import_path()
 
     # MoE strategies
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy import (

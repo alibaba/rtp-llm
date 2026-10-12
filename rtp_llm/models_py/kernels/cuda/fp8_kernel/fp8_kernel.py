@@ -14,6 +14,9 @@ from rtp_llm.models_py.utils.arch import is_cuda
 from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
+    from rtp_llm.models_py.utils.cutlass import setup_cutlass_import_path
+
+    setup_cutlass_import_path()
     from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
 
     from rtp_llm.ops.compute_ops import (

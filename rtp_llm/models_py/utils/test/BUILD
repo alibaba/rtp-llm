@@ -1,3 +1,9 @@
+py_test(
+    name = "cutlass_import_test",
+    srcs = ["cutlass_import_test.py"],
+    data = ["//rtp_llm/models_py:utils"],
+)
+
 py_test (
     name = "arch_test",
     srcs = ["arch_test.py"],

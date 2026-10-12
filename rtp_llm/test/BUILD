@@ -78,6 +78,15 @@ py_test(
 )
 
 py_test(
+    name = "kimi_k3_router_test",
+    srcs = ["kimi_k3_router_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["L20D_TEST"],
+    exec_properties = {"gpu": "L20D_TEST", "gpu_count": "1"},
+    env = {"GPU_COUNT": "1"},
+)
+
+py_test(
     name = "generate_config_test",
     srcs = [
         "generate_config_test.py",
