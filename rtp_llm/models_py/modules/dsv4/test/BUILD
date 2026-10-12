@@ -784,6 +784,8 @@ py_test(
         "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_loader_worker_testlib",
         "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_cp_owner_testlib",
         "//rtp_llm/tools:dsv41_pp_smoke",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_precision_testlib",
+        "//rtp_llm/models_py/modules/dsv4/fp8/test:v41_mhc_collapse_reference_testlib",
     ],
     tags = ["RTX_5000_PRO", "manual"],
     env = {"GPU_COUNT": "8"},
