@@ -1798,6 +1798,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "IContextParallelProcessor::handleInputs explicitly rejects ROCm",
+    )
     def test_capture_cp_validates_before_existing_restore_and_store(self) -> None:
         events = []
         _FakeEagleMooncakeStore.events = events
@@ -2071,6 +2075,19 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(_FakeEagleMooncakeStore.instances[0].puts, [])
 
+    @unittest.skipUnless(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM", "ROCm unsupported-backend contract"
+    )
+    def test_capture_context_parallel_is_rejected_on_rocm(self) -> None:
+        # Keep the backend's fail-closed contract covered rather than running
+        # CUDA-only restore/layout expectations against an unsupported path.
+        model = CacheStoreForwardModel()
+        with self.assertRaisesRegex(RuntimeError, "Context parallel not supported on ROCm"):
+            run_scenario(model, "capture_cp")
+        self.assertEqual(model.forward_calls, 0)
+        for store in _FakeEagleMooncakeStore.instances:
+            self.assertEqual(store.puts, [])
+
     def test_capture_context_parallel_and_micro_batch_is_explicitly_unsupported(
         self,
     ) -> None:
@@ -2085,6 +2102,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.micro_batch_calls, 0)
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "IContextParallelProcessor::handleInputs explicitly rejects ROCm",
+    )
     def test_capture_context_parallel_rejects_invalid_num_valid_tokens(self) -> None:
         layout_statuses = []
 
@@ -2104,6 +2125,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(layout_statuses, [1])
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "IContextParallelProcessor::handleInputs explicitly rejects ROCm",
+    )
     def test_capture_context_parallel_rejects_local_layout_before_restore(self) -> None:
         layout_statuses = []
 
@@ -2130,6 +2155,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         hidden_states = result["forward_hidden_states"][0]
         torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "IContextParallelProcessor::handleInputs explicitly rejects ROCm",
+    )
     def test_capture_context_parallel_remote_invalid_rank_skips_restore(self) -> None:
         layout_reduce_calls = []
 
@@ -2156,6 +2185,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         hidden_states = result["forward_hidden_states"][0]
         torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "IContextParallelProcessor::handleInputs explicitly rejects ROCm",
+    )
     def test_capture_context_parallel_rechecks_width_after_restore(self) -> None:
         layout_statuses = []
 
@@ -2246,6 +2279,10 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         # publication was rejected and the remote-rank error was surfaced.
         self.assertTrue(torch.any(result["forward_hidden_states"][0] != 0).item())
 
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "IContextParallelProcessor::handleInputs explicitly rejects ROCm",
+    )
     def test_capture_context_parallel_uses_original_ids_and_lengths(self) -> None:
         layout_statuses = []
 
