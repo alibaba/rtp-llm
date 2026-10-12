@@ -1,14 +1,23 @@
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include "torch/all.h"
 #include "gtest/gtest.h"
+#include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
+
+extern char** environ;
 
 // The ROCm compiler wrapper drops -fno-access-control. These existing
 // executor policy fixtures intentionally inspect protected engine/stream state.
@@ -1268,7 +1277,179 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
-void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
+// Stop at the first draft forward: the regression concerns the real decodeStep
+// caller's TP input construction, before proposal sampling or target execution.
+struct TpProposalReached {};
+
+TEST_F(MtpExecutorTest, DISABLED_BlockDraftTpReceiver) {
+    const auto rank_env = std::getenv("RTP_MTP_PROPOSAL_TEST_RANK");
+    const auto base_env = std::getenv("RTP_MTP_PROPOSAL_TEST_BASE");
+    ASSERT_NE(rank_env, nullptr);
+    ASSERT_NE(base_env, nullptr);
+    ::alarm(90);
+    const int rank        = std::atoi(rank_env);
+    auto&     broadcaster = CpuTpBroadcaster::instance();
+    broadcaster.initialize(rank, 2, base_env);
+    auto cleanup = std::shared_ptr<void>(nullptr, [&](void*) {
+        broadcaster.reset();
+        ::alarm(0);
+    });
+
+    for (const auto sp_type : {SP_TYPE_DSPARK, SP_TYPE_DFLASH}) {
+        SCOPED_TRACE(static_cast<int>(sp_type));
+        if (rank == 0) {
+            // A CPU-only wire peer exercises the real TP serializer without
+            // requiring NCCL or a second GPU. Its row order differs from the
+            // receiver's configured order, so copying rank 0's tags is not a fix.
+            GptModelInputs input;
+            const int      width           = sp_type == SP_TYPE_DFLASH ? 3 : 2;
+            input.combo_tokens             = torch::zeros({width}, torch::kInt32);
+            input.input_lengths            = torch::tensor({width}, torch::kInt32);
+            input.prefix_lengths           = torch::tensor({4}, torch::kInt32);
+            input.sequence_lengths         = torch::empty({0}, torch::kInt32);
+            input.lm_output_indexes        = torch::arange(sp_type == SP_TYPE_DFLASH ? 1 : 0, width, torch::kInt32);
+            input.kv_cache_group_tags      = {"full", "linear"};
+            input.kv_cache_block_id        = torch::tensor({1, 2, 3, 4}, torch::kInt32).reshape({2, 1, 2});
+            input.kv_cache_kernel_block_id = torch::tensor({5, 6, 7, 8, 9, 10}, torch::kInt32).reshape({2, 1, 3});
+            input.kv_cache_group_types     = torch::tensor(
+                {static_cast<int>(CacheGroupType::FULL), static_cast<int>(CacheGroupType::LINEAR)}, torch::kInt32);
+            input.kv_cache_update_mapping = torch::tensor({1, 5, 6}, torch::kInt32).reshape({1, 3});
+            input.is_target_verify        = true;
+            ParallelismConfig parallelism;
+            parallelism.tp_size = 2;
+            parallelism.tp_rank = 0;
+            tpSyncModelInputs(input, parallelism);
+            continue;
+        }
+
+        auto full        = test::makeMhaSpec("full", 4, TYPE_FP16, 1, 2);
+        auto target      = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
+        target.layer_num = 2;
+        target.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
+                                {{0}, {1}},
+                                {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                {"linear", "full"});
+        auto draft = test::makeSingleLayerCacheConfig(full, CacheGroupType::FULL, 8);
+        target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+        target.finalizeBlockNums(8, RuntimeConfig{});
+
+        MtpExecutorTestConfig config;
+        config.sp_type                        = sp_type;
+        config.vocab_size_override            = config.vocab_size;
+        config.gen_num_per_cycle              = 2;
+        config.dspark_mask_token_id           = 0;
+        config.role_type                      = sp_type == SP_TYPE_DFLASH ? RoleType::PDFUSION : RoleType::DECODE;
+        auto  components                      = createMtpExecutorComponents(config, &target);
+        auto* executor                        = components.executor.get();
+        executor->tp_rank_                    = 1;
+        executor->parallelism_config_.tp_rank = 1;
+        executor->parallelism_config_.tp_size = 2;
+        bool reached_proposal                 = false;
+        components.fake_draft_model->setInputObserver([&](const GptModelInputs& input) {
+            reached_proposal = true;
+            EXPECT_EQ(input.kv_cache_group_tags, (std::vector<std::string>{"linear", "full"}));
+            checkTensorEqual(input.kv_cache_block_id, torch::tensor({3, 4, 1, 2}, torch::kInt32).reshape({2, 1, 2}));
+            checkTensorEqual(input.kv_cache_kernel_block_id,
+                             torch::tensor({8, 9, 10, 5, 6, 7}, torch::kInt32).reshape({2, 1, 3}));
+            checkTensorEqual(
+                input.kv_cache_group_types,
+                torch::tensor({static_cast<int>(CacheGroupType::LINEAR), static_cast<int>(CacheGroupType::FULL)},
+                              torch::kInt32));
+            checkTensorEqual(input.kv_cache_update_mapping, torch::tensor({0, 5, 6}, torch::kInt32).reshape({1, 3}));
+            throw TpProposalReached{};
+        });
+        setupFakeModels(executor,
+                        std::move(components.fake_target_model),
+                        std::move(components.fake_draft_model),
+                        std::move(components.fake_fast_topk_sampler),
+                        std::move(components.fake_speculative_sampler),
+                        std::move(components.fake_sampler));
+        MtpMetricsCollector metrics;
+        // Real non-root ranks have no streams; metadata must come from their
+        // local gather configuration and survive proposal-input construction.
+        EXPECT_THROW(executor->decodeStep({}, metrics), TpProposalReached);
+        EXPECT_TRUE(reached_proposal);
+    }
+}
+
+TEST(MtpExecutorTpTest, BlockDraftProposalPreservesReceiverCacheIdentity) {
+    const auto        tmpdir  = std::getenv("TMPDIR");
+    std::string       pattern = std::string(tmpdir ? tmpdir : "/tmp") + "/mtp_proposal.XXXXXX";
+    std::vector<char> temp_path(pattern.begin(), pattern.end());
+    temp_path.push_back('\0');
+    ASSERT_NE(::mkdtemp(temp_path.data()), nullptr);
+    const std::string  base = std::string(temp_path.data()) + "/b";
+    std::vector<pid_t> children;
+    auto               cleanup  = std::shared_ptr<void>(nullptr, [&](void*) {
+        for (const auto pid : children) {
+            if (pid > 0) {
+                ::kill(pid, SIGKILL);
+                while (::waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+            }
+        }
+        ::unlink((base + "_0.sock").c_str());
+        ::rmdir(temp_path.data());
+    });
+    const auto         deadline = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    for (int rank = 0; rank < 2; ++rank) {
+        std::vector<std::string> env_strings;
+        for (char** entry = environ; *entry != nullptr; ++entry) {
+            const std::string value(*entry);
+            if (value.rfind("GTEST_", 0) != 0 && value.rfind("TEST_PREMATURE_EXIT_FILE=", 0) != 0
+                && value.rfind("RTP_MTP_PROPOSAL_TEST_", 0) != 0 && value.rfind("RTP_LLM_DEVICE_INPUT", 0) != 0
+                && value.rfind("RTP_LLM_MTP_ASYNC_PREPARE=", 0) != 0 && value.rfind("RTP_LLM_STREAM_ASYNC=", 0) != 0
+                && value.rfind("RTP_LLM_MTP_ASYNC_DEVICE_STATE=", 0) != 0
+                && value.rfind("RTP_LLM_DROP_BROAD_SYNC=", 0) != 0) {
+                env_strings.push_back(value);
+            }
+        }
+        env_strings.insert(env_strings.end(),
+                           {"RTP_MTP_PROPOSAL_TEST_RANK=" + std::to_string(rank),
+                            "RTP_MTP_PROPOSAL_TEST_BASE=" + base,
+                            "RTP_LLM_DEVICE_INPUT=0",
+                            "RTP_LLM_DEVICE_INPUT_CHECK=0",
+                            "RTP_LLM_MTP_ASYNC_PREPARE=0",
+                            "RTP_LLM_STREAM_ASYNC=0",
+                            "RTP_LLM_MTP_ASYNC_DEVICE_STATE=0",
+                            "RTP_LLM_DROP_BROAD_SYNC=0"});
+        std::vector<char*> child_env;
+        for (auto& value : env_strings) {
+            child_env.push_back(value.data());
+        }
+        child_env.push_back(nullptr);
+        // Re-exec avoids forking a CUDA runtime initialized by earlier tests.
+        std::vector<std::string> args = {"/proc/self/exe",
+                                         "--gtest_filter=MtpExecutorTest.DISABLED_BlockDraftTpReceiver",
+                                         "--gtest_also_run_disabled_tests",
+                                         "--gtest_output="};
+        std::vector<char*>       child_args;
+        for (auto& arg : args) {
+            child_args.push_back(arg.data());
+        }
+        child_args.push_back(nullptr);
+        pid_t     pid    = -1;
+        const int result = ::posix_spawn(&pid, "/proc/self/exe", nullptr, nullptr, child_args.data(), child_env.data());
+        ASSERT_EQ(result, 0);
+        children.push_back(pid);
+    }
+    for (auto& pid : children) {
+        int   status = 0;
+        pid_t waited = 0;
+        do {
+            waited = ::waitpid(pid, &status, WNOHANG);
+            if (waited == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        } while ((waited == 0 || (waited < 0 && errno == EINTR)) && std::chrono::steady_clock::now() < deadline);
+        ASSERT_EQ(waited, pid) << "TP proposal child did not finish before the deadline";
+        pid = -1;  // Reaped: the cleanup guard must not signal a reused PID.
+        EXPECT_TRUE(WIFEXITED(status)) << "TP proposal child failed: " << status;
+        if (WIFEXITED(status)) {
+            EXPECT_EQ(WEXITSTATUS(status), 0);
+        }
+    }
+}
+
 TEST_F(MtpExecutorTest, DFlashInitializesWithoutMarkovWeights) {
     MtpExecutorTestConfig config;
     config.sp_type              = SP_TYPE_DFLASH;
@@ -1426,7 +1607,7 @@ TEST_F(MtpExecutorTest, DFlashPartialRejectionUsesTargetResidualWithPaddedVocabu
     }
 }
 
-TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
+void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
     auto components               = createMtpExecutorComponents(test_config);
