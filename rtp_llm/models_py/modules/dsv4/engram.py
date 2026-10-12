@@ -669,9 +669,11 @@ def gated_engram_residual(
     gate_input = dot.abs().clamp_min(1e-6).sqrt()
     gate_input = torch.where(dot < 0, -gate_input, gate_input)
     gate = torch.sigmoid(gate_input)
-    if token_mask is not None:
-        gate = torch.where(token_mask.to(device=hidden.device)[:, None], gate, 0.0)
     result = (h + gate[..., None] * value).to(hidden.dtype)
+    if token_mask is not None:
+        result = torch.where(
+            token_mask.to(device=hidden.device)[:, None, None], result, hidden
+        )
     return result if out is None else out.copy_(result)
 
 
