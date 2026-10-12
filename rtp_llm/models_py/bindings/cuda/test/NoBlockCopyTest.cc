@@ -84,7 +84,8 @@ TEST(NoBlockCopyTest, VmmCopiesOnFreshAndReusedRpcThreads) {
                 TORCH_CHECK(host.eq(53 + device).all().item<bool>());
 #if CUDART_VERSION >= 12080
                 host.zero_();
-                TORCH_CHECK(execBatchedMemoryCopy({{{host.data_ptr(), other.data_ptr(), host.nbytes()}}, device}));
+                TORCH_CHECK(execBatchedMemoryCopy({{{host.data_ptr(), other.data_ptr(), host.nbytes()}}, device}) ==
+                            BatchedMemoryCopyStatus::SUCCESS);
                 TORCH_CHECK(host.eq(53 + device).all().item<bool>());
 #endif
                 host.zero_();
