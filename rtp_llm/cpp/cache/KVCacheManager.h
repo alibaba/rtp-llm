@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <thread>
@@ -90,6 +91,7 @@ public:
     size_t                  maxAvailableTokensNum() const;
     KVCacheInfo             getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
     void                    refreshKVCacheInfoSnapshot();
+    void                    requestKVCacheInfoSnapshotRefresh();
 
     // 系统资源管理
     void regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
@@ -143,6 +145,8 @@ private:
     void        allocateAndSync();
     void        reportMetricsLoop();
     KVCacheInfo buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const;
+    void        refreshKVCacheInfoSnapshotLocked();
+    void        cacheStatusSnapshotRefreshLoop();
 
     // 成员变量
     CacheConfig         config_;
@@ -168,6 +172,13 @@ private:
 
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
+
+    std::mutex              cache_status_refresh_mutex_;
+    std::mutex              cache_status_refresh_request_mutex_;
+    std::condition_variable cache_status_refresh_cv_;
+    std::thread             cache_status_refresh_thread_;
+    bool                    cache_status_refresh_pending_{false};
+    bool                    cache_status_refresh_stopping_{false};
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

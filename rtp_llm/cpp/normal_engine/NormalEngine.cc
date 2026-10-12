@@ -866,8 +866,8 @@ void NormalEngine::maybeRefreshCacheStatusSnapshot(const std::list<GenerateStrea
     if (!resource_context_.cache_manager || !shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams)) {
         return;
     }
-    RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
-    resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+    RTP_LLM_PROFILE_SCOPE("engine.normal.request_cache_status_snapshot");
+    resource_context_.cache_manager->requestKVCacheInfoSnapshotRefresh();
 }
 
 absl::Status NormalEngine::step() {
@@ -921,8 +921,6 @@ absl::Status NormalEngine::step() {
                 published_completed_steps_.store(completed_steps_, std::memory_order_relaxed);
             }
         }
-        // MTP refreshes immediately after the target model has finished CPU dispatch, while its GPU
-        // work is still outstanding. The normal executor keeps the original post-process placement.
         if (status.ok() && !propose_params_) {
             maybeRefreshCacheStatusSnapshot(streams);
         }
