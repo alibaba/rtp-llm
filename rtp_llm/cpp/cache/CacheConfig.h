@@ -49,6 +49,7 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
+    bool enable_linear_cache_reclaim = false;
     int linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
 
     // mtp-model configurations

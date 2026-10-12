@@ -549,6 +549,26 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         }
     }
 
+    if (config_.enable_linear_cache_reclaim && cp_scale == 1 && matched_blocks > 0) {
+        for (size_t i = 0; i < kv_cache_groups_.size(); ++i) {
+            const auto& group = kv_cache_groups_[i];
+            auto&       ids   = kv_resource.mutableBlockIds(0, group->tag());
+            if (group->policy().group_type != CacheGroupType::LINEAR) {
+                continue;
+            }
+            size_t end = std::min(ids.blocksNum(), matched_blocks);
+            // Matched prefixes restore only their tail. Earlier null slots are
+            // intentionally absent, and must not be charged or allocated again.
+            // Keep every explicit lower-tier load destination and existing ref.
+            for (size_t pos = 0; pos < end; ++pos) {
+                if (!isNullBlockIdx(ids.blocks()[pos]) || prepared.required_positions[i].count(pos)) {
+                    end = pos;
+                    break;
+                }
+            }
+            ids.setReclaimedPrefixBlocks(end);
+        }
+    }
     const int seq_len        = malloc_info.complete_token_ids->seqLength();
     const int common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
     prepared.materialize_status =
@@ -605,6 +625,8 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
             const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
             kv_cache_groups_[static_cast<size_t>(group_id)]->reference(kv_resource.mutableBlockIds(batch, tag),
                                                                        kv_resource.blocks(0, tag));
+            kv_resource.mutableBlockIds(batch, tag)
+                .setReclaimedPrefixBlocks(kv_resource.cacheResource(0).blockIds(tag).reclaimedPrefixBlocks());
         }
     }
     return true;
@@ -785,6 +807,62 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
         }
     }
     kv_cache_resource->clearBlocks();
+}
+
+void CoordinatorCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr& resource,
+                                                   int                            committed_tokens,
+                                                   bool                           reuse_cache) {
+    if (!config_.enable_linear_cache_reclaim || !resource || resource->batchSize() != 1 || committed_tokens <= 0
+        || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
+        return;
+    }
+    // Use the same ordering as allocation and prefix lookup. Admission must not
+    // observe the interval between publication and dropping request references.
+    std::lock_guard<std::mutex> lock(malloc_mutex_);
+    if (reuse_cache && (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled())) {
+        return;
+    }
+    std::vector<size_t> ends;
+    size_t              publish_end = 0;
+    bool                advanced    = false;
+    const auto&         keys        = resource->cacheKeys(0);
+    for (const auto& group : kv_cache_groups_) {
+        const auto& ids = resource->cacheResource(0).blockIds(group->tag());
+        size_t      end = std::min(group->historyReclaimEnd(committed_tokens), ids.blocksNum());
+        if (reuse_cache) {
+            end = std::min(end, keys.size());
+        }
+        ends.push_back(end);
+        publish_end = std::max(publish_end, end);
+        advanced |= end > ids.reclaimedPrefixBlocks();
+    }
+    if (!advanced) {
+        return;
+    }
+    if (reuse_cache && publish_end > 0) {
+        auto snapshot = std::make_shared<BatchKVCacheResource>();
+        snapshot->resetBatchSize(1);
+        snapshot->initGroups(config_.topologyPtr());
+        snapshot->setBatchCacheKeys(0, CacheKeysType(keys.begin(), keys.begin() + publish_end));
+        for (size_t i = 0; i < kv_cache_groups_.size(); ++i) {
+            const auto& group  = kv_cache_groups_[i];
+            const auto& source = resource->blocks(0, group->tag());
+            // FULL data is immutable; only retired LINEAR states may be
+            // published. Other bounded state groups retain their own lifecycle.
+            const size_t count =
+                group->policy().group_type == CacheGroupType::FULL ? std::min(publish_end, source.size()) : ends[i];
+            snapshot->mutableBlockIds(0, group->tag()).assign(BlockIndicesType(source.begin(), source.begin() + count));
+        }
+        size_t resident_prefix = 0;
+        insertIntoCache(InsertInfo{snapshot, nullptr, false, Tier::DEVICE}, resident_prefix);
+        // DEVICE insertion synchronously establishes tree ownership. Publication
+        // is best effort (a busy/duplicate entry can reject it), as with eviction.
+    }
+    for (size_t i = 0; i < kv_cache_groups_.size(); ++i) {
+        if (ends[i] > 0) {
+            kv_cache_groups_[i]->reclaimHistory(resource->mutableBlockIds(0, kv_cache_groups_[i]->tag()), ends[i]);
+        }
+    }
 }
 
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
@@ -1243,6 +1321,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
                 kv_cache_groups_[static_cast<size_t>(group_id)]->reference(block_ids,
                                                                            old_resources[old_batch_idx].blocks(tag));
+                block_ids.setReclaimedPrefixBlocks(old_resources[old_batch_idx].blockIds(tag).reclaimedPrefixBlocks());
 
                 if (copy_last_block && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
@@ -1945,12 +2024,14 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const int    group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, tag);
         const auto&  group_required_positions =
             required_positions == nullptr ? no_required_positions : (*required_positions)[group_index];
-        const auto   need           = kv_cache_groups_[group_index]->getNeedBlocks(group_common_seq,
-                                                                       group_seq_len,
-                                                                       reserve_step,
-                                                                       group_reuse_blocks_len,
-                                                                       reuse_enabled,
-                                                                       group_required_positions);
+        const auto need = kv_cache_groups_[group_index]->getNeedBlocks(
+            group_common_seq,
+            group_seq_len,
+            reserve_step,
+            group_reuse_blocks_len,
+            reuse_enabled,
+            group_required_positions,
+            malloc_info.batch_kv_cache_resource->cacheResource(0).blockIds(tag).reclaimedPrefixBlocks());
         const int    need_blocks    = need.common_blocks + batch_size * need.extra_blocks;
         const size_t planned_blocks = static_cast<size_t>(std::max(need_blocks, 0));
 

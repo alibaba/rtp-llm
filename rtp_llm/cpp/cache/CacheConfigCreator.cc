@@ -371,6 +371,34 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   int                      gen_num_per_cycle) {
     auto config        = createConfigFromDescs(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     config.linear_step = std::max(1, kv_cache_config.linear_step);
+    if (!kv_cache_config.enable_linear_cache_reclaim) {
+        return config;
+    }
+    const auto& groups     = config.topology().groups();
+    const bool  has_linear = std::any_of(groups.begin(), groups.end(), [](const GroupBase& group) {
+        return group.policy.group_type == CacheGroupType::LINEAR;
+    });
+    // Target and draft models share KVCacheConfig. A FULL-only draft has no
+    // recurrent state to reclaim and must not inherit the target capability.
+    if (!has_linear) {
+        return config;
+    }
+    RTP_LLM_CHECK_WITH_INFO(model_config.linear_attention_config.supports_history_state_reclaim,
+                            "enable_linear_cache_reclaim requires model supports_history_state_reclaim");
+    for (const auto& group : groups) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            RTP_LLM_CHECK_WITH_INFO(
+                group.cacheKeyTokenStride() == config.seq_size_per_block,
+                "enable_linear_cache_reclaim requires LINEAR cache-key span to match the base span: "
+                "tag=%s group_span=%zu base_span=%zu",
+                group.tag.c_str(),
+                group.cacheKeyTokenStride(),
+                config.seq_size_per_block);
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(!parallelism_config.prefill_cp_config.kv_cache_sharded,
+                            "enable_linear_cache_reclaim does not support CP-sharded KV cache");
+    config.enable_linear_cache_reclaim = true;
     return config;
 }
 

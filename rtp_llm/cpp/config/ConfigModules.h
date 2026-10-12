@@ -192,6 +192,8 @@ struct KVCacheConfig {
     double block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
     double block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int    linear_step                                  = 1;  // for linear attention cache reuse
+    // Opt-in request policy; only models declaring history-state reclaim support may enable it.
+    bool enable_linear_cache_reclaim = false;
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models
@@ -712,6 +714,9 @@ struct LinearAttentionConfig {
     int         linear_value_head_dim  = 0;
     DataType    ssm_state_dtype        = DataType::TYPE_BF16;
     DataType    conv_state_dtype       = DataType::TYPE_BF16;
+    // Execution accepts null historical checkpoint slots. Active and speculative
+    // rollback state slots must still be retained by the cache manager.
+    bool        supports_history_state_reclaim = false;
     std::string to_string() const;
 };
 

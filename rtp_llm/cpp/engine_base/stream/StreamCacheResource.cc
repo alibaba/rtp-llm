@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
@@ -48,6 +49,7 @@ void StreamCacheResource::init(int batch_size) {
                               warmupCacheTopology();
     batch_kv_cache_resource_->initGroups(topology);
     resource_released_ = false;
+    pending_linear_history_committed_tokens_ = 0;
 }
 
 void StreamCacheResource::releaseResource() {
@@ -380,6 +382,11 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
     }
+    // The scheduler owns host block-table mutation. In particular, an async
+    // output worker may have committed tokens while the previous gather still
+    // read this table. Its watermark is safe to consume here, before the next
+    // allocation/gather, and is independent of a speculative allocation bound.
+    drainLinearHistory();
 
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource      = batch_kv_cache_resource_;
@@ -409,6 +416,35 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     }
 
     return absl::OkStatus();
+}
+
+void StreamCacheResource::reclaimLinearHistory(int committed_tokens) {
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim
+        || committed_tokens <= 0) {
+        return;
+    }
+    pending_linear_history_committed_tokens_ = std::max(pending_linear_history_committed_tokens_, committed_tokens);
+}
+
+void StreamCacheResource::drainLinearHistory() {
+    if (pending_linear_history_committed_tokens_ <= 0 || !resource_context_.cache_manager
+        || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim || fake_inited_
+        || resource_released_ || !need_release_resource_ || allocator_load_context_ || isContextStream()
+        || stream_->hasErrorWithoutLock() || stream_->hasNumBeams() || batch_kv_cache_resource_->batchSize() != 1
+        || !block_update_mapping_.empty() || stream_->queryPdSep() || pd_kvcache_ref_ || curBlocksNum() == 0) {
+        return;
+    }
+    const bool reuse_cache = reuseCache();
+    // DEVICE publication acquires tree references synchronously. Lower-tier
+    // stores only queue a transfer, so retain the request references there.
+    if (reuse_cache && !enableDeviceCache()) {
+        return;
+    }
+    const int committed_tokens =
+        std::min(pending_linear_history_committed_tokens_, std::max(0, stream_->seqLength() - 1));
+    updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), seqSizePerBlock());
+    resource_context_.cache_manager->reclaimLinearHistory(batch_kv_cache_resource_, committed_tokens, reuse_cache);
+    pending_linear_history_committed_tokens_ = 0;
 }
 
 bool StreamCacheResource::asyncLoadCache() {
@@ -462,6 +498,7 @@ BatchKVCacheResource& StreamCacheResource::kvCacheMutable() {
 
 void StreamCacheResource::setKVCache(const BatchKVCacheResource& kv_cache_resource) {
     *batch_kv_cache_resource_ = kv_cache_resource;
+    pending_linear_history_committed_tokens_ = 0;
 }
 
 bool StreamCacheResource::updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block) {
