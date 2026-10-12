@@ -32,6 +32,7 @@ register_tokenizer(
         "baichuan",
         "baichuan2",
         "gemma",
+        "gemma4",
         "cohere",
     ],
     LlamaTokenizer,

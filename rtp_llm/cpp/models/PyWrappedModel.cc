@@ -714,7 +714,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         input_list.back().capture_hidden_states = capture_hidden_states;
     }
 
-    const bool has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
+    const bool                has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
     CacheStoreWriteCycleGuard cache_store_write_cycle(
         cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
@@ -746,7 +746,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                 if (!split_inputs[i].kv_cache_kernel_block_id.defined()) {
                     continue;
                 }
-                const auto& output = py_model_outputs[i].hidden_states;
+                const auto& output   = py_model_outputs[i].hidden_states;
                 capture_layout_error = hidden_state_capture_publisher_->validatePackedLayout(
                     output,
                     input_list[i].input_ids.numel(),
@@ -1072,18 +1072,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 }
             }
         }
-        const bool has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
+        const bool                has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
         CacheStoreWriteCycleGuard cache_store_write_cycle(
             cache_store_async_writer_, has_cache_store_work, track_cache_store_completion_);
 
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs_,
-                                                        attention_inputs_by_tag_,
-                                                        bert_embedding_inputs});
+        auto py_model_inputs                  = PyModelInputs({token_ids,
+                                                               input_hiddens,
+                                                               combo_position_ids,
+                                                               embedding_inputs,
+                                                               multimodal_inputs,
+                                                               attention_inputs_,
+                                                               attention_inputs_by_tag_,
+                                                               bert_embedding_inputs});
         py_model_inputs.capture_hidden_states = capture_hidden_states;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -1097,8 +1097,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        bool owned_hidden_states = false;
-        const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
+        bool       owned_hidden_states = false;
+        const bool can_run_graph       = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
@@ -1134,8 +1134,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
                               py_model_inputs.attention_inputs.is_prefill);
-            auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
-            py_model_outputs = outputs.cast<PyModelOutputs>();
+            auto outputs        = py_forward_method_(py_model_inputs, held_attn_pyobj_);
+            py_model_outputs    = outputs.cast<PyModelOutputs>();
             owned_hidden_states = py::hasattr(py_model_, "returns_owned_hidden_states")
                                   && py::isinstance<py::bool_>(py_model_.attr("returns_owned_hidden_states"))
                                   && py::cast<bool>(py_model_.attr("returns_owned_hidden_states"));
@@ -1393,7 +1393,18 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         torch::Tensor last_hidden;
         if (has_context_request && !need_all_logits) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(index_select_last_hidden)");
-            last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+#if USING_CUDA
+            if (hidden.is_cuda() && hidden.scalar_type() == torch::kBFloat16 && hidden.is_contiguous()
+                && hidden.dim() == 2 && hidden.size(1) % 8 == 0
+                && reinterpret_cast<std::uintptr_t>(hidden.const_data_ptr()) % 16 == 0
+                && lm_output_indexes_device.is_cuda() && lm_output_indexes_device.scalar_type() == torch::kInt
+                && lm_output_indexes_device.is_contiguous()) {
+                last_hidden = torch_ext::gemma4_gather_rows_bf16(hidden, lm_output_indexes_device);
+            } else
+#endif
+            {
+                last_hidden = torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong));
+            }
         } else {
             last_hidden = hidden;
         }
@@ -1455,7 +1466,14 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& last_hidden) {
     if (description_.final_logit_softcapping > 0.0) {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(final_logit_softcapping)");
         const auto cap = description_.final_logit_softcapping;
-        logits = torch::tanh(logits / cap) * cap;
+#if USING_CUDA
+        if (logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.is_contiguous()) {
+            logits = torch_ext::gemma4_logit_softcap_fp32(logits, cap);
+        } else
+#endif
+        {
+            logits = torch::tanh(logits / cap) * cap;
+        }
     }
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(tp_sync_logits)");
@@ -1483,7 +1501,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         return {torch::Tensor(), torch::Tensor(), hidden};
     }
 
-    const auto&       lm_head = weights_.lm_head;
+    const auto& lm_head = weights_.lm_head;
     if (!lm_head) {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }
@@ -1601,9 +1619,9 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
         fake_inputs.kv_cache_block_id = torch::Tensor();
         fake_inputs.combo_tokens =
             inputs.combo_tokens.numel() == 0 ? inputs.combo_tokens : inputs.combo_tokens.narrow(0, 0, 1);
-        fake_inputs.input_lengths     = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        fake_inputs.sequence_lengths  = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-        fake_inputs.prefix_lengths    = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.input_lengths    = torch::ones({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.sequence_lengths = torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+        fake_inputs.prefix_lengths   = torch::zeros({1}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
         micro_batch_inputs.push_back(fake_inputs);
     } else {
         for (size_t i = 0; i < micro_batch_plan.batch_infos.size(); ++i) {

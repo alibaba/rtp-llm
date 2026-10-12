@@ -738,6 +738,11 @@ class OpenaiEndpoint(object):
             mm_inputs=rendered_input.multimodal_inputs,
             generate_config=generate_config,
             tokenizer=self.tokenizer,
+            rendered_prompt=(
+                rendered_input.rendered_prompt
+                if renderer.model_type == "gemma4" and rendered_input.multimodal_inputs
+                else ""
+            ),
         )
         return gen_input, generate_config
 
