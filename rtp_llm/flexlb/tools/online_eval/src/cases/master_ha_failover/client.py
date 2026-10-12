@@ -21,7 +21,6 @@ class HaReplayClient:
         env,
         case_dir: Path,
         name: str,
-        targets: list,
         *,
         source: dict,
         duration_s: int = 60,
@@ -37,22 +36,25 @@ class HaReplayClient:
         sampler_limits, monitor,
     ):
         self.name = name
-        self.targets = list(targets)
         self.out_dir = case_dir / f"{name}_out"
         self.log_file = case_dir / f"{name}.log"
         self.state_sampler = None
         if "master_inflight" in selected_sources(monitor.query_plan):
             self.state_sampler = evidence_collector(monitor.query_plan, "master_inflight", env,
                 case_dir / "master_states.jsonl", limits=sampler_limits, session=monitor)
+        # The environment registry owns membership and candidate order.
         specs_by_target = {
             manager.master_instance_target(env, master_name): spec
             for master_name, spec in env.master_specs.items()
         }
+        if not specs_by_target:
+            raise ValueError("HA discovery requires registered Masters")
+        self.targets = list(specs_by_target)
         discovery_file = case_dir / "master-discovery.json"
         discovery_file.write_text(json.dumps({"hosts": [
             {"http": f"{specs_by_target[target].bind_ip}:{specs_by_target[target].http_port}",
              "grpc": target}
-            for target in targets
+            for target in self.targets
         ]}), encoding="utf-8")
         self._client = ClientOps(manager, "8g", "8g")
         from traffic.traffic_source import materialize

@@ -34,9 +34,7 @@ class MasterActionsTest(unittest.TestCase):
         with patch("cases.master_ha_failover.client.ClientOps"), patch(
             "traffic.traffic_source.materialize", side_effect=replay_trace
         ):
-            runner = HaReplayClient(manager, env, root, "flow", [
-                "127.0.0.1:18082", "127.0.0.1:18085"
-            ], source=replay_source(), monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
+            runner = HaReplayClient(manager, env, root, "flow", source=replay_source(), monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
         path = Path(runner._overrides["MASTER_DISCOVERY_FILE"])
         self.assertEqual({"hosts": [
             {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
@@ -73,6 +71,32 @@ class MasterActionsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "stop command"):
             runner.validate_drain([{}, {}])
 
+    def test_ha_discovery_uses_zookeeper_bind_addresses_from_registry(self):
+        root = Path(self.tmp.name)
+        env = SimpleNamespace(master_specs={
+            "A": SimpleNamespace(bind_ip="127.0.0.1", http_port=18080),
+            "B": SimpleNamespace(bind_ip="127.0.0.2", http_port=18080),
+        })
+        manager = Mock()
+        manager.master_instance_target.side_effect = lambda env, name: (
+            f"{env.master_specs[name].bind_ip}:{env.master_specs[name].http_port + 2}"
+        )
+        with patch("cases.master_ha_failover.client.ClientOps"), patch(
+            "traffic.traffic_source.materialize", side_effect=replay_trace
+        ):
+            runner = HaReplayClient(manager, env, root, "flow", source=replay_source(),
+                monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
+        self.assertEqual("127.0.0.1:18082,127.0.0.2:18082", runner._overrides["GRPC_TARGETS"])
+        self.assertEqual({"hosts": [
+            {"http": "127.0.0.1:18080", "grpc": "127.0.0.1:18082"},
+            {"http": "127.0.0.2:18080", "grpc": "127.0.0.2:18082"},
+        ]}, json.loads(Path(runner._overrides["MASTER_DISCOVERY_FILE"]).read_text()))
+
+    def test_ha_start_rejects_incomplete_registered_topology(self):
+        self.ctx.env.master_specs = {"A": SimpleNamespace()}
+        with self.assertRaisesRegex(ValueError, "registered Masters A and B"):
+            ha._ha_start(self.ctx, {}, self.deadline)
+
     def test_ha_one_pass_rejects_trace_shorter_than_client_duration(self):
         root = Path(self.tmp.name)
         env = SimpleNamespace(master_specs={
@@ -91,9 +115,7 @@ class MasterActionsTest(unittest.TestCase):
         with patch("cases.master_ha_failover.client.ClientOps"), patch(
             "traffic.traffic_source.materialize", side_effect=short_trace
         ), self.assertRaisesRegex(ValueError, "one-pass HA trace ends"):
-            HaReplayClient(manager, env, root, "flow", [
-                "127.0.0.1:18082", "127.0.0.1:18085"
-            ], duration_s=10, replay_speed=2, source={"kind": "trace"},
+            HaReplayClient(manager, env, root, "flow", duration_s=10, replay_speed=2, source={"kind": "trace"},
               monitor=self.ctx.monitor, sampler_limits=dict(max_samples=10, max_bytes=10000))
 
     def test_ha_state_sampler_keeps_each_master_and_missing_inflight_distinct(self):
@@ -324,7 +346,12 @@ class MasterActionsTest(unittest.TestCase):
             "master_layout": "dual_standalone",
             "master_stable_window_s": 0,
         }
-        self.assertEqual(["A", "B"], ha._ha_validate(dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000)), plan)["targets"])
+        for layout in ("dual_standalone", "dual_zookeeper"):
+            plan.environment["master_layout"] = layout
+            params = dict(source=replay_source(), capture=dict(max_samples=10, max_bytes=10000))
+            self.assertNotIn("targets", ha._ha_validate(params, plan))
+            with self.assertRaises(ValueError):
+                ha._ha_validate(dict(params, targets=["A", "B"]), plan)
 
     def test_empty_client_rows_fail_even_zero_error_assertion(self):
         handle = self.ctx.register_resource("ha_rows", [])

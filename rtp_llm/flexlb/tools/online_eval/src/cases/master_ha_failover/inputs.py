@@ -116,7 +116,7 @@ def read_cycle(case):
     if isinstance(case.parameters.get("procedure"), dict) and "restart_mode" in case.parameters["procedure"]:
         raise ScenarioError("restart_mode is owned by flow identity, not parameters")
     data = case.inputs(
-        traffic={"kind", "source", "targets", "duration_s", "timeout_ms", "replay_speed", "loop",
+        traffic={"kind", "source", "duration_s", "timeout_ms", "replay_speed", "loop",
                  "max_concurrency", "max_requests", "fallback"},
         procedure={"setup_timeout_s", "kill_a", "kill_b", "b_ready", "a_ready",
                    "restart_timeout_s", "finish_timeout_s",

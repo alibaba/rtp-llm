@@ -12,7 +12,7 @@ def require_process(ctx, target):
     else:
         if set(getattr(ctx.env, "master_specs", {})) != {"A", "B"}:
             raise ValueError(
-                "A/B target requires an actual dual-standalone environment"
+                "A/B target requires an actual dual-master environment"
             )
         proc = ctx.env.masters.get(target)
     if proc is None or not proc.alive():
