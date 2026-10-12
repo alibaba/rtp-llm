@@ -1943,6 +1943,93 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
 }
 
+TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearHistoryBecomesReusableAndEvictableWhileRequestRuns) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 6);
+    const auto full        = allocateReferencedBlocks(full_pool, 6);
+    auto       resource    = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105});
+    resource->mutableBlockIds(0, "linear").assign(linear);
+    resource->mutableBlockIds(0, "full1").assign(full);
+
+    allocator->reclaimLinearHistory(resource, /*committed_tokens=*/20, /*reuse_cache=*/true);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(resource->blocks(0, "linear")[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(resource->blocks(0, "full1"), full);
+    EXPECT_EQ(linear_pool->referencedBlocksNum(), 3u);
+    EXPECT_EQ(full_pool->referencedBlocksNum(), 6u);
+    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102});
+    ASSERT_EQ(path.size(), 3u);
+    EXPECT_EQ(path[0]->group_set_resources[0].device_blocks, (BlockIndicesType{linear[0]}));
+    auto match = allocator->blockTreeCacheOwner()->match({100, 101, 102});
+    EXPECT_EQ(match.matched_device_blocks, 3u);
+    block_tree_cache_test::releaseRequestRefsForTest(*allocator->blockTreeCacheOwner(), match.matched_device_resources);
+
+    // Eviction can recover historical states even though FULL remains pinned by this request.
+    for (const auto& group : allocator->cacheGroups()) {
+        if (group->tag() == "linear") {
+            EXPECT_TRUE(group->ensureFreeBlocks(6));
+            EXPECT_GE(linear_pool->freeBlocksNum(), 6u);
+            ASSERT_TRUE(group->malloc(resource->mutableBlockIds(0, "linear"), 28, true));
+        }
+    }
+    EXPECT_EQ(linear_pool->referencedBlocksNum(), 4u);
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(resource->blocks(0, "linear")[i], NULL_BLOCK_IDX);
+    }
+    for (const auto& group : allocator->cacheGroups()) {
+        group->unreference(resource->blocks(0, group->tag()));
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, LinearHistoryPrefixHitDoesNotRematerializeRetiredCheckpoints) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 8);
+    const auto full        = allocateReferencedBlocks(full_pool, 8);
+    auto       running     = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105, 106, 107});
+    running->mutableBlockIds(0, "linear").assign(linear);
+    running->mutableBlockIds(0, "full1").assign(full);
+    allocator->reclaimLinearHistory(running, 32, true);
+
+    auto       incoming = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105, 999});
+    auto       tokens   = makeCompleteTokenIds(1, 28, 4);
+    MallocInfo info{incoming, tokens};
+    info.enable_remove_skipped_blocks = false;
+    const auto result                 = allocator->malloc(info);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 24);
+    const auto& ids = incoming->blocks(0, "linear");
+    ASSERT_EQ(ids.size(), 7u);
+    for (size_t i = 0; i < 5; ++i) {
+        EXPECT_EQ(ids[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(ids[5], linear[5]);
+    EXPECT_EQ(std::count_if(ids.begin(), ids.end(), [](auto id) { return !isNullBlockIdx(id); }), 2);
+    // An evicted historical checkpoint must stay absent; this request never
+    // recomputed it and cannot republish an allocated-but-uninitialized state.
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForGroup("linear", 5), 5);
+    allocator->reclaimLinearHistory(incoming, 28, true);
+    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode({100, 101, 102, 103, 104});
+    ASSERT_EQ(path.size(), 5u);
+    EXPECT_FALSE(path.back()->group_set_resources[0].hasTier(Tier::DEVICE));
+    allocator->free(FreeInfo{incoming, tokens});
+    for (const auto& group : allocator->cacheGroups()) {
+        group->unreference(running->blocks(0, group->tag()));
+    }
+}
+
 TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto config    = makeTinyHybridConfig();
     auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);

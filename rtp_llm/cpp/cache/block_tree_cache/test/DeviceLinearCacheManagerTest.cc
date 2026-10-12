@@ -414,6 +414,63 @@ TEST_F(DeviceLinearCacheManagerTest, ReferenceAppendsAndIncrementsRefCountForVal
     EXPECT_EQ(block_pool->freeBlocksNum(), free_before + 1);
 }
 
+TEST_F(DeviceLinearCacheManagerTest, CommittedHistoryReclaimPreservesActiveAndSpeculativeStates) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 1);
+    ASSERT_TRUE(group.init());
+    BlockIds blocks;
+    // Six sequence checkpoints plus two tentative verification states.
+    ASSERT_TRUE(group.malloc(blocks, 24, true, 3));
+    const auto original = blocks.blocks();
+    EXPECT_EQ(group.historyReclaimEnd(20), 3u);
+    group.reclaimHistory(blocks, group.historyReclaimEnd(20));
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(blocks.blocks()[i], NULL_BLOCK_IDX);
+    }
+    for (size_t i = 3; i < original.size(); ++i) {
+        EXPECT_EQ(blocks.blocks()[i], original[i]);
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(), 5u);
+    EXPECT_EQ(pool->freeBlocksNum(), 4u);
+    group.reclaimHistory(blocks, group.historyReclaimEnd(16));
+    EXPECT_EQ(pool->referencedBlocksNum(), 5u);
+    // Reallocation must not backfill retired stride-1 checkpoints.
+    ASSERT_TRUE(group.malloc(blocks, 28, true, 3));
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(blocks.blocks()[i], NULL_BLOCK_IDX);
+    }
+    EXPECT_EQ(pool->referencedBlocksNum(), 6u);
+    group.unreference(blocks.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), 9u);
+}
+
+TEST_F(DeviceLinearCacheManagerTest, ReclaimDoesNotTurnAnOldReadIntoAnUninitializedState) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 1);
+    ASSERT_TRUE(group.init());
+    BlockIds blocks;
+    ASSERT_TRUE(group.malloc(blocks, 24, true));
+    group.reclaimHistory(blocks, group.historyReclaimEnd(20));
+    const auto free_before = pool->freeBlocksNum();
+    EXPECT_FALSE(group.malloc(blocks, 8, true));
+    EXPECT_FALSE(group.malloc(blocks, 24, true, 0, nullptr, {0}));
+    EXPECT_EQ(pool->freeBlocksNum(), free_before);
+    group.unreference(blocks.blocks());
+}
+
+TEST_F(DeviceLinearCacheManagerTest, ReclaimRespectsModelTailPolicyAndPartialCheckpoint) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.active_tail_blocks = 3;
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 1, policy);
+    EXPECT_EQ(group.historyReclaimEnd(15), 0u);
+    EXPECT_EQ(group.historyReclaimEnd(19), 1u);
+    EXPECT_EQ(group.historyReclaimEnd(-1), 0u);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

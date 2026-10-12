@@ -195,6 +195,13 @@ class Qwen3Next(Qwen3NextBase):
 
 
 class Qwen35Moe(Qwen3NextBase):
+    @classmethod
+    def _parse_linear_attention_config(cls, config_json: dict, config: ModelConfig):
+        super()._parse_linear_attention_config(config_json, config)
+        # GDN prefill skips null historical checkpoint slots. Decode and verify
+        # require the cache manager to retain active and speculative state slots.
+        config.linear_attention_config.supports_history_state_reclaim = True
+
     @staticmethod
     def get_weight_cls():
         return Qwen35MoeWeight

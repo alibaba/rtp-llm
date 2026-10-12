@@ -107,7 +107,8 @@ NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_se
                                               int                      reserve_step,
                                               int                      reuse_blocks_len,
                                               bool                     reuse_enabled,
-                                              const RequiredPositions& required_positions) const {
+                                              const RequiredPositions& required_positions,
+                                              size_t /*reclaimed_prefix_blocks*/) const {
     (void)common_seq_len;
     const int      step                    = std::max(1, linear_step_);
     const bool     effective_reuse_enabled = effectiveReuseCacheForAllocation(reuse_enabled);
