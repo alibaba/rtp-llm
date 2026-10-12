@@ -16,11 +16,6 @@ namespace rtp_llm {
 
 namespace {
 
-at::cuda::CUDAStream& getNoBlockCopyStream() {
-    static thread_local auto stream = at::cuda::getStreamFromPool(/*isHighPriority=*/false);
-    return stream;
-}
-
 enum class HostCoverage {
     Invalid,
     Partial,
@@ -304,8 +299,10 @@ BatchedMemoryCopyStatus execBatchedMemoryCopy(const BatchedMemoryCopyParams& par
         return BatchedMemoryCopyStatus::NOT_SUPPORTED;
     }
 
-    check_cuda_value(cudaSetDevice(params.device_index));
-    auto stream = getNoBlockCopyStream().stream();
+    // RPC workers can alternate devices. Use the same per-device stream
+    // registry as generic copies, and restore PyTorch's lazy device state.
+    c10::cuda::CUDAGuard device_guard(params.device_index);
+    auto stream = getNoBlockCopyStream(params.device_index).stream();
 
     const size_t             tile_num = params.tiles.size();
     std::vector<void*>       dsts;
@@ -416,8 +413,8 @@ bool execStagedMemoryCopy(const StagedMemoryCopyParams& params, StagedMemoryCopy
         return false;
     }
 
-    check_cuda_value(cudaSetDevice(params.device_index));
-    auto stream = getNoBlockCopyStream().stream();
+    c10::cuda::CUDAGuard device_guard(params.device_index);
+    auto stream = getNoBlockCopyStream(params.device_index).stream();
 
     std::vector<void*>  h_ptrs;
     std::vector<size_t> h_offsets;
