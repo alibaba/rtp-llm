@@ -20,6 +20,7 @@
 #include <numeric>
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/NvtxRange.h"
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
@@ -1015,31 +1016,47 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // handleInputs enforces both constraints before mutating the batch.
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
+        GptModelInputs post_inputs = inputs;
+        if (weights_.lm_head && (has_context_request || inputs.need_all_logits)) {
+            // Stage the current final rows, after CP input rewriting. Async
+            // attention prepare can carry MTP placeholders rather than these
+            // actual verify/proposal rows, so it cannot own this snapshot.
+            RTP_LLM_PROFILE_SCOPE("py_model.prepareHeadIndexes");
+            ScopedModelNvtxRange range("model/prepare_head");
+            buffer_holder_.hold_host(inputs.lm_output_indexes);
+            post_inputs.lm_output_indexes = inputs.lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+        }
 
         torch::Tensor token_ids;
-        if (inputs.combo_tokens.device().is_cuda()) {
-            token_ids = inputs.combo_tokens;
-        } else {
-            buffer_holder_.hold_host(inputs.combo_tokens);
-            token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
-        }
-
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-
-        torch::Tensor combo_position_ids = torch::empty({0});
-        if (inputs.combo_position_ids.defined()) {
-            if (inputs.combo_position_ids.device().is_cuda()) {
-                combo_position_ids = inputs.combo_position_ids;
+        torch::Tensor                  combo_position_ids = torch::empty({0});
+        torch_ext::PyEmbeddingInputs   embedding_inputs;
+        torch_ext::PyMultimodalInputs  multimodal_inputs;
+        torch_ext::BertEmbeddingInputs bert_embedding_inputs;
+        {
+            RTP_LLM_PROFILE_SCOPE("py_model.prepareInputData");
+            ScopedModelNvtxRange range("model/prepare_inputs");
+            if (inputs.combo_tokens.device().is_cuda()) {
+                token_ids = inputs.combo_tokens;
             } else {
-                buffer_holder_.hold_host(inputs.combo_position_ids);
-                combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
+                buffer_holder_.hold_host(inputs.combo_tokens);
+                token_ids = inputs.combo_tokens.to(torch::kCUDA, /*non_blocking=*/true);
             }
-        }
 
-        auto embedding_inputs      = buildPyEmbeddingInputs(inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+            if (inputs.combo_position_ids.defined()) {
+                if (inputs.combo_position_ids.device().is_cuda()) {
+                    combo_position_ids = inputs.combo_position_ids;
+                } else {
+                    buffer_holder_.hold_host(inputs.combo_position_ids);
+                    combo_position_ids = inputs.combo_position_ids.to(torch::kCUDA, /*non_blocking=*/true);
+                }
+            }
+
+            embedding_inputs      = buildPyEmbeddingInputs(inputs);
+            multimodal_inputs     = buildPyMultimodalInputs(inputs);
+            bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
+        }
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
@@ -1080,6 +1097,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
+        bool owned_hidden_states = false;
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
@@ -1103,9 +1121,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+            owned_hidden_states = graph_runner->returnsOwnedHiddenStates();
         } else {
             py::gil_scoped_acquire gil;
-            held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            {
+                RTP_LLM_PROFILE_SCOPE("py_model.prepareFmhaImpl");
+                ScopedModelNvtxRange range("model/prepare_attention");
+                held_attn_pyobj_ = py_model_.attr("prepare_fmha_impl")(py_model_inputs, false);
+            }
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
@@ -1113,12 +1136,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                               py_model_inputs.attention_inputs.is_prefill);
             auto outputs     = py_forward_method_(py_model_inputs, held_attn_pyobj_);
             py_model_outputs = outputs.cast<PyModelOutputs>();
+            owned_hidden_states = py::hasattr(py_model_, "returns_owned_hidden_states")
+                                  && py::isinstance<py::bool_>(py_model_.attr("returns_owned_hidden_states"))
+                                  && py::cast<bool>(py_model_.attr("returns_owned_hidden_states"));
         }
 
-        if (capture_hidden_states) {
-            // Capture consumes the Python output directly. CP restoration below
-            // remains the sole distributed layout operation on this path, and
-            // publish() validates the restored/local packed tensor once before store.
+        if (capture_hidden_states || owned_hidden_states) {
+            // Hidden-state capture uses the Python output directly before CP
+            // restoration; explicitly owned eager/graph outputs are also stable.
             hidden_states = py_model_outputs.hidden_states;
         } else {
             hidden_states = py_model_outputs.hidden_states.clone();
@@ -1139,7 +1164,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
                 return with_generation_prefill_cuda_graph_status(
-                    attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+                    attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, post_inputs, true)));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -1201,11 +1226,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs)));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return with_generation_prefill_cuda_graph_status(
-                attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens)));
+            return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
+                callForwardPostLayers(hidden_states, post_inputs, true, num_valid_tokens)));
         }
         return with_generation_prefill_cuda_graph_status(
-            attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+            attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, post_inputs, true)));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
@@ -1359,8 +1384,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
         printTorchTensorData(lm_output_indexes, "lm_output_indexes");
 
-        buffer_holder_.hold_host(lm_output_indexes);
-        auto lm_output_indexes_device = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+        torch::Tensor lm_output_indexes_device;
+        if ((has_context_request && !need_all_logits) || need_all_logits) {
+            buffer_holder_.hold_host(lm_output_indexes);
+            lm_output_indexes_device = lm_output_indexes.to(torch::kCUDA, /*non_blocking=*/true);
+        }
 
         torch::Tensor last_hidden;
         if (has_context_request && !need_all_logits) {
@@ -1410,8 +1438,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 }
 
 torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& last_hidden) {
-    const auto&   lm_head = weights_.lm_head;
-    torch::Tensor logits;
+    ScopedModelNvtxRange range("model/head");
+    const auto&          lm_head = weights_.lm_head;
+    torch::Tensor        logits;
     {
         RTP_LLM_PROFILE_SCOPE("py_model.computeLogits(lm_head_mm)");
 #if USING_CUDA

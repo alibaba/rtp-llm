@@ -13,6 +13,7 @@
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/NvtxRange.h"
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -64,6 +65,32 @@ int64_t CudaGraphRunner::captureKernelBlockTableWidth(const CacheTopology& topol
 }
 
 namespace {
+
+bool canRetainCaptureOutput(const PyModelInputs& inputs, const torch::Tensor& expected, const torch::Tensor& output) {
+    if (!output.defined() || output.device() != expected.device() || output.scalar_type() != expected.scalar_type()
+        || output.sizes() != expected.sizes() || !output.is_contiguous()) {
+        return false;
+    }
+    const auto aliases = [&](const torch::Tensor& input) { return input.defined() && output.is_alias_of(input); };
+    if (aliases(inputs.input_ids) || aliases(inputs.input_hiddens) || aliases(inputs.combo_position_ids)
+        || aliases(inputs.embedding_inputs.combo_tokens_type_ids) || aliases(inputs.embedding_inputs.text_tokens_mask)
+        || aliases(inputs.bert_embedding_inputs.combo_position_ids)
+        || aliases(inputs.bert_embedding_inputs.combo_tokens_type_ids)
+        || aliases(inputs.multimodal_inputs.mm_features_locs)) {
+        return false;
+    }
+    for (const auto& feature : inputs.multimodal_inputs.multimodal_features) {
+        if (aliases(feature)) {
+            return false;
+        }
+    }
+    for (const auto& input : inputs.multimodal_inputs.mm_extra_input) {
+        if (aliases(input)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct FallbackTick {
     uint64_t count;
@@ -1138,6 +1165,24 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         }
     } flag_guard{prepared_attention_inputs_};
 
+    struct ForwardEventGuard {
+        torch::Event& event;
+        bool          armed = false;
+        ~ForwardEventGuard() {
+            if (armed) {
+                try {
+                    event.record(cuda_graph::graphGetCurrentStream());
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("failed to record graph forward completion: %s", error.what());
+                }
+            }
+        }
+    } event_guard{forward_event_};
+
+    torch::Tensor captured_hidden;
+    torch::Tensor captured_auxiliary;
+    int           real_rows = 0;
+
     // decode or embedding model only
     RTP_LLM_LOG_DEBUG("Replay Start");
     if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
@@ -1148,6 +1193,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     if (is_prefill_cuda_graph_mode_) {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayPrefill)");
+            ScopedModelNvtxRange range("model/prefill");
+            event_guard.armed = true;
             replayPrefill(state.current_real_graph_seq_len);
         }
         if (isGenerationPrefillCudaGraph()) {
@@ -1164,6 +1211,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             }
         }
         auto& mem_hold        = graph_instances_[state.current_real_graph_seq_len].mem_hold_;
+        captured_hidden       = mem_hold.decoder_layer_hidden_states_;
+        captured_auxiliary    = mem_hold.mtp_target_hidden_states_;
+        real_rows             = state.current_seq_len;
         outputs.hidden_states = mem_hold.decoder_layer_hidden_states_.slice(0, 0, state.current_seq_len);
         if (mem_hold.mtp_target_hidden_states_.defined()) {
             outputs.mtp_target_hidden_states = mem_hold.mtp_target_hidden_states_.slice(0, 0, state.current_seq_len);
@@ -1171,6 +1221,8 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
     } else {
         {
             RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(replayDecode)");
+            ScopedModelNvtxRange range(is_target_verify_ ? "model/verify" : "model/decode");
+            event_guard.armed = true;
             replayDecode(state.current_real_graph_bs);
         }
         {
@@ -1197,12 +1249,38 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.seq_len_sum);
         const auto& mtp_target_hidden_states =
             graph_instances_[state.current_real_graph_bs].mem_hold_.mtp_target_hidden_states_;
+        captured_hidden    = graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_hidden_states_;
+        captured_auxiliary = mtp_target_hidden_states;
+        real_rows          = state.seq_len_sum;
         if (mtp_target_hidden_states.defined()) {
             outputs.mtp_target_hidden_states = mtp_target_hidden_states.slice(0, 0, state.seq_len_sum);
         }
     }
-    // record forward done event
-    forward_event_.record(cuda_graph::graphGetCurrentStream());
+    if (!py_finalize_graph_output_.is_none()) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.forward(finalizeOutput)");
+        ScopedModelNvtxRange   range("model/finalize_output");
+        py::gil_scoped_acquire gil;
+        // Finalize the full bucket before trimming, preserving any projection's
+        // captured GEMM shape and its BF16 arithmetic selection.
+        auto finalized =
+            py_finalize_graph_output_(PyModelOutputs(captured_hidden, captured_auxiliary)).cast<PyModelOutputs>();
+        RTP_LLM_CHECK_WITH_INFO(finalized.hidden_states.defined()
+                                    && finalized.hidden_states.sizes() == captured_hidden.sizes()
+                                    && finalized.hidden_states.device() == captured_hidden.device()
+                                    && finalized.hidden_states.scalar_type() == model_data_type_
+                                    && !finalized.hidden_states.is_alias_of(captured_hidden),
+                                "graph finalizer changed hidden output shape/device/dtype");
+        outputs.hidden_states = finalized.hidden_states.slice(0, 0, real_rows);
+        if (finalized.mtp_target_hidden_states.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(finalized.mtp_target_hidden_states.dim() == 2
+                                        && finalized.mtp_target_hidden_states.size(0) == captured_hidden.size(0)
+                                        && finalized.mtp_target_hidden_states.device() == captured_hidden.device(),
+                                    "graph finalizer changed auxiliary output rows/device");
+            outputs.mtp_target_hidden_states = finalized.mtp_target_hidden_states.slice(0, 0, real_rows);
+        } else {
+            outputs.mtp_target_hidden_states = torch::Tensor();
+        }
+    }
     RTP_LLM_LOG_DEBUG("Replay End");
     return outputs;
 }
@@ -2051,7 +2129,20 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
             }
-            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            auto&      hold = graph_instances_[key].mem_hold_;
+            const bool retain_output =
+                !py_finalize_graph_output_.is_none()
+                && canRetainCaptureOutput(inputs, hold.decoder_layer_hidden_states_, outputs.hidden_states);
+            RTP_LLM_CHECK_WITH_INFO(
+                py_finalize_graph_output_.is_none() || retain_output,
+                "owned graph raw output must match capture shape/device/dtype/layout and not alias inputs");
+            if (retain_output) {
+                // The graph already writes this fixed-address output. Retain its
+                // storage rather than append a redundant copy node to every replay.
+                hold.setHiddenStates(outputs.hidden_states);
+            } else {
+                hold.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            }
             auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
             RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined() == outputs.mtp_target_hidden_states.defined(),
                                     "MTP target hidden output presence changed during CUDA graph capture");

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <optional>
@@ -115,10 +116,19 @@ public:
         for (auto& counter : generation_prefill_cuda_graph_fallback_log_counts_) {
             counter.store(0, std::memory_order_relaxed);
         }
-        py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
-        py_forward_method_    = py_instance_.attr(forward_method_name);
-        options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
-        options_cpu_int32_    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
+        py_attn_pyobj_method_     = py_instance_.attr("prepare_fmha_impl");
+        py_forward_method_        = py_instance_.attr(forward_method_name);
+        py_finalize_graph_output_ = py::none();
+        if (std::strcmp(forward_method_name, "forward") == 0 && py::hasattr(py_instance_, "returns_owned_hidden_states")
+            && py::isinstance<py::bool_>(py_instance_.attr("returns_owned_hidden_states"))
+            && py::cast<bool>(py_instance_.attr("returns_owned_hidden_states"))
+            && py::hasattr(py_instance_, "forward_for_cuda_graph")
+            && py::hasattr(py_instance_, "finalize_cuda_graph_output")) {
+            py_forward_method_        = py_instance_.attr("forward_for_cuda_graph");
+            py_finalize_graph_output_ = py_instance_.attr("finalize_cuda_graph_output");
+        }
+        options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
+        options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, max_kernel_block_table_width_: %lld, \
@@ -152,8 +162,14 @@ public:
             }
         }
         py::gil_scoped_acquire gil;
+        py_forward_method_        = py::object();
+        py_finalize_graph_output_ = py::object();
+        py_attn_pyobj_method_     = py::object();
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
+    }
+    bool returnsOwnedHiddenStates() const override {
+        return !py_finalize_graph_output_.is_none();
     }
     void     captureDecode();
     void     capturePrefill();
@@ -241,6 +257,7 @@ private:
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
     py::object              py_forward_method_;
+    py::object              py_finalize_graph_output_;
     py::object              py_attn_pyobj_method_;
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
