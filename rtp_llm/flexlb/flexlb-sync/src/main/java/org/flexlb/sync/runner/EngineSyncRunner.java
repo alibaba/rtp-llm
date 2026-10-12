@@ -13,7 +13,6 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.WorkerDirectory;
 import org.flexlb.util.CommonUtils;
-import org.flexlb.util.SyncDiagnostics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
@@ -33,7 +32,6 @@ public class EngineSyncRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final long diagCreatedNs = System.nanoTime();
     private final String modelName;
 
     private final WorkerDirectory workerDirectory;
@@ -102,11 +100,6 @@ public class EngineSyncRunner implements Runnable {
 
     @Override
     public void run() {
-        long diagStartNs = System.nanoTime();
-        long diagCleanupEndNs = diagStartNs;
-        int diagSubmitted = 0;
-        int diagSkipped = 0;
-        int diagMissing = 0;
         logger.debug("EngineSyncRunner start for model: {}, role: {}", modelName, roleType.toString());
         try {
             long startTimeInUs = System.nanoTime() / 1000;
@@ -133,12 +126,10 @@ public class EngineSyncRunner implements Runnable {
                 WorkerStatus workerStatus = entry.getValue();
                 String ipPort = entry.getKey();
                 if (!latestValidIpPorts.contains(ipPort)) {
-                    diagMissing++;
                     retireMissingGenerationIfExpired(
                             ipPort, workerStatus);
                 }
             }
-            diagCleanupEndNs = System.nanoTime();
             if (latestEngineWorkerList.isEmpty()) {
                 logger.debug("latestEngineWorkerList is empty, role: {}", roleType);
                 return;
@@ -174,7 +165,6 @@ public class EngineSyncRunner implements Runnable {
                                 syncRequestTimeoutMs,
                                 cacheAwareService, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
-                        diagSubmitted++;
                         handedOff = true;
                     } catch (RejectedExecutionException e) {
                         logger.debug("Status check rejected for worker: {}, reset flag for retry", workerIpPort);
@@ -184,7 +174,6 @@ public class EngineSyncRunner implements Runnable {
                         }
                     }
                 } else {
-                    diagSkipped++;
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
@@ -221,15 +210,6 @@ public class EngineSyncRunner implements Runnable {
             logger.error("sync engine workers status exception, modelName:{}, error:{}", modelName, e.getMessage(), e);
             engineHealthReporter.reportStatusCheckerFail(modelName, BalanceStatusEnum.UNKNOWN_ERROR, null);
         } finally {
-            long diagNow = System.nanoTime();
-            if (SyncDiagnostics.ENABLED && (diagNow - diagStartNs > 100_000_000L
-                    || SyncDiagnostics.sample("scan:" + roleType))) {
-                SyncDiagnostics.event("event=scan role={} queue_ms={} pre_submit_ms={} total_ms={} missing={} status_submitted={} status_skipped={} start_epoch_ms={}",
-                        roleType, SyncDiagnostics.ms(diagStartNs - diagCreatedNs),
-                        SyncDiagnostics.ms(diagCleanupEndNs - diagStartNs), SyncDiagnostics.ms(diagNow - diagStartNs),
-                        diagMissing, diagSubmitted, diagSkipped,
-                        System.currentTimeMillis() - (diagNow - diagStartNs) / 1_000_000L);
-            }
             logger.debug("Entering finally block for model: {}", modelName);
             Map<String, WorkerStatus> currentStatuses =
                     workerDirectory.statusSnapshot(roleType);
