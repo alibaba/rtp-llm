@@ -6,19 +6,20 @@ from ....mhc.pre_apply_mix_kernel import _mhc_pre_apply_mix_bwd, _mhc_pre_apply_
 class MHCPreApplyMix(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: "MHCPreApplyMix",
+        ctx: "MHCPreApplyMix | None",
         x: torch.Tensor,
         mix: torch.Tensor,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        ctx.save_for_backward(x, mix)
+        if ctx is not None:
+            ctx.save_for_backward(x, mix)
         h = x.shape[-1]
         mhc = mix.shape[-2]
         assert mix.shape[-1] == 1
-        ctx.fwd_kernel = _mhc_pre_apply_mix_fwd(mhc, h)
+        fwd_kernel = _mhc_pre_apply_mix_fwd(mhc, h)
         if out is None:
             out = torch.empty(*x.shape[:-2], h, dtype=torch.bfloat16, device=x.device)
-        ctx.fwd_kernel(x.view(-1, mhc, h), mix.view(-1, mhc), out.view(-1, h))
+        fwd_kernel(x.view(-1, mhc, h), mix.view(-1, mhc), out.view(-1, h))
         return out
 
     @staticmethod
@@ -54,4 +55,6 @@ def mhc_pre_apply_mix(
     mix: torch.Tensor,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
+        return MHCPreApplyMix.forward(None, x, mix, out)
     return MHCPreApplyMix.apply(x, mix, out)

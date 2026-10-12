@@ -99,6 +99,76 @@ def test_cached_q_view_keeps_slice_boundaries_and_cp_region_limits():
             assert torch.equal(actual, expected)
 
 
+def test_projection_scratch_reuses_q_storage_without_allocations_or_live_aliases():
+    ws = PrefillWorkspace(
+        torch.device("cpu"), q_rows=9, q_dim=1024, reserve_cp=False, align_bytes=1
+    )
+    for rows in (1, 3, 4, 8, 9):
+        q, heads, rope = ws.prefill_q_head_views(rows, 2, 512, 64)
+        fp8, scales = ws.output_projection_quant_buffers(rows, 2, 512)
+        assert fp8.shape == (2, rows, 512)
+        padded = (rows + 3) // 4 * 4
+        assert scales.shape == (2, rows, 4)
+        assert scales.stride() == (4 * padded, 1, padded)
+        assert (
+            q.data_ptr() == heads.data_ptr() == fp8.data_ptr() == ws._union.data_ptr()
+        )
+        assert rope.shape == (rows, 2, 64)
+        assert rope.storage_offset() == 448
+        fp8_bytes = rows * 1024
+        assert scales.data_ptr() == ws._union.data_ptr() + fp8_bytes
+        # Packed scale padding must fit in the Q allocation and stay disjoint
+        # from the quantized values even for one unaligned row.
+        ws._union.fill_(0xA5)
+        scales.fill_(0)
+        assert bool((ws._union[:fp8_bytes] == 0xA5).all())
+        assert bool((ws._union[fp8_bytes + 2 * padded * 4 * 4 :] == 0xA5).all())
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as p:
+            cached_q = ws.prefill_q_head_views(rows, 2, 512, 64)
+            cached_quant = ws.output_projection_quant_buffers(rows, 2, 512)
+        assert cached_q[0] is q and cached_q[1] is heads and cached_q[2] is rope
+        assert cached_quant[0] is fp8 and cached_quant[1] is scales
+        assert not any(event.key.startswith("aten::") for event in p.key_averages())
+
+
+def test_projection_scratch_rejects_invalid_shapes_and_keeps_policy_forward_local():
+    with patch.dict(
+        "os.environ",
+        {
+            "DSV4_FP8_QUANT_KERNEL": "legacy",
+            "DSV4_INV_ROPE_FP8_QUANT_IMPL": "legacy",
+            "DSV4_INV_ROPE_HEADS_PER_CTA": "1",
+            "DSV4_INV_ROPE_NUM_WARPS": "4",
+        },
+    ):
+        ws = PrefillWorkspace(
+            torch.device("cpu"), q_rows=5, q_dim=1024, reserve_cp=False, align_bytes=1
+        )
+    with patch.dict(
+        "os.environ",
+        {
+            "DSV4_FP8_QUANT_KERNEL": "v2",
+            "DSV4_INV_ROPE_FP8_QUANT_IMPL": "optimized",
+            "DSV4_INV_ROPE_HEADS_PER_CTA": "8",
+            "DSV4_INV_ROPE_NUM_WARPS": "2",
+        },
+    ):
+        new_ws = PrefillWorkspace(
+            torch.device("cpu"), q_rows=5, q_dim=1024, reserve_cp=False, align_bytes=1
+        )
+    assert ws.fp8_quant_kernel == "legacy" and new_ws.fp8_quant_kernel == "v2"
+    assert ws.inv_rope_quant_config == ("legacy", "1", "4")
+    assert new_ws.inv_rope_quant_config == ("optimized", "8", "2")
+    for shape in ((0, 2, 512), (6, 2, 512), (4, 1, 512), (4, 2, 513)):
+        try:
+            ws.output_projection_quant_buffers(*shape)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected invalid scratch shape {shape} to be rejected")
+
+
 def test_attention_metadata_cache_tracks_query_domain_and_preserves_strides():
     ws = PrefillWorkspace(
         torch.device("cpu"), q_rows=4, q_dim=4, reserve_cp=False, align_bytes=1

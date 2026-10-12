@@ -13,6 +13,7 @@ covered by the SM100_ARM smoke suite.
 
 import os
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -96,6 +97,39 @@ class TestMegaMoeBufCodeChange(unittest.TestCase):
         self.assertEqual(out.shape, (T, D))
 
 
+class TestMegaGatePackViews(unittest.TestCase):
+    def test_live_rows_reuse_and_buffer_replacement(self):
+        from rtp_llm.models_py.modules.dsv4.moe.strategies.mega import MegaMoEStrategy
+
+        strategy = MegaMoEStrategy.__new__(MegaMoEStrategy)
+        torch.nn.Module.__init__(strategy)
+        strategy._mega_buf = types.SimpleNamespace(
+            x=torch.zeros(16, 8),
+            x_sf=torch.zeros(16, 2),
+            topk_idx=torch.zeros(16, 2, dtype=torch.int64),
+            topk_weights=torch.zeros(16, 2),
+        )
+        strategy._mega_y = torch.zeros(16, 8)
+        views = strategy._gate_pack_views(7)
+        self.assertIs(strategy._gate_pack_views(7), views)
+        views[0].fill_(3)
+        torch.testing.assert_close(strategy._mega_buf.x[:7], torch.full((7, 8), 3.0))
+        self.assertEqual(strategy._mega_buf.x[7:].count_nonzero().item(), 0)
+        for rows in (0, 1, 16, 7):
+            current = strategy._gate_pack_views(rows)
+            self.assertTrue(all(t.shape[0] == rows for t in current))
+            self.assertIs(strategy._gate_pack_views(rows), current)
+        strategy._mega_y = torch.ones(16, 8)
+        self.assertEqual(strategy._gate_pack_views(7)[-1].sum().item(), 56)
+        strategy._mega_buf = types.SimpleNamespace(
+            **{
+                name: value.clone() + 1
+                for name, value in vars(strategy._mega_buf).items()
+            }
+        )
+        self.assertEqual(strategy._gate_pack_views(7)[0][0, 0].item(), 4)
+
+
 class TestMegaBufferGraphBakedGate(unittest.TestCase):
     """Sleep-time buffer releases must be NO-OPS when CUDA graphs are captured.
 
@@ -122,6 +156,7 @@ class TestMegaBufferGraphBakedGate(unittest.TestCase):
 
         self.strat = _FakeStrat()
         self.strat._mega_y = self._buf
+        self.strat._mega_gate_pack_views = (self._buf[:2],)
         self.strat._mega_buf = object()  # opaque; must not be touched when baked
         mega_buf._MEGA_STRATEGY_REGISTRY.add(self.strat)
 
@@ -139,6 +174,7 @@ class TestMegaBufferGraphBakedGate(unittest.TestCase):
         # Buffer + per-strategy ref stay resident across sleep.
         self.assertEqual(len(self.mega_buf._MEGA_OUTPUT_CACHE), 1)
         self.assertIsNotNone(self.strat._mega_y)
+        self.assertIsNotNone(self.strat._mega_gate_pack_views)
         # Footprint is still reportable for the sleep-reclaim note.
         self.assertGreater(self.mega_buf.mega_output_buffer_gib(), 0.0)
 
@@ -149,6 +185,7 @@ class TestMegaBufferGraphBakedGate(unittest.TestCase):
         self.assertGreater(gib, 0.0)
         self.assertEqual(len(self.mega_buf._MEGA_OUTPUT_CACHE), 0)
         self.assertIsNone(self.strat._mega_y)
+        self.assertIsNone(self.strat._mega_gate_pack_views)
 
     def test_symm_release_is_noop_when_graph_baked(self):
         self.mega_buf.set_mega_buffers_graph_baked(True)
@@ -169,10 +206,12 @@ class TestMegaBufferGraphBakedGate(unittest.TestCase):
             self.assertIs(self.mega_buf._MEGA_BUF_CACHE["failed"], failed)
             self.assertIs(self.strat._mega_buf, failed)
             self.assertIs(self.strat._mega_y, self._buf)
+            self.assertIsNotNone(self.strat._mega_gate_pack_views)
             failed.destroy.side_effect = None
             self.assertGreater(self.mega_buf.release_mega_symm_buffers(), 0)
             self.assertEqual(self.mega_buf._MEGA_BUF_CACHE, {})
             self.assertIsNone(self.strat._mega_buf)
+            self.assertIsNone(self.strat._mega_gate_pack_views)
             self.assertIsNone(self.strat._mega_y)
 
     def test_partial_destroy_removes_only_successful_buffer(self):

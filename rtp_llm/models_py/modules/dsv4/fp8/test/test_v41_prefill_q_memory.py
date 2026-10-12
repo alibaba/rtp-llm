@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4 import chunk_env, prefill_workspace
 from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillQKV
@@ -88,7 +89,7 @@ class PrefillQMemoryTest(unittest.TestCase):
         owner.wq_b = project
         owner._prefill_output_all_reduce = Mock()
 
-        def output_project(o, freqs, *, out):
+        def output_project(o, freqs, *, out, workspace=None):
             events.append(("output", len(o)))
             attention.apply_rotary_emb(
                 o[..., -owner.rope_head_dim :].unsqueeze(0), freqs, inverse=True

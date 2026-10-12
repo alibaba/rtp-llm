@@ -54,6 +54,38 @@ def _metadata(m=33):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    def test_inverse_quant_buffers_elide_full_slices_and_cache_explicit_devices(self):
+        inverse = _load(
+            "v41_inverse_quant_contract",
+            _ROOT.parent / "_fused_inv_rope_fp8_quant_triton.py",
+        )
+        fp8, scales = inverse._alloc_output_buffers(5, 2, 512, 4, torch.device("cpu"))
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as p:
+            actual = inverse._alloc_output_buffers(
+                5, 2, 512, 4, torch.device("cpu"), fp8, scales
+            )
+        self.assertIs(actual[0], fp8)
+        self.assertIs(actual[1], scales)
+        self.assertFalse(any(e.key.startswith("aten::") for e in p.key_averages()))
+        short = inverse._alloc_output_buffers(
+            3, 2, 512, 4, torch.device("cpu"), fp8, scales
+        )
+        self.assertEqual(short[0].shape, (2, 3, 512))
+        self.assertEqual(short[1].stride(), scales.stride())
+        with mock.patch.object(
+            torch.cuda, "get_device_capability", side_effect=[(10, 3), (9, 0)]
+        ) as get_cap:
+            self.assertTrue(inverse._is_blackwell_device(torch.device("cuda:0")))
+            self.assertTrue(inverse._is_blackwell_device(0))
+            with mock.patch.object(torch.cuda, "current_device", return_value=1):
+                self.assertFalse(inverse._is_blackwell_device())
+            with mock.patch.object(torch.cuda, "current_device", return_value=0):
+                self.assertTrue(inverse._is_blackwell_device(torch.device("cuda")))
+            self.assertFalse(inverse._is_blackwell_device(torch.device("cpu")))
+            self.assertEqual(get_cap.call_args_list, [mock.call(0), mock.call(1)])
+
     def test_output_scale_alias_padding_stride_and_full_range_slice_elision(self):
         for m in (0, 1, 3, 4, 5, 512):
             with self.subTest(m=m), torch.profiler.profile(
@@ -75,6 +107,31 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 e.count for e in profile.key_averages() if e.key == "aten::slice"
             )
             self.assertEqual(slices, int(padded != m))
+
+    def test_inverse_quant_forward_config_and_public_environment_dispatch(self):
+        inverse = _load(
+            "v41_inverse_quant_dispatch",
+            _ROOT.parent / "_fused_inv_rope_fp8_quant_triton.py",
+        )
+        optimized, legacy = mock.MagicMock(), mock.MagicMock()
+        o = torch.empty(3, 8, 512, dtype=torch.bfloat16)
+        freqs = torch.ones(3, 32, dtype=torch.complex64)
+        with mock.patch.object(
+            inverse, "_fused_inv_rope_fp8_quant_group_heads", optimized
+        ), mock.patch.object(
+            inverse, "_fused_inv_rope_fp8_quant_per_head", legacy
+        ), mock.patch.dict(
+            os.environ, {"DSV4_INV_ROPE_FP8_QUANT_IMPL": "legacy"}
+        ):
+            inverse.fused_inv_rope_fp8_quant(
+                o, freqs, 1, 8, 448, 64, _launch_config=("optimized", "4", "2")
+            )
+            options = optimized.__getitem__.return_value.call_args.kwargs
+            self.assertEqual(options["HEADS_PER_CTA"], 4)
+            self.assertEqual(options["num_warps"], 2)
+            legacy.__getitem__.assert_not_called()
+            inverse.fused_inv_rope_fp8_quant(o, freqs, 1, 8, 448, 64)
+            legacy.__getitem__.return_value.assert_called_once()
 
     def test_quantize_keeps_contiguous_copy_and_restores_leading_dimensions(self):
         linear_cls = self._linear_class()
@@ -408,7 +465,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             packages[name].__path__ = []
         projection = SimpleNamespace(
             is_supported=mock.Mock(return_value=True),
-            try_grouped_output_quant=mock.Mock(),
+            _try_grouped_output_quant_supported=mock.Mock(),
             grouped_output_projection=mock.Mock(),
         )
         packages["rtp_llm.models_py.modules.dsv4.fp8"]._v41_output_projection = (
@@ -428,7 +485,9 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             ), mock.patch.dict(sys.modules, packages):
                 for operation in vars(projection).values():
                     operation.reset_mock()
-                projection.try_grouped_output_quant.return_value = result_pair
+                projection._try_grouped_output_quant_supported.return_value = (
+                    result_pair
+                )
                 projection.grouped_output_projection.return_value = bf16
                 linear = linear_cls()
                 linear.forward.return_value = linear.forward_quantized.return_value = (
@@ -443,6 +502,9 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 )
                 actual = namespace["_project_output"](owner, x, freqs, out=output)
                 self.assertIs(actual, output)
+                projection.is_supported.assert_called_once_with(
+                    x, freqs, owner._wo_a_stk_w, owner._wo_a_stk_s
+                )
                 if linear_cls is V41MXFP8Linear and result_pair is not None:
                     linear.forward_quantized.assert_called_once_with(*pair, out=output)
                     linear.forward.assert_not_called()
@@ -452,7 +514,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                     linear.forward_quantized.assert_not_called()
                     projection.grouped_output_projection.assert_called_once()
                 if linear_cls is OtherLinear:
-                    projection.try_grouped_output_quant.assert_not_called()
+                    projection._try_grouped_output_quant_supported.assert_not_called()
 
     def test_cpu_and_empty_inputs_fall_back(self):
         x = torch.empty(0, 8, 4096, dtype=torch.float8_e4m3fn)
@@ -540,6 +602,7 @@ class WoAQuantCudaTest(unittest.TestCase):
             raise unittest.SkipTest("Qualified SM100/SM103 device required")
         import deep_gemm
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
+
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             sgl_per_token_group_quant_fp8,
         )

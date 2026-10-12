@@ -125,6 +125,7 @@ def release_mega_output_buffers() -> tuple[int, float]:
     entries = len(_MEGA_OUTPUT_CACHE)
     for strat in list(_MEGA_STRATEGY_REGISTRY):
         try:
+            strat._mega_gate_pack_views = None
             strat._mega_y = None
         except Exception:
             pass
@@ -166,6 +167,7 @@ def release_mega_symm_buffers() -> float:
         buf.destroy()
         for strat in list(_MEGA_STRATEGY_REGISTRY):
             if strat._mega_buf is buf:
+                strat._mega_gate_pack_views = None
                 strat._mega_buf = None
         del _MEGA_BUF_CACHE[key]
     release_mega_output_buffers()

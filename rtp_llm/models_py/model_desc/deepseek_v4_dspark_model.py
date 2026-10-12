@@ -445,6 +445,62 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     # DSpark attention / block forward
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _commit_slot_metadata(
+        attn,
+        block_table: torch.Tensor,
+        context_req_ids: torch.Tensor,
+        context_positions: torch.Tensor,
+        committed_ends: torch.Tensor,
+        entries_per_block: int,
+        tokens_per_block: int,
+        metadata_by_geometry: Optional[dict] = None,
+    ):
+        """Share the write map only within one CP prefill commit.
+
+        The three draft pools hold different KV values, but their write slots
+        use the same request table and gathered row order. Pool geometry can
+        differ between layers, so it is part of the key. The caller owns both
+        the cache and all its inputs for this forward; no target-model or
+        previous-forward metadata is retained on the draft modules.
+        """
+        byte_sliced = attn._swa_cp_byte_sliced()
+        geometry = (
+            entries_per_block,
+            tokens_per_block,
+            byte_sliced,
+            int(attn._pool_raw_u8(SWA_KV).shape[0]) if byte_sliced else 0,
+        )
+        if metadata_by_geometry is not None:
+            metadata = metadata_by_geometry.get(geometry)
+            if metadata is not None:
+                return metadata
+
+        slots = compute_swa_slot_mapping_from_positions(
+            block_table=block_table,
+            req_id_per_token=context_req_ids,
+            positions=context_positions,
+            seq_lens=committed_ends,
+            num_tokens=int(context_positions.numel()),
+            pool_entries_per_block=entries_per_block,
+            tokens_per_block_for_block_table=tokens_per_block,
+            ring_entries=entries_per_block,
+        )
+        compaction = (
+            attn._build_swa_cp_byte_compaction(
+                slots,
+                full_entries_per_block=entries_per_block,
+                validation_site=f"dspark.commit.layer_{attn.layer_id}",
+                negative_mode="skip_minus_one",
+            )
+            if byte_sliced
+            else None
+        )
+        metadata = (slots, compaction)
+        if metadata_by_geometry is not None:
+            metadata_by_geometry[geometry] = metadata
+        return metadata
+
     @contextmanager
     def _swa_cache_bound(
         self,
@@ -485,6 +541,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         gathered_req_ids: Optional[torch.Tensor] = None,
         gathered_positions: Optional[torch.Tensor] = None,
         cp_ctx: Any = None,
+        metadata_by_geometry: Optional[dict] = None,
     ) -> None:
         """Insert committed target features through one layer's own
         wkv/kv_norm/RoPE pipeline. Rows superseded by newer SWA ring
@@ -502,6 +559,29 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             entries_per_block,
             pool,
         ):
+            write_req_ids = (
+                gathered_req_ids if gathered_positions is not None else context_req_ids
+            )
+            write_positions = (
+                gathered_positions
+                if gathered_positions is not None
+                else context_positions
+            )
+            metadata = None
+            if metadata_by_geometry is not None:
+                # Build before this layer's WKV/all-gather: the fallback
+                # compaction has a data-dependent size and would otherwise
+                # synchronize behind that unrelated GPU work on layer zero.
+                metadata = self._commit_slot_metadata(
+                    attn,
+                    block_table,
+                    write_req_ids,
+                    write_positions,
+                    committed_ends,
+                    entries_per_block,
+                    tokens_per_block,
+                    metadata_by_geometry,
+                )
             safe_context_pos = context_positions.to(torch.long).clamp_min(0)
             context_freqs = attn.freqs_cis.index_select(
                 0, safe_context_pos
@@ -520,21 +600,22 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 )
 
                 context_kv = all_gather(context_kv.contiguous(), group=Group.TP)
-                context_req_ids = gathered_req_ids
-                context_positions = gathered_positions
-            context_rows = int(context_positions.numel())
-            context_slots = compute_swa_slot_mapping_from_positions(
-                block_table=block_table[:batch_size]
-                .to(device=main_x.device, dtype=torch.int32)
-                .contiguous(),
-                req_id_per_token=context_req_ids,
-                positions=context_positions,
-                seq_lens=committed_ends,
-                num_tokens=context_rows,
-                pool_entries_per_block=entries_per_block,
-                tokens_per_block_for_block_table=tokens_per_block,
-                ring_entries=entries_per_block,
-            )
+            context_rows = int(write_positions.numel())
+            if metadata is None:
+                # Dense decode / CUDA graph calls keep their existing build
+                # location and recompute from the current graph input tensors.
+                metadata = self._commit_slot_metadata(
+                    attn,
+                    block_table[:batch_size]
+                    .to(device=main_x.device, dtype=torch.int32)
+                    .contiguous(),
+                    write_req_ids,
+                    write_positions,
+                    committed_ends,
+                    entries_per_block,
+                    tokens_per_block,
+                )
+            context_slots, compaction = metadata
             if attn._swa_cp_byte_sliced():
                 # Sharded prefill: same full-domain slots, but each rank owns
                 # only its byte slice of every block — route through the
@@ -549,12 +630,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         _swa_kv_insert_triton as insert_ops,
                     )
 
-                compaction = attn._build_swa_cp_byte_compaction(
-                    context_slots,
-                    full_entries_per_block=entries_per_block,
-                    validation_site=f"dspark.commit.layer_{layer_idx}",
-                    negative_mode="skip_minus_one",
-                )
                 insert_ops.quantize_and_insert_k_cache_cp_byte_sliced(
                     context_kv.reshape(-1, int(attn.head_dim)).to(torch.bfloat16),
                     attn._pool_raw_u8(SWA_KV),
@@ -651,6 +726,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         )
         gathered_req_ids: Optional[torch.Tensor] = None
         gathered_positions: Optional[torch.Tensor] = None
+        metadata_by_geometry = None
         if commit_ctx is not None:
             # Proj-then-gather: the row map is gathered once here; each
             # layer's projected KV is gathered inside _commit_layer_features.
@@ -660,6 +736,16 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             gathered_positions = all_gather(
                 context_positions.contiguous(), group=Group.TP
             )
+            block_table = (
+                block_table[:batch_size]
+                .to(device=main_x.device, dtype=torch.int32)
+                .contiguous()
+            )
+            # Each layer consumes on the current forward stream; retain the
+            # shared tensors until the final writer has been enqueued. A new
+            # local cache also makes failures and retries unable to reuse an
+            # old request's physical pages or CP row order.
+            metadata_by_geometry = {}
         layer_forward_range = _profiler.make_layer_forward_range()
         for layer_idx in range(len(self.v4.layers)):
             with layer_forward_range(layer_idx):
@@ -675,6 +761,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                     gathered_req_ids=gathered_req_ids,
                     gathered_positions=gathered_positions,
                     cp_ctx=commit_ctx,
+                    metadata_by_geometry=metadata_by_geometry,
                 )
                 # PD-separated prefill publishes each committed draft-layer
                 # cache from the commit call: the published range is exactly

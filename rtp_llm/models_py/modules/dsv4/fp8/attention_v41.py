@@ -13,6 +13,7 @@ from bisect import bisect_left
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.attn_type import (
@@ -431,7 +432,7 @@ def rope_only(x, freqs, rope_dim):
     return x
 
 
-def _prefill_q_rope(x, freqs, rope_dim):
+def _prefill_q_rope(x, freqs, rope_dim, *, rope_view=None):
     """Rotate the BF16 projection in place without an FP32 Q-sized temporary."""
     if x.numel() == 0 or rope_dim == 0:
         return x
@@ -445,7 +446,7 @@ def _prefill_q_rope(x, freqs, rope_dim):
         and 0 < rope_dim <= x.shape[-1]
         and rope_dim % 2 == 0
     ):
-        rope_only_inplace(x[..., -rope_dim:], freqs)
+        rope_only_inplace(x[..., -rope_dim:] if rope_view is None else rope_view, freqs)
         return x
     return rope_only(x, freqs, rope_dim)
 
@@ -682,7 +683,7 @@ class AttentionV41FP8(AttentionFP8):
         norm, quantized, scales = result
         return norm, (quantized, scales)
 
-    def _project_output(self, o, freqs, out=None):
+    def _project_output(self, o, freqs, out=None, *, workspace=None):
         from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
 
         if o.ndim != 3 or o.shape[1:] != (self.n_heads, self.head_dim):
@@ -693,14 +694,14 @@ class AttentionV41FP8(AttentionFP8):
             from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
 
             if type(self.wo_b) is V41MXFP8Linear:
-                quantized = _v41_output_projection.try_grouped_output_quant(
-                    o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
+                quantized = _v41_output_projection._try_grouped_output_quant_supported(
+                    o, freqs, self._wo_a_stk_w, self._wo_a_stk_s, workspace
                 )
                 if quantized is not None:
                     return self.wo_b.forward_quantized(*quantized, out=out)
 
             projected = _v41_output_projection.grouped_output_projection(
-                o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
+                o, freqs, self._wo_a_stk_w, self._wo_a_stk_s, workspace=workspace
             )
             return self.wo_b(projected, out=out)
         apply_rotary_emb(
@@ -716,8 +717,8 @@ class AttentionV41FP8(AttentionFP8):
         )
         return self.wo_b(projected.flatten(1), out=out)
 
-    def _prefill_output_proj_into(self, o, freqs_cis, *, out):
-        self._project_output(o, freqs_cis, out=out)
+    def _prefill_output_proj_into(self, o, freqs_cis, *, out, workspace=None):
+        self._project_output(o, freqs_cis, out=out, workspace=workspace)
 
     def _ensure_freqs_cis_bound(self):
         # V4.1 has no independent compressor module or nested index compressor.
@@ -908,16 +909,17 @@ class AttentionV41FP8(AttentionFP8):
 
     def _project_prefill_q(self, qr, freqs_cis, workspace):
         rows = qr.shape[0]
-        q_out = workspace.prefill_q(rows)
-        if q_out.shape != (rows, self.n_heads * self.head_dim):
-            q_out = q_out.view(rows, self.n_heads * self.head_dim)
+        q_out, q, q_rope = workspace.prefill_q_head_views(
+            rows, self.n_heads, self.head_dim, self.rope_head_dim
+        )
         if rows == 0:
-            return q_out.view(rows, self.n_heads, self.head_dim)
+            return q
         with record_function_range("dsv41.prefill.q_lora_b_rope"):
-            q = self._lin(self.wq_b, qr, out=q_out).view(
-                rows, self.n_heads, self.head_dim
-            )
-            return _prefill_q_rope(q, freqs_cis, self.rope_head_dim)
+            projected = self._lin(self.wq_b, qr, out=q_out)
+            if projected is not q_out:
+                q = projected.view(rows, self.n_heads, self.head_dim)
+                q_rope = None
+            return _prefill_q_rope(q, freqs_cis, self.rope_head_dim, rope_view=q_rope)
 
     def _prefill_sparse_attention(
         self, qkv, common, *, kv, indices, topk_length, profile_name
@@ -951,7 +953,12 @@ class AttentionV41FP8(AttentionFP8):
                     topk_length=lengths,
                 )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
-                self._prefill_output_proj_into(o, freqs, out=target)
+                # FlashMLA has submitted the final Q read on this stream. Its
+                # separate output tensor remains live while output quantization
+                # overwrites the now-dead Q workspace, before the next chunk.
+                self._prefill_output_proj_into(
+                    o, freqs, out=target, workspace=common.workspace
+                )
             dispose_tensor(o)
         self._prefill_output_all_reduce(out)
         return out

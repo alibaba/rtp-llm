@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -188,6 +189,168 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         outputs = model.dspark_empty_outputs(2, torch.device("cpu"))
 
         self.assertEqual(tuple(outputs.hidden_states.shape), (6, 8))
+
+    def test_commit_metadata_reuses_only_matching_pool_geometry(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
+            build_cp_byte_sliced_slot_compaction,
+        )
+
+        table = torch.tensor([[2, 5], [2, 0]], dtype=torch.int32)
+        # Gathered CP order, including padding and a shared physical page.
+        requests = torch.tensor([0, 1, 0, -1, 0, 1], dtype=torch.int32)
+        positions = torch.tensor([14, 14, 16, -1, 17, 15], dtype=torch.int32)
+        ends = torch.tensor([18, 16], dtype=torch.int32)
+        cache = {}
+        compaction_calls = []
+
+        def compact(slots, *, full_entries_per_block, **_kwargs):
+            compaction_calls.append(slots)
+            return build_cp_byte_sliced_slot_compaction(
+                slots,
+                full_entries_per_block,
+                num_blocks=8,
+                validation_site="test",
+                negative_mode="skip_minus_one",
+            )
+
+        attention = SimpleNamespace(
+            layer_id=0,
+            _swa_cp_byte_sliced=lambda: True,
+            _pool_raw_u8=lambda _region: torch.empty((8, 4), dtype=torch.uint8),
+            _build_swa_cp_byte_compaction=compact,
+        )
+
+        def reference_slots(**kwargs):
+            # Scalar reference preserves the last ring generation within
+            # each logical block, rather than deduplicating request rows.
+            entries = kwargs["pool_entries_per_block"]
+            span = kwargs["tokens_per_block_for_block_table"]
+            result = []
+            for req, pos in zip(requests.tolist(), kwargs["positions"].tolist()):
+                if req < 0 or pos < 0 or pos // span >= table.shape[1]:
+                    result.append(-1)
+                    continue
+                end = min(((pos // span) + 1) * span, int(ends[req]))
+                block = int(table[req, pos // span])
+                result.append(
+                    block * entries + pos % entries
+                    if block > 0 and pos + entries >= end
+                    else -1
+                )
+            return torch.tensor(result, dtype=torch.long)
+
+        build_metadata = dspark_model_module.DeepSeekV4DSparkModel._commit_slot_metadata
+        with patch.object(
+            dspark_model_module,
+            "compute_swa_slot_mapping_from_positions",
+            side_effect=reference_slots,
+        ) as mapper:
+            first = build_metadata(
+                attention, table, requests, positions, ends, 8, 16, cache
+            )
+            for layer_id in (1, 2):
+                attention.layer_id = layer_id
+                self.assertIs(
+                    build_metadata(
+                        attention, table, requests, positions, ends, 8, 16, cache
+                    ),
+                    first,
+                )
+            self.assertEqual(mapper.call_count, 1)
+            self.assertEqual(len(compaction_calls), 1)
+            self.assertEqual(first[0].tolist(), [22, 22, 40, -1, 41, 23])
+            self.assertEqual(first[1].unique_blocks.tolist(), [2, 5])
+            self.assertEqual(first[1].compact_slots.tolist(), [6, 6, 8, -1, 9, 7])
+
+            # Different ring capacity or table span must build independently.
+            other = build_metadata(
+                attention, table, requests, positions, ends, 16, 16, cache
+            )
+            self.assertIsNot(first, other)
+            self.assertEqual(other[0].tolist(), [46, 46, 80, -1, 81, 47])
+            build_metadata(attention, table, requests, positions, ends, 8, 32, cache)
+            self.assertEqual(mapper.call_count, 3)
+
+            # A new forward can mutate the same input objects in place; a
+            # new local dictionary must rebuild rather than key by identity.
+            positions[0] = 13
+            next_forward = build_metadata(
+                attention, table, requests, positions, ends, 8, 16, {}
+            )
+            self.assertEqual(next_forward[0][0].item(), 21)
+            self.assertEqual(mapper.call_count, 4)
+
+            # Replicated caches never inherit a byte-sliced compaction.
+            attention._swa_cp_byte_sliced = lambda: False
+            replicated = build_metadata(
+                attention, table, requests, positions, ends, 8, 16, cache
+            )
+            self.assertIsNone(replicated[1])
+            self.assertEqual(mapper.call_count, 5)
+            self.assertEqual(len(compaction_calls), 4)
+
+    def test_commit_cache_lifetime_is_local_even_after_layer_failure(self) -> None:
+        model = _dspark_harness()
+        model.v4 = SimpleNamespace(layers=[object(), object(), object()])
+        model.kv_cache = object()
+        model._swa_block_table = lambda *_args: torch.tensor([[1]], dtype=torch.int32)
+        contexts = []
+        caches = []
+        fail = False
+
+        def commit_layer(layer_idx, *_args, **kwargs):
+            cache = kwargs["metadata_by_geometry"]
+            contexts.append(kwargs["cp_ctx"])
+            caches.append(cache)
+            if cache is not None:
+                cache["test-marker"] = True
+            if fail and layer_idx == 1:
+                raise RuntimeError("injected layer failure")
+
+        model._commit_layer_features = commit_layer
+        rows = torch.zeros((2, 4), dtype=torch.bfloat16)
+        req = torch.zeros(2, dtype=torch.int32)
+        pos = torch.tensor([0, 1], dtype=torch.int32)
+        ends = torch.tensor([2], dtype=torch.int32)
+        inputs = SimpleNamespace(attention_inputs=object())
+        cp = SimpleNamespace(cp_size=4, cp_rank=0, kv_cache_sharded=True)
+        with (
+            patch.object(dspark_model_module, "cached_swa_region", return_value=0),
+            patch.object(
+                dspark_model_module, "require_pool_tokens_per_block", return_value=16
+            ),
+            patch.object(
+                dspark_model_module, "create_write_cache_store_impl", return_value=None
+            ),
+            patch.object(
+                dspark_model_module._profiler,
+                "make_layer_forward_range",
+                return_value=lambda _: nullcontext(),
+            ),
+            patch(
+                "rtp_llm.models_py.distributed.collective_torch.all_gather",
+                side_effect=lambda tensor, **_kwargs: torch.cat((tensor, tensor)),
+            ),
+        ):
+            model.commit_feature_rows(rows, req, pos, ends, inputs, commit_ctx=cp)
+            self.assertTrue(all(cache is caches[0] for cache in caches))
+            self.assertTrue(all(context is cp for context in contexts))
+            self.assertEqual(len(caches), 3)
+
+            fail = True
+            with self.assertRaisesRegex(RuntimeError, "injected layer failure"):
+                model.commit_feature_rows(rows, req, pos, ends, inputs, commit_ctx=cp)
+            self.assertIs(caches[3], caches[4])
+            self.assertIsNot(caches[3], caches[0])
+
+            fail = False
+            model.commit_feature_rows(rows, req, pos, ends, inputs, commit_ctx=cp)
+            self.assertIsNot(caches[5], caches[3])
+            self.assertTrue(all(cache is caches[5] for cache in caches[5:8]))
+
+            # Non-CP dense/graph commits keep the prior per-layer path.
+            model.commit_feature_rows(rows, req, pos, ends, inputs)
+            self.assertEqual(caches[8:], [None, None, None])
 
     def test_padded_graph_slot_maps_no_rows_with_prefix_sum_starts(self) -> None:
         # A graph bucket of two requests replays a one-request batch. Rows
@@ -425,24 +588,41 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
         gathered_positions = torch.tensor([10, 12, 11, 13], dtype=torch.int32)
         expected_slots = torch.tensor([26, 28, 27, 29], dtype=torch.long)
 
-        for byte_sliced, entry_bytes in (
-            (False, 584),
-            (True, 584),
-            (False, 528),
-            (True, 528),
+        for byte_sliced, entry_bytes, reuse_metadata in (
+            (False, 584, False),
+            (True, 584, False),
+            (False, 528, False),
+            (True, 528, False),
+            (False, 584, True),
+            (True, 584, True),
+            (False, 528, True),
+            (True, 528, True),
         ):
-            with self.subTest(byte_sliced=byte_sliced, entry_bytes=entry_bytes):
+            with self.subTest(
+                byte_sliced=byte_sliced,
+                entry_bytes=entry_bytes,
+                reuse_metadata=reuse_metadata,
+            ):
                 model = _dspark_harness(gamma=1)
                 attention = FakeAttention(byte_sliced, entry_bytes)
                 model.v4 = SimpleNamespace(layers=[SimpleNamespace(attn=attention)])
                 model.kv_cache = object()
                 commit_cp_ctx = SimpleNamespace(cp_rank=1, cp_size=2)
+                launch_order = []
+
+                def project(*_args, **_kwargs):
+                    launch_order.append("project")
+                    return local_kv
+
+                def map_slots(*_args, **_kwargs):
+                    launch_order.append("metadata")
+                    return expected_slots
 
                 with (
                     patch.object(
                         dspark_model_module,
                         "fused_rmsnorm_rope",
-                        return_value=local_kv,
+                        side_effect=project,
                     ),
                     patch(
                         "rtp_llm.models_py.distributed.collective_torch.all_gather",
@@ -451,7 +631,7 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                     patch.object(
                         dspark_model_module,
                         "compute_swa_slot_mapping_from_positions",
-                        return_value=expected_slots,
+                        side_effect=map_slots,
                     ) as slot_mapper,
                     patch.object(
                         dspark_model_module, "decode_write_swa_fp8"
@@ -481,9 +661,18 @@ class DSparkCudaGraphContractTest(unittest.TestCase):
                         gathered_req_ids=gathered_req_ids,
                         gathered_positions=gathered_positions,
                         cp_ctx=commit_cp_ctx,
+                        metadata_by_geometry={} if reuse_metadata else None,
                     )
 
                 all_gather.assert_called_once()
+                self.assertEqual(
+                    launch_order,
+                    (
+                        ["metadata", "project"]
+                        if reuse_metadata
+                        else ["project", "metadata"]
+                    ),
+                )
                 self.assertTrue(
                     torch.equal(
                         slot_mapper.call_args.kwargs["positions"],

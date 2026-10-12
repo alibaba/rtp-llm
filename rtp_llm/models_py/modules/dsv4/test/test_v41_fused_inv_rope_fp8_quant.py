@@ -13,10 +13,12 @@ from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._v41_output_projection import (
+    _quantize_projection_input,
     grouped_output_projection,
     is_supported,
     quantization_scale_min,
 )
+from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import apply_rotary_emb
 
 
@@ -69,6 +71,40 @@ def make_inputs(rows, seed=0):
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class V41OutputProjectionTest(unittest.TestCase):
+    def test_prefill_scratch_reuse_matches_private_buffers_and_graph_replay(self):
+        workspace = PrefillWorkspace(
+            torch.device("cuda"),
+            q_rows=128,
+            q_dim=64 * 512,
+            reserve_cp=False,
+            align_bytes=1,
+        )
+        weight = torch.empty((8, 1024, 4096), device="meta")
+        for rows in (1, 3, 17, 128, 17):
+            with self.subTest(rows=rows):
+                o, freqs = make_inputs(rows, rows)
+                original = o.clone()
+                expected = _quantize_projection_input(o, freqs, weight)
+                actual = _quantize_projection_input(o, freqs, weight, workspace)
+                self.assert_quant_equal(expected, actual)
+                torch.testing.assert_close(o, original, rtol=0, atol=0)
+                torch.cuda.synchronize()
+                allocated = torch.cuda.memory_allocated()
+                torch.cuda.reset_peak_memory_stats()
+                _quantize_projection_input(o, freqs, weight, workspace)
+                torch.cuda.synchronize()
+                self.assertEqual(torch.cuda.max_memory_allocated(), allocated)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = _quantize_projection_input(o, freqs, weight, workspace)
+        torch.cuda.current_stream().wait_stream(stream)
+        o.mul_(0.75)
+        expected = _quantize_projection_input(o, freqs, weight)
+        graph.replay()
+        self.assert_quant_equal(expected, captured)
+
     def assert_quant_equal(self, expected, actual):
         for ref, got in zip(expected, actual):
             self.assertEqual(ref.shape, got.shape)
