@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, ModelOptFp4Config
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -34,6 +34,7 @@ _PLE_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_PLE"
 _PLE_CPU_OFFLOAD_ENV = "RTP_LLM_QWEN4_PLE_CPU_OFFLOAD"
 _QSA_ENV = "RTP_LLM_ENABLE_QWEN4_EXP_QSA"
 _GRAPH_EXPERIMENTAL_ENV = "RTP_LLM_QWEN4_EXP_GRAPH_EXPERIMENTAL"
+_MOE_FP4_ENV = "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL"
 _MOE_FP8_ENV = "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL"
 
 
@@ -96,6 +97,17 @@ class Qwen4Exp(Qwen35Moe):
         # change which model implementation is loaded.
         config = getattr(self, "model_config", None)
         moe_only_fp8 = getattr(config, "_qwen4_moe_only_fp8", False) is True
+        moe_only_fp4 = getattr(config, "_qwen4_moe_only_fp4", False) is True
+        if moe_only_fp4:
+            quant = getattr(config, "quant_config", None)
+            if (
+                not isinstance(quant, ModelOptFp4Config)
+                or quant.is_quanted()
+                or quant.group_size() != 16
+            ):
+                raise RuntimeError(
+                    "qwen4_exp online expert NVFP4 requires BF16 source and block16"
+                )
         if moe_only_fp8:
             quant = getattr(config, "quant_config", None)
             parallelism = getattr(self, "parallelism_config", None)
@@ -130,7 +142,7 @@ class Qwen4Exp(Qwen35Moe):
             quant_config = getattr(config, "quant_config", None)
             is_quanted = getattr(quant_config, "is_quanted", None)
             if (
-                not moe_only_fp8
+                not (moe_only_fp8 or moe_only_fp4)
                 and quant_config is not None
                 and (not callable(is_quanted) or bool(is_quanted()))
             ):
@@ -225,6 +237,22 @@ class Qwen4Exp(Qwen35Moe):
     def _create_config(cls, ckpt_path: str) -> ModelConfig:
         config = super()._create_config(ckpt_path)
         config._qwen4_moe_only_fp8 = False
+        config._qwen4_moe_only_fp4 = False
+        if str_to_bool(os.environ.get(_MOE_FP4_ENV, "false")):
+            root = Path(ckpt_path)
+            config_json = json.loads((root / "config.json").read_text())
+            if config_json.get("quantization_config"):
+                raise ValueError(
+                    "Qwen4 online NVFP4 requires an unquantized BF16 source"
+                )
+            config.quant_config = ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                activation_amax=32.0,
+                require_contiguous_experts=True,
+            )
+            config._qwen4_moe_only_fp4 = True
         if str_to_bool(os.environ.get(_MOE_FP8_ENV, "false")):
             from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
 
@@ -346,6 +374,15 @@ class Qwen4Exp(Qwen35Moe):
 
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        if getattr(model_config, "_qwen4_moe_only_fp4", False) is True:
+            model_config.quant_config = ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                activation_amax=32.0,
+                require_contiguous_experts=True,
+            )
+            model_config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
         ple_layer_ids = (
             getattr(model_config, "_qwen4_ple_layer_ids", [])
             if model_config.enable_qwen4_ple

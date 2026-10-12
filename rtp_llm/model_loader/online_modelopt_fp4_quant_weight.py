@@ -10,8 +10,9 @@ The math follows ModelOptimizer's NVFP4 reference (block_size=16):
     per_block_scale = per_block_amax / (FLOAT4_E2M1_MAX * weight_scale_2)
     q4 = round(W / (per_block_scale.fp8 * weight_scale_2))   -> packed e2m1 uint8
 
-input_scale defaults to 1.0 because no calibration data is available; the FP4
-executors fall back to dynamic per-block activation quantization.
+An explicit activation_amax supplies the activation dequant global scale;
+otherwise the existing 1.0 contract is preserved. Per-block activation scaling
+remains dynamic. Online weights are not a calibrated checkpoint.
 """
 
 from typing import Any, Optional
@@ -21,7 +22,7 @@ import torch
 from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
-from rtp_llm.model_loader.tensor_source import TensorSource
+from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
 from rtp_llm.model_loader.weight_module import (
     CompositeWeight,
     QuantWeight,
@@ -216,6 +217,14 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         self.scale_2 = scale_2
         self.input_scale = input_scale
         self._block_size = max(quant_config.group_size(), NVFP4_BLOCK_SIZE)
+        activation_amax = quant_config.activation_amax
+        self._input_scale = (
+            1.0
+            if activation_amax is None
+            else float(activation_amax) / (FLOAT4_E2M1_MAX * FLOAT8_E4M3_MAX)
+        )
+        if not 0 < self._input_scale < float("inf"):
+            raise ValueError("online NVFP4 activation amax must be finite and positive")
 
     def get_tensor_names(
         self, layer_id: Optional[int], load_config: LoadConfig
@@ -230,24 +239,83 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         device: str,
         load_config: LoadConfig,
     ):
-        kernel_dict = self.kernel._load_raw_tensor(
-            tensor_source, layer_id, device, load_config
+        # Keep the temporary BF16 allocation bounded to one expert while
+        # previously quantized layers remain resident.
+        selected = load_config.get_selected_experts(
+            layer_id, self.kernel.config.expert_num
         )
-        weight = kernel_dict[self.kernel.name]
-        # Quantize on the device the tensor already lives on (typically GPU).
-        packed, block_scale, scale_2 = _quantize_moe_weight(
-            weight, block_size=self._block_size
-        )
-        num_experts = weight.shape[0]
-        input_scale = torch.ones(
-            [num_experts], dtype=torch.float32, device=weight.device
-        )
-        return {
-            self.kernel.name: packed,
-            self.scale.name: block_scale,
-            self.scale_2.name: scale_2,
-            self.input_scale.name: input_scale,
-        }
+        if not selected:
+            raise ValueError("online NVFP4 requires at least one local expert")
+        if self.quant_config.require_contiguous_experts:
+            count = self.kernel.config.expert_num // load_config.ep_size
+            expected = list(
+                range(count * load_config.ep_rank, count * (load_config.ep_rank + 1))
+            )
+            if list(selected) != expected:
+                raise ValueError(
+                    "CUTLASS NVFP4 requires contiguous logical expert ownership"
+                )
+        if self.kernel.stacked_ckpt_keys and tensor_source.has_tensor(
+            self.kernel.weights[0].tensor_name(layer_id)
+        ):
+            # Share the CPU stacked cache across expert reads. Hide raw keys
+            # from the nested loader so it consumes logical slices directly.
+            class ExpertTensorSource(StackSplitTensorSource):
+                def has_tensor(self, name):
+                    if name in self._split_config:
+                        return super().has_tensor(name)
+                    return False
+
+            tensor_source = ExpertTensorSource(
+                tensor_source, self.kernel._build_split_config(layer_id, load_config)
+            )
+        output = None
+        for expert_index, expert_id in enumerate(selected):
+
+            class ExpertLoadConfig:
+                def __getattr__(self, name):
+                    return getattr(load_config, name)
+
+                def get_selected_experts(self, requested_layer, expert_count):
+                    return [expert_id]
+
+            kernel_dict = self.kernel._load_raw_tensor(
+                tensor_source, layer_id, device, ExpertLoadConfig()
+            )
+            weight = kernel_dict[self.kernel.name]
+            if weight.ndim != 3 or weight.shape[0] != 1:
+                raise ValueError("online NVFP4 expected exactly one expert")
+            packed, scale, scale_2 = quantize_expert_to_nvfp4(
+                weight[0], self._block_size
+            )
+            if output is None:
+                output = {
+                    self.kernel.name: torch.empty(
+                        (len(selected), *packed.shape),
+                        dtype=packed.dtype,
+                        device=packed.device,
+                    ),
+                    self.scale.name: torch.empty(
+                        (len(selected), *scale.shape),
+                        dtype=scale.dtype,
+                        device=scale.device,
+                    ),
+                    self.scale_2.name: torch.empty(
+                        len(selected), dtype=torch.float32, device=packed.device
+                    ),
+                    # This explicit activation range is not calibration.
+                    self.input_scale.name: torch.full(
+                        (len(selected),),
+                        self._input_scale,
+                        dtype=torch.float32,
+                        device=packed.device,
+                    ),
+                }
+            output[self.kernel.name][expert_index].copy_(packed)
+            output[self.scale.name][expert_index].copy_(scale)
+            output[self.scale_2.name][expert_index].copy_(scale_2)
+            del weight, kernel_dict, packed, scale, scale_2
+        return output
 
     def _postprocess(
         self,

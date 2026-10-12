@@ -21,6 +21,7 @@ MOE_STRATEGY_CHOICES = (
     "fp4_ep_low_latency",
     "fp4_ep_normal",
     "fp4_no_dp",
+    "nvfp4_cutlass",
     "mega_moe",
     "mega_moe_se",
     "grouped_fp4",
@@ -206,7 +207,7 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         env_name="FP4_MOE_OP",
         bind_to=(moe_config, "fp4_moe_op"),
         type=str,
-        choices=["auto", "trtllm", "cutedsl"],
+        choices=["auto", "trtllm", "cutedsl", "cutlass"],
         default="auto",
         help="指定 FP4 MOE算子。可选值: auto (自动选择), trtllm (使用 TensorRT-LLM), cutedsl (使用 CuTe DSL)。",
     )

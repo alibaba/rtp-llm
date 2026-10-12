@@ -79,3 +79,9 @@ py_test(
         'gpu': 'MI308X-ROCM7',
     },
 )
+
+py_test(
+    name = "test_online_modelopt_fp4",
+    srcs = ["test_online_modelopt_fp4.py"],
+    deps = py_test_deps,
+)
