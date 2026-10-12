@@ -1230,6 +1230,19 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     }
 }
 
+TEST_F(MtpExecutorTest, testMtpTargetHiddenRowsZeroUsesTensorRows) {
+    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    GptModelOutputs output;
+    output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat);
+
+    // Prefill can pass zero as an unspecified row hint. The explicit MTP
+    // tensor follows the same contract as getMtpTargetHiddenStates below.
+    components.executor->maybeOverrideLastHiddenWithMtpBuffer(output, *components.fake_target_model, 0);
+    ASSERT_TRUE(output.all_hidden_states.defined());
+    EXPECT_EQ(output.all_hidden_states.data_ptr(), output.mtp_target_hidden_states.data_ptr());
+    EXPECT_EQ(output.all_hidden_states.size(0), 3);
+}
+
 void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;
