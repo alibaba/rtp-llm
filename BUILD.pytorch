@@ -53,10 +53,15 @@ cc_library(
         "@//:using_cuda13_x86": [
             "torch/lib/libtorch_nvshmem.so",
             "@pip_gpu_cuda13_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            # Python Torch preloads this wheel's NCCL by absolute path. Carry
+            # the same library in C++ runfiles/RPATH: loading system NCCL first
+            # creates two parameter registries and double-frees them at exit.
+            "@pip_gpu_cuda13_torch_nvidia_nccl_cu13//:site-packages/nvidia/nccl/lib/libnccl.so.2",
         ],
         "@//:using_cuda13_arm": [
             "torch/lib/libtorch_nvshmem.so",
             "@pip_cuda13_arm_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            "@pip_cuda13_arm_torch_nvidia_nccl_cu13//:site-packages/nvidia/nccl/lib/libnccl.so.2",
             # The ARM wheel bundles these libtorch_cpu dependencies under
             # torch/lib, not the torch.libs directory used by older wheels.
             "torch/lib/libarm_compute.so",
