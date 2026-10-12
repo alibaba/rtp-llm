@@ -25,10 +25,11 @@ import math
 import mmap
 import os
 import shutil
+import threading
 import time
 import uuid
 import weakref
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -672,8 +673,21 @@ def engram_cpu_lookup_enabled():
     return os.getenv("DSV41_CPU_ENGRAM_LOOKUP", "0") == "1"
 
 
-def _hash_token_windows_cpu(state, windows, image_token):
-    """Single-threaded integer hashing, without the PyTorch intra-op pool."""
+def _hash_token_windows_cpu(state, windows, image_token, num_threads=None):
+    """Native token-parallel hash; NumPy remains an independent CPU oracle."""
+    if num_threads is not None:
+        from rtp_llm.models_py.modules.dsv4.engram_cpu import hash_token_windows_cpu
+
+        return hash_token_windows_cpu(
+            windows,
+            state.token_map,
+            state.multipliers,
+            state.primes,
+            state.layout.offsets,
+            pad_id=state.pad_id,
+            image_token=image_token,
+            num_threads=num_threads,
+        )
     values = windows.detach().numpy().astype(np.int64, copy=False)
     token_map = state.token_map.numpy()
     blocked = np.logical_or.accumulate(
@@ -702,10 +716,22 @@ def _hash_token_windows_cpu(state, windows, image_token):
     return torch.from_numpy(hashes)
 
 
+def _timed_cpu_hash(state, windows, image_token, num_threads, timing):
+    if timing is not None:
+        timing["hash_started_ns"] = time.perf_counter_ns()
+    try:
+        return _hash_token_windows_cpu(state, windows, image_token, num_threads)
+    finally:
+        if timing is not None:
+            timing["hash_finished_ns"] = time.perf_counter_ns()
+
+
 class _EngramCPULookupSlot:
     """Fixed host storage; request outputs belong to their allocation stream."""
 
     def __init__(self, module, capacity):
+        from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
+
         self.embedding = module.embed_tokens
         self.device = module.q_weight.device
         self.hash_index = module.layer_hash_index
@@ -716,9 +742,15 @@ class _EngramCPULookupSlot:
             raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
         self.collect_timing = os.getenv("DSV41_CPU_ENGRAM_LOOKUP_TIMING", "0") == "1"
         self.last_timing = None
-        self.width = self.heads * module.layout.head_dim
+        self.deadline_enabled = True
+        self.packed = type(module.wkv) is V41MXFP8Linear
+        self.head_dim = module.layout.head_dim
+        self.width = self.heads * (
+            self.head_dim + self.head_dim // 32 if self.packed else self.head_dim
+        )
+        self.dtype = torch.uint8 if self.packed else torch.bfloat16
         self.host = torch.empty(
-            (capacity, self.width), dtype=torch.bfloat16, device="cpu", pin_memory=True
+            (capacity, self.width), dtype=self.dtype, device="cpu", pin_memory=True
         )
         self.stream = torch.cuda.Stream(device=self.device)
         self.copied = torch.cuda.Event()
@@ -731,14 +763,16 @@ class _EngramCPULookupSlot:
     def allocate_output(self, count):
         current = torch.cuda.current_stream(self.device)
         output = torch.empty(
-            (count, self.width), dtype=torch.bfloat16, device=self.device
+            (count, self.width),
+            dtype=getattr(self, "dtype", torch.bfloat16),
+            device=self.device,
         )
         # Record before submitting the worker. A later worker-side recording
         # could include the consumer's wait for copied and create a cycle.
         self.allocated.record(current)
         return output, current
 
-    def run(self, hashes, output, submitted_ns=None):
+    def run(self, hashes, output, submitted_ns=None, work=None):
         from rtp_llm.models_py.modules.dsv4.engram_cpu import lookup_host_rows_cpu
 
         with torch.inference_mode(), torch.cuda.device(self.device):
@@ -748,16 +782,34 @@ class _EngramCPULookupSlot:
                     if self.collect_timing
                     else None
                 )
+                if work is not None:
+                    if work.timing is not None:
+                        work.timing.update(timing)
+                    timing = work.timing
+                    self.last_timing = timing
+                    if work.abandoned:
+                        return None
                 ids = torch.from_numpy(
                     np.ascontiguousarray(hashes.result().numpy()[:, self.hash_index])
                 )
+                if timing is not None:
+                    timing.update(getattr(hashes, "engram_timing", None) or {})
+                if work is not None and work.abandoned:
+                    return None
                 # The host buffer may be overwritten once its preceding H2D
                 # finishes, independently of the previous GPU consumer.
                 self.copied.synchronize()
                 host = self.host[: output.shape[0]]
                 if timing is not None:
                     timing["lookup_started_ns"] = time.perf_counter_ns()
-                lookup_host_rows_cpu(
+                lookup = lookup_host_rows_cpu
+                if getattr(self, "packed", False):
+                    from rtp_llm.models_py.modules.dsv4.engram_cpu import (
+                        lookup_host_rows_cpu_packed,
+                    )
+
+                    lookup = lookup_host_rows_cpu_packed
+                lookup(
                     self.embedding.weight,
                     self.embedding.scales,
                     ids,
@@ -766,10 +818,18 @@ class _EngramCPULookupSlot:
                 )
                 if timing is not None:
                     timing["lookup_finished_ns"] = time.perf_counter_ns()
-                with torch.cuda.stream(self.stream):
-                    self.stream.wait_event(self.allocated)
-                    output.copy_(host, non_blocking=True)
-                    self.copied.record(self.stream)
+                # Abandonment and copy submission must be one atomic decision.
+                # Once H2D is submitted, consuming it is cheaper than starting
+                # a competing UVA lookup, and its owning stream must join it.
+                if work is None:
+                    self._copy(output, host)
+                else:
+                    with work.lock:
+                        if work.abandoned:
+                            self.last_timing = timing
+                            return None
+                        self._copy(output, host)
+                        work.copy_submitted = True
                 if timing is not None:
                     timing["copy_submitted_ns"] = time.perf_counter_ns()
                 self.last_timing = timing
@@ -777,6 +837,12 @@ class _EngramCPULookupSlot:
             except BaseException:
                 self.stream.synchronize()
                 raise
+
+    def _copy(self, output, host):
+        with torch.cuda.stream(self.stream):
+            self.stream.wait_event(self.allocated)
+            output.copy_(host, non_blocking=True)
+            self.copied.record(self.stream)
 
     def close(self):
         self.stream.synchronize()
@@ -796,6 +862,10 @@ class EngramCPULookupRuntime:
 
         prepare_cpu_lookup()
         self.capacity = min(int(capacity), 32768)
+        self.num_threads = int(os.getenv("DSV41_CPU_ENGRAM_LOOKUP_THREADS", "16"))
+        if not 1 <= self.num_threads <= 16:
+            raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
+        self.retired = []
         self.slots = {}
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="engram-cpu-lookup"
@@ -811,12 +881,26 @@ class EngramCPULookupRuntime:
             windows = torch.zeros(
                 (self.capacity, state.layout.max_ngram_size), dtype=torch.int32
             )
-            hashes = self.executor.submit(_hash_token_windows_cpu, state, windows, -2)
+            hashes = self.executor.submit(
+                _hash_token_windows_cpu, state, windows, -2, self.num_threads
+            )
             for slot in self.slots.values():
                 output, _ = slot.allocate_output(self.capacity)
                 future = self.executor.submit(slot.run, hashes, output)
                 future.result()
                 slot.copied.synchronize()
+                if getattr(slot, "packed", False):
+                    from rtp_llm.models_py.modules.dsv4._engram_packed_triton import (
+                        unpack_packed_rows,
+                    )
+
+                    pair = unpack_packed_rows(output, slot.heads, slot.head_dim)
+                    if pair is None:
+                        raise RuntimeError(
+                            "Engram packed output failed startup qualification"
+                        )
+                    torch.cuda.current_stream(slot.device).synchronize()
+                    del pair
                 # Warm the allocation, copy and events without retaining a
                 # device tensor or a Future holding it after startup.
                 del future, output
@@ -829,6 +913,27 @@ class EngramCPULookupRuntime:
 
     def close(self):
         self._finalizer()
+        self.reap()
+
+    def reap(self):
+        """Bound abandoned work to one request; never queue behind old lookups."""
+        pending = []
+        error = None
+        for future in self.retired:
+            if future.done():
+                try:
+                    future.result()
+                except BaseException as exc:
+                    error = error or exc
+            else:
+                pending.append(future)
+        self.retired = pending
+        if error is not None:
+            raise error  # Surface background errors once, including at shutdown.
+        return not pending
+
+    def retire(self, work):
+        self.retired.append(self.executor.submit(work._drain))
 
 
 def prepare_engram_cpu_lookup(model, *, max_m):
@@ -857,8 +962,15 @@ def prepare_engram_cpu_lookup(model, *, max_m):
 
 
 class _EngramCPULookupWork:
-    def __init__(self, slot, ids):
+    def __init__(self, slot, ids, runtime=None):
         self.slot, self.ids = slot, ids
+        # The model/request plan owns the runtime. A queued worker must not
+        # become its final owner: finalization on that same worker would call
+        # executor.shutdown(wait=True) and try to join its own thread.
+        self.runtime = weakref.proxy(runtime) if runtime is not None else None
+        self.lock = threading.Lock()
+        self.abandoned = self.copy_submitted = self.retired = False
+        self.timing = None
         self.future = None
         self.allocation_stream = None
         self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
@@ -866,8 +978,24 @@ class _EngramCPULookupWork:
         self.consumed = False
 
     def submit(self, executor, hashes, count, submitted_ns):
+        if getattr(self.slot, "collect_timing", False):
+            self.timing = {"submitted_ns": submitted_ns}
+            self.slot.last_timing = self.timing
         output, self.allocation_stream = self.slot.allocate_output(count)
-        self.future = executor.submit(self.slot.run, hashes, output, submitted_ns)
+        if self.runtime is None:
+            self.future = executor.submit(self.slot.run, hashes, output, submitted_ns)
+        else:
+            self.future = executor.submit(
+                self.slot.run, hashes, output, submitted_ns, self
+            )
+
+    def _abandon_before_copy(self):
+        with self.lock:
+            if self.copy_submitted:
+                return False
+            self.abandoned = True
+            self.future.cancel()
+            return True
 
     def consume(self, ids, hidden):
         if not (
@@ -882,11 +1010,41 @@ class _EngramCPULookupWork:
             self.clear()
             return None
         started = time.perf_counter_ns() if self.slot.collect_timing else None
+        current = torch.cuda.current_stream(hidden.device)
+        polls = 0
+        if self.runtime is not None and self.slot.deadline_enabled:
+            while not self.future.done():
+                # Query before submitting WKV: completion means the GPU has
+                # reached this consumer, not merely that a wall-clock estimate
+                # expired. No extra event or GPU kernel is needed. Yield the
+                # GIL between probes rather than busy-polling the driver.
+                polls += 1
+                if current.query() and self._abandon_before_copy():
+                    if self.timing is not None:
+                        self.timing.update(
+                            outcome="gpu_deadline_fallback",
+                            consumer_wait_started_ns=started,
+                            consumer_wait_finished_ns=time.perf_counter_ns(),
+                            consumer_stream_queries=polls,
+                        )
+                    self.clear()
+                    return None
+                try:
+                    self.future.result(timeout=0.001)
+                except TimeoutError:
+                    if self.future.done():
+                        # Completion can race the timeout. Retrieve the actual
+                        # result/worker error instead of rethrowing a stale
+                        # wait timeout after a successful completion.
+                        self.future.result()
+                        break
         rows = self.future.result()
         if self.slot.last_timing is not None:
             self.slot.last_timing["consumer_wait_started_ns"] = started
             self.slot.last_timing["consumer_wait_finished_ns"] = time.perf_counter_ns()
-        torch.cuda.current_stream(hidden.device).wait_event(self.slot.copied)
+            self.slot.last_timing["consumer_stream_queries"] = polls
+            self.slot.last_timing["outcome"] = "consumed"
+        current.wait_event(self.slot.copied)
         self.consumed = True
         # Join the copy on the allocation's owning stream before returning it.
         # Dropping the Future lets WKV release the tensor before forward ends;
@@ -895,10 +1053,24 @@ class _EngramCPULookupWork:
         return rows
 
     def clear(self):
+        self.ids = None
+        if self.runtime is not None and self.future is not None:
+            if not self.retired:
+                self._abandon_before_copy()
+                self.retired = True
+                self.runtime.retire(self)
+            return
+        self._drain()
+
+    def _drain(self):
         try:
             if self.future is not None:
-                self.future.result()
-                if not self.consumed:
+                try:
+                    self.future.result()
+                except CancelledError:
+                    if not self.abandoned:
+                        raise
+                if not self.consumed and (self.copy_submitted or not self.abandoned):
                     self.slot.copied.synchronize()
         finally:
             self.ids = self.future = None
@@ -922,9 +1094,22 @@ class EngramCPULookupPrefetch:
             or torch.cuda.is_current_stream_capturing()
         ):
             return
-        self.hashes = self.runtime.executor.submit(
-            _hash_token_windows_cpu, model._engram_hash_state, windows, image_token
+        if isinstance(self.runtime, EngramCPULookupRuntime) and not self.runtime.reap():
+            return
+        timing = (
+            {"hash_submitted_ns": time.perf_counter_ns()}
+            if any(slot.collect_timing for slot in self.runtime.slots.values())
+            else None
         )
+        self.hashes = self.runtime.executor.submit(
+            _timed_cpu_hash,
+            model._engram_hash_state,
+            windows,
+            image_token,
+            getattr(self.runtime, "num_threads", None),
+            timing,
+        )
+        self.hashes.engram_timing = timing
         try:
             for layer_id, slot in self.runtime.slots.items():
                 layer = model.v4.layers[layer_id]
@@ -939,7 +1124,15 @@ class EngramCPULookupPrefetch:
                     continue
                 if layer.engram._cpu_lookup_work is not None:
                     raise RuntimeError("Engram CPU lookup is already pending")
-                work = _EngramCPULookupWork(slot, layer.engram_hashes)
+                work = _EngramCPULookupWork(
+                    slot,
+                    layer.engram_hashes,
+                    (
+                        self.runtime
+                        if isinstance(self.runtime, EngramCPULookupRuntime)
+                        else None
+                    ),
+                )
                 self.work.append((layer.engram, work))
                 work.submit(
                     self.runtime.executor,
@@ -965,7 +1158,16 @@ class EngramCPULookupPrefetch:
                 error = error or exc
         if self.hashes is not None:
             try:
-                self.hashes.result()
+                if isinstance(self.runtime, EngramCPULookupRuntime):
+                    # Hold CPU windows/state until hashing finishes without
+                    # blocking the fallback consumer or allowing another batch
+                    # to pile work behind this one.
+                    if not self.hashes.done():
+                        self.runtime.retired.append(self.hashes)
+                    else:
+                        self.hashes.result()
+                else:
+                    self.hashes.result()
             except BaseException as exc:
                 error = error or exc
         self.hashes = None
@@ -1246,7 +1448,21 @@ class Engram(nn.Module):
             self._cpu_lookup_work = None
             rows = cpu_work.consume(hash_ids, hidden)
             if rows is not None:
-                kv = self.wkv(rows)
+                if rows.dtype == torch.uint8:
+                    from rtp_llm.models_py.modules.dsv4._engram_packed_triton import (
+                        unpack_packed_rows,
+                    )
+
+                    pair = unpack_packed_rows(
+                        rows, self.layout.n_hash_cols, self.layout.head_dim
+                    )
+                    if pair is None:
+                        del rows
+                        return self._forward_rows(hidden, hash_ids, token_mask, out=out)
+                    kv = self.wkv.forward_quantized(*pair)
+                    del pair
+                else:
+                    kv = self.wkv(rows)
                 del rows
                 return gated_engram_residual(
                     hidden,

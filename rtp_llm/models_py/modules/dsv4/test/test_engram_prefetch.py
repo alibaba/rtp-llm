@@ -674,6 +674,156 @@ class EngramCPUPrefetchTest(unittest.TestCase):
             )
         work.clear()
 
+    def test_packed_forward_quantized_releases_rows_and_pair_before_gate(self):
+        work, ids, _ = self._work()
+        work.future = Future()
+        work.future.set_result(torch.empty((16, 24 * 33), dtype=torch.uint8))
+        rows_reference = weakref.ref(work.future.result())
+        pair_references = []
+        order = []
+
+        def unpack(rows, heads, dim):
+            self.assertIs(rows, rows_reference())
+            self.assertEqual((heads, dim), (24, 32))
+            order.append("unpack")
+            values = torch.empty((16, 24 * 32), dtype=torch.float8_e4m3fn)
+            scales = torch.empty((16, 6), dtype=torch.int32)
+            pair_references.extend((weakref.ref(values), weakref.ref(scales)))
+            return values, scales
+
+        test = self
+
+        class WKV:
+            def __call__(self, rows):
+                raise AssertionError("Packed rows must use forward_quantized")
+
+            def forward_quantized(self, values, scales):
+                test.assertIs(values, pair_references[0]())
+                test.assertIs(scales, pair_references[1]())
+                test.assertEqual(values.dtype, torch.float8_e4m3fn)
+                test.assertEqual(scales.dtype, torch.int32)
+                order.append("quantized_wkv")
+                return torch.empty((16, 32), dtype=torch.bfloat16)
+
+        module = SimpleNamespace(
+            _cpu_lookup_work=work,
+            _lookup_work=None,
+            layout=SimpleNamespace(n_hash_cols=24, head_dim=32),
+            wkv=WKV(),
+            embed_tokens=Mock(side_effect=AssertionError("Unexpected GPU lookup")),
+            q_weight=None,
+            k_weight=None,
+            eps=1e-20,
+        )
+        mask, output = object(), object()
+
+        def gate(hidden, kv, q, k, eps, token_mask, *, out):
+            self.assertIsNone(rows_reference())
+            self.assertTrue(all(reference() is None for reference in pair_references))
+            self.assertEqual(kv.dtype, torch.bfloat16)
+            self.assertIs(token_mask, mask)
+            self.assertIs(out, output)
+            order.append("gate")
+            return out
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv4._engram_packed_triton": SimpleNamespace(
+                        unpack_packed_rows=unpack
+                    )
+                },
+            ),
+            patch.object(engram, "gated_engram_residual", side_effect=gate),
+        ):
+            self.assertIs(
+                engram.Engram._forward_rows(module, Tensor(), ids, mask, out=output),
+                output,
+            )
+        self.assertEqual(order, ["unpack", "quantized_wkv", "gate"])
+        self.assertIsNone(module._cpu_lookup_work)
+        self.assertIsNone(work.future)
+        self.current.wait_event.assert_called_once_with(work.slot.copied)
+        work.clear()
+        work.slot.copied.synchronize.assert_not_called()
+
+    def test_unsupported_packed_unpack_falls_back_to_bf16_gpu_lookup(self):
+        work, ids, _ = self._work()
+        work.future = Future()
+        work.future.set_result(torch.empty((16, 24 * 33), dtype=torch.uint8))
+        rows_reference = weakref.ref(work.future.result())
+        order = []
+        hidden, mask, output = Tensor(), object(), object()
+
+        def unpack(rows, heads, dim):
+            self.assertIs(rows, rows_reference())
+            self.assertEqual((heads, dim), (24, 32))
+            order.append("unpack_unsupported")
+            return None
+
+        def lookup(hash_ids, device):
+            self.assertIsNone(rows_reference())
+            self.assertIsNone(module._cpu_lookup_work)
+            self.assertIs(hash_ids, ids)
+            self.assertEqual(device, hidden.device)
+            order.append("gpu_lookup")
+            return torch.empty((16, 24, 32), dtype=torch.bfloat16)
+
+        test = self
+
+        class WKV:
+            def __call__(self, rows):
+                test.assertEqual(rows.dtype, torch.bfloat16)
+                test.assertEqual(rows.shape, (16, 24 * 32))
+                order.append("bf16_wkv")
+                return rows.new_empty((16, 32))
+
+            def forward_quantized(self, values, scales):
+                raise AssertionError("Unsupported unpack cannot call quantized WKV")
+
+        module = SimpleNamespace(
+            _cpu_lookup_work=work,
+            _lookup_work=None,
+            layout=SimpleNamespace(n_hash_cols=24, head_dim=32),
+            embed_tokens=lookup,
+            wkv=WKV(),
+            q_weight=None,
+            k_weight=None,
+            eps=1e-20,
+        )
+        module._forward_rows = lambda *args, **kwargs: engram.Engram._forward_rows(
+            module, *args, **kwargs
+        )
+
+        def gate(value, kv, q, k, eps, token_mask, *, out):
+            self.assertIs(value, hidden)
+            self.assertIsNone(rows_reference())
+            self.assertIs(token_mask, mask)
+            self.assertIs(out, output)
+            order.append("gate")
+            return out
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv4._engram_packed_triton": SimpleNamespace(
+                        unpack_packed_rows=unpack
+                    )
+                },
+            ),
+            patch.object(engram, "gated_engram_residual", side_effect=gate),
+        ):
+            self.assertIs(module._forward_rows(hidden, ids, mask, out=output), output)
+        self.assertEqual(
+            order, ["unpack_unsupported", "gpu_lookup", "bf16_wkv", "gate"]
+        )
+        self.assertIsNone(work.future)
+        self.current.wait_event.assert_called_once_with(work.slot.copied)
+        work.clear()
+        work.slot.copied.synchronize.assert_not_called()
+
     def test_abandoned_output_remains_owned_until_copy_is_drained(self):
         work, _, rows = self._work()
         reference = weakref.ref(rows)
@@ -814,6 +964,68 @@ class EngramCPUPrefetchTest(unittest.TestCase):
         self.assertEqual(2 * target_bytes, 384 * 1024**2)
         self.assertFalse(hasattr(slot, "output"))
 
+    def test_packed_slot_storage_and_request_bytes_without_device_allocation(self):
+        class V41MXFP8Linear:
+            pass
+
+        module = SimpleNamespace(
+            embed_tokens=object(),
+            q_weight=Tensor(),
+            layer_hash_index=0,
+            layout=SimpleNamespace(n_hash_cols=24, head_dim=256),
+            wkv=V41MXFP8Linear(),
+        )
+        allocations = []
+        real_empty = torch.empty
+
+        def allocate(shape, **kwargs):
+            self.assertEqual(kwargs["dtype"], torch.uint8)
+            allocations.append((shape, kwargs.copy()))
+            return real_empty(shape, dtype=torch.uint8, device="meta")
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DSV41_CPU_ENGRAM_LOOKUP_THREADS": "16",
+                    "DSV41_CPU_ENGRAM_LOOKUP_TIMING": "0",
+                },
+            ),
+            patch.dict(
+                sys.modules,
+                {
+                    "rtp_llm.models_py.modules.dsv4.utils": SimpleNamespace(
+                        V41MXFP8Linear=V41MXFP8Linear
+                    )
+                },
+            ),
+            patch.object(torch.cuda, "Stream", side_effect=lambda **kwargs: Mock()),
+            patch.object(torch.cuda, "Event", side_effect=lambda: Mock()),
+            patch.object(torch, "empty", side_effect=allocate),
+        ):
+            slots = [engram._EngramCPULookupSlot(module, 32768) for _ in range(2)]
+            output, allocation_stream = slots[0].allocate_output(16384)
+        self.assertEqual(len(allocations), 3)
+        for shape, kwargs in allocations[:2]:
+            self.assertEqual(shape, (32768, 6336))
+            self.assertEqual(
+                kwargs, dict(dtype=torch.uint8, device="cpu", pin_memory=True)
+            )
+        self.assertEqual(
+            allocations[2],
+            ((16384, 6336), dict(dtype=torch.uint8, device=torch.device("cuda:0"))),
+        )
+        self.assertTrue(all(slot.packed for slot in slots))
+        self.assertEqual(
+            sum(slot.host.numel() * slot.host.element_size() for slot in slots),
+            396 * 1024**2,
+        )
+        self.assertEqual(output.numel() * output.element_size(), 99 * 1024**2)
+        self.assertIs(allocation_stream, self.current)
+        self.assertEqual(slots[0].allocated.record.call_count, 2)
+        self.assertTrue(all(not hasattr(slot, "output") for slot in slots))
+        self.assertFalse(torch.cuda.is_initialized())
+
     def test_runtime_warmup_does_not_retain_outputs_or_completed_futures(self):
         references = []
 
@@ -847,7 +1059,10 @@ class EngramCPUPrefetchTest(unittest.TestCase):
                 sys.modules,
                 {
                     "rtp_llm.models_py.modules.dsv4.engram_cpu": SimpleNamespace(
-                        prepare_cpu_lookup=Mock()
+                        prepare_cpu_lookup=Mock(),
+                        hash_token_windows_cpu=lambda windows, *args, **kwargs: self.state.hash_token_windows(
+                            windows
+                        ),
                     )
                 },
             ),

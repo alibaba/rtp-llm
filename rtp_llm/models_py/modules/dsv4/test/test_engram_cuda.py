@@ -1,6 +1,7 @@
 """Run on an explicitly reserved GPU; covers pinned host reads in graph replay."""
 
 import os
+import threading
 import unittest
 import uuid
 import weakref
@@ -320,7 +321,7 @@ class EngramCudaTest(unittest.TestCase):
         torch.testing.assert_close(output, expected, rtol=0, atol=0)
         torch.testing.assert_close(output[1], hidden[1], rtol=0, atol=0)
 
-    def _cpu_prefetch_model(self, capacity=128):
+    def _cpu_prefetch_model(self, capacity=128, *, deadline=False):
         from rtp_llm.models_py.modules.dsv4.engram import prepare_engram_cpu_lookup
 
         layers = [SimpleNamespace(engram=None) for _ in range(15)]
@@ -347,6 +348,11 @@ class EngramCudaTest(unittest.TestCase):
         )
         with patch.dict(os.environ, {"DSV41_CPU_ENGRAM_LOOKUP": "1"}):
             prepare_engram_cpu_lookup(model, max_m=capacity)
+        # The existing H2D/allocator tests must exercise CPU consumption even
+        # when their tiny synthetic workloads leave no GPU submission lead.
+        # The separate deadline test explicitly enables fallback.
+        for slot in model._engram_cpu_runtime.slots.values():
+            slot.deadline_enabled = deadline
         self.addCleanup(model._engram_cpu_runtime.close)
         return model
 
@@ -570,6 +576,97 @@ class EngramCudaTest(unittest.TestCase):
             sentinel = torch.ones(1, device="cuda")
         graph.replay()
         self.assertEqual(sentinel.item(), 1)
+
+    @torch.inference_mode()
+    def test_cpu_prefetch_deadline_abandons_late_lookup_and_recovers_next_request(self):
+        from rtp_llm.models_py.modules.dsv4 import engram_cpu
+        from rtp_llm.models_py.modules.dsv4.engram import EngramCPULookupPrefetch
+
+        model = self._cpu_prefetch_model(16, deadline=True)
+        runtime = model._engram_cpu_runtime
+        windows = torch.full((16, 4), 7, dtype=torch.int32)
+        hashes = self.hash(windows.cuda())
+        hidden = torch.randn(16, 4, 128, dtype=torch.bfloat16, device="cuda")
+        for layer_id, index in model._engram_layers:
+            model.v4.layers[layer_id].engram_hashes = hashes[:, index].contiguous()
+        layer = model.v4.layers[1]
+        expected = layer.engram(hidden, layer.engram_hashes)
+        torch.cuda.current_stream().synchronize()
+
+        entered, release = threading.Event(), threading.Event()
+        native = engram_cpu.lookup_host_rows_cpu
+
+        def late_native(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("test failed to release native lookup")
+            return native(*args, **kwargs)
+
+        plan = None
+        with (
+            patch.object(engram_cpu, "lookup_host_rows_cpu", side_effect=late_native),
+            patch.object(
+                runtime.slots[1], "_copy", wraps=runtime.slots[1]._copy
+            ) as copy,
+        ):
+            try:
+                plan = EngramCPULookupPrefetch(model, windows, 9)
+                self.assertTrue(entered.wait(5))
+                # Finish only the GPU predecessors/allocation events. Native
+                # lookup is blocked before H2D, so this cannot wait for it.
+                torch.cuda.current_stream().synchronize()
+                self.assertTrue(torch.cuda.current_stream().query())
+                work = plan.work[0][1]
+                actual = layer.engram(hidden, layer.engram_hashes)
+                self.assertFalse(release.is_set())
+                self.assertTrue(work.abandoned)
+                self.assertFalse(work.consumed)
+                self.assertTrue(work.future.running())
+                copy.assert_not_called()
+                self.assertFalse(runtime.reap())
+                # A still-running abandoned lookup must not queue another
+                # batch's hashes or permit early pinned-buffer reuse.
+                for _ in range(3):
+                    skipped = EngramCPULookupPrefetch(model, windows, 9)
+                    self.assertIsNone(skipped.hashes)
+                    self.assertEqual(skipped.work, [])
+                    skipped.clear()
+                self.assertEqual(len(runtime.retired), 1)
+            finally:
+                # Release before drain/close, including any assertion failure.
+                release.set()
+                if plan is not None:
+                    plan.clear()
+                runtime.executor.submit(lambda: None).result(timeout=10)
+                runtime.reap()
+            copy.assert_not_called()
+
+        torch.cuda.synchronize()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertIsNone(work.future)
+        self.assertEqual(runtime.retired, [])
+
+        # Reuse the GPU hash tensor identities with different token values;
+        # the next request must receive new CPU rows, never the retired result.
+        windows.fill_(11)
+        fresh_hashes = self.hash(windows.cuda())
+        for layer_id, index in model._engram_layers:
+            model.v4.layers[layer_id].engram_hashes.copy_(fresh_hashes[:, index])
+        expected = layer.engram(hidden, layer.engram_hashes)
+        fresh = EngramCPULookupPrefetch(model, windows, 9)
+        try:
+            self.assertEqual(len(fresh.work), 2)
+            for _, new_work in fresh.work:
+                new_work.future.result(timeout=10)
+            actual = layer.engram(hidden, layer.engram_hashes)
+            self.assertTrue(fresh.work[0][1].consumed)
+            self.assertFalse(fresh.work[0][1].abandoned)
+        finally:
+            fresh.clear()
+            runtime.executor.submit(lambda: None).result(timeout=10)
+            runtime.reap()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def _prefetch_model(self):
         model = Engram(

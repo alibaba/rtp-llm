@@ -1,6 +1,6 @@
 """Explicitly startup-warmed CPU gather/dequant for experimental Engram prefill.
 
-The caller owns CPU indices and a BF16 output (pinned for asynchronous H2D).
+The caller owns CPU indices and a BF16 or packed byte output (pinned for H2D).
 ctypes.CDLL releases the GIL while the native bounded OpenMP team runs. Neither
 the operator nor its startup loader changes Torch's global CPU thread settings.
 """
@@ -83,6 +83,14 @@ def prepare_cpu_lookup():
                 [ctypes.c_void_p] * 4 + [ctypes.c_int64] * 5 + [ctypes.c_int]
             )
             library.engram_cpu_lookup.restype = ctypes.c_int
+            library.engram_cpu_lookup_packed.argtypes = (
+                library.engram_cpu_lookup.argtypes
+            )
+            library.engram_cpu_lookup_packed.restype = ctypes.c_int
+            library.engram_cpu_hash.argtypes = (
+                [ctypes.c_void_p] * 6 + [ctypes.c_int64] * 9 + [ctypes.c_int] * 2
+            )
+            library.engram_cpu_hash.restype = ctypes.c_int
             backend = library.engram_cpu_prepare()
             if backend not in (1, 2):
                 raise RuntimeError(f"Engram CPU preparation failed: {backend}")
@@ -102,7 +110,7 @@ def _cpu_tensor(tensor):
     )
 
 
-def is_supported(weight, scales, indices, out, *, num_threads=16):
+def _lookup_supported(weight, scales, indices, out, *, num_threads, packed):
     """Metadata-only qualification; inputs must remain alive until return."""
     if not (
         type(num_threads) is int
@@ -112,7 +120,7 @@ def is_supported(weight, scales, indices, out, *, num_threads=16):
         and scales.dtype == torch.uint8
         and weight.ndim == scales.ndim == indices.ndim == out.ndim == 2
         and indices.dtype == torch.int64
-        and out.dtype == torch.bfloat16
+        and out.dtype == (torch.uint8 if packed else torch.bfloat16)
         and indices.is_contiguous()
         and out.is_contiguous()
     ):
@@ -125,13 +133,26 @@ def is_supported(weight, scales, indices, out, *, num_threads=16):
         and weight.stride(1) == scales.stride(1) == 1
         and weight.stride(0) >= dim
         and scales.stride(0) >= dim // 32
-        and out.shape == (indices.shape[0], indices.shape[1] * dim)
+        and out.shape
+        == (indices.shape[0], indices.shape[1] * (dim + dim // 32 if packed else dim))
     ):
         return False
     output_storage = out.untyped_storage().data_ptr()
     return all(
         not t.numel() or t.untyped_storage().data_ptr() != output_storage
         for t in (weight, scales, indices)
+    )
+
+
+def is_supported(weight, scales, indices, out, *, num_threads=16):
+    return _lookup_supported(
+        weight, scales, indices, out, num_threads=num_threads, packed=False
+    )
+
+
+def is_packed_supported(weight, scales, indices, out, *, num_threads=16):
+    return _lookup_supported(
+        weight, scales, indices, out, num_threads=num_threads, packed=True
     )
 
 
@@ -156,3 +177,96 @@ def lookup_host_rows_cpu(weight, scales, indices, out, *, num_threads=16):
     if status:
         raise RuntimeError(f"Engram CPU lookup failed: {status}")
     return out
+
+
+def lookup_host_rows_cpu_packed(weight, scales, indices, out, *, num_threads=16):
+    """Copy each selected head's FP8 bytes followed by its UE8M0 scale bytes."""
+    if _LIBRARY is None:
+        raise RuntimeError("Engram CPU lookup requires startup prepare_cpu_lookup")
+    if not is_packed_supported(weight, scales, indices, out, num_threads=num_threads):
+        raise ValueError("Unsupported packed Engram CPU lookup geometry or threads")
+    status = _LIBRARY.engram_cpu_lookup_packed(
+        weight.data_ptr(),
+        scales.data_ptr(),
+        indices.data_ptr(),
+        out.data_ptr(),
+        weight.shape[0],
+        weight.shape[1],
+        weight.stride(0),
+        scales.stride(0),
+        indices.numel(),
+        num_threads,
+    )
+    if status:
+        raise RuntimeError(f"Packed Engram CPU lookup failed: {status}")
+    return out
+
+
+def hash_token_windows_cpu(
+    windows,
+    token_map,
+    multipliers,
+    primes,
+    offsets,
+    *,
+    pad_id,
+    image_token,
+    num_threads=16,
+):
+    """Parallel exact int64 hashing; no CUDA or Torch intra-op pool is used."""
+    if _LIBRARY is None:
+        raise RuntimeError("Engram CPU hash requires startup prepare_cpu_lookup")
+    constants = (token_map, multipliers, primes, offsets)
+    if not (
+        type(num_threads) is int
+        and 1 <= num_threads <= 16
+        and all(_cpu_tensor(t) for t in (windows, *constants))
+        and windows.dtype in (torch.int32, torch.int64)
+        and windows.ndim == 2
+        and all(t.dtype == torch.int64 and t.is_contiguous() for t in constants)
+        and token_map.ndim == 1
+        and token_map.numel() > 0
+        and multipliers.ndim == offsets.ndim == 2
+        and primes.ndim == 3
+        and type(pad_id) is int
+        and -(2**63) <= pad_id < 2**63
+        and type(image_token) is int
+        and -(2**63) <= image_token < 2**63
+    ):
+        raise ValueError("Unsupported Engram CPU hash tensors, IDs or threads")
+    tokens, ngram = windows.shape
+    layers, depth, heads = primes.shape
+    if not (
+        ngram >= 2
+        and layers >= 1
+        and heads >= 1
+        and depth == ngram - 1
+        and multipliers.shape == (layers, ngram)
+        and offsets.shape == (layers, depth * heads)
+    ):
+        raise ValueError("Unsupported Engram CPU hash geometry")
+    output = torch.empty(
+        (tokens, layers, depth * heads), dtype=torch.int64, device="cpu"
+    )
+    status = _LIBRARY.engram_cpu_hash(
+        windows.data_ptr(),
+        token_map.data_ptr(),
+        multipliers.data_ptr(),
+        primes.data_ptr(),
+        offsets.data_ptr(),
+        output.data_ptr(),
+        tokens,
+        ngram,
+        layers,
+        heads,
+        token_map.numel(),
+        windows.stride(0),
+        windows.stride(1),
+        pad_id,
+        image_token,
+        windows.element_size(),
+        num_threads,
+    )
+    if status:
+        raise ValueError(f"Invalid Engram CPU hash constants or geometry: {status}")
+    return output

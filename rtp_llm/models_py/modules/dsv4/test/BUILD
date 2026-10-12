@@ -55,6 +55,29 @@ py_test(
 )
 
 py_test(
+    name = "test_engram_cpu_native_packed",
+    srcs = ["test_engram_cpu_native_packed.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_engram_cpu_deadline",
+    srcs = ["test_engram_cpu_deadline.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)
+
+py_test(
+    name = "test_engram_packed",
+    srcs = ["test_engram_packed.py"],
+    deps = _DSV4_TEST_DEPS,
+    env = {"RTP_ENGRAM_CPU_TEST_CUDA": "1"},
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_engram_cuda",
     srcs = ["test_engram_cuda.py"],
     deps = _DSV4_TEST_DEPS,
