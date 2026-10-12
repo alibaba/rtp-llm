@@ -229,6 +229,11 @@ def _register_builtin_lazy_models() -> None:
     register_lazy_model("baichuan2", "rtp_llm.models.llama")
     register_lazy_model("gemma", "rtp_llm.models.llama", ["GemmaForCausalLM"])
     register_lazy_model(
+        "embedding_gemma2",
+        "rtp_llm.models.embedding_gemma2",
+        ["EmbeddingGemma2Model", "EmbeddingGemma2TextModel"],
+    )
+    register_lazy_model(
         "gemma4",
         "rtp_llm.models.gemma4",
         ["Gemma4ForCausalLM", "Gemma4ForConditionalGeneration"],

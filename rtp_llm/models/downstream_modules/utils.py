@@ -41,6 +41,12 @@ def create_custom_module(
     model_type = config.model_type
     assert tokenizer is not None, "tokenizer should not be None"
     if task_type == TaskType.DENSE_EMBEDDING:
+        if model_type == "embedding_gemma2":
+            from rtp_llm.models.downstream_modules.embedding.embedding_gemma2_module import (
+                EmbeddingGemma2Module,
+            )
+
+            return EmbeddingGemma2Module(config, tokenizer)
         from rtp_llm.models.downstream_modules.embedding.dense_embedding_module import (
             DenseEmbeddingModule,
         )

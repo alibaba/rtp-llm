@@ -1,0 +1,62 @@
+{
+  "model_type": "embedding_gemma2",
+  "model_path": "/mnt/nas1/hf/embeddinggemma-2",
+  "query_result": [
+    {
+      "name": "text_image_audio_video",
+      "endpoint": "/v1/embeddings",
+      "query": {
+        "input": [
+          {
+            "type": "text",
+            "text": "Compare the picture: "
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data/model/qwen_vl/1.jpeg"
+            }
+          },
+          {
+            "type": "text",
+            "text": " With the sound: "
+          },
+          {
+            "type": "audio_url",
+            "audio_url": {
+              "url": "$GEMMA_SMOKE_AUDIO"
+            }
+          },
+          {
+            "type": "text",
+            "text": " And the recording: "
+          },
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "data/model/llava/1.mp4"
+            }
+          },
+          {
+            "type": "text",
+            "text": " Describe their connection."
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "data": [
+          {
+            "object": "embedding",
+            "embedding": "data/model/gemma/embedding_gemma2.pt",
+            "index": 0
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1206,
+          "total_tokens": 1206
+        }
+      }
+    }
+  ]
+}

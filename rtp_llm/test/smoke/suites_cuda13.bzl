@@ -46,6 +46,7 @@ def cuda13_suites():
     native.test_suite(
         name = "smoke_cuda13_arm",
         tests = [
+            ":gemma_multimodal",
             # DSpark speculative decode with CP page-RR. This is the blocking
             # regression for publishing both target and draft SWA_KV before decode
             # dispatch; missing draft publication fails with EC_FAILED_LOAD_BUFFER.

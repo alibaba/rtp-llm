@@ -256,6 +256,7 @@ py_library(
         "multimodal/**/*.py",
     ]),
     deps = [
+        ":librosa",
         ":utils",
         ":Pillow",
         ":pillow-heif",

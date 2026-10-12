@@ -112,6 +112,9 @@ def _register_builtin_lazy_renderers() -> None:
     )
     register_lazy_renderer(["gemma4"], "rtp_llm.openai.renderers.gemma4_renderer")
     register_lazy_renderer(
+        ["embedding_gemma2"], "rtp_llm.openai.renderers.embedding_gemma2_renderer"
+    )
+    register_lazy_renderer(
         ["kimi_k2", "kimi_linear"], "rtp_llm.openai.renderers.kimik2_renderer"
     )
     register_lazy_renderer(["kimi_k25"], "rtp_llm.openai.renderers.kimi_k25_renderer")

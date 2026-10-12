@@ -7,6 +7,7 @@ from .base_multimodal_mixin import (
 )
 from .chatglm4v.chatglm4v_mixin import ChatGlmV4VisionMixin
 from .deepseek_vl2.deepseek_vl2_mixin import DeepSeekVLV2Mixin
+from .embedding_gemma2.embedding_gemma2_vit_mixin import EmbeddingGemma2VisionMixin
 from .gemma4.gemma4_vit_mixin import Gemma4Mixin
 from .kimi_k25.kimi_k25_mixin import KimiK25Mixin
 from .llava.llava_mixin import LlavaMixin

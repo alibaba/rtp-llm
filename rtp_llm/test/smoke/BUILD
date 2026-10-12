@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 package(default_visibility = ["//visibility:public"])
 
 # Framework source files for cross-package smoke tests.
@@ -93,6 +93,23 @@ sm100_suites()
 sm120_suites()
 rocm_oss_suites()
 remote_cache_suites()
+
+custom_smoke_test(
+    name = "gemma_multimodal",
+    main = "gemma_multimodal_smoke.py",
+    smoke_args = "--tp_size 1 --world_size 1",
+    gpu_type = ["SM100_ARM_CU13"],
+    data = [
+        ":smoke_framework_srcs",
+        "data/model/gemma/gemma4.json",
+        "data/model/gemma/embedding_gemma2.json",
+        "data/model/gemma/embedding_gemma2.pt",
+        "data/model/qwen_vl/1.jpeg",
+        "data/model/llava/1.mp4",
+        "//rtp_llm:sdk",
+    ],
+    deps = ["//rtp_llm:numpy", "//rtp_llm:torch"],
+)
 
 # ============================================================================
 # Top-level CI suites (OSS tests only)
