@@ -28,7 +28,11 @@ cc_test(
         "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
-    exec_properties = {"gpu": "H20"},
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13", "gpu_count": "2"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "2"},
+        "//conditions:default": {"gpu": "H20", "gpu_count": "2"},
+    }),
 )
 
 cc_test(
