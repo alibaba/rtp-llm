@@ -762,7 +762,7 @@ protected:
         // TEMPORARY CI PROBE (branch probe/dsv41-engine-test-crash only; never merged):
         // capture loaded library identity and crash context around interpreter + torch import.
         _probeDumpMaps("PROBE before interpreter", 1);
-        _probeInstallCrashHandler();
+        // v5: keep our native handler as fallback only; faulthandler below becomes primary.
         fprintf(stderr,
                 "PROBE env PYTHONPATH=%s LD_LIBRARY_PATH=%s\n",
                 getenv("PYTHONPATH") ? getenv("PYTHONPATH") : "(unset)",
@@ -818,6 +818,14 @@ ctypes.CDLL(_ext[0])
 print("PROBE _C dlopen-only loaded, constructors ran, no PyInit", file=sys.stderr))");
         } catch (const std::exception& e) {
             fprintf(stderr, "PROBE _C dlopen phase exception: %s\n", e.what());
+            fflush(stderr);
+        }
+        // v5: faulthandler becomes the primary crash handler (Python stacks of all threads)
+        // for the full import; our native handler stays installed only as a fallback.
+        try {
+            py::exec(R"(import faulthandler, sys; faulthandler.enable(file=sys.stderr, all_threads=True); print("PROBE faulthandler enabled", file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE faulthandler enable exception: %s\n", e.what());
             fflush(stderr);
         }
         try {
