@@ -21,6 +21,7 @@ from typing import Any
 import torch
 
 from rtp_llm.config.dsv41_config import (
+    v41_mhc_collapse_mode,
     v41_rotary_compute_device,
     v41_sparse_attention_mode,
 )
@@ -78,6 +79,7 @@ class DeepSeekV41Model(DeepSeekV4Model):
             raise ValueError("DeepSeek V4.1 requires deepseek_v41_config")
         self._rotary_compute_device = v41_rotary_compute_device(config)
         self._sparse_attention_mode = v41_sparse_attention_mode(config)
+        self._mhc_collapse_mode = v41_mhc_collapse_mode(config)
         self._v4_args.v41_config = config
         self._v4_args.n_hash_layers = 0
         self._engram_hash_state = None
@@ -125,9 +127,19 @@ class DeepSeekV41Model(DeepSeekV4Model):
                 if layer.attn._sparse_attention_mode != self._sparse_attention_mode:
                     raise ValueError("V4.1 worker and attention sparse modes disagree")
 
+    def _check_collapse_config(self):
+        if v41_mhc_collapse_mode(self._v4_args.v41_config) != self._mhc_collapse_mode:
+            raise ValueError("V4.1 mHC collapse mode changed; replace the worker")
+        if self.v4 is not None:
+            for layer in self.v4.layers:
+                for unit in (layer.attn_hc, layer.ffn_hc):
+                    if unit.collapse_mode != self._mhc_collapse_mode:
+                        raise ValueError("V4.1 worker and mHC collapse modes disagree")
+
     def _check_execution_config(self):
         self._check_rotary_config()
         self._check_sparse_config()
+        self._check_collapse_config()
 
     def _configure_dp_group(self):
         args = self._v4_args
