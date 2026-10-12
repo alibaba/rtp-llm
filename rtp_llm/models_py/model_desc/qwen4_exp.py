@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
+from torch import nn
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -56,7 +58,6 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 # Bring-up fault injection for the speculative target-commit transaction:
 # "<attn_tp_rank>:<prepare|commit|finalize>" makes exactly that rank raise in
@@ -439,6 +440,32 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
         )
+        if os.environ.get("RTP_LLM_QWEN4_SHARED_HC_WEIGHTS", "0") == "1":
+            for unit, down_name, inject_name in (
+                (
+                    self.attn_hyper_connection,
+                    W.qwen4_hc_attn_mix_down,
+                    W.qwen4_hc_attn_inject,
+                ),
+                (
+                    self.mlp_hyper_connection,
+                    W.qwen4_hc_mlp_mix_down,
+                    W.qwen4_hc_mlp_inject,
+                ),
+            ):
+                merged = unit.merged_down_inject
+                if merged is None:
+                    continue
+                rank = int(unit.mix_down.shape[0])
+                unit.mix_down = merged[:rank]
+                unit.inject = merged[rank : rank + unit.hc_mult]
+                # Views are also used by captured merged GEMMs. Updating them
+                # in place requires restarting, before either execution path
+                # can observe a partially changed projection.
+                unit.mix_down._rtp_requires_restart_for_update = True
+                unit.inject._rtp_requires_restart_for_update = True
+                weights[down_name] = unit.mix_down
+                weights[inject_name] = unit.inject
 
     def forward(
         self,
