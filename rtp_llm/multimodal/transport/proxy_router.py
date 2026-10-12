@@ -5,6 +5,8 @@ import time
 from collections import defaultdict
 from typing import Optional
 
+import grpc
+
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
     ReleaseLeasePB,
@@ -63,9 +65,7 @@ class MMOutputProxyRouter:
                 0.001, transport_config.control.release_timeout_ms / 1000.0
             )
 
-    def record_receipt(
-        self, worker_address: str, receipt: MultimodalOutputPB
-    ) -> None:
+    def record_receipt(self, worker_address: str, receipt: MultimodalOutputPB) -> None:
         handles = list(
             dict.fromkeys(
                 slot.rdma_descriptor.lease_id
@@ -115,13 +115,17 @@ class MMOutputProxyRouter:
                     self._handle_generations.pop(handle, None)
                     skipped_routes.append((handle, "release_handle_collision"))
                     continue
-                route = self._handle_routes.pop(handle, None)
+                # Keep routes visible until the worker acknowledges release. Concurrent
+                # retries are safe (worker release is idempotent), and must not receive
+                # a false success while an earlier forwarding RPC is still in flight.
+                route = self._handle_routes.get(handle)
                 if route is None:
                     skipped_routes.append((handle, "release_handle_unknown"))
                     continue
                 if now - route[1] > self._route_ttl_seconds:
                     if self._handle_generations.get(handle) == route[2]:
                         self._handle_generations.pop(handle, None)
+                        self._handle_routes.pop(handle, None)
                     skipped_routes.append((handle, "release_handle_expired"))
                     continue
                 handles_by_worker[route[0]].append(handle)
@@ -144,9 +148,10 @@ class MMOutputProxyRouter:
                 "RDMA release deadline exhausted; skipping %d handles", skipped_count
             )
             self._report_error("release_deadline_exhausted", skipped_count)
-            self._restore_claims(selected_routes)
+            self._set_release_failure(context)
             return
 
+        failed = False
         release_groups = list(handles_by_worker.items())
         for group_index, (worker_address, handles) in enumerate(release_groups):
             try:
@@ -166,19 +171,10 @@ class MMOutputProxyRouter:
                         skipped_count,
                     )
                     self._report_error("release_deadline_exhausted", skipped_count)
-                    remaining_handles = [
-                        handle
-                        for _, group_handles in release_groups[group_index:]
-                        for handle in group_handles
-                    ]
-                    self._restore_claims(
-                        {handle: selected_routes[handle] for handle in remaining_handles}
-                    )
+                    failed = True
                     break
                 stub = self._connection_pool.get_stub(worker_address)
-                stub.ReleaseRdmaLease(
-                    ReleaseLeasePB(lease_id=handles), timeout=timeout
-                )
+                stub.ReleaseRdmaLease(ReleaseLeasePB(lease_id=handles), timeout=timeout)
                 self._complete_claims(handles, selected_routes)
             except Exception:  # noqa: BLE001 - worker GC is the backstop
                 logging.exception(
@@ -186,9 +182,15 @@ class MMOutputProxyRouter:
                     "worker GC will reclaim them",
                     worker_address,
                 )
-                self._restore_claims(
-                    {handle: selected_routes[handle] for handle in handles}
-                )
+                failed = True
+        if failed:
+            self._set_release_failure(context)
+
+    @staticmethod
+    def _set_release_failure(context):
+        if context is not None:
+            context.set_code(grpc.StatusCode.UNAVAILABLE)
+            context.set_details("RDMA lease release incomplete; retry pending handles")
 
     def _complete_claims(self, handles, selected_routes) -> None:
         with self._lock:
@@ -196,16 +198,7 @@ class MMOutputProxyRouter:
                 route = selected_routes[handle]
                 if self._handle_generations.get(handle) == route[2]:
                     self._handle_generations.pop(handle, None)
-
-    def _restore_claims(self, selected_routes) -> None:
-        with self._lock:
-            for handle, route in selected_routes.items():
-                if (
-                    self._handle_generations.get(handle) == route[2]
-                    and handle not in self._handle_routes
-                    and handle not in self._handle_collisions
-                ):
-                    self._handle_routes[handle] = route
+                    self._handle_routes.pop(handle, None)
 
     def _sweep_locked(self, now: float) -> None:
         cutoff = now - self._route_ttl_seconds

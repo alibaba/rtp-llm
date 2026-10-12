@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cstring>
+#include <chrono>
+#include <future>
 #include <limits>
 #include <memory>
 #include <string>
@@ -81,7 +83,7 @@ public:
         Slot slot;
         slot.lease_id = "lease-" + std::to_string(slots.size());
         slot.backing  = torch::zeros({static_cast<int64_t>(std::max<uint64_t>(offset, 1))}, torch::kUInt8);
-        auto* base = slot.backing.data_ptr<uint8_t>();
+        auto* base    = slot.backing.data_ptr<uint8_t>();
         for (size_t i = 0; i < tensors.size(); ++i) {
             const auto contiguous = tensors[i].contiguous();
             std::memcpy(base + descriptor.tensors[i].offset, contiguous.data_ptr(), tensorBytes(tensors[i]));
@@ -100,9 +102,8 @@ public:
     }
 
     bool read(const ::RdmaDescriptorPB& descriptor, std::vector<torch::Tensor>* tensors) const {
-        const auto it = std::find_if(slots.begin(), slots.end(), [&](const Slot& slot) {
-            return slot.lease_id == descriptor.lease_id();
-        });
+        const auto it = std::find_if(
+            slots.begin(), slots.end(), [&](const Slot& slot) { return slot.lease_id == descriptor.lease_id(); });
         if (it == slots.end()) {
             return false;
         }
@@ -124,8 +125,8 @@ public:
                     break;
             }
             std::vector<int64_t> shape(meta.shape().begin(), meta.shape().end());
-            auto view = torch::from_blob(const_cast<uint8_t*>(base) + meta.offset(), shape,
-                                         torch::TensorOptions().dtype(torchTypeOf(dtype)));
+            auto                 view = torch::from_blob(
+                const_cast<uint8_t*>(base) + meta.offset(), shape, torch::TensorOptions().dtype(torchTypeOf(dtype)));
             if (tensorBytes(view) != meta.nbytes() || meta.offset() + meta.nbytes() > descriptor.payload_bytes()) {
                 return false;
             }
@@ -152,11 +153,55 @@ protected:
     std::shared_ptr<RecordingExport> exporter;
 };
 
+class BlockingExport: public rdma_transport::RdmaExport {
+public:
+    explicit BlockingExport(bool concurrent): concurrent_(concurrent), resume_(resume_promise.get_future()) {}
+    bool supportsConcurrentRelease() const override {
+        return concurrent_;
+    }
+    rdma_transport::RdmaDescriptor create(const std::vector<torch::Tensor>&) override {
+        entered.set_value();
+        resume_.wait();
+        return {};
+    }
+    void release(const std::vector<std::string>&) override {
+        released.set_value();
+    }
+    std::promise<void> entered;
+    std::promise<void> released;
+    std::promise<void> resume_promise;
+
+private:
+    bool              concurrent_;
+    std::future<void> resume_;
+};
+
+TEST(MMRdmaExporterConcurrencyTest, releaseBypassesBlockedExportOnlyForCapableProviders) {
+    for (bool concurrent : {true, false}) {
+        auto           provider = std::make_shared<BlockingExport>(concurrent);
+        MMRdmaExporter adapter(provider, 1 << 20);
+        auto           entered        = provider->entered.get_future();
+        auto           released       = provider->released.get_future();
+        auto           export_task    = std::async(std::launch::async, [&] {
+            std::vector<MMRdmaSlotPB> slots;
+            return adapter.exportSlots(torch::zeros({1, 4}), std::nullopt, {}, &slots);
+        });
+        const auto     entered_status = entered.wait_for(std::chrono::seconds(2));
+        EXPECT_EQ(entered_status, std::future_status::ready);
+        auto release_task = std::async(std::launch::async, [&] { adapter.releaseHandles({"old-lease"}); });
+        EXPECT_EQ(released.wait_for(std::chrono::milliseconds(concurrent ? 1000 : 100)),
+                  concurrent ? std::future_status::ready : std::future_status::timeout);
+        provider->resume_promise.set_value();
+        export_task.get();
+        release_task.get();
+    }
+}
+
 TEST_F(MMRdmaTransportTest, packsRolesIntoOneSlotInOrder) {
-    auto adapter = makeAdapter(1 << 20);
-    std::vector<MMRdmaSlotPB> slots;
-    const auto embedding = rowMarkedTensor(4, 8);
-    const auto pos_id = torch::zeros({4, 3}, torch::kInt32);
+    auto                       adapter = makeAdapter(1 << 20);
+    std::vector<MMRdmaSlotPB>  slots;
+    const auto                 embedding = rowMarkedTensor(4, 8);
+    const auto                 pos_id    = torch::zeros({4, 3}, torch::kInt32);
     std::vector<torch::Tensor> extras{torch::zeros({5}, torch::kInt32), torch::zeros({6}, torch::kInt32)};
 
     ASSERT_TRUE(adapter.exportSlots(embedding, pos_id, extras, &slots));
@@ -172,9 +217,9 @@ TEST_F(MMRdmaTransportTest, packsRolesIntoOneSlotInOrder) {
 }
 
 TEST_F(MMRdmaTransportTest, rowSplitsAndRoundTripsInOrder) {
-    auto adapter = makeAdapter(300);
+    auto                      adapter = makeAdapter(300);
     std::vector<MMRdmaSlotPB> slots;
-    const auto embedding = rowMarkedTensor(6, 25);
+    const auto                embedding = rowMarkedTensor(6, 25);
 
     ASSERT_TRUE(adapter.exportSlots(embedding, std::nullopt, {}, &slots));
     ASSERT_EQ(slots.size(), 3u);
@@ -189,15 +234,15 @@ TEST_F(MMRdmaTransportTest, rowSplitsAndRoundTripsInOrder) {
 }
 
 TEST_F(MMRdmaTransportTest, rejectsEmbeddingRowLargerThanSlot) {
-    auto adapter = makeAdapter(256);
+    auto                      adapter = makeAdapter(256);
     std::vector<MMRdmaSlotPB> slots;
     EXPECT_FALSE(adapter.exportSlots(rowMarkedTensor(2, 128), std::nullopt, {}, &slots));
     EXPECT_TRUE(slots.empty());
 }
 
 TEST_F(MMRdmaTransportTest, rollsBackEarlierLeasesOnCreateFailure) {
-    exporter->fail_at = 2;
-    auto adapter = makeAdapter(512);
+    exporter->fail_at                 = 2;
+    auto                      adapter = makeAdapter(512);
     std::vector<MMRdmaSlotPB> slots;
     EXPECT_FALSE(adapter.exportSlots(rowMarkedTensor(8, 64), std::nullopt, {}, &slots));
     EXPECT_TRUE(slots.empty());
@@ -205,13 +250,13 @@ TEST_F(MMRdmaTransportTest, rollsBackEarlierLeasesOnCreateFailure) {
 }
 
 TEST_F(MMRdmaTransportTest, reassemblesChunkedMultimodalOutput) {
-    auto adapter = makeAdapter(512);
+    auto                      adapter = makeAdapter(512);
     std::vector<MMRdmaSlotPB> slots;
-    const auto embedding = rowMarkedTensor(7, 64);
-    const auto pos_id = torch::zeros({7, 3}, torch::kInt32);
+    const auto                embedding = rowMarkedTensor(7, 64);
+    const auto                pos_id    = torch::zeros({7, 3}, torch::kInt32);
     ASSERT_TRUE(adapter.exportSlots(embedding, pos_id, {}, &slots));
 
-    std::vector<torch::Tensor> tensors;
+    std::vector<torch::Tensor>      tensors;
     std::vector<MMRdmaSlotPB::Role> roles;
     for (const auto& slot : slots) {
         ASSERT_TRUE(exporter->read(slot.rdma_descriptor(), &tensors));
@@ -229,14 +274,12 @@ TEST_F(MMRdmaTransportTest, reassemblesChunkedMultimodalOutput) {
 }
 
 TEST_F(MMRdmaTransportTest, rejectsUnsetRoleAndInconsistentSplit) {
-    const auto embedding = rowMarkedTensor(4, 4);
-    MultimodalOutput output;
+    const auto         embedding = rowMarkedTensor(4, 4);
+    MultimodalOutput   output;
     MultimodalOutputPB output_pb;
     output_pb.add_split_size(3);
-    EXPECT_FALSE(assembleMMRdmaOutput(
-        {embedding}, {MMRdmaSlotPB::ROLE_UNSPECIFIED}, &output_pb, &output));
-    EXPECT_FALSE(assembleMMRdmaOutput(
-        {embedding}, {MMRdmaSlotPB::EMBEDDING}, &output_pb, &output));
+    EXPECT_FALSE(assembleMMRdmaOutput({embedding}, {MMRdmaSlotPB::ROLE_UNSPECIFIED}, &output_pb, &output));
+    EXPECT_FALSE(assembleMMRdmaOutput({embedding}, {MMRdmaSlotPB::EMBEDDING}, &output_pb, &output));
 }
 
 }  // namespace

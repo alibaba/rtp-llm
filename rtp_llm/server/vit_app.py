@@ -30,6 +30,7 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
 from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.ops import RoleType
+from rtp_llm.server.vit_grpc_server import stop_vit_grpc_server
 from rtp_llm.server.vit_rpc_server import MultimodalRpcServer, create_rpc_server
 
 MM_CACHE_SNAPSHOT_MAX_KEYS = 100000
@@ -400,7 +401,7 @@ class VitEndpointServer:
 
     def stop(self):
         if self.rpc_server is not None:
-            self.rpc_server.stop(grace=None)
+            stop_vit_grpc_server(self.rpc_server)
         if self.mm_rpc_server is not None:
             self.mm_rpc_server.stop()
 

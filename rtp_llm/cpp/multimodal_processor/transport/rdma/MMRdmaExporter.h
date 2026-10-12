@@ -32,11 +32,13 @@ public:
     std::vector<py::bytes> exportEmbedding(torch::Tensor                embedding,
                                            std::optional<torch::Tensor> pos_id,
                                            std::vector<torch::Tensor>   extra_inputs);
-    void release(const std::vector<std::string>& handles);
+    void                   release(const std::vector<std::string>& handles);
 
 private:
     MMRdmaExporter(std::shared_ptr<rdma_transport::RdmaExport> exporter, int64_t max_slot_bytes):
         exporter_(std::move(exporter)), max_slot_bytes_(max_slot_bytes) {}
+
+    void releaseHandles(const std::vector<std::string>& handles);
 
     bool exportSlots(const torch::Tensor&                embedding,
                      const std::optional<torch::Tensor>& pos_id,
@@ -44,8 +46,8 @@ private:
                      std::vector<MMRdmaSlotPB>*          slots);
 
     std::shared_ptr<rdma_transport::RdmaExport> exporter_;
-    int64_t                                    max_slot_bytes_ = 0;
-    std::mutex                                 provider_mutex_;
+    int64_t                                     max_slot_bytes_ = 0;
+    std::mutex                                  provider_mutex_;
 };
 
 void registerMMRdmaExporter(py::module& m);

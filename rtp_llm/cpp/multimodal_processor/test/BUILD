@@ -64,6 +64,7 @@ cc_test(
     name = "mm_remote_output_transport_test",
     srcs = [
         "MMRemoteOutputTransportTest.cc",
+        "MMGrpcReleaseTest.cc",
     ],
     copts = test_copts,
     deps = torch_deps() + cuda13_torch_link_deps + [

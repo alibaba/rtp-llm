@@ -12,12 +12,20 @@ py_library(
         "server_args/*.py"
     ], exclude = [
         "request_headers.py",
+        "vit_grpc_server.py",
     ]),
     deps = [
         ":request_headers",
+        ":vit_grpc_server",
         "//rtp_llm:telemetry",
         "//rtp_llm:warmup",
         "//rtp_llm:vipserver",
         "//rtp_llm/cpp/model_rpc/proto:flexlb_schedule_service_py_proto",
     ]
+)
+
+py_library(
+    name = "vit_grpc_server",
+    srcs = ["vit_grpc_server.py"],
+    deps = ["//rtp_llm:grpcio-tools"],
 )

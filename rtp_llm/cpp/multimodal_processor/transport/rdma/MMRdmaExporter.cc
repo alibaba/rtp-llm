@@ -171,8 +171,15 @@ void MMRdmaExporter::release(const std::vector<std::string>& handles) {
     if (exporter_ == nullptr) {
         return;
     }
-    py::gil_scoped_release      release;
-    std::lock_guard<std::mutex> provider_lock(provider_mutex_);
+    py::gil_scoped_release release;
+    releaseHandles(handles);
+}
+
+void MMRdmaExporter::releaseHandles(const std::vector<std::string>& handles) {
+    std::unique_lock<std::mutex> provider_lock(provider_mutex_, std::defer_lock);
+    if (!exporter_->supportsConcurrentRelease()) {
+        provider_lock.lock();
+    }
     exporter_->release(handles);
 }
 

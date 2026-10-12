@@ -64,3 +64,9 @@ py_test(
     ],
     tags = ["manual"],
 )
+
+py_test(
+    name = "vit_grpc_server_test",
+    srcs = ["vit_grpc_server_test.py"],
+    deps = ["//rtp_llm/server:vit_grpc_server"],
+)

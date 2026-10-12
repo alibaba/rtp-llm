@@ -15,10 +15,10 @@ class RdmaDescriptorPB;
 
 namespace rtp_llm::rdma_transport {
 
-inline constexpr uint64_t kRdmaSlotAlign            = 256;
-inline constexpr size_t   kMaxRdmaNicKeys           = 64;
-inline constexpr size_t   kMaxRdmaTensorsPerSlot    = 4096;
-inline constexpr size_t   kMaxRdmaTensorDimensions  = 16;
+inline constexpr uint64_t kRdmaSlotAlign           = 256;
+inline constexpr size_t   kMaxRdmaNicKeys          = 64;
+inline constexpr size_t   kMaxRdmaTensorsPerSlot   = 4096;
+inline constexpr size_t   kMaxRdmaTensorDimensions = 16;
 
 enum class TensorDataType {
     FLOAT32,
@@ -69,7 +69,12 @@ public:
     // create() throws, every lease created earlier in the batch is released before returning
     // an empty result or propagating the exception.
     std::vector<RdmaDescriptor> createBatch(const std::vector<std::vector<torch::Tensor>>& tensor_groups);
-    // Production adapters serialize provider calls. Release must remain idempotent: duplicate,
+    // By default adapters serialize provider calls. Providers may opt in only when release()
+    // is safe concurrently with create(), createBatch() rollback and other release() calls.
+    virtual bool supportsConcurrentRelease() const {
+        return false;
+    }
+    // Release must remain idempotent: duplicate,
     // unknown, or already expired leases are ignored.
     virtual void release(const std::vector<std::string>& lease_ids) = 0;
 };
@@ -83,13 +88,13 @@ public:
 };
 
 // Implemented by the build-selected provider (Barex or no-op).
-bool                        hasRdmaImplementation();
+bool hasRdmaImplementation();
 // device_id < 0 is retained for legacy callers; service paths pass an explicit local CUDA device.
 std::shared_ptr<RdmaExport> createRdmaExport(const RdmaConfig& config, int device_id = -1);
 std::shared_ptr<RdmaRead>   createRdmaRead(const RdmaConfig& config, int device_id = -1);
 
-void toProto(const RdmaDescriptor& src, ::RdmaDescriptorPB* dst);
-bool fromProto(const ::RdmaDescriptorPB& src, RdmaDescriptor* dst);
+void      toProto(const RdmaDescriptor& src, ::RdmaDescriptorPB* dst);
+bool      fromProto(const ::RdmaDescriptorPB& src, RdmaDescriptor* dst);
 ErrorInfo validateRdmaDescriptor(const RdmaDescriptor& descriptor, int64_t max_slot_bytes);
 
 }  // namespace rtp_llm::rdma_transport

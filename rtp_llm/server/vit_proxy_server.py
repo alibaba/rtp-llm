@@ -33,6 +33,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.transport.proxy_router import MMOutputProxyRouter
+from rtp_llm.server.vit_grpc_server import create_vit_grpc_server, stop_vit_grpc_server
 
 # Proxy forwarding includes transport and serialization after the worker's
 # preprocessing budget. The margin lets the worker return its own timeout error;
@@ -363,9 +364,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self.connection_pool = connection_pool
         self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.profiler = MMProfiler()
-        self._transport_router = MMOutputProxyRouter(
-            connection_pool, transport_config
-        )
+        self._transport_router = MMOutputProxyRouter(connection_pool, transport_config)
         kmonitor.init()
         self._status_probes: dict[str, _WorkerStatusProbe] = {}
         self._status_probes_lock = threading.Lock()
@@ -715,9 +714,7 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         for probe in probes:
             probe.cancel()
 
-    def ReleaseRdmaLease(
-        self, request: ReleaseLeasePB, context
-    ) -> EmptyPB:
+    def ReleaseRdmaLease(self, request: ReleaseLeasePB, context) -> EmptyPB:
         self._transport_router.release(request, context)
         return EmptyPB()
 
@@ -841,16 +838,7 @@ class VitProxyServer:
 
     def start(self):
         """启动代理服务器"""
-        self.rpc_server = grpc.server(
-            futures.ThreadPoolExecutor(max_workers=200),
-            options=[
-                ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-                ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-                ("grpc.max_concurrent_streams", -1),
-                ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-                ("grpc.http2.max_ping_strikes", 1000),
-            ],
-        )
+        self.rpc_server = create_vit_grpc_server()
 
         self.proxy_servicer = VitProxyRpcServer(
             self.load_balancer,
@@ -871,7 +859,7 @@ class VitProxyServer:
     def stop(self):
         """停止代理服务器"""
         if self.rpc_server:
-            self.rpc_server.stop(grace=None)
+            stop_vit_grpc_server(self.rpc_server)
             logging.info("VIT Proxy Server stopped")
         if self.proxy_servicer:
             self.proxy_servicer.cancel_status_probes()

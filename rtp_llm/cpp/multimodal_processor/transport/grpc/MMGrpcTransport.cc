@@ -25,6 +25,21 @@ inline constexpr const char* kReasonGrpcError          = "grpc_error";
 inline constexpr const char* kReasonReleaseQueueFull   = "release_queue_full";
 inline constexpr const char* kReasonReleaseClientStop  = "release_client_stopping";
 inline constexpr size_t      kMaxPendingReleaseHandles = 1024;
+inline constexpr unsigned    kMaxReleaseAttempts       = 6;
+
+bool retryableRelease(const grpc::Status& status) {
+    switch (status.error_code()) {
+        case grpc::StatusCode::DEADLINE_EXCEEDED:
+        case grpc::StatusCode::UNAVAILABLE:
+        case grpc::StatusCode::RESOURCE_EXHAUSTED:
+        case grpc::StatusCode::CANCELLED:
+        case grpc::StatusCode::UNKNOWN:
+        case grpc::StatusCode::INTERNAL:
+            return true;
+        default:
+            return false;
+    }
+}
 
 std::vector<std::string> uniqueReleaseHandles(const std::vector<std::string>& handles) {
     std::vector<std::string>        unique;
@@ -45,7 +60,7 @@ std::string pendingReleaseKey(const std::string& endpoint, const std::string& ha
 class GrpcMMControlClient: public MMControlClient {
 public:
     GrpcMMControlClient(MMTransportMetricsPtr metrics, int64_t release_timeout_ms):
-        metrics_(std::move(metrics)), release_timeout_ms_(release_timeout_ms) {
+        metrics_(std::move(metrics)), release_timeout_ms_(std::max<int64_t>(1, release_timeout_ms)) {
         release_thread_ = std::thread(&GrpcMMControlClient::releaseLoop, this);
     }
 
@@ -120,10 +135,14 @@ public:
     release(const std::string& endpoint, const std::vector<std::string>& handles, DeadlineBudget& budget) override {
         const int64_t remaining      = budget.remainingMs();
         const auto    unique_handles = uniqueReleaseHandles(handles);
-        if (unique_handles.empty() || remaining <= 0) {
+        if (unique_handles.empty()) {
             return;
         }
-        releaseNow(endpoint, unique_handles, std::min(release_timeout_ms_, remaining));
+        // Cleanup owns its budget; an expired inference request must not lose the lease.
+        if (remaining <= 0
+            || retryableRelease(releaseNow(endpoint, unique_handles, std::min(release_timeout_ms_, remaining)))) {
+            releaseAsync(endpoint, unique_handles);
+        }
     }
 
     void releaseAsync(std::string endpoint, std::vector<std::string> handles) override {
@@ -172,13 +191,15 @@ public:
 
 private:
     struct ReleaseTask {
-        std::string              endpoint;
-        std::vector<std::string> handles;
+        std::string                           endpoint;
+        std::vector<std::string>              handles;
+        unsigned                              attempts = 0;
+        std::chrono::steady_clock::time_point ready_at = std::chrono::steady_clock::now();
     };
 
-    void releaseNow(const std::string& endpoint, const std::vector<std::string>& handles, int64_t timeout_ms) {
-        if (handles.empty() || timeout_ms <= 0) {
-            return;
+    grpc::Status releaseNow(const std::string& endpoint, const std::vector<std::string>& handles, int64_t timeout_ms) {
+        if (handles.empty()) {
+            return grpc::Status::OK;
         }
         auto connection_status = pool_.getConnection(endpoint);
         if (!connection_status.ok()) {
@@ -187,7 +208,7 @@ private:
                                 handles.size(),
                                 handles.front().c_str(),
                                 connection_status.status().ToString().c_str());
-            return;
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, connection_status.status().ToString());
         }
         auto&               stub = connection_status.value().stub;
         grpc::ClientContext rel_ctx;
@@ -211,38 +232,77 @@ private:
                 static_cast<int>(rel_status.error_code()),
                 rel_status.error_message().c_str());
         }
+        return rel_status;
     }
 
     void releaseLoop() {
         while (true) {
-            std::unordered_map<std::string, std::vector<std::string>> batches;
+            ReleaseTask task;
             {
                 std::unique_lock<std::mutex> lock(release_mutex_);
-                release_cv_.wait(lock, [this] { return stopping_ || !release_queue_.empty(); });
-                if (stopping_) {
-                    return;
-                }
-                while (!release_queue_.empty()) {
-                    auto task = std::move(release_queue_.front());
-                    release_queue_.pop_front();
-                    auto& handles = batches[task.endpoint];
-                    handles.insert(handles.end(),
-                                   std::make_move_iterator(task.handles.begin()),
-                                   std::make_move_iterator(task.handles.end()));
-                }
-            }
-            for (const auto& [endpoint, handles] : batches) {
-                {
-                    std::lock_guard<std::mutex> lock(release_mutex_);
+                while (true) {
                     if (stopping_) {
                         return;
                     }
+                    if (release_queue_.empty()) {
+                        release_cv_.wait(lock);
+                        continue;
+                    }
+                    auto       next = std::min_element(release_queue_.begin(),
+                                                 release_queue_.end(),
+                                                 [](const auto& a, const auto& b) { return a.ready_at < b.ready_at; });
+                    const auto now  = std::chrono::steady_clock::now();
+                    if (next->ready_at > now) {
+                        const auto ready_at = next->ready_at;
+                        release_cv_.wait_until(lock, ready_at);
+                        continue;
+                    }
+                    task = std::move(*next);
+                    release_queue_.erase(next);
+                    // Batch due leases for the same endpoint and retry round. Fresh
+                    // cleanup can run while another endpoint is backing off.
+                    for (auto it = release_queue_.begin(); it != release_queue_.end();) {
+                        if (it->endpoint == task.endpoint && it->attempts == task.attempts && it->ready_at <= now) {
+                            task.handles.insert(task.handles.end(),
+                                                std::make_move_iterator(it->handles.begin()),
+                                                std::make_move_iterator(it->handles.end()));
+                            it = release_queue_.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    break;
                 }
-                releaseNow(endpoint, handles, release_timeout_ms_);
-                std::lock_guard<std::mutex> lock(release_mutex_);
-                for (const auto& handle : handles) {
-                    pending_release_keys_.erase(pendingReleaseKey(endpoint, handle));
-                }
+            }
+            const auto status = releaseNow(task.endpoint, task.handles, release_timeout_ms_);
+            ++task.attempts;
+            std::lock_guard<std::mutex> lock(release_mutex_);
+            if (stopping_) {
+                return;
+            }
+            if (retryableRelease(status) && task.attempts < kMaxReleaseAttempts) {
+                const auto delay_ms = 100 * (1u << (task.attempts - 1));
+                task.ready_at       = std::chrono::steady_clock::now() + std::chrono::milliseconds(delay_ms);
+                RTP_LLM_LOG_WARNING("[MM-RDMA-RELEASE] retry scheduled endpoint=%s leases=%zu attempt=%u delay_ms=%u",
+                                    task.endpoint.c_str(),
+                                    task.handles.size(),
+                                    task.attempts + 1,
+                                    delay_ms);
+                // Retain dedup keys until success or exhaustion, including during backoff.
+                release_queue_.push_back(std::move(task));
+                continue;
+            }
+            if (!status.ok()) {
+                metrics_->reportRpcClientError(
+                    task.endpoint, "release_retry_exhausted", std::to_string(static_cast<int>(status.error_code())));
+                RTP_LLM_LOG_WARNING("[MM-RDMA-RELEASE] giving up endpoint=%s leases=%zu attempts=%u; "
+                                    "encoder slot GC will reclaim them",
+                                    task.endpoint.c_str(),
+                                    task.handles.size(),
+                                    task.attempts);
+            }
+            for (const auto& handle : task.handles) {
+                pending_release_keys_.erase(pendingReleaseKey(task.endpoint, handle));
             }
         }
     }

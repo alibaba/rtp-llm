@@ -1313,6 +1313,25 @@ class MMOutputProxyRouterTest(TestCase):
         self.assertIn("handle-a", router._handle_routes)
         self.assertNotIn("handle-b", router._handle_routes)
 
+    def test_failed_worker_release_can_be_retried(self):
+        pool = MagicMock()
+        stub = pool.get_stub.return_value
+        stub.ReleaseRdmaLease.side_effect = [RuntimeError("busy"), None]
+        router = MMOutputProxyRouter(pool)
+        router.record_receipt(
+            "worker", MultimodalOutputPB(output_rdma_slots=[_rdma_slot("handle")])
+        )
+        request = ReleaseLeasePB(lease_id=["handle"])
+        first_context = FakeContext([1.0])
+        router.release(request, first_context)
+        self.assertEqual(first_context.code, grpc.StatusCode.UNAVAILABLE)
+        self.assertIn("handle", router._handle_routes)
+        second_context = FakeContext([1.0])
+        router.release(request, second_context)
+        self.assertIsNone(second_context.code)
+        self.assertNotIn("handle", router._handle_routes)
+        self.assertEqual(stub.ReleaseRdmaLease.call_count, 2)
+
     def test_duplicate_handles_are_forwarded_once(self):
         connection_pool = MagicMock()
         stub = MagicMock()
@@ -1332,7 +1351,7 @@ class MMOutputProxyRouterTest(TestCase):
         self.assertEqual(list(request.lease_id), ["handle"])
         self.assertEqual(stub.ReleaseRdmaLease.call_count, 1)
 
-    def test_concurrent_release_atomically_claims_route(self):
+    def test_concurrent_release_keeps_route_until_worker_acknowledges(self):
         entered = threading.Event()
         unblock = threading.Event()
 
@@ -1342,8 +1361,11 @@ class MMOutputProxyRouterTest(TestCase):
 
             def ReleaseRdmaLease(self, request, timeout):
                 self.calls += 1
-                entered.set()
-                unblock.wait(timeout=1.0)
+                if self.calls == 1:
+                    entered.set()
+                    unblock.wait(timeout=2.0)
+                else:
+                    raise RuntimeError("second forwarding attempt failed")
 
         stub = BlockingStub()
         connection_pool = MagicMock()
@@ -1360,12 +1382,16 @@ class MMOutputProxyRouterTest(TestCase):
         first.start()
         self.assertTrue(entered.wait(timeout=1.0))
 
-        router.release(request, FakeContext([1.0]))
+        second_context = FakeContext([1.0])
+        router.release(request, second_context)
+        self.assertEqual(second_context.code, grpc.StatusCode.UNAVAILABLE)
+        self.assertIn("handle", router._handle_routes)
         unblock.set()
         first.join(timeout=1.0)
 
         self.assertFalse(first.is_alive())
-        self.assertEqual(stub.calls, 1)
+        self.assertEqual(stub.calls, 2)
+        self.assertNotIn("handle", router._handle_routes)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 import logging
 import threading
 import time
-from concurrent import futures
 
 import grpc
 import torch
@@ -33,6 +32,7 @@ from rtp_llm.multimodal.mm_scheduler import (
 )
 from rtp_llm.multimodal.multimodal_util import trans_mm_input
 from rtp_llm.multimodal.transport import create_mm_output_transport
+from rtp_llm.server.vit_grpc_server import create_vit_grpc_server
 
 
 def merge_embedding_results(results: list[MMEmbeddingRes]) -> MMEmbeddingRes:
@@ -242,14 +242,4 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
 
 
 def create_rpc_server():
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=200),
-        options=[
-            ("grpc.max_send_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
-            ("grpc.max_concurrent_streams", -1),
-            ("grpc.http2.min_ping_interval_without_data_ms", 1000),
-            ("grpc.http2.max_ping_strikes", 1000),
-        ],
-    )
-    return server
+    return create_vit_grpc_server()
