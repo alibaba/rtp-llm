@@ -33,7 +33,6 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.rope_applier import (
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 from rtp_llm.models_py.modules.factory.attention.rope_applier import RopeApplier
 from rtp_llm.ops import RopeStyle
-from rtp_llm.ops.compute_ops import FusedRopeKVCachePrefillOpQKVOut
 
 
 def _attn_configs(style: RopeStyle, mrope_interleaved: bool = True) -> SimpleNamespace:
@@ -74,18 +73,22 @@ def _patch_sm10x(value: bool):
 
 
 class RopeApplierContractTest(unittest.TestCase):
-    def test_fused_applier_is_the_fused_operator(self):
-        # The applier adds rope metadata to the existing operator instead of
-        # wrapping it, so callers keep the operator API unchanged.
+    def test_fused_applier_delegates_to_the_fused_operator(self):
+        # The applier composes the operator (the PPU binding's pybind
+        # metaclass cannot be combined with ABCMeta), so callers go through
+        # the applier's own rope vocabulary while the op keeps its API.
         applier = FusedRopeQKVOutApplier(SimpleNamespace())
-        self.assertIsInstance(applier, FusedRopeKVCachePrefillOpQKVOut)
         self.assertIsInstance(applier, RopeApplier)
         self.assertTrue(FusedRopeQKVOutApplier.fused_kv_write)
         self.assertTrue(FusedRopeQKVOutApplier.owns_params)
-        with mock.patch.object(applier, "forward") as op_forward:
+        with mock.patch.object(applier.op, "forward") as op_forward:
             op_forward.return_value = "roped"
             self.assertEqual(applier.apply("qkv", "cache", "params"), "roped")
         op_forward.assert_called_once_with("qkv", "cache", "params")
+        with mock.patch.object(applier.op, "prepare") as op_prepare:
+            op_prepare.return_value = "params"
+            self.assertEqual(applier.prepare("attn_inputs"), "params")
+        op_prepare.assert_called_once_with("attn_inputs")
 
     def test_flashinfer_applier_is_the_rotary_operator(self):
         applier = FlashinferRopeApplier(_attn_configs(RopeStyle.Base))

@@ -17,11 +17,22 @@ from rtp_llm.ops import RopeStyle
 from rtp_llm.ops.compute_ops import FusedRopeKVCachePrefillOpQKVOut
 
 
-class FusedRopeQKVOutApplier(FusedRopeKVCachePrefillOpQKVOut, RopeApplier):
-    """Packed QKV in, packed QKV out; stores K/V when handed a cache."""
+class FusedRopeQKVOutApplier(RopeApplier):
+    """Packed QKV in, packed QKV out; stores K/V when handed a cache.
+
+    Composes (not subclasses) the platform rope operator: on CUDA the op is a
+    plain Python class, but on PPU it is a pybind11 type whose metaclass
+    cannot be combined with ABCMeta.
+    """
 
     fused_kv_write = True
     owns_params = True
+
+    def __init__(self, attn_configs: Any):
+        self.op = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
+
+    def prepare(self, attn_inputs: Any, forbid_reallocation: bool = False) -> Any:
+        return self.op.prepare(attn_inputs)
 
     def apply(
         self,
@@ -29,7 +40,7 @@ class FusedRopeQKVOutApplier(FusedRopeKVCachePrefillOpQKVOut, RopeApplier):
         kv_cache: Optional[Any] = None,
         params: Optional[Any] = None,
     ) -> torch.Tensor:
-        return self.forward(qkv, kv_cache, params)
+        return self.op.forward(qkv, kv_cache, params)
 
 
 def prefill_rope_is_fused(attn_configs: Any) -> bool:

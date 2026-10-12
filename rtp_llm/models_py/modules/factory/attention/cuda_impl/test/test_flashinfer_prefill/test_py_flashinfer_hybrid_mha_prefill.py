@@ -291,8 +291,8 @@ class TestPyFlashinferHybridPrefillAttnOp(BaseAttentionTest):
         if self.kv_cache_dtype == KvCacheDataType.FP8:
             self.assertEqual(impl.fmha_impl.kv_dtype, torch.float8_e4m3fn)
 
-        self.assertIsNotNone(impl.rope_impl)
-        expected_q, expected_k, expected_v = impl.rope_impl.forward(qkv.clone())
+        self.assertIsNotNone(impl.rope_applier)
+        expected_q, expected_k, expected_v = impl.rope_applier.apply(qkv.clone())
         ref_chunks = []
         token_offset = 0
         for batch_idx, (prefix_len, input_len) in enumerate(
