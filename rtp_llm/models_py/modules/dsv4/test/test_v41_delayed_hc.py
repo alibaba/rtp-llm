@@ -7,13 +7,13 @@ import torch
 from rtp_llm.models_py.modules.dsv4.hc.delayed import DelayedHCHead, DelayedHCUnit
 from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import (
     DelayedHCUnit as ReferenceHCUnit,
-    identity_pre_mix,
 )
+from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import identity_pre_mix
 
 
 class DelayedHCTest(unittest.TestCase):
     @staticmethod
-    def unit(pre_bias):
+    def unit(pre_bias, *, collapse_mode=None):
         base = torch.zeros(24)
         base[:4] = torch.tensor(pre_bias)
         return DelayedHCUnit(
@@ -25,6 +25,7 @@ class DelayedHCTest(unittest.TestCase):
             hc_sinkhorn_iters=20,
             norm_eps=1e-6,
             hc_eps=1e-6,
+            collapse_mode=collapse_mode,
         )
 
     def test_entry_uses_identity_and_next_sublayer_uses_previous_mix(self):
@@ -129,6 +130,77 @@ class DelayedHCTest(unittest.TestCase):
                     rtol=1e-5,
                     atol=1e-6,
                 )
+
+    def test_ordered_policy_identity_read_is_an_independent_copy(self):
+        unit = self.unit([0.0] * 4, collapse_mode="ordered_fp32")
+        x = torch.arange(24, dtype=torch.bfloat16).reshape(2, 4, 3)
+        before = x.clone()
+        y, _, _ = unit.pre(x)
+        self.assertEqual(unit.collapse_mode, "ordered_fp32")
+        torch.testing.assert_close(y, x[:, 0], rtol=0, atol=0)
+        y.add_(1)
+        torch.testing.assert_close(x, before, rtol=0, atol=0)
+
+    def test_ordered_predecessor_and_head_use_the_selected_readout(self):
+        previous = self.unit([0.0] * 4)
+        unit = self.unit([5.0] * 4, collapse_mode="ordered_fp32")
+        unit.set_previous(previous)
+        x = torch.arange(24, dtype=torch.bfloat16).reshape(2, 4, 3)
+        mix = torch.tensor([[1.0, 0.5, 0.25, 0.125]]).repeat(2, 1)
+        previous.pre_mix_out = mix
+        expected = torch.tensor(
+            [[4.125, 6.0, 7.875], [26.625, 28.5, 30.375]], dtype=torch.bfloat16
+        )
+        y, _, _ = unit.pre(x)
+        torch.testing.assert_close(y, expected, rtol=0, atol=0)
+        unit.pre_mix_out = mix
+        torch.testing.assert_close(
+            DelayedHCHead(unit).head(x), expected, rtol=0, atol=0
+        )
+        torch.testing.assert_close(previous.pre_mix_out, mix, rtol=0, atol=0)
+
+    def test_ordered_rejection_preserves_coefficient_state(self):
+        previous = self.unit([0.0] * 4)
+        unit = self.unit([1.0] * 4, collapse_mode="ordered_fp32")
+        unit.set_previous(previous)
+        sentinel = torch.ones(1, 4)
+        unit.pre_mix_out = sentinel
+        for mix, error in (
+            (None, RuntimeError),
+            (torch.ones(2, 3), ValueError),
+            (torch.ones(2, 4, dtype=torch.bfloat16), TypeError),
+        ):
+            previous.pre_mix_out = mix
+            with self.subTest(mix=mix), self.assertRaises(error):
+                unit.pre(torch.ones(2, 4, 3, dtype=torch.bfloat16))
+            self.assertIs(unit.pre_mix_out, sentinel)
+        previous.pre_mix_out = torch.ones(2, 4)
+        with self.assertRaisesRegex(TypeError, "BF16 residuals"):
+            unit.pre(torch.ones(2, 4, 3))
+        self.assertIs(unit.pre_mix_out, sentinel)
+        del previous
+        with self.assertRaisesRegex(RuntimeError, "predecessor has not run"):
+            unit.pre(torch.ones(2, 4, 3, dtype=torch.bfloat16))
+        self.assertIs(unit.pre_mix_out, sentinel)
+
+    def test_ordered_policy_validation_and_empty_layouts(self):
+        for mode in (False, True, 0, [], "", "torch", "ORDERED_FP32"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                ValueError, "collapse_mode"
+            ):
+                self.unit([0.0] * 4, collapse_mode=mode)
+        previous = self.unit([0.0] * 4)
+        unit = self.unit([0.0] * 4, collapse_mode="ordered_fp32")
+        unit.set_previous(previous)
+        for shape in ((0, 4, 3), (2, 0, 4, 3)):
+            with self.subTest(shape=shape):
+                x = torch.empty(shape, dtype=torch.bfloat16)
+                previous.pre_mix_out = torch.empty(shape[:-1])
+                y, post, comb = unit.pre(x)
+                self.assertEqual(y.shape, shape[:-2] + (3,))
+                self.assertEqual(post.shape, shape[:-1] + (1,))
+                self.assertEqual(comb.shape, shape[:-2] + (4, 4))
+                self.assertEqual(DelayedHCHead(unit).head(x).shape, y.shape)
 
 
 if __name__ == "__main__":

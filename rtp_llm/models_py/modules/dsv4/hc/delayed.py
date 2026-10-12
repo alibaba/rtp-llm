@@ -52,6 +52,25 @@ def collapse_delayed(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
     return (x.float() * pre_mix.unsqueeze(-1)).sum(dim=-2).to(x.dtype)
 
 
+def _validate_ordered_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> None:
+    if x.ndim not in (3, 4) or min(x.shape[-2:]) <= 0:
+        raise ValueError("Ordered delayed mHC requires [..., streams, dim] residuals")
+    if pre_mix.shape != x.shape[:-1]:
+        raise ValueError("Ordered delayed mHC coefficients must match residual streams")
+    if x.dtype != torch.bfloat16 or pre_mix.dtype != torch.float32:
+        raise TypeError(
+            "Ordered delayed mHC requires BF16 residuals and FP32 coefficients"
+        )
+    if pre_mix.device != x.device:
+        raise ValueError("Ordered delayed mHC operands must share a device")
+
+
+def collapse_ordered_fp32(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
+    """Preserve separate FP32 multiplication and stream reduction before BF16."""
+    _validate_ordered_collapse(x, pre_mix)
+    return (pre_mix.unsqueeze(-1) * x.float()).sum(dim=-2).to(x.dtype)
+
+
 class DelayedHCPredecessor(Protocol):
     @property
     def pre_mix_out(self) -> Optional[torch.Tensor]:
@@ -60,8 +79,13 @@ class DelayedHCPredecessor(Protocol):
 
 
 class DelayedHCUnit(HCUnitBase):
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args, collapse_mode: Optional[str] = None, **kwargs) -> None:
+        if collapse_mode is not None and (
+            type(collapse_mode) is not str or collapse_mode != "ordered_fp32"
+        ):
+            raise ValueError("Delayed mHC collapse_mode must be ordered_fp32 or None")
         super().__init__(*args, **kwargs)
+        self._collapse_mode = collapse_mode
         mix_width = self.hc_mult * (self.hc_mult + 2)
         expected_fn_shape = (mix_width, self.hc_mult * self.dim)
         if tuple(self.fn.shape) != expected_fn_shape:
@@ -80,17 +104,46 @@ class DelayedHCUnit(HCUnitBase):
         self._previous_ref: Optional[weakref.ReferenceType[DelayedHCPredecessor]] = None
         self.pre_mix_out: Optional[torch.Tensor] = None
 
+    @property
+    def collapse_mode(self) -> Optional[str]:
+        return self._collapse_mode
+
+    def collapse(self, x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
+        if self._collapse_mode == "ordered_fp32":
+            return collapse_ordered_fp32(x, pre_mix)
+        return collapse_delayed(x, pre_mix)
+
     def set_previous(self, previous: Optional[DelayedHCPredecessor]) -> None:
         # Avoid registering predecessors as nested modules or creating cycles.
         self._previous_ref = weakref.ref(previous) if previous is not None else None
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):
         shape = x.shape
-        if x.is_cuda and x.dtype == torch.bfloat16:
+        previous_mix = None
+        if self._collapse_mode == "ordered_fp32":
+            if x.dtype != torch.bfloat16:
+                raise TypeError("Ordered delayed mHC requires BF16 residuals")
+            if any(t.device != x.device for t in (self.fn, self.base, self.scale)):
+                raise ValueError(
+                    "Ordered delayed mHC weights must share the residual device"
+                )
+            if self._previous_ref is not None:
+                previous = self._previous_ref()
+                if previous is None or previous.pre_mix_out is None:
+                    raise RuntimeError("Delayed mHC predecessor has not run")
+                previous_mix = previous.pre_mix_out
+                _validate_ordered_collapse(x, previous_mix)
+        if (
+            x.is_cuda
+            and x.dtype == torch.bfloat16
+            and (self._collapse_mode is None or x.numel() != 0)
+        ):
             from rtp_llm.models_py.modules.dsv4.hc.v41_prenorm import prenorm
 
             ops = _tile_ops()
             residual = x.reshape(1, -1, self.hc_mult, self.dim)
+            if self._collapse_mode == "ordered_fp32":
+                residual = residual.contiguous()
             mixes = prenorm(residual, self.fn, self.norm_eps)
             if mixes is None:
                 mixes = ops.mhc_pre_norm_fn(
@@ -127,10 +180,12 @@ class DelayedHCUnit(HCUnitBase):
             # Block's fast path cannot overwrite the residual lane.
             y = x[..., 0, :].clone(memory_format=torch.contiguous_format)
         else:
-            previous = self._previous_ref()
-            if previous is None or previous.pre_mix_out is None:
-                raise RuntimeError("Delayed mHC predecessor has not run")
-            y = collapse_delayed(x, previous.pre_mix_out)
+            if previous_mix is None:
+                previous = self._previous_ref()
+                if previous is None or previous.pre_mix_out is None:
+                    raise RuntimeError("Delayed mHC predecessor has not run")
+                previous_mix = previous.pre_mix_out
+            y = self.collapse(x, previous_mix)
         return y, post, comb
 
     def _post_impl(self, x, residual, post, comb):
@@ -151,7 +206,12 @@ class DelayedHCHead(nn.Module):
         unit = self._last_ffn_ref()
         if unit is None or unit.pre_mix_out is None:
             raise RuntimeError("V4.1 final FFN pre-mix is unavailable")
-        return collapse_delayed(hidden, unit.pre_mix_out)
+        return unit.collapse(hidden, unit.pre_mix_out)
 
 
-__all__ = ["DelayedHCUnit", "DelayedHCHead", "collapse_delayed"]
+__all__ = [
+    "DelayedHCUnit",
+    "DelayedHCHead",
+    "collapse_delayed",
+    "collapse_ordered_fp32",
+]
