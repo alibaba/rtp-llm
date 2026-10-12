@@ -1192,3 +1192,29 @@ py_test(
     exec_properties = {"gpu": "SM120", "gpu_count": "1"},
     target_compatible_with = _DSV4_SM120_ONLY,
 )
+
+py_test(
+    name = "test_v41_post_owner_sm120",
+    srcs = ["test_v41_post_owner_sm120.py", "test_v41_collapse_owner_sm120.py", "v41_mhc_precision.py"],
+    main = "test_v41_post_owner_sm120.py",
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_worker_testlib", ":v41_mhc_collapse_reference_testlib"],
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_post_dp_agreement_sm120",
+    srcs = [
+        "test_v41_post_dp_agreement_sm120.py",
+        "test_v41_collapse_dp_agreement_sm120.py",
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_rotary_dp_agreement_sm120.py",
+    ],
+    main = "test_v41_post_dp_agreement_sm120.py",
+    deps = _DSV4_FP8_TEST_DEPS + [":v41_worker_testlib"],
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)

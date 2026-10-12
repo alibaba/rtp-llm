@@ -10,6 +10,7 @@ from rtp_llm.config.dsv41_config import (
     V41Config,
     dsv41_pp_partition,
     v41_mhc_collapse_mode,
+    v41_mhc_post_mode,
     v41_rotary_compute_device,
     v41_sparse_attention_mode,
 )
@@ -96,6 +97,21 @@ class V41ConfigTest(unittest.TestCase):
             self.source["text_config"]["mhc_collapse_mode"] = value
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "mhc_collapse_mode"):
+                    V41Config.from_dict(self.source)
+
+    def test_explicit_mhc_post_selection_is_validated(self):
+        self.assertIsNone(v41_mhc_post_mode(self.source["text_config"]))
+        for value in (None, "ordered_fp32"):
+            self.source["text_config"]["mhc_post_mode"] = value
+            config = V41Config.from_dict(self.source)
+            self.assertEqual(v41_mhc_post_mode(config.text), value)
+            self.assertEqual(
+                config.runtime_text_config("/checkpoint")["mhc_post_mode"], value
+            )
+        for value in (False, True, 0, "", "native", "fp32", [], {}):
+            self.source["text_config"]["mhc_post_mode"] = value
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "mhc_post_mode"):
                     V41Config.from_dict(self.source)
 
     def test_invalid_source_schedules(self):

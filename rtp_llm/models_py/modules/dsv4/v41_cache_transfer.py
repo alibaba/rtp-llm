@@ -16,6 +16,7 @@ import torch
 
 from rtp_llm.config.dsv41_config import (
     v41_mhc_collapse_mode,
+    v41_mhc_post_mode,
     v41_rotary_compute_device,
     v41_sparse_attention_mode,
 )
@@ -49,6 +50,7 @@ class V41L20Contract:
     rotary_compute_device: str | None = None
     sparse_attention_mode: str | None = None
     mhc_collapse_mode: str | None = None
+    mhc_post_mode: str | None = None
 
     def __post_init__(self):
         for digest in (
@@ -66,6 +68,7 @@ class V41L20Contract:
         v41_rotary_compute_device({"rotary_compute_device": self.rotary_compute_device})
         v41_sparse_attention_mode({"sparse_attention_mode": self.sparse_attention_mode})
         v41_mhc_collapse_mode({"mhc_collapse_mode": self.mhc_collapse_mode})
+        v41_mhc_post_mode({"mhc_post_mode": self.mhc_post_mode})
 
     def require_rotary_config(self, text_config) -> None:
         if v41_rotary_compute_device(text_config) != self.rotary_compute_device:
@@ -77,6 +80,8 @@ class V41L20Contract:
             raise ValueError("V4.1 L20 sparse mode disagrees with its contract")
         if v41_mhc_collapse_mode(text_config) != self.mhc_collapse_mode:
             raise ValueError("V4.1 L20 mHC collapse mode disagrees with its contract")
+        if v41_mhc_post_mode(text_config) != self.mhc_post_mode:
+            raise ValueError("V4.1 L20 mHC post mode disagrees with its contract")
 
     def canonical_bytes(self) -> bytes:
         layouts = dsv41_page_layouts(0)
@@ -117,6 +122,8 @@ class V41L20Contract:
             manifest["sparse_attention_mode"] = self.sparse_attention_mode
         if self.mhc_collapse_mode is not None:
             manifest["mhc_collapse_mode"] = self.mhc_collapse_mode
+        if self.mhc_post_mode is not None:
+            manifest["mhc_post_mode"] = self.mhc_post_mode
         return json.dumps(
             manifest, sort_keys=True, separators=(",", ":"), allow_nan=False
         ).encode("ascii")
