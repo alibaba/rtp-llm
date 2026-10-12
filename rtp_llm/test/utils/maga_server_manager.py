@@ -279,29 +279,46 @@ class MagaServerManager(object):
 
         if server_process is not None and server_process.pid is not None:
             try:
-                # 如果只kill start_server，会残留 backend/frontend 占用显存。
-                # 部署时容器整体会回收，但测试时需要自己递归 kill
-                # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源
                 logging.info("stop server and children: %d", server_process.pid)
                 parent = psutil.Process(server_process.pid)
-                children = list(
-                    parent.children(recursive=True)
-                )  # 获取所有子进程（递归）
-                for child in children:
-                    child.terminate()  # 先尝试优雅终止
-                _, alive = psutil.wait_procs(children, timeout=5)
-                for child in alive:
-                    child.kill()  # 强制终止未退出的进程
+                children = list(parent.children(recursive=True))
+                # The server coordinates frontend drain and backend shutdown.
+                # Let it close its workers before cleaning up any survivors.
                 parent.terminate()
-                # 添加超时机制，避免永久阻塞
+                raw_timeout = (self._env_args or {}).get(
+                    "SHUTDOWN_TIMEOUT", os.environ.get("SHUTDOWN_TIMEOUT", "600")
+                )
                 try:
-                    parent.wait(timeout=10)
+                    shutdown_timeout = float(raw_timeout)
+                    if not 0 < shutdown_timeout < float("inf"):
+                        shutdown_timeout = 600.0
+                except (TypeError, ValueError):
+                    shutdown_timeout = 600.0
+                from rtp_llm.utils.process_manager import ProcessManager
+
+                # The coordinator gives frontend drain and backend cleanup
+                # separate budgets. Wait for both before cleaning survivors.
+                deferred_timeout = (
+                    ProcessManager.deferred_group_shutdown_timeout_seconds(
+                        shutdown_timeout
+                    )
+                ) or 0.0
+                try:
+                    parent.wait(timeout=shutdown_timeout + deferred_timeout + 5)
                 except psutil.TimeoutExpired:
                     logging.warning(
                         "Parent process did not exit gracefully, force killing"
                     )
+                    children.extend(parent.children(recursive=True))
                     parent.kill()
                     parent.wait(timeout=5)
+                _, alive = psutil.wait_procs(children, timeout=5)
+                for child in alive:
+                    child.terminate()
+                _, alive = psutil.wait_procs(alive, timeout=5)
+                for child in alive:
+                    child.kill()
+                psutil.wait_procs(alive, timeout=5)
                 with self._state_lock:
                     if self._server_process is server_process:
                         self._server_process = None
