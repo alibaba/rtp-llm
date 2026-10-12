@@ -161,3 +161,71 @@ def cached_indexer_prefill(function):
         return cache[key]
 
     return wrapped
+
+
+def cached_prefill_prefix_summary(prefix):
+    """Read immutable prefix metadata once at the start of this forward."""
+    import os
+
+    cache = metadata_cache()
+    if cache is None or os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") == "0":
+        return None
+    key = ("prefill_prefix_host", tensor_key(prefix))
+    if key not in cache:
+        host = prefix.detach().cpu()
+        values = tuple(int(v) for v in host.reshape(-1).tolist())
+        cache[key] = (host, values)
+    values = cache[key][1]
+    return any(v > 0 for v in values), bool(values) and all(v > 0 for v in values)
+
+
+def cached_indexer_host_lengths(cu, prefix, input_lengths, ratio, device):
+    """Share logical length geometry without caching physical pool mappings."""
+    import os
+    from itertools import accumulate
+
+    import torch
+
+    cache = metadata_cache()
+    if cache is None or os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") == "0":
+        return None
+    if cu.numel() != prefix.numel() + 1 or input_lengths.numel() != prefix.numel():
+        return None
+    key = (
+        "indexer_host_lengths",
+        tensor_key(cu),
+        tensor_key(prefix),
+        tensor_key(input_lengths),
+        ratio,
+        str(device),
+    )
+    if key in cache:
+        return cache[key]
+    cu_key = ("prefill_cu_host", tensor_key(cu))
+    boundaries = cache.get(cu_key)
+    if boundaries is None:
+        boundaries = tuple(int(v) for v in cu.detach().cpu().tolist())
+        cache[cu_key] = boundaries
+    cached_prefill_prefix_summary(prefix)
+    prefixes = cache[("prefill_prefix_host", tensor_key(prefix))][1]
+    totals = tuple(p + b - a for p, a, b in zip(prefixes, boundaries, boundaries[1:]))
+    counts = tuple(n // ratio for n in totals)
+    if any(n < 0 or n >= 2**31 for n in counts) or sum(counts) >= 2**31:
+        return None
+    offsets = (0, *accumulate(counts))
+    host_counts = torch.tensor(
+        counts, dtype=torch.int32, pin_memory=torch.device(device).type == "cuda"
+    )
+    host_cu = torch.tensor(
+        offsets, dtype=torch.int32, pin_memory=torch.device(device).type == "cuda"
+    )
+    result = (
+        host_counts.to(device, non_blocking=True),
+        host_cu.to(device, non_blocking=True),
+        offsets[-1],
+        totals[0],
+        host_counts,
+        host_cu,
+    )
+    cache[key] = result
+    return result

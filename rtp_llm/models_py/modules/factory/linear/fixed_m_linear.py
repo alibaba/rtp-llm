@@ -25,6 +25,11 @@ def fixed_m_linear(
     if input.size(0) == 0:
         return linear(input)
 
+    graph_forward = getattr(linear, "forward_fixed_rows", None)
+    if graph_forward is not None:
+        result = graph_forward(input, chunk_rows)
+        if result is not None:
+            return result
     num_rows, hidden_size = input.shape
     output_chunks = []
     for begin in range(0, num_rows, chunk_rows):

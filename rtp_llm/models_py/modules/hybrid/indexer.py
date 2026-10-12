@@ -5,6 +5,11 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    cached_prefill_prefix_summary,
+    metadata_cache,
+    tensor_key,
+)
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.hybrid.indexer_compressor import (
     fp8_pool_view,
@@ -56,13 +61,30 @@ def _build_tp_cache_shard_context(
     page owner rank and pool readers still need all-gather restore metadata,
     but compressor projections must not be gathered a second time.
     """
+    cache = (
+        metadata_cache()
+        if os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") != "0"
+        else None
+    )
+    key = (
+        "tp_cache_shard_context",
+        tp_size,
+        tp_rank,
+        tensor_key(attention_inputs.input_lengths),
+        tensor_key(attention_inputs.prefix_lengths),
+        tensor_key(attention_inputs.cu_seqlens),
+        tensor_key(fmha_params.positions_d),
+        tensor_key(fmha_params.batch_indice_d),
+    )
+    if cache is not None and key in cache:
+        return cache[key]
     input_lengths = attention_inputs.input_lengths.reshape(-1)
     prefix_lengths = attention_inputs.prefix_lengths.reshape(-1)
     positions = fmha_params.positions_d.reshape(-1)
     req_ids = fmha_params.batch_indice_d.reshape(-1)
     token_count = int(positions.numel())
     identity = torch.arange(token_count, device=positions.device, dtype=torch.int64)
-    return SimpleNamespace(
+    result = SimpleNamespace(
         cp_size=int(tp_size),
         cp_rank=int(tp_rank),
         chunk_length=token_count,
@@ -88,6 +110,9 @@ def _build_tp_cache_shard_context(
         kv_cache_sharded=True,
         sequence_parallel=False,
     )
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 class Indexer(nn.Module):
@@ -260,10 +285,7 @@ class Indexer(nn.Module):
     def _bind_compressed_pools(
         self, global_kv_cache: KVCache, attention_inputs: Any
     ) -> tuple[torch.Tensor, int]:
-        from rtp_llm.models_py.modules.dsv4.attn_type import (
-            INDEXER_KV,
-            INDEXER_STATE,
-        )
+        from rtp_llm.models_py.modules.dsv4.attn_type import INDEXER_KV, INDEXER_STATE
         from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
             require_pool_tokens_per_block,
         )
@@ -319,7 +341,12 @@ class Indexer(nn.Module):
         if prefix_host is not None and prefix_host.numel():
             return any(int(value) > 0 for value in prefix_host.tolist())
         prefix = attention_inputs.prefix_lengths
-        return bool(prefix.numel() and prefix.max().item() > 0)
+        summary = cached_prefill_prefix_summary(prefix)
+        return (
+            summary[0]
+            if summary is not None
+            else bool(prefix.numel() and prefix.max().item() > 0)
+        )
 
     def _forward_compressed(
         self,

@@ -8,7 +8,6 @@
 # Adapted for rtp-llm: forward-only, no CP, no backward.
 
 import torch
-
 from rtp_llm.models_py.triton_kernels.fla.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
 )
@@ -85,13 +84,22 @@ def chunk_kda_fwd(
     )
 
     if (
-        fuse_state_recurrence and not state_v_first and chunk_size == 64
-        and safe_gate and lower_bound == -5.0
+        fuse_state_recurrence
+        and not state_v_first
+        and chunk_size == 64
+        and safe_gate
+        and lower_bound == -5.0
     ):
         h, v_new, final_state = chunk_gated_delta_rule_fwd_h_reuse_graph(
-            k=kg, w=w, u=u, gk=g, initial_state=initial_state,
-            output_final_state=output_final_state, cu_seqlens=cu_seqlens,
-            chunk_size=chunk_size, use_exp2=True,
+            k=kg,
+            w=w,
+            u=u,
+            gk=g,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            chunk_size=chunk_size,
+            use_exp2=True,
             intermediate_state_dtype=(
                 torch.float32 if return_intermediate_states else k.dtype
             ),
@@ -137,6 +145,7 @@ def chunk_kda_fwd(
         scale=scale,
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
+        chunk_indices=chunk_indices,
         use_exp2=True,
         transpose_state_layout=state_v_first,
     )

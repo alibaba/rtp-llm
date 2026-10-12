@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 import requests
-
 from rtp_llm.config.py_config_modules import MIN_WORKER_INFO_PORT_NUM
 from rtp_llm.test.utils.port_util import PortManager
 
@@ -37,6 +36,7 @@ class MagaServerManager(object):
         process_file_name: str = "process.log",
         smoke_args_str: str = "",
         health_check_path: str = "/health",
+        launch_prefix: Optional[List[str]] = None,
     ):
         self._username = os.getenv("USER")
         self._env_args = env_args
@@ -49,6 +49,7 @@ class MagaServerManager(object):
         self._port = port
         self._smoke_args_str = smoke_args_str
         self._health_check_path = health_check_path
+        self._launch_prefix = list(launch_prefix or [])
         self._exit_code: Optional[int] = None
         self._state_lock = threading.Lock()
         self._stop_requested = False
@@ -224,7 +225,9 @@ class MagaServerManager(object):
             current_env.get("CUDA_VISIBLE_DEVICES", "<not set>"),
         )
         p = subprocess.Popen(
-            ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"] + parsed_args,
+            self._launch_prefix
+            + ["/opt/conda310/bin/python", "-m", "rtp_llm.start_server"]
+            + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,

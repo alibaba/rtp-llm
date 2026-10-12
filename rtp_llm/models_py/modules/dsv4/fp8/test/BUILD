@@ -158,6 +158,15 @@ py_test(
 )
 
 py_test(
+    name = "test_glm53_indexer_weights_rows",
+    srcs = ["test_glm53_indexer_weights_rows.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["manual", "L20A_DEV"],
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    env = {"GPU_COUNT": "1", "WORLD_SIZE": "1"},
+)
+
+py_test(
     name = "test_glm53_int64_cache_ops",
     srcs = ["test_glm53_int64_cache_ops.py"],
     deps = _DSV4_FP8_TEST_DEPS,
@@ -187,3 +196,43 @@ py_test(
         "test_indexer_fp8_quant_triton",
     ]
 ]
+
+py_test(
+    name = "test_glm53_host_geometry",
+    srcs = ["test_glm53_host_geometry.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "test_glm53_score_span",
+    srcs = ["test_glm53_score_span.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "test_glm53_fixed_projection_graph",
+    srcs = ["test_glm53_fixed_projection_graph.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+py_test(
+    name = "test_glm53_kda_padding_precision",
+    srcs = ["test_glm53_kda_padding_precision.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)

@@ -10,10 +10,8 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-import torch
-from torch import nn
-
 import rtp_llm.ops.compute_ops as compute_ops
+import torch
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.glm53_prefill_parallel import (
@@ -49,7 +47,12 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     write_typed_aux_cache_regions,
 )
-from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
+from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    cached_prefill_prefix_summary,
+    metadata_cache,
+    scoped_forward_metadata,
+    tensor_key,
+)
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -74,6 +77,9 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     prepare_kda_recurrent_checkpoint_metadata,
     store_kda_recurrent_checkpoints,
 )
+from rtp_llm.models_py.triton_kernels.kimi_kda.full_reuse_graph import (
+    chunk_kda_full_reuse_graph,
+)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -92,6 +98,7 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+from torch import nn
 
 _CULA_LOGGED_DEVICES: set[int] = set()
 
@@ -515,28 +522,55 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
 
         # A compact-cache hit leaves at most one TP-wide alignment unit. Fuse
         # its reference chunk-state recurrence into one CUDA graph replay.
-        fuse_kda_state_recurrence = attn_meta.fuse_kda_state_recurrence and q_len <= (
-            seq_size_per_block * int(self.parallelism_config.get_attn_tp_size())
+        # Ragged GLM batches are gated by each sequence's short-tail length in
+        # the graph wrapper, rather than the total number of execution tokens.
+        reuse_limit = seq_size_per_block * int(
+            self.parallelism_config.get_attn_tp_size()
         )
-        attn_out, final_state, h_from_chunk = chunk_kda(
-            query,
-            key,
-            value,
-            g,
-            beta_reshaped,
-            initial_state=initial_states,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens_without_padding,
-            use_qk_l2norm_in_kernel=True,
-            use_gate_in_kernel=True,
-            return_intermediate_states=True,
-            A_log=self.alog,
-            dt_bias=self.dt_bias,
-            safe_gate=self.gate_lower_bound is not None,
-            lower_bound=self.gate_lower_bound,
-            fuse_state_recurrence=fuse_kda_state_recurrence,
-            chunk_size=kda_chunk_size,
+        if self.gate_lower_bound == -5.0:
+            reuse_limit = 16384
+        fuse_kda_state_recurrence = (
+            attn_meta.fuse_kda_state_recurrence and q_len <= reuse_limit
         )
+        full_result = None
+        if (
+            fuse_kda_state_recurrence
+            and kda_chunk_size == 64
+            and self.gate_lower_bound == -5.0
+        ):
+            full_result = chunk_kda_full_reuse_graph(
+                query,
+                key,
+                value,
+                g,
+                beta_reshaped,
+                initial_states,
+                cu_seqlens_without_padding,
+                self.alog,
+                self.dt_bias,
+            )
+        if full_result is not None:
+            attn_out, final_state, h_from_chunk = full_result
+        else:
+            attn_out, final_state, h_from_chunk = chunk_kda(
+                query,
+                key,
+                value,
+                g,
+                beta_reshaped,
+                initial_state=initial_states,
+                output_final_state=True,
+                cu_seqlens=cu_seqlens_without_padding,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                return_intermediate_states=True,
+                A_log=self.alog,
+                dt_bias=self.dt_bias,
+                safe_gate=self.gate_lower_bound is not None,
+                lower_bound=self.gate_lower_bound,
+                fuse_state_recurrence=fuse_kda_state_recurrence,
+                chunk_size=kda_chunk_size,
+            )
 
         if ssm_states is not None and final_state is not None:
             _target_dtype = ssm_states.dtype
@@ -1733,6 +1767,14 @@ class KimiLinearModel(GptModelBase):
 
     @scoped_forward_metadata
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        prefix_summary = None
+        if (
+            inputs.attention_inputs.is_prefill
+            and not inputs.attention_inputs.is_target_verify
+        ):
+            prefix_summary = cached_prefill_prefix_summary(
+                inputs.attention_inputs.prefix_lengths
+            )
         input_ids: torch.Tensor = inputs.input_ids
         multimodal_embedding_injector = getattr(
             self, "multimodal_embedding_injector", None
@@ -1762,12 +1804,31 @@ class KimiLinearModel(GptModelBase):
                 query_start_loc=cu_seqlen_without_padding,
                 device=hidden_states.device,
             )
+            cache = metadata_cache()
+            if (
+                cache is not None
+                and os.environ.get("GLM53_PREFILL_HOST_GEOMETRY", "1") != "0"
+            ):
+                boundaries = prefill_conv1d_meta.sequence_boundaries_host
+                cache[("prefill_cu_host", tensor_key(cu_seqlen_without_padding))] = (
+                    boundaries
+                )
+                cache[
+                    (
+                        "kda_sequence_boundaries",
+                        tensor_key(cu_seqlen_without_padding),
+                        boundaries[-1],
+                    )
+                ] = boundaries
 
         fuse_kda_state_recurrence = False
         if self.enable_kda_reuse_fusion and prefill_conv1d_meta is not None:
             prefix_lengths = attention_inputs.prefix_lengths
-            fuse_kda_state_recurrence = prefix_lengths.numel() > 0 and bool(
-                (prefix_lengths > 0).all().item()
+            fuse_kda_state_recurrence = (
+                prefix_summary[1]
+                if prefix_summary is not None
+                else prefix_lengths.numel() > 0
+                and bool((prefix_lengths > 0).all().item())
             )
         attn_meta = KimiLinearMetadata(
             prefill_conv1d_meta,

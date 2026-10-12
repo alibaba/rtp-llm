@@ -2,9 +2,8 @@
 
 import torch
 import torch.nn.functional as F
-from torch import nn
-
 from rtp_llm.models_py.distributed.sequence_parallel import TokenShardLayout
+from torch import nn
 
 
 class Glm53FP32Router(nn.Module):
@@ -31,6 +30,15 @@ class Glm53FP32Router(nn.Module):
             ],
             dim=0,
         )
+
+    def forward_fixed_rows(self, hidden_states: torch.Tensor, rows: int):
+        from rtp_llm.models_py.modules.glm53_fixed_projection_graph import (
+            fixed_projection_graph,
+        )
+
+        if rows > self.chunk_rows:
+            return None
+        return fixed_projection_graph(hidden_states, self.weight, rows)
 
     def forward_shard(
         self, hidden_states: torch.Tensor, layout: TokenShardLayout

@@ -35,6 +35,7 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     build_cp_full_prefill_positions,
 )
 from rtp_llm.models_py.modules.dsv4.forward_metadata import (
+    cached_indexer_host_lengths,
     cached_indexer_prefill,
     metadata_cache,
     score_workspace_budget,
@@ -314,6 +315,40 @@ class _IndexerFP8PrefillMeta(NamedTuple):
     score_segments: Optional[tuple[tuple[int, int, int, int], ...]] = None
     score_relative_ks: Optional[torch.Tensor] = None
     score_relative_ke: Optional[torch.Tensor] = None
+    # Compressed logits are request-local even when K is batch-concatenated.
+    # Host geometry supplies this bound without another device scalar read.
+    max_request_keys: Optional[int] = None
+
+
+def _linear_fixed_rows(
+    x: torch.Tensor, weight: torch.Tensor, rows: int
+) -> torch.Tensor:
+    """Fix the FP32 GEMM shape across cold/cached/batched query rows.
+
+    The native cuBLAS FP32 projection can move a BF16 rounding boundary when
+    M changes. Padding only independent rows keeps each real dot product's
+    inputs intact and uses the same GEMM shape for every chunk.
+    """
+    flat = x.reshape(-1, x.shape[-1])
+    from rtp_llm.models_py.modules.glm53_fixed_projection_graph import (
+        fixed_projection_graph,
+    )
+
+    result = fixed_projection_graph(flat, weight, rows)
+    if result is not None:
+        return result.view(*x.shape[:-1], weight.shape[0])
+    output = torch.empty(
+        (flat.shape[0], weight.shape[0]), device=x.device, dtype=weight.dtype
+    )
+    for begin in range(0, flat.shape[0], rows):
+        end = min(begin + rows, flat.shape[0])
+        block = flat[begin:end].to(weight.dtype)
+        if end - begin < rows:
+            padded = block.new_zeros((rows, block.shape[1]))
+            padded[: end - begin].copy_(block)
+            block = padded
+        output[begin:end].copy_(F.linear(block, weight)[: end - begin])
+    return output.view(*x.shape[:-1], weight.shape[0])
 
 
 class IndexerFP8(PoolBackedModule):
@@ -371,6 +406,13 @@ class IndexerFP8(PoolBackedModule):
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
         self.rotate_q = bool(rotate_q)
+        self._glm_weights_chunk_rows = (
+            int(os.environ.get("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS", "0"))
+            if compressor_kpool_mode
+            else 0
+        )
+        if self._glm_weights_chunk_rows < 0:
+            raise ValueError("GLM53_INDEXER_WEIGHTS_CHUNK_ROWS must be nonnegative")
         if prefill_topk_backend not in ("legacy", "topk_v3_tie_break"):
             raise ValueError(
                 f"Unsupported Prefill TopK backend: {prefill_topk_backend}"
@@ -448,6 +490,9 @@ class IndexerFP8(PoolBackedModule):
     def _compute_weights(self, x: torch.Tensor) -> torch.Tensor:
         """Project per-head gates in the checkpoint weight's native dtype."""
         weight = self.weights_proj
+        rows = getattr(self, "_glm_weights_chunk_rows", 0)
+        if rows and weight.dtype == torch.float32:
+            return _linear_fixed_rows(x, weight, rows)
         return F.linear(x if x.dtype == weight.dtype else x.to(weight.dtype), weight)
 
     def _fuse_glm_q_quant(self) -> bool:
@@ -480,6 +525,13 @@ class IndexerFP8(PoolBackedModule):
                 if segments is not None
                 else meta.T
             )
+            request_bound = getattr(meta, "max_request_keys", None)
+            if (
+                segments is None
+                and request_bound is not None
+                and os.environ.get("GLM53_INDEXER_LOCAL_SCORE_SPAN", "1") != "0"
+            ):
+                max_keys = request_bound
             if max_keys == 0:
                 out.fill_(-1)
                 return out
@@ -915,6 +967,7 @@ class IndexerFP8(PoolBackedModule):
             self.compressor.kpool_mode or self.freqs_cis is not None
         ), "IndexerFP8.prepare needs freqs_cis unless GLM KPool NoPE is active"
         ratio = self.compress_ratio
+        max_request_keys = None
         # ``use_varlen`` is required — set by
         # ``Attention._build_csa_prefill_meta`` which receives it from
         # ``Attention._build_shared_prefill_meta`` (the single env-read
@@ -961,19 +1014,33 @@ class IndexerFP8(PoolBackedModule):
             ), f"prefix_lengths must be [B={batch_size}], got {prefix_lengths.shape}"
             # Per-request compressed-K count: T_b = (sp_b + S_b) // ratio.
             with record_function_range("dsv4.fp8.indexer.prepare.varlen_lengths"):
-                seq_total_per_req = prefix_lengths.to(
-                    device=device, dtype=torch.int64
-                ) + eff_input_lengths.to(
-                    device=device, dtype=torch.int64
-                )  # [B]
-                T_per_req = (seq_total_per_req // ratio).to(torch.int32)  # [B]
-                cu_kv_seqlens = torch.zeros(
-                    batch_size + 1, dtype=torch.int32, device=device
+                host_geometry = (
+                    cached_indexer_host_lengths(
+                        cu_seqlens, prefix_lengths, eff_input_lengths, ratio, device
+                    )
+                    if self.compressor.kpool_mode
+                    and (
+                        not cp_active or not getattr(cp_ctx, "sequence_parallel", True)
+                    )
+                    else None
                 )
-                cu_kv_seqlens[1:] = torch.cumsum(T_per_req.to(torch.int64), dim=0).to(
-                    torch.int32
-                )
-                T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
+                if host_geometry is not None:
+                    T_per_req, cu_kv_seqlens, T, end_pos, host_counts, _ = host_geometry
+                    max_request_keys = max(host_counts.tolist(), default=0)
+                else:
+                    seq_total_per_req = prefix_lengths.to(
+                        device=device, dtype=torch.int64
+                    ) + eff_input_lengths.to(
+                        device=device, dtype=torch.int64
+                    )  # [B]
+                    T_per_req = (seq_total_per_req // ratio).to(torch.int32)  # [B]
+                    cu_kv_seqlens = torch.zeros(
+                        batch_size + 1, dtype=torch.int32, device=device
+                    )
+                    cu_kv_seqlens[1:] = torch.cumsum(
+                        T_per_req.to(torch.int64), dim=0
+                    ).to(torch.int32)
+                    T = int(cu_kv_seqlens[-1].item())  # total compressed K across batch
                 M = int(position_ids.numel())  # T_total
 
                 positions_d = position_ids.to(
@@ -1039,7 +1106,8 @@ class IndexerFP8(PoolBackedModule):
             # is still passed to ``self.compressor(x, sp, meta=...)`` but
             # is ignored there because ``meta.is_batched=True``. Keep the
             # request-0 values for diagnostics / B==1 collapse equivalence.
-            end_pos = int(seq_total_per_req[0].item())
+            if host_geometry is None:
+                end_pos = int(seq_total_per_req[0].item())
             is_fresh_prefill = sp_int == 0
         else:
             # Legacy B == 1 scalar path — unchanged, bit-equal to pre-Phase-3a.
@@ -1243,6 +1311,7 @@ class IndexerFP8(PoolBackedModule):
             score_segments=score_segments,
             score_relative_ks=score_relative_ks,
             score_relative_ke=score_relative_ke,
+            max_request_keys=max_request_keys,
         )
 
     # --------------------------------------------------------------

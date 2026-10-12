@@ -43,6 +43,49 @@ class ForwardMetadataTest(unittest.TestCase):
     def patch_object(self, obj, name, value):
         return self.start_patch(mock.patch.object(obj, name, value))
 
+    def test_prefix_summary_once_and_next_forward_refresh(self):
+        prefix = torch.tensor([8192, 0], dtype=torch.int32)
+        transfers = []
+        self.start_patch(
+            mock.patch.object(torch.Tensor, "cpu", lambda t: transfers.append(t) or t)
+        )
+        for expected in ((True, False), (True, True)):
+            token = meta._FORWARD_METADATA.set({})
+            try:
+                for _ in range(11):
+                    self.assertEqual(
+                        meta.cached_prefill_prefix_summary(prefix), expected
+                    )
+            finally:
+                meta._FORWARD_METADATA.reset(token)
+            prefix[1] = 128
+        self.assertEqual(len(transfers), 2)
+
+    def test_logical_indexer_lengths_reuse_and_match_reference(self):
+        cu = torch.tensor([0, 419, 837, 1349], dtype=torch.int32)
+        lengths = torch.diff(cu)
+        prefix = torch.tensor([8192, 4096, 0], dtype=torch.int32)
+        token = meta._FORWARD_METADATA.set({})
+        try:
+            meta.metadata_cache()[("prefill_cu_host", meta.tensor_key(cu))] = tuple(
+                cu.tolist()
+            )
+            a = meta.cached_indexer_host_lengths(cu, prefix, lengths, 4, "cpu")
+            b = meta.cached_indexer_host_lengths(cu, prefix, lengths, 4, "cpu")
+            self.assertIs(a, b)
+            expected = (prefix.long() + lengths.long()) // 4
+            torch.testing.assert_close(a[0].long(), expected, rtol=0, atol=0)
+            torch.testing.assert_close(
+                a[1].long(),
+                torch.cat((torch.zeros(1, dtype=torch.int64), expected.cumsum(0))),
+                rtol=0,
+                atol=0,
+            )
+            self.assertEqual(a[2], int(expected.sum()))
+            self.assertEqual(a[3], 8611)
+        finally:
+            meta._FORWARD_METADATA.reset(token)
+
     def test_workspace_reused_once_per_forward(self):
 
         @meta.scoped_forward_metadata

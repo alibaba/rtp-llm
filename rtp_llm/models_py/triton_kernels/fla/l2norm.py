@@ -82,6 +82,7 @@ def l2norm_fwd(
     x: torch.Tensor,
     eps: float = 1e-6,
     output_dtype: Optional[torch.dtype] = None,
+    config_rows: Optional[int] = None,
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -106,7 +107,7 @@ def l2norm_fwd(
         # recurrence and MoE routing.  Pin the two configurations selected by
         # the sealed Golden's NB=1 (64/256 and decode) and NB>1 (8192) shapes
         # instead of re-autotuning them under RTP's different Triton version.
-        NB = triton.cdiv(T, 2048 * 32)
+        NB = triton.cdiv(T if config_rows is None else config_rows, 2048 * 32)
         if NB == 1:
             BT = 8
             num_warps = 2

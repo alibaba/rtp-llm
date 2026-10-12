@@ -1,12 +1,13 @@
 """Replay the reference chunk-state math for short cached GLM prefills."""
 
 import logging
+import os
 from collections import OrderedDict
+from itertools import accumulate
 
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_delta_h import (
     _sequence_boundaries,
     chunk_gated_delta_rule_fwd_h_cublas,
@@ -20,11 +21,24 @@ _MAX_GRAPHS = 8
 
 @triton.jit
 def _copy_inputs(
-    k, w, u, g, h, kd, wd, ud, gd, hd,
-    NK: tl.constexpr, NW: tl.constexpr, NU: tl.constexpr,
-    NG: tl.constexpr, NH: tl.constexpr, BLOCK: tl.constexpr,
+    k,
+    w,
+    u,
+    g,
+    h,
+    kd,
+    wd,
+    ud,
+    gd,
+    hd,
+    NK: tl.constexpr,
+    NW: tl.constexpr,
+    NU: tl.constexpr,
+    NG: tl.constexpr,
+    NH: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     tl.store(kd + i, tl.load(k + i, i < NK, 0), i < NK)
     tl.store(wd + i, tl.load(w + i, i < NW, 0), i < NW)
     tl.store(ud + i, tl.load(u + i, i < NU, 0), i < NU)
@@ -34,10 +48,18 @@ def _copy_inputs(
 
 @triton.jit
 def _copy_outputs(
-    h, v, f, hd, vd, fd,
-    NH: tl.constexpr, NV: tl.constexpr, NF: tl.constexpr, BLOCK: tl.constexpr,
+    h,
+    v,
+    f,
+    hd,
+    vd,
+    fd,
+    NH: tl.constexpr,
+    NV: tl.constexpr,
+    NF: tl.constexpr,
+    BLOCK: tl.constexpr,
 ):
-    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    i = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     tl.store(hd + i, tl.load(h + i, i < NH, 0), i < NH)
     tl.store(vd + i, tl.load(v + i, i < NV, 0), i < NV)
     tl.store(fd + i, tl.load(f + i, i < NF, 0), i < NF)
@@ -55,11 +77,19 @@ def _supported(k, w, u, gk, initial_state, options):
     if any(t.device != k.device for t in tensors):
         return False
     if (
-        k.ndim != 4 or k.shape[0] != 1 or not 0 < k.shape[1] <= 512
-        or k.shape[-1] != 128 or w.shape != k.shape or u.shape != k.shape
-        or gk.shape != k.shape or initial_state.shape != (1, k.shape[2], 128, 128)
+        k.ndim != 4
+        or k.shape[0] != 1
+        or not 0 < k.shape[1] <= 16384
+        or k.shape[-1] != 128
+        or w.shape != k.shape
+        or u.shape != k.shape
+        or gk.shape != k.shape
+        or initial_state.ndim != 4
+        or not 1 <= initial_state.shape[0] <= 32
+        or initial_state.shape[1:] != (k.shape[2], 128, 128)
         or any(t.dtype != torch.bfloat16 for t in (k, w, u))
-        or gk.dtype != torch.float32 or initial_state.dtype != torch.float32
+        or gk.dtype != torch.float32
+        or initial_state.dtype != torch.float32
         or options.get("g") is not None
         or options.get("chunk_size", 64) != 64
         or not options.get("use_exp2", True)
@@ -84,22 +114,51 @@ def chunk_gated_delta_rule_fwd_h_reuse_graph(k, w, u, gk, initial_state, **optio
     if not _supported(k, w, u, gk, initial_state, options):
         return chunk_gated_delta_rule_fwd_h_cublas(**reference)
     cu = options.get("cu_seqlens")
-    if cu is not None:
-        if cu.numel() != 2:
-            return chunk_gated_delta_rule_fwd_h_cublas(**reference)
-        _sequence_boundaries(cu, k.shape[1])
+    boundaries = (
+        (0, k.shape[1]) if cu is None else tuple(_sequence_boundaries(cu, k.shape[1]))
+    )
+    lengths = tuple(stop - start for start, stop in zip(boundaries, boundaries[1:]))
+    if (
+        len(lengths) != initial_state.shape[0]
+        or any(length <= 0 or length > 512 for length in lengths)
+        or (
+            len(lengths) > 1
+            and os.environ.get("GLM53_KDA_BATCH_REUSE_GRAPH", "1") == "0"
+        )
+    ):
+        return chunk_gated_delta_rule_fwd_h_cublas(**reference)
 
+    sequence_count = len(lengths)
+    graph_lengths = lengths
+    if len(set(lengths)) == 1:
+        # Adjacent dynamic batches reuse one graph. Add independent dummy
+        # sequences, preserving the exact GEMM length of every real chunk.
+        graph_lengths = lengths[:1] * triton.next_power_of_2(sequence_count)
+    graph_tokens = sum(graph_lengths)
+    graph_shape = torch.Size((1, graph_tokens, *k.shape[2:]))
     stream = torch.cuda.current_stream(k.device)
-    key = (k.device.index, stream.cuda_stream, k.shape, gk.dtype)
+    # Identical total token counts can have different sequence/chunk layouts.
+    key = (k.device.index, stream.cuda_stream, graph_shape, gk.dtype, graph_lengths)
     entry = _GRAPHS.get(key)
     inputs = (k, w, u, gk, initial_state)
     if entry is None:
-        buffers = tuple(torch.empty_like(t) for t in inputs)
+        buffers = tuple(t.new_zeros(graph_shape) for t in inputs[:4]) + (
+            initial_state.new_zeros((len(graph_lengths), *initial_state.shape[1:])),
+        )
         captured = dict(reference)
         captured.update(zip(("k", "w", "u", "gk", "initial_state"), buffers))
-        # One sequence has identical layout with or without cu_seqlens. Keeping
-        # it None removes host metadata reads from the captured reference loop.
-        captured["cu_seqlens"] = None
+        # The reference reads boundaries only on the host. Freeze a CPU copy
+        # for capture, preserving every sequence's original GEMM and chunk order
+        # without a device-to-host transfer inside the captured graph.
+        captured["cu_seqlens"] = (
+            None
+            if len(graph_lengths) == 1
+            else torch.tensor(
+                (0, *accumulate(graph_lengths)),
+                dtype=torch.int32,
+                device="cpu",
+            )
+        )
         captured["chunk_indices"] = None
         capture_stream = torch.cuda.Stream(device=k.device)
         capture_stream.wait_stream(stream)
@@ -109,7 +168,11 @@ def chunk_gated_delta_rule_fwd_h_reuse_graph(k, w, u, gk, initial_state, **optio
                 chunk_gated_delta_rule_fwd_h_cublas(**captured)
         stream.wait_stream(capture_stream)
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, stream=capture_stream):
+        # Cache IO can allocate/copy/synchronize on other host threads while
+        # this graph is captured. Its buffers are private to this stream.
+        with torch.cuda.graph(
+            graph, stream=capture_stream, capture_error_mode="thread_local"
+        ):
             outputs = chunk_gated_delta_rule_fwd_h_cublas(**captured)
         stream.wait_stream(capture_stream)
         entry = (buffers, graph, outputs)
@@ -117,17 +180,24 @@ def chunk_gated_delta_rule_fwd_h_reuse_graph(k, w, u, gk, initial_state, **optio
         while len(_GRAPHS) > _MAX_GRAPHS:
             _GRAPHS.popitem(last=False)
         logging.info(
-            "[KDA reuse fusion] reference state graph enabled tokens=%d heads=%d",
-            k.shape[1], k.shape[2],
+            "[KDA reuse fusion] reference state graph enabled tokens=%d heads=%d sequences=%d capacity=%d",
+            k.shape[1],
+            k.shape[2],
+            len(lengths),
+            len(graph_lengths),
         )
     else:
         _GRAPHS.move_to_end(key)
     buffers, graph, outputs = entry
     _copy_into(inputs, buffers)
     graph.replay()
-    result = tuple(torch.empty_like(t) for t in outputs)
-    sizes = tuple(t.numel() for t in outputs)
-    _copy_outputs[(triton.cdiv(max(sizes), 256),)](
-        *outputs, *result, *sizes, 256
+    real_chunks = sum(triton.cdiv(length, 64) for length in lengths)
+    result = (
+        outputs[0].new_empty((1, real_chunks, *outputs[0].shape[2:])),
+        torch.empty_like(u),
+        torch.empty_like(initial_state),
     )
+    # Real sequences occupy a contiguous prefix of every captured output.
+    sizes = tuple(t.numel() for t in result)
+    _copy_outputs[(triton.cdiv(max(sizes), 256),)](*outputs, *result, *sizes, 256)
     return result
