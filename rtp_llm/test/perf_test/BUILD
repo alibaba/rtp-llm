@@ -47,6 +47,12 @@ py_test(
 )
 
 py_test(
+    name = "runner_log_path_test",
+    srcs = ["runner_log_path_test.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
     name = "test_perf_config_and_runners",
     srcs = ["test_perf_config_and_runners.py"],
     data = [
