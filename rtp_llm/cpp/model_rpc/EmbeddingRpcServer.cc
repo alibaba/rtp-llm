@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/EmbeddingRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 namespace py = pybind11;
 namespace th = torch;
@@ -73,7 +74,11 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
             auto mm_res = mm_processor_->updateMultimodalFeatures(
                 embedding_input, multimodal_inputs, request->vit_role_addr(), context);
             if (!mm_res.ok()) {
-                throw std::runtime_error(mm_res.ToString());
+                ErrorDetailsPB details;
+                details.set_error_code(static_cast<int64_t>(mm_res.code()));
+                details.set_error_message(mm_res.ToString());
+                return grpc::Status(
+                    transErrorCodeToGrpc(mm_res.code()), mm_res.ToString(), details.SerializeAsString());
             }
         }
 

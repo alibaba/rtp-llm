@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional, Tuple
 import grpc
 import numpy as np
 import torch
+from google.protobuf.message import DecodeError
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc as pb2_grpc
@@ -108,6 +109,8 @@ class EmbeddingEndpoint(object):
             profile_config = self._extract_profile_config(request)
             formate_request = self.renderer.render_request(request)
             batch_input = self.renderer.create_input(formate_request)
+        except FtRuntimeException:
+            raise
         except Exception as e:
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
         try:
@@ -116,6 +119,8 @@ class EmbeddingEndpoint(object):
                 formate_request, batch_input, batch_output
             )
             logable_response = await self.renderer.render_log_response(response)
+        except FtRuntimeException:
+            raise
         except Exception as e:
             raise FtRuntimeException(ExceptionType.EXECUTION_EXCEPTION, str(e))
         return response, logable_response
@@ -226,4 +231,21 @@ class EmbeddingEndpoint(object):
             return result
         except grpc.RpcError as e:
             logging.warning(f"RPC failed: {e.code()}: {e.details()}")
+            encoded_details = next(
+                (
+                    value
+                    for key, value in e.trailing_metadata() or []
+                    if key == "grpc-status-details-bin"
+                ),
+                None,
+            )
+            if encoded_details:
+                details = pb2.ErrorDetailsPB()
+                try:
+                    details.ParseFromString(encoded_details)
+                    kind = ExceptionType(details.error_code)
+                except (DecodeError, ValueError):
+                    pass
+                else:
+                    raise FtRuntimeException(kind, details.error_message) from e
             raise
