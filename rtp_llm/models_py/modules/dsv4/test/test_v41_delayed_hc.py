@@ -13,7 +13,7 @@ from rtp_llm.models_py.modules.dsv4.hc.delayed_reference import identity_pre_mix
 
 class DelayedHCTest(unittest.TestCase):
     @staticmethod
-    def unit(pre_bias, *, collapse_mode=None):
+    def unit(pre_bias, *, collapse_mode=None, post_mode=None):
         base = torch.zeros(24)
         base[:4] = torch.tensor(pre_bias)
         return DelayedHCUnit(
@@ -26,6 +26,7 @@ class DelayedHCTest(unittest.TestCase):
             norm_eps=1e-6,
             hc_eps=1e-6,
             collapse_mode=collapse_mode,
+            post_mode=post_mode,
         )
 
     def test_entry_uses_identity_and_next_sublayer_uses_previous_mix(self):
@@ -201,6 +202,65 @@ class DelayedHCTest(unittest.TestCase):
                 self.assertEqual(post.shape, shape[:-1] + (1,))
                 self.assertEqual(comb.shape, shape[:-2] + (4, 4))
                 self.assertEqual(DelayedHCHead(unit).head(x).shape, y.shape)
+
+    def test_ordered_post_orientation_and_inplace_writeback(self):
+        owner = self.unit([0.0] * 4, post_mode="ordered_fp32")
+        self.assertEqual(owner.post_mode, "ordered_fp32")
+        self.assertIsNone(owner.collapse_mode)
+        for leading in ((2,), (2, 3), (0,), (2, 0)):
+            with self.subTest(leading=leading):
+                residual = torch.tensor([-8.0, 4.0, 2.0, -1.0], dtype=torch.bfloat16)
+                residual = residual.reshape(4, 1).expand(*leading, 4, 3).clone()
+                x = torch.full((*leading, 3), 4.0, dtype=torch.bfloat16)
+                post = torch.tensor([0.5, 0.25, 1.0, 2.0]).reshape(4, 1)
+                post = post.expand(*leading, 4, 1).clone()
+                comb = (
+                    torch.tensor(
+                        [
+                            [1, 0.25, 0.5, 2],
+                            [0.5, 1, 2, 0.25],
+                            [2, 0.5, 0.25, 1],
+                            [0.25, 2, 1, 0.5],
+                        ]
+                    )
+                    .expand(*leading, 4, 4)
+                    .clone()
+                )
+                before = [v.clone() for v in (x, post, comb)]
+                result = owner.post(x, residual, post, comb)
+                self.assertIs(result, residual)
+                expected = torch.tensor([-0.25, 2, 7.5, -5.5], dtype=torch.bfloat16)
+                expected = expected.reshape(4, 1).expand_as(residual)
+                torch.testing.assert_close(result, expected, rtol=0, atol=0)
+                for actual, saved in zip((x, post, comb), before):
+                    torch.testing.assert_close(actual, saved, rtol=0, atol=0)
+
+    def test_ordered_post_rejection_precedes_writeback(self):
+        owner = self.unit([0.0] * 4, post_mode="ordered_fp32")
+        values = [
+            torch.ones(2, 3, dtype=torch.bfloat16),
+            torch.ones(2, 4, 3, dtype=torch.bfloat16),
+            torch.ones(2, 4, 1),
+            torch.ones(2, 4, 4),
+        ]
+        for index in range(4):
+            for dtype in (torch.float16, torch.float64):
+                invalid = [v.clone() for v in values]
+                invalid[index] = invalid[index].to(dtype)
+                saved = invalid[1].clone()
+                with self.subTest(index=index, dtype=dtype), self.assertRaises(
+                    TypeError
+                ):
+                    owner.post(*invalid)
+                torch.testing.assert_close(invalid[1], saved, rtol=0, atol=0)
+
+    def test_ordered_post_policy_validation_preserves_default(self):
+        self.assertIsNone(self.unit([0.0] * 4).post_mode)
+        for mode in (False, True, 0, [], "", "torch", "ORDERED_FP32"):
+            with self.subTest(mode=mode), self.assertRaisesRegex(
+                ValueError, "post_mode"
+            ):
+                self.unit([0.0] * 4, post_mode=mode)
 
 
 if __name__ == "__main__":

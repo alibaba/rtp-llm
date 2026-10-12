@@ -1179,3 +1179,16 @@ py_test(
     exec_properties = {"gpu": "RTX_5000_PRO", "gpu_count": "1"},
     target_compatible_with = _DSV4_SM120_ONLY,
 )
+
+py_test(
+    name = "test_v41_post_mode_sm120",
+    srcs = ["test_v41_post_mode_sm120.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:tile_kernels_mhc",
+        "//rtp_llm:testlib",
+    ],
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
