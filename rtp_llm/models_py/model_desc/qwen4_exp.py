@@ -405,6 +405,8 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
                 hw_kernel_config=hw_kernel_config,
                 layer_idx=layer_idx,
             )
+        if self.layer_type == HybridAttentionType.LINEAR:
+            self.self_attn._qwen4_fused_post_conv = True
         # Full-attention layers only; linear-attention layers have no qk norm.
         # The checkpoint's q/k gamma is stored raw for this reason, so the fused
         # version would silently drop upstream's +1 -- see norm.py.
