@@ -99,6 +99,7 @@ class Block(nn.Module):
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         attn_extra = {}
         moe_extra = {}
+        hc_extra = {}
         if v41_config is not None:
             if commit_only:
                 raise NotImplementedError("V4.1 commit-only blocks are not integrated")
@@ -108,12 +109,14 @@ class Block(nn.Module):
                 )
             if n_hash_layers != 0:
                 raise ValueError("V4.1 has no token-to-expert hash layers")
+            from rtp_llm.config.dsv41_config import v41_mhc_collapse_mode
             from rtp_llm.models_py.modules.dsv4.fp8.attention_v41 import AttentionV41FP8
             from rtp_llm.models_py.modules.dsv4.v41_expert import V41_EXPERT_RECIPE
             from rtp_llm.models_py.utils.arch import is_sm120
             from rtp_llm.utils.model_weight import W
 
             attn_cls = AttentionV41FP8
+            hc_extra["collapse_mode"] = v41_mhc_collapse_mode(v41_config)
             attn_extra = dict(
                 v41_config=v41_config,
                 shared_attention=shared_attention,
@@ -215,6 +218,7 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="attn",
+            **hc_extra,
         )
         self.ffn_hc = hc_factory(
             layer_weights[W.v4_hc_ffn_fn],
@@ -227,6 +231,7 @@ class Block(nn.Module):
             hc_eps=hc_eps,
             layer_id=layer_id,
             name="ffn",
+            **hc_extra,
         )
         self._prefill_fast_hc_impls_cached = self._resolve_prefill_fast_hc_impls()
 
