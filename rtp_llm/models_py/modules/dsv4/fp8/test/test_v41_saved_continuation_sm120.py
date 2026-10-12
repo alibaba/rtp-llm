@@ -4,7 +4,6 @@ import copy
 import hashlib
 import json
 import os
-import socket
 import subprocess
 import time
 import traceback
@@ -35,6 +34,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.test_v41_worker_sm120 import (
     tagged_cache,
 )
 from rtp_llm.models_py.modules.dsv4.hc import delayed as delayed_hc
+from rtp_llm.models_py.modules.dsv4.hc import v41_prenorm
 from rtp_llm.models_py.modules.dsv4.v41_cache import V41PagedCache
 from rtp_llm.utils.model_weight import W
 
@@ -56,7 +56,7 @@ ROUNDS = 12
 
 def worker_choices(model):
     choices = dict(CHOICES)
-    for component in ("collapse", "post"):
+    for component in ("collapse", "post", "prenorm"):
         key = f"mhc_{component}_mode"
         mode = model._v4_args.v41_config.get(key)
         if mode is not None:
@@ -215,6 +215,7 @@ def validate_saved(state, admitted, model, generation, rank, identity):
         or admitted["choices"] != worker_choices(model)
         or model._mhc_collapse_mode != admitted["choices"].get("mhc_collapse_mode")
         or model._mhc_post_mode != admitted["choices"].get("mhc_post_mode")
+        or model._mhc_prenorm_mode != admitted["choices"].get("mhc_prenorm_mode")
         or model._rotary_compute_device != "cuda"
         or model._sparse_attention_mode != "short_preserved"
     ):
@@ -359,7 +360,7 @@ def continue_worker(model, head, generation, rank, admitted, pages, phase):
     }
 
 
-def run_rank(rank, port, config, generation, phase, directory):
+def run_rank(rank, rendezvous, config, generation, phase, directory):
     with ExitStack() as stack:
         for component in ("collapse", "post"):
             if config.get(f"mhc_{component}_mode") == "ordered_fp32":
@@ -372,15 +373,27 @@ def run_rank(rank, port, config, generation, phase, directory):
                         ),
                     )
                 )
-        run_rank_impl(rank, port, config, generation, phase, directory)
+        if config.get("mhc_prenorm_mode") == "fp32":
+            stack.enter_context(
+                patch.object(
+                    v41_prenorm,
+                    "prenorm",
+                    side_effect=AssertionError(
+                        "Selected continuation reached default prenorm"
+                    ),
+                )
+            )
+        run_rank_impl(rank, rendezvous, config, generation, phase, directory)
 
 
 @torch.inference_mode()
-def run_rank_impl(rank, port, config, generation, phase, directory):
+def run_rank_impl(rank, rendezvous, config, generation, phase, directory):
     torch.cuda.set_device(rank)
     assert torch.cuda.get_device_capability() == (12, 0)
     torch.set_num_threads(1)
     torch.set_default_dtype(torch.float32)
+    if config.get("mhc_prenorm_mode") is not None:
+        torch.set_float32_matmul_precision("highest")
     directory = Path(directory)
     os.environ.update(
         {
@@ -398,7 +411,7 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
     Dsv4SharedRuntimeBufferStore._reset_for_test()
     dist.init_process_group(
         "nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
+        init_method=rendezvous,
         rank=rank,
         world_size=8,
         timeout=timedelta(seconds=180),
@@ -424,6 +437,8 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
             assert layer.ffn_hc.collapse_mode == mode
             assert layer.attn_hc.post_mode == config.get("mhc_post_mode")
             assert layer.ffn_hc.post_mode == config.get("mhc_post_mode")
+            assert layer.attn_hc.prenorm_mode == config.get("mhc_prenorm_mode")
+            assert layer.ffn_hc.prenorm_mode == config.get("mhc_prenorm_mode")
         if config.get("mhc_collapse_mode") is not None:
             emit(
                 "DSV41_SAVED_COLLAPSE_OWNER",
@@ -444,6 +459,19 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
                 mhc_post_mode="ordered_fp32",
                 mhc_collapse_mode=config.get("mhc_collapse_mode"),
                 diagnostic_post_hook=False,
+            )
+        if config.get("mhc_prenorm_mode") is not None:
+            emit(
+                "DSV41_SAVED_PRENORM_OWNER",
+                generation=generation,
+                rank=rank,
+                phase=phase,
+                layers=len(model.v4.layers),
+                mhc_prenorm_mode="fp32",
+                mhc_collapse_mode=config.get("mhc_collapse_mode"),
+                mhc_post_mode=config.get("mhc_post_mode"),
+                diagnostic_prenorm_hook=False,
+                float32_matmul_precision=torch.get_float32_matmul_precision(),
             )
         state_path = directory / f"rank{rank}.state.pt"
         manifest_path = directory / f"rank{rank}.state.json"
@@ -503,22 +531,30 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
                 and config.get("mhc_collapse_mode") is not None
             ):
                 variants.append("collapse_policy")
+            if config.get("mhc_prenorm_mode") is not None:
+                variants.extend(("prenorm_policy", "precision"))
             for variant in variants:
                 mutated = copy.deepcopy(state)
                 if rank == 0:
                     if variant == "generation":
                         mutated["metadata"]["generation"] = 1 - generation
-                    elif variant in ("policy", "collapse_policy"):
+                    elif variant == "precision":
+                        torch.set_float32_matmul_precision("high")
+                    elif variant in ("policy", "collapse_policy", "prenorm_policy"):
                         policy = (
-                            "mhc_collapse_mode"
-                            if variant == "collapse_policy"
+                            "mhc_prenorm_mode"
+                            if variant == "prenorm_policy"
                             else (
-                                "mhc_post_mode"
-                                if config.get("mhc_post_mode") is not None
+                                "mhc_collapse_mode"
+                                if variant == "collapse_policy"
                                 else (
-                                    "mhc_collapse_mode"
-                                    if config.get("mhc_collapse_mode") is not None
-                                    else "sparse_attention_mode"
+                                    "mhc_post_mode"
+                                    if config.get("mhc_post_mode") is not None
+                                    else (
+                                        "mhc_collapse_mode"
+                                        if config.get("mhc_collapse_mode") is not None
+                                        else "sparse_attention_mode"
+                                    )
                                 )
                             )
                         )
@@ -534,6 +570,10 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
                     validate_saved(mutated, admitted, model, generation, rank, identity)
                 except ValueError as exc:
                     error = exc
+                finally:
+                    if variant == "precision" and rank == 0:
+                        assert torch.get_float32_matmul_precision() == "high"
+                        torch.set_float32_matmul_precision("highest")
                 try:
                     model._agree_dp(error, ("saved-preflight", variant), head.device)
                 except (ValueError, RuntimeError):
@@ -551,6 +591,7 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
                     variant=variant,
                     cache_exact=True,
                     ready=True,
+                    **({"precision_unchanged": True} if variant == "precision" else {}),
                 )
             validate_saved(state, admitted, model, generation, rank, identity)
             model._agree_dp(None, "saved-preflight-ready", head.device)
@@ -626,10 +667,14 @@ def run_rank_impl(rank, port, config, generation, phase, directory):
 
 
 class SavedContinuationSM120Test(unittest.TestCase):
-    def run_case(self, generation, *, collapse_mode=None, post_mode=None):
+    def run_case(
+        self, generation, *, collapse_mode=None, post_mode=None, prenorm_mode=None
+    ):
         self.assertEqual(torch.cuda.device_count(), 8)
-        suffix = ("-collapse" if collapse_mode is not None else "") + (
-            "-post" if post_mode is not None else ""
+        suffix = (
+            ("-collapse" if collapse_mode is not None else "")
+            + ("-post" if post_mode is not None else "")
+            + ("-prenorm" if prenorm_mode is not None else "")
         )
         root = Path(os.environ["DSV41_TEST_HANDOFF_ROOT"]) / f"gen{generation}{suffix}"
         root.mkdir(parents=True)
@@ -643,6 +688,8 @@ class SavedContinuationSM120Test(unittest.TestCase):
             config["mhc_collapse_mode"] = collapse_mode
         if post_mode is not None:
             config["mhc_post_mode"] = post_mode
+        if prenorm_mode is not None:
+            config["mhc_prenorm_mode"] = prenorm_mode
         save_json(root / "fixture.json", config)
         for phase in ("source", "resume"):
             baseline = gpu_observation()
@@ -652,14 +699,28 @@ class SavedContinuationSM120Test(unittest.TestCase):
                 phase=phase,
                 observation=baseline,
             )
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = sock.getsockname()[1]
+            rendezvous = root / f"{phase}.rendezvous"
+            self.assertFalse(rendezvous.exists())
             mp.spawn(
                 run_rank,
-                args=(port, config, generation, phase, str(root)),
+                args=(rendezvous.as_uri(), config, generation, phase, str(root)),
                 nprocs=8,
                 join=True,
+            )
+            self.assertFalse(rendezvous.exists())
+            emit(
+                "DSV41_SAVED_RENDEZVOUS",
+                generation=generation,
+                phase=phase,
+                scheme="file",
+                removed=True,
+                **(
+                    {}
+                    if collapse_mode is None
+                    else {"mhc_collapse_mode": collapse_mode}
+                ),
+                **({} if post_mode is None else {"mhc_post_mode": post_mode}),
+                **({} if prenorm_mode is None else {"mhc_prenorm_mode": prenorm_mode}),
             )
             observed = drain_to_control_baseline(baseline)
             self.assertTrue(
@@ -684,6 +745,7 @@ class SavedContinuationSM120Test(unittest.TestCase):
             standalone_decode_role=False,
             **({} if collapse_mode is None else {"mhc_collapse_mode": collapse_mode}),
             **({} if post_mode is None else {"mhc_post_mode": post_mode}),
+            **({} if prenorm_mode is None else {"mhc_prenorm_mode": prenorm_mode}),
         )
 
     def test_generation_zero(self):
@@ -709,6 +771,40 @@ class SavedContinuationSM120Test(unittest.TestCase):
 
     def test_ordered_collapse_post_generation_one(self):
         self.run_case(1, collapse_mode="ordered_fp32", post_mode="ordered_fp32")
+
+    def test_fp32_prenorm_generation_zero(self):
+        self.run_case(0, prenorm_mode="fp32")
+
+    def test_fp32_prenorm_generation_one(self):
+        self.run_case(1, prenorm_mode="fp32")
+
+    def test_fp32_collapse_prenorm_generation_zero(self):
+        self.run_case(0, collapse_mode="ordered_fp32", prenorm_mode="fp32")
+
+    def test_fp32_collapse_prenorm_generation_one(self):
+        self.run_case(1, collapse_mode="ordered_fp32", prenorm_mode="fp32")
+
+    def test_fp32_post_prenorm_generation_zero(self):
+        self.run_case(0, post_mode="ordered_fp32", prenorm_mode="fp32")
+
+    def test_fp32_post_prenorm_generation_one(self):
+        self.run_case(1, post_mode="ordered_fp32", prenorm_mode="fp32")
+
+    def test_fp32_collapse_post_prenorm_generation_zero(self):
+        self.run_case(
+            0,
+            collapse_mode="ordered_fp32",
+            post_mode="ordered_fp32",
+            prenorm_mode="fp32",
+        )
+
+    def test_fp32_collapse_post_prenorm_generation_one(self):
+        self.run_case(
+            1,
+            collapse_mode="ordered_fp32",
+            post_mode="ordered_fp32",
+            prenorm_mode="fp32",
+        )
 
 
 if __name__ == "__main__":
