@@ -22,6 +22,28 @@ FLASHINFER_069_ANNOTATIONS = {
     ),
 }
 
+CUDA13_OPERATOR_ANNOTATIONS = {
+    "flashinfer-python": package_annotation(
+        whl_patches = {
+            "@rtp_llm//package:patches/0017-python-decode-max-kv-len-0.6.18.patch": json.encode({
+                "whls": ["flashinfer_python-0.6.18.post1-py3-none-any.whl"],
+                "patch_strip": 1,
+            }),
+        },
+    ),
+    "tilelang": package_annotation(
+        whl_patches = {
+            "@rtp_llm//package:patches/0018-tilelang-tvm-ffi-compat.patch": json.encode({
+                "whls": [
+                    "tilelang-0.1.9-cp38-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+                    "tilelang-0.1.9+cuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
+                ],
+                "patch_strip": 1,
+            }),
+        },
+    ),
+}
+
 def pip_deps():
     pip_parse(
         name = "pip_cpu_torch",
@@ -68,7 +90,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_gpu_cuda13_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_OPERATOR_ANNOTATIONS,
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda13.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + ["--quiet"],
@@ -87,7 +109,7 @@ def pip_deps():
 
     pip_parse(
         name = "pip_cuda13_arm_torch",
-        annotations = FLASHINFER_069_ANNOTATIONS,
+        annotations = CUDA13_OPERATOR_ANNOTATIONS,
         requirements_lock = "@rtp_deps//:requirements_lock_cuda13_arm.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS,

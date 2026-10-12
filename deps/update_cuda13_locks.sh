@@ -19,10 +19,8 @@ case "$platform" in
         output="$workspace/deps/requirements_lock_torch_gpu_cuda13.txt"
         python_platform=x86_64-manylinux_2_28
         target=requirements_torch_gpu_cuda13.update
-        # The x86 lock resolves by-name packages from public PyPI (with the
-        # aliyun mirror fallback) while the arm lock uses the internal artlab
-        # index set, which carries the aarch64+cu13 artifacts; keep each lock
-        # on its own lineage when regenerating to avoid cross-arch drift.
+        # Public packages use PyPI with the aliyun mirror fallback;
+        # operator wheels are pinned by URL in the input requirements.
         indexes=(
             --default-index https://pypi.org/simple/
             --index https://mirrors.aliyun.com/pypi/simple/
@@ -33,12 +31,11 @@ case "$platform" in
         output="$workspace/deps/requirements_lock_cuda13_arm.txt"
         python_platform=aarch64-manylinux_2_28
         target=requirements_cuda13_arm.update
-        # The arm lock is resolved against the artlab index set (its emitted
-        # --index-url lines); keep regeneration on the same lineage.
+        # Resolve public packages from PyPI; private operator wheels are
+        # pinned by URL in the input requirements.
         indexes=(
-            --default-index http://artlab.alibaba-inc.com/1/pypi/rtp_diffusion
-            --index https://artlab.alibaba-inc.com/1/pypi/huiwa_rtp_internal
-            --index https://artlab.alibaba-inc.com/1/PYPI/simple/
+            --default-index https://pypi.org/simple/
+            --index https://mirrors.aliyun.com/pypi/simple/
         )
         ;;
     *) usage ;;

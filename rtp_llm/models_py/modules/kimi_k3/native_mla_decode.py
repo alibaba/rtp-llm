@@ -1,4 +1,4 @@
-"""Absorbed MLA using vLLM's BF16 epilogue and FlashInfer backends.
+"""Absorbed MLA using RTP's fused cache insertion and FlashInfer backends.
 
 Metadata and workspace belong to the RTP attention instance. Keeping cache
 insertion separate lets that instance publish CacheStore writes before reading
@@ -6,28 +6,11 @@ attention, without an extra query-concatenation or cache-scatter kernel.
 """
 
 import inspect
-import os
-from pathlib import Path
 
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.mla_fp8_kernels import quantize_fp8
 from rtp_llm.ops import compute_ops
-
-
-def _load_fused_epilogue():
-    name = "fused_kimi_k3_mla_decode_q_concat_kv_cache_insert"
-    if not hasattr(torch.ops._C, name):
-        path = os.environ.get("KIMI_K3_VLLM_STABLE_LIBRARY")
-        if not path:
-            raise RuntimeError(
-                "K3 native MLA requires the vLLM stable-libtorch epilogue; "
-                "set KIMI_K3_VLLM_STABLE_LIBRARY to its ABI-compatible library"
-            )
-        torch.ops.load_library(str(Path(path).resolve(strict=True)))
-    if not hasattr(torch.ops._C, name):
-        raise RuntimeError("The selected vLLM library does not provide K3 MLA")
-    return getattr(torch.ops._C, name)
 
 
 class NativeMlaDecode:
@@ -85,7 +68,11 @@ class NativeMlaDecode:
             # The native kernel resets its semaphores after every launch.
             # Allocate once before capture; no per-step zero kernel is needed.
             self.counter = torch.zeros(counter_bytes, dtype=torch.uint8, device=workspace.device)
-        self.fused_epilogue = None if fp8_compute else _load_fused_epilogue()
+        self.fused_epilogue = (
+            None
+            if fp8_compute
+            else compute_ops.fused_mla_decode_q_concat_kv_cache_insert
+        )
 
     def write_cache(self, q, kv, k_pe, cache, slot_mapping, k_weight):
         """Return absorbed Q while inserting this step's K/V in-place."""
@@ -127,7 +114,7 @@ class NativeMlaDecode:
         self.fused_epilogue(
             latent_q.transpose(0, 1), q[..., self.nope_dim:], kv, k_pe,
             absorbed_q, cache.view(-1, self.page_size, self.kv_lora_rank + self.pe_dim),
-            slot_mapping, self.page_size, None, None,
+            slot_mapping,
         )
         return absorbed_q
 

@@ -75,6 +75,7 @@ sh_binary(
         "requirements_base.txt",
         "requirements_cuda13_overrides.txt",
         "requirements_torch_gpu_cuda13.txt",
+        "requirements_kimi_k3_native.txt",
     ],
     tags = ["manual"],
 )
@@ -95,6 +96,7 @@ sh_binary(
     data = [
         "requirements_base.txt",
         "requirements_cuda13_arm.txt",
+        "requirements_kimi_k3_native.txt",
         "requirements_cuda13_overrides.txt",
     ],
     tags = ["manual"],

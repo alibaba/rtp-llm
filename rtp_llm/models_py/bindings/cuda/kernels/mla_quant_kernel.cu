@@ -6,8 +6,10 @@
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cmath>
+#include <cstdint>
 #include <type_traits>
 
 namespace rtp_llm {
@@ -906,6 +908,124 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
         dim3 block(std::min(kv_lora_rank, 512));
         DISPATCH_BY_KV_CACHE_DTYPE(kv_c.scalar_type(), kv_cache_dtype, CALL_CONCAT_AND_CACHE_MLA);
     }
+}
+
+// Each row copies either one absorbed query head or this token's latent cache.
+// Copy storage bits directly: this epilogue neither rotates nor quantizes inputs.
+template<typename storage_t>
+__global__ void fused_mla_decode_q_concat_kv_cache_kernel(const storage_t* q_latent,
+                                                          const storage_t* q_pe,
+                                                          const storage_t* kv_c,
+                                                          const storage_t* k_pe,
+                                                          storage_t*       q_out,
+                                                          storage_t*       kv_cache,
+                                                          const int64_t*   slots,
+                                                          int64_t          heads,
+                                                          int64_t          latent_dim,
+                                                          int64_t          pe_dim,
+                                                          int64_t          page_size,
+                                                          int64_t          q_latent_token_stride,
+                                                          int64_t          q_latent_head_stride,
+                                                          int64_t          q_pe_token_stride,
+                                                          int64_t          q_pe_head_stride,
+                                                          int64_t          kv_token_stride,
+                                                          int64_t          k_pe_token_stride,
+                                                          int64_t          cache_block_stride,
+                                                          int64_t          cache_token_stride,
+                                                          int64_t          slot_stride) {
+    const int64_t token = int64_t(blockIdx.x) / (heads + 1);
+    const int64_t head  = int64_t(blockIdx.x) % (heads + 1);
+    const int64_t width = latent_dim + pe_dim;
+    if (head < heads) {
+        storage_t* output = q_out + (token * heads + head) * width;
+        for (int64_t d = threadIdx.x; d < width; d += blockDim.x) {
+            output[d] = d < latent_dim ? q_latent[token * q_latent_token_stride + head * q_latent_head_stride + d] :
+                                         q_pe[token * q_pe_token_stride + head * q_pe_head_stride + d - latent_dim];
+        }
+    } else {
+        const int64_t slot = slots[token * slot_stride];
+        if (slot < 0) {
+            return;
+        }
+        storage_t* output =
+            kv_cache + (slot / page_size) * cache_block_stride + (slot % page_size) * cache_token_stride;
+        for (int64_t d = threadIdx.x; d < width; d += blockDim.x) {
+            output[d] =
+                d < latent_dim ? kv_c[token * kv_token_stride + d] : k_pe[token * k_pe_token_stride + d - latent_dim];
+        }
+    }
+}
+
+void fused_mla_decode_q_concat_kv_cache_insert(const torch::Tensor& q_latent,
+                                               const torch::Tensor& q_pe,
+                                               const torch::Tensor& kv_c,
+                                               const torch::Tensor& k_pe,
+                                               torch::Tensor&       q_out,
+                                               torch::Tensor&       kv_cache,
+                                               const torch::Tensor& slot_mapping) {
+    TORCH_CHECK(q_latent.is_cuda() && q_latent.dim() == 3, "q_latent must be CUDA [token, head, latent]");
+    const auto dtype = q_latent.scalar_type();
+    TORCH_CHECK(dtype == torch::kBFloat16 || dtype == torch::kHalf || dtype == torch::kFloat,
+                "MLA concatenation requires BF16, FP16 or FP32 storage");
+    for (const auto& tensor : {q_pe, kv_c, k_pe, q_out, kv_cache}) {
+        TORCH_CHECK(tensor.device() == q_latent.device() && tensor.scalar_type() == dtype,
+                    "MLA operands must share the query's CUDA device and dtype");
+    }
+    TORCH_CHECK(q_pe.dim() == 3 && kv_c.dim() == 2 && k_pe.dim() == 2 && q_out.dim() == 3 && kv_cache.dim() == 3,
+                "MLA query/output must be 3D, latent/key must be 2D and cache must be 3D");
+    const int64_t tokens     = q_latent.size(0);
+    const int64_t heads      = q_latent.size(1);
+    const int64_t latent_dim = q_latent.size(2);
+    const int64_t pe_dim     = q_pe.size(2);
+    const int64_t width      = latent_dim + pe_dim;
+    TORCH_CHECK(heads > 0 && latent_dim > 0 && kv_cache.size(1) > 0,
+                "MLA heads, latent and page size must be positive");
+    TORCH_CHECK(q_pe.size(0) == tokens && q_pe.size(1) == heads && kv_c.size(0) == tokens && kv_c.size(1) == latent_dim
+                    && k_pe.size(0) == tokens && k_pe.size(1) == pe_dim && q_out.size(0) == tokens
+                    && q_out.size(1) == heads && q_out.size(2) == width && kv_cache.size(2) == width,
+                "Incompatible MLA query, latent, output or cache dimensions");
+    TORCH_CHECK(q_latent.stride(2) == 1 && q_pe.stride(2) == 1 && kv_c.stride(1) == 1 && k_pe.stride(1) == 1
+                    && kv_cache.stride(2) == 1 && q_out.is_contiguous(),
+                "MLA input/cache feature strides must be one and query output must be contiguous");
+    TORCH_CHECK(slot_mapping.device() == q_latent.device() && slot_mapping.scalar_type() == torch::kLong
+                    && slot_mapping.dim() == 1 && slot_mapping.size(0) == tokens,
+                "slot_mapping must be one CUDA int64 slot per physical query");
+    if (tokens == 0) {
+        return;
+    }
+    TORCH_CHECK(tokens <= INT32_MAX / (heads + 1), "MLA physical query count exceeds CUDA launch capacity");
+    const c10::cuda::CUDAGuard device_guard(q_latent.device());
+    const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();
+    auto                       launch = [&](auto storage) {
+        using storage_t = decltype(storage);
+        fused_mla_decode_q_concat_kv_cache_kernel<storage_t>
+            <<<tokens*(heads + 1), 128, 0, stream>>>(reinterpret_cast<const storage_t*>(q_latent.data_ptr()),
+                                                     reinterpret_cast<const storage_t*>(q_pe.data_ptr()),
+                                                     reinterpret_cast<const storage_t*>(kv_c.data_ptr()),
+                                                     reinterpret_cast<const storage_t*>(k_pe.data_ptr()),
+                                                     reinterpret_cast<storage_t*>(q_out.data_ptr()),
+                                                     reinterpret_cast<storage_t*>(kv_cache.data_ptr()),
+                                                     slot_mapping.data_ptr<int64_t>(),
+                                                     heads,
+                                                     latent_dim,
+                                                     pe_dim,
+                                                     kv_cache.size(1),
+                                                     q_latent.stride(0),
+                                                     q_latent.stride(1),
+                                                     q_pe.stride(0),
+                                                     q_pe.stride(1),
+                                                     kv_c.stride(0),
+                                                     k_pe.stride(0),
+                                                     kv_cache.stride(0),
+                                                     kv_cache.stride(1),
+                                                     slot_mapping.stride(0));
+    };
+    if (dtype == torch::kFloat) {
+        launch(uint32_t{});
+    } else {
+        launch(uint16_t{});
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace rtp_llm

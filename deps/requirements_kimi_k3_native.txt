@@ -1,6 +1,6 @@
-# Optional K3 native operator runtime; base RTP dependencies remain unchanged.
-# Native router requires CUTLASS DSL 4.7.1; validated with PyTorch 2.11/CUDA 13.
-tokenspeed-mla==0.1.8
-tokenspeed-triton==3.8.10.post20260906
+# Shared K3 operator runtime for CUDA13 x86 and ARM.
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed_mla/tokenspeed_mla-0.2.3+74170ca1.cu132-py3-none-manylinux_2_28_x86_64.whl ; platform_machine == "x86_64"
+http://artlab.alibaba-inc.com/1/pypi/rtp_llm/tokenspeed_mla/tokenspeed_mla-0.2.3+74170ca1.cu132-py3-none-manylinux_2_28_aarch64.whl ; platform_machine == "aarch64"
+apache-tvm-ffi==0.1.13
 nvidia-cutlass-dsl[cu13]==4.7.1
 flashinfer-python==0.6.18.post1

@@ -306,6 +306,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("slot_mapping"),
                   py::arg("kv_cache_dtype"),
                   py::arg("scale"));
+
+    rtp_ops_m.def("fused_mla_decode_q_concat_kv_cache_insert",
+                  &rtp_llm::fused_mla_decode_q_concat_kv_cache_insert,
+                  "Concatenate absorbed MLA queries and insert unquantized latent KV",
+                  py::arg("q_latent"),
+                  py::arg("q_pe"),
+                  py::arg("kv_c"),
+                  py::arg("k_pe"),
+                  py::arg("q_out"),
+                  py::arg("kv_cache"),
+                  py::arg("slot_mapping"));
 }
 
 void registerBaseCudaBindings(py::module& rtp_ops_m) {
