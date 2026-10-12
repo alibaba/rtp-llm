@@ -12,6 +12,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
     MoeConfigResolver,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_parallelism import (
+    use_nvfp4_tensor_parallel,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -28,12 +31,15 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         checker.check(
             torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 12
         )
-        checker.check(config.parallelism_config.get_ffn_tp_size() == 1)
+        tensor_parallel = use_nvfp4_tensor_parallel(config)
+        checker.check(
+            config.parallelism_config.get_ffn_tp_size() == 1 or tensor_parallel
+        )
         checker.check(config.moe_config.fp4_moe_op == "cutlass")
         checker.check(not config.model_config.quant_config.is_quanted())
         checker.check(not config.has_redundant_experts)
         checker.check(not config.model_config.eplb_config.enable_eplb())
-        checker.check(config.tp_size == config.ep_size)
+        checker.check(config.tp_size == config.ep_size or tensor_parallel)
 
     @property
     def topk_ids_dtype(self):
@@ -64,6 +70,9 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
         ]
         self.ep_size = config.ep_size
         self.ep_rank = config.ep_rank
+        pc = getattr(config, "parallelism_config", None)
+        self.tp_size = pc.get_ffn_tp_size() if pc is not None else 1
+        self.tp_rank = pc.get_ffn_tp_rank() if pc is not None else 0
 
     @property
     def local_num_experts(self):
@@ -96,8 +105,8 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             fc2_expert_weights=self.w2,
             output_dtype=payload.expert_x_origin_dtype or torch.bfloat16,
             quant_scales=self.quant_scales,
-            tp_size=1,
-            tp_rank=0,
+            tp_size=self.tp_size,
+            tp_rank=self.tp_rank,
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             activation_type=ActivationType.Swiglu,

@@ -1,5 +1,6 @@
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
@@ -20,6 +21,198 @@ from rtp_llm.utils.model_weight import W
 
 
 class CutlassNvfp4ExecutorTest(unittest.TestCase):
+    @unittest.skipUnless(
+        torch.cuda.is_available()
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability()[0] == 12,
+        "requires SM120 NVIDIA GPU",
+    )
+    def test_tensor_parallel_loader_split_and_dynamic_graph(self):
+        from rtp_llm.config.quant_config import ModelOptFp4Config
+        from rtp_llm.config.server_config_setup import set_parallelism_config
+        from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            OnlineModelOptFp4MoeWeight,
+        )
+        from rtp_llm.ops import ParallelismConfig
+        from rtp_llm.utils.model_weight import CkptWeightInfo
+
+        torch.manual_seed(85)
+        experts, hidden, inter = 4, 2560, 640
+        raw = {}
+        descriptors = []
+        for wn, sn, an, ins, shape in [
+            (W.moe_w1, W.moe_s1, W.moe_w1_s2, W.moe_w1_i_s, (2 * inter, hidden)),
+            (W.moe_w2, W.moe_s2, W.moe_w2_s2, W.moe_w2_i_s, (hidden, inter)),
+        ]:
+            quantized = [
+                quantize_expert_to_nvfp4(
+                    torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.02
+                )
+                for _ in range(experts)
+            ]
+            q, s, a = zip(*quantized)
+            raw[wn], raw[sn], raw[an] = map(torch.stack, (q, s, a))
+            raw[ins] = torch.full((experts,), 32 / 2688.0, device="cuda")
+            descriptors.append(
+                OnlineModelOptFp4MoeWeight(
+                    MoeAtomicWeight(
+                        wn,
+                        [CkptWeightInfo("unused")],
+                        config=MoeConfig(expert_num=experts),
+                    ),
+                    ModelOptFp4Config(bits=4, group_size=16, is_quanted=False),
+                )
+            )
+
+        def prepared(values):
+            return {
+                name: (
+                    CudaImpl.swizzle_blockscale(value)
+                    if name in (W.moe_s1, W.moe_s2)
+                    else value
+                )
+                for name, value in values.items()
+            }
+
+        qc = FusedMoEQuantConfig(quant_dtype=torch.uint8, block_shape=[16, 16])
+        full = CutlassNvfp4Executor(
+            SimpleNamespace(ep_size=1, ep_rank=0), qc, prepared(raw)
+        )
+        parts = []
+        for rank in range(2):
+            lc = SimpleNamespace(
+                tp_size=2,
+                tp_rank=rank,
+                ep_size=1,
+                ep_rank=0,
+                dp_size=1,
+                dp_rank=0,
+                ffn_tp_size=2,
+                ffn_tp_rank=rank,
+                hidden_size=hidden,
+                head_num=24,
+                head_num_kv=2,
+                size_per_head=256,
+                moe_pure_tp_mode=True,
+                bit=4,
+            )
+            local = {}
+            for descriptor in descriptors:
+                local.update(descriptor._split(raw, lc))
+            self.assertEqual(local[W.moe_w1].shape, (experts, inter, hidden // 2))
+            self.assertEqual(local[W.moe_w2].shape, (experts, hidden, inter // 4))
+            self.assertTrue(torch.equal(local[W.moe_w1_s2], raw[W.moe_w1_s2]))
+            self.assertTrue(torch.equal(local[W.moe_w2_s2], raw[W.moe_w2_s2]))
+            pc = ParallelismConfig()
+            pc.tp_size = 2
+            pc.tp_rank = rank
+            pc.ep_size = 1
+            pc.ffn_sp_size = 1
+            pc.world_size = 2
+            pc.local_world_size = 2
+            pc.world_rank = rank
+            set_parallelism_config(pc)
+            parts.append(
+                CutlassNvfp4Executor(
+                    SimpleNamespace(ep_size=1, ep_rank=0, parallelism_config=pc),
+                    qc,
+                    prepared(local),
+                )
+            )
+            self.assertEqual(parts[-1].tp_size, 2)
+            self.assertEqual(parts[-1].tp_rank, rank)
+
+        x = torch.randn(8, hidden, device="cuda", dtype=torch.bfloat16) * 0.2
+        ids = (
+            torch.tensor([0, 1, 3], device="cuda", dtype=torch.int32)
+            .expand(8, -1)
+            .contiguous()
+        )
+        weights = (
+            torch.tensor([0.2, 0.3, 0.5], device="cuda").expand(8, -1).contiguous()
+        )
+        payload = ExpertForwardPayload(
+            expert_x=x,
+            expert_x_origin_dtype=torch.bfloat16,
+            expert_topk_ids=ids,
+            expert_topk_weights=weights,
+        )
+
+        def run(executor):
+            return executor.execute(
+                payload, "SiGLU", None, None, False, None
+            ).fused_expert_output
+
+        def combined():
+            return run(parts[0]).float() + run(parts[1]).float()
+
+        for _ in range(3):
+            combined()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            got = combined()
+        for _ in range(3):
+            x.mul_(0.8)
+            ids.add_(1).remainder_(experts)
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(got, combined(), atol=0, rtol=0)
+            torch.testing.assert_close(got, run(full).float(), atol=0.0005, rtol=0.02)
+
+    def test_tensor_parallel_selection_is_gated_and_rejects_sp_and_world_mismatch(self):
+        from rtp_llm.config.model_config import ModelConfig
+        from rtp_llm.config.quant_config import ModelOptFp4Config
+        from rtp_llm.config.server_config_setup import set_parallelism_config
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+            MoEConfigAdapter,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp4 import (
+            CudaNvfp4CutlassStrategy,
+        )
+        from rtp_llm.ops import MoeConfig, ParallelismConfig
+
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 12:
+            self.skipTest("requires SM120 NVIDIA GPU")
+        model = ModelConfig()
+        model.data_type = "bf16"
+        model.expert_num = 512
+        model.moe_k = 10
+        model.moe_inter_size = 640
+        model.hidden_size = 2560
+        model.n_shared_experts = 1
+        model._qwen4_moe_only_fp4 = True
+        model.quant_config = ModelOptFp4Config(
+            bits=4, group_size=16, is_quanted=False, activation_amax=32.0
+        )
+        pc = ParallelismConfig()
+        pc.tp_size = 2
+        pc.ep_size = 1
+        pc.ffn_sp_size = 1
+        pc.world_size = 2
+        pc.local_world_size = 2
+        set_parallelism_config(pc)
+        moe = MoeConfig()
+        moe.moe_strategy = "nvfp4_cutlass"
+        moe.fp4_moe_op = "cutlass"
+        moe.use_all_gather = True
+        moe.use_deepep_moe = False
+        strategy = CudaNvfp4CutlassStrategy()
+        setting = "RTP_LLM_QWEN4_NVFP4_TP_EXPERIMENTAL"
+        with patch.dict("os.environ", {setting: "0"}):
+            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+        with patch.dict("os.environ", {setting: "1"}):
+            self.assertTrue(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+            model._qwen4_moe_only_fp4 = False
+            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+            model._qwen4_moe_only_fp4 = True
+            pc.world_size = 4
+            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+            pc.world_size = 2
+            pc.ffn_sp_size = 2
+            set_parallelism_config(pc)
+            self.assertFalse(strategy.can_handle(MoEConfigAdapter(model, pc, moe)))
+
     def test_selection_requires_matching_attention_tp_ep_and_online_weights(self):
         from rtp_llm.config.model_config import ModelConfig
         from rtp_llm.config.quant_config import ModelOptFp4Config
