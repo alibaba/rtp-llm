@@ -581,6 +581,9 @@ def sparse_paged_gqa_attn(
                 page_size=page_size,
                 splits=splits,
                 block_k=block_k,
+                scale=scale_view,
+                allow_extended=os.environ.get("RTP_LLM_QWEN4_GROUPED_SPARSE_FP8", "0")
+                == "1",
             )
             if grouped:
                 grouped_sparse_paged_split(
@@ -592,6 +595,7 @@ def sparse_paged_gqa_attn(
                     partial,
                     page_size=page_size,
                     splits=splits,
+                    scale=scale_view,
                 )
         if not grouped:
             _sparse_paged_online_split_kernel[(batch, q_heads, query_len * splits)](
