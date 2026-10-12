@@ -1,9 +1,9 @@
 """Native lease provenance and read-only stage-agreed maintained CP preflight."""
 
 import gc
+import hashlib
 import json
 import os
-import socket
 import sys
 import tempfile
 import traceback
@@ -121,14 +121,182 @@ def corrupt(request, variant, cp):
     return request
 
 
-def run_rank(rank, port, config):
+def weight_digest(weight):
+    hasher = hashlib.sha256()
+    for layer_id, mapping in enumerate((weight.global_weights, *weight.weights)):
+        for name, value in sorted(mapping.items()):
+            hasher.update(
+                json.dumps(
+                    (layer_id, name, list(value.shape), str(value.dtype))
+                ).encode()
+            )
+            hasher.update(value.contiguous().view(torch.uint8).cpu().numpy().tobytes())
+    return hasher.hexdigest()
+
+
+def cache_digest(values):
+    hasher = hashlib.sha256()
+    for key, value in sorted(values.items()):
+        hasher.update(json.dumps((key, list(value.shape), str(value.dtype))).encode())
+        hasher.update(value.contiguous().view(torch.uint8).numpy().tobytes())
+    return hasher.hexdigest()
+
+
+def cold_mhc_checks(rank, config, cache):
+    for actor in (0, 4):
+        for variant in ("policy", "precision"):
+            choices = dict(config)
+            if variant == "policy" and rank == actor:
+                choices["mhc_prenorm_mode"] = None
+            model = make_worker(rank, choices)
+            wrapper = model.weight
+            before = weight_digest(wrapper)
+            cache_before = snapshot(cache)
+            blocked = rank // 4 == actor // 4
+            if variant == "precision" and rank == actor:
+                torch.set_float32_matmul_precision("high")
+            observed_precision = torch.get_float32_matmul_precision()
+            try:
+                try:
+                    result = model.initialize(resources(cache))
+                except (ValueError, RuntimeError):
+                    assert blocked
+                    assert model.v4 is None and not model._materialized
+                    assert model.weight is wrapper and model._worker_state == "new"
+                    assert not model._engram_tables
+                    after = weight_digest(model.weight)
+                    assert before == after
+                else:
+                    assert not blocked and result and model._materialized
+                    after = None
+                assert torch.get_float32_matmul_precision() == observed_precision
+                require_snapshot(cache, cache_before)
+                print(
+                    "DSV41_PP_MHC_COLD "
+                    + json.dumps(
+                        {
+                            "rank": rank,
+                            "actor": actor,
+                            "variant": variant,
+                            "combined": bool(config.get("mhc_post_mode")),
+                            "rejected_stage": blocked,
+                            "weights_before_sha256": before,
+                            "weights_after_sha256": after,
+                            "cache_before_sha256": cache_digest(cache_before),
+                            "cache_after_sha256": cache_digest(snapshot(cache)),
+                            "cache_exact": True,
+                            "precision": observed_precision,
+                            "precision_unchanged": True,
+                            "materialized": not blocked,
+                            "tables_empty_on_rejection": True,
+                        }
+                    ),
+                    flush=True,
+                )
+            finally:
+                torch.set_float32_matmul_precision("highest")
+                model.close()
+                del wrapper, model, cache_before
+                gc.collect()
+                Dsv4SharedRuntimeBufferStore._reset_for_test()
+            dist.barrier()
+
+
+def ready_mhc_checks(
+    model, native, batch, ids, windows, request, dispatch, raw, rank, config
+):
+    selected = [
+        component
+        for component in ("collapse", "post", "prenorm")
+        if config.get(f"mhc_{component}_mode") is not None
+    ]
+    mutations = [
+        (component, mutation)
+        for component in selected
+        for mutation in ("config", "owner")
+    ]
+    if "prenorm" in selected:
+        mutations.append(("prenorm", "precision"))
+    for actor in (0, 4):
+        for component, mutation in mutations:
+            blocked = rank // 4 == actor // 4
+            before_precision = torch.get_float32_matmul_precision()
+            with ExitStack() as changes:
+                if rank == actor:
+                    if mutation == "config":
+                        changes.enter_context(
+                            patch.dict(
+                                model._v4_args.v41_config,
+                                {f"mhc_{component}_mode": None},
+                            )
+                        )
+                    elif mutation == "owner":
+                        changes.enter_context(
+                            patch.object(
+                                model.v4.layers[-1].ffn_hc, f"_{component}_mode", None
+                            )
+                        )
+                    else:
+                        torch.set_float32_matmul_precision("high")
+                expected_precision = (
+                    "high"
+                    if mutation == "precision" and rank == actor
+                    else before_precision
+                )
+                negative = native.split_local_inputs(batch, ids, windows)
+                try:
+                    try:
+                        admitted = model.prepare_native_pp_prefill(negative)
+                    except V41InputRejected:
+                        assert blocked
+                    else:
+                        assert not blocked
+                        del admitted
+                    assert torch.get_float32_matmul_precision() == expected_precision
+                    clean_worker(model)
+                    require_snapshot(model.kv_cache, raw)
+                finally:
+                    torch.set_float32_matmul_precision(before_precision)
+                    del negative
+            retry = model.prepare_native_pp_prefill(request)
+            assert retry.schedule == dispatch.schedule
+            del retry
+            clean_worker(model)
+            require_snapshot(model.kv_cache, raw)
+            print(
+                "DSV41_PP_MHC_READY "
+                + json.dumps(
+                    {
+                        "rank": rank,
+                        "actor": actor,
+                        "component": component,
+                        "mutation": mutation,
+                        "combined": bool(config.get("mhc_post_mode")),
+                        "rejected_stage": blocked,
+                        "cache_before_sha256": cache_digest(raw),
+                        "cache_after_sha256": cache_digest(snapshot(model.kv_cache)),
+                        "cache_exact": True,
+                        "ready": True,
+                        "retry": True,
+                        "precision_unchanged": True,
+                        "rejected_precision": expected_precision,
+                        "restored_precision": torch.get_float32_matmul_precision(),
+                    }
+                ),
+                flush=True,
+            )
+
+
+def run_rank(rank, rendezvous, config):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
+    if config.get("mhc_prenorm_mode") is not None:
+        torch.set_float32_matmul_precision("highest")
     os.environ.update(
         {
             "NCCL_P2P_DISABLE": "1",
             "DSV41_ENGRAM_HOST_BYTES": str(2**20),
-            "DSV41_ENGRAM_CACHE_DIR": "/dev/shm",
+            "DSV41_ENGRAM_CACHE_DIR": str(Path(config["checkpoint_path"]) / "tables"),
             "DSV4_PP_EP_ENABLE": "1",
             "DSV4_PP_EP_BACKEND": "fork_nccl_mxfp8",
             "DSV4_MOE_STRATEGY": "auto",
@@ -137,7 +305,7 @@ def run_rank(rank, port, config):
     )
     dist.init_process_group(
         "nccl",
-        init_method=f"tcp://127.0.0.1:{port}",
+        init_method=rendezvous,
         rank=rank,
         world_size=8,
         timeout=timedelta(seconds=180),
@@ -155,16 +323,32 @@ def run_rank(rank, port, config):
         try:
             pcfg = parallelism_for(rank)
             collective.init_distributed_environment(
-                pcfg, NcclCommConfig(nccl_ip="127.0.0.1"), port
+                pcfg, NcclCommConfig(nccl_ip="127.0.0.1"), 0
             )
             with torch.inference_mode():
                 native = ops.NativePPTransport(cache_config(), pcfg)
                 other = ops.NativePPTransport(cache_config(), pcfg)
                 cache = native.cache
                 free_before = native.free_blocks
+                for layer_id in range(cache.layer_count):
+                    for group in cache.get_layer_cache_groups(layer_id):
+                        group.kv_cache_base.view(torch.uint8).fill_(37)
                 roots = root_allocations(native, rank)
+                if config.get("mhc_prenorm_mode") is not None:
+                    cold_mhc_checks(rank, config, cache)
                 model = make_worker(rank, config)
                 assert model.initialize(resources(cache))
+                selected_choices = {
+                    f"mhc_{component}_mode": config[f"mhc_{component}_mode"]
+                    for component in ("collapse", "post", "prenorm")
+                    if config.get(f"mhc_{component}_mode") is not None
+                }
+                for layer in model.v4.layers:
+                    for unit in (layer.attn_hc, layer.ffn_hc):
+                        for component in ("collapse", "post", "prenorm"):
+                            assert getattr(
+                                unit, f"{component}_mode"
+                            ) == selected_choices.get(f"mhc_{component}_mode")
                 for layer in range(cache.layer_count):
                     for group in cache.get_layer_cache_groups(layer):
                         group.kv_cache_base.zero_()
@@ -267,6 +451,18 @@ def run_rank(rank, port, config):
                             s.wire_values() for s in spans
                         )
                         if step == 0:
+                            ready_mhc_checks(
+                                model,
+                                native,
+                                batch,
+                                ids,
+                                windows,
+                                request,
+                                dispatch,
+                                raw,
+                                rank,
+                                config,
+                            )
                             for variant, actor in (
                                 ("missing-lease", 0),
                                 ("table", 4),
@@ -353,6 +549,8 @@ def run_rank(rank, port, config):
                             + json.dumps(
                                 {
                                     "rank": rank,
+                                    "mhc_choices": selected_choices,
+                                    "float32_matmul_precision": torch.get_float32_matmul_precision(),
                                     "step": step,
                                     "ends": prefixes,
                                     "real_cp_rows": int(cp.local_is_real.sum()),
@@ -387,6 +585,7 @@ def run_rank(rank, port, config):
                     + json.dumps(
                         {
                             "rank": rank,
+                            "mhc_choices": selected_choices,
                             "agreement_calls": calls[0],
                             "descriptor_holds_native_leases": True,
                             "free_before": free_before,
@@ -411,15 +610,49 @@ def run_rank(rank, port, config):
 
 
 class V41NativePPPreflightSM120Test(unittest.TestCase):
-    def test_native_cp_preflight_and_stage_retries(self):
+    def run_case(self, choices):
         self.assertGreaterEqual(torch.cuda.device_count(), 8)
-        with tempfile.TemporaryDirectory() as root, socket.socket() as sock:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
             torch.manual_seed(41700)
-            config = checkpoint(Path(root), full_schedule=True, hidden_size=5120)
-            sock.bind(("127.0.0.1", 0))
-            port = sock.getsockname()[1]
-            sock.close()
-            mp.spawn(run_rank, args=(port, config), nprocs=8, join=True)
+            config = checkpoint(root, full_schedule=True, hidden_size=5120)
+            config.update(choices)
+            (root / "tables").mkdir()
+            rendezvous = root / "world.rendezvous"
+            self.assertFalse(rendezvous.exists())
+            mp.spawn(run_rank, args=(rendezvous.as_uri(), config), nprocs=8, join=True)
+            rendezvous.unlink(missing_ok=True)
+            self.assertFalse(rendezvous.exists())
+            self.assertTrue(
+                all(path.name.endswith(".lock") for path in (root / "tables").iterdir())
+            )
+            print(
+                "DSV41_PP_MHC_PREFLIGHT_RENDEZVOUS "
+                + json.dumps(
+                    {
+                        "choices": choices,
+                        "scheme": "file",
+                        "removed": True,
+                        "tables_empty": True,
+                    }
+                ),
+                flush=True,
+            )
+
+    def test_native_cp_preflight_and_stage_retries(self):
+        self.run_case({})
+
+    def test_fp32_prenorm_preflight_and_stage_retries(self):
+        self.run_case({"mhc_prenorm_mode": "fp32"})
+
+    def test_composed_mhc_preflight_and_stage_retries(self):
+        self.run_case(
+            {
+                "mhc_collapse_mode": "ordered_fp32",
+                "mhc_post_mode": "ordered_fp32",
+                "mhc_prenorm_mode": "fp32",
+            }
+        )
 
 
 if __name__ == "__main__":
