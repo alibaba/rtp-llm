@@ -27,6 +27,8 @@ python3 tools/online_eval/scripts/commands/run_ci.py \
   --job workload --out-dir /path/to/new-workload-run
 ```
 
+手动流水线可先调用 `scripts/commands/plan_ci.py --suite <suite> --profiles <profile列表> --json /path/to/selection.json` 编译完整选例。`--instances <case::variant::profile列表>` 可覆盖 suite/profile 选择；未知或重复 ID 在启动执行组前失败。输出按配置的缩容 case 划分两个 profile 执行组，其余实例归入第三组；额外的缩容对照变体仍进入对应缩容组。空组由流水线跳过，各组使用独立 job，组内串行、profile 输出目录分开。这是固定分组，运行中不迁移任务。
+
 这些策略和入口不会自动创建外部 CI 任务；流水线需要显式调用 `run_ci.py --job <job>`，不能仅凭 `ci_jobs` 配置认为已接入。
 
 `--dry-run` 显示执行、端口及报告视图计划，不启动服务。核对 profile、worker 端口容量、lane 和内存预算后再执行；编译与执行使用同一组端口容量参数。列表顺序和 dry-run 成功不代表测试通过。

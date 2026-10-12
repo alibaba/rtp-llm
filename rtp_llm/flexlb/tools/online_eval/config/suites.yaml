@@ -8,6 +8,11 @@ suites:
   - cache_scale_in::default
   - master_ha_failover::default
   - master_performance::default
+  workload_cache:
+  - cache_scale_in::default
+  workload_other:
+  - master_ha_failover::default
+  - master_performance::default
 ci_jobs:
   quick:
     suite: core
@@ -22,4 +27,20 @@ ci_jobs:
     profiles:
     - batch-window
     - single-nonbatch
+    parallel: 1
+  workload_cache_single:
+    suite: workload_cache
+    profiles:
+    - single-nonbatch
+    parallel: 1
+  workload_cache_batch:
+    suite: workload_cache
+    profiles:
+    - batch-window
+    parallel: 1
+  workload_other:
+    suite: workload_other
+    profiles:
+    - single-nonbatch
+    - batch-window
     parallel: 1
