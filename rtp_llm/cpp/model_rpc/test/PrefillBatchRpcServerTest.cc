@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "opentelemetry/exporters/memory/in_memory_span_data.h"
@@ -83,6 +84,21 @@ public:
 class TestPrefillBatchRpcServer: public PrefillBatchRpcServer {
 public:
     using LocalRpcServer::prepareInput;
+
+    void buildAdmittedSlotContexts(std::vector<BatchSlot>& slots) {
+        // Stage-level tracing tests construct slots directly. Mirror the
+        // admission ownership normally established by admitGroup before
+        // exercising buildSlotContexts; do not weaken that production contract.
+        for (auto& slot : slots) {
+            if (!slot.deferred) {
+                auto admission = acquireAdmission();
+                TORCH_CHECK(admission.detail.admitted, admission.detail.message);
+                slot.deferred = std::make_shared<DeferredPrefillContext>();
+                slot.deferred->admission_complete = std::exchange(admission.complete, {});
+            }
+        }
+        PrefillBatchRpcServer::buildSlotContexts(slots);
+    }
 
     grpc::Status EnqueueGroup(grpc::ServerContext*,
                               const EnqueueGroupRequestPB* request,
@@ -1507,7 +1523,7 @@ TEST_F(PrefillBatchTraceTest, VitUsesEachBatchRequestParentAndDoesNotRepeatProce
         slots[i].input = std::make_shared<GenerateInputPB>(makeVitRequest(4201 + i));
         setTraceContext(*slots[i].input, std::string(32, '1' + i), std::string(16, '3' + i));
     }
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     for (auto& slot : slots) {
         auto& context          = *slot.deferred->context;
         context.generate_input = QueryConverter::transQuery(slot.input.get());
@@ -1611,7 +1627,7 @@ TEST_F(PrefillBatchTraceTest, PerRequestCarriersCreateIsolatedLogicalParentsAndP
     setTraceContext(*slots[0].input, first_trace, first_parent);
     setTraceContext(*slots[1].input, second_trace, second_parent);
 
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     ASSERT_TRUE(slots[0].deferred->context->trace_span_guard);
     ASSERT_TRUE(slots[1].deferred->context->trace_span_guard);
 
@@ -1669,7 +1685,7 @@ TEST_F(PrefillBatchTraceTest, ActiveOnlyShutdownWaitsForOperationOwnerAndEndsOnc
     slots[0].input = std::make_shared<GenerateInputPB>();
     slots[0].input->set_request_id(4051);
     setTraceContext(*slots[0].input, "33333333333333333333333333333333", "3333333333333333");
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
 
     auto contexts = std::make_shared<DeferredPrefillContextMap>();
     auto deferred = slots[0].deferred;
@@ -1701,7 +1717,7 @@ TEST_F(PrefillBatchTraceTest, MissingMalformedAndDisabledCarriersFailOpenWithout
     setTraceContext(*slots[0].input, "33333333333333333333333333333333", "3333333333333333");
     slots[2].input->mutable_request_info()->mutable_trace_context()->set_traceparent("malformed");
 
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     ASSERT_TRUE(slots[0].deferred->context->trace_span_guard);
     EXPECT_FALSE(slots[1].deferred->context->trace_span_guard);
     EXPECT_FALSE(slots[2].deferred->context->trace_span_guard);
@@ -1717,7 +1733,7 @@ TEST_F(PrefillBatchTraceTest, MissingMalformedAndDisabledCarriersFailOpenWithout
     disabled_slots[0].input = std::make_shared<GenerateInputPB>();
     disabled_slots[0].input->set_request_id(4104);
     setTraceContext(*disabled_slots[0].input, "44444444444444444444444444444444", "4444444444444444");
-    server.buildSlotContexts(disabled_slots);
+    server.buildAdmittedSlotContexts(disabled_slots);
     EXPECT_FALSE(disabled_slots[0].deferred->context->trace_span_guard);
 }
 
@@ -1744,7 +1760,7 @@ TEST_F(PrefillBatchTraceTest, TraceContextLengthBoundaryPreservesValidParent) {
     setTraceContext(*slots[1].input, second_trace, second_parent);
     slots[1].input->mutable_request_info()->mutable_trace_context()->set_tracestate(tracestate_513);
 
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     ASSERT_TRUE(slots[0].deferred->context->trace_span_guard);
     ASSERT_TRUE(slots[1].deferred->context->trace_span_guard);
     for (auto& slot : slots) {
@@ -1775,7 +1791,7 @@ TEST_F(PrefillBatchTraceTest, LogicalFailureUsesDomainStatusWithoutRpcAttributes
     slots[0].input = std::make_shared<GenerateInputPB>();
     slots[0].input->set_request_id(4201);
     setTraceContext(*slots[0].input, "55555555555555555555555555555555", "5555555555555555");
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
 
     auto& deferred = slots[0].deferred;
     ASSERT_TRUE(deferred->context->tryMarkOtherTerminal());
@@ -1811,7 +1827,7 @@ TEST_F(PrefillBatchTraceTest, CancelPublishingCauseItselfNeverReportsFailureAsSu
     slots[0].input = std::make_shared<GenerateInputPB>();
     slots[0].input->set_request_id(4601);
     setTraceContext(*slots[0].input, "77777777777777777777777777777777", "7777777777777777");
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     auto deferred = slots[0].deferred;
     ASSERT_TRUE(deferred->context->trace_span_guard);
 
@@ -1845,7 +1861,7 @@ TEST_F(PrefillBatchTraceTest, ConcurrentShutdownAndSlotFinalizationNeverReportsF
         slots[0].input                                           = std::make_shared<GenerateInputPB>();
         slots[0].input->set_request_id(request_id);
         setTraceContext(*slots[0].input, "99999999999999999999999999999999", "9999999999999999");
-        server.buildSlotContexts(slots);
+        server.buildAdmittedSlotContexts(slots);
         auto deferred = slots[0].deferred;
         ASSERT_TRUE(deferred->context->trace_span_guard);
 
@@ -1907,7 +1923,7 @@ TEST_F(PrefillBatchTraceTest, PrepareRegistrationFailureReachesTheLogicalSpan) {
     slots[0].input = std::make_shared<GenerateInputPB>();
     slots[0].input->set_request_id(7701);
     setTraceContext(*slots[0].input, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaa");
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     auto deferred = slots[0].deferred;
     ASSERT_TRUE(deferred->context->trace_span_guard);
     // The slot never registered, so prepareGroup() takes its first failure exit.
@@ -1940,7 +1956,7 @@ TEST_F(PrefillBatchTraceTest, PriorityPreemptionStillOutranksAnAlreadyCommittedP
     slots[0].input = std::make_shared<GenerateInputPB>();
     slots[0].input->set_request_id(7702);
     setTraceContext(*slots[0].input, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "bbbbbbbbbbbbbbbb");
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
     auto  deferred = slots[0].deferred;
     auto& context  = *deferred->context;
 
@@ -1971,7 +1987,7 @@ TEST_F(PrefillBatchTraceTest, TtlStyleCancellationSynthesizesTruncatedWaitExactl
     slots[0].input = std::make_shared<GenerateInputPB>();
     slots[0].input->set_request_id(4301);
     setTraceContext(*slots[0].input, "66666666666666666666666666666666", "6666666666666666");
-    server.buildSlotContexts(slots);
+    server.buildAdmittedSlotContexts(slots);
 
     auto generate_input = makeGenerateInput(4301);
     auto stream         = makeGenerateStream(generate_input);
@@ -2006,7 +2022,7 @@ TEST_F(PrefillBatchTraceTest, PriorityFinalizationUsesSnapshotBeforeReleasingStr
         slots[0].input                                           = std::make_shared<GenerateInputPB>();
         slots[0].input->set_request_id(request_id);
         setTraceContext(*slots[0].input, "77777777777777777777777777777777", "7777777777777777");
-        server.buildSlotContexts(slots);
+        server.buildAdmittedSlotContexts(slots);
 
         auto& deferred       = slots[0].deferred;
         auto  generate_input = makeGenerateInput(request_id);

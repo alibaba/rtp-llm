@@ -50,7 +50,11 @@ cc_test(
     copts = copts(),
     deps = test_deps,
     env = {"TEST_USING_DEVICE": "CUDA"},
-    exec_properties = {"gpu": "H20"},
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "L20_CU13"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13"},
+        "//conditions:default": {"gpu": "H20"},
+    }),
 )
 
 cc_test(

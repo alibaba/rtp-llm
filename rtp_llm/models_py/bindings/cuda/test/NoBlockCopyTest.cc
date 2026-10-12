@@ -84,8 +84,23 @@ TEST(NoBlockCopyTest, VmmCopiesOnFreshAndReusedRpcThreads) {
                 TORCH_CHECK(host.eq(53 + device).all().item<bool>());
 #if CUDART_VERSION >= 12080
                 host.zero_();
-                TORCH_CHECK(execBatchedMemoryCopy({{{host.data_ptr(), other.data_ptr(), host.nbytes()}}, device}) ==
-                            BatchedMemoryCopyStatus::SUCCESS);
+                int driver_version = 0;
+                int runtime_version = 0;
+                TORCH_CHECK(cudaDriverGetVersion(&driver_version) == cudaSuccess);
+                TORCH_CHECK(cudaRuntimeGetVersion(&runtime_version) == cudaSuccess);
+                const bool batch_supported = driver_version >= (CUDART_VERSION >= 13000 ? 13000 : 12080)
+                                             && runtime_version >= 12080
+                                             && (CUDART_VERSION >= 13000) == (runtime_version >= 13000);
+                const auto batch_status =
+                    execBatchedMemoryCopy({{{host.data_ptr(), other.data_ptr(), host.nbytes()}}, device});
+                // CUDA13 compatibility pools can have a pre-13 driver. That
+                // supported deployment uses the generic copy fallback; an
+                // actual batch execution failure must still fail this test.
+                TORCH_CHECK(batch_status == (batch_supported ? BatchedMemoryCopyStatus::SUCCESS :
+                                                               BatchedMemoryCopyStatus::NOT_SUPPORTED));
+                if (!batch_supported) {
+                    execNoBlockCopy(MultiCopyParams{{host}, {other}});
+                }
                 TORCH_CHECK(host.eq(53 + device).all().item<bool>());
 #endif
                 host.zero_();
