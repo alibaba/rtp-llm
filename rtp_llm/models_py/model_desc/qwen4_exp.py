@@ -5,8 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
-from torch import nn
-
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
@@ -58,6 +56,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelOutputs,
 )
 from rtp_llm.utils.model_weight import W
+from torch import nn
 
 # Bring-up fault injection for the speculative target-commit transaction:
 # "<attn_tp_rank>:<prepare|commit|finalize>" makes exactly that rank raise in
@@ -746,6 +745,62 @@ class Qwen4ExpModel(Qwen35Model):
         ).to(device=device)
 
     @classmethod
+    def _commit_physical_blocks(
+        cls,
+        attention_inputs: PyAttentionInputs,
+        tag: str,
+        logical_pages: torch.Tensor,
+        pool_rows: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Validate commit destinations with one host read, before pool writes."""
+        table = cls._resolve_block_table(attention_inputs, tag)
+        if logical_pages.dim() != 1 or int(table.shape[0]) != int(
+            logical_pages.numel()
+        ):
+            raise RuntimeError(f"PLE cache {tag!r} block-table batch is inconsistent")
+        if not logical_pages.numel():
+            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
+        pages = logical_pages.to(device=table.device, dtype=torch.long)
+        from rtp_llm.models_py.modules.qwen4_exp.ple_commit_triton import (
+            resolve_commit_blocks,
+        )
+
+        payload = resolve_commit_blocks(table, pages, pool_rows)
+        if payload is not None:
+            host = payload.tolist()
+            blocks = payload[4:]
+        else:
+            # Clamp only the temporary lookup. The original page validity remains
+            # part of the verdict; an invalid page never becomes a commit plan.
+            blocks = table.gather(
+                1, pages.clamp(0, int(table.shape[1]) - 1).unsqueeze(1)
+            ).squeeze(1)
+            verdict = torch.stack(
+                [
+                    (pages < 0).any(),
+                    (pages >= int(table.shape[1])).any(),
+                    (blocks <= 0).any(),
+                    (blocks >= pool_rows).any(),
+                ]
+            ).to(torch.long)
+            host = torch.cat([verdict, blocks.to(torch.long)]).tolist()
+        if host[0]:
+            raise RuntimeError(f"PLE cache {tag!r} has an invalid logical page")
+        if host[1]:
+            raise RuntimeError(
+                f"PLE cache {tag!r} logical page exceeds its block table"
+            )
+        if host[2]:
+            raise RuntimeError(
+                f"PLE cache {tag!r} has an unallocated logical page; "
+                f"blocks={host[4:36]} pool_rows={pool_rows}"
+            )
+        if host[3]:
+            raise RuntimeError(f"PLE cache {tag!r} physical block id exceeds its pool")
+        return blocks.to(device=device, dtype=torch.long), host[4:]
+
+    @classmethod
     def _physical_blocks_for_pairs(
         cls,
         attention_inputs: PyAttentionInputs,
@@ -1108,6 +1163,9 @@ class Qwen4ExpModel(Qwen35Model):
         accepted = accept_len.to(torch.long)
         pending = []
         destination_rows: set[tuple[int, int]] = set()
+        bulk_validate = (
+            os.environ.get("RTP_LLM_QWEN4_PLE_COMMIT_BULK_VALIDATE", "0") == "1"
+        )
         for layer_idx in sorted(transaction.stages):
             stage = transaction.stages[layer_idx]
             state_len = int(stage.initial_state.shape[1])
@@ -1137,20 +1195,39 @@ class Qwen4ExpModel(Qwen35Model):
             final_pages = torch.div(
                 final_positions, stage.page_size, rounding_mode="floor"
             )
-            state_blocks = self._physical_blocks(
-                stage.state_inputs,
-                PLE_STATE_TAG,
-                final_pages,
-                int(stage.state_pool.shape[0]),
-                stage.state_pool.device,
-            )
-            ctx_blocks = self._physical_blocks(
-                stage.ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                final_pages,
-                int(stage.ctx_pool.shape[0]),
-                stage.ctx_pool.device,
-            )
+            host_blocks = {}
+            if bulk_validate:
+                state_blocks, host_blocks[PLE_STATE_TAG] = self._commit_physical_blocks(
+                    stage.state_inputs,
+                    PLE_STATE_TAG,
+                    final_pages,
+                    int(stage.state_pool.shape[0]),
+                    stage.state_pool.device,
+                )
+                ctx_blocks, host_blocks[PLE_NGRAM_CTX_TAG] = (
+                    self._commit_physical_blocks(
+                        stage.ctx_inputs,
+                        PLE_NGRAM_CTX_TAG,
+                        final_pages,
+                        int(stage.ctx_pool.shape[0]),
+                        stage.ctx_pool.device,
+                    )
+                )
+            else:
+                state_blocks = self._physical_blocks(
+                    stage.state_inputs,
+                    PLE_STATE_TAG,
+                    final_pages,
+                    int(stage.state_pool.shape[0]),
+                    stage.state_pool.device,
+                )
+                ctx_blocks = self._physical_blocks(
+                    stage.ctx_inputs,
+                    PLE_NGRAM_CTX_TAG,
+                    final_pages,
+                    int(stage.ctx_pool.shape[0]),
+                    stage.ctx_pool.device,
+                )
             pending.append(
                 (
                     stage,
@@ -1166,7 +1243,8 @@ class Qwen4ExpModel(Qwen35Model):
                 (stage.ctx_pool, ctx_blocks, PLE_NGRAM_CTX_TAG),
             ):
                 pool_ptr = int(pool.data_ptr())
-                for block in blocks.tolist():
+                destination_ids = host_blocks[tag] if bulk_validate else blocks.tolist()
+                for block in destination_ids:
                     row = (pool_ptr, int(block))
                     if row in destination_rows:
                         raise RuntimeError(
