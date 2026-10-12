@@ -633,18 +633,18 @@ TEST_F(NormalEngineTest, testEnqueueMultipleIgnoresInvalidStreamForModeCheck) {
 
 #include <cstdio>
 
-static void _probeDumpMaps(const char* tag) {
+static void _probeDumpMaps(const char* tag, int filtered) {
     fprintf(stderr, "%s\n", tag);
     int fd = open("/proc/self/maps", O_RDONLY);
     if (fd < 0) {
         return;
     }
-    char buf[4096];
+    char buf[8192];
     ssize_t n;
     while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
         buf[n] = '\0';
         for (char* line = strtok(buf, "\n"); line; line = strtok(nullptr, "\n")) {
-            if (strstr(line, "torch") || strstr(line, "nccl") || strstr(line, "python")
+            if (!filtered || strstr(line, "torch") || strstr(line, "nccl") || strstr(line, "python")
                 || strstr(line, "libcuda.so")) {
                 fprintf(stderr, "PROBEMAP %s\n", line);
             }
@@ -653,29 +653,97 @@ static void _probeDumpMaps(const char* tag) {
     close(fd);
     fflush(stderr);
 }
-static void* _probeCtxPc(void* ctx) {
+static void* _probeCtxReg(void* ctx, int which) {
 #if defined(__x86_64__)
-    return (void*)(((ucontext_t*)ctx)->uc_mcontext.gregs[REG_RIP]);
+    if (!ctx) {
+        return nullptr;
+    }
+    ucontext_t* u = (ucontext_t*)ctx;
+    if (which == 1) {
+        return (void*)u->uc_mcontext.gregs[REG_RSP];
+    }
+    if (which == 2) {
+        return (void*)u->uc_mcontext.gregs[REG_RBP];
+    }
+    return (void*)u->uc_mcontext.gregs[REG_RIP];
 #elif defined(__aarch64__)
-    return (void*)(((ucontext_t*)ctx)->uc_mcontext.pc);
+    if (!ctx) {
+        return nullptr;
+    }
+    ucontext_t* u = (ucontext_t*)ctx;
+    if (which == 1) {
+        return (void*)u->uc_mcontext.sp;
+    }
+    if (which == 2) {
+        return (void*)u->uc_mcontext.regs[29];
+    }
+    return (void*)u->uc_mcontext.pc;
 #else
+    (void)ctx;
+    (void)which;
     return nullptr;
 #endif
 }
 
+static void* _probeCtxPc(void* ctx) {
+    return _probeCtxReg(ctx, 0);
+}
+
 
 static void _probeCrashHandler(int sig, siginfo_t* info, void* ctx) {
-    char msg[256];
+    char msg[512];
     int  len = snprintf(msg,
                        sizeof(msg),
-                       "PROBE crash sig=%d addr=%p pc=%p\n",
+                       "PROBE crash sig=%d addr=%p pc=%p rsp=%p rbp=%p\n",
                        sig,
                        info ? info->si_addr : nullptr,
-                       ctx ? _probeCtxPc(ctx) : nullptr);
+                       ctx ? _probeCtxPc(ctx) : nullptr,
+                       ctx ? _probeCtxReg(ctx, 1) : nullptr,
+                       ctx ? _probeCtxReg(ctx, 2) : nullptr);
     write(STDERR_FILENO, msg, len);
     void* frames[32];
     int   n = backtrace(frames, 32);
-    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    // Symbolize each frame via dladdr before raw backtrace output.
+    for (int i = 0; i < n; ++i) {
+        Dl_info dli;
+        memset(&dli, 0, sizeof(dli));
+        if (dladdr(frames[i], &dli) && dli.dli_fname) {
+            unsigned long off = (unsigned long)frames[i] - (unsigned long)dli.dli_fbase;
+            char sym[512];
+            int  l = snprintf(sym,
+                              sizeof(sym),
+                              "PROBEFRAME %d %s+0x%lx (%s)\n",
+                              i,
+                              dli.dli_sname ? dli.dli_sname : "?",
+                              off,
+                              dli.dli_fname);
+            write(STDERR_FILENO, sym, l);
+        }
+    }
+    // Hexdump code bytes around the crashing call site for manual disassembly.
+    if (n > 0) {
+        unsigned char* site = (unsigned char*)frames[0];
+        unsigned char* start = site - 64;
+        char hd[64 * 3 + 64];
+        int  pos = snprintf(hd, sizeof(hd), "PROBE code bytes before return addr %p:\n", (void*)site);
+        for (int b = 0; b < 80; ++b) {
+            pos += snprintf(hd + pos, sizeof(hd) - pos, "%02x ", start[b]);
+        }
+        pos += snprintf(hd + pos, sizeof(hd) - pos, "\n");
+        write(STDERR_FILENO, hd, pos);
+    }
+    // Dump stack qwords from the crash frame's return address for provenance.
+    if (n > 0) {
+        unsigned long* sp = (unsigned long*)frames[0];
+        char sd[32 * 20 + 64];
+        int  pos = snprintf(sd, sizeof(sd), "PROBE stack words above %p:\n", (void*)sp);
+        for (int w = 0; w < 32; ++w) {
+            pos += snprintf(sd + pos, sizeof(sd) - pos, "[%p] %016lx\n", (void*)(sp + w), sp[w]);
+        }
+        write(STDERR_FILENO, sd, pos);
+    }
+    // Full unfiltered maps at crash time (second-copy library evidence).
+    _probeDumpMaps("PROBE crash maps", 0);
     _exit(128 + sig);
 }
 
@@ -693,10 +761,21 @@ protected:
     static void SetUpTestSuite() {
         // TEMPORARY CI PROBE (branch probe/dsv41-engine-test-crash only; never merged):
         // capture loaded library identity and crash context around interpreter + torch import.
-        _probeDumpMaps("PROBE before interpreter");
+        _probeDumpMaps("PROBE before interpreter", 1);
         _probeInstallCrashHandler();
+        fprintf(stderr,
+                "PROBE env PYTHONPATH=%s LD_LIBRARY_PATH=%s\n",
+                getenv("PYTHONPATH") ? getenv("PYTHONPATH") : "(unset)",
+                getenv("LD_LIBRARY_PATH") ? getenv("LD_LIBRARY_PATH") : "(unset)");
         interpreter_ = std::make_unique<py::scoped_interpreter>();
-        _probeDumpMaps("PROBE after interpreter");
+        _probeDumpMaps("PROBE after interpreter", 1);
+        try {
+            py::exec(R"(import sys; print("PROBE sys.path:", sys.path, file=sys.stderr); import os;
+print("PROBE cwd:", os.getcwd(), file=sys.stderr))");
+        } catch (const std::exception& e) {
+            fprintf(stderr, "PROBE sys.path exec exception: %s\n", e.what());
+            fflush(stderr);
+        }
         try {
             py::module_::import("torch");
         } catch (const std::exception& e) {
@@ -704,7 +783,7 @@ protected:
             fflush(stderr);
             throw;
         }
-        _probeDumpMaps("PROBE after torch import");
+        _probeDumpMaps("PROBE after torch import", 1);
     }
 
     static void TearDownTestSuite() {
