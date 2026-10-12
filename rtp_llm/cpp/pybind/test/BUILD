@@ -12,10 +12,11 @@ cc_test_wrapper(
     # librtp_compute_ops.so lives at the runfiles repository root.
     data = ["//:rtp_compute_ops"],
     linkopts = [
-        # The native executable and compute DSO both contain static alog
-        # dependencies. Do not interpose the executable's archive globals into
-        # the DSO: both copies would then destroy the same Appender registry.
-        "-Wl,--exclude-libs,ALL",
+        # The native executable and compute DSO both contain alog/kmonitor.
+        # Isolate their Appender registry and PrometheusSink string globals
+        # to prevent double destruction. Do not hide ALL archives: the DSO
+        # also references gRPC globals which must remain externally visible.
+        "-Wl,--exclude-libs,libalog.a:libalog.pic.a:libkmonitor_client_cpp.lo:libkmonitor_client_cpp.pic.lo",
         "-Wl,-rpath='$$ORIGIN/../../../..'",
         "-Wl,--no-as-needed",
         "$(location //:rtp_compute_ops)",
