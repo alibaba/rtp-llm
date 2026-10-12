@@ -1,9 +1,10 @@
 from collections.abc import Mapping
-from typing import Any, Dict, Optional, cast
+from typing import Dict, Optional, Tuple, Union, cast
 
 import torch
 from torch import nn
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
@@ -12,6 +13,23 @@ from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
+
+# CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
+# q_b_proj is fp8, we additionally emit fp8+scale to skip a separate
+# per-token-group fp8 quant launch. ROCm path falls back to the unfused chain.
+_DEVICE_TYPE = get_device_type()
+if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
+    from rtp_llm.models_py.triton_kernels.common.fused_strided_rmsnorm import (
+        fused_strided_rmsnorm,
+        fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output,
+    )
+else:
+    CudaFp8GEMMLinear = None  # type: ignore
+    fused_strided_rmsnorm = None  # type: ignore
+    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output = None  # type: ignore
 
 
 class MlaAttention(nn.Module):
@@ -29,6 +47,9 @@ class MlaAttention(nn.Module):
         quant_config: object,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
+        has_indexer: Optional[bool] = None,
+        reuse_topk_indices: bool = False,
+        stable_topk: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -45,8 +66,12 @@ class MlaAttention(nn.Module):
         self.softmax_scale = self.q_head_dim ** (-0.5)
         self.layer_idx = layer_idx
         self.token_per_block = attn_config.kernel_tokens_per_block
+        self.has_indexer = (
+            bool(attn_config.is_sparse) if has_indexer is None else has_indexer
+        )
+        self.reuse_topk_indices = bool(reuse_topk_indices)
 
-        if attn_config.is_sparse:
+        if self.has_indexer:
             self.indexer = Indexer(
                 attn_config,
                 weights,
@@ -56,6 +81,7 @@ class MlaAttention(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 parallelism_config,
+                stable_topk=stable_topk,
             )
         else:
             self.indexer = None
@@ -103,14 +129,68 @@ class MlaAttention(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
+        # ------------------------------------------------------------------
+        # Fusion detection (DSV3.2 MLA path).
+        #
+        # F2  : kv_a_layernorm receives a strided slice from torch.split. We
+        #       always try the fused_strided_rmsnorm path; the wrapper falls
+        #       back to .contiguous() + flashinfer.norm.rmsnorm when the input
+        #       isn't compatible (H>8192 or last-dim stride != 1).
+        # F1a : q_a_layernorm with bf16 q_b_proj — same as F2 (bf16 output).
+        # F1b : q_a_layernorm with fp8 q_b_proj — produces dual output
+        #       (bf16 for the indexer wq_b consumer, fp8 + scale for q_b_proj).
+        # ------------------------------------------------------------------
+        from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
+
+        _fuse_on = fuse_kernels_enabled(hw_kernel_config)
+        self._fuse_kv_a_norm = (
+            _fuse_on
+            and _DEVICE_TYPE == DeviceType.Cuda
+            and fused_strided_rmsnorm is not None
+        )
+
+        # q-path fusion mode: "fp8_dual" (F1b), "bf16" (F1a), or "off" (fallback)
+        self._fuse_q_a_norm_mode = "off"
+        if _fuse_on and self.q_lora_rank > 0 and _DEVICE_TYPE == DeviceType.Cuda:
+            q_b_is_fp8 = (
+                CudaFp8GEMMLinear is not None
+                and isinstance(self.q_b_proj, CudaFp8GEMMLinear)
+                and self.q_lora_rank % 128 == 0
+            )
+            if q_b_is_fp8:
+                # UE8M0 needs num_groups % 4 == 0
+                if self.q_b_proj.scale_ue8m0:
+                    if (self.q_lora_rank // 128) % 4 == 0:
+                        self._fuse_q_a_norm_mode = "fp8_dual"
+                else:
+                    self._fuse_q_a_norm_mode = "fp8_dual"
+            elif fused_strided_rmsnorm is not None:
+                self._fuse_q_a_norm_mode = "bf16"
+
     def _run_sparse_indexer(
         self,
         hidden_states: torch.Tensor,
         q_c: Optional[torch.Tensor],
-        q_view: torch.Tensor,
+        q_view: Optional[torch.Tensor],
         kv_cache: Optional[LayerKVCache],
         fmha_impl: MlaImplBase,
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        q_c_fp8: Optional[torch.Tensor] = None,
+        q_c_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
     ) -> Optional[torch.Tensor]:
+        if self.reuse_topk_indices or force_reuse_topk_indices:
+            if not fmha_impl.is_sparse():
+                return None
+            if prev_topk_indices is None:
+                raise RuntimeError(
+                    f"DSA shared layer {self.layer_idx} needs previous top-k "
+                    "indices, but none were provided"
+                )
+            return prev_topk_indices
+
         if self.indexer is None or kv_cache is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
@@ -122,6 +202,10 @@ class MlaAttention(nn.Module):
             fmha_impl.attn_inputs,
             use_fast_path=not fmha_impl.is_sparse(),
             cp_params=fmha_impl.cp_params,
+            x_fp8=x_fp8,
+            x_scale=x_scale,
+            q_c_fp8=q_c_fp8,
+            q_c_scale=q_c_scale,
         )
         attn_inputs = fmha_impl.attn_inputs
         if (
@@ -139,8 +223,13 @@ class MlaAttention(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: MlaImplBase | Mapping[str, MlaImplBase],
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
-    ) -> torch.Tensor:
-        if self.indexer is not None:
+        x_fp8: Optional[torch.Tensor] = None,
+        x_scale: Optional[torch.Tensor] = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
+        force_reuse_topk_indices: bool = False,
+        return_topk: bool = False,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Optional[torch.Tensor]]]:
+        if self.attn_config.is_sparse:
             required_tags = {"default", "indexer_kv"}
             if not isinstance(fmha_impl, Mapping) or set(fmha_impl) != required_tags:
                 raise RuntimeError(
@@ -155,11 +244,15 @@ class MlaAttention(nn.Module):
             if kv_cache is None:
                 default_kv_cache = None
                 indexer_kv_cache = None
-            elif isinstance(kv_cache, Mapping) and set(kv_cache) == required_tags:
+            elif isinstance(kv_cache, Mapping) and (
+                set(kv_cache) == required_tags
+                or (self.reuse_topk_indices and set(kv_cache) == {"default"})
+            ):
                 default_kv_cache = kv_cache["default"]
-                indexer_kv_cache = kv_cache["indexer_kv"]
-                if not isinstance(default_kv_cache, LayerKVCache) or not isinstance(
-                    indexer_kv_cache, LayerKVCache
+                indexer_kv_cache = kv_cache.get("indexer_kv")
+                if not isinstance(default_kv_cache, LayerKVCache) or (
+                    indexer_kv_cache is not None
+                    and not isinstance(indexer_kv_cache, LayerKVCache)
                 ):
                     raise RuntimeError(
                         "sparse MLA cache routes must contain LayerKVCache"
@@ -175,10 +268,17 @@ class MlaAttention(nn.Module):
             default_fmha_impl = cast(MlaImplBase, fmha_impl)
             default_kv_cache = cast(Optional[LayerKVCache], kv_cache)
 
+        fmha_impl = default_fmha_impl
+        kv_cache = default_kv_cache
         input_shape = hidden_states.shape[:-1]
         q_c = None
+        q_c_fp8 = None
+        q_c_scale = None
         if self.q_lora_rank > 0:
-            fused_qkv = self.fused_qkv_a_proj(hidden_states)
+            if x_fp8 is not None and x_scale is not None:
+                fused_qkv = self.fused_qkv_a_proj(x_fp8, input_scales=x_scale)
+            else:
+                fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -188,10 +288,37 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(q_c)
+            # F1a/F1b: fused strided RMSNorm (skip .contiguous() copy). When
+            # q_b_proj is fp8 we additionally emit fp8+scale (F1b dual output)
+            # so q_b_proj can use input_scales= and skip its internal quant.
+            if self._fuse_q_a_norm_mode == "fp8_dual":
+                q_c, q_c_fp8, q_c_scale = (
+                    fused_strided_rmsnorm_per_token_fp8_quant_with_bf16_output(
+                        q,
+                        self.q_a_layernorm.weight.data,
+                        self.q_a_layernorm.variance_epsilon,
+                        group_size=128,
+                        scale_ue8m0=self.q_b_proj.scale_ue8m0,
+                    )
+                )
+            elif self._fuse_q_a_norm_mode == "bf16":
+                q_c = fused_strided_rmsnorm(
+                    q,
+                    self.q_a_layernorm.weight.data,
+                    self.q_a_layernorm.variance_epsilon,
+                )
+            else:
+                q_c = self.q_a_layernorm(q.contiguous())
+            q = (
+                self.q_b_proj(q_c_fp8, input_scales=q_c_scale)
+                if q_c_fp8 is not None
+                else self.q_b_proj(q_c)
+            )
         else:
-            fused_qkv = self.fused_qkv_proj(hidden_states)
+            if x_fp8 is not None and x_scale is not None:
+                fused_qkv = self.fused_qkv_proj(x_fp8, input_scales=x_scale)
+            else:
+                fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -207,25 +334,45 @@ class MlaAttention(nn.Module):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
-
-        topk_indices = None
-        if self.indexer is not None:
-            topk_indices = self._run_sparse_indexer(
-                hidden_states,
-                q_c,
-                q_view,
-                indexer_kv_cache,
-                indexer_fmha_impl,
+        # F2: fused strided RMSNorm on compressed_kv (skip .contiguous() copy)
+        if self._fuse_kv_a_norm:
+            compressed_kv = fused_strided_rmsnorm(
+                compressed_kv,
+                self.kv_a_layernorm.weight.data,
+                self.kv_a_layernorm.variance_epsilon,
             )
-        attn_output = default_fmha_impl.forward(
+        else:
+            compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+
+        topk_indices = self._run_sparse_indexer(
+            hidden_states,
+            q_c,
+            q_view,
+            indexer_kv_cache,
+            indexer_fmha_impl,
+            x_fp8,
+            x_scale,
+            q_c_fp8,
+            q_c_scale,
+            prev_topk_indices,
+            force_reuse_topk_indices,
+        )
+        # q_c and its quantized representation are Indexer-only. Releasing
+        # the local references here lets SparseMLA reuse their blocks;
+        # q_view, compressed_kv and k_pe must stay live through attention.
+        del q_c, q_c_fp8, q_c_scale
+        attn_output = fmha_impl.forward(
             q_view,
             compressed_kv,
             k_pe,
-            default_kv_cache,
+            kv_cache,
             self.layer_idx,
             topk_indices,
         )
+
+        # The sparse-attention launch has consumed these projections. PyTorch's
+        # stream-aware allocator delays physical reuse until the launch is safe.
+        del q_view, compressed_kv, k_pe, fused_qkv, q
 
         if attn_output is not None:
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
@@ -238,4 +385,6 @@ class MlaAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
+        if return_topk:
+            return attn_output, topk_indices
         return attn_output

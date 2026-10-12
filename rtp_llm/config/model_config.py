@@ -5,10 +5,10 @@ import os
 from typing import Any, Dict, Optional
 
 import torch
-
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
+    ModelOptFp4Config,
     QuantizationConfig,
     W4a8Int4PerChannelQuantConfig,
     init_quant_config,
@@ -88,6 +88,7 @@ class ModelConfig(CppModelConfig):
         "dspark_markov_rank",
         "dspark_sample_from_anchor",
         "capture_aux_hidden_layer_ids",
+        "mtp_layer_offset",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
@@ -113,6 +114,10 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "index_topk_freq",
+        "index_skip_topk_offset",
+        "index_topk_pattern",
+        "indexer_types",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)
@@ -164,6 +169,9 @@ class ModelConfig(CppModelConfig):
         "input_vocab_size",
         "type_vocab_size",
         "gen_num_per_cycle",
+        "index_share_for_mtp_iteration",
+        "enable_glm52_shared_indexer_kv_cache",
+        "glm52_indexer_kv_slot_mapping",
         "embedding_size",
         "moe_normalize_expert_scale",
         "scoring_func",
@@ -587,6 +595,7 @@ class ModelConfig(CppModelConfig):
         self.dspark_sample_from_anchor: bool = True
         # Target-side decoder layer outputs exported to the DSpARK draft.
         self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
+        self.mtp_layer_offset: int = 0
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.enable_output_vocab_pruning: bool = False
@@ -628,6 +637,7 @@ class ModelConfig(CppModelConfig):
         self.mm_related_params = VitParameters()
         self.vit_separation: VitSeparation = VitSeparation.VIT_SEPARATION_LOCAL
         self.quant_config = None
+        self._is_glm52_architecture: bool = False
 
     def apply_override_args(self, json_model_override_args: str) -> None:
         """Apply model override arguments to ModelConfig.
@@ -750,6 +760,18 @@ class ModelConfig(CppModelConfig):
             logging.info(
                 f"Overriding data_type from {original_data_type} to {data_type} "
                 f"because fp8_block_wise quantization only supports BF16"
+            )
+        elif (
+            quant_config
+            and isinstance(quant_config, ModelOptFp4Config)
+            and getattr(quant_config, "hybrid_attn_quant_method", None)
+            == "FP8_PER_BLOCK"
+        ):
+            original_data_type = data_type
+            data_type = WEIGHT_TYPE.BF16
+            logging.info(
+                f"Overriding data_type from {original_data_type} to {data_type} "
+                f"because MODELOPT_FP4 hybrid mode with FP8_PER_BLOCK only supports BF16"
             )
         elif quant_config and quant_config.get_method().lower() in [
             "smooth_quant",
@@ -1056,3 +1078,54 @@ def build_model_config(
     # JSON model overrides are applied first; the dedicated operational switch
     # is the final override when it was explicitly supplied by CLI or env.
     _apply_model_override_args(model_config, model_args)
+
+    model_config.enable_glm52_shared_indexer_kv_cache = bool(
+        model_args.enable_glm52_shared_indexer_kv_cache
+    )
+    if model_config.enable_glm52_shared_indexer_kv_cache:
+        from rtp_llm.utils.dsa_indexing import (
+            build_dsa_indexer_kv_slot_mapping,
+            dsa_layer_has_indexer,
+        )
+
+        if not model_config._is_glm52_architecture:
+            raise ValueError(
+                "GLM5.2 shared Indexer KV cache requires architecture=GlmMoeDsaForCausalLM"
+            )
+        model_config.glm52_indexer_kv_slot_mapping = build_dsa_indexer_kv_slot_mapping(
+            model_config, model_config.num_layers
+        )
+        mapping = list(model_config.glm52_indexer_kv_slot_mapping)
+        if model_config.model_type != "glm_5":
+            raise ValueError(
+                "ENABLE_GLM52_SHARED_INDEXER_KV_CACHE only supports model_type=glm_5"
+            )
+        if (
+            not model_config.attn_config.is_sparse
+            or len(mapping) != model_config.num_layers
+        ):
+            raise ValueError(
+                "GLM5.2 shared Indexer KV cache requires a sparse "
+                "GlmMoeDsaForCausalLM checkpoint with a complete layer mapping"
+            )
+        physical_slots = max(mapping, default=-1) + 1
+        model_config.kv_cache_spec_descs = [
+            [
+                desc
+                for desc in layer_descs
+                if desc.tag != "indexer_kv"
+                or dsa_layer_has_indexer(model_config, layer_idx)
+            ]
+            for layer_idx, layer_descs in enumerate(model_config.kv_cache_spec_descs)
+        ]
+        if physical_slots <= 0 or physical_slots >= model_config.num_layers:
+            raise ValueError(
+                "GLM5.2 shared Indexer KV cache did not find any shared Indexer layers"
+            )
+        logging.info(
+            "enable GLM5.2 shared Indexer KV cache: logical_layers=%d, "
+            "physical_slots=%d, shared_layers=%d",
+            model_config.num_layers,
+            physical_slots,
+            model_config.num_layers - physical_slots,
+        )

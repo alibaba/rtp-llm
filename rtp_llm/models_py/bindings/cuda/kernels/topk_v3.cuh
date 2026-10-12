@@ -1,5 +1,5 @@
 /// \file topk_impl.cuh
-/// \brief DeepSeek V4 (DSA indexer) top-k implementation classes.
+/// \brief GLM5 (DSA indexer) top-k implementation classes.
 ///
 /// This header holds ONLY the device-side implementation classes + helpers; the
 /// `__global__` kernels and the host dispatcher live in csrc/deepseek_v4/topk_v2.cuh.
@@ -49,8 +49,7 @@ constexpr T ct_max(T a, Ts... rest) {
 
 /// Static shared-memory buffer sized + aligned to hold any one of the given
 /// impl `Smem` types. A kernel that dispatches across several paths (e.g. the
-/// fused small-batch kernel runs either Streaming or Cluster; the main kernel
-/// runs any of Register2/Register4/Streaming) declares one
+/// main kernel runs Register or Streaming implementations) declares one
 /// `__shared__ MaxSmem<...> smem` and hands `&smem` to whichever forward() it
 /// calls -- instead of hand-picking "the largest" type and relying on it
 /// staying the largest. `&smem` converts to the `void*` the forwards expect;
@@ -109,12 +108,17 @@ SGL_DEVICE float coarse_bin_lower_bound(uint32_t bin) {
     // range-checked at once: `key` and `key - 1` both land in the finite band
     // [0x0401, 0xFBFF] -- every boundary a finite-score threshold produces.
     // fp16 rounds to nearest, so the fp32 boundary is the midpoint between the
-    // fp16 values at `key` and `key - 1`. (Verified bit-exact against the slow
-    // path for every bin of kBits 10 and 12, and measured faster than either
-    // per-key dispatch or an ordered-bit decrement trick -- the two conversions
-    // are independent and issue in parallel.)
+    // fp16 values at `key` and `key - 1`, adjusted for ties-to-even below.
+    // The two conversions are independent and can issue in parallel.
     if (key - 0x0401u <= 0xFBFFu - 0x0401u && bin < (1u << kBits)) {
-        return 0.5f * (to_finite_val(key) + to_finite_val(key - 1));
+        const float midpoint = 0.5f * (to_finite_val(key) + to_finite_val(key - 1));
+        // On the negative side the lower ordered key has the even FP16
+        // significand. An exact midpoint rounds to that preceding bin, so the
+        // inclusive FP32 lower bound is the next representable value above it.
+        // This midpoint is finite and is strictly negative for negative keys.
+        // Decrementing its IEEE-754 bits advances it toward zero without the
+        // general nextafterf special-case checks on this hot path.
+        return __uint_as_float(__float_as_uint(midpoint) - static_cast<uint32_t>(key < 0x8000u));
     }
     // Slow path: an edge of `bin` touches the +/-inf keys or NaN key space.
     // The ordered-key line is: [0, 0x03FF) negative-NaN space, 0x03FF = -inf,
@@ -142,7 +146,22 @@ SGL_DEVICE float coarse_bin_lower_bound(uint32_t bin) {
             return FLT_MAX;
         return to_finite_val(okey);
     };
-    return 0.5f * (to_val(key) + to_val(key - 1));
+    const float midpoint = 0.5f * (to_val(key) + to_val(key - 1));
+    return midpoint < 0.0f && midpoint > -std::numeric_limits<float>::infinity() ? nextafterf(midpoint, FLT_MAX) :
+                                                                                   midpoint;
+}
+
+// Numeric comparisons cannot distinguish signed-zero bins or reproduce
+// the canonical NaN bin. Scan exact FP32 keys when the threshold touches
+// these bins (including finite scores that round to FP16 infinity).
+template<uint32_t kHistBits>
+SGL_DEVICE bool coarse_bin_needs_exact_scan(uint32_t bin) {
+    constexpr uint32_t shift         = 16u - kHistBits;
+    constexpr uint32_t negative_zero = 0x7fffu >> shift;
+    constexpr uint32_t positive_zero = 0x8000u >> shift;
+    constexpr uint32_t finite_begin  = (0x03ffu >> shift) + 1u;
+    constexpr uint32_t finite_size   = (0xfc00u >> shift) - finite_begin;
+    return bin - negative_zero <= positive_zero - negative_zero || bin - finite_begin >= finite_size;
 }
 
 SGL_DEVICE uint32_t warp_inclusive_sum(uint32_t lane_id, uint32_t val) {
@@ -276,6 +295,8 @@ struct TopKConfig {
     /// than the fixed shared-memory tie buffer can hold. Re-scan only that
     /// coarse value interval and skip any FP32 key bytes shared by both interval
     /// endpoints. Values above the interval have already been emitted.
+    /// kFullRow also handles zero and non-finite coarse thresholds.
+    template<bool kFullRow = false>
     SGL_DEVICE static void exact_boundary_scan_topk(
         const TopKProblem& problem, TieHandleSmem* smem, float v_lo, float v_hi, uint32_t output_base) {
         const uint32_t tx = threadIdx.x;
@@ -285,7 +306,7 @@ struct TopKConfig {
             uint32_t       prefix      = 0;
             uint32_t       first_round = 0;
 #pragma unroll
-            for (uint32_t round = 0; round < 4; ++round) {
+            for (uint32_t round = 0; !kFullRow && round < 4; ++round) {
                 const uint32_t shift   = 24u - round * 8u;
                 const uint32_t lo_byte = (lo_key >> shift) & 0xffu;
                 const uint32_t hi_byte = (hi_key >> shift) & 0xffu;
@@ -312,7 +333,7 @@ struct TopKConfig {
             for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
                 const float    value = problem.in[idx];
                 const uint32_t key   = extract_exact_bin(value);
-                if (value >= v_lo && value < v_hi && (key & mask) == prefix) {
+                if ((kFullRow || (value >= v_lo && value < v_hi)) && (key & mask) == prefix) {
                     atomicAdd(&smem->histogram[0][(key >> shift) & 0xffu], 1u);
                 }
             }
@@ -358,7 +379,7 @@ struct TopKConfig {
         uint32_t my_above = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) > pivot) {
+            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) > pivot) {
                 ++my_above;
             }
         }
@@ -367,7 +388,7 @@ struct TopKConfig {
         uint32_t       run_above  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) > pivot) {
+            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) > pivot) {
                 problem.emit(output_base + base_above + run_above++, idx);
             }
         }
@@ -378,7 +399,7 @@ struct TopKConfig {
         uint32_t my_eq = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) == pivot) {
+            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot) {
                 ++my_eq;
             }
         }
@@ -387,7 +408,7 @@ struct TopKConfig {
         uint32_t       run_eq  = 0;
         for (uint32_t idx = tx; idx < problem.seq_len; idx += kBlockSize) {
             const float value = problem.in[idx];
-            if (value >= v_lo && value < v_hi && extract_exact_bin(value) == pivot) {
+            if ((kFullRow || (value >= v_lo && value < v_hi)) && extract_exact_bin(value) == pivot) {
                 const uint32_t pos = output_base + smem->total_scratch[0] + base_eq + run_eq++;
                 if (pos < problem.topk) {
                     problem.emit(pos, idx);
@@ -396,6 +417,138 @@ struct TopKConfig {
         }
         __syncthreads();
     }
+
+    /// Resolve the threshold bin's ties exactly. `base` is the number of strictly
+    /// "above" elements already emitted (final output starts at slot `base`);
+    /// `topk` here is the number of remaining slots to fill (== global_topk - base).
+    SGL_DEVICE static void handle_tie(  //
+        const TieValue*    tie_buffer,
+        const TopKProblem& problem,
+        const uint32_t     base,
+        const uint32_t     num_ties,
+        const uint32_t     topk,
+        TieHandleSmem*     smem) {
+        constexpr auto is_greater = [](const TieValue& a, const TieValue& b) {
+            return (a.value > b.value) || (a.value == b.value && a.idx < b.idx);
+        };
+        const auto tx      = threadIdx.x;
+        const auto lane_id = tx % kWarpSize;
+        const auto warp_id = tx / kWarpSize;
+        static_assert(kNumWarps == kWarpSize);
+
+        if (num_ties <= topk) {
+            for (uint32_t t = tx; t < num_ties; t += kBlockSize) {
+                problem.emit(base + t, tie_buffer[t].idx);
+            }
+            for (uint32_t t = num_ties + tx; t < topk; t += kBlockSize) {
+                problem.emit(base + t, base + t);
+            }
+        } else if (num_ties <= kWarpSize) {
+            if (lane_id >= num_ties || warp_id >= num_ties)
+                return;  // some threads are idle
+            /// NOTE: use long long to avoid mask overflow when num_tie == 32
+            const uint32_t mask   = (1ull << num_ties) - 1u;
+            const auto     tie    = tie_buffer[lane_id];
+            const auto     target = tie_buffer[warp_id];
+            const auto     rank   = warp_sum_bool(is_greater(tie, target), mask);
+            if (lane_id == 0 && rank < topk)
+                problem.emit(base + rank, target.idx);
+        } else if (num_ties <= kWarpSize * 2) {
+            // 64 x 64 topk implementation: each thread takes 2 elements
+            const auto warp_id_0 = warp_id;
+            const auto warp_id_1 = warp_id + kWarpSize;
+            const auto lane_id_1 = lane_id + kWarpSize;
+            const auto invalid   = TieValue::invalid();
+            const auto tie_0     = tie_buffer[lane_id];
+            const auto tie_1     = lane_id_1 < num_ties ? tie_buffer[lane_id_1] : invalid;
+            const auto target_0  = tie_buffer[warp_id_0];
+            const auto target_1  = tie_buffer[warp_id_1];
+            if (true) {  // NOTE: warp_id_0 <= kNumWarps < num_ties
+                const auto rank_0 = warp_sum_bool(is_greater(tie_0, target_0));
+                const auto rank_1 = warp_sum_bool(is_greater(tie_1, target_0));
+                const auto rank   = rank_0 + rank_1;
+                if (lane_id == 0 && rank < topk)
+                    problem.emit(base + rank, target_0.idx);
+            }
+            if (warp_id_1 < num_ties) {
+                const auto rank_0 = warp_sum_bool(is_greater(tie_0, target_1));
+                const auto rank_1 = warp_sum_bool(is_greater(tie_1, target_1));
+                const auto rank   = rank_0 + rank_1;
+                if (lane_id == 0 && rank < topk)
+                    problem.emit(base + rank, target_1.idx);
+            }
+        } else if (num_ties <= kWarpSize * 4) {
+            // 128 x 128 topk implementation: each thread takes 4 elements and does local sort + merge
+            const auto     invalid = TieValue::invalid();
+            const TieValue tie[]   = {
+                tie_buffer[lane_id + 0 * kWarpSize],
+                tie_buffer[lane_id + 1 * kWarpSize],
+                lane_id + 2 * kWarpSize < num_ties ? tie_buffer[lane_id + 2 * kWarpSize] : invalid,
+                lane_id + 3 * kWarpSize < num_ties ? tie_buffer[lane_id + 3 * kWarpSize] : invalid,
+            };
+            const TieValue target[] = {
+                tie_buffer[warp_id + 0 * kWarpSize],
+                tie_buffer[warp_id + 1 * kWarpSize],
+                tie_buffer[warp_id + 2 * kWarpSize],
+                tie_buffer[warp_id + 3 * kWarpSize],
+            };
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                if (i >= 2 && warp_id + i * kWarpSize >= num_ties)
+                    break;
+                uint32_t rank = 0;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    rank += warp_sum_bool(is_greater(tie[j], target[i]));
+                }
+                if (lane_id == 0 && rank < topk)
+                    problem.emit(base + rank, target[i].idx);
+            }
+        } else if (num_ties <= kBlockSize) {
+            // Common case: one candidate per thread.
+            radix_tie_select<1>(tie_buffer, problem, base, num_ties, topk, smem);
+        } else {
+            // Rare overflow case (kBlockSize < num_ties <= kMaxNumTie), kept out of
+            // the common path so it alone pays the multi-item register cost.
+            radix_tie_select<kTieItems>(tie_buffer, problem, base, num_ties, topk, smem);
+        }
+    }
+
+    /// Exact radix select over the tie candidates: each thread owns kItems
+    /// strided elements (inactive beyond num_ties). Requires
+    /// num_ties <= kItems * kBlockSize.
+    template<uint32_t kItems>
+    SGL_DEVICE static void radix_tie_select(  //
+        const TieValue*    tie_buffer,
+        const TopKProblem& problem,
+        const uint32_t     base,
+        const uint32_t     num_ties,
+        const uint32_t     topk,
+        TieHandleSmem*     smem) {
+        const auto tx      = threadIdx.x;
+        const auto lane_id = tx % kWarpSize;
+        const auto warp_id = tx / kWarpSize;
+
+        bool     active[kItems];
+        uint32_t key[kItems];
+        uint32_t idx[kItems];
+        uint32_t write_pos[kItems];
+#pragma unroll
+        for (uint32_t i = 0; i < kItems; ++i) {
+            const auto t   = tx + i * kBlockSize;
+            active[i]      = t < num_ties;
+            const auto tie = active[i] ? tie_buffer[t] : TieValue::invalid();
+            key[i]         = extract_exact_bin(tie.value);
+            idx[i]         = tie.idx;
+            write_pos[i]   = topk;
+        }
+        uint32_t topk_remain = topk;
+        if (tx < kRadixSize)
+            smem->histogram[0][tx] = 0;
+        if (tx == kRadixSize)
+            smem->counter = smem->counter_final = 0;
+        __syncthreads();
+        uint32_t total_active = num_ties;
 
     /// Resolve the threshold bin's ties exactly. `base` is the number of strictly
     /// "above" elements already emitted (final output starts at slot `base`);
@@ -815,6 +968,10 @@ struct TopKRegister: TopKRadixBase<12> {
         // Phase 3: collect by two fp32 boundaries (raw indices; transform applied later)
         const auto topk          = problem.topk;
         const auto threshold_bin = smem->threshold_bin;
+        if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
+            exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+            return;
+        }
         const auto v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
         const auto v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
         const auto is_above      = [&](float val) { return is_nan(val) || val >= v_hi; };
@@ -938,6 +1095,10 @@ public:
         // v_lo <= val < v_hi (bin == threshold). This drops the F2F + bit-twiddle from
         // the second full pass over the input.
         const auto  threshold_bin = smem->threshold_bin;
+        if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
+            exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+            return;
+        }
         const float v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
         const float v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
         const auto  topk          = problem.topk;
@@ -1073,6 +1234,10 @@ private:
 
         // Phase 2: Find the threshold bin (uses global seq_len)
         find_threshold(problem.topk, problem.seq_len, smem);
+        // The candidate buffer overlays the histogram. Every rank must finish
+        // reading its histogram before a peer can write candidates into rank 0's
+        // buffer; find_threshold() only synchronizes threads within one block.
+        cluster.sync();
 
         // Phase 3: Collect candidates over this rank's chunk; convert local indices
         // back to global by adding chunk_start. Classify by two fp32 boundaries derived
@@ -1081,6 +1246,14 @@ private:
         // across ranks, so v_hi/v_lo are too.
         const auto  topk          = problem.topk;
         const auto  threshold_bin = smem->threshold_bin;
+        if (__builtin_expect(coarse_bin_needs_exact_scan<kHistBits>(threshold_bin), false)) {
+            if (is_primary) {
+                exact_boundary_scan_topk<true>(problem, &smem->tie.handle, 0.0f, 0.0f, 0);
+            }
+            // The caller's cluster barrier keeps every peer's shared memory alive
+            // while the primary block finishes the full-row scan and output writes.
+            return;
+        }
         const float v_hi          = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
         const float v_lo          = coarse_bin_lower_bound<kHistBits>(threshold_bin);
         const auto  cur_out       = is_primary ? problem.out : smem->tmp_out;

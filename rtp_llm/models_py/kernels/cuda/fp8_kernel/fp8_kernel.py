@@ -6,7 +6,6 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
-
 from rtp_llm.models_py.kernels.cuda.fp8_kernel.get_best_config import (
     get_cutlass_groupgemm_best_config,
 )
@@ -15,7 +14,6 @@ from rtp_llm.models_py.utils.math import align
 
 if is_cuda():
     from rtp_kernel.fp8_group_gemm import fp8_grouped_gemm_ptpc
-
     from rtp_llm.ops.compute_ops import (
         per_tensor_quant_fp8,
         per_token_group_quant_fp8,
@@ -58,6 +56,10 @@ def _transform_scale_ue8m0(sf, mn):
 
     if not sf.is_cuda:
         sf = sf.cuda()
+    # Exponent-only UE8M0 values are exactly representable in float32.
+    # DeepGEMM's layout conversion accepts float scales before packing.
+    if sf.dtype == getattr(torch, "float8_e8m0fnu", None):
+        sf = sf.float()
     sf = sf.index_select(-2, torch.arange(mn, device=sf.device) // 128)
     sf = deep_gemm.utils.layout.get_mn_major_tma_aligned_packed_ue8m0_tensor(sf)
     return sf
