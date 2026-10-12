@@ -22,9 +22,10 @@ inline bool dsv4DpPrefillPhaseSyncEnabled(std::string_view model_type,
                                           bool             ffn_disaggregate) {
     const bool v4 = model_type == "deepseek_v4" && moe_strategy
                     && std::string_view(moe_strategy) == "sm120_decode" && role == RoleType::PDFUSION;
-    // V4.1 currently qualifies only eager prefill on the complete eight-rank
-    // group. Decode/PDFUSION must not inherit this admission before qualification.
-    const bool v41 = model_type == "deepseek_v41" && role == RoleType::PREFILL && dp_size == 8
+    // V4.1 eager prefill and decode use the same complete eight-rank EP group.
+    // PDFUSION must defer live decode when any peer admits a new prompt.
+    const bool v41 = model_type == "deepseek_v41"
+                     && (role == RoleType::PREFILL || role == RoleType::PDFUSION) && dp_size == 8
                      && (!moe_strategy || std::string_view(moe_strategy) == "auto"
                          || std::string_view(moe_strategy) == "v41_nccl_ep");
     return (v4 || v41) && pp_size == 1 && tp_size == 1 && dp_size > 1 && ep_size == dp_size

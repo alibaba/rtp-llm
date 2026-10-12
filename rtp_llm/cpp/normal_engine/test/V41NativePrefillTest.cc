@@ -141,8 +141,57 @@ public:
         return result;
     }
 
+    py::dict runDecode(const std::vector<std::vector<int32_t>>& requests, int new_tokens) {
+        RTP_LLM_CHECK(requests.size() <= 2 && new_tokens > 1 && new_tokens <= 16);
+        RTP_LLM_CHECK(!executor_->useStreamAsync());
+        const auto free_before = manager_->freeBlocksNum();
+        std::list<GenerateStreamPtr> live;
+        for (const auto& tokens : requests) {
+            RTP_LLM_CHECK(!tokens.empty() && tokens.size() + new_tokens - 1 <= 512
+                          && tokens.size() + new_tokens <= static_cast<size_t>(model_config_.max_seq_len));
+            live.push_back(makeStream(tokens, false, new_tokens));
+        }
+        for (int step = 0; step < new_tokens; ++step) {
+            // The direct executor fixture must perform the scheduler's cache
+            // growth before gathering metadata for each decode step.
+            if (step > 0) {
+                for (const auto& stream : live) {
+                    auto status = stream->streamCacheResource().incrKVBlock();
+                    if (!status.ok()) {
+                        throw std::runtime_error(status.ToString());
+                    }
+                }
+            }
+            ScheduleOutput schedule;
+            schedule.streams = live;
+            if (schedule.streams.empty()) {
+                auto fake = makeStream({0}, true);
+                fake->setIsContextStream(step == 0);
+                schedule.streams.push_back(std::move(fake));
+            }
+            auto status = executor_->process(schedule);
+            if (!status.ok()) {
+                throw std::runtime_error(status.ToString());
+            }
+            for (const auto& stream : schedule.streams) {
+                RTP_LLM_CHECK(stream->iterCount() == (stream->isFakeStream() ? 0 : step + 1));
+            }
+        }
+        py::list tokens_out;
+        for (const auto& stream : live) {
+            tokens_out.append(stream->completeTokenIdsVec());
+            stream->releaseResource();
+        }
+        executor_->model_->releaseBuffers();
+        py::dict result;
+        result["tokens"] = std::move(tokens_out);
+        result["free_before"] = free_before;
+        result["free_after"] = manager_->freeBlocksNum();
+        return result;
+    }
+
 private:
-    GenerateStreamPtr makeStream(const std::vector<int32_t>& tokens, bool fake) {
+    GenerateStreamPtr makeStream(const std::vector<int32_t>& tokens, bool fake, int new_tokens = 1) {
         ResourceContext context;
         context.cache_manager = manager_;
         context.reuse_cache = false;
@@ -150,7 +199,7 @@ private:
         input->input_ids = torch::tensor(tokens, torch::kInt32);
         input->request_id = ++request_id_;
         input->generate_config = std::make_shared<GenerateConfig>();
-        input->generate_config->max_new_tokens = 1;
+        input->generate_config->max_new_tokens = new_tokens;
         input->generate_config->top_k = 1;
         input->fake_query = fake;
         auto stream = std::make_shared<NormalGenerateStream>(input, model_config_, RuntimeConfig{}, context, nullptr);
@@ -181,5 +230,6 @@ private:
 PYBIND11_MODULE(libth_v41_native_prefill_test, m) {
     py::class_<rtp_llm::test::V41NativePrefillTest>(m, "NativePrefill")
         .def(py::init<py::object, rtp_llm::ModelConfig, const rtp_llm::ParallelismConfig&, torch::Tensor>())
-        .def("run", &rtp_llm::test::V41NativePrefillTest::run);
+        .def("run", &rtp_llm::test::V41NativePrefillTest::run)
+        .def("run_decode", &rtp_llm::test::V41NativePrefillTest::runDecode);
 }

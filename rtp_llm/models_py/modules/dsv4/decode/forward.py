@@ -262,6 +262,8 @@ def build_metadata_eager(
             paged_block_tables=paged_block_tables or None,
             paged_pool_entries_per_block=paged_entries_per_block or None,
             paged_pool_tokens_per_block=paged_tokens_per_block or None,
+            swa_single_block_per_request=getattr(v4_args, "v41_config", None)
+            is not None,
         )
 
     # BF16 path: legacy ``build_decode_metadata`` takes a raw ``start_pos``
@@ -452,10 +454,24 @@ def forward_decode(
             fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
         )
         if meta is None:
-            # Empty batch (B == 0) — short-circuit with zero-row hidden.
-            return PyModelOutputs(
-                torch.zeros((0, v4_args.dim), dtype=torch.bfloat16, device=param_dev)
+            hidden = torch.zeros(
+                (0, v4_args.dim), dtype=torch.bfloat16, device=param_dev
             )
+            if getattr(v4_args, "v41_config", None) is not None:
+                if (
+                    v4_args.pp_size,
+                    v4_args.tp_size,
+                    v4_args.dp_size,
+                    v4_args.ep_size,
+                ) != (1, 1, 8, 8):
+                    raise NotImplementedError(
+                        "V4.1 idle decode requires PP1/TP1/DP8/EP8"
+                    )
+                # Eager EP counts and payload collectives include idle peers.
+                # No local attention, history, mHC or cache writes are needed.
+                for layer in v4.layers:
+                    layer.ffn(hidden, input_ids)
+            return PyModelOutputs(hidden)
 
     B = meta.batch_size
     q_len = meta.q_len_per_req

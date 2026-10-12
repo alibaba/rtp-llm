@@ -274,7 +274,7 @@ TEST_F(V41CacheDispatchTest, FailedGatherDoesNotConsumeGenerationsOrLeakLeases) 
     EXPECT_EQ(manager_->freeBlocksNum(), initially_free);
 }
 
-TEST_F(V41CacheDispatchTest, IdlePrefillHasNoRequestsAndPreservesLiveGeneration) {
+TEST_F(V41CacheDispatchTest, IdlePhasesHaveNoRequestsAndPreserveLiveGeneration) {
     auto live = makeStream(41);
     chunk(live, 0, 2);
     auto first = gather({live});
@@ -283,10 +283,12 @@ TEST_F(V41CacheDispatchTest, IdlePrefillHasNoRequestsAndPreservesLiveGeneration)
     fake->setIsFakeStream(true);
     const auto free_blocks = manager_->freeBlocksNum();
     const auto fake_step = fake->iterCount();
-    for (int round = 0; round < 2; ++round) {
+    for (int round = 0; round < 4; ++round) {
+        fake->setIsContextStream(round % 2 == 0);
         auto idle = gather({fake});
         ASSERT_TRUE(idle.ok()) << idle.status();
         EXPECT_TRUE(idle->is_fake_stream);
+        EXPECT_EQ(idle->is_idle_decode, round % 2 != 0);
         for (const auto& tensor : {idle->combo_tokens, idle->input_lengths, idle->prefix_lengths,
                                   idle->sequence_lengths, idle->lm_output_indexes, idle->request_id}) {
             ASSERT_TRUE(tensor.defined());

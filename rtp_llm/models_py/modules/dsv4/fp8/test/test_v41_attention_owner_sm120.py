@@ -10,7 +10,6 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.models.dsv41_kv_cache import dsv41_page_layouts
-from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.fp8._v41_prefill_attention_sm120 import (
     sparse_prefill_attention,
 )
@@ -30,7 +29,7 @@ from rtp_llm.utils.model_weight import W
 class NativeTaggedCache:
     """Small native LayerKVCache allocations, without an engine scheduler."""
 
-    def __init__(self, layers, gen=1, padding=128):
+    def __init__(self, layers, gen=1, padding=128, pages=4):
         self.groups = {}
         self.storage = {}
         self.layouts = dsv41_page_layouts(gen)
@@ -44,7 +43,7 @@ class NativeTaggedCache:
                 layout = self.layouts[tag]
                 gap = 0 if tag == "csa_state" else padding
                 raw = torch.full(
-                    (4, layout.stride_bytes + gap),
+                    (pages, layout.stride_bytes + gap),
                     173,
                     device="cuda",
                     dtype=torch.uint8,
@@ -236,10 +235,10 @@ def contraction_oracle(q, kv, indices, lengths, sinks):
 def output_composition(layer, attn, freqs):
     apply_rotary_emb(attn[..., -64:].unsqueeze(0), freqs, inverse=True)
     grouped = attn.reshape(len(attn), layer.n_groups, -1)
-    projection = torch.stack(
-        [op(grouped[:, g].contiguous()) for g, op in enumerate(layer._wo_a_groups_v41)],
-        1,
-    )
+    scales = layer.wo_a_s.float().repeat_interleave(32, 0).repeat_interleave(32, 1)
+    weight = (layer.wo_a_w.float() * scales).bfloat16()
+    weight = weight.view(layer.n_groups, layer.o_lora_rank, -1)
+    projection = torch.einsum("tgd,grd->tgr", grouped, weight)
     return layer.wo_b(projection.flatten(1))
 
 
@@ -281,13 +280,15 @@ class AttentionOwnerSM120Test(unittest.TestCase):
             q = rope_only(
                 layer.wq_b(qr).view(-1, layer.n_heads, 512), meta.freqs_cis, 64
             )
-            kv = fused_rmsnorm_rope(
-                layer.wkv(x).unsqueeze(0),
-                layer.kv_norm,
-                meta.freqs_cis,
-                64,
-                eps=layer.eps,
-            ).squeeze(0)
+            kv = layer.wkv(x).float()
+            kv = kv * torch.rsqrt(kv.square().mean(-1, keepdim=True) + layer.eps)
+            kv = (kv * layer.kv_norm.float()).bfloat16()
+            apply_rotary_emb(kv[..., -64:].unsqueeze(0), meta.freqs_cis)
+            cache_input = kv
+            groups = kv.float().reshape(-1, 16, 32)
+            scales = (groups.abs().amax(-1).clamp_min(1e-4) / 448).log2().ceil().exp2()
+            quantized = (groups / scales[..., None]).to(torch.float8_e4m3fn).float()
+            kv = (quantized * scales[..., None]).reshape_as(kv).bfloat16()
             topk = meta.topk_idxs.reshape(len(x), 1, -1).int()
             attn = contraction_oracle(
                 q,
@@ -300,7 +301,7 @@ class AttentionOwnerSM120Test(unittest.TestCase):
             expected_cache = V41PagedCache(
                 cache.groups[0, "swa_kv"].kv_cache_base.clone(), "swa_kv"
             )
-            expected_cache.write(kv, meta.swa_meta.slot_mapping)
+            expected_cache.write(cache_input, meta.swa_meta.slot_mapping)
             actual = layer(x, positions, cache, tables)
             torch.testing.assert_close(actual, expected, rtol=0.025, atol=0.003)
             torch.testing.assert_close(
@@ -669,14 +670,14 @@ class AttentionOwnerSM120Test(unittest.TestCase):
         original = {key: val.kv_cache_base.clone() for key, val in cache.groups.items()}
         for bad in (
             meta._replace(cp_on=True),
-            meta._replace(input_lengths=torch.tensor([257], device="cuda")),
+            meta._replace(input_lengths=torch.tensor([513], device="cuda")),
         ):
             layer._set_prefill_meta_shared(bad)
             with self.assertRaises(NotImplementedError):
                 layer(x, positions, cache, tables)
         layer._set_prefill_meta_shared(meta)
         with self.assertRaises(NotImplementedError):
-            prepare(layer, x, cache, [257])
+            prepare(layer, x, cache, [513])
         with self.assertRaisesRegex(ValueError, "nonempty requests"):
             prepare(layer, x, cache, [3], [-1])
         for value in (
@@ -690,7 +691,7 @@ class AttentionOwnerSM120Test(unittest.TestCase):
                 prepare(layer, x, cache, [3], tables=bad_tables)
             with self.assertRaisesRegex(ValueError, "block table"):
                 layer(x, positions, cache, bad_tables)
-        with self.assertRaisesRegex(NotImplementedError, "decode"):
+        with self.assertRaisesRegex(ValueError, "decode"):
             layer.forward_decode(x.unsqueeze(1), None, cache)
         cache.groups[0, "indexer_kv"] = LayerKVCache(
             original[0, "indexer_kv"], 256, 99, 0, "indexer_kv"

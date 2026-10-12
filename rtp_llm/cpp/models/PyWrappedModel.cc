@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/models/context_parallel/ZigzagTokenLayout.h"
 #include "rtp_llm/cpp/normal_engine/pipeline/PPTypes.h"
@@ -221,7 +222,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     size_t context_batch_size       = py_attn_inputs.prefix_lengths.size(0);
     size_t decode_batch_size        = py_attn_inputs.sequence_lengths.size(0);
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
-    py_attn_inputs.is_prefill       = !decode_batch_size;
+    RTP_LLM_CHECK_WITH_INFO(!inputs.is_idle_decode || (inputs.is_fake_stream && batch_size == 0
+                                                     && inputs.combo_tokens.numel() == 0),
+                            "idle decode phase requires a zero-token fake batch");
+    py_attn_inputs.is_prefill       = !decode_batch_size && !inputs.is_idle_decode;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
@@ -402,11 +406,27 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                 col_count,
                                 group.tag.c_str(),
                                 col);
-        auto group_inputs                            = py_attn_inputs;
-        group_inputs.kv_cache_kernel_block_id        = inputs.kv_cache_kernel_block_id[col];
+        // Native gathering pads every group to the widest table. Persistent
+        // request state owns one physical block, possibly split into kernel blocks.
+        auto group_table = [&](const torch::Tensor& table, size_t retained_width) {
+            auto result = table[col];
+            if (group.policy.single_block_per_request) {
+                RTP_LLM_CHECK_WITH_INFO(result.size(0) == 0 || result.size(1) >= static_cast<int64_t>(retained_width),
+                                        "KV block table for retained group [%s] is too narrow",
+                                        group.tag.c_str());
+                result = result.narrow(1, 0, std::min<int64_t>(result.size(1), retained_width)).contiguous();
+                if (!result.is_cuda()) {
+                    result = result.pin_memory();
+                }
+            }
+            return result;
+        };
+        auto group_inputs = py_attn_inputs;
+        group_inputs.kv_cache_kernel_block_id =
+            group_table(inputs.kv_cache_kernel_block_id, group.seq_size_per_block / group.kernel_seq_size_per_block);
         group_inputs.kv_cache_kernel_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_kernel_block_id);
         if (inputs.kv_cache_block_id.defined()) {
-            group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[col];
+            group_inputs.kv_cache_block_id        = group_table(inputs.kv_cache_block_id, 1);
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
             if (group_inputs.cache_store_inputs.has_value()) {
                 group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id.is_cuda() ?
@@ -948,6 +968,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return attach_model_side_outputs(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
+        if (inputs.v41_cache_spans.defined()) {
+            py::gil_scoped_acquire gil;
+            const py::object rejected =
+                py::module_::import("rtp_llm.models_py.model_desc.v41_errors").attr("V41InputRejected");
+            if (e.matches(rejected)) {
+                throw V41InputRejected(e.what());
+            }
+        }
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {

@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
+from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from rtp_llm.models_py.modules.dsv4.fp8.attention import AttentionFP8
@@ -60,7 +61,11 @@ def decode_compute_qkv(
     q = attn._lin(attn.wq_b, qr).unflatten(
         -1, (attn.n_heads, attn.head_dim)
     )  # [B, S, H, D]
-    q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
+    if getattr(attn, "skip_post_q_norm", False):
+        if rd:
+            rope_only_inplace(q[..., -rd:], freqs_cis)
+    else:
+        q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
     kv = fused_rmsnorm_rope(
@@ -69,6 +74,7 @@ def decode_compute_qkv(
         freqs_cis,
         rd,
         eps=attn.eps,
+        round_norm_to_input_dtype=getattr(attn, "round_kv_norm_to_input_dtype", False),
     )
 
     return DecodeQKV(qr=qr, q=q, kv=kv, freqs_cis=freqs_cis)

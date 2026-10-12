@@ -75,6 +75,8 @@ struct GroupSpec {
     size_t         tokens_per_block;
     size_t         stride_bytes;
     CacheGroupType group_type{CacheGroupType::FULL};
+    bool           retained{false};
+    size_t         kernel_tokens_per_block{0};
 };
 
 CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
@@ -99,11 +101,18 @@ CacheConfig makeCacheConfig(const std::vector<GroupSpec>& groups) {
         group.tag    = spec.tag;
         group.spec   = std::make_shared<TestCacheSpec>(spec.tag, spec.tokens_per_block, spec.stride_bytes);
         group.policy = defaultCacheGroupPolicy(spec.group_type);
+        if (spec.retained) {
+            group.policy.single_block_per_request = true;
+            group.policy.enable_prefix_reuse      = false;
+            group.policy.cp_mapping               = CpBlockMappingMode::NONE;
+            group.policy.cp_slice                 = CpBlockSliceMode::NONE;
+        }
         group.policy.explicit_block_num = kPhysicalBlocks;
         group.layer_ids                 = {kLayerId};
         group.block_num                 = kPhysicalBlocks;
         group.seq_size_per_block        = spec.tokens_per_block;
-        group.kernel_seq_size_per_block = spec.tokens_per_block;
+        group.kernel_seq_size_per_block =
+            spec.kernel_tokens_per_block ? spec.kernel_tokens_per_block : spec.tokens_per_block;
         group.kv_block_stride_bytes     = spec.stride_bytes;
         topology_groups.push_back(std::move(group));
         layer_tags.push_back(spec.tag);
@@ -391,6 +400,24 @@ Scenario makeMicroBatchScenario() {
     return scenario;
 }
 
+Scenario makeRetainedScenario(bool idle, bool device_tables) {
+    auto config = makeCacheConfig({{"state", 4, 24, CacheGroupType::SWA, true, 2}, {"full", 2, 16}});
+    auto layout = makeLayout(config);
+    auto inputs = idle ? makeInputs({}, {}, {}, 0, {}, 2, 0, 2, 24) :
+                         makeInputs({4, 4}, {601, 602}, {6101, 6102, 6201, 6202}, 2,
+                                    {3, -1, 5, 0, 1, 2, 6, 7}, 2, 2, 2, 24);
+    if (!idle) {
+        inputs.kv_cache_kernel_block_id =
+            pinnedTensor({6, 7, -1, -1, 10, 11, 0, 0, 1, 2, -1, -1, 6, 7, -1, -1}, {2, 2, 4});
+    }
+    if (device_tables) {
+        inputs.kv_cache_block_id        = inputs.kv_cache_block_id.cuda();
+        inputs.kv_cache_kernel_block_id = inputs.kv_cache_kernel_block_id.cuda();
+    }
+    inputs.is_fake_stream = idle;
+    return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
+}
+
 Scenario makeContextParallelScenario() {
     auto     config = makeCacheConfig({{"default", 2, 16}});
     auto     layout = makeLayout(config);
@@ -459,10 +486,14 @@ Scenario makeMtpScenario() {
 }
 
 Scenario makeScenario(const std::string& name) {
-    if (name == "idle_prefill") {
+    if (name == "retained" || name == "retained_device" || name == "idle_retained") {
+        return makeRetainedScenario(name == "idle_retained", name == "retained_device");
+    }
+    if (name == "idle_prefill" || name == "idle_decode") {
         auto scenario = makeMultiTagScenario();
         scenario.inputs = makeInputs({}, {}, {}, 0, {}, 2, 0, 4, 16);
         scenario.inputs.is_fake_stream = true;
+        scenario.inputs.is_idle_decode = name == "idle_decode";
         scenario.inputs.engram_token_windows = pinnedTensor({}, {0, 4});
         return scenario;
     }
@@ -543,7 +574,7 @@ py::dict runPyWrappedModelCacheStoreScenario(py::object py_model, const std::str
 
     Weights weights;
     weights.layers.resize(1);
-    if (scenario_name == "idle_prefill") {
+    if (scenario_name == "idle_prefill" || scenario_name == "idle_decode") {
         auto head = std::make_shared<DenseWeights>();
         head->kernel = torch::ones({8, 1}, torch::TensorOptions(torch::kBFloat16).device(torch::kCUDA));
         weights.lm_head = std::move(head);

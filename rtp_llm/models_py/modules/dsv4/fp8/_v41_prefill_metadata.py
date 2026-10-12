@@ -122,6 +122,7 @@ def _prefill_slots_kernel(
     CP: tl.constexpr,
     RANK: tl.constexpr,
     STATE: tl.constexpr,
+    SINGLE_BLOCK: tl.constexpr,
     HAS_ENDS: tl.constexpr,
     TILE: tl.constexpr,
 ):
@@ -132,14 +133,18 @@ def _prefill_slots_kernel(
     pos = tl.maximum(pos, 0)
     if STATE:
         raw_column = pos // TPB
-        column = raw_column % COLS
+        column = tl.full((TILE,), 0, tl.int64) if SINGLE_BLOCK else raw_column % COLS
         offset = pos % (EB * CP)
         valid &= offset // EB == RANK
         offset %= EB
         if HAS_ENDS:
             seq_end = tl.load(seq_ends + req * END_STRIDE, valid, other=0).to(tl.int64)
-            effective_end = tl.minimum((raw_column + 1) * TPB, seq_end)
+            effective_end = (
+                seq_end if SINGLE_BLOCK else tl.minimum((raw_column + 1) * TPB, seq_end)
+            )
             valid &= pos + EB * CP >= effective_end
+            if SINGLE_BLOCK:
+                valid &= pos < seq_end
     else:
         owner_block = pos // OWNER_TPB
         column = owner_block // CP * (OWNER_TPB // TPB) + pos % OWNER_TPB // TPB
@@ -164,6 +169,7 @@ def try_slot_mapping(
     owner_tokens_per_block=None,
     state=False,
     seq_ends=None,
+    single_block_per_request=False,
 ):
     """Return int64 slots, or None before launch for unsupported metadata."""
     if not (
@@ -194,6 +200,8 @@ def try_slot_mapping(
         seq_ends, table.shape[0], positions.device
     ):
         return None
+    if single_block_per_request and (not state or cp_size != 1 or table.shape[1] != 1):
+        return None
     out = torch.empty(positions.shape, dtype=torch.int64, device=positions.device)
     _prefill_slots_kernel[(triton.cdiv(positions.numel(), 256),)](
         positions,
@@ -215,6 +223,7 @@ def try_slot_mapping(
         cp_size,
         cp_rank,
         state,
+        single_block_per_request,
         seq_ends is not None,
         256,
     )

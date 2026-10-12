@@ -781,6 +781,11 @@ void NormalEngine::loop() {
             RTP_LLM_LOG_ERROR("PP comm watchdog fired, peer rank unreachable: %s", e.what());
             RTP_LLM_FAIL("PP comm watchdog timeout - forcing process exit");
         } catch (const std::exception& e) {
+            if (model_config_.model_type == "deepseek_v41") {
+                // Input rejection is handled collectively by NormalExecutor.
+                // Other failures may follow cache writes or partial collectives.
+                RTP_LLM_FAIL("V4.1 execution failed; refusing dispatch retry: %s", e.what());
+            }
             if (parallelism_config.pp_size > 1) {
                 RTP_LLM_FAIL("PP execution failed: %s", e.what());
             }

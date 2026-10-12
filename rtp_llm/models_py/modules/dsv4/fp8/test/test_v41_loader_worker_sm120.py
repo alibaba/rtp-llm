@@ -143,12 +143,12 @@ def save_checkpoint(root, args, weights):
     (root / "model.safetensors.index.json").write_text(json.dumps(index))
 
 
-def load_configuration(root):
+def load_configuration(root, *, max_seq_len=256):
     config = DeepSeekV41._create_config(str(root))
     config.model_type = "deepseek_v41"
     config.ckpt_path = str(root)
     config.phy2log_path = None
-    config.max_seq_len = 256
+    config.max_seq_len = max_seq_len
     config.gen_num_per_cycle = 0
     config.enable_fp32_lm_head = False
     kv_config = KVCacheConfig()

@@ -253,11 +253,14 @@ class _PinnedSharedTable:
         try:
             fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
             with os.fdopen(fd, "wb") as destination:
-                # Reserve before writes; ENOSPC must be an exception, not mmap SIGBUS.
-                os.posix_fallocate(destination.fileno(), 0, self.source.nbytes)
+                # Fully write and fsync before mmap so ENOSPC is an exception.
+                # posix_fallocate can emulate allocation with one-byte writes
+                # per filesystem block on NAS, making large tables impractical.
                 _copy_span(self.source.weight, destination)
                 _copy_span(self.source.scales, destination)
                 destination.flush()
+                if os.fstat(destination.fileno()).st_size != self.source.nbytes:
+                    raise ValueError("Engram shared table copy has incorrect size")
                 os.fsync(destination.fileno())
             self.source.check_sources()
             ready_partial.write_bytes(self.source.manifest)

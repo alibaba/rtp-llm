@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/models/V41InputRejected.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
@@ -280,7 +281,23 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
-        model_output                        = std::move(model_->forward(model_input));
+        try {
+            model_output = std::move(model_->forward(model_input));
+        } catch (const V41InputRejected& e) {
+            // Every DP peer rejected before model computation. Retire the whole
+            // scheduled batch; never roll back or replay its dispatch cursors.
+            for (const auto& stream : streams) {
+                if (stream && !stream->isFakeStream()) {
+                    stream->reportError(ErrorCode::INVALID_PARAMS, std::string(e.what()));
+                }
+            }
+            cudaSyncAndCheck();
+            model_->releaseBuffers();
+            if (profile_step_finish_) {
+                profile_step_finish_();
+            }
+            return absl::OkStatus();
+        }
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
     if (expert_balancer_) {

@@ -27,6 +27,102 @@ _DSV4_FP8_TEST_DEPS = [
 ]
 
 py_test(
+    name = "test_v41_reference_math_sm120",
+    srcs = ["test_v41_reference_math_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_context_owner_sm120",
+    srcs = [
+        "test_v41_context_owner_sm120.py",
+        "test_v41_decode_owner_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+        "test_v41_decode_attention_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_single_block_metadata_sm120",
+    srcs = ["test_v41_single_block_metadata_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_native_decode_sm120",
+    srcs = [
+        "test_v41_native_decode_sm120.py",
+        "test_v41_native_prefill_sm120.py",
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_prefill_test"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_dp_decode_sm120",
+    srcs = [
+        "test_v41_dp_decode_sm120.py",
+        "test_v41_dp_worker_sm120.py",
+        "test_v41_worker_sm120.py",
+        "test_v41_transformer_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120", "manual"],
+    env = {"GPU_COUNT": "8"},
+    exec_properties = {"gpu": "SM120", "gpu_count": "8"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+    timeout = "long",
+)
+
+py_test(
+    name = "test_v41_decode_owner_sm120",
+    srcs = [
+        "test_v41_decode_owner_sm120.py",
+        "test_v41_attention_owner_sm120.py",
+        "test_v41_decode_attention_sm120.py",
+    ],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_decode_global_sm120",
+    srcs = ["test_v41_decode_global_sm120.py", "test_v41_decode_global.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
+    name = "test_v41_decode_attention_sm120",
+    srcs = ["test_v41_decode_attention_sm120.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    tags = ["SM120"],
+    exec_properties = {"gpu": "SM120", "gpu_count": "1"},
+    target_compatible_with = _DSV4_SM120_ONLY,
+)
+
+py_test(
     name = "test_v41_engram_full_tables_sm120",
     srcs = ["test_v41_engram_full_tables_sm120.py"],
     deps = _DSV4_FP8_TEST_DEPS,
@@ -47,7 +143,7 @@ py_test(
         "test_v41_attention_owner_sm120.py",
     ],
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
-    deps = _DSV4_FP8_TEST_DEPS,
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_trace"],
     tags = ["SM120", "manual"],
     env = {"GPU_COUNT": "8"},
     exec_properties = {"gpu": "SM120", "gpu_count": "8"},
@@ -74,13 +170,15 @@ py_test(
     name = "test_v41_checkpoint_engine_sm120",
     srcs = [
         "test_v41_checkpoint_engine_sm120.py",
+        "v41_reference_precision.py",
+        "v41_tp8_projection.py",
         "test_v41_loader_worker_sm120.py",
         "test_v41_worker_sm120.py",
         "test_v41_transformer_sm120.py",
         "test_v41_attention_owner_sm120.py",
     ],
     data = ["//rtp_llm/cpp/normal_engine/test:th_v41_native_engine_test"],
-    deps = _DSV4_FP8_TEST_DEPS,
+    deps = _DSV4_FP8_TEST_DEPS + ["//rtp_llm/tools:dsv41_trace"],
     tags = ["SM120", "manual"],
     env = {"GPU_COUNT": "8"},
     exec_properties = {"gpu": "SM120", "gpu_count": "8"},

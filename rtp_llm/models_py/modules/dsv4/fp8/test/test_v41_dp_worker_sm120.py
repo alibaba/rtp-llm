@@ -58,9 +58,15 @@ def assert_released(model):
         assert layer.attn._prefill_meta_shared is None
 
 
-def make_workers(rank, config, gen_num_per_cycle=0, *, initialize_model=True):
+def make_workers(
+    rank, config, gen_num_per_cycle=0, *, initialize_model=True, max_seq_len=256
+):
     torch.manual_seed(41901)
-    args, full = fixture(experts=16, full_schedule=config["num_hidden_layers"] == 40)
+    args, full = fixture(
+        experts=16,
+        full_schedule=config["num_hidden_layers"] == 40,
+        max_seq_len=max_seq_len,
+    )
     shard = SimpleNamespace(
         global_weights={
             key: value.clone() for key, value in full.global_weights.items()

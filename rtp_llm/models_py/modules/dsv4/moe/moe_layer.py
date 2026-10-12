@@ -187,6 +187,7 @@ class MoE(nn.Module):
         cp_enabled: bool = False,
         stage_context: Optional[object] = None,
         expert_recipe: Optional[object] = None,
+        router_fp32: bool = False,
     ):
         """``layer_weights`` is the framework's per-layer dict
         (``ModelWeights.weights[layer_id]``) keyed by ``W.v4_*`` enum.
@@ -229,6 +230,7 @@ class MoE(nn.Module):
             n_hash_layers,
             vocab_size,
             layer_weights=layer_weights,
+            fp32_logits=router_fp32,
         )
         assert n_shared_experts == 1, "V4 always has exactly 1 shared expert"
 

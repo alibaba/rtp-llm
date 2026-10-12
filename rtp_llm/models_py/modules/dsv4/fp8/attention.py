@@ -245,6 +245,7 @@ def _build_suffix_pool_slot_mapping(
     entries_per_block: int,
     tokens_per_block_for_block_table: int,
     ring_entries: int,
+    single_block_per_request: bool = False,
 ) -> torch.Tensor:
     """Build request-major flat slots for a suffix gather.
 
@@ -256,6 +257,8 @@ def _build_suffix_pool_slot_mapping(
     assert entries_per_block > 0
     assert tokens_per_block_for_block_table > 0
     assert ring_entries > 0
+    if single_block_per_request and block_table.shape[1] != 1:
+        raise ValueError("Single-block suffix gather requires one table column")
     device = block_table.device
     B = int(seq_lens.numel())
     if B == 0:
@@ -285,8 +288,11 @@ def _build_suffix_pool_slot_mapping(
     # not compact: shifting block 2 to column 0 would read an invalid block and
     # silently zero-fill a live continuation prefix.  Any future compact table
     # must carry an explicit logical-start offset instead of being inferred
-    # from the number of allocated entries.
-    table_block = block_in_seq
+    # from the number of allocated entries. V4.1's explicit single-block mode
+    # uses a retained state ring, independent of these paged-cache semantics.
+    table_block = (
+        torch.zeros_like(block_in_seq) if single_block_per_request else block_in_seq
+    )
     in_block = abs_pos % int(ring_entries)
     max_blocks = int(block_table.shape[1])
     in_capacity = valid_pos & (table_block >= 0) & (table_block < max_blocks)
@@ -4950,6 +4956,9 @@ class AttentionFP8(nn.Module):
             entries_per_block=swa_eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=swa_eb,
+            single_block_per_request=getattr(
+                self, "swa_single_block_per_request", False
+            ),
         )
         swa_cache_compaction = self._build_swa_cp_byte_compaction(
             swa_cache_slot_mapping,
@@ -5257,6 +5266,9 @@ class AttentionFP8(nn.Module):
             pool_entries_per_block=eb,
             tokens_per_block_for_block_table=swa_tokens_per_block,
             ring_entries=eb,
+            single_block_per_request=getattr(
+                self, "swa_single_block_per_request", False
+            ),
         )
         slot_compaction = self._build_swa_cp_byte_compaction(
             slot_mapping,
@@ -5338,6 +5350,9 @@ class AttentionFP8(nn.Module):
                 entries_per_block=eb,
                 tokens_per_block_for_block_table=swa_tokens_per_block,
                 ring_entries=eb,
+                single_block_per_request=getattr(
+                    self, "swa_single_block_per_request", False
+                ),
             )
             cache_compaction = self._build_swa_cp_byte_compaction(
                 cache_slot_mapping,
@@ -5478,7 +5493,14 @@ class AttentionFP8(nn.Module):
                 else:
                     kv_in = self._lin(self.wkv, x_3d)
                 return fused_rmsnorm_rope(
-                    kv_in, self.kv_norm, common.freqs_cis, rd, eps=self.eps
+                    kv_in,
+                    self.kv_norm,
+                    common.freqs_cis,
+                    rd,
+                    eps=self.eps,
+                    round_norm_to_input_dtype=getattr(
+                        self, "round_kv_norm_to_input_dtype", False
+                    ),
                 )
 
         qr = compute_qr()
