@@ -36,8 +36,8 @@ if _TRITON_AVAILABLE:
         # T=1M and expanded top-k=2051 exceed signed 32-bit element offsets.
         # Widen before multiplying either input or output row stride.
         row = tl.program_id(0).to(tl.int64)
-        tile = tl.program_id(1)
-        cols = tile * BLOCK_COLS + tl.arange(0, BLOCK_COLS)
+        tile = tl.program_id(1).to(tl.int64)
+        cols = tile * BLOCK_COLS + tl.arange(0, BLOCK_COLS).to(tl.int64)
         mask = cols < output_width
 
         raw_len = tl.load(raw_lengths_ptr + row).to(tl.int64)

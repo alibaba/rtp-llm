@@ -72,8 +72,8 @@ if _TRITON_AVAILABLE:
         HAS_SEQ_END: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
-        pid = tl.program_id(0)
-        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        pid = tl.program_id(0).to(tl.int64)
+        offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(tl.int64)
         mask = offs < N
 
         pos = tl.load(positions_ptr + offs, mask=mask, other=0).to(tl.int64)

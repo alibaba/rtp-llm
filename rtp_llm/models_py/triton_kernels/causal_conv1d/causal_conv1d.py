@@ -69,6 +69,7 @@ class CausalConv1dMetadata:
     batch_ptr: torch.Tensor
     token_chunk_offset_ptr: torch.Tensor
     total: int
+    sequence_boundaries_host: Optional[tuple[int, ...]] = None
 
 
 def prepare_causal_conv1d_metadata(
@@ -97,8 +98,8 @@ def prepare_causal_conv1d_metadata(
         >>> metadata = prepare_causal_conv1d_metadata(query_start_loc, device='cuda')
         >>> output = causal_conv1d_fn(x, weight, bias, ..., metadata=metadata)
     """
-    seqlens = np.diff(query_start_loc.cpu().numpy())
-
+    boundaries = query_start_loc.cpu().numpy()
+    seqlens = np.diff(boundaries)
     # Calculate number of chunks per sequence
     nums = -(-seqlens // BLOCK_M)  # Ceiling division
     total = int(nums.sum())
@@ -126,6 +127,7 @@ def prepare_causal_conv1d_metadata(
         batch_ptr=batch_ptr,
         token_chunk_offset_ptr=token_chunk_offset_ptr,
         total=total,
+        sequence_boundaries_host=tuple(int(v) for v in boundaries),
     )
 
 
@@ -143,9 +145,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     token_chunk_offset_ptr,
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
-    batch: tl.int32,  # actually padded_batch
+    batch: tl.int64,  # actually padded_batch
     dim: tl.constexpr,
-    max_block_size: tl.int32,
+    max_block_size: tl.int64,
     # Strides
     stride_x_seq: tl.constexpr,  # stride to get to next sequence,
     stride_x_dim: tl.constexpr,  # stride to get to next feature-value,
@@ -155,7 +157,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     stride_istate_seq: tl.constexpr,
     stride_istate_dim: tl.constexpr,
     stride_istate_token: tl.constexpr,
-    stride_o_seq,
+    stride_o_seq: tl.int64,
     stride_o_dim: tl.constexpr,
     stride_o_token: tl.constexpr,
     # others
@@ -191,15 +193,19 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # rather than mixing sequences - to make updating initial_states across sequences efficiently
 
     # single-sequence id
-    idx_seq = tl.load(batch_ptr + tl.program_id(0))
-    chunk_offset = tl.load(token_chunk_offset_ptr + tl.program_id(0)).to(tl.int64)
-    prefix_length = tl.load(prefix_lengths_ptr + idx_seq).to(tl.int32)
-
-    # BLOCK_N elements along the feature-dimension (channel)
-    idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    if idx_seq == pad_slot_id:
+    program = tl.program_id(0).to(tl.int64)
+    idx_seq = tl.load(batch_ptr + program).to(tl.int64)
+    # Padded programs must exit before indexing any per-sequence metadata.
+    if idx_seq == pad_slot_id or idx_seq < 0 or idx_seq >= batch:
         return
+    chunk_offset = tl.load(token_chunk_offset_ptr + program).to(tl.int64)
+    prefix_length = tl.load(prefix_lengths_ptr + idx_seq).to(tl.int64)
+
+    # Widen before multiplication: strides into packed activations and shared
+    # cache arenas are not limited by the logical tensor's small dimensions.
+    idx_feats = tl.program_id(1).to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N).to(
+        tl.int64
+    )
 
     sequence_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
     sequence_end_index = tl.load(query_start_loc_ptr + idx_seq + 1).to(tl.int64)
@@ -355,7 +361,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
             if KERNEL_WIDTH == 2:
                 if j == 1:  # KERNEL_WIDTH-1:
                     matrix_w = w_col1
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(history_dtype)
             elif KERNEL_WIDTH == 3:
                 if j == 1:
@@ -363,7 +371,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                     matrix_x = col1
                 elif j == 2:
                     matrix_w = w_col2
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(history_dtype)
             elif KERNEL_WIDTH == 4:
                 if j == 1:
@@ -374,7 +384,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
                     matrix_x = col2
                 elif j == 3:
                     matrix_w = w_col3
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d).to(history_dtype)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
@@ -744,7 +756,7 @@ def _causal_conv1d_update_kernel(
     conv_state_ptr,
     cache_seqlens_ptr,  # circular buffer
     block_map_ptr,
-    stride_block_map: tl.int32,
+    stride_block_map: tl.int64,
     sequence_lengths_ptr,
     query_start_loc_ptr,  # (batch + 1)
     o_ptr,  # (batch, dim, seqlen)
@@ -777,12 +789,14 @@ def _causal_conv1d_update_kernel(
     SEQ_SIZE_PER_BLOCK: tl.constexpr,
 ):
     # ruff: noqa: E501
-    idx_seq = tl.program_id(0)
+    idx_seq = tl.program_id(0).to(tl.int64)
     if idx_seq >= batch:
         return
 
     # [BLOCK_N,] elements along the feature-dimension (channel)
-    idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    idx_feats = tl.program_id(1).to(tl.int64) * BLOCK_N + tl.arange(0, BLOCK_N).to(
+        tl.int64
+    )
 
     # if IS_VARLEN:
     #     query_start_index = tl.load(query_start_loc_ptr + idx_seq).to(tl.int64)
@@ -801,7 +815,7 @@ def _causal_conv1d_update_kernel(
     # if query_start_index >= query_end_index:
     #     return
 
-    sequence_length = tl.load(sequence_lengths_ptr + idx_seq).to(tl.int32)
+    sequence_length = tl.load(sequence_lengths_ptr + idx_seq).to(tl.int64)
     read_block_offset = cal_block_idx(sequence_length - 1, SEQ_SIZE_PER_BLOCK)
     read_block_id = tl.load(
         block_map_ptr + idx_seq * stride_block_map + read_block_offset
@@ -832,7 +846,7 @@ def _causal_conv1d_update_kernel(
         col4 = tl.load(conv_states_ptrs, mask_w, 0.0)
 
     # STEP 2: assume state_len > seqlen
-    idx_tokens = tl.arange(0, NP2_STATELEN_TOTAL)  # [BLOCK_M]
+    idx_tokens = tl.arange(0, NP2_STATELEN_TOTAL).to(tl.int64)  # [BLOCK_M]
 
     # the conv_state updates works in a sliding
     # window manner, at each forward pass, the tokens are shift by 1, so we
@@ -937,7 +951,9 @@ def _causal_conv1d_update_kernel(
             if KERNEL_WIDTH == 2:
                 if j == 1:  # KERNEL_WIDTH-1:
                     matrix_w = w_col1
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
             elif KERNEL_WIDTH == 3:
                 if j == 1:
@@ -945,7 +961,9 @@ def _causal_conv1d_update_kernel(
                     matrix_x = col1
                 elif j == 2:
                     matrix_w = w_col2
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
             elif KERNEL_WIDTH == 4:
                 if j == 1:
@@ -956,7 +974,9 @@ def _causal_conv1d_update_kernel(
                     matrix_x = col2
                 elif j == 3:
                     matrix_w = w_col3
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
             elif KERNEL_WIDTH == 5:
                 if j == 1:
@@ -970,7 +990,9 @@ def _causal_conv1d_update_kernel(
                     matrix_x = col3
                 elif j == 4:
                     matrix_w = w_col4
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
             elif KERNEL_WIDTH == 6:
                 if j == 1:
@@ -987,7 +1009,9 @@ def _causal_conv1d_update_kernel(
                     matrix_x = col4
                 elif j == 5:
                     matrix_w = w_col5
-                    x_ptrs_1d = x_base_1d + idx_token * stride_x_token  # [BLOCK_N]
+                    x_ptrs_1d = (
+                        x_base_1d + tl.cast(idx_token, tl.int64) * stride_x_token
+                    )  # [BLOCK_N]
                     matrix_x = tl.load(x_ptrs_1d, mask=mask_x_1d)
 
             acc += matrix_x * matrix_w  # [BLOCK_N]
@@ -1019,7 +1043,10 @@ def _causal_conv1d_update_kernel(
             idx_feats < dim
         )  # token-index  # feature-index
         o_ptrs = (
-            o_ptr + o_offset + idx_token * stride_o_token + (idx_feats * stride_o_dim)
+            o_ptr
+            + o_offset
+            + tl.cast(idx_token, tl.int64) * stride_o_token
+            + (idx_feats * stride_o_dim)
         )
 
         tl.store(o_ptrs, acc, mask=mask_1d)

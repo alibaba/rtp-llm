@@ -213,3 +213,21 @@ py_test(
     tags = ["manual"],
     exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
 )
+
+py_test(
+    name = "pinned_mla_cache_int64_l20a_test",
+    srcs = ["pinned_mla_cache_test.py"],
+    main = "pinned_mla_cache_test.py",
+    deps = [
+        "//rtp_llm/models_py:pinned_mla_cache",
+        "//rtp_llm:models",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+        ":torch",
+        ":triton",
+        ":flash-mla",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)

@@ -27,9 +27,10 @@ void launch_persistent_topk(const torch::Tensor& logits,
                             int64_t              max_seq_len) {
     namespace P = vllm::persistent;
 
-    const int64_t num_rows = logits.size(0);
-    const int64_t stride   = logits.stride(0);
-    cudaStream_t  stream   = at::cuda::getCurrentCUDAStream();
+    const int64_t num_rows  = logits.size(0);
+    const int64_t stride    = logits.stride(0);
+    const int64_t row_width = logits.size(1);
+    cudaStream_t  stream    = at::cuda::getCurrentCUDAStream();
 
     static int num_sms            = 0;
     static int max_smem_per_block = 0;
@@ -46,7 +47,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
                                                                                      lengths.data_ptr<int32_t>(),
                                                                                      static_cast<uint32_t>(num_rows),
                                                                                      static_cast<uint32_t>(TopK),
-                                                                                     static_cast<uint32_t>(stride),
+                                                                                     static_cast<uint64_t>(stride),
                                                                                      stream);
         TORCH_CHECK(status == cudaSuccess, "FilteredTopK failed: ", cudaGetErrorString(status));
     } else {
@@ -77,8 +78,8 @@ void launch_persistent_topk(const torch::Tensor& logits,
         if (max_chunk_elements < min_chunk)
             max_chunk_elements = min_chunk;
 
-        uint32_t ctas_per_group = (static_cast<uint32_t>(stride) + max_chunk_elements - 1) / max_chunk_elements;
-        uint32_t chunk_size     = (static_cast<uint32_t>(stride) + ctas_per_group - 1) / ctas_per_group;
+        uint32_t ctas_per_group = (static_cast<uint32_t>(row_width) + max_chunk_elements - 1) / max_chunk_elements;
+        uint32_t chunk_size     = (static_cast<uint32_t>(row_width) + ctas_per_group - 1) / ctas_per_group;
         chunk_size              = ((chunk_size + vec_size - 1) / vec_size) * vec_size;
         if (chunk_size > max_chunk_elements)
             chunk_size = max_chunk_elements;
@@ -142,7 +143,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
                                                                         lengths.data_ptr<int32_t>(),
                                                                         static_cast<uint32_t>(num_rows),
                                                                         static_cast<uint32_t>(TopK),
-                                                                        static_cast<uint32_t>(stride),
+                                                                        static_cast<uint64_t>(stride),
                                                                         stream);
             TORCH_CHECK(status == cudaSuccess, "FilteredTopK fallback failed: ", cudaGetErrorString(status));
             return;
@@ -156,9 +157,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
 
         {
             cudaError_t mz_err = cudaMemsetAsync(workspace.data_ptr<uint8_t>(), 0, state_bytes, stream);
-            TORCH_CHECK(mz_err == cudaSuccess,
-                        "row_states memset failed: ",
-                        cudaGetErrorString(mz_err));
+            TORCH_CHECK(mz_err == cudaSuccess, "row_states memset failed: ", cudaGetErrorString(mz_err));
         }
 
         P::PersistentTopKParams params;
@@ -166,7 +165,7 @@ void launch_persistent_topk(const torch::Tensor& logits,
         params.output         = output.data_ptr<int32_t>();
         params.lengths        = lengths.data_ptr<int32_t>();
         params.num_rows       = static_cast<uint32_t>(num_rows);
-        params.stride         = static_cast<uint32_t>(stride);
+        params.stride         = static_cast<uint64_t>(stride);
         params.top_k          = static_cast<uint32_t>(TopK);
         params.chunk_size     = chunk_size;
         params.row_states     = reinterpret_cast<P::RadixRowState*>(workspace.data_ptr<uint8_t>());

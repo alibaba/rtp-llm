@@ -49,7 +49,7 @@ def _indexer_q_fp8_fold_kernel(
     if pid >= BSH:
         return
 
-    d_off = tl.arange(0, D)
+    d_off = tl.arange(0, D).to(tl.int64)
     q = tl.load(q_ptr + pid * D + d_off).to(tl.float32)
 
     absmax = tl.max(tl.abs(q), axis=0)

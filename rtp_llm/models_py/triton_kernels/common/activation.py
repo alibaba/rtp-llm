@@ -23,20 +23,20 @@ def _silu_and_mul_kernel(
     output_ptr,
     input_ptr,
     # Tensor dimensions
-    N: tl.int32,
+    N: tl.int64,
     # Row strides for jumping between batches
-    input_row_stride: tl.int32,
-    output_row_stride: tl.int32,
+    input_row_stride: tl.int64,
+    output_row_stride: tl.int64,
     # Meta-parameter for tuning
     BLOCK_SIZE_N: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=0).to(tl.int64)  # Widen before row * stride.
-    pid_n_block = tl.program_id(axis=1)  # N-dimension block
+    pid_n_block = tl.program_id(axis=1).to(tl.int64)  # N-dimension block
 
     input_row_start_ptr = input_ptr + pid_b * input_row_stride
     output_row_start_ptr = output_ptr + pid_b * output_row_stride
 
-    n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    n_offsets = pid_n_block * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
 
     value_ptrs = input_row_start_ptr + n_offsets
     gate_ptrs = input_row_start_ptr + N + n_offsets
@@ -116,7 +116,7 @@ def _silu_mul_fp8_quant_deep_gemm_masked(
     G = H // GROUP_SIZE
 
     # map program id -> (e, g)
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     e = pid // G
     g = pid % G
 
@@ -265,7 +265,7 @@ def _silu_mul_bf16_deep_gemm_masked(
     G = H // GROUP_SIZE
 
     # map program id -> (e, g)
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     e = pid // G
     g = pid % G
 
@@ -526,9 +526,9 @@ def _silu_and_mul_post_quant_kernel(
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
 ):
-    expert_id = tl.program_id(2)
-    token_id = tl.program_id(1)
-    hidden_dim_block_index = tl.program_id(0)
+    expert_id = tl.program_id(2).to(tl.int64)
+    token_id = tl.program_id(1).to(tl.int64)
+    hidden_dim_block_index = tl.program_id(0).to(tl.int64)
 
     block_num_per_expert = tl.num_programs(1)
 
@@ -539,7 +539,7 @@ def _silu_and_mul_post_quant_kernel(
     stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
     stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
 
-    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
     input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
     output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
     output_scale_offs = (
@@ -685,10 +685,10 @@ def _silu_and_mul_post_quant_packed_kernel(
     - packed = exp0 | (exp1 << 8) | (exp2 << 16) | (exp3 << 24)
     - Where exp_i = (float32_bits >> 23) & 0xFF
     """
-    expert_id = tl.program_id(2)
-    token_id = tl.program_id(1)
+    expert_id = tl.program_id(2).to(tl.int64)
+    token_id = tl.program_id(1).to(tl.int64)
     # Now this index represents a "packed group" (4 groups packed together)
-    packed_group_index = tl.program_id(0)
+    packed_group_index = tl.program_id(0).to(tl.int64)
 
     block_num_per_expert = tl.num_programs(1)
 
@@ -721,7 +721,7 @@ def _silu_and_mul_post_quant_packed_kernel(
         # Process 4 groups
         for g in tl.static_range(4):
             group_idx = base_group_idx + g
-            offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
 
             # Check if this group is within bounds
             mask = offs_in_d < size_n
@@ -814,8 +814,8 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
     int32 (one byte per group exponent). When False, processes 1 group at a
     time and writes float32 scale.
     """
-    block_id = tl.program_id(axis=0)
-    token_id = tl.program_id(axis=1)
+    block_id = tl.program_id(axis=0).to(tl.int64)
+    token_id = tl.program_id(axis=1).to(tl.int64)
 
     stride_input_t = tl.cast(stride_input_t, dtype=tl.int64)
     stride_output_t = tl.cast(stride_output_t, dtype=tl.int64)
@@ -833,7 +833,7 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
         packed_scale: tl.int32 = 0
         for g in tl.static_range(4):
             group_idx = base_group_idx + g
-            offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+            offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
             mask = offs_in_d < size_n
             # Match baseline ``FusedSiluAndMul`` + sgl quant: silu(gate_fp32) is
             # multiplied by up_fp32 fully in fp32, rounded to bf16 (the
@@ -865,7 +865,7 @@ def _silu_and_mul_post_quant_dense_packed_kernel(
         tl.store(scale_base, packed_scale)
     else:
         group_idx = block_id
-        offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_in_d = group_idx * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
         mask = offs_in_d < size_n
         # See SCALE_UE8M0 branch above for rationale.
         gate = tl.load(in_base + offs_in_d, mask=mask, other=0.0).to(tl.float32)
@@ -1162,9 +1162,9 @@ def _silu_mul_masked_fp8_post_quant_fwd(
     NUM_STAGE: tl.constexpr,
     SCALE_UE8M0: tl.constexpr,
 ):
-    expert_id = tl.program_id(2)
-    token_id = tl.program_id(1)
-    hidden_dim_block_index = tl.program_id(0)
+    expert_id = tl.program_id(2).to(tl.int64)
+    token_id = tl.program_id(1).to(tl.int64)
+    hidden_dim_block_index = tl.program_id(0).to(tl.int64)
 
     block_num_per_expert = tl.num_programs(1)
 
@@ -1175,7 +1175,7 @@ def _silu_mul_masked_fp8_post_quant_fwd(
     stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
     stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
 
-    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
     input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
     output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
     output_scale_offs = (
@@ -1306,9 +1306,9 @@ def _silu_mul_masked_bf16_no_post_quant_fwd(
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
 ):
-    expert_id = tl.program_id(2)
-    token_id = tl.program_id(1)
-    hidden_dim_block_index = tl.program_id(0)
+    expert_id = tl.program_id(2).to(tl.int64)
+    token_id = tl.program_id(1).to(tl.int64)
+    hidden_dim_block_index = tl.program_id(0).to(tl.int64)
 
     block_num_per_expert = tl.num_programs(1)
 
@@ -1319,7 +1319,7 @@ def _silu_mul_masked_bf16_no_post_quant_fwd(
     stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
     stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
 
-    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
     input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
     output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
 

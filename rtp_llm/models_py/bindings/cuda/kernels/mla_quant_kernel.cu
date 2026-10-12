@@ -77,11 +77,11 @@ __global__ void
 indexer_k_quant_and_cache_kernel(const scalar_t* __restrict__ k,            // [num_tokens, head_dim]
                                  cache_t* __restrict__ kv_cache,            // [num_blocks, block_size, cache_stride]
                                  const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-                                 const int  head_dim,                       // dimension of each head
-                                 const int  quant_block_size,               // quantization block size
-                                 const int  cache_block_size,               // cache block size
-                                 const int  cache_stride,                   // stride for each token in kv_cache
-                                 const bool use_ue8m0                       // use ue8m0 scale format
+                                 const int     head_dim,                    // dimension of each head
+                                 const int     quant_block_size,            // quantization block size
+                                 const int     cache_block_size,            // cache block size
+                                 const int64_t cache_stride,                // stride for each token in kv_cache
+                                 const bool    use_ue8m0                    // use ue8m0 scale format
 ) {
     constexpr int VEC_SIZE  = 4;
     const int64_t token_idx = blockIdx.x;
@@ -153,7 +153,7 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
                                        const int     quant_block_size        // quantization block size
 ) {
     constexpr int VEC_SIZE  = sizeof(float4) / sizeof(char);
-    const int     token_idx = blockIdx.x * blockDim.y + threadIdx.y;
+    const int64_t token_idx = static_cast<int64_t>(blockIdx.x) * blockDim.y + threadIdx.y;
     const int     head_idx  = (blockIdx.y * blockDim.x + threadIdx.x) * VEC_SIZE;
 
     // CUDA graph replay may reuse a graph captured with a larger dst_k capacity
@@ -176,8 +176,9 @@ cp_gather_indexer_k_quant_cache_kernel(const char* __restrict__ kv_cache,  // [n
     if (head_idx >= head_dim || token_idx >= num_tokens || batch_idx[threadIdx.y] < 0) {
         return;
     }
-    const int     inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];
-    const int     block_idx = block_table[batch_idx[threadIdx.y] * num_blocks + inbatch_seq_idx / cache_block_size];
+    const int inbatch_seq_idx = token_idx - cu_seq_lens[batch_idx[threadIdx.y]];
+    const int block_idx =
+        block_table[static_cast<int64_t>(batch_idx[threadIdx.y]) * num_blocks + inbatch_seq_idx / cache_block_size];
     const int64_t src_block_offset     = block_idx * block_stride;
     const int64_t cache_inblock_offset = (inbatch_seq_idx % cache_block_size) * head_dim + head_idx;
     const int64_t src_inblock_offset   = src_block_offset + cache_inblock_offset;
@@ -226,11 +227,11 @@ void indexer_k_quant_and_cache(torch::Tensor&     k,                 // [num_tok
     TORCH_CHECK(slot_mapping.is_contiguous(), "indexer_k_quant_and_cache: slot_mapping must be contiguous");
     TORCH_CHECK(quant_block_size > 0, "indexer_k_quant_and_cache: quant_block_size must be positive");
 
-    int  num_tokens       = k.size(0);
-    int  head_dim         = k.size(1);
-    int  cache_block_size = kv_cache.size(1);
-    int  cache_stride     = kv_cache.size(2);
-    bool use_ue8m0        = (scale_fmt == "ue8m0");
+    int     num_tokens       = k.size(0);
+    int     head_dim         = k.size(1);
+    int     cache_block_size = kv_cache.size(1);
+    int64_t cache_stride     = kv_cache.size(2);
+    bool    use_ue8m0        = (scale_fmt == "ue8m0");
 
     // Validation checks
     TORCH_CHECK(k.device() == kv_cache.device(), "k and kv_cache must be on the same device");
@@ -382,7 +383,7 @@ cp_gather_and_upconvert_fp8_kv_cache_kernel(const uint8_t* __restrict__ src_cach
     if (split_start >= tot_slots)
         return;
 
-    const int32_t batch_offset       = bid * block_table_stride;
+    const int64_t batch_offset       = bid * block_table_stride;
     int32_t       offset             = split_start;
     int32_t       offset_div         = offset / block_size;
     offset                           = offset % block_size;
@@ -868,14 +869,14 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
                             const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
                             cache_t* __restrict__ kv_cache,     // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
                             const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-                            const int    block_stride,                 //
-                            const int    entry_stride,                 //
-                            const int    kv_c_stride,                  //
-                            const int    k_pe_stride,                  //
-                            const int    kv_lora_rank,                 //
-                            const int    pe_dim,                       //
-                            const int    block_size,                   //
-                            const float* scale                         //
+                            const int64_t block_stride,                //
+                            const int64_t entry_stride,                //
+                            const int64_t kv_c_stride,                 //
+                            const int64_t k_pe_stride,                 //
+                            const int     kv_lora_rank,                //
+                            const int     pe_dim,                      //
+                            const int     block_size,                  //
+                            const float*  scale                        //
 ) {
     const int64_t token_idx = blockIdx.x;
     const int64_t slot_idx  = slot_mapping[token_idx];
@@ -888,10 +889,10 @@ concat_and_cache_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_tokens, 
 
     auto copy = [&](const scalar_t* __restrict__ src,
                     cache_t* __restrict__ dst,
-                    int src_stride,
-                    int dst_stride,
-                    int size,
-                    int offset) {
+                    int64_t src_stride,
+                    int64_t dst_stride,
+                    int     size,
+                    int64_t offset) {
         for (int i = threadIdx.x; i < size; i += blockDim.x) {
             const int64_t src_idx = token_idx * src_stride + i;
             const int64_t dst_idx = block_idx * block_stride + block_offset * entry_stride + i + offset;
@@ -914,14 +915,14 @@ concat_and_cache_ds_mla_kernel(const scalar_t* __restrict__ kv_c,  // [num_token
                                const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
                                cache_t* __restrict__ kv_cache,     // [num_blocks, block_size, (kv_lora_rank + pe_dim)]
                                const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-                               const int    block_stride,                 //
-                               const int    entry_stride,                 //
-                               const int    kv_c_stride,                  //
-                               const int    k_pe_stride,                  //
-                               const int    kv_lora_rank,                 //
-                               const int    pe_dim,                       //
-                               const int    block_size,                   //
-                               const float* scale                         //
+                               const int64_t block_stride,                //
+                               const int64_t entry_stride,                //
+                               const int64_t kv_c_stride,                 //
+                               const int64_t k_pe_stride,                 //
+                               const int     kv_lora_rank,                //
+                               const int     pe_dim,                      //
+                               const int     block_size,                  //
+                               const float*  scale                        //
 ) {
     const int64_t token_idx = blockIdx.x;
     const int64_t slot_idx  = slot_mapping[token_idx];
@@ -1013,14 +1014,14 @@ concat_and_cache_ds_model1_kernel(const scalar_t* __restrict__ kv_c,  // [num_to
                                   const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
                                   cache_t* __restrict__ kv_cache,     // [num_blocks, block_size, bytes_per_token]
                                   const int64_t* __restrict__ slot_mapping,  // [num_tokens]
-                                  const int    block_stride,                 //
-                                  const int    entry_stride,                 //
-                                  const int    kv_c_stride,                  //
-                                  const int    k_pe_stride,                  //
-                                  const int    kv_lora_rank,                 //
-                                  const int    pe_dim,                       //
-                                  const int    block_size,                   //
-                                  const float* scale                         //
+                                  const int64_t block_stride,                //
+                                  const int64_t entry_stride,                //
+                                  const int64_t kv_c_stride,                 //
+                                  const int64_t k_pe_stride,                 //
+                                  const int     kv_lora_rank,                //
+                                  const int     pe_dim,                      //
+                                  const int     block_size,                  //
+                                  const float*  scale                        //
 ) {
     // MODEL1 Memory Layout:
     // 1. NoPE + RoPE interleaved: [NoPE: 448 bytes (FP8)] + [RoPE: 128 bytes (BF16)]
@@ -1266,10 +1267,10 @@ void concat_and_cache_mla(torch::Tensor&     kv_c,          // [num_tokens, kv_l
         TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
     }
 
-    int kv_c_stride  = kv_c.stride(0);
-    int k_pe_stride  = k_pe.stride(0);
-    int block_stride = kv_cache.stride(0);
-    int entry_stride = kv_cache.stride(1);
+    int64_t kv_c_stride  = kv_c.stride(0);
+    int64_t k_pe_stride  = k_pe.stride(0);
+    int64_t block_stride = kv_cache.stride(0);
+    int64_t entry_stride = kv_cache.stride(1);
 
     const c10::cuda::CUDAGuard device_guard(kv_c.device());
     const cudaStream_t         stream = c10::cuda::getCurrentCUDAStream();

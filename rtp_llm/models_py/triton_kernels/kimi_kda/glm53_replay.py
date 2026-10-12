@@ -89,14 +89,14 @@ def _capture_replay_gates(
     b,
     go,
     bo,
-    T: tl.int32,
+    T: tl.int64,
     H: tl.constexpr,
     D: tl.constexpr,
     CAP: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    n = tl.program_id(0)
-    d = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    n = tl.program_id(0).to(tl.int64)
+    d = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     for t in range(T):
         tl.store(
             go + (n * CAP + t) * H * D + d,
@@ -114,7 +114,7 @@ def _capture_replay_gates(
 def _glm53_kda_replay_commit_kernel(
     descriptors,
     accepted,
-    B: tl.int32,
+    B: tl.int64,
     MAX_B: tl.constexpr,
     H: tl.constexpr,
     D: tl.constexpr,
@@ -125,10 +125,10 @@ def _glm53_kda_replay_commit_kernel(
     LOWER: tl.constexpr,
     BV: tl.constexpr,
 ):
-    layer = tl.program_id(0)
-    n = tl.program_id(1)
-    hv = tl.program_id(2) // tl.cdiv(D, BV)
-    iv = tl.program_id(2) % tl.cdiv(D, BV)
+    layer = tl.program_id(0).to(tl.int64)
+    n = tl.program_id(1).to(tl.int64)
+    hv = tl.program_id(2).to(tl.int64) // tl.cdiv(D, BV)
+    iv = tl.program_id(2).to(tl.int64) % tl.cdiv(D, BV)
     desc = descriptors + layer * 10
     qkv = tl.load(desc).to(tl.pointer_type(tl.bfloat16))
     gate = tl.load(desc + 1).to(tl.pointer_type(tl.bfloat16))
@@ -148,8 +148,8 @@ def _glm53_kda_replay_commit_kernel(
     steps = tl.minimum(tl.load(accepted + n), width)
     if src <= 0 or steps <= 0:
         return
-    kk = tl.arange(0, D)
-    vv = iv * BV + tl.arange(0, BV)
+    kk = tl.arange(0, D).to(tl.int64)
+    vv = iv * BV + tl.arange(0, BV).to(tl.int64)
     sm = vv[:, None] < D
     state_offset = hv * D * D + kk[None, :] * D + vv[:, None]
     s = tl.load(state + src * STATE_STRIDE + state_offset, sm, 0).to(tl.float32)

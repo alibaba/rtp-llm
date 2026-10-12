@@ -156,3 +156,34 @@ py_test(
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},
 )
+
+py_test(
+    name = "test_glm53_int64_cache_ops",
+    srcs = ["test_glm53_int64_cache_ops.py"],
+    deps = _DSV4_FP8_TEST_DEPS,
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+    tags = ["manual"],
+    timeout = "long",
+)
+
+# GLM53 address audit regression on the same worker pool as its smoke tests.
+[
+    py_test(
+        name = name + "_int64_l20a",
+        srcs = [name + ".py"],
+        main = name + ".py",
+        deps = _DSV4_FP8_TEST_DEPS,
+        env = {"GPU_COUNT": "1"},
+        exec_properties = {"gpu": "L20A_DEV", "gpu_count": "1"},
+        tags = ["manual"],
+        timeout = "long",
+    )
+    for name in [
+        "test_glm53_kpool_kernel",
+        "test_fused_compressor_meta_triton",
+        "test_small_page_indexer_score",
+        "test_indexer_q_fp8_quant",
+        "test_indexer_fp8_quant_triton",
+    ]
+]

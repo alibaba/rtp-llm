@@ -77,11 +77,11 @@ def _gather_unique(
     PAGE_SIZE: tl.constexpr = 1,
 ):
     # One byte-preserving gather for an entire prefill layer, including mixed tiers.
-    for row in range(tl.program_id(0), N, tl.num_programs(0)):
+    for row in range(tl.program_id(0).to(tl.int64), N, tl.num_programs(0)):
         token = (
             tl.load(Ids + row // PAGE_SIZE).to(tl.int64) * PAGE_SIZE + row % PAGE_SIZE
         )
-        x = tl.arange(0, B)
+        x = tl.arange(0, B).to(tl.int64)
         host = tl.load(
             Host + (token - HBM_TOKENS) * WIDTH + x,
             (token >= HBM_TOKENS) & (x < WIDTH),
@@ -113,12 +113,12 @@ def _protect(
     B: tl.constexpr,
     HBM_TOKENS: tl.constexpr = 0,
 ):
-    if tl.program_id(0) == 0:
+    if tl.program_id(0).to(tl.int64) == 0:
         tl.store(MissCount, 0)
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    token = tl.load(Ids + i, i < N, other=-1)
+    i = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B).to(tl.int64)
+    token = tl.load(Ids + i, i < N, other=-1).to(tl.int64)
     valid = (i < N) & (token >= HBM_TOKENS)
-    slot = tl.load(Map + token, valid, other=-1)
+    slot = tl.load(Map + token, valid, other=-1).to(tl.int64)
     epoch = tl.load(Epoch)
     tl.atomic_xchg(Protected + slot, epoch, valid & (slot >= 0))
     generation = tl.load(
@@ -152,20 +152,20 @@ def _admit(
     CAPACITY: tl.constexpr,
     B: tl.constexpr,
 ):
-    i = tl.program_id(0) * B + tl.arange(0, B)
+    i = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B).to(tl.int64)
     refresh = tl.load(Slots + i, i < N, other=-1) == -2
     if tl.sum(refresh.to(tl.int32), 0) == 0:
         return
-    token = tl.load(Ids + i, refresh, other=-1)
-    owner = tl.load(Owners + token, refresh, other=-1)
-    slot = tl.load(Map + token, refresh, other=-1)
+    token = tl.load(Ids + i, refresh, other=-1).to(tl.int64)
+    owner = tl.load(Owners + token, refresh, other=-1).to(tl.int64)
+    slot = tl.load(Map + token, refresh, other=-1).to(tl.int64)
     owned = refresh & (owner == i)
     generation = tl.load(Generations + token // BLOCK_SIZE, owned, other=-1)
     pending = owned & (slot < 0)
     # Protection already marked exactly the missing or stale selections.
     # Each owner refreshes once; no second version lookup is needed.
     count = tl.sum(owned.to(tl.int32), 0)
-    start = tl.atomic_add(MissCount, count, sem="relaxed")
+    start = tl.atomic_add(MissCount, count, sem="relaxed").to(tl.int64)
     offset = tl.cumsum(owned.to(tl.int32), 0) - 1
     tl.store(Misses + start + offset, i, owned)
     # Recycled backing blocks keep their GPU slot and refresh all group layers.
@@ -185,9 +185,11 @@ def _admit(
     first_ticket = tl.atomic_add(Clock, count, sem="relaxed")
     while admitted < count:
         remaining = count - admitted
-        ticket = first_ticket + tl.arange(0, B)
-        candidate = (ticket % CAPACITY).to(tl.int32)
-        available = (tl.arange(0, B) < scan) & (tl.load(Protected + candidate) != epoch)
+        ticket = first_ticket + tl.arange(0, B).to(tl.int64)
+        candidate = (ticket % CAPACITY).to(tl.int64)
+        available = (tl.arange(0, B).to(tl.int64) < scan) & (
+            tl.load(Protected + candidate) != epoch
+        )
         rank = tl.cumsum(available.to(tl.int32), 0) - 1
         attempt = available & (rank < remaining)
         previous = tl.atomic_xchg(Protected + candidate, epoch, attempt)
@@ -195,7 +197,7 @@ def _admit(
         rank = tl.cumsum(claimed.to(tl.int32), 0) - 1
         token = tl.gather(tokens, tl.where(claimed, admitted + rank, 0), 0)
         generation = tl.load(Generations + token // BLOCK_SIZE, claimed, other=-1)
-        old = tl.load(Tags + candidate, claimed, other=-1)
+        old = tl.load(Tags + candidate, claimed, other=-1).to(tl.int64)
         tl.store(Map + old, -1, claimed & (old >= 0))
         tl.store(Tags + candidate, token, claimed)
         tl.store(Versions + candidate, generation, claimed)
@@ -231,23 +233,25 @@ def _fetch(
         # Admission has finished for every CTA. Fresh hits were remapped by
         # protection; an entirely hot group skips this work altogether.
         if count > 0:
-            for start in range(tl.program_id(0) * 256, N, tl.num_programs(0) * 256):
-                i = start + tl.arange(0, 256)
+            for start in range(
+                tl.program_id(0).to(tl.int64) * 256, N, tl.num_programs(0) * 256
+            ):
+                i = start + tl.arange(0, 256).to(tl.int64)
                 refresh = tl.load(Slots + i, i < N, other=-1) == -2
-                token = tl.load(Ids + i, refresh, other=-1)
-                slot = tl.load(Map + token, refresh, other=-1)
+                token = tl.load(Ids + i, refresh, other=-1).to(tl.int64)
+                slot = tl.load(Map + token, refresh, other=-1).to(tl.int64)
                 tl.store(Slots + i, slot + HBM_TOKENS, refresh)
         # Only the next invocation reads Epoch; all group layers share Map.
-        if tl.program_id(0) == 0:
+        if tl.program_id(0).to(tl.int64) == 0:
             tl.store(Epoch, tl.load(Epoch) + 1)
     # Fixed persistent grid over compact misses, including when all tokens hit.
-    for entry in range(tl.program_id(0), count, tl.num_programs(0)):
-        i = tl.load(Misses + entry)
-        token = tl.load(Ids + i).to(tl.int64)
-        slot = tl.load(Map + token).to(tl.int64)
+    for entry in range(tl.program_id(0).to(tl.int64), count, tl.num_programs(0)):
+        i = tl.load(Misses + entry).to(tl.int64)
+        token = tl.load(Ids + i).to(tl.int64).to(tl.int64)
+        slot = tl.load(Map + token).to(tl.int64).to(tl.int64)
         if REMAP:
             tl.store(Owners + token, 0x7FFFFFFF)
-        x = tl.arange(0, B)
+        x = tl.arange(0, B).to(tl.int64)
         data = tl.load(Host + (token - HBM_TOKENS) * WIDTH + x, x < WIDTH, other=0)
         tl.store(Device + (slot + HBM_TOKENS) * WIDTH + x, data, x < WIDTH)
 
@@ -275,25 +279,29 @@ def _fetch_tiled(
     count = tl.load(MissCount)
     if REMAP:
         if count > 0:
-            for start in range(tl.program_id(0) * 256, N, tl.num_programs(0) * 256):
-                i = start + tl.arange(0, 256)
+            for start in range(
+                tl.program_id(0).to(tl.int64) * 256, N, tl.num_programs(0) * 256
+            ):
+                i = start + tl.arange(0, 256).to(tl.int64)
                 refresh = tl.load(Slots + i, i < N, other=-1) == -2
-                token = tl.load(Ids + i, refresh, other=-1)
-                slot = tl.load(Map + token, refresh, other=-1)
+                token = tl.load(Ids + i, refresh, other=-1).to(tl.int64)
+                slot = tl.load(Map + token, refresh, other=-1).to(tl.int64)
                 tl.store(Slots + i, slot + HBM_TOKENS, refresh)
-        if tl.program_id(0) == 0:
+        if tl.program_id(0).to(tl.int64) == 0:
             tl.store(Epoch, tl.load(Epoch) + 1)
     host = Host.to(tl.pointer_type(tl.int32))
     device = Device.to(tl.pointer_type(tl.int32))
-    for start in range(tl.program_id(0) * ROWS, count, tl.num_programs(0) * ROWS):
-        entry = start + tl.arange(0, ROWS)
+    for start in range(
+        tl.program_id(0).to(tl.int64) * ROWS, count, tl.num_programs(0) * ROWS
+    ):
+        entry = start + tl.arange(0, ROWS).to(tl.int64)
         valid = entry < count
-        i = tl.load(Misses + entry, valid, other=0)
-        token = tl.load(Ids + i, valid, other=HBM_TOKENS).to(tl.int64)
-        slot = tl.load(Map + token, valid, other=0).to(tl.int64)
+        i = tl.load(Misses + entry, valid, other=0).to(tl.int64)
+        token = tl.load(Ids + i, valid, other=HBM_TOKENS).to(tl.int64).to(tl.int64)
+        slot = tl.load(Map + token, valid, other=0).to(tl.int64).to(tl.int64)
         if REMAP:
             tl.store(Owners + token, 0x7FFFFFFF, valid)
-        x = tl.arange(0, B)
+        x = tl.arange(0, B).to(tl.int64)
         data = tl.load(
             host + (token[:, None] - HBM_TOKENS) * (WIDTH // 4) + x[None, :],
             valid[:, None] & (x[None, :] < WIDTH // 4),
@@ -318,15 +326,15 @@ def _write(
     HBM_TOKENS: tl.constexpr = 0,
 ):
     i = tl.program_id(0).to(tl.int64)
-    token = tl.load(Ids + i).to(tl.int64)
+    token = tl.load(Ids + i).to(tl.int64).to(tl.int64)
     if token >= 0:
-        x = tl.arange(0, B)
+        x = tl.arange(0, B).to(tl.int64)
         data = tl.load(Values + i * WIDTH + x, x < WIDTH, other=0)
         if token < HBM_TOKENS:
             tl.store(Device + token * WIDTH + x, data, x < WIDTH)
         else:
             tl.store(Host + (token - HBM_TOKENS) * WIDTH + x, data, x < WIDTH)
-            slot = tl.load(Map + token).to(tl.int64)
+            slot = tl.load(Map + token).to(tl.int64).to(tl.int64)
             if slot >= 0:
                 tl.store(Device + (slot + HBM_TOKENS) * WIDTH + x, data, x < WIDTH)
 
@@ -335,10 +343,10 @@ def _write(
 def _invalidate(
     Ids, Map, Tags, N: tl.constexpr, B: tl.constexpr, HBM_TOKENS: tl.constexpr = 0
 ):
-    i = tl.program_id(0) * B + tl.arange(0, B)
-    token = tl.load(Ids + i, i < N, other=-1)
+    i = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B).to(tl.int64)
+    token = tl.load(Ids + i, i < N, other=-1).to(tl.int64)
     valid = (i < N) & (token >= HBM_TOKENS)
-    slot = tl.load(Map + token, valid, other=-1)
+    slot = tl.load(Map + token, valid, other=-1).to(tl.int64)
     tl.store(Tags + slot, -1, valid & (slot >= 0))
     tl.store(Map + token, -1, valid)
 

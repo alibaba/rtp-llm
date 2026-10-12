@@ -11,13 +11,15 @@
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.autotune_cache import (
     autotune_cache_kwargs,
     cuda_cached_autotune,
 )
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp, exp2
+
+# Global address arithmetic is int64. make_block_ptr requires int32 tile
+# coordinates; these bounded coordinates are widened by Triton before strides.
 
 
 @triton.heuristics(
@@ -58,13 +60,17 @@ def chunk_gla_fwd_kernel_o(
     TRANSPOSE_STATE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_v, i_t, i_bh = (
+        tl.program_id(0).to(tl.int64),
+        tl.program_id(1).to(tl.int64),
+        tl.program_id(2).to(tl.int64),
+    )
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
         i_tg = i_t.to(tl.int64)
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(
             chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int64)
@@ -75,7 +81,9 @@ def chunk_gla_fwd_kernel_o(
         i_tg = (i_b * NT + i_t).to(tl.int64)
         bos, eos = (i_b * T).to(tl.int64), (i_b * T + T).to(tl.int64)
 
-    m_s = tl.arange(0, BT)[:, None] >= tl.arange(0, BT)[None, :]
+    m_s = (
+        tl.arange(0, BT).to(tl.int64)[:, None] >= tl.arange(0, BT).to(tl.int64)[None, :]
+    )
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     for i_k in range(tl.cdiv(K, BK)):
@@ -83,7 +91,7 @@ def chunk_gla_fwd_kernel_o(
             q + (bos * H + i_h) * K,
             (T, K),
             (H * K, 1),
-            (i_t * BT, i_k * BK),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
             (BT, BK),
             (1, 0),
         )
@@ -91,7 +99,7 @@ def chunk_gla_fwd_kernel_o(
             g + (bos * H + i_h) * K,
             (T, K),
             (H * K, 1),
-            (i_t * BT, i_k * BK),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
             (BT, BK),
             (1, 0),
         )
@@ -100,7 +108,7 @@ def chunk_gla_fwd_kernel_o(
                 h + (i_tg * H + i_h) * K * V,
                 (V, K),
                 (K, 1),
-                (i_v * BV, i_k * BK),
+                (tl.cast(i_v * BV, tl.int32), tl.cast(i_k * BK, tl.int32)),
                 (BV, BK),
                 (1, 0),
             )
@@ -109,7 +117,7 @@ def chunk_gla_fwd_kernel_o(
                 h + (i_tg * H + i_h) * K * V,
                 (K, V),
                 (V, 1),
-                (i_k * BK, i_v * BV),
+                (tl.cast(i_k * BK, tl.int32), tl.cast(i_v * BV, tl.int32)),
                 (BK, BV),
                 (1, 0),
             )
@@ -134,7 +142,7 @@ def chunk_gla_fwd_kernel_o(
         v + (bos * H + i_h) * V,
         (T, V),
         (H * V, 1),
-        (i_t * BT, i_v * BV),
+        (tl.cast(i_t * BT, tl.int32), tl.cast(i_v * BV, tl.int32)),
         (BT, BV),
         (1, 0),
     )
@@ -142,12 +150,17 @@ def chunk_gla_fwd_kernel_o(
         o + (bos * H + i_h) * V,
         (T, V),
         (H * V, 1),
-        (i_t * BT, i_v * BV),
+        (tl.cast(i_t * BT, tl.int32), tl.cast(i_v * BV, tl.int32)),
         (BT, BV),
         (1, 0),
     )
     p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+        A + (bos * H + i_h) * BT,
+        (T, BT),
+        (H * BT, 1),
+        (tl.cast(i_t * BT, tl.int32), 0),
+        (BT, BT),
+        (1, 0),
     )
     # [BT, BV]
     b_v = tl.load(p_v, boundary_check=(0, 1))

@@ -58,7 +58,6 @@ from typing import Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     invalid_kv_access_validation_enabled,
     trap_invalid_kv_access_enabled,
@@ -105,7 +104,7 @@ def _save_partial_states_kernel(
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
-    slot_id = tl.load(slot_mapping_ptr + token_idx)
+    slot_id = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
     if slot_id < 0:
         return
 
@@ -122,13 +121,13 @@ def _save_partial_states_kernel(
         + pos_in_block * state_cache_stride1
     )
 
-    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    block = tl.arange(0, TRITON_BLOCK_SIZE).to(tl.int64)
     mask = block < HEAD_SIZE
 
     kv = tl.load(kv_ptr + token_idx * kv_stride + block, mask=mask)
     tl.store(base_ptr + block, kv, mask=mask)
 
-    position = tl.load(positions_ptr + token_idx)
+    position = tl.load(positions_ptr + token_idx).to(tl.int64)
     ape_row = position % COMPRESS_RATIO
     ape = tl.load(ape_ptr + ape_row * ape_stride + block, mask=mask)
     score = tl.load(score_ptr + token_idx * score_stride + block, mask=mask)
@@ -214,12 +213,12 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
 
     start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
-    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO).to(tl.int64)
     pos = start + tokens
     mask_pos = pos >= 0
-    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int64) * HEAD_SIZE
 
-    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    block = tl.arange(0, TRITON_BLOCK_SIZE).to(tl.int64)
     mask = block < HEAD_SIZE
 
     # ── Source dispatch (see module docstring) ──
@@ -370,7 +369,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     nope_mask = block < NOPE_HEAD_DIM
     tl.store(fp8_ptr + block, x_uint8_flat, mask=nope_mask)
 
-    scale_idx = tl.arange(0, N_QUANT_BLOCKS)
+    scale_idx = tl.arange(0, N_QUANT_BLOCKS).to(tl.int64)
     encoded = exponents + 127.0
     encoded = tl.maximum(tl.minimum(encoded, 255.0), 0.0)
     tl.store(
@@ -386,7 +385,7 @@ def _fused_kv_compress_norm_rope_insert_sparse_attn(
     pair_2d = tl.reshape(normed, (NUM_PAIRS, 2))
     even, odd = tl.split(pair_2d)
 
-    pair_idx = tl.arange(0, NUM_PAIRS)
+    pair_idx = tl.arange(0, NUM_PAIRS).to(tl.int64)
     rope_pair_local = pair_idx - NOPE_PAIRS
     is_rope_pair = rope_pair_local >= 0
     cs_idx = tl.maximum(rope_pair_local, 0)
@@ -507,12 +506,12 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     req_idx = tl.load(token_to_req_indices_ptr + token_idx).to(tl.int64)
 
     start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
-    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
+    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO).to(tl.int64)
     pos = start + tokens
     mask_pos = pos >= 0
-    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
+    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int64) * HEAD_SIZE
 
-    block = tl.arange(0, TRITON_BLOCK_SIZE)
+    block = tl.arange(0, TRITON_BLOCK_SIZE).to(tl.int64)
     mask = block < HEAD_SIZE
 
     # ── Source dispatch (see module docstring) ──
@@ -653,7 +652,7 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
         normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
         even, odd = tl.split(normed_2d)
 
-        pair_idx = tl.arange(0, NUM_PAIRS)
+        pair_idx = tl.arange(0, NUM_PAIRS).to(tl.int64)
         rope_pair_local = pair_idx - NOPE_PAIRS
         is_rope_pair = rope_pair_local >= 0
         cs_idx = tl.maximum(rope_pair_local, 0)
@@ -736,8 +735,8 @@ def _fused_kpool_decode_update_kernel(
     earlier boundary in the same invocation.
     """
 
-    req = tl.program_id(0)
-    offsets = tl.arange(0, BLOCK_D)
+    req = tl.program_id(0).to(tl.int64)
+    offsets = tl.arange(0, BLOCK_D).to(tl.int64)
     dim_mask = offsets < HEAD_DIM
     req_start_idx = req * next_n
     req_start_pos = tl.load(positions_ptr + req_start_idx).to(tl.int64)
@@ -748,12 +747,18 @@ def _fused_kpool_decode_update_kernel(
         position_valid = position >= 0
         safe_position = tl.maximum(position, 0)
         key = tl.load(
-            key_ptr + req * key_stride_b + token_offset * key_stride_t + offsets,
+            key_ptr
+            + req * key_stride_b
+            + tl.cast(token_offset, tl.int64) * key_stride_t
+            + offsets,
             mask=dim_mask & position_valid,
             other=0.0,
         ).to(tl.float32)
         score_current = tl.load(
-            score_ptr + req * score_stride_b + token_offset * score_stride_t + offsets,
+            score_ptr
+            + req * score_stride_b
+            + tl.cast(token_offset, tl.int64) * score_stride_t
+            + offsets,
             mask=dim_mask & position_valid,
             other=0.0,
         ).to(tl.float32)

@@ -24,9 +24,13 @@ def _score(
 ):
     # Score rows and Q/W addresses can exceed 2^31 elements independently of KV.
     batch = tl.program_id(0).to(tl.int64)
-    queries = tl.program_id(1) * QUERY_TILE + tl.arange(0, QUERY_TILE)
+    queries = tl.program_id(1).to(tl.int64) * QUERY_TILE + tl.arange(0, QUERY_TILE).to(
+        tl.int64
+    )
     lengths = tl.load(Lengths + batch * NEXT + queries, queries < NEXT, other=0)
-    cols = tl.program_id(2) * KEY_TILE + tl.arange(0, KEY_TILE)
+    cols = tl.program_id(2).to(tl.int64) * KEY_TILE + tl.arange(0, KEY_TILE).to(
+        tl.int64
+    )
     valid_keys = (
         (cols < WIDTH) & (cols < tl.max(lengths, 0)) & (cols < TABLE_STRIDE * PAGE)
     )
@@ -34,10 +38,10 @@ def _score(
         tl.int64
     )
     offsets = cols % PAGE
-    rows = tl.arange(0, QUERY_TILE * HEAD_TILE)
-    q_rows = tl.program_id(1) * QUERY_TILE + rows // HEAD_TILE
+    rows = tl.arange(0, QUERY_TILE * HEAD_TILE).to(tl.int64)
+    q_rows = tl.program_id(1).to(tl.int64) * QUERY_TILE + rows // HEAD_TILE
     heads = rows % HEAD_TILE
-    dim = tl.arange(0, 128)
+    dim = tl.arange(0, 128).to(tl.int64)
     q = tl.load(
         Q.to(tl.pointer_type(tl.uint8))
         + ((batch * NEXT + q_rows[:, None]) * HEADS + heads[:, None]) * 128

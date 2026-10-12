@@ -48,8 +48,8 @@ def _fused_scatter_kernel(
     BLOCK_HD: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
-    pid_blk = tl.program_id(1)
-    offs = pid_blk * BLOCK_HD + tl.arange(0, BLOCK_HD)
+    pid_blk = tl.program_id(1).to(tl.int64)
+    offs = pid_blk * BLOCK_HD + tl.arange(0, BLOCK_HD).to(tl.int64)
     mask = offs < HD
     # Keep row in int64 before multiplying by HD: with HD=16384 and
     # total_q approaching 131k (e.g. long-prefill / large CP shards), the

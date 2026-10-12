@@ -40,7 +40,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.modules.dsv4.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
     validate_slot_mapping,
@@ -100,7 +99,7 @@ def _indexer_k_quant_kernel(
     if block_idx >= num_cache_blocks:
         _trap_invalid_kv_access(TRAP_INVALID_KV_ACCESS)
 
-    d_off = tl.arange(0, D)
+    d_off = tl.arange(0, D).to(tl.int64)
     k_vals = tl.load(k_ptr + pid * D + d_off).to(tl.float32)  # [D]
 
     # Per-vector absmax → fp32 scale = absmax / 448 (clamp to avoid /0)
@@ -204,7 +203,7 @@ def _indexer_k_dequant_kernel(
     if pid >= T:
         return
 
-    d_off = tl.arange(0, D)
+    d_off = tl.arange(0, D).to(tl.int64)
     out_row_ptr = out_ptr + pid * D + d_off
 
     slot = tl.load(slot_mapping_ptr + pid).to(tl.int64)

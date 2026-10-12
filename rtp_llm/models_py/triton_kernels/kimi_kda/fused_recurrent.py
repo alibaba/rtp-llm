@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 
 logger = logging.getLogger(__name__)
@@ -43,7 +42,7 @@ def fused_recurrent_kda_fwd_kernel(
     cu_seqlens,
     block_map,
     sequence_lengths,
-    max_block_size: tl.int32,
+    max_block_size: tl.int64,
     lower_bound,
     scale: tl.constexpr,
     N: tl.int64,
@@ -72,7 +71,7 @@ def fused_recurrent_kda_fwd_kernel(
     STORE_STATES: tl.constexpr,
     num_stages: tl.constexpr,
 ):
-    pid = tl.program_id(0)
+    pid = tl.program_id(0).to(tl.int64)
     NV = tl.cdiv(V, BV)
     NK = tl.cdiv(K, BK)
     i_k = pid % NK
@@ -98,8 +97,8 @@ def fused_recurrent_kda_fwd_kernel(
     if T <= 0:
         return
 
-    o_k = i_k * BK + tl.arange(0, BK)
-    o_v = i_v * BV + tl.arange(0, BV)
+    o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
+    o_v = i_v * BV + tl.arange(0, BV).to(tl.int64)
 
     p_q = q + (bos * H + i_h) * K + o_k
     p_k = k + (bos * H + i_h) * K + o_k

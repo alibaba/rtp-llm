@@ -98,8 +98,8 @@ def _store_kda_checkpoints_kernel(
     V: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    store_index = tl.program_id(0)
-    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    store_index = tl.program_id(0).to(tl.int64)
+    offsets = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     checkpoint_index = tl.load(checkpoint_indices + store_index).to(tl.int64)
     sequence_index = tl.load(sequence_indices + store_index).to(tl.int64)
     page = tl.load(page_indices + store_index).to(tl.int64)

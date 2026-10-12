@@ -49,8 +49,10 @@ if triton is not None:
         ALIGNED_BLOCK_M: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,
     ):
-        destination_row = tl.program_id(0) * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
-        scale_col = tl.program_id(1)
+        destination_row = tl.program_id(0).to(tl.int64) * BLOCK_ROWS + tl.arange(
+            0, BLOCK_ROWS
+        ).to(tl.int64)
+        scale_col = tl.program_id(1).to(tl.int64)
         local_destination_row = destination_row % ALIGNED_BLOCK_M
         row_in_128_tile = local_destination_row % 128
         row_in_block = (

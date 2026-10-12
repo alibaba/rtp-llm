@@ -8,8 +8,11 @@ import torch
 import torch.nn as nn
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.fla.utils import input_guard
+
+# Global address arithmetic is int64. make_block_ptr requires int32 tile
+# coordinates; these bounded coordinates are widened by Triton before strides.
+
 
 BT_LIST = [8, 16, 32, 64, 128]
 
@@ -28,11 +31,11 @@ def l2norm_fwd_kernel1(
     BD: tl.constexpr,
     eps,
 ):
-    i_t = tl.program_id(0)
+    i_t = tl.program_id(0).to(tl.int64)
     x += i_t * D
     y += i_t * D
     # Compute mean and variance
-    cols = tl.arange(0, BD)
+    cols = tl.arange(0, BD).to(tl.int64)
     mask = cols < D
     b_x = tl.load(x + cols, mask=mask, other=0.0).to(tl.float32)
     b_var = tl.sum(b_x * b_x, axis=0)
@@ -62,17 +65,23 @@ def l2norm_fwd_kernel(
     BT: tl.constexpr,
     BD: tl.constexpr,
 ):
-    i_t = tl.program_id(0)
-    p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    i_t = tl.program_id(0).to(tl.int64)
+    p_x = tl.make_block_ptr(
+        x, (T, D), (D, 1), (tl.cast(i_t * BT, tl.int32), 0), (BT, BD), (1, 0)
+    )
     b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
     b_var = tl.sum(b_x * b_x, axis=1)
     b_y = b_x / tl.sqrt(b_var + eps)[:, None]
-    p_y = tl.make_block_ptr(y, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
+    p_y = tl.make_block_ptr(
+        y, (T, D), (D, 1), (tl.cast(i_t * BT, tl.int32), 0), (BT, BD), (1, 0)
+    )
     tl.store(p_y, b_y.to(p_y.dtype.element_ty), boundary_check=(0, 1))
 
 
 def l2norm_fwd(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
+    x: torch.Tensor,
+    eps: float = 1e-6,
+    output_dtype: Optional[torch.dtype] = None,
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -143,7 +152,9 @@ class L2NormFunction(torch.autograd.Function):
 
 
 def l2norm(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: Optional[torch.dtype] = None
+    x: torch.Tensor,
+    eps: float = 1e-6,
+    output_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     return L2NormFunction.apply(x, eps, output_dtype)
 

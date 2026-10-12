@@ -12,7 +12,6 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.autotune_cache import (
     autotune_cache_kwargs,
     cuda_cached_autotune,
@@ -20,6 +19,10 @@ from rtp_llm.models_py.triton_kernels.autotune_cache import (
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd as IS_AMD
+
+# Global address arithmetic is int64. make_block_ptr requires int32 tile
+# coordinates; these bounded coordinates are widened by Triton before strides.
+
 
 # The sealed K3 Golden was generated with Triton 3.7.  RTP's Triton 3.6
 # lowering is closest with BS=16; BS=8/32/64 all introduce larger KDA state
@@ -65,20 +68,32 @@ def kda_gate_fwd_kernel(
     HAS_BETA: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_t, i_h = tl.program_id(0), tl.program_id(1)
+    i_t, i_h = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     b_A = tl.load(A_log + i_h).to(tl.float32)
 
     p_g = tl.make_block_ptr(
-        g + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
+        g + i_h * D,
+        (T, D),
+        (H * D, 1),
+        (tl.cast(i_t * BT, tl.int32), 0),
+        (BT, BD),
+        (1, 0),
     )
     p_yg = tl.make_block_ptr(
-        yg + i_h * D, (T, D), (H * D, 1), (i_t * BT, 0), (BT, BD), (1, 0)
+        yg + i_h * D,
+        (T, D),
+        (H * D, 1),
+        (tl.cast(i_t * BT, tl.int32), 0),
+        (BT, BD),
+        (1, 0),
     )
     # [BT, BD]
     b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias, (H * D,), (1,), (i_h * D,), (BD,), (0,))
+        p_b = tl.make_block_ptr(
+            dt_bias, (H * D,), (1,), (tl.cast(i_h * D, tl.int32),), (BD,), (0,)
+        )
         b_g = b_g + tl.load(p_b, boundary_check=(0,)).to(tl.float32)
     if not USE_LOWER_BOUND:
         b_yg = -exp(b_A) * softplus(b_g)
@@ -87,8 +102,12 @@ def kda_gate_fwd_kernel(
     tl.store(p_yg, b_yg.to(p_yg.dtype.element_ty), boundary_check=(0, 1))
 
     if HAS_BETA:
-        p_b = tl.make_block_ptr(beta + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_yb = tl.make_block_ptr(yb + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        p_b = tl.make_block_ptr(
+            beta + i_h, (T,), (H,), (tl.cast(i_t * BT, tl.int32),), (BT,), (0,)
+        )
+        p_yb = tl.make_block_ptr(
+            yb + i_h, (T,), (H,), (tl.cast(i_t * BT, tl.int32),), (BT,), (0,)
+        )
         b_yb = tl.sigmoid(tl.load(p_b, boundary_check=(0,)).to(tl.float32))
         tl.store(p_yb, b_yb.to(p_yb.dtype.element_ty), boundary_check=(0,))
 
@@ -193,15 +212,19 @@ def kda_gate_chunk_cumsum_vector_kernel(
     IS_VARLEN: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
 ):
-    i_s, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    i_s, i_t, i_bh = (
+        tl.program_id(0).to(tl.int64),
+        tl.program_id(1).to(tl.int64),
+        tl.program_id(2).to(tl.int64),
+    )
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(
             chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        ).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         T = eos - bos
     else:
         bos = i_b.to(tl.int64) * T
@@ -214,7 +237,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
         s + (bos * H + i_h) * S,
         (T, S),
         (H * S, 1),
-        (i_t * BT, i_s * BS),
+        (tl.cast(i_t * BT, tl.int32), tl.cast(i_s * BS, tl.int32)),
         (BT, BS),
         (1, 0),
     )
@@ -222,7 +245,7 @@ def kda_gate_chunk_cumsum_vector_kernel(
         o + (bos * H + i_h) * S,
         (T, S),
         (H * S, 1),
-        (i_t * BT, i_s * BS),
+        (tl.cast(i_t * BT, tl.int32), tl.cast(i_s * BS, tl.int32)),
         (BT, BS),
         (1, 0),
     )
@@ -231,7 +254,9 @@ def kda_gate_chunk_cumsum_vector_kernel(
 
     # Apply dt_bias if exists
     if HAS_BIAS:
-        p_b = tl.make_block_ptr(dt_bias + i_h * S, (S,), (1,), (i_s * BS,), (BS,), (0,))
+        p_b = tl.make_block_ptr(
+            dt_bias + i_h * S, (S,), (1,), (tl.cast(i_s * BS, tl.int32),), (BS,), (0,)
+        )
         b_bias = tl.load(p_b, boundary_check=(0,)).to(tl.float32)
         b_s = b_s + b_bias[None, :]
 

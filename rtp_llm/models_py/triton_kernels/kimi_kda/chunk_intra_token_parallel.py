@@ -11,12 +11,14 @@
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.autotune_cache import (
     autotune_cache_kwargs,
     cuda_cached_autotune,
 )
 from rtp_llm.models_py.triton_kernels.fla.op import exp2
+
+# Global address arithmetic is int64. make_block_ptr requires int32 tile
+# coordinates; these bounded coordinates are widened by Triton before strides.
 
 
 @triton.heuristics(
@@ -52,7 +54,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     BH: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_tg, i_hg = tl.program_id(0), tl.program_id(1)
+    i_tg, i_hg = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
 
     if IS_VARLEN:
         i_n = 0
@@ -61,15 +63,15 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
         for _ in range(20):
             if left < right:
                 mid = (left + right) // 2
-                if i_tg < tl.load(cu_seqlens + mid + 1).to(tl.int32):
+                if i_tg < tl.load(cu_seqlens + mid + 1).to(tl.int64):
                     right = mid
                 else:
                     left = mid + 1
         i_n = left
 
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         T = eos - bos
         i_t = i_tg - bos
     else:
@@ -94,22 +96,42 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     beta += bos * H
 
     BK: tl.constexpr = triton.next_power_of_2(K)
-    o_h = tl.arange(0, BH)
-    o_k = tl.arange(0, BK)
+    o_h = tl.arange(0, BH).to(tl.int64)
+    o_k = tl.arange(0, BK).to(tl.int64)
     m_h = (i_hg * BH + o_h) < H
     m_k = o_k < K
 
     p_q = tl.make_block_ptr(
-        q + i_t.to(tl.int64) * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+        q + i_t.to(tl.int64) * H * K,
+        (H, K),
+        (K, 1),
+        (tl.cast(i_hg * BH, tl.int32), 0),
+        (BH, BK),
+        (1, 0),
     )
     p_k = tl.make_block_ptr(
-        k + i_t.to(tl.int64) * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+        k + i_t.to(tl.int64) * H * K,
+        (H, K),
+        (K, 1),
+        (tl.cast(i_hg * BH, tl.int32), 0),
+        (BH, BK),
+        (1, 0),
     )
     p_g = tl.make_block_ptr(
-        g + i_t.to(tl.int64) * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
+        g + i_t.to(tl.int64) * H * K,
+        (H, K),
+        (K, 1),
+        (tl.cast(i_hg * BH, tl.int32), 0),
+        (BH, BK),
+        (1, 0),
     )
     p_beta = tl.make_block_ptr(
-        beta + i_t.to(tl.int64) * H, (H,), (1,), (i_hg * BH,), (BH,), (0,)
+        beta + i_t.to(tl.int64) * H,
+        (H,),
+        (1,),
+        (tl.cast(i_hg * BH, tl.int32),),
+        (BH,),
+        (0,),
     )
     # [BH, BK]
     b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
@@ -122,7 +144,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
             k + tl.cast(j, tl.int64) * H * K,
             (H, K),
             (K, 1),
-            (i_hg * BH, 0),
+            (tl.cast(i_hg * BH, tl.int32), 0),
             (BH, BK),
             (1, 0),
         )
@@ -130,7 +152,7 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
             g + tl.cast(j, tl.int64) * H * K,
             (H, K),
             (K, 1),
-            (i_hg * BH, 0),
+            (tl.cast(i_hg * BH, tl.int32), 0),
             (BH, BK),
             (1, 0),
         )

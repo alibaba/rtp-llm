@@ -8,6 +8,7 @@ py_test(
     env = {"TRITON_INTERPRET": "1"},
     deps = [
         "//rtp_llm/models_py:dsv4_fused_kernel_sources",
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
         "//rtp_llm/models_py/triton_kernels:kimi_kda",
@@ -25,9 +26,11 @@ py_test(
     exec_properties = {"gpu_count": "1"},
     tags = ["manual"],  # Actual >2^31-element storage needs at least 9 GiB free.
     deps = [
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
         "//rtp_llm/models_py/triton_kernels:kimi_kda",
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
         ":packaging",
         ":torch",
         ":triton",

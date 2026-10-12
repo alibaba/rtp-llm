@@ -51,7 +51,7 @@ def _layer_norm_fwd_1pass_kernel(
     if HAS_BIAS:
         B += group * N
     # Compute mean and variance
-    cols = tl.arange(0, BLOCK_N)
+    cols = tl.arange(0, BLOCK_N).to(tl.int64)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if HAS_Z and not NORM_BEFORE_GATE:
         z = tl.load(Z + cols, mask=cols < N).to(tl.float32)

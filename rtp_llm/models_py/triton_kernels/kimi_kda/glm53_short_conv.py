@@ -29,8 +29,8 @@ def glm_conv_decode_kernel(
     PAGE: tl.constexpr,
     N: tl.constexpr,
 ):
-    b = tl.program_id(0)
-    d = tl.program_id(1) * N + tl.arange(0, N)
+    b = tl.program_id(0).to(tl.int64)
+    d = tl.program_id(1).to(tl.int64) * N + tl.arange(0, N).to(tl.int64)
     mask = d < 3 * C
     seq = tl.load(lens + b).to(tl.int64)
     rp = (seq - 2) // PAGE
@@ -132,23 +132,23 @@ def _glm53_kda_verify_conv_kernel(
     raw,
     seed,
     meta,
-    B: tl.int32,
-    T: tl.int32,
+    B: tl.int64,
+    T: tl.int64,
     C: tl.constexpr,
     XS: tl.constexpr,
     WS: tl.constexpr,
     SS: tl.constexpr,
-    BS: tl.int32,
-    PAGES: tl.int32,
-    POOL: tl.int32,
+    BS: tl.int64,
+    PAGES: tl.int64,
+    POOL: tl.int64,
     PAGE: tl.constexpr,
     MAX_B: tl.constexpr,
     CAP: tl.constexpr,
     REPLAY: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    n = tl.program_id(0)
-    d = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    n = tl.program_id(0).to(tl.int64)
+    d = tl.program_id(1).to(tl.int64) * BLOCK + tl.arange(0, BLOCK).to(tl.int64)
     mask = d < 3 * C
     seq = tl.load(lens + n).to(tl.int64)
     rp = (seq - 2) // PAGE
@@ -162,7 +162,7 @@ def _glm53_kda_verify_conv_kernel(
         tl.store(seed + n * 9 * C + d, h0, mask)
         tl.store(seed + n * 9 * C + 3 * C + d, h1, mask)
         tl.store(seed + n * 9 * C + 6 * C + d, h2, mask)
-        if tl.program_id(1) == 0:
+        if tl.program_id(1).to(tl.int64) == 0:
             dst0 = tl.load(bm + n * BS + wp, (wp >= 0) & (wp < PAGES), 0).to(tl.int64)
             dst1 = tl.load(bm + n * BS + wp + 1, (wp >= 0) & (wp + 1 < PAGES), 0).to(
                 tl.int64

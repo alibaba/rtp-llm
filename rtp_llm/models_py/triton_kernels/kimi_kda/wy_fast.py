@@ -10,13 +10,15 @@
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.autotune_cache import (
     autotune_cache_kwargs,
     cuda_cached_autotune,
 )
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp2
+
+# Global address arithmetic is int64. make_block_ptr requires int32 tile
+# coordinates; these bounded coordinates are widened by Triton before strides.
 
 
 @triton.heuristics(
@@ -60,15 +62,15 @@ def recompute_w_u_fwd_kda_kernel(
     STORE_KG: tl.constexpr,
     IS_VARLEN: tl.constexpr,
 ):
-    i_t, i_bh = tl.program_id(0), tl.program_id(1)
+    i_t, i_bh = tl.program_id(0).to(tl.int64), tl.program_id(1).to(tl.int64)
     i_b, i_h = i_bh // H, i_bh % H
     if IS_VARLEN:
-        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
+        i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int64), tl.load(
             chunk_indices + i_t * 2 + 1
-        ).to(tl.int32)
-        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
+        ).to(tl.int64)
+        bos, eos = tl.load(cu_seqlens + i_n).to(tl.int64), tl.load(
             cu_seqlens + i_n + 1
-        ).to(tl.int32)
+        ).to(tl.int64)
         T = eos - bos
     else:
         bos = i_b.to(tl.int64) * T
@@ -76,11 +78,18 @@ def recompute_w_u_fwd_kda_kernel(
 
     # Block-pointer coordinates stay int32; global base offsets must not.
     bos = bos.to(tl.int64)
-    p_b = tl.make_block_ptr(beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+    p_b = tl.make_block_ptr(
+        beta + bos * H + i_h, (T,), (H,), (tl.cast(i_t * BT, tl.int32),), (BT,), (0,)
+    )
     b_b = tl.load(p_b, boundary_check=(0,))
 
     p_A = tl.make_block_ptr(
-        A + (bos * H + i_h) * BT, (T, BT), (H * BT, 1), (i_t * BT, 0), (BT, BT), (1, 0)
+        A + (bos * H + i_h) * BT,
+        (T, BT),
+        (H * BT, 1),
+        (tl.cast(i_t * BT, tl.int32), 0),
+        (BT, BT),
+        (1, 0),
     )
     b_A = tl.load(p_A, boundary_check=(0, 1))
 
@@ -89,7 +98,7 @@ def recompute_w_u_fwd_kda_kernel(
             v + (bos * H + i_h) * V,
             (T, V),
             (H * V, 1),
-            (i_t * BT, i_v * BV),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_v * BV, tl.int32)),
             (BT, BV),
             (1, 0),
         )
@@ -97,7 +106,7 @@ def recompute_w_u_fwd_kda_kernel(
             u + (bos * H + i_h) * V,
             (T, V),
             (H * V, 1),
-            (i_t * BT, i_v * BV),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_v * BV, tl.int32)),
             (BT, BV),
             (1, 0),
         )
@@ -111,7 +120,7 @@ def recompute_w_u_fwd_kda_kernel(
             w + (bos * H + i_h) * K,
             (T, K),
             (H * K, 1),
-            (i_t * BT, i_k * BK),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
             (BT, BK),
             (1, 0),
         )
@@ -119,7 +128,7 @@ def recompute_w_u_fwd_kda_kernel(
             k + (bos * H + i_h) * K,
             (T, K),
             (H * K, 1),
-            (i_t * BT, i_k * BK),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
             (BT, BK),
             (1, 0),
         )
@@ -130,7 +139,7 @@ def recompute_w_u_fwd_kda_kernel(
             gk + (bos * H + i_h) * K,
             (T, K),
             (H * K, 1),
-            (i_t * BT, i_k * BK),
+            (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
             (BT, BK),
             (1, 0),
         )
@@ -141,7 +150,7 @@ def recompute_w_u_fwd_kda_kernel(
                 q + (bos * H + i_h) * K,
                 (T, K),
                 (H * K, 1),
-                (i_t * BT, i_k * BK),
+                (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
                 (BT, BK),
                 (1, 0),
             )
@@ -149,7 +158,7 @@ def recompute_w_u_fwd_kda_kernel(
                 qg + (bos * H + i_h) * K,
                 (T, K),
                 (H * K, 1),
-                (i_t * BT, i_k * BK),
+                (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
                 (BT, BK),
                 (1, 0),
             )
@@ -158,13 +167,13 @@ def recompute_w_u_fwd_kda_kernel(
             tl.store(p_qg, b_qg.to(p_qg.dtype.element_ty), boundary_check=(0, 1))
         if STORE_KG:
             last_idx = min(i_t * BT + BT, T) - 1
-            o_k = i_k * BK + tl.arange(0, BK)
+            o_k = i_k * BK + tl.arange(0, BK).to(tl.int64)
             m_k = o_k < K
             b_gn = tl.load(
                 gk + ((bos + last_idx) * H + i_h) * K + o_k, mask=m_k, other=0.0
             ).to(tl.float32)
             b_kg = b_k * tl.where(
-                (i_t * BT + tl.arange(0, BT) < T)[:, None],
+                (i_t * BT + tl.arange(0, BT).to(tl.int64) < T)[:, None],
                 exp2(b_gn[None, :] - b_gk),
                 0,
             )
@@ -172,7 +181,7 @@ def recompute_w_u_fwd_kda_kernel(
                 kg + (bos * H + i_h) * K,
                 (T, K),
                 (H * K, 1),
-                (i_t * BT, i_k * BK),
+                (tl.cast(i_t * BT, tl.int32), tl.cast(i_k * BK, tl.int32)),
                 (BT, BK),
                 (1, 0),
             )

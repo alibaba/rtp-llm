@@ -18,13 +18,9 @@ os.environ["TRITON_INTERPRET"] = "1"
 
 import numpy as np
 import triton.language as tl
-from triton.runtime.interpreter import (
-    InterpretedFunction,
-    TensorHandle,
-    _get_np_dtype,
-    interpreter_builder,
+from rtp_llm.models_py.triton_kernels.causal_conv1d.causal_conv1d import (
+    _causal_conv1d_fwd_kernel,
 )
-
 from rtp_llm.models_py.triton_kernels.common.activation import _silu_and_mul_kernel
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import (
     _layer_norm_fwd_1pass_kernel,
@@ -48,6 +44,12 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.gate import (
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.wy_fast import (
     recompute_w_u_fwd_kda_kernel,
+)
+from triton.runtime.interpreter import (
+    InterpretedFunction,
+    TensorHandle,
+    _get_np_dtype,
+    interpreter_builder,
 )
 
 
@@ -81,7 +83,7 @@ class SparseMemory:
         dtype = ptrs.get_element_ty()
         itemsize = _get_np_dtype(dtype).itemsize
         addresses = ptrs.data.astype(np.int64)
-        active = np.broadcast_to(mask.data, addresses.shape)
+        active = np.broadcast_to(np.asarray(mask.data, dtype=bool), addresses.shape)
         result = np.zeros(addresses.shape, dtype=_get_np_dtype(dtype))
         remaining = active.copy()
         for buffer in self.buffers:
@@ -155,6 +157,93 @@ class SparseMemory:
 
 
 class AddressOverflowTest(unittest.TestCase):
+    def _conv_memory(
+        self, sequence=0, map_stride=1, feature_stride=1, state_page=None, padded=False
+    ):
+        mem = SparseMemory()
+        x, w, states, out = [mem.buffer(n) for n in ("x", "w", "states", "out")]
+        bm, prefix, cu, batch, chunk = [
+            mem.buffer(n, tl.int32) for n in ("map", "prefix", "cu", "batch", "chunk")
+        ]
+        mem.window(batch, 0, [-1 if padded else sequence])
+        mem.window(chunk, 0, [0])
+        if not padded:
+            mem.window(prefix, sequence, [0 if state_page is None else 256])
+            mem.window(cu, sequence, [0, 1])
+            mem.window(x, 2 * feature_stride, [2])
+            mem.window(w, 8, [1, 1, 1, 1])
+        result = mem.window(out, 2 * feature_stride, [np.nan])
+        state_stride = (1 << 30) + 128
+        if state_page is not None:
+            mem.window(bm, sequence * map_stride, [state_page, -1])
+            for tap, value in enumerate((3, 4, 5)):
+                mem.window(states, state_page * state_stride + tap * 3 + 2, [value])
+        elif not padded:
+            mem.window(bm, sequence * map_stride, [-1])
+        mem.run(
+            _causal_conv1d_fwd_kernel,
+            (0, 2),
+            x_ptr=x,
+            w_ptr=w,
+            bias_ptr=w,
+            initial_states_ptr=states,
+            block_map_ptr=bm,
+            prefix_lengths_ptr=prefix,
+            query_start_loc_ptr=cu,
+            batch_ptr=batch,
+            token_chunk_offset_ptr=chunk,
+            o_ptr=out,
+            batch=sequence + 1,
+            dim=3,
+            max_block_size=map_stride,
+            stride_x_seq=0,
+            stride_x_dim=feature_stride,
+            stride_x_token=1,
+            stride_w_dim=4,
+            stride_w_width=1,
+            stride_istate_seq=state_stride,
+            stride_istate_dim=1,
+            stride_istate_token=3,
+            stride_o_seq=0,
+            stride_o_dim=feature_stride,
+            stride_o_token=1,
+            pad_slot_id=-1,
+            HAS_BIAS=False,
+            KERNEL_WIDTH=4,
+            SILU_ACTIVATION=False,
+            HAS_CACHE=True,
+            IS_CONTINUOUS_BATCHING=True,
+            USE_PAD_SLOT=True,
+            NP2_STATELEN=4,
+            BLOCK_M=8,
+            BLOCK_N=1,
+            SEQ_SIZE_PER_BLOCK=256,
+            OUTPUT_GROUP_WIDTH=0,
+        )
+        return result
+
+    def test_conv_prefill_feature_offset_boundary(self):
+        for stride in ((1 << 30) - 1, 1 << 30, (1 << 30) + 1):
+            with self.subTest(stride=stride):
+                np.testing.assert_array_equal(
+                    self._conv_memory(feature_stride=stride), [2]
+                )
+
+    def test_conv_prefill_block_map_row_boundary(self):
+        for stride in ((1 << 30) - 1, 1 << 30, (1 << 30) + 1):
+            with self.subTest(stride=stride):
+                np.testing.assert_array_equal(
+                    self._conv_memory(sequence=2, map_stride=stride), [2]
+                )
+
+    def test_conv_prefill_physical_state_offset_boundary(self):
+        for page in (1, 2, 3):
+            with self.subTest(page=page):
+                np.testing.assert_array_equal(self._conv_memory(state_page=page), [14])
+
+    def test_conv_prefill_padding_does_not_read_prefix(self):
+        self.assertTrue(np.isnan(self._conv_memory(padded=True)).all())
+
     def test_gated_norm_before_at_after_int32_boundary(self):
         for row in ((1 << 24) - 1, 1 << 24, (1 << 24) + 1):
             with self.subTest(row=row):

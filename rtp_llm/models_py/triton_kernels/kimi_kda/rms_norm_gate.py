@@ -37,10 +37,10 @@ def _kimi_kda_rms_norm_sigmoid_gate_kernel(
     block_rows: tl.constexpr,
     block_features: tl.constexpr,
 ):
-    row_block = tl.program_id(0)
-    row_offsets = row_block * block_rows + tl.arange(0, block_rows)
+    row_block = tl.program_id(0).to(tl.int64)
+    row_offsets = row_block * block_rows + tl.arange(0, block_rows).to(tl.int64)
     row_offsets_i64 = row_offsets.to(tl.int64)
-    feature_offsets = tl.arange(0, block_features)
+    feature_offsets = tl.arange(0, block_features).to(tl.int64)
     feature_offsets_i64 = feature_offsets.to(tl.int64)
     head_offsets = row_offsets_i64 % head_count
     token_offsets = row_offsets_i64 // head_count

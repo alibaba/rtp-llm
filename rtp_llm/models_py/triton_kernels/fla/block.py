@@ -1,8 +1,10 @@
 import torch
 import triton
 import triton.language as tl
-
 from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
+
+# Global address arithmetic is int64. make_block_ptr requires int32 tile
+# coordinates; these bounded coordinates are widened by Triton before strides.
 
 
 @triton.jit(do_not_specialize=["max_block_size"])
@@ -11,7 +13,7 @@ def load_initial_state_from_block_map_kernel(
     block_map: tl.tensor,
     conv_states: tl.tensor,
     initial_states: tl.tensor,
-    max_block_size: tl.int32,
+    max_block_size: tl.int64,
     HEAD_NUM: tl.constexpr,
     V: tl.constexpr,
     K: tl.constexpr,
@@ -24,9 +26,9 @@ def load_initial_state_from_block_map_kernel(
     SSM_PER_BATCH = HEAD_NUM * SSM_PER_HEAD
 
     i_b = tl.program_id(0).to(tl.int64)
-    i_h, i_v = tl.program_id(1), tl.program_id(2)
+    i_h, i_v = tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
-    prefix = tl.load(prefix_lengths + i_b)
+    prefix = tl.load(prefix_lengths + i_b).to(tl.int64)
 
     v_offset = i_v * BLOCK_V
 
@@ -41,7 +43,7 @@ def load_initial_state_from_block_map_kernel(
         initial_states + i_b * SSM_PER_BATCH + i_h * SSM_PER_HEAD,
         (V, K),
         (K, 1),
-        (v_offset, 0),
+        (tl.cast(v_offset, tl.int32), 0),
         (BLOCK_V, K),
         (1, 0),
     )
@@ -49,7 +51,7 @@ def load_initial_state_from_block_map_kernel(
         conv_states + block_idx * CONV_STRIDE_TOKEN + i_h * SSM_PER_HEAD,
         (V, K),
         (K, 1),
-        (v_offset, 0),
+        (tl.cast(v_offset, tl.int32), 0),
         (BLOCK_V, K),
         (1, 0),
     )
@@ -103,7 +105,7 @@ def store_ssm_state_to_block_map_kernel(
     cu_seqlens: tl.tensor,
     block_map: tl.tensor,
     ssm_states: tl.tensor,
-    max_block_size: tl.int32,
+    max_block_size: tl.int64,
     HEAD_NUM: tl.constexpr,
     V: tl.constexpr,
     K: tl.constexpr,
@@ -114,22 +116,22 @@ def store_ssm_state_to_block_map_kernel(
 ):
     # Both the source checkpoint and destination page can exceed 2^31 elements.
     i_c = tl.program_id(0).to(tl.int64)
-    i_h, i_v = tl.program_id(1), tl.program_id(2)
+    i_h, i_v = tl.program_id(1).to(tl.int64), tl.program_id(2).to(tl.int64)
 
     batch = tl.load(chunk_indices + i_c * 2).to(tl.int64)
-    chunk = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int32)
+    chunk = tl.load(chunk_indices + i_c * 2 + 1).to(tl.int64)
 
     SSM_PER_HEAD = K * V
     SSM_PER_BATCH = SSM_PER_HEAD * HEAD_NUM
     v_offset = i_v * BLOCK_V
 
-    prefix = tl.load(prefix_lengths + batch)
-    bos = tl.load(cu_seqlens + batch).to(tl.int32)
-    eos = tl.load(cu_seqlens + batch + 1).to(tl.int32)
+    prefix = tl.load(prefix_lengths + batch).to(tl.int64)
+    bos = tl.load(cu_seqlens + batch).to(tl.int64)
+    eos = tl.load(cu_seqlens + batch + 1).to(tl.int64)
     input_len = eos - bos
 
     should_write = False
-    dest_block_pos = 0
+    dest_block_pos = tl.full((), 0, tl.int64)
     source_ptr = final_states
 
     # last chunk always record to final states
@@ -160,7 +162,7 @@ def store_ssm_state_to_block_map_kernel(
         source_ptr,
         (V, K),
         (K, 1),
-        (v_offset, 0),
+        (tl.cast(v_offset, tl.int32), 0),
         (BLOCK_V, K),
         (1, 0),
     )
@@ -168,7 +170,7 @@ def store_ssm_state_to_block_map_kernel(
         dest_ptr,
         (V, K),
         (K, 1),
-        (v_offset, 0),
+        (tl.cast(v_offset, tl.int32), 0),
         (BLOCK_V, K),
         (1, 0),
     )
