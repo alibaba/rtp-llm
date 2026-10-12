@@ -10,7 +10,6 @@ import rtp_llm.models
 from rtp_llm.cpp.cuda_graph.tests.cuda_graph_test_utils import (
     CudaGraphTestModelBuilder,
     ModelBuildConfig,
-    use_synthetic_cuda_graph_model,
 )
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import CudaGraphRunner
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
@@ -37,13 +36,11 @@ class TestCudaGraphPrefill(unittest.TestCase):
         # The default path is an integration-test convention; local/Bazel runs
         # can override it.
         model_path = _resolve_model_path()
-        if not use_synthetic_cuda_graph_model() and not os.path.isdir(model_path):
+        if not os.path.isdir(model_path):
             raise unittest.SkipTest(
                 f"CUDA graph prefill test model path does not exist: {model_path}; "
                 "set RTP_LLM_CUDA_GRAPH_PREFILL_MODEL_PATH or "
-                "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH, or set "
-                "RTP_LLM_CUDA_GRAPH_USE_SYNTHETIC_MODEL=1 for local "
-                "CudaGraphRunner coverage"
+                "RTP_LLM_CUDA_GRAPH_TEST_MODEL_PATH"
             )
 
         # Set device first to ensure all tensors are created on the correct device
@@ -358,8 +355,8 @@ class TestCudaGraphDiscovery(unittest.TestCase):
         # Discovery must not allocate GPU resources or raise SkipTest itself.
         with mock.patch(
             __name__ + "._resolve_model_path", return_value="/missing-model"
-        ), mock.patch(__name__ + ".os.path.isdir", return_value=False), mock.patch(
-            __name__ + ".use_synthetic_cuda_graph_model", return_value=False
+        ), mock.patch(
+            __name__ + ".os.path.isdir", return_value=False
         ), mock.patch.object(
             torch.cuda, "set_device"
         ) as set_device:
