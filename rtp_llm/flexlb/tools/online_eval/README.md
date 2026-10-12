@@ -15,3 +15,5 @@
 
 从本目录运行测试：`PYTHONPATH=src:. python3 -m pytest -q tests`。
 更多说明见[文档导航](docs/README.md)、[配置目录](config/README.md)和[数据规则](data/README.md)。
+
+合入评审及实验解释需同时阅读[已知问题与验收边界](docs/development/known-issues.md)。
