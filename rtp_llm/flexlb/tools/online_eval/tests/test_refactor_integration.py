@@ -19,7 +19,7 @@ def test_manual_suite_preserves_exact_three_cases_per_profile():
     documents = preselect_documents(load_scenarios(ROOT/'config/scenarios'), 'workload_manual')
     with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
         plans = compile_scenarios(documents, handlers=handlers())
-    assert {p['id'] for p in plans} == {f'{case}::{variant}::{profile}' for case,variant in [('cache_scale_in','default'),('master_ha_failover','rolling'),('master_performance','default')] for profile in ['single-nonbatch','batch-window']}
+    assert {p['id'] for p in plans} == {f'{case}::default::{profile}' for case in ['cache_scale_in', 'master_ha_failover', 'master_performance'] for profile in ['single-nonbatch','batch-window']}
 
 def test_cache_controls_share_inputs_and_keep_independent_gap_budgets():
     plans = compile_case(load_document(ROOT/'config/scenarios/cache_scale_in.yaml'))

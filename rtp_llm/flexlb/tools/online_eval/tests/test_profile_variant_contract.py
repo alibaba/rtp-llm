@@ -163,7 +163,7 @@ def test_variant_cannot_change_undeclared_dimensions(patch):
 def test_flow_identity_cannot_disagree_with_program_or_switch():
     data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
     document = configure_program(data, 'ha.yaml')
-    assert [v['id'] for v in document['variants']] == ['default', 'rolling', 'non_rolling']
+    assert [v['id'] for v in document['variants']] == ['default', 'non_rolling']
     for variant in document['variants']:
         ids = [s['id'] for s in variant['stages']]
         assert ('outage_failures' in ids) == (variant['id'] == 'non_rolling')

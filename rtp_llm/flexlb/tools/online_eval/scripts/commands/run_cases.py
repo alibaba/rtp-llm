@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run instances selected by config/suites.yaml or an explicit kind filter.
 
-Use --suite functional for the extended contract matrix, --suite workload for
-sustained scenarios, or --suite all for full regression.
+Use --suite workload_manual for default workload instances, --suite functional
+or --suite workload for all variants of that kind, or --suite all for full regression.
 Port leasing and lane planning remain in the existing parallel runner.
 """
 import sys

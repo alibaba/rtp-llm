@@ -12,13 +12,6 @@ from scenario.loader import ScenarioError
 from traffic.contracts import driver
 
 
-FLOW_PROGRAMS = ("rolling", "non_rolling")
-
-
-def default(case):
-    _cycle(case, "rolling")
-
-
 def rolling(case):
     _cycle(case, "rolling")
 
@@ -105,7 +98,7 @@ from cases.master_ha_failover.metrics import produce as produce_evidence
 from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
 
 CASE = CaseDefinition(
-    builders={"default": default, "rolling": rolling, "non_rolling": non_rolling},
+    builders={"default": rolling, "non_rolling": non_rolling},
     numeric_parameters=NUMERIC_PARAMETERS,
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,

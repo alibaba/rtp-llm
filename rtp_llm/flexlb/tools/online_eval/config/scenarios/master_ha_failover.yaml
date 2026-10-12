@@ -265,8 +265,6 @@ variant_axis:
   fields:
   - program
 variants:
-- id: rolling
-  program: rolling
 - id: non_rolling
   program: non_rolling
 reporting:
