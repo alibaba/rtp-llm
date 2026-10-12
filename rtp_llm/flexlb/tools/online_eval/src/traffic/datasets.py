@@ -45,15 +45,15 @@ def distribution(values):
                    for p in (50, 90, 95, 99)})
 
 
-def statistics(events, *, version=2, block_size=BLOCK):
+def statistics(events, *, version=2):
     """Nearest-rank percentiles; sharing describes the DAG, not cache hits."""
     duration = (events[-1][0] - events[0][0]) / 1000
     counts = [0] * (int(duration) + 1)
     for event in events:
         counts[(event[0] - events[0][0]) // 1000] += 1
-    resolution = 1 if version == 3 else block_size
+    resolution = 1 if version == 3 else BLOCK
     inputs = [event[1] * resolution for event in events]
-    shared = [event[3] * block_size for event in events]
+    shared = [event[3] * BLOCK for event in events]
     return dict(
         scope="captured_requests_only_no_missing_shard_extrapolation",
         request_count=len(events), percentile_method="nearest_rank",
@@ -88,7 +88,7 @@ def build_manifest(path, source=None):
                     attribution=dict(identity=None, status="unconfirmed", evidence=None),
                     model=dict(name=None, status="unconfirmed", evidence=None)),
                 capture_window=dict(window, timezone="Asia/Shanghai"),
-                statistics=statistics(events, version=metadata["version"], block_size=metadata["block_size"]),
+                statistics=statistics(events, version=metadata["version"]),
                 limitations=[("Input lengths are exact; original text and tokens are absent."
                               if metadata["version"] == 3 else
                               "Input lengths are block aligned; original text and tokens are absent."),
@@ -102,8 +102,7 @@ def read_manifest(path):
     sidecar = path.with_suffix(".manifest.json")
     if not sidecar.is_file():
         raise ValueError(f"missing manifest: {sidecar}")
-    from traffic.manifest_contract import normalize
-    manifest = normalize(json.loads(sidecar.read_text()))
+    manifest = json.loads(sidecar.read_text())
     raw = path.read_bytes()
     if manifest.get("bytes") != len(raw) or manifest.get("sha256") != hashlib.sha256(raw).hexdigest():
         raise ValueError(f"{path}: model and manifest bytes/SHA256 disagree")
