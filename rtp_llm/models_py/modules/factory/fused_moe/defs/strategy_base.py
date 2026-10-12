@@ -56,6 +56,9 @@ class MoeStrategy(ABC):
             Whether this configuration can be handled
         """
         checker = ConditionChecker(f"{self.__class__.__name__}.can_handle()")
+        self.check_conditions(checker, config)
+        if not checker.all_passed():
+            return False
 
         # Get Router and Executor types from strategy attributes
         # If get_attributes() fails due to missing dependencies (e.g., deep_ep),
@@ -83,10 +86,6 @@ class MoeStrategy(ABC):
 
         router_cls = attrs.get_router_class()
         executor_cls = attrs.get_executor_class()
-
-        # for CudaNoQuantEpLowLatencyStrategy/CudaFp8PerBlockEpLowLatencyStrategy has same router and executor,
-        # so we need to check Strategy conditions here (like quant_method)
-        self.check_conditions(checker, config)
 
         # Call check_conditions on Router and Executor classes
         if router_cls:
