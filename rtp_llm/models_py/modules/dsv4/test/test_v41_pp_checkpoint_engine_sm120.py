@@ -132,6 +132,7 @@ def run_rank(
     mhc_choices=None,
     diagnostic_mhc=False,
     artifact_directory=None,
+    max_seq_len=256,
 ):
     torch.cuda.set_device(rank)
     torch.set_num_threads(1)
@@ -187,7 +188,9 @@ def run_rank(
             )
             cp_group = collective._get_group(collective.Group.TP)
             with torch.inference_mode():
-                config, kv_config = load_configuration(Path(checkpoint))
+                config, kv_config = load_configuration(
+                    Path(checkpoint), max_seq_len=max_seq_len
+                )
                 owner_choices = {} if diagnostic_mhc else mhc_choices
                 config.deepseek_v41_config.update(owner_choices)
                 parallelism, hw, loader = make_pp_loader(config, kv_config, rank)
@@ -201,7 +204,7 @@ def run_rank(
                 del loaded, loader
                 identities = checkpoint_identities(Path(checkpoint))
                 contract = V41L20Contract(
-                    **identities, max_sequence_length=256, **owner_choices
+                    **identities, max_sequence_length=max_seq_len, **owner_choices
                 )
                 initialize = worker.initialize
                 original_execute = worker._execute_native_pp_engine
@@ -528,6 +531,7 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
         mhc_choices=None,
         diagnostic_mhc=False,
         artifact_directory=None,
+        max_seq_len=256,
     ):
         self.assertEqual(torch.cuda.device_count(), 8)
         rendezvous = Path(directory).resolve() / "world.rendezvous"
@@ -544,6 +548,7 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
                 mhc_choices,
                 diagnostic_mhc,
                 str(artifact_directory) if artifact_directory is not None else None,
+                max_seq_len,
             ),
             nprocs=8,
             join=True,
@@ -564,9 +569,10 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
             flush=True,
         )
 
-    def run_mhc_case(self, *components):
+    def run_mhc_case(self, *components, prompts=None, label_suffix="", max_seq_len=256):
         choices = {f"mhc_{key}_mode": MHC_MODES[key] for key in components}
-        label = "-".join(components) or "default"
+        prompts = prompts or [[3, 4, 5, 6, 7], [8, 9, 10, 11, 12]]
+        label = ("-".join(components) or "default") + label_suffix
         root = Path(os.environ["DSV41_TEST_PP_MHC_ROOT"]).resolve() / label
         root.mkdir(parents=True)
         checkpoint_root = root / "checkpoint"
@@ -585,11 +591,12 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
             self.run_checkpoint(
                 checkpoint_root,
                 cache,
-                [[3, 4, 5, 6, 7], [8, 9, 10, 11, 12]],
+                prompts,
                 full=False,
                 mhc_choices=choices,
                 diagnostic_mhc=kind == "reference",
                 artifact_directory=directory,
+                max_seq_len=max_seq_len,
             )
             self.assertTrue(
                 all(path.name.endswith(".lock") for path in cache.iterdir())
@@ -623,6 +630,8 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
                 {
                     "policy": label,
                     "choices": choices,
+                    "prompts": prompts,
+                    "max_sequence_length": max_seq_len,
                     "rank_phase_checks_exact": 32,
                     "delivered_phase_checks_exact": 4,
                     "tensors_exact": tensors,
@@ -633,6 +642,32 @@ class V41PPCheckpointEngineSM120Test(unittest.TestCase):
             ),
             flush=True,
         )
+
+    def run_boundary_case(self, boundary, selected):
+        lengths = [127, 129] if boundary == 128 else [255, 256]
+        prompts = [
+            [(3 + request * 17 + token) % 127 for token in range(length)]
+            for request, length in enumerate(lengths)
+        ]
+        components = tuple(MHC_MODES) if selected else ()
+        self.run_mhc_case(
+            *components,
+            prompts=prompts,
+            label_suffix=f"-boundary{boundary}",
+            max_seq_len=512,
+        )
+
+    def test_default_mhc_window_boundary(self):
+        self.run_boundary_case(128, False)
+
+    def test_composed_mhc_window_boundary(self):
+        self.run_boundary_case(128, True)
+
+    def test_default_mhc_page_boundary(self):
+        self.run_boundary_case(256, False)
+
+    def test_composed_mhc_page_boundary(self):
+        self.run_boundary_case(256, True)
 
     def test_bounded_default_mhc_equations(self):
         self.run_mhc_case()
