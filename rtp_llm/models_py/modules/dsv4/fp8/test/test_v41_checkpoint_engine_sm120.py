@@ -89,6 +89,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.test.v41_sparse_prefill_reference import
 )
 from rtp_llm.models_py.modules.dsv4.fp8.test.v41_tp8_projection import tp8_projection
 from rtp_llm.models_py.modules.dsv4.hc import delayed as delayed_hc
+from rtp_llm.models_py.modules.dsv4.hc import v41_prenorm
 from rtp_llm.models_py.modules.dsv4.v41_engram_host import (
     _live_leases,
     _locked,
@@ -109,7 +110,7 @@ def canonical_attention_profile(profile):
     # Compact aliases keep the longest checkpoint trace name within 255 bytes.
     return (
         profile[:-2] + "_j"
-        if profile.endswith(("_s", "_f", "_c", "_m", "_n", "_w"))
+        if profile.endswith(("_s", "_f", "_c", "_m", "_n", "_w", "_q"))
         else profile
     )
 
@@ -142,6 +143,20 @@ def checkpoint_post(post, maintained):
         yield
 
 
+@contextmanager
+def checkpoint_prenorm(enabled, maintained):
+    with mhc_fp32(enabled and not maintained), (
+        patch.object(
+            v41_prenorm,
+            "prenorm",
+            side_effect=AssertionError("Maintained prenorm reached default dispatch"),
+        )
+        if maintained
+        else nullcontext()
+    ):
+        yield
+
+
 def run_rank(
     rank,
     port,
@@ -154,9 +169,12 @@ def run_rank(
     maintained_attention=False,
     maintained_collapse=False,
     maintained_post=False,
+    maintained_prenorm=False,
 ):
     torch.set_num_threads(1)
     torch.cuda.set_device(rank)
+    if maintained_prenorm:
+        torch.set_float32_matmul_precision("highest")
     os.environ.update(
         {
             "NCCL_P2P_DISABLE": "1",
@@ -218,6 +236,10 @@ def run_rank(
         maintained_post and not (maintained_collapse and compare_post)
     ):
         raise ValueError("Maintained post requires qualified composed controls")
+    if type(maintained_prenorm) is not bool or (
+        maintained_prenorm and not (maintained_post and compare_mhc)
+    ):
+        raise ValueError("Maintained prenorm requires qualified composed controls")
     if compare_attention and not (compare_projection and compare_block_norm):
         raise ValueError("Attention comparison requires the qualified W13 composition")
     if compare_projection and not compare_router:
@@ -379,7 +401,15 @@ def run_rank(
         if maintained_attention:
             profiles = [
                 base[:-2]
-                + ("_w" if maintained_post else "_n" if maintained_collapse else "_m")
+                + (
+                    "_q"
+                    if maintained_prenorm
+                    else (
+                        "_w"
+                        if maintained_post
+                        else "_n" if maintained_collapse else "_m"
+                    )
+                )
             ]
         if any(len(profile.encode()) > 255 for profile in profiles):
             raise ValueError(
@@ -477,6 +507,8 @@ def run_rank(
                 config.deepseek_v41_config["mhc_collapse_mode"] = "ordered_fp32"
             if maintained_post:
                 config.deepseek_v41_config["mhc_post_mode"] = "ordered_fp32"
+            if maintained_prenorm:
+                config.deepseek_v41_config["mhc_prenorm_mode"] = "fp32"
             parallelism, loader = make_loader(config, kv_config, 8, rank)
             started = time.monotonic()
             weights = loader.load_weights(f"cuda:{rank}")
@@ -590,6 +622,28 @@ def run_rank(
                                 mhc_post_mode="ordered_fp32",
                                 mhc_collapse_mode="ordered_fp32",
                                 diagnostic_post_hook=False,
+                            )
+                        ),
+                        flush=True,
+                    )
+                if maintained_prenorm:
+                    assert model._mhc_prenorm_mode == "fp32"
+                    for layer in model.v4.layers:
+                        assert layer.attn_hc.prenorm_mode == "fp32"
+                        assert layer.ffn_hc.prenorm_mode == "fp32"
+                    model._check_execution_config()
+                    print(
+                        "DSV41_MAINTAINED_PRENORM_OWNER "
+                        + json.dumps(
+                            dict(
+                                rank=rank,
+                                layers=len(model.v4.layers),
+                                full_nas=full,
+                                mhc_prenorm_mode="fp32",
+                                mhc_post_mode="ordered_fp32",
+                                mhc_collapse_mode="ordered_fp32",
+                                diagnostic_prenorm_hook=False,
+                                float32_matmul_precision=torch.get_float32_matmul_precision(),
                             )
                         ),
                         flush=True,
@@ -819,12 +873,17 @@ def run_rank(
                         if maintained_post:
                             post_metadata.pop("mhc_post_reference", None)
                             post_metadata["mhc_post_mode"] = "ordered_fp32"
+                        if maintained_prenorm:
+                            post_metadata["mhc_prenorm_mode"] = "fp32"
+                            post_metadata["float32_matmul_precision"] = (
+                                torch.get_float32_matmul_precision()
+                            )
                 with (
                     capture_model_boundaries(model.v4) if tracing else nullcontext({})
                 ) as snapshots, tp8_projection(
                     profile.startswith("tp8_projection")
-                ), mhc_fp32(
-                    "mhc_fp32" in profile
+                ), checkpoint_prenorm(
+                    "mhc_fp32" in profile, maintained_prenorm
                 ), compressor_bf16(
                     profile.endswith("compressor_bf16") or recipe,
                     fused=recipe,
@@ -1167,6 +1226,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         maintained_attention=False,
         maintained_collapse=False,
         maintained_post=False,
+        maintained_prenorm=False,
     ):
         self.assertEqual(torch.cuda.device_count(), 8)
         with socket.socket() as sock:
@@ -1185,6 +1245,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 maintained_attention,
                 maintained_collapse,
                 maintained_post,
+                maintained_prenorm,
             ),
             nprocs=8,
             join=True,
@@ -1198,6 +1259,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         maintained_attention=False,
         maintained_collapse=False,
         maintained_post=False,
+        maintained_prenorm=False,
     ):
         torch.manual_seed(41990)
         with tempfile.TemporaryDirectory() as temporary:
@@ -1231,6 +1293,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 maintained_attention=maintained_attention,
                 maintained_collapse=maintained_collapse,
                 maintained_post=maintained_post,
+                maintained_prenorm=maintained_prenorm,
             )
 
     def test_bounded_checkpoint_cold_engine(self):
@@ -1265,6 +1328,22 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
     def test_bounded_checkpoint_maintained_post(self):
         self.run_bounded_checkpoint(
             9, maintained_attention=True, maintained_collapse=True, maintained_post=True
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("DSV41_TEST_COMPARE_ATTENTION_LAYOUT") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_COLLAPSE") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC_POST") == "1"
+        and os.environ.get("DSV41_TEST_COMPARE_MHC") == "1",
+        "maintained prenorm requires the qualified composed controls",
+    )
+    def test_bounded_checkpoint_maintained_prenorm(self):
+        self.run_bounded_checkpoint(
+            9,
+            maintained_attention=True,
+            maintained_collapse=True,
+            maintained_post=True,
+            maintained_prenorm=True,
         )
 
     def test_two_page_bounded_checkpoint_cold_decode(self):
@@ -1328,6 +1407,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
         maintained_attention=False,
         maintained_collapse=False,
         maintained_post=False,
+        maintained_prenorm=False,
     ):
         from transformers import AutoTokenizer
 
@@ -1435,6 +1515,7 @@ class V41CheckpointEngineSM120Test(unittest.TestCase):
                 maintained_attention=maintained_attention,
                 maintained_collapse=maintained_collapse,
                 maintained_post=maintained_post,
+                maintained_prenorm=maintained_prenorm,
             )
 
 
