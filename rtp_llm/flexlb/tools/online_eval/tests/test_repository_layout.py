@@ -66,7 +66,7 @@ class RepositoryLayoutTest(unittest.TestCase):
         from scenario.catalog import handlers
 
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )

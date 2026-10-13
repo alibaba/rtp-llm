@@ -42,6 +42,12 @@ class RuntimeContext(ResourceScope):
         self.report_events.append(event)
         return dict(event)
 
+    def start_observation(self):
+        """Record the execution event before handing its anchor to the clock."""
+        from runtime.observation import ObservationClock
+        event = self.record_event("observation_start")
+        return ObservationClock(event["epoch_s"], event["monotonic_s"])
+
     def resolve(self, value):
         if isinstance(value, dict) and "$ref" in value:
             if set(value) != {"$ref"}:

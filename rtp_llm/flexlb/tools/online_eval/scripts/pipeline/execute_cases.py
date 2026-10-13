@@ -15,7 +15,7 @@ from typing import IO
 
 from runtime.network import PROBE_BIND_HOST, port_in_use
 from scripts.pipeline.selection import add_selection_arguments, resolve_selection
-from runtime.resource_plan import (
+from adapters.java_mock_resources import (
     MOCK_WINDOW_LAST,
     child_port_env,
     port_intervals,

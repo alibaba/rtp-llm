@@ -180,7 +180,7 @@ class WorkloadPolicy:
             )
 
         ctx.add_cleanup("prometheus-" + str(ctx.env_epoch), stop_source)
-        from runtime.startup import startup_phase
+        from artifacts.startup import startup_phase
         with startup_phase(ctx.artifact_dir, "monitoring", ctx.stage_deadline):
             source.start(deadline=ctx.stage_deadline)
         self.monitors[ctx.env_epoch] = source

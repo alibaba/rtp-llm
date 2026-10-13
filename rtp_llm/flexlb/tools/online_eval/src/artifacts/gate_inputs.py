@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 
@@ -37,3 +38,19 @@ def compact_flow(snapshot):
     result["records"] = [{k: v for k, v in row.items() if k in terminal}
                          for row in snapshot["records"]]
     return result
+
+
+def evidence_origin(evidence):
+    """Live evidence has an explicit anchor; historical imports have one legal adapter."""
+    if "clock" in evidence:
+        value = evidence["clock"]["origin_epoch_s"]
+    elif "observation_origin_epoch_s" in evidence:
+        value = evidence["observation_origin_epoch_s"]
+    else:
+        rows = evidence["samples"]
+        if not rows:
+            raise ValueError("historical evidence lacks a clock anchor and samples")
+        value = rows[0]["epoch_s"] - rows[0]["t"]
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError("evidence origin must be finite epoch seconds")
+    return value

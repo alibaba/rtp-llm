@@ -84,7 +84,7 @@ def _ha_start(ctx, params, deadline):
         require_process(ctx, target)
     directory = ctx.artifact_dir / f"ha-client-{ctx.resource_count}"
     directory.mkdir(parents=True, exist_ok=True)
-    from runtime.startup import startup_phase
+    from artifacts.startup import startup_phase
     with startup_phase(ctx.artifact_dir, 'traffic/input', deadline):
         client = HaReplayClient(
             ctx.backend.manager,
@@ -114,7 +114,7 @@ def _ha_start(ctx, params, deadline):
             ),
         )
     def export_client(value, profile):
-        from runtime.resource_evidence import ResourceEvidence
+        from case_api.extension_contracts import ResourceEvidence
         snapshot = value.evidence_snapshot()
         manifest = snapshot if profile == "diagnostic" else {
             k: v for k, v in snapshot.items() if k != "records"}

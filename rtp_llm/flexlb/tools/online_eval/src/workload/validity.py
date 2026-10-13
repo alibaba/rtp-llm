@@ -162,7 +162,7 @@ def analyze_report(directory, result, evidence):
     if missing:
         result["workload"]["runtime_validity"] = "INVALID"
         result["workload"]["missing_telemetry"] = missing
-    from runtime.outcome import apply_outcome
+    from scenario.outcome import apply_outcome
     apply_outcome(result)
     traffic = []
     iterations = []

@@ -10,7 +10,8 @@ import pytest
 
 from scenario.program_compiler import configure_program
 from input_contract import mapping_fields
-from runtime.observation import ObservationClock, SampleBudget, evidence_origin, poll_samples
+from runtime.observation import SampleBudget, poll_samples
+from artifacts.gate_inputs import evidence_origin
 from scenario.loader import ScenarioError, load_document
 from scenario.runtime import Deadline, RuntimeContext
 
@@ -100,9 +101,9 @@ def test_monotonic_anchor_survives_wall_clock_jump_and_poll_uses_virtual_time(tm
     value = [0]
     ctx = RuntimeContext({}, None, tmp_path, lambda: value[0], lambda dt: value.__setitem__(0, value[0]+dt),
                          wall_clock=lambda: 1000 if value[0] == 0 else 500)
-    clock = ObservationClock.start(ctx)
+    clock = ctx.start_observation()
     deadline = Deadline(10, ctx.clock, ctx.sleeper)
-    rows = list(poll_samples(deadline, 1, lambda: clock.stamp(ctx), until=3, immediate=True))
+    rows = list(poll_samples(deadline, 1, lambda: clock.stamp(ctx.clock()), until=3, immediate=True))
     assert [row["epoch_s"] for row in rows] == [1000, 1001, 1002, 1003]
     assert [row["elapsed_s"] for row in rows] == [0, 1, 2, 3]
     assert ctx.report_events[0]["epoch_s"] == clock.origin_epoch_s

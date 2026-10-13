@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from schema_contract import matches_schema
 from typing import Mapping, Sequence
 
-from runtime.resource_plan import JavaMockBudget
+from adapters.java_mock_resources import JavaMockBudget
 
 
 class InstancePlanError(ValueError):

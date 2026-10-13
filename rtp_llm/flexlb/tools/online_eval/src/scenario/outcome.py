@@ -49,6 +49,16 @@ class RunOutcome:
             return "FINALIZING"
         return self.gate
 
+    def error_detail(self, check_statuses):
+        """Explain invalid evidence consistently for execution and JSON results."""
+        if self.gate == "INVALID":
+            return ("no effective checks executed" if not any(
+                status in EFFECTIVE_CHECK_STATUSES for status in check_statuses)
+                else "check evidence is invalid")
+        if self.validity == "INVALID":
+            return "workload evidence is invalid; inspect workload diagnostics"
+        return None
+
     @classmethod
     def evaluate(cls, evidence: OutcomeEvidence):
         execution = ("TIMEOUT" if "TIMEOUT" in evidence.error_statuses
@@ -90,10 +100,9 @@ def apply_outcome(result):
     outcome = RunOutcome.from_result(result)
     result["outcome"] = asdict(outcome)
     result["status"] = outcome.status
-    if outcome.gate == "INVALID" and not result.get("error"):
-        result["error"] = "no effective checks executed" if not any(
-            check["status"] in EFFECTIVE_CHECK_STATUSES
-            for stage in result["stages"] for check in stage["checks"]) else "check evidence is invalid"
-    if outcome.validity == "INVALID" and not result.get("error"):
-        result["error"] = "workload evidence is invalid; inspect workload diagnostics"
+    if not result.get("error"):
+        detail = outcome.error_detail(
+            check["status"] for stage in result["stages"] for check in stage["checks"])
+        if detail is not None:
+            result["error"] = detail
     return outcome

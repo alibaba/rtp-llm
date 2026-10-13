@@ -7,7 +7,7 @@ from scenario.plan import CompiledInstance
 
 from flexlb_cfg import PROFILES
 
-from runtime.resource_plan import VICTIM_OFFSETS
+from adapters.java_mock_resources import VICTIM_OFFSETS
 from scenario.validation import fail, mapping, identifier, number, names
 from scenario.stage_compiler import OUTPUTS, stages
 from scenario.execution_policy import EXECUTION_FIELDS, EXECUTION_BUDGETS

@@ -8,7 +8,7 @@ from artifacts.gate_inputs import compact_flow, new_evidence
 from artifacts.gate import gate_check
 from cases.master_performance.inputs import engine_roles
 from file_digest import sha256_file
-from runtime.observation import ObservationClock, SampleBudget, poll_samples
+from runtime.observation import SampleBudget, poll_samples
 
 
 def observe_validate(params, plan):
@@ -37,7 +37,7 @@ def provenance(ctx, flow):
 def observe(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
     c = for_profile(p["criteria"], ctx.instance["profile"], p["gate_input"])
-    clock = ObservationClock.start(ctx)
+    clock = ctx.start_observation()
     origin = clock.origin_epoch_s * 1000
     lo = origin + c["warmup_s"] * 1000
     hi = lo + c["measure_s"] * 1000
@@ -52,7 +52,7 @@ def observe(ctx, p, deadline):
         evidence["window_declarations"] = p["observation"]["windows"]
         def sample():
             state = flow.control_status()
-            row = dict(clock.stamp(ctx), state=state.get("state"),
+            row = dict(clock.stamp(ctx.clock()), state=state.get("state"),
                        process_returncode=state.get("process_returncode"))
             row["epoch_ms"] = row["epoch_s"] * 1000
             budget.append(row)

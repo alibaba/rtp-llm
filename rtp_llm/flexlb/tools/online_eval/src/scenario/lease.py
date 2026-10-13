@@ -4,7 +4,7 @@ import os
 
 from schema_contract import matches_schema
 
-from runtime.resource_plan import MOCK_WINDOW_LAST, WORKER_PORT_CAPACITY
+from adapters.java_mock_resources import MOCK_WINDOW_LAST, WORKER_PORT_CAPACITY
 from scenario.loader import ScenarioError, load_document
 
 

@@ -4,12 +4,17 @@ import json
 import math
 from dataclasses import dataclass
 
-from input_contract import mapping_fields
-
 
 def capture_limits(data, path):
-    mapping_fields(data, {"max_samples", "max_bytes"}, path,
-                   required={"max_samples", "max_bytes"})
+    if not isinstance(data, dict):
+        raise ValueError(f"{path}: expected mapping")
+    fields = {"max_samples", "max_bytes"}
+    extra = set(data) - fields
+    if extra:
+        raise ValueError(f"{path}: unknown configuration fields {sorted(extra)}")
+    missing = fields - set(data)
+    if missing:
+        raise ValueError(f"missing YAML parameter {path}.{sorted(missing)[0]}")
     for field in data:
         if type(data[field]) is not int or data[field] < 1:
             raise ValueError(f"{path}.{field}: positive integer required")
@@ -39,13 +44,8 @@ class ObservationClock:
     origin_epoch_s: float
     origin_monotonic_s: float
 
-    @classmethod
-    def start(cls, ctx):
-        event = ctx.record_event("observation_start")
-        return cls(event["epoch_s"], event["monotonic_s"])
-
-    def stamp(self, ctx):
-        elapsed = ctx.clock() - self.origin_monotonic_s
+    def stamp(self, monotonic_s):
+        elapsed = monotonic_s - self.origin_monotonic_s
         return dict(elapsed_s=elapsed, epoch_s=self.origin_epoch_s + elapsed,
                     monotonic_s=self.origin_monotonic_s + elapsed)
 
@@ -67,23 +67,3 @@ def poll_samples(deadline, interval_s, sample, *, until=None, immediate=False):
             deadline.sleep(wait)
         first = False
         yield sample()
-
-
-def evidence_origin(evidence):
-    """Live evidence has an explicit anchor; historical imports have one legal adapter."""
-    if "clock" in evidence:
-        value = evidence["clock"]["origin_epoch_s"]
-    elif "observation_origin_epoch_s" in evidence:
-        value = evidence["observation_origin_epoch_s"]
-    else:
-        rows = evidence["samples"]
-        if not rows:
-            raise ValueError("historical evidence lacks a clock anchor and samples")
-        value = rows[0]["epoch_s"] - rows[0]["t"]
-    if type(value) not in (int, float) or not math.isfinite(value):
-        raise ValueError("evidence origin must be finite epoch seconds")
-    return value
-
-
-def verdict_status(verdict):
-    return {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[verdict]

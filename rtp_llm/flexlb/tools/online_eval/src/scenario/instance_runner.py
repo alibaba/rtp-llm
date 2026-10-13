@@ -32,10 +32,11 @@ from scenario.instance_plan import (
     order_instances,
     select_instances,
 )
-from runtime.resource_plan import ResourcePlanError, plan_lane_leases
+from runtime.resource_plan import ResourcePlanError
+from adapters.java_mock_resources import plan_lane_leases
 
 SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
-from runtime.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
+from scenario.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
 
 
 class ChildProcesses:

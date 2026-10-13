@@ -5,7 +5,7 @@ import hashlib
 import json
 import threading
 
-from runtime.requests import ClientRecords, request_success
+from adapters.requests import ClientRecords, request_success
 from runtime.deadline import StageTimeout
 
 

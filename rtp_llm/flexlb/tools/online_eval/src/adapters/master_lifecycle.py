@@ -17,7 +17,8 @@ from adapters.environment_config import MasterSpec
 from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
 from adapters.master_artifact import configure_master
 from runtime.network import http_post_json, port_accepting
-from runtime.startup import startup_deadline, wait_ready, startup_phase
+from runtime.startup import startup_deadline, wait_ready
+from artifacts.startup import startup_phase
 from runtime.paths import API_JAR
 from runtime.process import ManagedProcess, ProcessOps
 

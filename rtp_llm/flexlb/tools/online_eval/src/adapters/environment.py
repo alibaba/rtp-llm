@@ -20,12 +20,13 @@ from adapters.environment_config import (
     MasterSpec,
 )
 from runtime.java_runtime import resolve_java21
-from runtime.startup import startup_deadline, wait_ready, startup_phase
+from runtime.startup import startup_deadline, wait_ready
+from artifacts.startup import startup_phase
 from adapters.master_lifecycle import MasterLifecycle
 from runtime.network import PROBE_BIND_HOST, port_accepting, port_in_use, wait_for, wait_for_port
 from runtime.paths import FLEXLB_DIR, MOCK_JAR
 from runtime.process import ManagedProcess, ProcessOps
-from runtime.resource_plan import VICTIM_OFFSETS
+from adapters.java_mock_resources import VICTIM_OFFSETS
 from adapters.zk_helper import (
     ZK_LAUNCH_CMD_ENV,
     ZK_READY_TIMEOUT_S,

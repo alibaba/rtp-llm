@@ -5,8 +5,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import json
 
-from analysis.checks import CheckResult, EFFECTIVE_CHECK_STATUSES
-from runtime.outcome import RunOutcome, OutcomeEvidence
+from analysis.checks import CheckResult
+from scenario.outcome import RunOutcome, OutcomeEvidence
 from scenario.plan import CompiledInstance, json_document
 
 
@@ -139,12 +139,10 @@ class RunResult:
             runtime_validity=self.workload.runtime_validity if self.workload else "VALID",
             delivery_statuses=tuple(row.status.value for row in self.finalization),
         ))
-        gate, validity = self.outcome.gate, self.outcome.validity
-        if gate == "INVALID" and not self.error:
-            self.error = ("no effective checks executed" if not any(check.status in EFFECTIVE_CHECK_STATUSES
-                          for check in checks) else "check evidence is invalid")
-        if validity == "INVALID" and not self.error:
-            self.error = "workload evidence is invalid; inspect workload diagnostics"
+        if not self.error:
+            detail = self.outcome.error_detail(check.status for check in checks)
+            if detail is not None:
+                self.error = detail
         return self.outcome
 
     def absorb_policy_result(self, value):

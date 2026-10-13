@@ -1,6 +1,6 @@
 """Present frozen cache-gate results and published metrics; never adjudicate."""
 
-from runtime.observation import evidence_origin
+from artifacts.gate_inputs import evidence_origin
 
 import hashlib
 import json

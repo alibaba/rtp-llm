@@ -127,7 +127,6 @@ class PerformanceGateTest(unittest.TestCase):
         self.assertEqual(analyze(shuffled), actual)
 
     def test_measurement_events_use_gate_boundaries_not_late_poll_times(self):
-        from types import SimpleNamespace
         from cases.master_performance.actions import observe
         recorded = []
         def record(identity, *, timestamp=None):
@@ -135,12 +134,14 @@ class PerformanceGateTest(unittest.TestCase):
             recorded.append(event)
             return event
         with tempfile.TemporaryDirectory() as d:
-            ctx = SimpleNamespace(
-                artifact_dir=Path(d), env_epoch=1,
-                instance=dict(id="master_performance::default::batch-window", profile="batch-window"),
-                record_event=record, resource=lambda *args: mock.Mock(),
-                register_resource=lambda kind, value, **kwargs: value,
-            )
+            from scenario.context import RuntimeContext
+            ctx = RuntimeContext(
+                dict(id="master_performance::default::batch-window", profile="batch-window"),
+                None, Path(d), lambda: 1, lambda _: None, wall_clock=lambda: 100)
+            ctx.env_epoch = 1
+            ctx.record_event = record
+            ctx.resource = lambda *args: mock.Mock()
+            ctx.register_resource = lambda kind, value, **kwargs: value
             c = dict(evidence()["criteria"], warmup_s=5, measure_s=30)
             rows = [dict(epoch_ms=t, state="SENDING", process_returncode=None)
                     for t in (100000, 106000, 135100)]
@@ -155,18 +156,16 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(events["measurement_ended"]["monotonic_s"], 36)
 
     def test_observe_freezes_run_identity_even_when_provenance_collection_fails(self):
-        from types import SimpleNamespace
         from cases.master_performance.actions import observe
 
         identity = "master_performance::default::single-nonbatch"
         with tempfile.TemporaryDirectory() as d:
-            ctx = SimpleNamespace(
-                artifact_dir=Path(d), env_epoch=2, instance=dict(id=identity, profile="single-nonbatch"),
-                clock=lambda: 1, wall_clock=lambda: 100,
-                record_event=lambda identity: dict(id=identity, epoch_s=100, monotonic_s=1),
-                resource=lambda name, kind: mock.Mock(),
-                register_resource=lambda kind, value, **kwargs: value,
-            )
+            from scenario.context import RuntimeContext
+            ctx = RuntimeContext(dict(id=identity, profile="single-nonbatch"), None, Path(d),
+                                 lambda: 1, lambda _: None, wall_clock=lambda: 100)
+            ctx.env_epoch = 2
+            ctx.resource = lambda name, kind: mock.Mock()
+            ctx.register_resource = lambda kind, value, **kwargs: value
             with mock.patch("cases.master_performance.actions.provenance",
                             side_effect=ValueError("artifact missing")):
                 observe(ctx, dict(flow="flow", criteria=evidence()["criteria"], gate_input=None), mock.Mock())
@@ -570,7 +569,7 @@ class PerformanceGateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate(c)
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (300, 301, 302)), \
-             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (300, 301, 302)):
+             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (300, 301, 302)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios/master_performance.yaml"),
                 handlers=handlers(),

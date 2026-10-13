@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from adapters.load_client import LOAD_CLIENT_ENV_VARS
-from runtime.requests import ClientRecords, request_success
+from adapters.requests import ClientRecords, request_success
 from adapters.java_client import ClientOps
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -21,7 +21,7 @@ class SharedRuntimeTests(unittest.TestCase):
             [
                 sys.executable,
                 "-c",
-                "import sys; import runtime.requests; "
+                "import sys; import adapters.requests; "
                 'assert not any(k.startswith("flexlb_test_framework") for k in sys.modules)',
             ],
             cwd=ROOT,
