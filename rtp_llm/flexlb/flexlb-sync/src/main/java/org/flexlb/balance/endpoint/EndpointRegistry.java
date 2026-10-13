@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
 @Component
 public class EndpointRegistry {
@@ -136,7 +136,12 @@ public class EndpointRegistry {
         EnumMap<RoleType, ConcurrentHashMap<String, WorkerEndpoint>> maps =
                 new EnumMap<>(RoleType.class);
         for (RoleType role :
-                List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION, RoleType.VIT)) {
+                List.of(
+                        RoleType.PREFILL,
+                        RoleType.DECODE,
+                        RoleType.PDFUSION,
+                        RoleType.ENCODER,
+                        RoleType.VIT)) {
             maps.put(role, new ConcurrentHashMap<>());
         }
         return maps;
@@ -698,12 +703,13 @@ public class EndpointRegistry {
             case PREFILL, PDFUSION ->
                     new PrefillEndpoint(
                             status,
-                            configService.loadBalanceConfig(),
+                            configService::loadBalanceConfig,
                             deliveryStrategy,
                             endpointEvents,
                             reporter,
                             placementAvailability);
             case DECODE -> new DecodeEndpoint(status, endpointEvents, placementAvailability);
+            case ENCODER -> new EncoderEndpoint(status, endpointEvents);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");
         };
@@ -711,12 +717,12 @@ public class EndpointRegistry {
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
         try {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
+            reporter.prepareEndpointMetrics(roleType.name(), status.getMetricIpPort());
         } catch (RuntimeException telemetryFailure) {
             Logger.warn(
                     "Endpoint metric preparation failed: role={}, engine={}",
                     roleType,
-                    status.getIp(),
+                    status.getMetricIpPort(),
                     telemetryFailure);
         }
     }
@@ -913,7 +919,7 @@ public class EndpointRegistry {
      * @param retainForSchedulerCleanup current directory lookup, called under endpoint locks;
      *                                  must not acquire request locks or use a historical snapshot
      */
-    public void evictExpiredOrphans(long ttlMs, LongPredicate retainForSchedulerCleanup) {
+    public void evictExpiredOrphans(long ttlMs, Predicate<String> retainForSchedulerCleanup) {
         endpoints(RoleType.PREFILL)
                 .forEach(
                         (endpoint, worker) -> {

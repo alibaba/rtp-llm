@@ -196,7 +196,7 @@ final class RequestCompletionPublisher implements AutoCloseable {
                         org.flexlb.dao.route.RoleType.PREFILL.name(),
                         delivery.item().prefillEp() == null
                                 ? ""
-                                : delivery.item().prefillEp().getIp(),
+                                : delivery.item().prefillEp().getStatus().getMetricIpPort(),
                         Math.max(
                                 0L,
                                 delivery.item().ctx().getAckAtMs()

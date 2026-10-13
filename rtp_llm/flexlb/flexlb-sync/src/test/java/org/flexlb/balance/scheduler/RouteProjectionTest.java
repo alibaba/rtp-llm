@@ -140,7 +140,7 @@ class RouteProjectionTest {
                 work(
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        1L, WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
+                                        "1", WorkSnapshot.Phase.ENGINE_RUNNING, 100L)),
                         List.of(),
                         0L);
 
@@ -189,15 +189,16 @@ class RouteProjectionTest {
         WorkSnapshot committed =
                 work(
                         List.of(
-                                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        2L, WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                        "1", WorkSnapshot.Phase.COMMITTED, 10L),
                                 new WorkSnapshot.RequestWork(
-                                        3L, WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
+                                        "2", WorkSnapshot.Phase.ENGINE_QUEUED, 20L),
+                                new WorkSnapshot.RequestWork(
+                                        "3", WorkSnapshot.Phase.ENGINE_RUNNING, 30L)),
                         List.of(
                                 new WorkSnapshot.BatchWork(
                                         7L,
-                                        List.of(4L, 5L),
+                                        List.of("4", "5"),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         40L)),
                         0L);
@@ -286,9 +287,9 @@ class RouteProjectionTest {
     @Test
     void endpointCacheHitChangesServiceAndCandidateMetadata() {
         RouteProjection.Probe coldProbe =
-                new RouteProjection.Probe(99L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
+                new RouteProjection.Probe("99", 50, NOW_MS, Long.MAX_VALUE, 1_000L, 0L, 123L);
         RouteProjection.Probe warmProbe =
-                new RouteProjection.Probe(100L, 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
+                new RouteProjection.Probe("100", 50, NOW_MS, Long.MAX_VALUE, 1_000L, 800L, 900L);
 
         RouteProjection.Candidate cold =
                 project(
@@ -395,7 +396,7 @@ class RouteProjectionTest {
                         List.of(
                                 new WorkSnapshot.BatchWork(
                                         7L,
-                                        List.of(1L),
+                                        List.of("1"),
                                         WorkSnapshot.Phase.ENGINE_RUNNING,
                                         OptionalLong.empty())),
                         0L);
@@ -603,7 +604,7 @@ class RouteProjectionTest {
                         work(
                                 List.of(
                                         new WorkSnapshot.RequestWork(
-                                                99L, WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
+                                                "99", WorkSnapshot.Phase.ENGINE_RUNNING, 20L)),
                                 List.of(),
                                 0L),
                         TOKEN_EVALUATOR,

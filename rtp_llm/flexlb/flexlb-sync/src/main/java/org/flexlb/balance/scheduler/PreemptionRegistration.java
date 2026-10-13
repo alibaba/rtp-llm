@@ -17,7 +17,7 @@ import java.util.concurrent.CompletionStage;
  */
 public final class PreemptionRegistration {
     private final RequestSlot owner;
-    private final long requestId;
+    private final String requestId;
     private final long attemptToken;
     private final String detail;
     private final CompletableFuture<VictimTerminal> terminal = new CompletableFuture<>();
@@ -28,7 +28,7 @@ public final class PreemptionRegistration {
     private boolean pendingDeliveryConfirmation;
     private long pendingConfirmationBatchId;
 
-    PreemptionRegistration(RequestSlot owner, long requestId, long attemptToken, String detail) {
+    PreemptionRegistration(RequestSlot owner, String requestId, long attemptToken, String detail) {
         this.owner = owner;
         this.requestId = requestId;
         this.attemptToken = attemptToken;
@@ -47,7 +47,7 @@ public final class PreemptionRegistration {
         return owner.completePreemption(this, detail);
     }
 
-    public long requestId() {
+    public String requestId() {
         return requestId;
     }
 
