@@ -9,6 +9,7 @@ from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.model_desc.qwen3 import Qwen3DecoderLayer
 from rtp_llm.models_py.modules import AttnImplFactory, Embedding, LinearFactory, RMSNorm
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -91,9 +92,14 @@ class Qwen2MtpModel(GptModelBase):
                 hidden_states,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
         hidden_states = self.norm(hidden_states)
-        return PyModelOutputs(hidden_states)
+        return finish_nan_check(
+            PyModelOutputs(hidden_states),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )
 
 
 __all__ = [

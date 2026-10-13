@@ -5,6 +5,8 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -16,6 +18,54 @@ namespace rtp_llm {
 // depending on torch's registered CustomClassHolder type.
 class CudaGraphTestRunner {
 public:
+    static py::list dispatchNanMetadata(const torch::Tensor& records) {
+        ModelConfig model_config;
+        model_config.max_seq_len = 32;
+        model_config.vocab_size  = 64;
+        std::list<GenerateStreamPtr> streams;
+        for (int64_t row = 0; row < records.size(0); ++row) {
+            auto input                             = std::make_shared<GenerateInput>();
+            input->generate_config                 = std::make_shared<GenerateConfig>();
+            input->generate_config->max_new_tokens = 4;
+            input->generate_config->is_streaming   = true;
+            input->generate_config->aux_info       = false;
+            input->begin_time_us                   = autil::TimeUtility::currentTimeInMicroSeconds();
+            input->input_ids                       = torch::tensor({1, 2, 3}, torch::kInt32);
+            auto stream                            = std::make_shared<NormalGenerateStream>(
+                input, model_config, RuntimeConfig{}, ResourceContext{}, nullptr);
+            stream->setIsContextStream(false);
+            stream->reportEvent(StreamEvents::CanRun);
+            stream->moveToNext();
+            streams.push_back(std::move(stream));
+        }
+        MergedOutput outputs;
+        outputs.model_output.nan_metadata = records;
+        outputs.sampler_output.token_ids  = torch::full({records.size(0), 1}, 7, torch::kInt32);
+        NormalOutputDispatcher dispatcher;
+        auto                   status = dispatcher.dispatch(StreamGroups(streams), outputs);
+        RTP_LLM_CHECK_WITH_INFO(status.ok(), "%s", status.ToString().c_str());
+
+        py::list results;
+        for (const auto& stream : streams) {
+            auto normal_stream = std::static_pointer_cast<NormalGenerateStream>(stream);
+            auto output        = normal_stream->nextOutput(/*wait_timeout_ms=*/100);
+            RTP_LLM_CHECK_WITH_INFO(output.ok(), "dispatcher did not produce an output");
+            const auto& generated = output.value().generate_outputs.front();
+            py::dict    result;
+            result["finished"]      = generated.finished;
+            result["has_error"]     = stream->hasError();
+            result["output_tokens"] = generated.output_ids.numel();
+            result["nan_info"]      = py::none();
+            if (generated.aux_info.nan_info.has_value()) {
+                const auto& info = *generated.aux_info.nan_info;
+                result["nan_info"] =
+                    py::make_tuple(info.layer_id, info.stage, info.token_index, info.element_index, info.kind);
+            }
+            results.append(std::move(result));
+        }
+        return results;
+    }
+
     static std::vector<int64_t> topologyWidths(const std::vector<uint32_t>& spans,
                                                const std::vector<uint32_t>& kernel_spans,
                                                const std::vector<int>&      types,
@@ -47,10 +97,12 @@ public:
                       int64_t                      hidden_size,
                       std::vector<std::string>     group_tags,
                       std::optional<torch::Tensor> position_encoding,
-                      std::optional<torch::Tensor> token_type_embedding) {
+                      std::optional<torch::Tensor> token_type_embedding,
+                      bool                         check_nan) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
+        params.check_nan                    = check_nan;
         params.enable_cuda_graph_debug_mode = true;
         params.is_prefill_cuda_graph_mode   = true;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
@@ -82,12 +134,14 @@ public:
                                  std::vector<std::string>     group_tags,
                                  int64_t                      position_id_len_factor,
                                  std::optional<torch::Tensor> position_encoding,
-                                 std::optional<torch::Tensor> token_type_embedding) {
+                                 std::optional<torch::Tensor> token_type_embedding,
+                                 bool                         check_nan) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
         params.enable_cuda_graph_debug_mode = true;
         params.role                         = CudaGraphRole::GENERATION_PREFILL;
+        params.check_nan                    = check_nan;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
 
         params.num_tokens_per_bs                          = 1;
@@ -118,12 +172,14 @@ public:
                      std::vector<std::string> group_tags,
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
-                     int64_t                  position_id_len_factor) {
+                     int64_t                  position_id_len_factor,
+                     bool                     check_nan) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
         params.enable_cuda_graph_debug_mode = false;
         params.is_prefill_cuda_graph_mode   = false;
+        params.check_nan                    = check_nan;
         params.max_seq_len                  = static_cast<int>(max_seq_len);
 
         params.input_hidden_size          = static_cast<size_t>(hidden_size);
@@ -238,6 +294,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
     py::register_exception<DirtyCudaGraphCaptureError>(m, "DirtyCudaGraphCaptureError", PyExc_RuntimeError);
     py::class_<CudaGraphTestRunner>(m, "CudaGraphRunner")
         .def(py::init<>())
+        .def_static("dispatch_nan_metadata", &CudaGraphTestRunner::dispatchNanMetadata)
         .def_static("topologyWidths", &CudaGraphTestRunner::topologyWidths)
         .def("init_prefill",
              &CudaGraphTestRunner::init_prefill,
@@ -247,9 +304,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_block_table_width"),
              py::arg("prefill_capture_seq_lens"),
              py::arg("hidden_size"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("position_encoding")     = py::none(),
-             py::arg("token_type_embedding")  = py::none())
+             py::arg("group_tags")           = std::vector<std::string>{},
+             py::arg("position_encoding")    = py::none(),
+             py::arg("token_type_embedding") = py::none(),
+             py::arg("check_nan")            = false)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -257,10 +315,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("max_seq_len"),
              py::arg("kernel_block_table_width"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")            = std::vector<std::string>{},
-             py::arg("is_target_verify")      = false,
-             py::arg("num_tokens_per_bs")     = 1,
-             py::arg("position_id_len_factor") = 0)
+             py::arg("group_tags")             = std::vector<std::string>{},
+             py::arg("is_target_verify")       = false,
+             py::arg("num_tokens_per_bs")      = 1,
+             py::arg("position_id_len_factor") = 0,
+             py::arg("check_nan")              = false)
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),
@@ -272,7 +331,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("group_tags")             = std::vector<std::string>{},
              py::arg("position_id_len_factor") = 0,
              py::arg("position_encoding")      = py::none(),
-             py::arg("token_type_embedding")   = py::none())
+             py::arg("token_type_embedding")   = py::none(),
+             py::arg("check_nan")              = false)
         .def("updateBlockTables", &CudaGraphTestRunner::updateBlockTables)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("canPrepare", &CudaGraphTestRunner::canPrepare)

@@ -47,6 +47,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    NumericNanInfo,
     RoleAddr,
 )
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
@@ -863,6 +864,7 @@ def trans_output(
         and config.has_num_beams()
         and config.num_return_sequences > 1
         and not aux_info_flag
+        and not any(aux.HasField("nan_info") for aux in output_pb.aux_info)
         and not stream_state.cached_logits_dict
         and all(output_pb.finished)
         and all_output_ids is not None
@@ -955,7 +957,9 @@ def trans_output(
         output_py = GenerateOutput()
         output_py.finished = output_pb.finished[i]
         current_aux_info = None
-        if aux_info_flag and len(output_pb.aux_info) > i:
+        if len(output_pb.aux_info) > i and (
+            aux_info_flag or output_pb.aux_info[i].HasField("nan_info")
+        ):
             aux_info_pb = output_pb.aux_info[i]
             current_aux_info = AuxInfo(
                 cost_time=aux_info_pb.cost_time_us / 1000.0,
@@ -993,6 +997,15 @@ def trans_output(
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )
+            if aux_info_pb.HasField("nan_info"):
+                nan_info = aux_info_pb.nan_info
+                current_aux_info.nan_info = NumericNanInfo(
+                    layer_id=nan_info.layer_id,
+                    stage=nan_info.stage,
+                    token_index=nan_info.token_index,
+                    element_index=nan_info.element_index,
+                    kind=nan_info.kind,
+                )
             if aux_info_pb.HasField("cum_log_probs"):
                 current_aux_info.cum_log_probs = trans_tensor(
                     aux_info_pb.cum_log_probs

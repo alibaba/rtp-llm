@@ -50,6 +50,13 @@ struct PyWrappedModelTestPeer {
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
         return model.generation_prefill_graph_runner_ != nullptr;
     }
+
+    static GptModelOutputs finishNanCheck(PyWrappedModel&       model,
+                                          GptModelOutputs       outputs,
+                                          const GptModelInputs& inputs,
+                                          torch::Tensor         metadata) {
+        return model.finishNanCheck(std::move(outputs), inputs, std::move(metadata));
+    }
 };
 
 namespace {
@@ -1543,6 +1550,34 @@ py::dict runCustomOutput(py::object py_model, py::object handler, torch::Tensor 
     return result;
 }
 
+py::tuple runNanMetadataMapping(py::object           py_model,
+                                const torch::Tensor& hidden,
+                                const torch::Tensor& logits,
+                                const torch::Tensor& metadata,
+                                const torch::Tensor& indexes) {
+    static std::once_flag runtime_once;
+    std::call_once(runtime_once, []() { initRuntime(0, false, false, MlaOpsType::AUTO); });
+    Weights weights;
+    weights.layers.resize(1);
+    GptModelDescription description;
+    description.data_type                    = DataType::TYPE_FP16;
+    description.attention_conf.head_num      = 1;
+    description.attention_conf.kv_head_num   = 1;
+    description.attention_conf.size_per_head = hidden.size(1);
+    auto               layout = std::make_optional(makeLayout(makeCacheConfig({{"full", 4, 64}})).layout);
+    GptModelInitParams params{weights, description, layout};
+    params.profile_debug_logging_config.check_nan = true;
+    PyWrappedModel model(params, std::move(py_model));
+    GptModelInputs inputs;
+    inputs.lm_output_indexes = indexes;
+    GptModelOutputs outputs;
+    outputs.hidden_states     = hidden;
+    outputs.all_hidden_states = hidden;
+    outputs.logits            = logits;
+    auto result = PyWrappedModelTestPeer::finishNanCheck(model, std::move(outputs), inputs, metadata.clone());
+    return py::make_tuple(result.nan_metadata, result.logits);
+}
+
 }  // namespace
 }  // namespace rtp_llm::test
 
@@ -1550,6 +1585,7 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
     torch_ext::registerPyOpDefs(m);
     rtp_llm::registerExecCtxOps(m);
     m.def("run_post_layers", &rtp_llm::test::runCustomOutput);
+    m.def("run_nan_metadata_mapping", &rtp_llm::test::runNanMetadataMapping);
     m.def("flush_capture_publisher_without_close", &rtp_llm::test::flushCapturePublisherWithoutClose);
     m.def("close_capture_publisher_without_gil", &rtp_llm::test::closeCapturePublisherWithoutGil);
     m.def("initialize_capture_publisher_with_core_dump", &rtp_llm::test::initializeCapturePublisherWithCoreDump);

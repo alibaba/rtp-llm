@@ -432,6 +432,33 @@ TEST_F(QueryConverterTest, RoleAddrPreservesPdfusionDefaultAndRejectsConflicts) 
     EXPECT_EQ(QueryConverter::getRoleAddrs(&omitted_legacy_default)[0].role, RoleType::PDFUSION);
 }
 
+TEST_F(QueryConverterTest, testTransNanTerminationWithoutAuxStats) {
+    GenerateOutputs outputs;
+    for (int i = 0; i < 2; ++i) {
+        GenerateOutput output;
+        output.output_ids = torch::empty({1, 0}, torch::kInt32);
+        output.finished   = true;
+        outputs.generate_outputs.push_back(std::move(output));
+    }
+    outputs.generate_outputs[1].aux_info.nan_info = NumericNanInfo{3, 2, 17, 4294967301LL, 1};
+
+    GenerateOutputsPB wire;
+    QueryConverter::transResponse(&wire, &outputs, false, "", 0);
+
+    const auto& flattened = wire.flatten_output();
+    ASSERT_EQ(flattened.finished_size(), 2);
+    EXPECT_TRUE(flattened.finished(1));
+    ASSERT_EQ(flattened.aux_info_size(), 2);
+    EXPECT_FALSE(flattened.aux_info(0).has_nan_info());
+    ASSERT_TRUE(flattened.aux_info(1).has_nan_info());
+    const auto& info = flattened.aux_info(1).nan_info();
+    EXPECT_EQ(info.layer_id(), 3);
+    EXPECT_EQ(info.stage(), 2);
+    EXPECT_EQ(info.token_index(), 17);
+    EXPECT_EQ(info.element_index(), 4294967301LL);
+    EXPECT_EQ(info.kind(), 1);
+}
+
 TEST_F(QueryConverterTest, testTransOutput) {
     auto output_token_ids = torch::empty({1, 3}, torch::kInt32);
     auto data             = output_token_ids.data_ptr<int>();

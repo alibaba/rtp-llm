@@ -623,6 +623,11 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         }
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
+        if (sp_output_buffer->proposal_nan_metadata.defined()) {
+            auto records = sp_output_buffer->proposal_nan_metadata.cpu().contiguous();
+            generate_request.mutable_propose_nan_metadata()->Add(records.data_ptr<int64_t>(),
+                                                                 records.data_ptr<int64_t>() + records.numel());
+        }
     }
 
     generate_request.set_stage(RemoteStage::GENERATE);

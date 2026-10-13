@@ -62,6 +62,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    NumericNanInfo,
 )
 
 
@@ -622,6 +623,65 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 self.assertEqual(generate_config.is_streaming, stream)
                 self.assertFalse(generate_config.aux_info)
                 self.assertFalse(request.aux_info)
+
+    async def test_nan_terminal_without_tokens_preserves_aux_info(self):
+        tokenizer, renderer, _ = self._create_base_thinking_endpoint("disabled")
+        nan_info = NumericNanInfo(2, 1, 3, 17, 1)
+
+        class NanBackend:
+            async def enqueue(self, generate_input):
+                async def outputs():
+                    yield GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.empty((1, 0), dtype=torch.int32),
+                                input_ids=generate_input.token_ids.reshape(1, -1),
+                                finished=True,
+                                aux_info=AuxInfo(input_len=7, nan_info=nan_info),
+                            )
+                        ]
+                    )
+
+                return outputs()
+
+        for stream, logprobs in (
+            (True, False),
+            (True, True),
+            (False, False),
+            (False, True),
+        ):
+            with self.subTest(stream=stream, logprobs=logprobs):
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                    stream=stream,
+                    aux_info=False,
+                    logprobs=logprobs,
+                )
+                self.assertIsNone(
+                    renderer._generate_log_probs_sync(
+                        custom_renderer.StreamStatusSync(request),
+                        None,
+                        torch.empty((1, 0), dtype=torch.int32),
+                    )
+                )
+                choices = renderer.generate_choice(
+                    request_id=1,
+                    input_ids=[1] * 7,
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(aux_info=False, is_streaming=stream),
+                    backend_rpc_server_visitor=NanBackend(),
+                    request=request,
+                )
+                responses = OpenaiEndpoint._complete_stream_response(
+                    choices, None, tokenizer
+                )
+                chunks = [chunk async for chunk in responses]
+                final = await responses.gen_complete_response_once()
+                self.assertEqual(chunks[-1].aux_info.nan_info, nan_info)
+                self.assertEqual(final.aux_info.nan_info, nan_info)
+                self.assertEqual(final.choices[0].finish_reason, FinisheReason.stop)
+                self.assertEqual(final.usage.completion_tokens, 0)
+                self.assertEqual(final.usage.prompt_tokens, 7)
 
     async def test_aux_info_false_preserves_length_limits_and_usage(self):
         for termination in ("max_tokens", "max_seq_len"):
@@ -3177,6 +3237,34 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             self.assertEqual(
                 json.loads(response)["extra_outputs"]["custom_output"], values
             )
+
+    def test_native_chat_final_preserves_nan_diagnostic_with_aux_disabled(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        status = [
+            custom_renderer.StreamStatusSync(
+                ChatCompletionRequest(messages=[], aux_info=False)
+            )
+        ]
+        nan_info = {
+            "layer_id": 3,
+            "stage": 2,
+            "token_index": 7,
+            "element_index": 2**32 + 5,
+            "kind": 1,
+        }
+        args = (status, [7], [0], [0])
+        final = renderer.render_stream_response_final_blocking(*args, nan_info=nan_info)
+        for response in (
+            renderer.render_stream_response_final(*args, nan_info=nan_info),
+            renderer.collect_complete_response([final]),
+        ):
+            payload = json.loads(response)
+            self.assertEqual(payload["aux_info"]["nan_info"], nan_info)
+            self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
+            self.assertEqual(payload["usage"]["prompt_tokens"], 7)
+            self.assertEqual(payload["usage"]["completion_tokens"], 0)
+        clean = json.loads(renderer.render_stream_response_final(*args))
+        self.assertNotIn("aux_info", clean)
 
     async def test_debug_info_with_output_ids_and_raw_output(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""

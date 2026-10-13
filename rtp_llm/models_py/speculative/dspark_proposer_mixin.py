@@ -41,6 +41,7 @@ from typing import Any, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 
@@ -332,7 +333,11 @@ class DSparkProposerMixin:
         )
         # The fixed-width commit CUDA graph owns a row-aligned output buffer even
         # though the executor only needs this call's KV-cache side effect.
-        return PyModelOutputs(main_x)
+        return finish_nan_check(
+            PyModelOutputs(main_x),
+            getattr(inputs, "nan_metadata", None),
+            getattr(self, "layer_num", 0),
+        )
 
     def run_propose_step(
         self,
@@ -405,4 +410,8 @@ class DSparkProposerMixin:
         if batch_size == 0:
             return self.dspark_empty_outputs(0, device)
 
-        return PyModelOutputs(self.compute_draft_hidden_states(hidden))
+        return finish_nan_check(
+            PyModelOutputs(self.compute_draft_hidden_states(hidden)),
+            getattr(inputs, "nan_metadata", None),
+            getattr(self, "layer_num", 0),
+        )

@@ -79,6 +79,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     for (int i = 0; i < currentBatchSize(); i++) {
         GenerateOutput generate_output;
         generate_output.aux_info.iter_count = iter_count_;
+        generate_output.aux_info.nan_info   = nan_info_;
         generate_output.output_ids          = torch::empty({1, (int64_t)output_len}, torch::kInt32);
 
         // TODO(xinfei.sxf) optimize this copy : only copy last token
@@ -125,7 +126,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             && iter_count_ == 1) {
             generate_output.all_hidden_states = update_info.all_hidden_states.cpu();
         }
-        if (loss_.defined()) {
+        if (loss_.defined() && !nan_info_.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(loss_index_ == inputLength() - 1,
                                     "loss index should be input len [%d] - 1 but is [%d]",
                                     inputLength(),
@@ -146,7 +147,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         }
 
         generate_output.finished = isSubGenerateDoneWithoutLock(i);
-        if (generate_input_->generate_config->aux_info) {
+        if (generate_input_->generate_config->aux_info || nan_info_.has_value()) {
             generate_output.aux_info.iter_count   = iter_count_;
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
@@ -180,7 +181,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
         }
         // all_probs is returned as an independent tensor in FlattenOutputPB.
         // Disabling auxiliary metadata must not discard this explicit output.
-        if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
+        if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE && !nan_info_.has_value()) {
             if (!update_info.all_probs.defined()) {
                 throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
             }
@@ -252,7 +253,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             update_info.softmax_probs, seqLength() - update_info.num_new_tokens, update_info.src_batch_indices);
     }
 
-    finished_ = needFinish();
+    finished_ = nan_info_.has_value() || needFinish();
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
         fillSubGenerateStatus(StreamState::FINISHED);
@@ -291,7 +292,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         return;
     }
 
-    if (seqLength() - last_output_pos_ == 0
+    if (seqLength() - last_output_pos_ == 0 && !nan_info_.has_value()
         && !(update_info.num_new_tokens == 0 && generate_input_->generate_config->isPrefillOnly())) {
         return;
     }

@@ -89,7 +89,7 @@ cc_test(
     srcs = glob([
         "EngineTest.cc",
     ]),
-    data = [],
+    data = ["//rtp_llm/models_py:utils"],
     copts = test_copts,
     deps = [
         ":mock_engine",

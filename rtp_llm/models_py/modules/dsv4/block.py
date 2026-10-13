@@ -25,6 +25,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer imp
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_adapter import (
     adapt_split_moe_weights,
 )
+from rtp_llm.models_py.utils.nan_check import (
+    NanCheckMetadata,
+    NanCheckStage,
+    detect_nan,
+)
 from rtp_llm.utils.model_weight import W
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
@@ -403,6 +408,7 @@ class Block(nn.Module):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
@@ -456,6 +462,11 @@ class Block(nn.Module):
                     2, f"L{self.layer_id:02d}_decode_attn_out", attn_out
                 )
             x = self.attn_hc.post(attn_out, residual, post, comb)
+        if nan_metadata is not None:
+            detect_nan(
+                x,
+                NanCheckMetadata(nan_metadata, self.layer_id, NanCheckStage.ATTENTION),
+            )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_attn_residual", x)
 
@@ -473,6 +484,10 @@ class Block(nn.Module):
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
+        if nan_metadata is not None:
+            detect_nan(
+                x, NanCheckMetadata(nan_metadata, self.layer_id, NanCheckStage.FFN)
+            )
         return x
 
     def forward_prefill_fast(
@@ -483,6 +498,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Prefill fast path for the FP8 production path.
 
@@ -501,6 +517,7 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                nan_metadata=nan_metadata,
             )
         return fast_call(
             x,
@@ -509,6 +526,7 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            nan_metadata=nan_metadata,
         )
 
     def _forward_prefill_fast_fp8(
@@ -519,6 +537,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,
         kv_cache=None,
         block_tables_by_type=None,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Validated FP8 prefill fast body.
 
@@ -563,13 +582,23 @@ class Block(nn.Module):
                 block_tables_by_type=block_tables_by_type,
             )
         x = attn_hc_post(attn_out, residual, post, comb)
+        if nan_metadata is not None:
+            detect_nan(
+                x,
+                NanCheckMetadata(nan_metadata, self.layer_id, NanCheckStage.ATTENTION),
+            )
         self._sync_after_first_cp_prefill_attention()
 
         residual = x
         x_pre, post, comb = ffn_hc_pre(x)
         x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         ffn_out = self.ffn(x_pre, input_ids)
-        return ffn_hc_post(ffn_out, residual, post, comb)
+        x = ffn_hc_post(ffn_out, residual, post, comb)
+        if nan_metadata is not None:
+            detect_nan(
+                x, NanCheckMetadata(nan_metadata, self.layer_id, NanCheckStage.FFN)
+            )
+        return x
 
     def forward(
         self,
@@ -579,6 +608,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
@@ -700,6 +730,11 @@ class Block(nn.Module):
                     attn_out[dbg_pos_mask].contiguous(),
                 )
         x = self.attn_hc.post(attn_out, residual, post, comb)  # [T, hc, dim]
+        if nan_metadata is not None:
+            detect_nan(
+                x,
+                NanCheckMetadata(nan_metadata, self.layer_id, NanCheckStage.ATTENTION),
+            )
         self._sync_after_first_cp_prefill_attention()
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_attn_residual", x)
@@ -743,6 +778,10 @@ class Block(nn.Module):
                     ffn_out[dbg_pos_mask].contiguous(),
                 )
         x = self.ffn_hc.post(ffn_out, residual, post, comb)  # [T, hc, dim]
+        if nan_metadata is not None:
+            detect_nan(
+                x, NanCheckMetadata(nan_metadata, self.layer_id, NanCheckStage.FFN)
+            )
         if _dbg_layer and dbg_pos_mask is not None:
             _rt.record_if_level(
                 2,

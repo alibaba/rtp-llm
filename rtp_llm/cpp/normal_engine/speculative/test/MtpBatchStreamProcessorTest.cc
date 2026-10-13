@@ -380,6 +380,128 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatch) {
     checkOutput(stream2, {1, 2, 3}, {3, 0}, {0.3, 0.1, 0.4, 0.2}, {1.7, 1.8});
 }
 
+class NanTestMtpProcessor: public MtpBatchStreamProcessor {
+public:
+    using MtpBatchStreamProcessor::MtpBatchStreamProcessor;
+    using MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo;
+};
+
+TEST_F(MtpBatchStreamProcessorTest, NanMetadataFollowsVerifyAndProposalAcceptance) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 1;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 1;
+    NanTestMtpProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), sp_config, false);
+    // Verify row 1 and draft proposal 0 are rejected at accept_len=1 and
+    // eligible at accept_len=2. A replacement/bonus is never a draft token.
+    for (bool proposal : {false, true}) {
+        for (int accepted : {1, 2}) {
+            auto         stream = createContextStream(model_config, RuntimeConfig{}, ResourceContext{}, {1, 2}, 1);
+            auto         normal = std::dynamic_pointer_cast<NormalGenerateStream>(stream);
+            StreamGroups groups({stream});
+            speculative::SpeculativeSamplerOutput output;
+            output.accept_len_cpu        = torch::tensor({accepted}, torch::kInt32);
+            output.accept_tokens_cpu     = torch::tensor({{2, 3}}, torch::kInt32);
+            output.verify_nan_metadata   = torch::zeros({2, 4}, torch::kInt64);
+            output.proposal_nan_metadata = torch::zeros({1, 4}, torch::kInt64);
+            auto& records                = proposal ? output.proposal_nan_metadata : output.verify_nan_metadata;
+            records.select(0, proposal ? 0 : 1).copy_(torch::tensor({0, 1, 7, 1}, torch::kInt64));
+            MergedOutput                      tail;
+            std::vector<StreamSpecUpdateInfo> updates;
+            processor.prepareDecodeSpecUpdateInfo(groups, output, tail, updates);
+            ASSERT_EQ(updates.size(), 1);
+            EXPECT_FALSE(stream->hasError());
+            EXPECT_EQ(normal->hasOutput(), accepted == 2);
+            EXPECT_EQ(stream->seqLength(), 2);
+            if (accepted == 2) {
+                auto terminal = normal->nextOutput();
+                ASSERT_TRUE(terminal.ok());
+                ASSERT_EQ(terminal.value().generate_outputs.size(), 1);
+                EXPECT_TRUE(terminal.value().generate_outputs[0].finished);
+                ASSERT_TRUE(terminal.value().generate_outputs[0].aux_info.nan_info.has_value());
+            }
+        }
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, NanMetadataUsesBatchOffsetsBeforeAcceptanceCropping) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 4;
+    model_config.num_layers  = 3;
+    SpeculativeExecutionConfig sp_config;
+    sp_config.gen_num_per_cycle = 3;
+    NanTestMtpProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), sp_config, false);
+
+    // Processor layout selection reads these flags on each call. Cover both
+    // compact accepted rows and the fixed-width async/graph draft tail layout.
+    for (bool dense : {false, true}) {
+        autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+        autil::EnvGuard device_state("RTP_LLM_MTP_ASYNC_DEVICE_STATE", dense ? "1" : "0");
+        for (int source = 0; source < 3; ++source) {  // verify, proposal, post-draft
+            for (bool bad_first : {false, true}) {
+                SCOPED_TRACE(::testing::Message()
+                             << "dense=" << dense << " source=" << source << " bad_first=" << bad_first);
+                auto first  = createContextStream(model_config, RuntimeConfig{}, ResourceContext{}, {1, 2}, 1);
+                auto second = createContextStream(model_config, RuntimeConfig{}, ResourceContext{}, {2, 1, 2, 1, 2}, 2);
+                StreamGroups               groups({first, second});
+                const int                  bad_batch     = bad_first ? 0 : 1;
+                const int                  healthy_batch = 1 - bad_batch;
+                const std::vector<int32_t> accepted =
+                    bad_first ? std::vector<int32_t>{3, 1} : std::vector<int32_t>{1, 3};
+                speculative::SpeculativeSamplerOutput output;
+                output.accept_len_cpu        = torch::tensor(accepted, torch::kInt32);
+                output.accept_tokens_cpu     = torch::tensor({{2, 3, 1, 2}, {2, 3, 1, 2}}, torch::kInt32);
+                output.verify_nan_metadata   = torch::zeros({8, 4}, torch::kInt64);
+                output.proposal_nan_metadata = torch::zeros({6, 4}, torch::kInt64);
+                MergedOutput tail;
+                const int    tail_rows              = dense ? 8 : 4;
+                tail.model_output.all_hidden_states = torch::zeros({tail_rows, 2}, torch::kFloat32);
+                tail.model_output.nan_metadata      = torch::zeros({tail_rows, 4}, torch::kInt64);
+                auto&     records                   = source == 0 ? output.verify_nan_metadata :
+                                                      source == 1 ? output.proposal_nan_metadata :
+                                                                    tail.model_output.nan_metadata;
+                const int width                     = source == 1 ? 3 : 4;
+                const int accepted_row              = source == 1 ? 1 : 2;
+                const int bad_offset = source == 2 && !dense ? (bad_batch == 0 ? 0 : accepted[0]) : bad_batch * width;
+                records.select(0, bad_offset + accepted_row).copy_(torch::tensor({2, 1, 7, 3}, torch::kInt64));
+                if (source != 2 || dense) {
+                    // An earlier site in the other request's rejected suffix
+                    // must not finish it or displace the accepted diagnostic.
+                    const int rejected_row = source == 1 ? 0 : 1;
+                    records.select(0, healthy_batch * width + rejected_row)
+                        .copy_(torch::tensor({0, 1, 0, 1}, torch::kInt64));
+                }
+                std::vector<StreamSpecUpdateInfo> updates;
+                processor.prepareDecodeSpecUpdateInfo(groups, output, tail, updates);
+                ASSERT_EQ(updates.size(), 2);
+                EXPECT_EQ(updates[0].num_new_tokens, accepted[0]);
+                EXPECT_EQ(updates[1].num_new_tokens, accepted[1]);
+                const auto bad     = std::dynamic_pointer_cast<NormalGenerateStream>(bad_first ? first : second);
+                const auto healthy = std::dynamic_pointer_cast<NormalGenerateStream>(bad_first ? second : first);
+                EXPECT_FALSE(first->hasError());
+                EXPECT_FALSE(second->hasError());
+                EXPECT_FALSE(healthy->hasOutput());
+                ASSERT_TRUE(bad->hasOutput());
+                auto result = bad->nextOutput();
+                ASSERT_TRUE(result.ok());
+                ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                const auto& terminal = result.value().generate_outputs[0];
+                EXPECT_TRUE(terminal.finished);
+                EXPECT_EQ(terminal.output_ids.numel(), 0);
+                ASSERT_TRUE(terminal.aux_info.nan_info.has_value());
+                EXPECT_EQ(terminal.aux_info.nan_info->layer_id, 2);
+                EXPECT_EQ(terminal.aux_info.nan_info->kind, 3);
+                EXPECT_EQ(terminal.aux_info.nan_info->token_index, bad->seqLength() + (source == 2 ? 2 : 1));
+            }
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

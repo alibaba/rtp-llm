@@ -75,7 +75,8 @@ public:
         position_id_len_factor_(graph_params.position_id_len_factor),
         metrics_reporter_(std::move(metrics_reporter)),
         generation_prefill_cuda_graph_max_requests_(graph_params.generation_prefill_cuda_graph_max_requests),
-        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id) {
+        generation_prefill_cuda_graph_pad_token_id_(graph_params.generation_prefill_cuda_graph_pad_token_id),
+        check_nan_(graph_params.check_nan) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -269,6 +270,7 @@ private:
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     int                                        generation_prefill_cuda_graph_max_requests_{0};
     int                                        generation_prefill_cuda_graph_pad_token_id_{0};
+    bool                                       check_nan_{false};
     torch::Tensor                              generation_prefill_cuda_graph_padding_offset_host_;
     mutable std::atomic<uint64_t>              combo_position_fallback_count_{0};
     static constexpr size_t                    kGenerationPrefillCudaGraphStatusCount =

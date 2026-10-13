@@ -120,6 +120,7 @@ private:
     torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
     bool                            shouldCaptureHiddenStates(const GptModelInputs& inputs);
+    GptModelOutputs finishNanCheck(GptModelOutputs outputs, const GptModelInputs& inputs, torch::Tensor metadata);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -385,6 +386,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         GraphParams graph_params;
         graph_params.enable_cuda_graph            = params.hw_kernel_config.enable_cuda_graph;
         graph_params.enable_cuda_graph_debug_mode = params.hw_kernel_config.enable_cuda_graph_debug_mode;
+        graph_params.check_nan                    = check_nan_;
         graph_params.is_prefill_cuda_graph_mode   = is_prefill_cuda_graph_mode;
         graph_params.max_seq_len                  = params.max_seq_len;
         graph_params.hidden_size                  = params.hidden_size;

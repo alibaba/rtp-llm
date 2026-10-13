@@ -151,7 +151,8 @@ protected:
                                       const StreamGroups&                              stream_groups,
                                       const MtpBatchStreamProcessor::DSparkRoundState& round_state,
                                       SamplerOutput&                                   draft_sampler_output,
-                                      int64_t&                                         model_forward_us);
+                                      int64_t&                                         model_forward_us,
+                                      torch::Tensor*                                   proposal_nan_metadata = nullptr);
     GptModelOutputs runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
@@ -177,7 +178,8 @@ protected:
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
                           torch::Tensor&              draft_token_ids_t,
-                          int64_t&                    model_forward_us);
+                          int64_t&                    model_forward_us,
+                          torch::Tensor*              proposal_nan_metadata = nullptr);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -255,6 +257,7 @@ private:
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     bool                                                                     enable_ffn_disaggregate_ = false;
+    bool                                                                     check_nan_               = false;
     bool                                                                     enable_detail_log_       = false;
     int                                                                      tp_rank_                 = 0;
     ParallelismConfig                                                        parallelism_config_;

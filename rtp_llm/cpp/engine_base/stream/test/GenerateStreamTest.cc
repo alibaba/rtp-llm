@@ -136,6 +136,36 @@ void updateOneToken(const GenerateStreamPtr& stream, int token_id) {
                     torch::Tensor()});
 }
 
+TEST_F(GenerateStreamTest, nanFinishesNormallyWithEmptyOutputAndKeepsFirstRecord) {
+    GenerateStreamBuilder builder;
+    auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}));
+    stream->generateConfig()->aux_info       = false;
+    stream->generateConfig()->max_new_tokens = 10;
+    stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    stream->finishWithNan({2, 1, 1, 37, 1});
+    stream->finishWithNan({0, 2, 2, 9, 2});
+    updateOneToken(stream, 7);  // A queued async update must not append tokens.
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->seqLength(), 3);
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    const auto& terminal = output.value().generate_outputs[0];
+    EXPECT_TRUE(terminal.finished);
+    EXPECT_EQ(terminal.output_ids.numel(), 0);
+    EXPECT_EQ(terminal.aux_info.input_len, 3);
+    EXPECT_EQ(terminal.aux_info.output_len, 0);
+    EXPECT_EQ(terminal.aux_info.step_output_len, 0);
+    ASSERT_TRUE(terminal.aux_info.nan_info.has_value());
+    EXPECT_EQ(terminal.aux_info.nan_info->layer_id, 2);
+    EXPECT_EQ(terminal.aux_info.nan_info->element_index, 37);
+    EXPECT_EQ(terminal.aux_info.nan_info->kind, 1);
+    EXPECT_FALSE(stream->hasOutput());
+}
+
 TEST_F(GenerateStreamTest, testConstruct) {
     auto builder = GenerateStreamBuilder();
     auto stream1 = builder.createContextStream({{1, 2, 3, 4, 5}, {}});

@@ -10,10 +10,12 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 from rtp_llm.ops import PDSepConfig, SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
     BatchedTerminalOutputs,
     GenerateOutput,
     GenerateOutputs,
     GenerateResponse,
+    NumericNanInfo,
 )
 
 
@@ -62,6 +64,23 @@ class MockTokenizer(BaseTokenizer):
 
 
 class PipelineDecodeTest(unittest.TestCase):
+
+    def test_nan_terminal_aux_survives_disabled_stats(self):
+        from rtp_llm.frontend.frontend_worker import FrontendWorker
+
+        diagnostic = NumericNanInfo(3, 1, 4, 7, 2)
+        output = GenerateOutput(
+            output_ids=torch.empty((1, 0), dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(nan_info=diagnostic),
+        )
+        response = FrontendWorker.__new__(FrontendWorker)._format_response(
+            GenerateResponse(GenerateOutputs([output]), [""]),
+            GenerateConfig(aux_info=False),
+        )
+        self.assertTrue(response.finished)
+        self.assertEqual(list(response.aux_info), ["nan_info"])
+        self.assertEqual(response.aux_info["nan_info"]["kind"], 2)
 
     def test_batched_terminal_matches_legacy_without_materializing_rows(self):
         from unittest.mock import patch

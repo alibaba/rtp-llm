@@ -735,6 +735,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
@@ -743,6 +744,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         # only the attention call is substituted with the non-causal
         # fixed-block variant.
         layer_forward_range = _profiler.make_layer_forward_range()
+        nan_kwargs = {"nan_metadata": nan_metadata} if nan_metadata is not None else {}
         for layer_idx, layer in enumerate(self.v4.layers):
             with layer_forward_range(layer_idx):
                 hidden = layer.forward_decode(
@@ -759,6 +761,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         tokens_per_block,
                         graph_metadata,
                     ),
+                    **nan_kwargs,
                 )
 
         return hidden
@@ -800,6 +803,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             block_table,
             tokens_per_block,
             graph_metadata,
+            nan_metadata=getattr(inputs, "nan_metadata", None),
         )
 
     def compute_draft_hidden_states(self, hidden: torch.Tensor) -> torch.Tensor:

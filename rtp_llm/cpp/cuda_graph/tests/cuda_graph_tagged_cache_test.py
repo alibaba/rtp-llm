@@ -14,6 +14,7 @@ from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
 from rtp_llm.models_py.modules.factory.attention.attn_factory import (
     CudaGraphSelectionMode,
 )
+from rtp_llm.models_py.utils.nan_check import NanCheckMetadata, detect_nan
 from rtp_llm.ops.compute_ops import (
     BertEmbeddingInputs,
     PyAttentionInputs,
@@ -26,6 +27,27 @@ GROUP_TAGS = ["full", "aux"]
 HIDDEN_SIZE = 4
 TOKENS_PER_BLOCK = 8
 KERNEL_BLOCK_TABLE_WIDTH = 8
+
+
+class NanMetadataModel:
+    def __init__(self) -> None:
+        self.values = torch.zeros(
+            (64, HIDDEN_SIZE), device="cuda", dtype=torch.bfloat16
+        )
+        self.forward_calls = 0
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph=False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        self.forward_calls += 1
+        hidden = self.values[: inputs.input_ids.numel()] + 1
+        if inputs.nan_metadata is not None:
+            detect_nan(hidden, NanCheckMetadata(inputs.nan_metadata, 1, 1))
+            detect_nan(hidden, NanCheckMetadata(inputs.nan_metadata, 2, 2))
+        output = PyModelOutputs(hidden)
+        output.nan_metadata = inputs.nan_metadata
+        return output
 
 
 class TaggedBlockTableModel:
@@ -505,6 +527,103 @@ def _build_target_verify_inputs(
 
 
 class TestCudaGraphTaggedCache(unittest.TestCase):
+    def test_nan_metadata_reset_and_snapshot_survive_decode_replay(self):
+        model = NanMetadataModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            GROUP_TAGS,
+            check_nan=True,
+        )
+        calls_after_capture = model.forward_calls
+        inputs = _build_decode_inputs(GROUP_TAGS, {"full": 1, "aux": 2}, batch_size=3)
+        model.values[1, 2] = float("nan")
+        self.assertTrue(runner.canRun(inputs))
+        first = runner.forward(inputs).nan_metadata
+        model.values.zero_()
+        # Keep the first snapshot alive through another replay without a host wait.
+        self.assertTrue(runner.canRun(inputs))
+        second = runner.forward(inputs).nan_metadata
+        torch.testing.assert_close(first[1].cpu(), torch.tensor([1, 1, 2, 1]))
+        self.assertEqual(tuple(first.shape), (3, 4))
+        self.assertEqual(second.count_nonzero().item(), 0)
+        self.assertEqual(model.forward_calls, calls_after_capture)
+
+        # Feed the graph-owned records through the production dispatcher and
+        # stream terminal path, including the healthy rows in the same batch.
+        dirty_outputs = runner.dispatch_nan_metadata(first)
+        self.assertEqual(dirty_outputs[1]["nan_info"], (1, 1, 2, 2, 1))
+        self.assertTrue(dirty_outputs[1]["finished"])
+        self.assertEqual(dirty_outputs[1]["output_tokens"], 0)
+        self.assertTrue(all(not row["has_error"] for row in dirty_outputs))
+        for row in (dirty_outputs[0], dirty_outputs[2]):
+            self.assertFalse(row["finished"])
+            self.assertIsNone(row["nan_info"])
+            self.assertEqual(row["output_tokens"], 1)
+        clean_outputs = runner.dispatch_nan_metadata(second)
+        for row in clean_outputs:
+            self.assertFalse(row["finished"])
+            self.assertFalse(row["has_error"])
+            self.assertIsNone(row["nan_info"])
+            self.assertEqual(row["output_tokens"], 1)
+
+    def test_nan_metadata_verify_keeps_every_real_token(self):
+        model = NanMetadataModel()
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            model,
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [4],
+            GROUP_TAGS,
+            is_target_verify=True,
+            num_tokens_per_bs=3,
+            check_nan=True,
+        )
+        inputs = _build_target_verify_inputs(
+            GROUP_TAGS, {"full": 1, "aux": 2}, batch_size=2, query_len=3
+        )
+        model.values[2, 0] = float("inf")
+        model.values[4, 3] = float("-inf")
+        self.assertTrue(runner.canRun(inputs))
+        records = runner.forward(inputs).nan_metadata.cpu()
+        self.assertEqual(tuple(records.shape), (6, 4))
+        torch.testing.assert_close(records[2], torch.tensor([1, 1, 0, 2]))
+        torch.testing.assert_close(records[4], torch.tensor([1, 1, 3, 3]))
+        self.assertEqual(records[:, 3].count_nonzero().item(), 2)
+
+    def test_nan_metadata_prefill_excludes_padding_and_resets(self):
+        model = NanMetadataModel()
+        runner = CudaGraphRunner()
+        runner.init_generation_prefill(
+            model,
+            2,
+            TOKENS_PER_BLOCK,
+            KERNEL_BLOCK_TABLE_WIDTH,
+            [TOKENS_PER_BLOCK],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            check_nan=True,
+        )
+        inputs = _build_prefill_inputs(
+            GROUP_TAGS, {"full": 1, "aux": 2}, seq_len=[2, 1]
+        )
+        model.values[1, 1] = float("nan")
+        model.values[6, 0] = float("inf")
+        self.assertTrue(runner.canRun(inputs))
+        first = runner.forward(inputs).nan_metadata
+        model.values[1, 1] = 0
+        self.assertTrue(runner.canRun(inputs))
+        second = runner.forward(inputs).nan_metadata
+        self.assertEqual(tuple(first.shape), (3, 4))
+        torch.testing.assert_close(first[1].cpu(), torch.tensor([1, 1, 1, 1]))
+        self.assertEqual(second.count_nonzero().item(), 0)
+
     def test_draft_placeholder_map_preserves_eager_graph_contract(self):
         tags = ["unused", "draft", "other"]
         model = DraftBlockTableModel()

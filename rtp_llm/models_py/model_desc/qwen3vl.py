@@ -16,6 +16,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     reshape_extra_input_to_deepstack,
 )
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -124,12 +125,17 @@ class Qwen3VLModel(GptModelBase):
                 hidden_states,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             hidden_states = self.multimodal_deepstack_injector(
                 hidden_states, mm_deepstack_embeds, cpu_locs, i
             )
             capture.capture_layer(i, hidden_states)
-        return capture.finalize(hidden_states)
+        return finish_nan_check(
+            capture.finalize(hidden_states),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )
 
 
 __all__ = [

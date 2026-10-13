@@ -44,6 +44,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the
@@ -308,6 +309,7 @@ def forward_layers(
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
     prepare_hidden_fn: Optional[Any] = None,
+    nan_metadata: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
@@ -344,9 +346,12 @@ def forward_layers(
         begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
+    nan_kwargs = {"nan_metadata": nan_metadata} if nan_metadata is not None else {}
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
-            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            h = layer.forward_decode(
+                h, attn_metadata, input_ids, kv_cache=kv_cache, **nan_kwargs
+            )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
             if _rt_on:
@@ -487,6 +492,7 @@ def forward_decode(
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        nan_metadata=getattr(inputs, "nan_metadata", None),
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     if _fwd_dbg.enabled():
@@ -523,4 +529,6 @@ def forward_decode(
             extra["start_pos"] = start_pos.detach().cpu()
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
-    return PyModelOutputs(hidden)
+    return finish_nan_check(
+        PyModelOutputs(hidden), getattr(inputs, "nan_metadata", None), len(v4.layers)
+    )

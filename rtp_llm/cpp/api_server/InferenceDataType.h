@@ -107,6 +107,14 @@ public:
         json.Jsonize("generation_prefill_cuda_graph_status",
                      generation_prefill_cuda_graph_status,
                      generation_prefill_cuda_graph_status);
+        if (nan_info.has_value()) {
+            std::map<std::string, int64_t> fields{{"layer_id", nan_info->layer_id},
+                                                  {"stage", nan_info->stage},
+                                                  {"token_index", nan_info->token_index},
+                                                  {"element_index", nan_info->element_index},
+                                                  {"kind", nan_info->kind}};
+            json.Jsonize("nan_info", fields);
+        }
     }
     AuxInfoAdapter() = default;
     AuxInfoAdapter(const AuxInfo& base): AuxInfo(base) {

@@ -47,6 +47,12 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     fused_kda_gate,
     fused_recurrent_kda,
 )
+from rtp_llm.models_py.utils.nan_check import (
+    NanCheckMetadata,
+    NanCheckStage,
+    detect_nan,
+    finish_nan_check,
+)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -747,6 +753,7 @@ class KimiLinearDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: KimiLinearMetadata = KimiLinearMetadata(),
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -768,10 +775,20 @@ class KimiLinearDecoderLayer(nn.Module):
             )
 
         # Fused: residual = residual + hidden_states, hidden_states = RMSNorm(residual)
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.ATTENTION),
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         # MLP (Dense or MoE)
         hidden_states = self.mlp(hidden_states)
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.FFN),
+            )
 
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -891,9 +908,14 @@ class KimiLinearModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             hidden_states = output.hidden_states
             residual = output.residual
             capture.capture_layer(i, hidden_states, residual)
 
-        return capture.finalize(hidden_states, residual)
+        return finish_nan_check(
+            capture.finalize(hidden_states, residual),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )

@@ -351,6 +351,10 @@ struct PyModelInputs {
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;
 
+    // Per-token first non-finite value: [layer, stage, element, kind].
+    // Undefined when check_nan is disabled; kind == 0 denotes a clean token.
+    torch::Tensor nan_metadata;
+
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
     }
@@ -362,6 +366,7 @@ struct PyModelOutputs {
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.
     torch::Tensor mtp_target_hidden_states;
+    torch::Tensor nan_metadata;
 
     PyModelOutputs() = default;
 

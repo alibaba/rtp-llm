@@ -996,6 +996,45 @@ class TestComputeLocalLastHidden(unittest.TestCase):
     def test_multi_stream_cp4_with_padding(self):
         self._run_case(stream_lens=[10, 20, 7], cp_size=4)
 
+    def test_restore_all_token_nan_records(self):
+        # NaN metadata must retain non-last-token failures even when lm_head
+        # gathers only each request's last hidden row. Padding records must not
+        # become request failures, and every int64 field must survive exactly.
+        stream_lens = [6, 3, 9]
+        cp_size = 4
+        padded_lens = [self._pad_to(s, 2 * cp_size) for s in stream_lens]
+        chunk_lengths = torch.tensor(
+            [p // cp_size for p in padded_lens], dtype=torch.int32
+        )
+        padding_lengths = torch.tensor(
+            [p - s for p, s in zip(padded_lens, stream_lens)], dtype=torch.int32
+        )
+        restore = cp_test.generate_qkv_restore_indices(chunk_lengths, cp_size)
+        mask = cp_test.generate_qkv_padding_mask(
+            chunk_lengths, padding_lengths, cp_size
+        )
+        padded_records = torch.zeros((sum(padded_lens), 4), dtype=torch.int64)
+        # Include a feature index beyond float32's exact integer range.
+        padded_records[1] = torch.tensor([2, 1, 2**40 + 3, 1])
+        padded_records[padded_lens[0] + 1] = torch.tensor([5, 2, 17, 2])
+        padded_records[sum(padded_lens[:2]) + 7] = torch.tensor([0, 1, 9, 3])
+        padded_records[mask == 0] = torch.tensor([99, 4, 123, 1])
+        gathered = torch.zeros_like(padded_records)
+        gathered.index_copy_(0, restore.to(torch.long), padded_records)
+        rank_records = gathered.reshape(cp_size, -1, 4)
+
+        all_token_indexes = torch.arange(sum(stream_lens), dtype=torch.int64)
+        restored = torch.zeros((sum(stream_lens), 4), dtype=torch.int64)
+        for rank in range(cp_size):
+            restored += cp_test.compute_local_last_hidden(
+                rank_records[rank], restore, mask, all_token_indexes, rank, cp_size
+            )
+
+        torch.testing.assert_close(restored, padded_records[mask != 0])
+        self.assertEqual(restored[1].tolist(), [2, 1, 2**40 + 3, 1])
+        self.assertEqual(restored[7].tolist(), [5, 2, 17, 2])
+        self.assertEqual(restored[16].tolist(), [0, 1, 9, 3])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -68,6 +68,35 @@ GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs
 
 namespace {
 
+// The first ordinary-MTP proposal was produced by the previous draft tail.
+// Use the same immutable device-state snapshot as proposal-token consumers.
+torch::Tensor initialProposalNanMetadata(const StreamGroups& stream_groups) {
+    std::vector<torch::Tensor> records;
+    torch::TensorOptions       options;
+    bool                       enabled = false;
+    for (const auto& stream : stream_groups.allStreams()) {
+        const auto state = stream->getMtpAsyncDeviceState();
+        auto       record =
+            state.epoch != 0 ?
+                      state.proposal_nan_metadata :
+                      (stream->getSPOutputBuffer() ? stream->getSPOutputBuffer()->proposal_nan_metadata : torch::Tensor());
+        if (record.defined()) {
+            enabled = true;
+            options = record.options();
+        }
+        records.push_back(record);
+    }
+    if (!enabled) {
+        return {};
+    }
+    for (auto& record : records) {
+        if (!record.defined()) {
+            record = torch::zeros({1, 4}, options);
+        }
+    }
+    return torch::cat(records, 0);
+}
+
 bool readEnvFlagOnce(const char* env_name, const char* log_tag, const char* label) {
     const char* env = std::getenv(env_name);
     const bool  on  = (env != nullptr && std::string(env) == "1");
@@ -743,6 +772,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "dspark with an enabled prefill-CP split requires the PREFILL role");
     }
 
+    check_nan_          = params.profiling_debug_logging_config.check_nan;
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
@@ -1223,7 +1253,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             return absl::OkStatus();
         }
         if (isTpRank0()) {
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+            return batch_stream_processor_->dispatchPrefillOnly(
+                stream_groups, model_output.generation_prefill_cuda_graph_status, model_output.nan_metadata);
         }
         return absl::OkStatus();
     }
@@ -1298,8 +1329,10 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // are not persisted in stream or PD state.
             RTP_LLM_CHECK_WITH_INFO(sp_prefill_draft_model_ != nullptr,
                                     "DSpARK prefill requires a draft prefill model");
-            (void)forwardModel(sp_prefill_draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL);
+            auto commit_output =
+                forwardModel(sp_prefill_draft_model_.get(), model_input, ModelInputsModelRole::DRAFT_PREFILL);
             draft_model_output = GptModelOutputs();
+            draft_model_output.nan_metadata = std::move(commit_output.nan_metadata);
         } else {
             draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
         }
@@ -1339,7 +1372,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         if (isTpRank0()) {
-            return batch_stream_processor_->dispatchPrefillOnly(stream_groups);
+            return batch_stream_processor_->dispatchPrefillOnly(stream_groups,
+                                                                model_output.generation_prefill_cuda_graph_status,
+                                                                model_output.nan_metadata,
+                                                                draft_model_output.nan_metadata,
+                                                                is_dspark_ ? 0 : 1);
         }
         return absl::OkStatus();
     }
@@ -1469,6 +1506,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     torch::Tensor              draft_token_probs_d_t;
     torch::Tensor              hidden_states_d_t;
     torch::Tensor              draft_token_ids_t;
+    torch::Tensor              proposal_nan_metadata;
     torch::Tensor              spec_token_ids_t;
     std::vector<torch::Tensor> draft_probs_list;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
@@ -1559,7 +1597,12 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // synchronized proposal position bases to target-verify width locally.
         releaseAllModelBuffers();
         launchTargetVerifyPrepareAsync(proposal_input, batch_size);
-        runDSparkProposal(proposal_input, stream_groups, dspark_round_state, draft_sampler_output, model_forward_us);
+        runDSparkProposal(proposal_input,
+                          stream_groups,
+                          dspark_round_state,
+                          draft_sampler_output,
+                          model_forward_us,
+                          &proposal_nan_metadata);
 
         {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_dspark_target_and_tp_sync)");
@@ -1599,8 +1642,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         launchTargetVerifyPrepareAsync(model_input, batch_size);
         if (propose_step_ > 1) {
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-            draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+            draftModelDecode(model_input,
+                             stream_groups,
+                             draft_probs_list,
+                             draft_token_ids_t,
+                             model_forward_us,
+                             &proposal_nan_metadata);
             RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
+        } else if (isTpRank0() && check_nan_) {
+            proposal_nan_metadata = initialProposalNanMetadata(stream_groups);
         }
     }
 
@@ -1761,6 +1811,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             applySpecLogitsAcceptLenCap(
                 *spec_logits_result, sampler_output, speculative_sampler_output, batch_size, propose_step_);
         }
+        speculative_sampler_output.verify_nan_metadata   = model_output.nan_metadata;
+        speculative_sampler_output.proposal_nan_metadata = proposal_nan_metadata;
         if (is_dspark_) {
             // Target verify wrote its aux features into the shared MTP hidden
             // buffer inside the (possibly graphed) forward; replay does not
@@ -2275,7 +2327,8 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
                                     const StreamGroups&                              stream_groups,
                                     const MtpBatchStreamProcessor::DSparkRoundState& round_state,
                                     SamplerOutput&                                   draft_sampler_output,
-                                    int64_t&                                         model_forward_us) {
+                                    int64_t&                                         model_forward_us,
+                                    torch::Tensor*                                   proposal_nan_metadata) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
                                   proposal_input.input_lengths.size(0));
 
@@ -2285,6 +2338,12 @@ void MtpExecutor::runDSparkProposal(GptModelInputs&                             
     auto    propose_output = runDSparkProposeForward(proposal_input);
     model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
 
+    if (proposal_nan_metadata != nullptr && propose_output.nan_metadata.defined()) {
+        // DSpARK may include an unsampled anchor row. Preserve proposal order
+        // using exactly the LM output indexes that produced its logits.
+        *proposal_nan_metadata = propose_output.nan_metadata.index_select(
+            0, proposal_input.lm_output_indexes.to(propose_output.nan_metadata.device(), torch::kInt64));
+    }
     if (isTpRank0()) {
         draft_sampler_output = sampleDSparkDraft(stream_groups, propose_output.logits, round_state.anchors);
     }
@@ -2561,7 +2620,8 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t,
-                                   int64_t&                    model_forward_us) {
+                                   int64_t&                    model_forward_us,
+                                   torch::Tensor*              proposal_nan_metadata) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -2569,6 +2629,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
+    std::vector<torch::Tensor> draft_nan_columns;
+    if (check_nan_) {
+        draft_nan_columns.push_back(initialProposalNanMetadata(stream_groups));
+    }
     torch::Tensor              spec_prefix_lengths;
 
     // update TP > 0 batch_size
@@ -2666,6 +2730,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         maybeOverrideLastHiddenWithMtpBuffer(draft_decode_model_output, *draft_model_);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
+        if (check_nan_) {
+            draft_nan_columns.push_back(draft_decode_model_output.nan_metadata);
+        }
+
         // sample
         auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
         auto draft_probs              = fast_topk_sampler_output.all_probs;
@@ -2685,6 +2753,20 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         if (i != propose_step_ - 2) {
             batch_stream_processor_->updateDecodeDraftModelInput(
                 model_input, draft_decode_model_output, draft_token_ids, buffer_holder_);
+        }
+    }
+
+    if (check_nan_ && proposal_nan_metadata != nullptr) {
+        auto defined = std::find_if(
+            draft_nan_columns.begin(), draft_nan_columns.end(), [](const auto& records) { return records.defined(); });
+        if (defined != draft_nan_columns.end()) {
+            const auto options = defined->options();
+            for (auto& records : draft_nan_columns) {
+                if (!records.defined()) {
+                    records = torch::zeros({static_cast<int64_t>(batch_size), 4}, options);
+                }
+            }
+            *proposal_nan_metadata = torch::stack(draft_nan_columns, 1).reshape({-1, 4});
         }
     }
 
@@ -2892,6 +2974,7 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         state.accept_tokens_gpu = accept_tokens_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
             propose_tokens_all.defined() ? propose_tokens_all.narrow(0, idx, 1) : torch::Tensor();
+        state.proposal_nan_metadata = stream->getSPOutputBuffer()->proposal_nan_metadata;
         state.next_seq_len_gpu = next_seq_len_owned.narrow(0, idx, 1);
         state.next_position_ids_gpu =
             next_position_ids_all.defined() ? next_position_ids_all.narrow(0, idx, 1) : torch::Tensor();
@@ -2980,6 +3063,13 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
     }
 
+    torch::Tensor next_proposal_nan;
+    const auto&   draft_nan = draft_prefill_output.model_output.nan_metadata;
+    if (!is_dspark_ && draft_nan.defined() && batch_size > 0) {
+        auto index        = hidden_idx_all.reshape({batch_size, 1, 1}).expand({batch_size, 1, 4});
+        next_proposal_nan = draft_nan.reshape({batch_size, stream_hidden_len, 4}).gather(1, index).squeeze(1);
+    }
+
     // 3. One clone for all probs
     torch::Tensor draft_probs_all;
     if (draft_all_probs_full.defined()) {
@@ -3036,6 +3126,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         state.accept_tokens_gpu = accept_tokens_gpu_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
             propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
+        state.proposal_nan_metadata =
+            next_proposal_nan.defined() ? next_proposal_nan.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu = next_seq_len_all.narrow(0, idx, 1);
         state.next_position_ids_gpu =
             next_position_ids_all.defined() ? next_position_ids_all.narrow(0, idx, 1) : torch::Tensor();

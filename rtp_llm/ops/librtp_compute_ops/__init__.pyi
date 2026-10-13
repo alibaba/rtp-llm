@@ -300,6 +300,7 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    nan_metadata: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -379,6 +380,7 @@ class PyModelInputs:
     def multimodal_inputs(self, arg0: PyMultimodalInputs) -> None: ...
 
 class PyModelOutputs:
+    nan_metadata: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None:
         """

@@ -74,6 +74,7 @@ struct StreamSpecUpdateInfo {
     // updates leave speculative_propose_step at zero and are not counted.
     int speculative_propose_step = 0;
     int accepted_draft_tokens    = 0;
+    std::optional<torch::Tensor> proposal_nan_metadata    = std::nullopt;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -107,6 +108,7 @@ public:
     // GPU mirror of next-step draft tokens only (the target column is excluded),
     // used by PDFUSION fast paths to avoid a D2H + CPU loop + H2D round trip.
     torch::Tensor propose_tokens_gpu;
+    torch::Tensor proposal_nan_metadata;
     torch::Tensor hidden_states;
     torch::Tensor all_probs;
 
@@ -166,6 +168,9 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
+    // Finish normally and publish the first numeric diagnostic without
+    // committing the token(s) produced by the affected forward.
+    void finishWithNan(const NumericNanInfo& nan_info);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -630,6 +635,7 @@ public:
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
         int next_seq_len_upper_bound = -1;
+        torch::Tensor proposal_nan_metadata;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {
@@ -896,6 +902,7 @@ protected:
     size_t                             sp_iter_count_ = 0;
     std::vector<int32_t>               speculative_accepted_tokens_per_pos_;
     size_t                             last_output_pos_      = 0;
+    std::optional<NumericNanInfo>      nan_info_;
     int                                initial_reuse_length_ = 0;
     int                                reuse_length_         = 0;
     int                                local_reuse_length_   = 0;

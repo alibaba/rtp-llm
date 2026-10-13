@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules import (
     RMSResNorm,
     reshape_extra_input_to_deepstack,
 )
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops import MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -137,6 +138,7 @@ class Qwen3VLMoeModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             hidden_states = self.multimodal_deepstack_injector(
                 output.hidden_states, mm_deepstack_embeds, cpu_locs, i
@@ -144,7 +146,11 @@ class Qwen3VLMoeModel(GptModelBase):
             residual = output.residual
             capture.capture_layer(i, hidden_states, residual)
 
-        return capture.finalize(hidden_states, residual)
+        return finish_nan_check(
+            capture.finalize(hidden_states, residual),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )
 
 
 __all__ = ["Qwen3VLMoeModel"]

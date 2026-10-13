@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -126,8 +127,13 @@ class Qwen3NextMTPModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
                 attention_inputs=layer_attention_inputs,
                 attn_meta=Qwen3NextMetadata(),
             )
         hidden_states, residual = self.norm(hidden_states, residual)
-        return PyModelOutputs(hidden_states)
+        return finish_nan_check(
+            PyModelOutputs(hidden_states),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )

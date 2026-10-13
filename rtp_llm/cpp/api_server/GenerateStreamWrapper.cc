@@ -105,7 +105,11 @@ MultiSeqsResponse GenerateStreamWrapper::formatResponse(const std::vector<std::s
                                generate_outputs.generate_outputs.end(),
                                [](const auto& out) { return out.finished; });
 
-    if (generate_config->aux_info) {
+    const bool include_aux_info = generate_config->aux_info
+                                  || std::any_of(generate_outputs.generate_outputs.begin(),
+                                                 generate_outputs.generate_outputs.end(),
+                                                 [](const auto& out) { return out.aux_info.nan_info.has_value(); });
+    if (include_aux_info) {
         std::transform(generate_outputs.generate_outputs.begin(),
                        generate_outputs.generate_outputs.end(),
                        std::back_inserter(res.aux_info),

@@ -46,6 +46,7 @@ public:
         py_model_inputs_.attention_inputs.combo_position_ids       = inputs.attention_inputs.combo_position_ids;
         py_model_inputs_.input_ids                                 = inputs.input_ids;
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
+        py_model_inputs_.nan_metadata                              = inputs.nan_metadata;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
