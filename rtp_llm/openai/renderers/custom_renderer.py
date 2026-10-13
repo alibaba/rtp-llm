@@ -209,7 +209,7 @@ class StreamStatusSync:
         remove_stop_word_ids_func,
     ):
         self.index += 1
-        delta_output_ids = output.output_ids.cpu().flatten().tolist()
+        delta_output_ids = output_ids.cpu().flatten().tolist()
         self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
         self.finish_reason = check_finish_func(self.output_ids_list, input_len)
         self.output_ids = remove_stop_word_ids_func(
@@ -1163,7 +1163,7 @@ class CustomChatRenderer:
         # and is dependent to the length of sequence
         last_num_beams = (
             generate_config.variable_num_beams[-1]
-            if len(generate_config.variable_num_beams) > 1
+            if generate_config.variable_num_beams
             else generate_config.num_beams
         )
         nums_output = last_num_beams if last_num_beams != 1 else nums_output
