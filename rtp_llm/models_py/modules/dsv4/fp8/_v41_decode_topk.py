@@ -3,9 +3,8 @@
 """Batched V4.1 decode selection and fused candidate metadata.
 
 Candidate pooling/flags follow vLLM's attention/dsa/candidate_blocks.py.
-Keep PyTorch's candidate selection algorithm: tied block scores can select
-different tokens downstream. Only the unused ordering of the selected blocks
-is removed. Token selection uses RTP's existing exact radix-select kernel.
+Block and token selection reuse RTP's exact radix-select kernel. Output order
+and cutoff-tie choices are unspecified; the newest block remains pinned.
 """
 
 from __future__ import annotations
@@ -46,10 +45,12 @@ def _candidate_pool_kernel(
     logits,
     lengths,
     scores,
+    block_lengths,
     WIDTH: tl.constexpr,
     STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     NBLOCKS: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
     TILE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -71,17 +72,19 @@ def _candidate_pool_kernel(
         float("inf"),
         pooled,
     )
-    tl.store(scores + row * NBLOCKS + blocks, pooled, blocks < NBLOCKS)
+    tl.store(scores + row * SCORE_STRIDE + blocks, pooled, blocks < NBLOCKS)
+    if tl.program_id(1) == 0:
+        tl.store(block_lengths + row, tl.cdiv(tl.minimum(visible, WIDTH), BLOCK_SIZE))
 
 
 @triton.jit
 def _candidate_store_flags_kernel(
-    values,
-    indices,
+    scores,
     candidates,
     flags,
     K: tl.constexpr,
     NBLOCKS: tl.constexpr,
+    SCORE_STRIDE: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     offsets = tl.arange(0, 1024)
@@ -89,9 +92,14 @@ def _candidate_store_flags_kernel(
         blocks = tile * 1024 + offsets
         tl.store(flags + row * NBLOCKS + blocks, 0, blocks < NBLOCKS)
     columns = tl.arange(0, triton.next_power_of_2(K))
-    score = tl.load(values + row * K + columns, columns < K, other=-float("inf"))
-    index = tl.load(indices + row * K + columns, columns < K, other=-1)
-    valid = (columns < K) & (score > -float("inf"))
+    if NBLOCKS <= K:
+        # Every block fits: no selection or initialized index buffer is needed.
+        index = columns
+    else:
+        index = tl.load(candidates + row * K + columns, columns < K, other=-1)
+    domain = (columns < K) & (index >= 0) & (index < NBLOCKS)
+    score = tl.load(scores + row * SCORE_STRIDE + index, domain, other=-float("inf"))
+    valid = domain & (score > -float("inf"))
     # +inf pins the newest block; NaN and -inf remain invalid, as in torch.
     tl.store(candidates + row * K + columns, tl.where(valid, index, -1), columns < K)
     tl.debug_barrier()
@@ -154,15 +162,40 @@ def select_candidates(
     rows, width = logits.shape
     nblocks = triton.cdiv(width, block_size)
     count = min(topk_blocks, nblocks)
-    scores = torch.empty((rows, nblocks), dtype=logits.dtype, device=logits.device)
+    if topk_blocks not in (512, 1024, 2048):
+        raise ValueError("candidate TopK must be 512, 1024, or 2048")
+    # Keep score rows aligned for topk_v3's vectorized loads, without widening
+    # its logical selection domain or reading uninitialized padding.
+    score_stride = triton.cdiv(nblocks, 256) * 256
+    scores = torch.empty(
+        (rows, score_stride), dtype=logits.dtype, device=logits.device
+    )[:, :nblocks]
+    block_lengths = torch.empty((rows,), dtype=torch.int32, device=logits.device)
     _candidate_pool_kernel[(rows, triton.cdiv(nblocks, 128))](
-        logits, lengths, scores, width, logits.stride(0), block_size, nblocks, 128
+        logits,
+        lengths,
+        scores,
+        block_lengths,
+        width,
+        logits.stride(0),
+        block_size,
+        nblocks,
+        score_stride,
+        128,
     )
-    values, indices = scores.topk(count, dim=-1, sorted=False)
     candidates = torch.empty((rows, count), dtype=torch.int32, device=logits.device)
+    if nblocks > count:
+        rtp_llm_ops.topk_v3(
+            scores,
+            block_lengths,
+            candidates,
+            _get_topk_workspace(logits.device),
+            count,
+            nblocks,
+        )
     flags = torch.empty((rows, nblocks), dtype=torch.uint8, device=logits.device)
     _candidate_store_flags_kernel[(rows,)](
-        values, indices, candidates, flags, count, nblocks
+        scores, candidates, flags, count, nblocks, score_stride
     )
     return candidates, flags
 
