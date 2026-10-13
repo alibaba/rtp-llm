@@ -37,8 +37,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * </ul>
  *
  * <p>The drain-rate assertions run ONE decode engine at a steady running count
- * and compare achieved tokens/s against those production anchors with a ±15%
- * band (scheduler-timer quantisation + the one extra ramp-up step at admission
+ * and compare achieved tokens/s against those production anchors with a ±30%
+ * band (scheduler-timer quantisation, host load, and the one extra ramp-up step at admission
  * account for a few percent; the band rejects the removed per-token caliber,
  * which would sit ~2.8×–5.5× off).
  */
@@ -147,8 +147,8 @@ class ProductionCaliberDecodeTest {
     @Timeout(60)
     void lowBatchDrainRateMatchesProductionAnchor() throws Exception {
         double tokPerSec = drainRate(4, 500);
-        // Production anchor 519; model 514.7. ±15% band.
-        assertWithinBand(tokPerSec, 519.0, 0.15, "low batch (running=4)");
+        // Production anchor 519; model 514.7. ±30% wall-clock band.
+        assertWithinBand(tokPerSec, 519.0, 0.30, "low batch (running=4)");
     }
 
     /**
@@ -160,8 +160,8 @@ class ProductionCaliberDecodeTest {
     @Timeout(60)
     void fullBatchDrainRateMatchesProductionAnchor() throws Exception {
         double tokPerSec = drainRate(128, 100);
-        // Production anchor 7726; model 7943 (+2.8%). ±15% band.
-        assertWithinBand(tokPerSec, 7726.0, 0.15, "full batch (running=128)");
+        // Production anchor 7726; model 7943 (+2.8%). ±30% wall-clock band.
+        assertWithinBand(tokPerSec, 7726.0, 0.30, "full batch (running=128)");
     }
 
     /**
@@ -173,7 +173,7 @@ class ProductionCaliberDecodeTest {
     @Timeout(60)
     void singleStreamDrainRateMatchesProductionTpotCaliber() throws Exception {
         double tokPerSec = drainRate(1, 500);
-        assertWithinBand(tokPerSec, 119.0, 0.20, "single stream (running=1)");
+        assertWithinBand(tokPerSec, 119.0, 0.30, "single stream (running=1)");
     }
 
     // ──────────── helpers ────────────

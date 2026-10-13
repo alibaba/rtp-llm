@@ -128,6 +128,38 @@ class PlanLanesTest(unittest.TestCase):
             self.assertFalse({"master", "engine_fault"} <= set(lane))
 
 
+class ProfileFilteredListingTest(unittest.TestCase):
+    def test_missing_categories_are_valid_after_profile_filtering(self):
+        rows = [
+            ["cancel_basic", "cancel"],
+            ["kv_prefix", "kv"],
+            ["kv_capacity", "kv"],
+        ]
+        with mock.patch.object(parallel_runner, "_list_rows", return_value=rows):
+            self.assertEqual(
+                [("cancel_basic", "cancel"), ("kv_prefix", "kv"), ("kv_capacity", "kv")],
+                parallel_runner.list_case_pairs("window-nonbatch"),
+            )
+            self.assertEqual(
+                {"cancel": 1, "kv": 2},
+                parallel_runner.category_case_counts("window-nonbatch"),
+            )
+            self.assertEqual(
+                {
+                    "cancel": parallel_runner.CATEGORY_WEIGHTS["cancel"],
+                    "kv": 2 * parallel_runner.CATEGORY_WEIGHTS["kv"],
+                },
+                parallel_runner.family_weights("window-nonbatch"),
+            )
+
+    def test_empty_profile_listing_is_still_rejected(self):
+        with mock.patch.object(parallel_runner, "_list_rows", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "produced no cases"):
+                parallel_runner.list_case_pairs("empty")
+            with self.assertRaisesRegex(RuntimeError, "produced no cases"):
+                parallel_runner.category_case_counts("empty")
+
+
 class LaneEnvTest(unittest.TestCase):
     def test_lane_port_footprints_are_disjoint(self):
         # A lane owns a master group [m..m+5] (single-master/Tier-1 A:
