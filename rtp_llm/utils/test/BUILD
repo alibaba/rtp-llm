@@ -27,6 +27,12 @@ py_test(
 )
 
 py_test(
+    name = "numa_test",
+    srcs = ["numa_test.py"],
+    deps = ["//rtp_llm:numa"],
+)
+
+py_test(
     name = "jit_cache_env_test",
     srcs = ["jit_cache_env_test.py"],
     deps = ["//rtp_llm:jit_cache_env"],

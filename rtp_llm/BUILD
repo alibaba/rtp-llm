@@ -159,12 +159,14 @@ py_library(
     srcs = glob([
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
+        "utils/numa.py",
         "utils/warmup.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     deps = [
         ":jit_cache_env",
+        ":numa",
         ":torch",
         ":safetensors",
         #":decord",
@@ -174,6 +176,11 @@ py_library(
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
     ] + arch_dep + internal_deps()
+)
+
+py_library(
+    name = "numa",
+    srcs = ["utils/numa.py"],
 )
 
 py_library(
@@ -506,6 +513,7 @@ py_library(
         ":utils",
         ":config_ops",
         ":warmup",
+        ":numa",
         ":jit_cache_manager_lib",
     ],
     data = jit_deps(),
