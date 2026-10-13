@@ -27,8 +27,19 @@
       "use_fp8_w8a8": false,
       "dtype": "bf16",
       "timing_methods": "avg<=16 buckets: cuda_graph_replay (production decode regime); prefill buckets: L2-scrubbed eager (expert weights DRAM-cold per layer)",
-      "sweep": "BM={16,32,64} BN={64,128,256} BK={64,128} warps={4,8} stages={2,3,4,5} GROUP_SIZE_M={1,8,16}; M in {1,2,4,8,16,32,64,128,256,599,1200,2400,4792}",
+      "sweep": "BM={16,32,64} BN={64,128,256} BK={64,128} warps={4,8} stages={2,3,4,5} GROUP_SIZE_M={1,8,16}; M in {1,2,4,8,16,32,64,128,256,599,1200,2400,4792}; batch-1 sub-bucket (avg<=0.05, tokens<=1) added later by 6-round interleaved DRAM-cold cuda_graph_replay A/B (num_stages 3->4: median 0.95 gemm1 / 0.98 gemm2, all rounds on the winning side, bit-identical outputs) - the original M=1 sweep cells were recorded under (likely L2-warm) eager timing and chose s3; graph replay is the production decode regime and is the arbiter",
       "buckets": [
+        {
+          "max_avg_tokens_per_expert": 0.05,
+          "config": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 128,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 4,
+            "num_stages": 4
+          }
+        },
         {
           "max_avg_tokens_per_expert": 16.0,
           "config": {
@@ -75,8 +86,19 @@
       "use_fp8_w8a8": false,
       "dtype": "bf16",
       "timing_methods": "avg<=16 buckets: cuda_graph_replay (production decode regime); prefill buckets: L2-scrubbed eager (expert weights DRAM-cold per layer)",
-      "sweep": "BM={16,32,64} BN={64,128,256} BK={64,128} warps={4,8} stages={2,3,4,5} GROUP_SIZE_M={1,8,16}; M in {1,2,4,8,16,32,64,128,256,599,1200,2400,4792}",
+      "sweep": "BM={16,32,64} BN={64,128,256} BK={64,128} warps={4,8} stages={2,3,4,5} GROUP_SIZE_M={1,8,16}; M in {1,2,4,8,16,32,64,128,256,599,1200,2400,4792}; batch-1 sub-bucket (avg<=0.05, tokens<=1) added later by 6-round interleaved DRAM-cold cuda_graph_replay A/B (num_stages 3->4: median 0.95 gemm1 / 0.98 gemm2, all rounds on the winning side, bit-identical outputs) - the original M=1 sweep cells were recorded under (likely L2-warm) eager timing and chose s3; graph replay is the production decode regime and is the arbiter",
       "buckets": [
+        {
+          "max_avg_tokens_per_expert": 0.05,
+          "config": {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 64,
+            "BLOCK_SIZE_K": 64,
+            "GROUP_SIZE_M": 8,
+            "num_warps": 4,
+            "num_stages": 4
+          }
+        },
         {
           "max_avg_tokens_per_expert": 16.0,
           "config": {

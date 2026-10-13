@@ -419,9 +419,37 @@ moe_align_block_size_compiled = torch.compile(
 # BN128/BK64; large keeps BM64 (BM16/BM32 read expert weights 2-3x).
 # GEMM2 (N=hidden=2048, K=inter=512): short K wants BK64 everywhere; small
 # shapes prefer BN64, medium BN128.
+#
+# Batch-1 decode sub-bucket (max_avg_tokens_per_expert <= 0.05, i.e. exactly
+# tokens <= 1: the executor passes the token count as M so avg = tokens/32;
+# tokens=2 is 0.0625 and stays on the next bucket): the same tile shape as the
+# <=16 bucket with num_stages 3 -> 4. Selected by 6-round interleaved
+# CUDA-graph-replay A/B on idle H20 (DRAM-cold 8-variant routing cycle, the
+# production decode regime): M_routed=8 medians 0.95/0.98 across three
+# independent runs with every round on the winning side. num_stages=4 is a
+# LOSS at tokens>=2 (1.15x at tokens=2, 1.09x at tokens=3) so the 0.05 head
+# bucket deliberately excludes it; only software-pipeline depth changes
+# (scheduling), the tl.dot k-ascending fp32 accumulation is invariant, and
+# outputs are measured bit-identical (torch.equal True; max-rel-diff vs the
+# per-expert fp32 reference unchanged at ~3.9e-3, one bf16 output ulp).
+# The checked-in JSON sweep context recorded s3 for the M=1 cells under
+# (probably L2-warm) eager timing; the DRAM-cold graph-replay A/B is the
+# arbiter here. See bench_moe_decode_ab.json / bench_moe_ab_and_ceiling.json
+# under runs/minicpmv47_h20_20261013/build_logs/.
 _TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dict[str, Any]]]] = {
     # w1 GEMM: A [M, hidden] x B [E, 2*inter, hidden] -> [M*top_k, 2*inter]
     (256, 1024, 2048, 8): [
+        (
+            0.05,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+        ),
         (
             16.0,
             {
@@ -458,6 +486,17 @@ _TUNED_MOE_CONFIGS: Dict[tuple[int, int, int, int], list[tuple[float | None, Dic
     ],
     # w2 GEMM: A [M*top_k, inter] x B [E, hidden, inter] -> [M*top_k, hidden]
     (256, 2048, 512, 8): [
+        (
+            0.05,
+            {
+                "BLOCK_SIZE_M": 16,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 64,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 4,
+            },
+        ),
         (
             16.0,
             {
