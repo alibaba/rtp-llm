@@ -51,6 +51,16 @@ int LinearCacheManager::retainedDecodeBlocks(int reserve_step) const {
     return std::max(2, static_cast<int>(activeTailBlocks())) + reserve_step;
 }
 
+void LinearCacheManager::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
+    out.clear();
+    out.reserve(in.size());
+    for (auto b : in) {
+        if (!isNullBlockIdx(b)) {
+            out.push_back(b);
+        }
+    }
+}
+
 int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
     int       extra_blocks = reserve_step ? reserve_step - 1 : 0;
     const int block_size   = seqSizePerBlock();
@@ -86,7 +96,8 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                const BlockIndicesType& current_block_indices,
                                                int                     remaining_tokens,
                                                int                     reserve_step,
-                                               bool                    enable_reuse_cache) const {
+                                               bool                    enable_reuse_cache,
+                                               bool                    reclaim_history) const {
     const int current_seq_slots = (seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int final_seq_slots   = (seq_len + remaining_tokens + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int extra_blocks      = reserve_step ? reserve_step - 1 : 0;
@@ -109,6 +120,24 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
         }
     }
 
+    if (reclaim_history) {
+        if (!current_block_indices.empty()) {
+            // Existing request/transfer owners can keep these blocks pinned after our
+            // reference retires. Forecast only additional private allocations.
+            for (auto& cost : block_costs) {
+                cost = cost > 0 ? -1 : 0;
+            }
+        }
+        return estimateHistoryReclaimPeak(std::move(block_costs),
+                                          seq_len,
+                                          remaining_tokens,
+                                          reserve_step,
+                                          enable_reuse_cache,
+                                          !current_block_indices.empty());
+    }
+
+    // Main #1574 slot-cost peak model (no reclaim): the first decode slot
+    // starts above the active tail, growth is bounded by retained decode blocks.
     if (remaining_tokens <= 0) {
         return std::accumulate(block_costs.begin(), block_costs.end(), 0) - current_physical_blocks;
     }
@@ -129,7 +158,8 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                            int  remaining_tokens,
                                                            int  reserve_step,
                                                            bool enable_reuse_cache,
-                                                           int  target_batch_size) const {
+                                                           int  target_batch_size,
+                                                           bool reclaim_history) const {
     const int  batch_size = std::max(target_batch_size, 1);
     const auto seq_slots  = [&](int length) { return (length + seqSizePerBlock() - 1) / seqSizePerBlock(); };
 
@@ -150,6 +180,12 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         block_costs.push_back(shouldMaterializeBlock(slot, seq_len, reserve_step, enable_reuse_cache) ? batch_size : 0);
     }
 
+    if (reclaim_history && batch_size == 1) {
+        return estimateHistoryReclaimPeak(
+            std::move(block_costs), seq_len, remaining_tokens, reserve_step, enable_reuse_cache, false);
+    }
+
+    // Main #1574 slot-cost peak model (no reclaim).
     if (remaining_tokens <= 0) {
         return std::accumulate(block_costs.begin(), block_costs.end(), 0);
     }
@@ -160,6 +196,53 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         final_total,
         batch_size,
         retainedDecodeBlocks(reserve_step));
+}
+
+int LinearCacheManager::estimateHistoryReclaimPeak(std::vector<int> block_costs,
+                                                   int              seq_len,
+                                                   int              remaining_tokens,
+                                                   int              reserve_step,
+                                                   bool             enable_reuse_cache,
+                                                   bool             initialized) const {
+    int physical_blocks = 0;
+    for (const int cost : block_costs) {
+        physical_blocks += std::max(cost, 0);
+    }
+    int       peak_blocks = physical_blocks;
+    size_t    retired     = 0;
+    const int block_size  = seqSizePerBlock();
+    const int final_len   = seq_len + std::max(remaining_tokens, 0);
+    auto      allocate_at = [&](int length) {
+        // A decode input contains one token beyond the last committed KV. Use
+        // the exact retirement policy applied by the runtime before allocation.
+        const size_t end = std::min(historyReclaimEnd(std::max(length - 1, 0)), block_costs.size());
+        for (; retired < end; ++retired) {
+            physical_blocks -= std::max(block_costs[retired], 0);
+            block_costs[retired] = 0;
+        }
+        const int total_slots = needBlocksNum(length, 0, reserve_step);
+        if (static_cast<int>(block_costs.size()) < total_slots) {
+            block_costs.resize(total_slots, 0);
+        }
+        for (size_t pos = retired; pos < static_cast<size_t>(total_slots); ++pos) {
+            if (block_costs[pos] == 0
+                && shouldMaterializeBlock(static_cast<int>(pos), length, reserve_step, enable_reuse_cache)) {
+                block_costs[pos] = 1;
+                ++physical_blocks;
+            }
+        }
+        peak_blocks = std::max(peak_blocks, physical_blocks);
+    };
+    if (initialized) {
+        allocate_at(seq_len);
+    }
+    // A fresh prompt's complete bulk allocation has already been charged above.
+    // Allocation and committed-retirement boundaries change only at a new slot.
+    for (int64_t length = static_cast<int64_t>(seq_len) + 1; length <= final_len;) {
+        allocate_at(static_cast<int>(length));
+        length = ((length + block_size - 1) / block_size) * block_size + 1;
+    }
+    return peak_blocks;
 }
 
 NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common_seq_len,
@@ -189,21 +272,6 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
     }
     for (int pos = common_slots; pos < total_slots; ++pos) {
         if ((reclaimed(pos) && pos >= reuse_slots && shouldMaterializeBlock(pos, seq_len, 0, reuse_enabled))
-            || required_positions.count(static_cast<size_t>(pos)) != 0) {
-            ++info.extra_blocks;
-        }
-    }
-    return info;
-}
-
-    for (int pos = 0; pos < common_slots; ++pos) {
-        if ((pos >= reuse_slots && shouldMaterializeBlock(pos, common_seq_len, 0, reuse_enabled))
-            || required_positions.count(static_cast<size_t>(pos)) != 0) {
-            ++info.common_blocks;
-        }
-    }
-    for (int pos = common_slots; pos < total_slots; ++pos) {
-        if ((pos >= reuse_slots && shouldMaterializeBlock(pos, seq_len, 0, reuse_enabled))
             || required_positions.count(static_cast<size_t>(pos)) != 0) {
             ++info.extra_blocks;
         }
@@ -252,7 +320,6 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
         // Reallocating an old read slot would expose an uninitialized state.
         return false;
     }
-    auto should_materialize = [&](int pos) {
     auto should_materialize = [&](int pos) {
         // History-reclaim: slots retired below the committed prefix never
         // re-materialize (required positions were prechecked to be above it).
