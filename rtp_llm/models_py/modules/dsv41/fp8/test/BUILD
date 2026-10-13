@@ -27,9 +27,12 @@ _TESTS = [
     "test_v41_grouped_gemm",
     "test_v41_grouped_prefill_score",
     "test_v41_indexer_q_fusion",
+    "test_v41_mega_attention",
+    "test_v41_mega_wiring",
     "test_v41_joint_pool",
     "test_v41_norm_quant",
     "test_v41_prefill_candidates",
+    "test_v41_prefill_deepselect",
     "test_v41_prefill_global",
     "test_v41_prefill_index_plan",
     "test_v41_prefill_indexer",
@@ -68,6 +71,7 @@ _TESTS = [
             "@//:using_cuda13_arm": [],
             "//conditions:default": ["@platforms//:incompatible"],
         }),
+        env = {"RTP_V41_PREFILL_DEEPSELECT_GPU_TEST": "1"} if name == "test_v41_prefill_deepselect" else {},
         legacy_create_init = 0,
     )
     for name in _TESTS

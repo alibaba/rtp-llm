@@ -10,6 +10,7 @@ import os
 import torch
 
 from rtp_llm.models_py.modules.dsv41._fused_inv_rope_fp8_quant_triton import (
+    _device_capability,
     fused_inv_rope_fp8_quant,
 )
 
@@ -55,21 +56,36 @@ def is_supported(o, freqs, weight, weight_scale) -> bool:
         or any(t.device != o.device for t in (freqs, weight, weight_scale))
     ):
         return False
-    return torch.cuda.get_device_capability(o.device)[0] == 10
+    return _device_capability(o.device)[0] == 10
 
 
-def quantization_scale_min(tokens: int, group_width: int) -> float:
+def quantization_scale_min(
+    tokens: int, group_width: int, quant_kernel: str | None = None
+) -> float:
     """Mirror the per-group V41MXFP8Linear -> sgl quantizer dispatch."""
-    backend = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+    backend = (
+        (
+            os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto")
+            if quant_kernel is None
+            else quant_kernel
+        )
+        .strip()
+        .lower()
+    )
     use_v2 = backend == "v2" or (
         backend == "auto" and tokens * group_width >= 4 * 1024 * 1024
     )
     return 0.0 if use_v2 else 1e-10
 
 
-def _quantize_projection_input(o, freqs, weight):
+def _quantize_projection_input(o, freqs, weight, workspace=None):
     groups, _, width = weight.shape
     tokens = o.numel() // (o.shape[-2] * o.shape[-1])
+    buffers = (None, None)
+    quant_kernel = None
+    if workspace is not None:
+        buffers = workspace.output_projection_quant_buffers(tokens, groups, width)
+        quant_kernel = workspace.fp8_quant_kernel
     return fused_inv_rope_fp8_quant(
         o,
         freqs,
@@ -80,7 +96,10 @@ def _quantize_projection_input(o, freqs, weight):
         quant_group_size=32,
         eps=torch.finfo(torch.float32).tiny,
         round_rope_to_input_dtype=True,
-        scale_min=quantization_scale_min(tokens, width),
+        scale_min=quantization_scale_min(tokens, width, quant_kernel),
+        fp8_buf=buffers[0],
+        scale_buf=buffers[1],
+        _launch_config=None if workspace is None else workspace.inv_rope_quant_config,
     )
 
 
@@ -91,17 +110,27 @@ def try_grouped_output_quant(o, freqs, weight, weight_scale):
     V41MXFP8Linear.forward_quantized and retain their original path on None.
     Startup warmup must have prepared the device; cold calls never compile.
     """
+    if not is_supported(o, freqs, weight, weight_scale):
+        return None
+    return _try_grouped_output_quant_supported(o, freqs, weight, weight_scale)
+
+
+def _try_grouped_output_quant_supported(o, freqs, weight, weight_scale, workspace=None):
+    """Internal entry after the attention caller's complete support check."""
     from rtp_llm.models_py.modules.dsv41.fp8 import _v41_wo_a_quant
 
     if (
         o.requires_grad
         or freqs.requires_grad
-        or not is_supported(o, freqs, weight, weight_scale)
         or not _v41_wo_a_quant.is_ready(weight, weight_scale)
     ):
         return None
-    pair = _quantize_projection_input(o, freqs, weight)
-    return _v41_wo_a_quant.try_grouped_quant(pair, (weight, weight_scale))
+    pair = _quantize_projection_input(o, freqs, weight, workspace)
+    return _v41_wo_a_quant.try_grouped_quant(
+        pair,
+        (weight, weight_scale),
+        quant_kernel=None if workspace is None else workspace.fp8_quant_kernel,
+    )
 
 
 def warmup_quantized_output(weight, weight_scale):
@@ -110,7 +139,9 @@ def warmup_quantized_output(weight, weight_scale):
     return _v41_wo_a_quant.warmup(weight, weight_scale)
 
 
-def grouped_output_projection(o, freqs, weight, weight_scale, *, out=None):
+def grouped_output_projection(
+    o, freqs, weight, weight_scale, *, out=None, workspace=None
+):
     """Return BF16 [tokens, groups * rank] for the existing wo_b linear.
 
     Call only after ``is_supported``. CUDA/JIT errors intentionally propagate.
@@ -120,7 +151,7 @@ def grouped_output_projection(o, freqs, weight, weight_scale, *, out=None):
 
     groups, rank, _ = weight.shape
     tokens = o.numel() // (o.shape[-2] * o.shape[-1])
-    quantized, scales = _quantize_projection_input(o, freqs, weight)
+    quantized, scales = _quantize_projection_input(o, freqs, weight, workspace)
     if out is None:
         out = torch.empty(tokens, groups, rank, dtype=torch.bfloat16, device=o.device)
     deep_gemm.fp8_einsum(

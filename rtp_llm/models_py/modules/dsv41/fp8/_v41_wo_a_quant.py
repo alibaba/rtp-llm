@@ -1,4 +1,4 @@
-"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on SM100.
+"""Startup-only CUDA JIT for wo_a BF16-round/group32 FP8 output on SM100/SM103.
 
 No compilation, CUDA initialization, or vendor-library import occurs at import.
 Unsupported or unprepared calls return None so the caller retains its BF16 path.
@@ -25,13 +25,18 @@ _READY = {}
 _LIBRARIES = {}
 _LOCK = threading.Lock()
 _SOURCES = ("_v41_wo_a_quant.cu", "_v41_wo_a_quant.cuh", "_v41_wo_a_driver.cc")
-# The shim and two schedules depend on this private DeepGEMM ABI. A different
-# implementation falls back until its epilogue/layout has been verified.
+# The shim and two schedules are qualified against DeepGEMM 2.8.0+122e18b.
+# Its EpilogueDynamicScaledFP8 receives EpilogueArgs directly; pin the behavior
+# and host-visible layout as well as the mainloop. Other revisions fall back
+# until their epilogue/layout has been verified.
 _VENDOR_HASHES = {
-    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "88dd217719c153b805ee9a791a8c612c078c42a65205a14b7c9ee4f1d0fce110",
-    "epilogue/sm100_store_cd.cuh": "72ea5a5915552004c4b1d5cedd049442476c2cce367985527032f6dcca4a5b10",
-    "epilogue/sm100_store_cd_swap_ab.cuh": "0cc27e0ca66e3be47b1d90974ff7f66efca38c08b783ce16fc5e8f1d8db7010f",
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "0b42d290fbcaea544a7b1c2c786429e52453fc60a74a939c20fa73ce960abf69",
+    "epilogue/sm100_store_cd.cuh": "34264511eadb165477cfd92059e03f7cc7dbb5b694298f7e4e9f1074294dc4ad",
+    "epilogue/sm100_store_cd_swap_ab.cuh": "77c280afab2a284d7a105323f3a878549d1e7f358ab0a28190c43958aed247d2",
+    "epilogue/transform.cuh": "85c5159fbfa9cfbda4a1f99885e72668e4df771d01e200001fe39ab89da17ccb",
+    "common/types.cuh": "a5fc39709678359f8a326dcb6c216edf09aa7dc7443bacbe91cc416a8802e74a",
     "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
+    "layout/gemm.cuh": "b692f024495a4160dc65a8094bb13eae65be4c902d10436fce6446e6919d2b57",
 }
 
 
@@ -39,8 +44,11 @@ def _device_supported(device):
     if device.type != "cuda":
         return False
     prop = torch.cuda.get_device_properties(device)
-    # These two schedules have been validated on the 152-SM SM100 device.
-    return (prop.major, prop.minor, prop.multi_processor_count) == (10, 0, 152)
+    # The unchanged schedules are qualified only on these complete devices.
+    return (prop.major, prop.minor, prop.multi_processor_count) in (
+        (10, 0, 152),
+        (10, 3, 148),
+    )
 
 
 def _weight_supported(weight, scale):
@@ -69,7 +77,12 @@ def is_supported(a, weight):
         aq.device == sa.device == w.device
         and aq.dtype == torch.float8_e4m3fn
         and aq.shape == (m, 8, 4096)
-        and aq.stride() == (4096, m * 4096, 1)
+        # The driver encodes both runtime strides in its A-side TMA map.
+        # The inverse-RoPE quantizer emits group-major [G,M,K]; native mega
+        # attention emits token-major [M,G,K]. Both keep K contiguous and
+        # require no copy or different CUDA specialization. Other padded,
+        # overlapping or broadcast layouts remain outside the contract.
+        and aq.stride() in ((4096, m * 4096, 1), (32768, 4096, 1))
         and sa.dtype == torch.int32
         and sa.shape == (m, 8, 32)
         and sa.stride() == (1, stride * 32, stride)
@@ -87,6 +100,23 @@ def _legacy(m, mode):
     return mode == "legacy" or (mode == "auto" and m * 8192 < 4 * 1024 * 1024)
 
 
+def _nvcc_path():
+    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
+    if cuda:
+        # An explicit toolchain choice must not silently switch to another CUDA.
+        path = Path(cuda) / "bin/nvcc"
+        return str(path) if path.is_file() else None
+    path = shutil.which("nvcc")
+    if path:
+        return path
+    # Service launchers need not expose CUDA's bin directory on PATH.
+    for prefix in ("/usr/local/cuda", "/usr/local/cuda-13"):
+        path = Path(prefix) / "bin/nvcc"
+        if path.is_file():
+            return str(path)
+    return None
+
+
 def _dependencies():
     import deep_gemm
 
@@ -98,8 +128,7 @@ def _dependencies():
             or hashlib.sha256(path.read_bytes()).hexdigest() != expected
         ):
             return None
-    cuda = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
-    nvcc = str(Path(cuda) / "bin/nvcc") if cuda else shutil.which("nvcc")
+    nvcc = _nvcc_path()
     cxx = os.environ.get("CXX") or shutil.which("c++")
     if not nvcc or not cxx or not Path(nvcc).is_file():
         return None
@@ -223,8 +252,9 @@ def _load(device):
 
 def _output(m, device):
     q = torch.empty((m, 8192), dtype=torch.float8_e4m3fn, device=device)
-    s = torch.empty((64, (m + 3) // 4 * 4), dtype=torch.int32, device=device).T[:m]
-    return q, s
+    padded_m = (m + 3) // 4 * 4
+    s = torch.empty((64, padded_m), dtype=torch.int32, device=device).T
+    return q, s if padded_m == m else s[:m]
 
 
 def is_ready(weight, scale):
@@ -290,7 +320,13 @@ def warmup(weight, scale):
             return False
         _READY[device.index] = entry
         try:
-            for m in (128, 256):
+            prop = torch.cuda.get_device_properties(device)
+            rows = (
+                (128, 256, 512, 4096, 12288)
+                if (prop.major, prop.minor, prop.multi_processor_count) == (10, 3, 148)
+                else (128, 256)
+            )
+            for m in rows:
                 q = torch.zeros(
                     (8, m, 4096), dtype=torch.float8_e4m3fn, device=device
                 ).transpose(0, 1)
@@ -301,6 +337,14 @@ def warmup(weight, scale):
                 )
                 try_grouped_quant((q, s), (weight, scale))
             torch.cuda.current_stream(device).synchronize()
+            logging.info(
+                "[DSV41 WoAQuant] device=%s SM=%d%d SMS=%d M=%s ready=True",
+                device,
+                prop.major,
+                prop.minor,
+                prop.multi_processor_count,
+                rows,
+            )
         except BaseException:
             _READY.pop(device.index, None)
             raise

@@ -137,7 +137,62 @@ def _lookup_host_kernel(
         )
 
 
+# Reduce prefetch CTA register pressure on concurrent prefill kernels.
+# The synchronous/decode launch contract remains BLOCK_R=16, num_warps=4.
+PREFETCH_LOOKUP_CONFIG = (4, 4)
+PREFETCH_LOOKUP_CARVEOUT = 100
+_PREFETCH_LOOKUP_PREPARED = set()
+
+
+def _prepare_prefetch_kernel(kernel):
+    """Startup only: avoid carveout switches with large-shared-memory kernels."""
+    if kernel in _PREFETCH_LOOKUP_PREPARED:
+        return False
+    from cuda.bindings import driver
+
+    function = driver.CUfunction(kernel.function)
+    attribute = (
+        driver.CUfunction_attribute.CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT
+    )
+    (status,) = driver.cuFuncSetAttribute(function, attribute, PREFETCH_LOOKUP_CARVEOUT)
+    if status != driver.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"Engram prefetch carveout setup failed: {status}")
+    status, value = driver.cuFuncGetAttribute(attribute, function)
+    if status != driver.CUresult.CUDA_SUCCESS or value != PREFETCH_LOOKUP_CARVEOUT:
+        raise RuntimeError(
+            f"Engram prefetch carveout verification failed: {status}, {value}"
+        )
+    # Keep the compiled handle alive; a recycled CUDA function must be prepared.
+    _PREFETCH_LOOKUP_PREPARED.add(kernel)
+    return True
+
+
 def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
+    return _lookup_host_rows(weight_uva, scales_uva, indices, num_sms, 16, 4)
+
+
+def lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
+    return _lookup_host_rows(
+        weight_uva, scales_uva, indices, num_sms, *PREFETCH_LOOKUP_CONFIG
+    )
+
+
+def warmup_lookup_prefetch_rows(weight_uva, scales_uva, indices, num_sms):
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("Engram prefetch kernel preparation cannot run in capture")
+    return _lookup_host_rows(
+        weight_uva,
+        scales_uva,
+        indices,
+        num_sms,
+        *PREFETCH_LOOKUP_CONFIG,
+        prepare=True,
+    )
+
+
+def _lookup_host_rows(
+    weight_uva, scales_uva, indices, num_sms, block_rows, num_warps, *, prepare=False
+):
     tokens, heads = indices.shape
     dim = weight_uva.shape[1]
     output = torch.empty(
@@ -146,8 +201,8 @@ def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
     rows = tokens * heads
     if not rows:
         return output
-    grid = min(triton.cdiv(rows, 16), num_sms)
-    _lookup_host_kernel[(grid,)](
+    grid = min(triton.cdiv(rows, block_rows), num_sms)
+    kernel = _lookup_host_kernel[(grid,)](
         weight_uva,
         scales_uva,
         indices,
@@ -159,8 +214,13 @@ def lookup_host_rows(weight_uva, scales_uva, indices, num_sms):
         HEADS=heads,
         DIM=dim,
         QUANT_BLOCK=32,
-        BLOCK_R=16,
+        BLOCK_R=block_rows,
         GRID=grid,
-        num_warps=4,
+        num_warps=num_warps,
     )
+    if prepare and _prepare_prefetch_kernel(kernel):
+        # Exercise the configured function before readiness is published.
+        return _lookup_host_rows(
+            weight_uva, scales_uva, indices, num_sms, block_rows, num_warps
+        )
     return output

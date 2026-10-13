@@ -82,6 +82,7 @@ filegroup(
         "modules/dsv41/**/*.cu",
         "modules/dsv41/**/*.cuh",
         "modules/dsv41/**/*.cc",
+        "modules/dsv41/**/*.cpp",
         "modules/dsv41/**/*.h",
         "modules/dsv41/**/*.LICENSE",
     ]),
@@ -97,6 +98,7 @@ py_library(
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
+        "//rtp_llm/models_py/bindings/cuda/kernels:topk_v3_jit_headers",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [

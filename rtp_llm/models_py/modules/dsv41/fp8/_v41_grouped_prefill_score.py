@@ -283,15 +283,33 @@ def _group_layout(keys, rows):
                 > _MAX_LOGITS_BYTES
             ):
                 break
-            next_payload = _slab_view((payload, keys[stop].quant), padded=True)
-            next_scale = _slab_view((scale, keys[stop].scale), padded=True)
-            if next_payload is None or next_scale is None:
+            # Admission needs only adjacency metadata. Constructing a new
+            # growing slab at every request creates two discarded ATen views.
+            previous, following = keys[stop - 1], keys[stop]
+            padded = (len(previous) + 255) // 256 * 256
+            if not all(
+                left.untyped_storage().data_ptr() == right.untyped_storage().data_ptr()
+                and left.storage_offset() + padded * left.stride(0)
+                == right.storage_offset()
+                for left, right in (
+                    (previous.quant, following.quant),
+                    (previous.scale, following.scale),
+                )
+            ):
                 break
-            payload, scale = next_payload, next_scale
             group_rows += rows[stop]
             width = next_width
             useful_scores = next_useful
             stop += 1
+        if stop > first + 1:
+            payload = _slab_view(
+                tuple(key.quant for key in keys[first:stop]), padded=True
+            )
+            scale = _slab_view(
+                tuple(key.scale for key in keys[first:stop]), padded=True
+            )
+            if payload is None or scale is None:
+                return None
         groups.append(
             _ScoreGroup(
                 first,
@@ -328,7 +346,12 @@ class _GroupedScores:
         self.q, self.sf, self.weights = q, sf, weights
         self.positions, self.ratio, self.shared = positions, ratio, shared
         self.rows, self.layout = rows, layout
+        self.group_rows = tuple(g.rows.stop - g.rows.start for g in layout)
         self.req_ids, self.key_counts = req_ids, key_counts
+
+    def split_rows(self, tensor):
+        """Make views for this call only; never cache layer activations."""
+        return (tensor,) if len(self.layout) == 1 else tensor.split(self.group_rows)
 
     def _bounds(self):
         from ._v41_prefill_metadata import try_score_bounds
@@ -372,14 +395,12 @@ class _GroupedScores:
                     self.ratio,
                     num_warps=4,
                 )
+                vectors = output.split(
+                    tuple(n for n in self.group_rows for _ in range(4))
+                )
                 bounds = tuple(
-                    (
-                        g.rows,
-                        *output[4 * g.rows.start : 4 * g.rows.stop]
-                        .view(4, g.rows.stop - g.rows.start)
-                        .unbind(0),
-                    )
-                    for g in self.layout
+                    (g.rows, *vectors[4 * i : 4 * i + 4])
+                    for i, g in enumerate(self.layout)
                 )
                 cache[key] = (self.positions, self.req_ids, self.key_counts, bounds)
                 return bounds
@@ -445,14 +466,21 @@ class _GroupedScores:
         """
         from ._indexer_score import fp8_fp4_mqa_indexer_score
 
-        for group, bounds in zip(self.layout, self._bounds()):
+        bounds_by_group = self._bounds()
+        for group, bounds, q, sf, weights in zip(
+            self.layout,
+            bounds_by_group,
+            self.split_rows(self.q),
+            self.split_rows(self.sf),
+            self.split_rows(self.weights),
+        ):
             rows, starts, ends, zeros, visible = bounds
             logits = fp8_fp4_mqa_indexer_score(
-                self.q[rows],
-                self.sf[rows],
+                q,
+                sf,
                 group.payload,
                 group.scale,
-                self.weights[rows],
+                weights,
                 starts,
                 ends,
                 clean_logits=False,

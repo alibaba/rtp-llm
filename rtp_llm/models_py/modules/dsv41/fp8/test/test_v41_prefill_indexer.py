@@ -20,11 +20,25 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
 
 
 def _reference_logits(q, weights, k, visible):
-    """The V4.1 FP32 scoring path over FP4 fake-quantized Q and K."""
+    """Main's BF16 per-head dot and four-lane reduction over FP4 Q/K."""
     q_fake = indexer._fp4_rows_torch(q)[2].view(q.shape)
     k_fake = indexer._fp4_rows_torch(k)[2]
-    scores = torch.einsum("mhd,kd->mhk", q_fake, k_fake)
-    scores = (scores.relu_() * weights[:, :, None]).sum(1)
+    dots = (
+        torch.einsum("mhd,kd->mhk", q_fake.double(), k_fake.double())
+        .relu_()
+        .bfloat16()
+        .double()
+    )
+    weights = weights.bfloat16().double()
+    lanes = [torch.zeros_like(dots[:, 0]) for _ in range(4)]
+    for head in range(dots.shape[1]):
+        lane = head % 4
+        lanes[lane] = (
+            (dots[:, head] * weights[:, head, None] + lanes[lane]).bfloat16().double()
+        )
+    even = (lanes[0] + lanes[2]).bfloat16().double()
+    odd = (lanes[1] + lanes[3]).bfloat16().double()
+    scores = (even + odd).bfloat16().float()
     columns = torch.arange(k.shape[0], device=k.device)
     return scores.masked_fill(columns[None] >= visible[:, None], -torch.inf)
 
@@ -415,7 +429,7 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
                 float(expected[row, selected].min()), float(cutoff - 2 * error - 1e-6)
             )
 
-    def test_clean_logits_only_mixed_tile_boundaries_and_padded_stride(self):
+    def test_clean_logits_only_mixed_tile_boundaries_and_normalized_stride(self):
         if torch.cuda.get_device_capability(self.device)[0] != 10:
             self.skipTest("Clean-logits-only is enabled only on SM100")
         for heads in (32, 64):
@@ -473,11 +487,11 @@ class V41PrefillIndexerCUDA(unittest.TestCase):
                         self._assert_scores_and_topk(
                             actual, _reference_logits(q, weights, k, bounded)
                         )
-                        self.assertGreater(actual.stride(0), keys)
-                        padded = actual.as_strided(
-                            (len(ends), actual.stride(0)), actual.stride()
-                        )
-                        self.assertTrue(torch.isneginf(padded[:, keys:]).all())
+                        # Main normalizes request-relative BF16 backend output
+                        # into a contiguous masked FP32 selector tensor. The
+                        # backend's aligned padding is not exposed here.
+                        self.assertEqual(actual.stride(), (keys, 1))
+                        self.assertEqual(actual.dtype, torch.float32)
 
     def test_clean_logits_graph_replay_overwrites_poisoned_reused_storage(self):
         if torch.cuda.get_device_capability(self.device)[0] != 10:
