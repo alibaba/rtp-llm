@@ -191,10 +191,13 @@ bool DefaultLayerGroupPolicy::init() {
         RTP_LLM_LOG_ERROR("exist intersection between full and other [%s]", ss.str().c_str());
         return false;
     }
-    // Protocol IDs retain topology order; mask assignment below remains layer-first.
+    // Protocol IDs retain reusable topology order; mask assignment below remains layer-first.
     std::unordered_map<std::string, int32_t> topology_group_ids;
     int32_t                                  protocol_group_id = 0;
     for (const auto& tag : topology_.groupTags()) {
+        if (!topology_.group(tag).policy.enable_prefix_reuse) {
+            continue;
+        }
         topology_group_ids.emplace(tag, protocol_group_id++);
     }
     if (full_group_tags_.size() + other_group_tags_.size() != topology_group_ids.size()) {
@@ -227,6 +230,9 @@ bool DefaultLayerGroupPolicy::init() {
             return false;
         }
         for (const auto& cache_tag : topology_layer.group_tags) {
+            if (!topology_.group(cache_tag).policy.enable_prefix_reuse) {
+                continue;
+            }
             const auto group_idx     = topology_group_ids.at(cache_tag);
             bool       is_full_group = false;
             if (full_group_tags_.find(cache_tag) != full_group_tags_.end()) {
@@ -263,7 +269,7 @@ bool DefaultLayerGroupPolicy::init() {
     }
     if (pending_tag_to_group_id.size() != topology_group_ids.size()) {
         for (const auto& tag : topology_.groupTags()) {
-            if (pending_tag_to_group_id.count(tag) == 0) {
+            if (topology_.group(tag).policy.enable_prefix_reuse && pending_tag_to_group_id.count(tag) == 0) {
                 RTP_LLM_LOG_ERROR("remote cache topology tag [%s] has no layer membership", tag.c_str());
             }
         }

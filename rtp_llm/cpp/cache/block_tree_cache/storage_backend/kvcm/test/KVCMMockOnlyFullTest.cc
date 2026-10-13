@@ -86,6 +86,61 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     EXPECT_TRUE(backend->execute(request, response));
 }
 
+TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliases) {
+    BackendEnvironment environment;
+    environment.cache_config.dtype = DataType::TYPE_FP16;
+    environment.cache_config.layer_num = 2;
+    environment.cache_config.seq_size_per_block = 8;
+    auto state = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    state.enable_prefix_reuse = false;
+    environment.cache_config.fromGroupedSpecs(
+        {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),
+         test::makeMhaSpec("state0", 8, DataType::TYPE_FP16, 1, 2)},
+        {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::SWA}, {"full0", "state0"},
+        {defaultCacheGroupPolicy(CacheGroupType::FULL), state});
+    environment.cache_config.finalizeBlockNums(8, RuntimeConfig{});
+    initializeEnvironmentPools(environment, "kvcm_disabled_state_query", 12);
+    auto client = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _))
+        .WillOnce(Invoke([](const auto& configs, auto, const auto& registrations, const auto& tags) {
+            EXPECT_EQ(tags, (std::vector<std::string>{"full0"}));
+            EXPECT_EQ(registrations.size(), 1u);
+            const auto json = autil::legacy::ToJsonString(configs.at(""), true);
+            EXPECT_EQ(json.find("state0"), std::string::npos);
+            EXPECT_EQ(json.find("old_combined"), std::string::npos);
+            EXPECT_NE(json.find("safe_alias"), std::string::npos);
+            EXPECT_NE(json.find("custom_instance"), std::string::npos);
+            EXPECT_EQ(configs.at("")->addresses(), (std::vector<std::string>{"custom-test-address"}));
+            return true;
+        }));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto infos = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>(
+        kvcm::KVCMConfig::LocationSpecInfoMap{{"tp0_Ffull0", 64}, {"tp0_Lstate0", 64}});
+    auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>(
+        kvcm::KVCMConfig::LocationSpecGroups{{"Ffull0", {"tp0_Ffull0"}}, {"Lstate0", {"tp0_Lstate0"}},
+                                           {"old_combined", {"tp0_Ffull0", "tp0_Lstate0"}},
+                                           {"safe_alias", {"tp0_Ffull0"}}});
+    auto custom = std::make_shared<kvcm::KVCMConfig>(false, "", 8, "custom_group", "custom_instance",
+        std::vector<std::string>{"custom-test-address"}, infos,
+        std::make_shared<kvcm::MetaChannelConfig>(3, 1000, 1000),
+        std::make_shared<kvcm::SdkWrapperConfig>(), groups,
+        kvcm::ModelDeployment("custom_model", "fp16", false, 1, 1, 1, "", ""));
+    KVCacheConfig config;
+    config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"", custom}});
+    RuntimeConfig runtime;
+    runtime.model_name = "kvcm_test_model";
+    BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
+        singleRankConfig(), SpeculativeExecutionConfig{}, nullptr, client));
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    const kv_cache_manager::Locations locations{{{"tp0_Ffull0", "full_101"}}};
+    EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH,
+                              std::vector<int64_t>{101}, _, _))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto result = match(*backend.backend, makeStorageRequest(environment));
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.matched_blocks_num, 1u);
+}
+
 TEST(KVCMMockOnlyFullTest, SwaPayloadMatchUsesBatchLocationsForFullPrefix) {
     BackendEnvironment environment;
     environment.cache_config.dtype = DataType::TYPE_FP16;
@@ -156,6 +211,58 @@ TEST(KVCMMockOnlyFullTest, BackendMatchStopsAtAMissAndPreservesReadUriPosition) 
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"uri_101"}, _, _))
         .WillOnce(Return(true));
     EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment, {101}), matched.match_meta));
+}
+
+TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) {
+    auto environment = makeBackendEnvironment("kvcm_backend_local_prefix");
+    auto client = std::make_shared<MockClientWrapper>();
+    KVCacheConfig config;
+    config.kvcm_server_address = "unused-test-address";
+    config.kvcm_read_backend_type = 3;
+    RuntimeConfig runtime;
+    runtime.model_name = "kvcm_test_model";
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
+        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, client));
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
+        [&](int layer, const std::string&, int block) {
+            return environment.device_pool->convertIndexToBuffer(layer, block);
+        }));
+    ScopedReferencedBlocks source_blocks(environment.device_pool, 5);
+    const auto& block_ids = source_blocks.get();
+    const auto backend_type = kv_cache_manager::StorageType::ST_TAIRMEMPOOL;
+    const auto spec_size = static_cast<int32_t>(environment.cache_config.blockSizeBytesForGroup("default"));
+    const kv_cache_manager::BackendLocations locations{
+        {}, {{backend_type, spec_size, {{"tp0_Fdefault", "uri_102"}}}},
+        {{backend_type, spec_size, {{"tp0_Fdefault", "uri_103"}}}}, {},
+        {{backend_type, spec_size, {{"tp0_Fdefault", "uri_105"}}}}};
+    const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
+    EXPECT_CALL(*client, getCacheLocationsByBackend(_, _, std::vector<int64_t>({101, 102, 103, 104, 105}), _,
+                                                   offset, _, backend_type))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto request = makeStorageRequest(environment, {101, 102, 103, 104, 105}, 1, block_ids);
+    auto result = match(*backend.backend, request);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.matched_blocks_num, 3u);
+    ASSERT_NE(result.match_meta, nullptr);
+
+    // Only the contiguous remote suffix is materialized; the hit after the miss is excluded.
+    request.keys = std::make_shared<const CacheKeysType>(CacheKeysType{101, 102, 103});
+    request.handles.resize(result.matched_blocks_num);
+    const std::vector<void*> bases{blockBase(environment, "default", block_ids[1]),
+                                   blockBase(environment, "default", block_ids[2])};
+    EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec({"uri_102", "uri_103"}), _, _))
+        .WillOnce(Invoke([bases](const auto&, const auto&, auto& buffers, const auto&) {
+            if (buffers.size() != 2u || buffers[0].iovs.size() != 1u || buffers[1].iovs.size() != 1u) {
+                ADD_FAILURE() << "KVCM read received an invalid block-buffer shape";
+                return false;
+            }
+            EXPECT_EQ(buffers[0].iovs[0].base, bases[0]);
+            EXPECT_EQ(buffers[1].iovs[0].base, bases[1]);
+            return true;
+        }));
+    EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
 }
 
 TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {

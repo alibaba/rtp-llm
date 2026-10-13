@@ -146,6 +146,34 @@ int main(int argc, char** argv) {
         published.locations = std::move(read_locations);
         verifyPool(*full, published, "full", 262144, false);
         verifyPool(*state, published, "state", 65536, false);
+
+        auto [offset_code, offset_match] = meta->MatchLocation(
+            trace, QueryType::QT_BATCH_GET, keys, {}, BlockMaskOffset{1}, 0, {});
+        check(offset_code, "Batch match with local prefix");
+        require(offset_match.size() == keys.size() && offset_match[0].empty(),
+                "Batch offset query did not preserve the skipped key position");
+        for (size_t i = 1; i < keys.size(); ++i) {
+            require(std::is_permutation(offset_match[i].begin(), offset_match[i].end(),
+                                        published.locations[i].begin(), published.locations[i].end(),
+                                        [](const auto& left, const auto& right) {
+                                            return left.spec_name == right.spec_name && left.uri == right.uri;
+                                        }), "Batch offset query changed key-to-URI positions");
+        }
+        auto [offset_backend_code, offset_backend] = meta->GetCacheLocationsByBackend(
+            trace, keys, {}, BlockMaskOffset{1}, std::vector<std::string>(keys.size(), "full"),
+            backend, BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+        check(offset_backend_code, "Backend query with local prefix");
+        require(offset_backend.size() == keys.size() && offset_backend[0].empty(),
+                "Backend offset query did not preserve the skipped key position");
+        for (size_t i = 1; i < keys.size(); ++i) {
+            require(offset_backend[i].size() == 1 && offset_backend[i][0].location_specs.size() == 1,
+                    "Backend offset query lost a requested key");
+            const auto& spec = offset_backend[i][0].location_specs[0];
+            require(spec.spec_name == "full" && std::any_of(published.locations[i].begin(),
+                    published.locations[i].end(), [&](const auto& expected) {
+                        return expected.spec_name == spec.spec_name && expected.uri == spec.uri;
+                    }), "Backend offset query changed key-to-URI positions");
+        }
         auto [reuse_code, reuse] = meta->StartWrite(trace, keys, {}, {"Ffull", "Ffull", "FfullLstate"}, 60, 1);
         check(reuse_code, "Replica reuse");
         require(count(reuse.locations) == 0, "min_replica_count=1 did not skip existing replicas");

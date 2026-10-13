@@ -85,6 +85,9 @@ public:
         topology_ = &topology;
         group_block_size_bytes.reserve(groups.size());
         for (const auto& group : groups) {
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
+            }
             has_swa_ = has_swa_ || group.policy.group_type == CacheGroupType::SWA;
             if (group.policy.group_type == CacheGroupType::FULL) {
                 full_group_tags.push_back(group.tag);
@@ -111,11 +114,33 @@ public:
         kvcm::ClientWrapper::ConfigMap client_config_map;
         try {
             if (!kv_cache_config_.kvcm_client_config.empty()) {
-                // Custom client JSON owns the serialized location specs, while
-                // the runtime policy still needs the same deterministic spec
-                // name-to-group/rank mapping for payload routing.
-                (void)genLocationSpecs();
+                auto [location_infos, location_groups] = genLocationSpecs();
                 autil::legacy::FromJsonString(client_config_map, kv_cache_config_.kvcm_client_config);
+                if (group_policy_->groups().size() != topology.groups().size()) {
+                    // Keep custom settings and aliases, but only advertise
+                    // payloads that the runtime can actually reuse and transfer.
+                    auto config = client_config_map.at("");
+                    auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(autil::legacy::ToJson(config));
+                    kvcm::KVCMConfig::LocationSpecGroups custom_groups;
+                    if (autil::legacy::AnyCast<autil::legacy::json::JsonMap>(&fields.at("location_spec_groups"))) {
+                        autil::legacy::FromJson(custom_groups, fields.at("location_spec_groups"));
+                    }
+                    for (auto it = custom_groups.begin(); it != custom_groups.end();) {
+                        if (std::any_of(it->second.begin(), it->second.end(), [&](const auto& name) {
+                                return location_infos->count(name) == 0;
+                            })) {
+                            it = custom_groups.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                    for (const auto& [name, specs] : *location_groups) {
+                        custom_groups[name] = specs;
+                    }
+                    fields["location_spec_infos"] = autil::legacy::ToJson(location_infos);
+                    fields["location_spec_groups"] = autil::legacy::ToJson(custom_groups);
+                    autil::legacy::FromJson(*config, fields);
+                }
             } else {
                 client_config_map = genClientConfig();
             }

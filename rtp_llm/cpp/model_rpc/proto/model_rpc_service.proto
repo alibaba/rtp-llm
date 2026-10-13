@@ -833,11 +833,9 @@ enum RemoteOpType {
     REMOTE_OPERATION_UNSPECIFIED = 0;
     REMOTE_OPERATION_READ = 1;
     REMOTE_OPERATION_WRITE = 2;
-    reserved 3, 4, 8;
-    reserved "REMOTE_OPERATION_MATCH_LOCATION_LEN", "REMOTE_OPERATION_MATCH_META", "REMOTE_OPERATION_MATCH_LOCATION";
-    REMOTE_OPERATION_REMOVE_CACHE = 5;
-    REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND = 6;
-    REMOTE_OPERATION_GET_HOST_CACHE_STATE = 7;
+    REMOTE_OPERATION_REMOVE_CACHE = 3;
+    REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND = 4;
+    REMOTE_OPERATION_GET_HOST_CACHE_STATE = 5;
 }
 
 message RemoteBoolMasksTypePB { repeated bool values = 1; }
@@ -877,12 +875,10 @@ message RemoteMetadataRequestPB {
     repeated int64 block_keys = 2;
     repeated int64 token_ids = 3;
     RemoteBlockMaskPB block_mask = 4;
-    reserved 5, 6;
-    reserved "sw_size", "detail_level";
-    int32 backend_type = 7; // KVCM StorageType; one backend per request
-    repeated string location_spec_names = 8;
-    repeated string medium = 9;
-    int32 p2p_host_count = 10;
+    int32 backend_type = 5; // KVCM StorageType; one backend per request
+    repeated string location_spec_names = 6;
+    repeated string medium = 7;
+    int32 p2p_host_count = 8;
 }
 
 message RemoteLocationSpecPB {
@@ -910,10 +906,8 @@ message RemoteHostCacheMatchPB {
 message RemoteOperationResponsePB {
     RemoteBlockMaskPB succeed_block = 1;  // for read/write, TODO
     repeated string actual_uris = 2; // only for write
-    reserved 3, 4, 5;
-    reserved "matched_blocks", "locations", "metas";
-    repeated RemoteBackendKeyLocationsPB backend_locations = 6;
-    repeated RemoteHostCacheMatchPB hosts = 7;
+    repeated RemoteBackendKeyLocationsPB backend_locations = 3;
+    repeated RemoteHostCacheMatchPB hosts = 4;
 }
 
 message FunctionResponsePB {
