@@ -548,8 +548,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                     "MTP cache snapshots require one non-beam sequence per stream, stream=%ld",
                                     stream->streamId());
         }
-        auto& kv_cache = *stream->kvCachePtr();
         if (!use_mtp_cache_snapshot && !use_normal_device_state) {
+            auto& kv_cache = *stream->kvCachePtr();
             RTP_LLM_LOG_DEBUG("decode kv_cache: %s", kv_cache.debugString().c_str());
             RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
         }
