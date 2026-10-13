@@ -124,6 +124,116 @@ cc_binary(
     ],
 )
 
+# Test-only source generation changes the runtime segmentation decision while
+# retaining production workspace capacity, copy calls, kernels and checks.
+py_binary(
+    name = "generate_crc_segmentation_backend",
+    testonly = True,
+    srcs = ["generate_crc_segmentation_backend.py"],
+    tags = ["manual"],
+)
+
+genrule(
+    name = "crc_segmentation_backend_source",
+    testonly = True,
+    srcs = [
+        "//rtp_llm/models_py/bindings:CrcBlockCopy.h",
+        "//rtp_llm/models_py/bindings/cuda:CrcBlockCopy.cu",
+        "//rtp_llm/models_py/bindings/cuda:CrcBlockCopyInternal.cuh",
+    ],
+    outs = [
+        "ForcedCrcBlockCopy.h",
+        "ForcedCrcBlockCopy.cu",
+        "ForcedCrcBlockCopyInternal.cuh",
+        "crc_segmentation_backend_manifest.json",
+    ],
+    cmd = "$(location :generate_crc_segmentation_backend) " +
+          "--header $(location //rtp_llm/models_py/bindings:CrcBlockCopy.h) " +
+          "--source $(location //rtp_llm/models_py/bindings/cuda:CrcBlockCopy.cu) " +
+          "--internal $(location //rtp_llm/models_py/bindings/cuda:CrcBlockCopyInternal.cuh) " +
+          "--output-header $(location :ForcedCrcBlockCopy.h) " +
+          "--output-source $(location :ForcedCrcBlockCopy.cu) " +
+          "--output-internal $(location :ForcedCrcBlockCopyInternal.cuh) " +
+          "--manifest $(location :crc_segmentation_backend_manifest.json)",
+    tools = [":generate_crc_segmentation_backend"],
+    tags = ["manual"],
+)
+
+cc_library(
+    name = "forced_crc_block_copy",
+    testonly = True,
+    srcs = ["ForcedCrcBlockCopy.cu"],
+    hdrs = ["ForcedCrcBlockCopy.h", "ForcedCrcBlockCopyInternal.cuh"],
+    copts = cuda_copts(),
+    tags = ["manual"],
+    target_compatible_with = CUDA13_ONLY,
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:crc_dump_writer",
+        "//rtp_llm/models_py/bindings:crc_block_copy_hdr",
+        "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + select({
+        "//:using_cuda13_arm": ["@nvcomp_cuda13_arm//:crc32"],
+        "//conditions:default": ["@nvcomp_cuda13_x86//:crc32"],
+    }),
+)
+
+cc_library(
+    name = "crc_segmentation_benchmark_harness",
+    testonly = True,
+    textual_hdrs = ["CrcCopyBenchmark.cu"],
+    tags = ["manual"],
+    target_compatible_with = CUDA13_ONLY,
+    deps = [
+        ":crc_copy_benchmark_support",
+        "//rtp_llm/models_py/bindings:crc_block_copy",
+        "//rtp_llm/models_py/bindings/common/kernels:copy_tile_kernel",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_binary(
+    name = "crc_segmentation_benchmark",
+    testonly = True,
+    srcs = ["CrcSegmentationBenchmark.cu"],
+    copts = cuda_copts() + ["-O3"],
+    tags = ["manual"],
+    target_compatible_with = CUDA13_ONLY,
+    deps = [":crc_segmentation_benchmark_harness", ":forced_crc_block_copy"],
+)
+
+py_test(
+    name = "crc_segmentation_benchmark_test",
+    srcs = ["crc_segmentation_benchmark_stats.py", "run_crc_segmentation_benchmark.py"],
+    main = "run_crc_segmentation_benchmark.py",
+    data = [
+        ":crc_segmentation_benchmark",
+        ":ForcedCrcBlockCopy.h",
+        ":ForcedCrcBlockCopy.cu",
+        ":ForcedCrcBlockCopyInternal.cuh",
+        ":crc_segmentation_backend_manifest.json",
+    ],
+    args = [
+        "--binary=$(location :crc_segmentation_benchmark)",
+        "--backend-artifact=$(location :ForcedCrcBlockCopy.h)",
+        "--backend-artifact=$(location :ForcedCrcBlockCopy.cu)",
+        "--backend-artifact=$(location :ForcedCrcBlockCopyInternal.cuh)",
+        "--backend-artifact=$(location :crc_segmentation_backend_manifest.json)",
+    ],
+    size = "large",
+    timeout = "long",
+    tags = ["manual", "gpu", "local", "exclusive", "no-remote"],
+    target_compatible_with = CUDA13_ONLY,
+)
+
+py_test(
+    name = "crc_segmentation_benchmark_stats_test",
+    srcs = ["crc_segmentation_benchmark_stats.py", "crc_segmentation_benchmark_stats_test.py"],
+    main = "crc_segmentation_benchmark_stats_test.py",
+)
+
 # Diagnostic-only linker interception; the ordinary benchmark has no wrapper.
 cc_binary(
     name = "staged_memcpy_profile",

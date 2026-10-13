@@ -1,6 +1,8 @@
 load("//:def.bzl", "copts", "rocm_copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+exports_files(["CrcBlockCopy.h"], visibility = ["//rtp_llm/models_py/bindings/cuda/test:__pkg__"])
+
 cc_library(
     name = "op_defs",
     hdrs = [
