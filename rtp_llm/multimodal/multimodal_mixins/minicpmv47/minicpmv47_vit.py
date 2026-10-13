@@ -7,6 +7,7 @@ with a 2x2 window-attention merger applied inside the encoder at
 ``Merger`` MLP that projects into the LLM hidden size.  ``16x`` mode applies
 both merges (patch->LLM token factor 16); ``4x`` skips the in-tower merger.
 """
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -33,25 +34,84 @@ except Exception:
     except Exception:
         _HAS_FLASH_ATTN = False
 
+try:
+    from rtp_llm.models_py.triton_kernels.common.vit_elementwise import (
+        merger_row_gather,
+        pos_embed_gather_add,
+        vit_gelu,
+        window_gather_add,
+    )
+
+    _HAS_VIT_TRITON = True
+except Exception:
+    # Standalone import (same offline-verification fallback as above): load
+    # the bit-exact Triton elementwise kernels by file path.
+    try:
+        import importlib.util
+        import os
+        import sys
+
+        _VIT_TRITON_PATH = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+            "models_py",
+            "triton_kernels",
+            "common",
+            "vit_elementwise.py",
+        )
+        _vit_elementwise_spec = importlib.util.spec_from_file_location("vit_elementwise", _VIT_TRITON_PATH)
+        _vit_elementwise = importlib.util.module_from_spec(_vit_elementwise_spec)
+        sys.modules.setdefault("vit_elementwise", _vit_elementwise)
+        _vit_elementwise_spec.loader.exec_module(_vit_elementwise)
+        merger_row_gather = _vit_elementwise.merger_row_gather
+        pos_embed_gather_add = _vit_elementwise.pos_embed_gather_add
+        vit_gelu = _vit_elementwise.vit_gelu
+        window_gather_add = _vit_elementwise.window_gather_add
+        _HAS_VIT_TRITON = True
+    except Exception:
+        _HAS_VIT_TRITON = False
+
+if not _HAS_VIT_TRITON:
+    # aten fallbacks with identical results (triton unavailable).
+    def vit_gelu(x: torch.Tensor, approximate: str = "none") -> torch.Tensor:
+        return F.gelu(x, approximate=approximate)
+
+    def pos_embed_gather_add(
+        conv_out: torch.Tensor, pos_ids: torch.Tensor, weight: torch.Tensor
+    ) -> torch.Tensor:
+        embeddings = conv_out.transpose(-2, -1)
+        position_embeddings = F.embedding(pos_ids, weight).unsqueeze(0)
+        return embeddings + position_embeddings
+
+    def window_gather_add(
+        residual: torch.Tensor, window_index: torch.Tensor, attn_out: torch.Tensor
+    ) -> torch.Tensor:
+        return residual[:, window_index, :] + attn_out
+
 
 def get_vision_nearest_position_ids(
-    target_sizes: torch.Tensor, num_patches_per_side: int
+    target_sizes, num_patches_per_side: int, device: Optional[torch.device] = None
 ) -> torch.Tensor:
     """Nearest-bucket SigLIP position ids for NaViT packed patches.
 
     Port of transformers ``get_vision_nearest_position_ids``: fractional grid
     coordinates ``i/h`` bucketize onto the fixed pretraining grid.
+    ``target_sizes`` may be a tensor on any device or a host ``[[h, w], ...]``
+    list (preferred: the host list keeps the crop loop sync-free); ``device``
+    selects where the per-crop tensors are computed.  Per-crop ids depend only
+    on ``(h, w)``, so they are served from a small device-side LRU cache that
+    skips the per-crop launches on repeated crop grids while producing
+    identical values (the uncached ops are re-run unchanged on first sight).
     """
-    device = target_sizes.device
-    boundaries = torch.arange(1 / num_patches_per_side, 1.0, 1 / num_patches_per_side, device=device)
-    pos_ids_list = []
-    for height, width in target_sizes.tolist():
-        height, width = int(height), int(width)
-        h_coords = torch.arange(height, device=device) / height
-        w_coords = torch.arange(width, device=device) / width
-        bucket_h = torch.bucketize(h_coords, boundaries, right=True)
-        bucket_w = torch.bucketize(w_coords, boundaries, right=True)
-        pos_ids_list.append((bucket_h[:, None] * num_patches_per_side + bucket_w).flatten())
+    if device is None:
+        device = target_sizes.device if isinstance(target_sizes, torch.Tensor) else torch.device("cpu")
+    if isinstance(target_sizes, torch.Tensor):
+        sizes = target_sizes.tolist()
+    else:
+        sizes = target_sizes
+    pos_ids_list = [
+        _cached_nearest_pos_ids(int(height), int(width), num_patches_per_side, device)
+        for height, width in sizes
+    ]
     return torch.cat(pos_ids_list)
 
 
@@ -96,6 +156,159 @@ def get_vision_window_index(
     return window_index, cu_window_seqlens
 
 
+# ---------------------------------------------------------------------------
+# Host-built NaViT metadata.
+#
+# cu_seqlens / window bookkeeping / merger grids are pure integer data, so
+# they are computed with the exact same torch ops on CPU tensors (identical
+# results, zero GPU->CPU syncs) and uploaded to the device once per forward.
+# This removes the per-attention ``max_seqlen`` ``.item()`` syncs, the
+# per-forward window-index device build and the per-crop ``int()`` reads.
+# Crop grids repeat heavily across requests, so the small device uploads and
+# the per-(h, w) position ids are LRU-cached on the packed crop-grid tuple.
+# ---------------------------------------------------------------------------
+
+_POS_IDS_CACHE: "OrderedDict[Tuple[int, int, int, torch.device], torch.Tensor]" = OrderedDict()
+_POS_IDS_CACHE_MAX = 256
+_POS_BOUNDARIES_CACHE: "OrderedDict[Tuple[int, torch.device], torch.Tensor]" = OrderedDict()
+_META_CACHE: "OrderedDict[Tuple, _PackedMeta]" = OrderedDict()
+_META_CACHE_MAX = 32
+
+
+def _sizes_to_list(target_sizes) -> List[List[int]]:
+    """Host ``[[h, w], ...]`` crop grids from a tensor (any device) or list."""
+    if isinstance(target_sizes, torch.Tensor):
+        return [[int(h), int(w)] for h, w in target_sizes.tolist()]
+    return [[int(h), int(w)] for h, w in target_sizes]
+
+
+def _pos_boundaries(num_patches_per_side: int, device: torch.device) -> torch.Tensor:
+    key = (num_patches_per_side, device)
+    boundaries = _POS_BOUNDARIES_CACHE.get(key)
+    if boundaries is None:
+        boundaries = torch.arange(1 / num_patches_per_side, 1.0, 1 / num_patches_per_side, device=device)
+        _POS_BOUNDARIES_CACHE[key] = boundaries
+    return boundaries
+
+
+def _cached_nearest_pos_ids(
+    height: int, width: int, num_patches_per_side: int, device: torch.device
+) -> torch.Tensor:
+    """Per-crop nearest position ids; same device ops as the uncached path."""
+    key = (height, width, num_patches_per_side, device)
+    pos_ids = _POS_IDS_CACHE.get(key)
+    if pos_ids is not None:
+        _POS_IDS_CACHE.move_to_end(key)
+        return pos_ids
+    boundaries = _pos_boundaries(num_patches_per_side, device)
+    h_coords = torch.arange(height, device=device) / height
+    w_coords = torch.arange(width, device=device) / width
+    bucket_h = torch.bucketize(h_coords, boundaries, right=True)
+    bucket_w = torch.bucketize(w_coords, boundaries, right=True)
+    pos_ids = (bucket_h[:, None] * num_patches_per_side + bucket_w).flatten()
+    _POS_IDS_CACHE[key] = pos_ids
+    if len(_POS_IDS_CACHE) > _POS_IDS_CACHE_MAX:
+        _POS_IDS_CACHE.popitem(last=False)
+    return pos_ids
+
+
+@dataclass
+class _PackedMeta:
+    """Per-forward tower metadata, host-built and uploaded once (integers)."""
+
+    sizes: List[List[int]]  # host [h, w] per crop
+    cu_seqlens: Optional[torch.Tensor] = None  # device int32 [C + 1]
+    max_seqlen: int = 0  # host int, max crop token count
+    lengths: Optional[List[int]] = None  # host per-crop token counts
+    window_index: Optional[torch.Tensor] = None  # device int64 [S]
+    window_cu_seqlens: Optional[torch.Tensor] = None  # device int32
+    window_lengths: Optional[List[int]] = None  # host per-window token counts
+    max_window_seqlen: Optional[int] = None  # host int
+
+
+def _build_packed_meta(
+    sizes: List[List[int]], window_size: int, device: torch.device, with_window: bool
+) -> _PackedMeta:
+    cu = [0]
+    for height, width in sizes:
+        cu.append(cu[-1] + height * width)
+    lengths = [b - a for a, b in zip(cu[:-1], cu[1:])]
+    meta = _PackedMeta(
+        sizes=[list(size) for size in sizes],
+        cu_seqlens=torch.tensor(cu, dtype=torch.int32, device=device),
+        max_seqlen=max(lengths),
+        lengths=lengths,
+    )
+    if not with_window:
+        return meta
+    # Window permutation for the in-tower 2x2 merger: the ported ops run on
+    # CPU tensors (integer-only, identical results) and upload once.
+    grid_thw = F.pad(torch.tensor(sizes, dtype=torch.long), (1, 0), value=1)
+    window_index, window_cu_seqlens = get_vision_window_index(grid_thw, window_size)
+    window_cu_list = window_cu_seqlens.tolist()
+    window_lengths = [b - a for a, b in zip(window_cu_list[:-1], window_cu_list[1:])]
+    meta.window_index = window_index.to(device)
+    meta.window_cu_seqlens = window_cu_seqlens.to(device)
+    meta.window_lengths = window_lengths
+    meta.max_window_seqlen = max(window_lengths) if window_lengths else 0
+    return meta
+
+
+def _packed_meta(
+    sizes: List[List[int]], window_size: int, device: torch.device, with_window: bool
+) -> _PackedMeta:
+    key = (tuple((int(h), int(w)) for h, w in sizes), window_size if with_window else None, device)
+    meta = _META_CACHE.get(key)
+    if meta is not None:
+        _META_CACHE.move_to_end(key)
+        return meta
+    meta = _build_packed_meta(sizes, window_size, device, with_window)
+    _META_CACHE[key] = meta
+    if len(_META_CACHE) > _META_CACHE_MAX:
+        _META_CACHE.popitem(last=False)
+    return meta
+
+
+_MERGER_ROWMAP_CACHE: "OrderedDict[Tuple, torch.Tensor]" = OrderedDict()
+
+
+def _build_merger_rowmap(sizes: List[List[int]], merge_h: int, merge_w: int) -> torch.Tensor:
+    """Source row per (merged token, merge-block slot) for the final merger.
+
+    For crop (h, w) with merged grid (h//merge_h, w//merge_w), output token
+    (r, c) gathers source rows (merge_h*r + i, merge_w*c + j) in the
+    row-major (i, j) slot order of the ported ``view/permute/reshape``
+    expression; crops are concatenated row-major (matches the merger loop).
+    """
+    rows = []
+    offset = 0
+    for height, width in sizes:
+        merged_h, merged_w = height // merge_h, width // merge_w
+        r = torch.arange(merged_h, dtype=torch.long).view(merged_h, 1)
+        c = torch.arange(merged_w, dtype=torch.long).view(1, merged_w)
+        base = (merge_h * r) * width + (merge_w * c)
+        offs = torch.arange(merge_h * merge_w, dtype=torch.long)
+        offs = (offs // merge_w) * width + (offs % merge_w)
+        rows.append((base.reshape(-1, 1) + offs.view(1, -1)).reshape(-1) + offset)
+        offset += height * width
+    return torch.cat(rows)
+
+
+def _merger_rowmap(
+    sizes: List[List[int]], merge_h: int, merge_w: int, device: torch.device
+) -> torch.Tensor:
+    key = (tuple((int(h), int(w)) for h, w in sizes), merge_h, merge_w, device)
+    cached = _MERGER_ROWMAP_CACHE.get(key)
+    if cached is not None:
+        _MERGER_ROWMAP_CACHE.move_to_end(key)
+        return cached
+    rowmap = _build_merger_rowmap(sizes, merge_h, merge_w).to(device)
+    _MERGER_ROWMAP_CACHE[key] = rowmap
+    if len(_MERGER_ROWMAP_CACHE) > _META_CACHE_MAX:
+        _MERGER_ROWMAP_CACHE.popitem(last=False)
+    return rowmap
+
+
 @dataclass
 class MiniCPMV47VisionConfig:
     hidden_size: int = 1152
@@ -135,14 +348,19 @@ class MiniCPMV47VisionConfig:
         )
 
 
-def _nearest_position_ids(target_sizes: torch.Tensor, num_patches_per_side: int) -> torch.Tensor:
+def _nearest_position_ids(
+    target_sizes, num_patches_per_side: int, device: Optional[torch.device] = None
+) -> torch.Tensor:
     """SigLIP NaViT position ids for packed patches (ported authority above)."""
-    return get_vision_nearest_position_ids(target_sizes, num_patches_per_side)
+    return get_vision_nearest_position_ids(target_sizes, num_patches_per_side, device=device)
 
 
-def _window_partition_index(target_sizes: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def _window_partition_index(target_sizes, window_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Window permutation index for the in-tower merger (ported authority above)."""
-    grid_thw = F.pad(target_sizes.to(torch.long), (1, 0), value=1)
+    if isinstance(target_sizes, torch.Tensor):
+        grid_thw = F.pad(target_sizes.to(torch.long), (1, 0), value=1)
+    else:
+        grid_thw = F.pad(torch.tensor(target_sizes, dtype=torch.long), (1, 0), value=1)
     return get_vision_window_index(grid_thw, window_size)
 
 
@@ -160,15 +378,24 @@ class MiniCPMV47VisionAttention(nn.Module):
         self.v_proj = nn.Linear(self.dim, self.dim)
         self.out_proj = nn.Linear(self.dim, self.dim)
 
-    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: Optional[int] = None,
+        lengths: Optional[List[int]] = None,
+    ) -> torch.Tensor:
         # hidden_states: [1, seq, dim]; attention is crop-local (varlen, non-causal).
+        # max_seqlen / lengths are host metadata from _packed_meta; when omitted
+        # they are derived from cu_seqlens (the original sync-ing path).
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         q = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         k = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         v = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         if _HAS_FLASH_ATTN and cu_seqlens.numel() > 1:
-            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+            if max_seqlen is None:
+                max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
             # varlen layout: [total_seq, heads, head_dim]
             q_flat = q.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
             k_flat = k.transpose(1, 2).reshape(-1, self.num_heads, self.head_dim)
@@ -186,7 +413,8 @@ class MiniCPMV47VisionAttention(nn.Module):
             )
             attn_output = attn_output.view(*input_shape, -1)
         else:
-            lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+            if lengths is None:
+                lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
             if lengths and lengths[0] == q.shape[2] and len(lengths) == 1:
                 attn_output = F.scaled_dot_product_attention(q, k, v, scale=self.scaling)
             else:
@@ -214,24 +442,42 @@ class MiniCPMV47ViTWindowAttentionMerger(nn.Module):
         self.linear_1 = nn.Linear(config.window_hidden_size, config.window_intermediate_size, bias=True)
         self.linear_2 = nn.Linear(config.window_intermediate_size, self.embed_dim, bias=True)
 
-    def forward(self, hidden_states: torch.Tensor, target_sizes: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        target_sizes,
+        window_index: Optional[torch.Tensor] = None,
+        window_cu_seqlens: Optional[torch.Tensor] = None,
+        max_window_seqlen: Optional[int] = None,
+        window_lengths: Optional[List[int]] = None,
+    ) -> torch.Tensor:
         # hidden_states: [1, seq, dim] over the packed un-merged patches.
+        # (window_index, window_cu_seqlens) are host-built once per forward by
+        # _packed_meta; the device-build fallback stays for direct calls.
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
         device = hidden_states.device
         window_h, window_w = self.window_kernel_size
         window_size = window_h * window_w
-        window_index, window_cu_seqlens = _window_partition_index(target_sizes, window_h)
-        window_index = window_index.to(device)
-        window_cu_seqlens = window_cu_seqlens.to(device)
+        if window_index is None or window_cu_seqlens is None:
+            window_index, window_cu_seqlens = _window_partition_index(target_sizes, window_h)
+            window_index = window_index.to(device)
+            window_cu_seqlens = window_cu_seqlens.to(device)
 
         hidden_states = hidden_states[:, window_index, :]
-        hidden_states = self.self_attn(hidden_states, window_cu_seqlens)
-        hidden_states = residual[:, window_index, :] + hidden_states
+        hidden_states = self.self_attn(
+            hidden_states,
+            window_cu_seqlens,
+            max_seqlen=max_window_seqlen,
+            lengths=window_lengths,
+        )
+        # Fused residual gather + add (bit-exact vs residual[:, window_index, :]
+        # + hidden_states).
+        hidden_states = window_gather_add(residual, window_index, hidden_states)
 
         if window_cu_seqlens.numel() - 1 != hidden_states.shape[1] // window_size:
             raise ValueError(
-                f"patch grids {target_sizes.tolist()} must be divisible by window kernel "
+                f"patch grids {_sizes_to_list(target_sizes)} must be divisible by window kernel "
                 f"{self.window_kernel_size}"
             )
         embed_dim = hidden_states.shape[-1]
@@ -241,7 +487,7 @@ class MiniCPMV47ViTWindowAttentionMerger(nn.Module):
 
         hidden_state = self.pre_norm(flat)
         hidden_state = self.linear_1(hidden_state)
-        hidden_state = F.gelu(hidden_state, approximate="tanh")
+        hidden_state = vit_gelu(hidden_state, approximate="tanh")
         hidden_state = self.linear_2(hidden_state)
         return (hidden_state + patch_residual).unsqueeze(0)
 
@@ -263,14 +509,15 @@ class MiniCPMV47VisionEmbeddings(nn.Module):
         self.num_patches = self.num_patches_per_side**2
         self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
 
-    def forward(self, pixel_values: torch.Tensor, target_sizes: torch.Tensor) -> torch.Tensor:
+    def forward(self, pixel_values: torch.Tensor, target_sizes) -> torch.Tensor:
         # pixel_values: [1, C, patch, packed_len] (NaViT); Conv2d patchifies columns.
+        # target_sizes: host [[h, w], ...] list (preferred) or tensor on any device.
         patch_embeds = self.patch_embedding(pixel_values)
-        embeddings = patch_embeds.flatten(2).transpose(1, 2)
-        pos_ids = _nearest_position_ids(target_sizes, self.num_patches_per_side)
-        pos_ids = pos_ids.to(self.position_embedding.weight.device)
-        position_embeddings = self.position_embedding(pos_ids).unsqueeze(0)
-        return embeddings + position_embeddings
+        device = self.position_embedding.weight.device
+        pos_ids = _nearest_position_ids(target_sizes, self.num_patches_per_side, device=device)
+        # Fused position-embedding gather + add over the channel-major conv
+        # output (bit-exact vs embedding gather + broadcast add).
+        return pos_embed_gather_add(patch_embeds.flatten(2), pos_ids, self.position_embedding.weight)
 
 
 class MiniCPMV47VisionMLP(nn.Module):
@@ -281,7 +528,7 @@ class MiniCPMV47VisionMLP(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.fc1(hidden_states)
-        hidden_states = F.gelu(hidden_states, approximate="tanh")
+        hidden_states = vit_gelu(hidden_states, approximate="tanh")
         return self.fc2(hidden_states)
 
 
@@ -294,10 +541,16 @@ class MiniCPMV47VisionEncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = MiniCPMV47VisionMLP(config)
 
-    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: Optional[int] = None,
+        lengths: Optional[List[int]] = None,
+    ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states, cu_seqlens)
+        hidden_states = self.self_attn(hidden_states, cu_seqlens, max_seqlen=max_seqlen, lengths=lengths)
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
@@ -324,33 +577,47 @@ class MiniCPMV47VisionModel(nn.Module):
         self.post_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.vit_merger = MiniCPMV47ViTWindowAttentionMerger(config)
 
-    @staticmethod
-    def _cu_seqlens(target_sizes: torch.Tensor, device: torch.device) -> torch.Tensor:
-        seq = (target_sizes[:, 0] * target_sizes[:, 1]).to(torch.int32)
-        return F.pad(torch.cumsum(seq, dim=0, dtype=torch.int32).to(device), (1, 0))
-
     def forward(
         self,
         pixel_values: torch.Tensor,
-        target_sizes: torch.Tensor,
+        target_sizes,
         use_vit_merger: bool = True,
     ) -> torch.Tensor:
         """Returns last_hidden_state [1, seq, hidden]; when use_vit_merger the
-        sequence is already 2x2-merged and the caller must halve target_sizes."""
-        hidden_states = self.embeddings(pixel_values, target_sizes)
-        cu_seqlens = self._cu_seqlens(target_sizes, hidden_states.device)
+        sequence is already 2x2-merged and the caller must halve target_sizes.
+
+        ``target_sizes`` may be a host ``[[h, w], ...]`` list (preferred: keeps
+        the whole tower free of GPU->CPU syncs) or a tensor on any device
+        (converted once, host-side).  All varlen/window metadata is host-built
+        and uploaded once per phase (see ``_packed_meta``)."""
+        sizes = _sizes_to_list(target_sizes)
+        device = self.embeddings.position_embedding.weight.device
+        hidden_states = self.embeddings(pixel_values, sizes)
+        window_size = self.vit_merger.window_kernel_size[0]
+        meta = _packed_meta(sizes, window_size, device, with_window=use_vit_merger)
 
         insert_layer_id = self.config.insert_layer_id if use_vit_merger else -1
         if use_vit_merger and insert_layer_id >= 0:
             for layer_index, encoder_layer in enumerate(self.encoder.layers):
-                hidden_states = encoder_layer(hidden_states, cu_seqlens)
+                hidden_states = encoder_layer(
+                    hidden_states, meta.cu_seqlens, max_seqlen=meta.max_seqlen, lengths=meta.lengths
+                )
                 if layer_index == insert_layer_id:
-                    hidden_states = self.vit_merger(hidden_states, target_sizes)
-                    target_sizes = target_sizes // 2
-                    cu_seqlens = self._cu_seqlens(target_sizes, hidden_states.device)
+                    hidden_states = self.vit_merger(
+                        hidden_states,
+                        sizes,
+                        window_index=meta.window_index,
+                        window_cu_seqlens=meta.window_cu_seqlens,
+                        max_window_seqlen=meta.max_window_seqlen,
+                        window_lengths=meta.window_lengths,
+                    )
+                    sizes = [[height // 2, width // 2] for height, width in sizes]
+                    meta = _packed_meta(sizes, window_size, device, with_window=False)
         else:
             for encoder_layer in self.encoder.layers:
-                hidden_states = encoder_layer(hidden_states, cu_seqlens)
+                hidden_states = encoder_layer(
+                    hidden_states, meta.cu_seqlens, max_seqlen=meta.max_seqlen, lengths=meta.lengths
+                )
         return self.post_layernorm(hidden_states)
 
 
@@ -365,7 +632,7 @@ class MiniCPMV47DownsampleMLP(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(hidden_states).view(-1, self.linear_1.in_features)
         hidden_states = self.linear_1(hidden_states)
-        hidden_states = F.gelu(hidden_states)
+        hidden_states = vit_gelu(hidden_states)
         return self.linear_2(hidden_states)
 
 
@@ -380,26 +647,45 @@ class MiniCPMV47Merger(nn.Module):
         mlps.append(MiniCPMV47DownsampleMLP(vision_hidden_size, llm_embed_dim))
         self.mlp = nn.ModuleList(mlps)
 
-    def forward(self, hidden_states: torch.Tensor, target_sizes: torch.Tensor) -> List[torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor, target_sizes) -> List[torch.Tensor]:
         merge_h, merge_w = self.merge_kernel_size
-        start = 0
-        processed_features = []
-        for batch_idx in range(len(target_sizes)):
-            height, width = int(target_sizes[batch_idx][0]), int(target_sizes[batch_idx][1])
-            num_patches = height * width
-            embed_dim = hidden_states.shape[-1]
+        # Host crop grids (from _sizes_to_list): per-crop ints without the
+        # per-crop device reads (int(target_sizes[i][j]) syncs).
+        sizes = _sizes_to_list(target_sizes)
+        for height, width in sizes:
             if height % merge_h != 0 or width % merge_w != 0:
                 raise ValueError(
                     f"patch grid ({height}, {width}) must be divisible by merge kernel "
                     f"{self.merge_kernel_size}"
                 )
+        start = 0
+        start_tok = 0
+        processed_features = []
+        embed_dim = hidden_states.shape[-1]
+        # One fused row gather (bit-exact: pure row copies in the same token
+        # order) replaces the per-crop view/permute/reshape copies.
+        gathered = None
+        if (
+            _HAS_VIT_TRITON
+            and hidden_states.is_cuda
+            and hidden_states.dtype == torch.bfloat16
+            and hidden_states.is_contiguous()
+        ):
+            rowmap = _merger_rowmap(sizes, merge_h, merge_w, hidden_states.device)
+            gathered = merger_row_gather(hidden_states, rowmap, embed_dim, merge_h * merge_w * embed_dim)
+        for height, width in sizes:
+            num_patches = height * width
             merged_h, merged_w = height // merge_h, width // merge_w
-            hidden_state = (
-                hidden_states[0, start : start + num_patches, :]
-                .view(merged_h, merge_h, merged_w, merge_w, embed_dim)
-                .permute(0, 2, 1, 3, 4)
-                .reshape(merged_h * merged_w, merge_h * merge_w * embed_dim)
-            )
+            num_tokens = merged_h * merged_w
+            if gathered is not None:
+                hidden_state = gathered[start_tok : start_tok + num_tokens]
+            else:
+                hidden_state = (
+                    hidden_states[0, start : start + num_patches, :]
+                    .view(merged_h, merge_h, merged_w, merge_w, embed_dim)
+                    .permute(0, 2, 1, 3, 4)
+                    .reshape(num_tokens, merge_h * merge_w * embed_dim)
+                )
             hidden_state = self.mlp[0](hidden_state)
             for i in range(1, self.merger_times):
                 height = height // merge_h
@@ -413,6 +699,7 @@ class MiniCPMV47Merger(nn.Module):
                 )
                 hidden_state = self.mlp[i](hidden_state)
             start += num_patches
+            start_tok += num_tokens
             processed_features.append(hidden_state)
         return processed_features
 
@@ -421,18 +708,21 @@ def minicpmv47_image_features(
     visual: MiniCPMV47VisionModel,
     merger: MiniCPMV47Merger,
     pixel_values: torch.Tensor,
-    target_sizes: torch.Tensor,
+    target_sizes,
     downsample_mode: str,
 ) -> List[torch.Tensor]:
     """Equivalent of MiniCPMV4_7Model.get_image_features: tower + final merger.
 
     Returns one feature tensor per crop (row-major crop order).
+    ``target_sizes`` may be a host ``[[h, w], ...]`` list or a tensor on any
+    device (converted once, so the tower and merger run sync-free).
     """
     use_vit_merger = downsample_mode != "4x"
-    last_hidden_state = visual(pixel_values, target_sizes, use_vit_merger=use_vit_merger)
+    sizes = _sizes_to_list(target_sizes)
+    last_hidden_state = visual(pixel_values, sizes, use_vit_merger=use_vit_merger)
     if use_vit_merger:
-        target_sizes = target_sizes // 2
-    return merger(last_hidden_state, target_sizes)
+        sizes = [[height // 2, width // 2] for height, width in sizes]
+    return merger(last_hidden_state, sizes)
 
 
 def _grid_positions(llm_h: int, llm_w: int, h_coords: torch.Tensor, w_coords: torch.Tensor) -> torch.Tensor:

@@ -146,10 +146,24 @@ class MiniCPMV47ImageEmbedding(MultiModalEmbeddingInterface):
             target_sizes_list.append(data[1])
             grids.extend(data[2])
             num_patches_per_image.extend(data[3])
-        pixel_values = (
-            torch.cat(pixel_values_list, dim=-1).to(self._device).to(self._data_type)
-        )
-        target_sizes = torch.cat(target_sizes_list, dim=0).to(self._device)
+        # pixel_values arrive bf16 from the preprocess worker; for the
+        # single-image fast path skip the full-size CPU torch.cat copy and
+        # upload the crop tensor directly (values identical: torch.cat of a
+        # one-element list is a pure copy).
+        if len(pixel_values_list) == 1:
+            pixel_values = pixel_values_list[0]
+        else:
+            pixel_values = torch.cat(pixel_values_list, dim=-1)
+        pixel_values = pixel_values.to(self._device)
+        if pixel_values.dtype != self._data_type:
+            pixel_values = pixel_values.to(self._data_type)
+        # target_sizes stays on the host: the tower consumes it as host crop
+        # grids (single conversion, integer metadata host-built), which keeps
+        # the vision forward free of GPU->CPU syncs.
+        if len(target_sizes_list) == 1:
+            target_sizes = target_sizes_list[0]
+        else:
+            target_sizes = torch.cat(target_sizes_list, dim=0)
 
         crop_features = minicpmv47_image_features(
             self.visual,

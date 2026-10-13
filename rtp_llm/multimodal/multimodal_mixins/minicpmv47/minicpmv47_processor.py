@@ -8,7 +8,10 @@ rescaled/normalized and patchified into the NaViT packed layout
 ``[C, patch, P]``.  Output contract matches the HF processor:
 ``pixel_values [1, C, patch, P]``, ``target_sizes [n_crops, 2]`` patch grids,
 ``grids`` per-image slice grids ([rows, cols]; [0, 0] when unsliced),
-``num_patches_per_image``.
+``num_patches_per_image``.  ``pixel_values`` is pre-cast to bf16 inside the
+preprocess worker (round-to-nearest-even, identical values to the device-side
+cast it replaces): this halves the H2D pixel transfer and removes the
+device-side cast kernel from the vision forward.
 """
 import math
 from typing import Dict, List, Optional, Tuple
@@ -161,7 +164,7 @@ class MiniCPMV47ImageProcessor:
 
         pixel_values = np.concatenate(image_pv, axis=-1)[np.newaxis, ...]
         return {
-            "pixel_values": torch.from_numpy(np.ascontiguousarray(pixel_values)),
+            "pixel_values": torch.from_numpy(np.ascontiguousarray(pixel_values)).to(torch.bfloat16),
             "target_sizes": torch.tensor(image_ts, dtype=torch.int32),
             "grids": [best_grid if best_grid is not None else [0, 0]],
             "num_patches_per_image": [len(image_pv)],
