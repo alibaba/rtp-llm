@@ -194,6 +194,14 @@ build:cuda13_arm --host_copt=-Wno-error=missing-field-initializers
 # symbol resolves without having to rebuild the wheels.
 test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 
+# Resolve the bazel-fetched NVIDIA wheel libraries for tests: the dev images
+# ship only the CUDA toolkit, so nccl/cudnn/cublas/... come from pip_parse'd
+# wheel repos, whose per-repo runfiles layout breaks torch's co-located RPATH
+# expectation.  The wrapper locates the wheel lib dirs in the runfiles tree
+# and prepends them (plus the gcc-toolset-12 lib64 its ld needs) to
+# LD_LIBRARY_PATH.  Harmless where no such repo exists (CPU/ROCm configs).
+test --run_under=//tools:nvidia_wheel_env
+
 # deep_gemm JIT spawns nvcc at runtime to build SM100/SM103a kernels (called
 # from V4 weight loader → get_mn_major_tma_aligned_packed_ue8m0_tensor and
 # fp8_fp4_mega_moe in the routed-experts forward path). nvcc needs a host C++
@@ -216,16 +224,44 @@ test:cuda13_arm --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13_arm --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64
-test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/bin/triton_ptxas_cuda_wrapper.sh
+# The toolset lib64 must lead LD_LIBRARY_PATH: the JIT link lines use the
+# toolset's ld, which needs its own libctf (LIBCTF_1.1) ahead of the system
+# one.  test_env (not the run_under wrapper) carries this because remotely
+# executed tests honor test_env unconditionally.
+# The torch lib dir is appended LAST so engine tests' LD_PRELOAD=libtorch_cpu.so
+# resolves: the preload is the intended interposition against the 3fs
+# libcrypto crash documented in NormalEngineCustomOutputTest, and it is
+# silently ignored (crash class returns, flaky) when the loader cannot find
+# the library.  It must come AFTER any runfiles torch (the run_under wrapper
+# prepends those) -- an image-preinstalled torch ahead of the runfiles torch
+# would shadow it and ABI-skew torch plugins (libtorch_nvshmem's
+# materialize_cow_storage mismatch on ut-sm9x).
+test:cuda13_arm --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
+test:cuda13_arm --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 test:cuda13 --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
 test:cuda13 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
 test:cuda13 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
-test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64
+# The toolset lib64 must lead LD_LIBRARY_PATH (its ld needs libctf LIBCTF_1.1
+# ahead of the system one); test_env carries it because remotely executed
+# tests honor test_env unconditionally.  Images without preinstalled NVIDIA
+# wheels additionally get the run_under wrapper's runfiles lib dirs (see the
+# top of this section).  The torch lib dir is appended LAST (preload
+# resolution without shadowing the runfiles torch -- see cuda13_arm note).
+test:cuda13 --test_env=LD_LIBRARY_PATH=/opt/rh/gcc-toolset-12/root/usr/lib64:/usr/local/cuda/lib64:/opt/conda310/lib:/usr/local/nvidia/lib64:/usr/local/nvidia/lib:/usr/lib64:/opt/conda310/lib/python3.10/site-packages/torch/lib
 test:cuda13 --test_env=RAYON_NUM_THREADS=8
+test:cuda13 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+
+test:cuda12_9 --test_env=DG_JIT_CPP_STANDARD=20
+test:cuda12_9 --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc
+test:cuda12_9 --test_env=CXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda12_9 --test_env=CUDAHOSTCXX=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda12_9 --test_env=NVCC_PREPEND_FLAGS=-ccbin=/opt/rh/gcc-toolset-12/root/usr/bin/g++
+test:cuda12_9 --test_env=PATH=/opt/rh/gcc-toolset-12/root/usr/bin:/opt/conda310/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+test:cuda12_9 --test_env=RAYON_NUM_THREADS=8
+test:cuda12_9 --test_env=TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
 
 build:cpu --copt="-DENABLE_BF16=1"
 build:cpu --define=using_cuda=false --define=using_cuda_nvcc=false --define=using_cpu=true
