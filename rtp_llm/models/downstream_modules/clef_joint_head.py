@@ -219,12 +219,24 @@ def encode_clef_record(
     if max_state_tokens is not None:
         state_ids = state_ids[:max_state_tokens]
     fixed_length = len(prefix_ids) + len(schema_ids) + len(suffix_ids)
-    if fixed_length > max_length:
+    # The span table rides AFTER the body and its token length depends only
+    # on the question/option counts (all numeric fields are fixed-width), so
+    # it must come out of the state budget too. Without this reserve a long
+    # state that fills max_length exactly leaves the table itself over the
+    # limit and the whole record is rejected (codex round1 B9).
+    table_length = 2 + TABLE_BODY_LEN_WIDTH + TABLE_N_QUESTIONS_WIDTH + sum(
+        TABLE_TYPE_WIDTH
+        + 2 * TABLE_SPAN_WIDTH
+        + TABLE_N_OPTIONS_WIDTH
+        + 2 * TABLE_SPAN_WIDTH * len(q.option_spans)
+        for q in questions
+    )
+    if fixed_length + table_length > max_length:
         raise ValueError(
-            f"schema requires {fixed_length} tokens before state; "
-            f"maximum is {max_length}"
+            f"schema requires {fixed_length} tokens before state and the span "
+            f"table needs {table_length}; maximum is {max_length}"
         )
-    state_ids = state_ids[: max_length - fixed_length]
+    state_ids = state_ids[: max_length - fixed_length - table_length]
     schema_offset = len(prefix_ids) + len(state_ids)
     shifted = tuple(
         ClefEncodedQuestion(

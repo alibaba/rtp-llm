@@ -677,24 +677,26 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             if (ctx.need_cal_position_id) {
                 // The stream position ids are already interleaved per token
-                // with the axis factor, so the source element count is
-                // token_num * factor; the writer expands per token again.
-                // Convert back to the true token count before handing over.
+                // with the axis factor ([token][axis], element count =
+                // token_num * factor) and the combo buffer uses the same
+                // layout, so the right move is a verbatim element copy of
+                // the remaining slice — NOT the per-token expansion of
+                // writeComboPositionIds, which expects one scalar per token
+                // and would misread the interleaved axes.
                 auto context_pos_ids = stream->generateContextPositionIds();
                 int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
                 int32_t source_elements = (int32_t)(context_pos_ids.numel() - reuse_offset);
                 RTP_LLM_CHECK_WITH_INFO(
                     config_.position_id_len_factor >= 1
-                        && source_elements % config_.position_id_len_factor == 0,
+                        && source_elements % config_.position_id_len_factor == 0
+                        && source_elements >= 0,
                     "context position ids element count %d is not a multiple of the "
                     "rope index factor %d",
                     source_elements,
                     (int)config_.position_id_len_factor);
-                PositionIdsGenerator::writeComboPositionIds(
-                    ctx.combo_position_ids + (size_t)ctx.token_idx * config_.position_id_len_factor,
-                    context_pos_ids.data_ptr<int>() + reuse_offset,
-                    source_elements / (int32_t)config_.position_id_len_factor,
-                    (int)config_.position_id_len_factor);
+                memcpy(ctx.combo_position_ids + (size_t)ctx.token_idx * config_.position_id_len_factor,
+                       context_pos_ids.data_ptr<int>() + reuse_offset,
+                       (size_t)source_elements * sizeof(int32_t));
             }
 
             copyKvCacheBlocksToModelInput(model_input, stream, i, ctx.batch_idx);

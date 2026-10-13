@@ -61,6 +61,18 @@ py_test(
 )
 
 py_test(
+    name = "qkv_lora_wrap_test",
+    srcs = ["qkv_lora_wrap_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "linear_attn_lora_wrap_test",
+    srcs = ["linear_attn_lora_wrap_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "decider_label_cache_test",
     srcs = ["decider_label_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

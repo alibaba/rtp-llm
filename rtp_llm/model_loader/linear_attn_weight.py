@@ -16,6 +16,45 @@ class LinearAttnConfig(object):
         self.linear_value_head_dim = linear_attention_config.linear_value_head_dim
 
 
+def qkvz_lora_a_func_wrap(ts):
+    """peft per-projection in_proj_qkv/in_proj_z LoRA A -> [hidden, sum(r)].
+
+    The merged qkvz weight concatenates the two projections' columns, so the
+    per-projection A deltas rank-concatenate on the column axis of A.T.
+    An adapter targeting only one projection zero-fills the other.
+    """
+    assert isinstance(ts, (list, tuple)) and len(ts) == 2
+    reference = next((t for t in ts if t is not None), None)
+    if reference is None:
+        return None
+    ts = [torch.zeros_like(reference) if t is None else t for t in ts]
+    return torch.concat([t.t() for t in ts], dim=1).contiguous()
+
+
+def qkvz_lora_b_func_wrap(ts):
+    """peft per-projection in_proj_qkv/in_proj_z LoRA B -> block-diagonal.
+
+    Each projection's delta must stay on its own columns of the merged
+    weight, so B is block-diagonal rather than rank-concatenated.
+    """
+    assert isinstance(ts, (list, tuple)) and len(ts) == 2
+    reference = next((t for t in ts if t is not None), None)
+    if reference is None:
+        return None
+    ts = [torch.zeros_like(reference) if t is None else t for t in ts]
+    return torch.block_diag(ts[0].t(), ts[1].t()).contiguous()
+
+
+def ba_lora_a_func_wrap(ts):
+    """peft per-projection in_proj_b/in_proj_a LoRA A -> [hidden, sum(r)]."""
+    return qkvz_lora_a_func_wrap(ts)
+
+
+def ba_lora_b_func_wrap(ts):
+    """peft per-projection in_proj_b/in_proj_a LoRA B -> block-diagonal."""
+    return qkvz_lora_b_func_wrap(ts)
+
+
 # qkvz layout: [hidden_size, head_k, xx] -> [hidden, local_head_k, xx]
 def split_qkvz(
     t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
@@ -239,8 +278,9 @@ class LinearAttnAtomicWeight(AtomicWeight):
         process_fun: Callable[[List[torch.Tensor]], torch.Tensor],
         config: LinearAttnConfig,
         data_type: Optional[torch.dtype] = None,
+        **kwargs: Any,
     ):
-        super().__init__(name, weights, process_fun, data_type)
+        super().__init__(name, weights, process_fun, data_type, **kwargs)
         self.config = config
         self.split_func_factory = _linear_attn_split_stratey
 

@@ -1,3 +1,6 @@
+load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+
+
 """Community-adapted model smoke suites.
 
 Every case here serves a checkpoint adapted by the model-adaptation flow

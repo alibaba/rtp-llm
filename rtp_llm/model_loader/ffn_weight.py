@@ -72,18 +72,39 @@ def w13_func_wrap(ts: List[torch.Tensor], origin_w1, origin_w3):
     return torch.concat([w1, w3], dim=-1).contiguous()
 
 
+def _zero_side_delta(processed: torch.Tensor, rank_ref: torch.Tensor, transpose: bool):
+    """Zero delta block matching `processed`'s shape for an untargeted side."""
+    shape = tuple(processed.shape)
+    return torch.zeros(shape, dtype=rank_ref.dtype)
+
+
+def _side_or_none(func, ts):
+    """Apply the origin projection func; None through when untargeted."""
+    if all(t is None for t in ts):
+        return None
+    return func(ts)
+
+
 def w13_lora_a_func_wrap(
     ts: torch.Tensor, origin_w1: FfnAtomicWeight, origin_w3: FfnAtomicWeight
 ):
     assert origin_w1.lora_a_process_func and origin_w3.lora_a_process_func
     if isinstance(ts, (list, tuple)):
         # peft layout: separate gate_proj/up_proj LoRA tensors; each origin
-        # applies its own process func, ranks are concatenated.
+        # applies its own process func, ranks are concatenated.  An adapter
+        # may target only one side (gate-only / up-only): the untargeted side
+        # contributes a zero delta block so the trained side still merges.
         w1_size = len(origin_w1.weights)
         w3_size = len(origin_w3.weights)
         assert len(ts) == w1_size + w3_size
-        w1 = origin_w1.lora_a_process_func(ts[:w1_size])
-        w3 = origin_w3.lora_a_process_func(ts[w1_size:])
+        w1 = _side_or_none(origin_w1.lora_a_process_func, ts[:w1_size])
+        w3 = _side_or_none(origin_w3.lora_a_process_func, ts[w1_size:])
+        if w1 is None and w3 is None:
+            return None
+        if w1 is None:
+            w1 = torch.zeros_like(w3)
+        if w3 is None:
+            w3 = torch.zeros_like(w1)
         return torch.concat([w1, w3], dim=-1).contiguous()
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_a_process_func(w1)
@@ -98,12 +119,19 @@ def w13_lora_b_func_wrap(
     if isinstance(ts, (list, tuple)):
         # peft layout: per-projection LoRA B tensors; the merged w13 delta
         # must keep each rank block on its own projection's output columns,
-        # i.e. block-diagonal rather than rank-concatenated.
+        # i.e. block-diagonal rather than rank-concatenated.  An adapter
+        # targeting only one side leaves the other side's block zero.
         w1_size = len(origin_w1.weights)
         w3_size = len(origin_w3.weights)
         assert len(ts) == w1_size + w3_size
-        w1 = origin_w1.lora_b_process_func(ts[:w1_size])
-        w3 = origin_w3.lora_b_process_func(ts[w1_size:])
+        w1 = _side_or_none(origin_w1.lora_b_process_func, ts[:w1_size])
+        w3 = _side_or_none(origin_w3.lora_b_process_func, ts[w1_size:])
+        if w1 is None and w3 is None:
+            return None
+        if w1 is None:
+            w1 = torch.zeros_like(w3)
+        if w3 is None:
+            w3 = torch.zeros_like(w1)
         return torch.block_diag(w1, w3).contiguous()
     w1, w3 = torch.chunk(ts, 2, dim=-1)
     w1 = origin_w1.lora_b_process_func(w1)

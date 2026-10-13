@@ -515,32 +515,24 @@ class AtomicWeight(WeightModule):
                 self.lora_A_suffix,
                 lora_name,
             )
-            try:
-                tensors = [
-                    x
-                    for x in database.load_lora_tensor(
-                        lora_name, tensor_name, data_type
-                    )
-                ]
-                if self.lora_raw_projection_list:
-                    # peft per-projection layout: hand the raw adapter tensor
-                    # to the process func; the per-checkpoint merge_fun is for
-                    # base weights and would mangle the [r, hidden] adapter.
-                    before_merge_tensors.append(tensors[0])
-                else:
-                    before_merge_tensors.append(ckpt_weight.merge_fun(tensors))
-            except:
-                logging.warning(
-                    f"load {self.name} lora A failed: {tensor_name}, {traceback.format_exc()}"
+            before_merge_tensors.append(
+                self._load_lora_projection_tensor(
+                    database, lora_name, tensor_name, data_type
                 )
-                return {}
+                if self.lora_raw_projection_list
+                else ckpt_weight.merge_fun(
+                    list(
+                        database.load_lora_tensor(lora_name, tensor_name, data_type)
+                    )
+                )
+            )
         convert_type = (
             self.data_type if self.data_type is not None else load_config.compute_dtype
         )
-        after_merge_tensor = self.lora_a_process_func(before_merge_tensors).to(
-            convert_type
-        )
-        return {self.lora_a_name: after_merge_tensor}
+        after_merge_tensor = self.lora_a_process_func(before_merge_tensors)
+        if after_merge_tensor is None:
+            return {}
+        return {self.lora_a_name: after_merge_tensor.to(convert_type)}
 
     def _load_lora_b(
         self,
@@ -561,29 +553,51 @@ class AtomicWeight(WeightModule):
                 self.lora_B_suffix,
                 lora_name,
             )
-            try:
-                tensors = [
-                    x
-                    for x in database.load_lora_tensor(
-                        lora_name, tensor_name, data_type
-                    )
-                ]
-                if self.lora_raw_projection_list:
-                    before_merge_tensors.append(tensors[0])
-                else:
-                    before_merge_tensors.append(ckpt_weight.merge_fun(tensors))
-            except:
-                logging.warning(
-                    f"load {self.name} lora B failed: {tensor_name}, {traceback.format_exc()}"
+            before_merge_tensors.append(
+                self._load_lora_projection_tensor(
+                    database, lora_name, tensor_name, data_type
                 )
-                return {}
+                if self.lora_raw_projection_list
+                else ckpt_weight.merge_fun(
+                    list(
+                        database.load_lora_tensor(lora_name, tensor_name, data_type)
+                    )
+                )
+            )
         convert_type = (
             self.data_type if self.data_type is not None else load_config.compute_dtype
         )
-        after_merge_tensor = self.lora_b_process_func(before_merge_tensors).to(
-            convert_type
-        )
-        return {self.lora_b_name: after_merge_tensor}
+        after_merge_tensor = self.lora_b_process_func(before_merge_tensors)
+        if after_merge_tensor is None:
+            return {}
+        return {self.lora_b_name: after_merge_tensor.to(convert_type)}
+
+    def _load_lora_projection_tensor(
+        self,
+        database: BaseDatabase,
+        lora_name: str,
+        tensor_name: str,
+        data_type: torch.dtype,
+    ) -> torch.Tensor:
+        """One peft per-projection adapter tensor, zero-filled when untargeted.
+
+        An adapter that targets only a subset of a fused weight's projections
+        (e.g. target_modules=["q_proj","v_proj"] without k_proj) is legal: the
+        untargeted projection contributes a zero delta. A projection the
+        adapter DOES target must actually load; a corrupted/empty read is a
+        hard error, not a silent base-weight fallback that would drop the
+        other projections' trained deltas.
+        """
+        available = set(database.get_lora_tensor_names(lora_name))
+        if tensor_name not in available:
+            return None
+        tensors = list(database.load_lora_tensor(lora_name, tensor_name, data_type))
+        if not tensors:
+            raise RuntimeError(
+                f"lora tensor {tensor_name} is listed in adapter {lora_name} "
+                f"but failed to load"
+            )
+        return tensors[0]
 
     def _merge_lora(
         self,

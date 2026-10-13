@@ -16,6 +16,10 @@ from rtp_llm.model_loader.ffn_weight import (
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     LinearAttnConfig,
+    ba_lora_a_func_wrap,
+    ba_lora_b_func_wrap,
+    qkvz_lora_a_func_wrap,
+    qkvz_lora_b_func_wrap,
 )
 from rtp_llm.model_loader.model_weight_info import (
     ModelDeployWeightInfo,
@@ -192,13 +196,36 @@ def transpose_gate_up(ts: List[torch.Tensor]):
     return torch.cat([up, gate], dim=1)
 
 
+def _fill_unprojected(ts, builder):
+    """Zero-fill None entries from a partially-targeted fused-projection set.
+
+    ``ts`` holds one adapter tensor per fused projection; an adapter that does
+    not target a projection leaves None there. The delta for an untargeted
+    projection is exactly zero, so rebuild each missing tensor with
+    ``builder(template, reference)`` using any targeted tensor as the shape
+    reference. All-None means the adapter targets none of this fused weight's
+    projections and must not merge at all (None passthrough upstream).
+    """
+    reference = next((t for t in ts if t is not None), None)
+    if reference is None:
+        return None
+    return [builder(reference) if t is None else t for t in ts]
+
+
 def qkv_lora_a_func_wrap(ts):
     """peft per-projection q/k/v LoRA A tensors -> [hidden, 3r] concatenation.
 
     The merged qkv weight is concat([q.T, k.T, v.T], dim=1), so the rank
-    axis concatenates on the column side of A.T.
+    axis concatenates on the column side of A.T.  An adapter targeting only
+    a subset (e.g. q_proj+v_proj without k_proj) contributes zero deltas for
+    the untargeted projections; none targeted at all returns None.
     """
     assert isinstance(ts, (list, tuple)) and len(ts) == 3
+    ts = _fill_unprojected(
+        ts, lambda ref: torch.zeros_like(ref)
+    )
+    if ts is None:
+        return None
     return torch.concat([t.t() for t in ts], dim=1).contiguous()
 
 
@@ -224,9 +251,15 @@ def qkv_lora_b_func_wrap(ts, head_num: int, head_dim: int):
     A' @ B' then equals concat([qA.T@qB.T, kA.T@kB.T, vA.T@vB.T], dim=1),
     the transpose of the per-projection deltas, matching merge_qkv_hf. The
     gated q_proj B rows are split to the q half first (the gate half belongs
-    to attn_gate_w).
+    to attn_gate_w).  Untargeted projections get zero B rows; none targeted
+    at all returns None.
     """
     assert isinstance(ts, (list, tuple)) and len(ts) == 3
+    ts = _fill_unprojected(
+        ts, lambda ref: torch.zeros_like(ref)
+    )
+    if ts is None:
+        return None
     q_b, k_b, v_b = ts
     q_b = _split_gated_q_lora_b([q_b], head_num, head_dim, part=0)
     return torch.block_diag(q_b.t(), k_b.t(), v_b.t()).contiguous()
@@ -235,11 +268,15 @@ def qkv_lora_b_func_wrap(ts, head_num: int, head_dim: int):
 def gated_q_lora_a_func_wrap(ts):
     """attn_gate_w LoRA A: the q_proj adapter A shared with the qkv weight."""
     assert isinstance(ts, (list, tuple)) and len(ts) == 1
+    if ts[0] is None:
+        return None
     return ts[0].t().contiguous()
 
 
 def gated_q_lora_b_func_wrap(ts, head_num: int, head_dim: int):
     """attn_gate_w LoRA B: the gate half of the gated q_proj adapter rows."""
+    if ts[0] is None:
+        return None
     gate_b = _split_gated_q_lora_b(ts, head_num, head_dim, part=1)
     return gate_b.t().contiguous()
 
@@ -284,6 +321,11 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
         return AtomicWeight(
             W.lm_head,
             [CkptWeightInfo("lm_head.weight", identity)],
+            # peft adapters (e.g. JEV) carry a trained lm_head delta; merging
+            # it into the weight means decision heads that select lm_head
+            # rows by label_token_ids automatically score the adapted rows
+            lora_a_process_func=transpose,
+            lora_b_process_func=transpose,
         )
 
     def _create_layer_norm_weight(self) -> List[WeightModule]:
@@ -583,6 +625,10 @@ class Qwen3NextBaseWeight(ModelDeployWeightInfo):
                 ],
                 transpose,
                 LinearAttnConfig(self.model_config.linear_attention_config),
+                # peft adapters (e.g. JEV) target linear_attn.out_proj as a
+                # plain projection: standard A/B transpose merge
+                lora_a_process_func=transpose,
+                lora_b_process_func=transpose,
             ),
         ]
 
@@ -707,6 +753,12 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
                 linear_attention_config=self.model_config.linear_attention_config,
             ),
             LinearAttnConfig(self.model_config.linear_attention_config),
+            # peft adapters (e.g. JEV) target in_proj_qkv/in_proj_z as two
+            # per-projection LoRA pairs; raw projection list + the wrap math
+            # keeps each delta on its own columns of the merged weight
+            lora_raw_projection_list=True,
+            lora_a_process_func=qkvz_lora_a_func_wrap,
+            lora_b_process_func=qkvz_lora_b_func_wrap,
         )
 
     def _create_linear_attn_ba_weight(self) -> LinearAttnAtomicWeight:
@@ -728,6 +780,10 @@ class Qwen35MoeWeight(Qwen3NextBaseWeight):
                 linear_attention_config=self.model_config.linear_attention_config,
             ),
             LinearAttnConfig(self.model_config.linear_attention_config),
+            # peft adapters may target in_proj_b/in_proj_a independently
+            lora_raw_projection_list=True,
+            lora_a_process_func=ba_lora_a_func_wrap,
+            lora_b_process_func=ba_lora_b_func_wrap,
         )
 
 

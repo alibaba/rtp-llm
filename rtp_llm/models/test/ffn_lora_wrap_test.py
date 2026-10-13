@@ -50,6 +50,39 @@ class W13PeftLoraWrapTest(unittest.TestCase):
         with self.assertRaises(AssertionError):
             w13_lora_a_func_wrap([torch.randn(2, 4)], origin_w1=w1, origin_w3=w3)
 
+    def test_gate_only_adapter_zero_fills_up_side(self):
+        # target_modules with only gate_proj: the up side must contribute a
+        # zero delta so the trained gate delta still merges (codex B5).
+        w1, w3 = _FakeOrigin(1), _FakeOrigin(1)
+        h, inter, r = 8, 12, 4
+        gA, gB = torch.randn(r, h), torch.randn(inter, r)
+
+        a = w13_lora_a_func_wrap([gA, None], origin_w1=w1, origin_w3=w3)
+        expect_a = torch.cat([gA.t(), torch.zeros(h, r)], dim=1)
+        torch.testing.assert_close(a, expect_a)
+
+        b = w13_lora_b_func_wrap([gB, None], origin_w1=w1, origin_w3=w3)
+        expect_b = torch.block_diag(gB.t(), torch.zeros(r, inter))
+        torch.testing.assert_close(b, expect_b)
+
+        scale = 2.0
+        merged = a @ b * scale
+        expect_delta = torch.cat(
+            [(gB @ gA * scale).t(), torch.zeros(h, inter)], dim=1
+        )
+        torch.testing.assert_close(merged, expect_delta)
+
+    def test_fully_untargeted_fused_weight_returns_none(self):
+        # neither projection targeted: the wrap reports "no delta" instead of
+        # fabricating a zero-rank block that would silently mask the miss.
+        w1, w3 = _FakeOrigin(1), _FakeOrigin(1)
+        self.assertIsNone(
+            w13_lora_a_func_wrap([None, None], origin_w1=w1, origin_w3=w3)
+        )
+        self.assertIsNone(
+            w13_lora_b_func_wrap([None, None], origin_w1=w1, origin_w3=w3)
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

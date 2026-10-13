@@ -826,12 +826,21 @@ class ModelConfig(CppModelConfig):
 
 
 def _checkpoint_has_visual_weights(ckpt_path: str) -> bool:
-    """True when the checkpoint index (or any root shard) carries visual.* tensors."""
+    """True when the checkpoint index (or any root shard) carries visual tensors.
+
+    The wrapped Qwen3.5-VL release names its vision tower ``model.visual.*``
+    while the bare layout uses ``visual.*``; match the visual segment at any
+    naming depth so a real vision-bearing release is never mistaken for a
+    text-only checkpoint (and downgraded) by prefix accident.
+    """
     index_path = os.path.join(ckpt_path, "model.safetensors.index.json")
     if os.path.isfile(index_path):
         with open(index_path, encoding="utf-8") as reader:
             weight_map = json.load(reader).get("weight_map") or {}
-        return any(name.startswith("visual.") for name in weight_map)
+        if any("visual." in name for name in weight_map):
+            return True
+        # The index names only backbone shards; a vision tower shipped as a
+        # sidecar shard (beside the index) still means a multimodal release.
     for pattern in ("*.safetensors", "*.bin"):
         for shard in Path(ckpt_path).glob(pattern):
             try:
@@ -841,7 +850,7 @@ def _checkpoint_has_visual_weights(ckpt_path: str) -> bool:
                         names = json.loads(f.read(header_len)).keys()
                     else:
                         continue
-                if any(name.startswith("visual.") for name in names):
+                if any("visual." in name for name in names):
                     return True
             except Exception:
                 continue

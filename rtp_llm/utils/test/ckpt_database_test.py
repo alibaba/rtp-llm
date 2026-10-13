@@ -255,6 +255,29 @@ class IndexedExtrasTest(unittest.TestCase):
             all_names = db.get_pretrain_tensor_names()
             self.assertEqual(len(all_names), len(set(all_names)))
 
+    def test_two_sidecars_with_same_head_key_keeps_first(self):
+        # codex round1 B11: two extras both defining the same head tensor must
+        # not both load (duplicate names would disable fast loaders and flip
+        # the _tensor_index winner to whichever appended last).
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_indexed_release(tmp)
+            save_file(
+                {"decision.head.weight": torch.zeros(1)},
+                os.path.join(tmp, "a_head.safetensors"),
+            )
+            save_file(
+                {"decision.head.weight": torch.ones(1)},
+                os.path.join(tmp, "z_head.safetensors"),
+            )
+            db = CkptDatabase(tmp)
+            names = self._file_names(db)
+            self.assertIn("a_head.safetensors", names)
+            self.assertNotIn("z_head.safetensors", names)
+            all_names = db.get_pretrain_tensor_names()
+            self.assertEqual(len(all_names), len(set(all_names)))
+            # the accepted sidecar is the authoritative source for its key
+            self.assertIn("a_head", db._tensor_index["decision.head.weight"].file_name)
+
 
 class SafetensorHandleCacheTest(unittest.TestCase):
     """Tests for CkptFileInfo safetensor handle caching."""

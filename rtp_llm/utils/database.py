@@ -204,11 +204,19 @@ class CkptDatabase(BaseDatabase):
                 if extra.name in files or extra.name.startswith("consolidated"):
                     continue
                 ckpt = CkptFileInfo(file_name=str(extra))
-                if indexed_names.intersection(ckpt.get_tensor_names()):
+                overlap = indexed_names.intersection(ckpt.get_tensor_names())
+                if overlap:
+                    # The index stays authoritative for every tensor it
+                    # names — an extra colliding with the indexed shards OR
+                    # with a previously accepted extra is skipped whole, so
+                    # duplicate names can never silently disable the fast
+                    # loaders or flip the _tensor_index winner (codex B11).
                     logging.warning(
-                        f"skip {extra.name}: tensors already covered by the index"
+                        f"skip {extra.name}: tensors already covered by the "
+                        f"index or an accepted sidecar: {sorted(overlap)[:4]}"
                     )
                     continue
+                indexed_names.update(ckpt.get_tensor_names())
                 self.pretrain_file_list.append(ckpt)
             return
 

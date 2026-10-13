@@ -33,7 +33,7 @@ import json
 import logging
 import math
 import string
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 
@@ -63,7 +63,7 @@ from rtp_llm.models.downstream_modules.clef_joint_head import (
 from rtp_llm.models.downstream_modules.decider_decision import (
     encode_decider_record,
 )
-from rtp_llm.models.downstream_modules.embedding.api_datatype import ContentPart
+from rtp_llm.models.downstream_modules.embedding.api_datatype import ContentPart, ContentPartTypeEnum
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.model_weight import CkptWeightInfo
@@ -132,9 +132,20 @@ def default_codes(n: int) -> List[str]:
     return names[:n]
 
 
-def escape_special_tokens(text: str) -> str:
-    """Keep user text from forging reserved marker/special tokens."""
-    return text.replace("<|", "< |").replace("|>", "| >")
+def escape_special_tokens(text: str, reserved_markers: Optional[Iterable[str]] = None) -> str:
+    """Keep user text from forging reserved marker/special tokens.
+
+    ``<|``/``|>`` breaks the HF-style special fences; every string in
+    ``reserved_markers`` (the active decision markers, e.g. kev's
+    ``<state>``/``</opt>``) is broken at its first character so user content
+    can never emit a real marker token and forge pointer boundaries
+    (codex round1 B6).
+    """
+    text = text.replace("<|", "< |").replace("|>", "| >")
+    for marker in reserved_markers or ():
+        if marker:
+            text = text.replace(marker, marker[0] + " " + marker[1:])
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -187,12 +198,24 @@ def question_options(question: DecisionQuestion) -> List[str]:
 
 
 def question_labels(question: DecisionQuestion, options: List[str]) -> List[str]:
-    """Response label per option (matches the TypeSafe/systemone convention)."""
+    """Response label per option (matches the TypeSafe/systemone convention).
+
+    Duplicate choice options would silently collapse in the response dict
+    (the later prob overwriting the earlier one), so they are rejected here
+    before any GPU work (codex round1 B10).
+    """
     if question.type == "noul":
         return list(NOUL_LABELS)
     if question.type == "score":
         return [str(i) for i in range(len(options))]
-    return list(options)
+    labels = list(options)
+    if len(set(labels)) != len(labels):
+        dupes = sorted({o for o in labels if labels.count(o) > 1})
+        raise ValueError(
+            f"choice question '{question.id}' has duplicate options: {dupes}; "
+            "each option becomes a response key and must be unique"
+        )
+    return labels
 
 
 # --------------------------------------------------------------------------- #
@@ -324,8 +347,6 @@ class DecisionHandler(CustomHandler):
                     0, torch.tensor(self.label_token_ids, dtype=torch.long, device=weight.device)
                 ).contiguous()
                 weight = rows
-                if self.inline_bias is not None:
-                    self.linear.bias.data = self.inline_bias.to(weight.device)
             if weight.ndim != 2 or weight.shape != (self.num_labels, self.config_.hidden_size):
                 raise ValueError(
                     f"decision head weight must be [{self.num_labels}, "
@@ -333,10 +354,26 @@ class DecisionHandler(CustomHandler):
                 )
             self.linear.weight.data = weight
             if self.bias_key:
+                if self.inline_bias is not None:
+                    raise ValueError(
+                        "decision head cannot take both an inline head_bias and "
+                        "a checkpoint bias tensor"
+                    )
                 bias = tensor_map[self.bias_key]
                 if bias.shape != (self.num_labels,):
                     raise ValueError("decision head bias must be [num_labels]")
                 self.linear.bias.data = bias
+            elif self.inline_bias is not None:
+                # Applies to both the explicit linear readout and the
+                # lm_head row-select path: an inline bias list always loads,
+                # otherwise a randomly initialized nn.Linear bias would skew
+                # every score (codex round1 B8).
+                if len(self.inline_bias) != self.num_labels:
+                    raise ValueError(
+                        f"inline head_bias has {len(self.inline_bias)} entries, "
+                        f"expected {self.num_labels}"
+                    )
+                self.linear.bias.data = self.inline_bias.to(weight.device)
             self.linear = self.linear.to(data_type).eval().to(self.device)
         elif self.head_type == HEAD_TYPE_POINTER:
             if self.head_tensors is not None:
@@ -590,22 +627,59 @@ class DecisionRenderer(CustomRenderer):
         return DecisionRequest(**request)
 
     def create_input(self, request: DecisionRequest) -> EngineInputs:
+        # Duplicate question ids would merge response entries (and collapse
+        # packed-format per-question records) before any GPU work; reject
+        # them once at the shared entry (codex round1 B10).
+        ids = [q.id for q in request.questions]
+        if len(set(ids)) != len(ids):
+            dupes = sorted({i for i in ids if ids.count(i) > 1})
+            raise ValueError(f"duplicate question ids in request: {dupes}")
         if self.prompt_format == PROMPT_FORMAT_CLEF:
             return self._create_clef_input(request)
         if self.prompt_format == PROMPT_FORMAT_DECIDER:
             return self._create_decider_input(request)
         if self.prompt_format == PROMPT_FORMAT_BARE:
+            # Guard the known multimodal batch-length gap (issues/
+            # codex-round1-multimodal-batch-lengths.md): the MM expansion
+            # only refreshes input_lengths/total_length for single-segment
+            # inputs, so multi-question image requests would proceed with
+            # stale lengths and an out-of-bounds mask copy. Reject the
+            # combination until the processor maintains per-segment lengths.
+            if (
+                isinstance(request.document, list)
+                and len(request.questions) > 1
+                and any(
+                    part.type in (ContentPartTypeEnum.image_url, ContentPartTypeEnum.video_url, ContentPartTypeEnum.audio_url)
+                    for part in request.document
+                )
+            ):
+                raise ValueError(
+                    "multi-question requests with media documents are not "
+                    "supported yet: the multimodal processor does not update "
+                    "per-segment lengths (see issues/"
+                    "codex-round1-multimodal-batch-lengths.md); send one "
+                    "question per request for image/video/audio documents"
+                )
             pairs = [
                 self._build_prompt(request.document, q) for q in request.questions
             ]
             # The bare format tokenizes the prompt exactly as written (the
             # reference uses add_special_tokens=False), images spliced through
-            # the vision marker.
+            # the vision marker.  Truncation stays OFF: a right-truncating
+            # tokenizer would silently drop the question/options/decision
+            # suffix and the head would score an answer to a question that
+            # never reached the model; the generator's length check raises
+            # LONG_PROMPT_ERROR for genuinely over-long prompts instead
+            # (codex round1 B7).
             return self.generator.generate(
-                pairs, tokenizer_config={"add_special_tokens": False}
+                pairs,
+                truncate=False,
+                tokenizer_config={"add_special_tokens": False},
             )
         prompts = [self._build_prompt(request.document, q) for q in request.questions]
-        return self.generator.generate(prompts)
+        # Same rationale as the bare branch: keep the decision suffix intact
+        # and fail loudly on over-long prompts.
+        return self.generator.generate(prompts, truncate=False)
 
     # decider packs every question into ONE sequence (Context + one block per
     # question ending in its Answer slot); slot positions ride the span table.
@@ -811,10 +885,18 @@ class DecisionRenderer(CustomRenderer):
             m_decide = self.markers["decide"]
         except KeyError as e:
             raise ValueError(f"kev_branch prompt_format needs markers.{e.args[0]}") from e
-        parts = [m_state, escape_special_tokens(document), m_question]
-        parts.append(escape_special_tokens(question.prompt or CHAT_DEFAULT_INSTRUCTION))
+
+        def esc(text: str) -> str:
+            # break every active marker inside user content so a literal
+            # "</opt>" or "<decide>" cannot forge pointer boundaries
+            return escape_special_tokens(
+                text, reserved_markers=self.markers.values()
+            )
+
+        parts = [m_state, esc(document), m_question]
+        parts.append(esc(question.prompt or CHAT_DEFAULT_INSTRUCTION))
         for opt in options:
-            parts += [m_option, escape_special_tokens(opt), m_option_end]
+            parts += [m_option, esc(opt), m_option_end]
         parts.append(m_decide)
         return "".join(parts)
 
