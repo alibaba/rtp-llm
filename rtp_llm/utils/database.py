@@ -188,6 +188,28 @@ class CkptDatabase(BaseDatabase):
             for f in files:
                 ckpt = CkptFileInfo(file_name=os.path.join(path, f))
                 self.pretrain_file_list.append(ckpt)
+            # Releases with a sharded backbone may ship additional
+            # safetensors beside the index (e.g. decision heads like clef's
+            # joint_head.safetensors); those tensors are part of the
+            # checkpoint too, so enumerate them alongside the indexed shards.
+            # The index stays authoritative: a file overlapping the indexed
+            # tensor names (consolidated.safetensors, reshard remnants) is
+            # skipped whole, because duplicated names silently disable
+            # fast-safetensors loading and let the extra file override the
+            # shard entry in _tensor_index.
+            indexed_names = set()
+            for ckpt in self.pretrain_file_list:
+                indexed_names.update(ckpt.get_tensor_names())
+            for extra in sorted(Path(path).glob("*.safetensors")):
+                if extra.name in files or extra.name.startswith("consolidated"):
+                    continue
+                ckpt = CkptFileInfo(file_name=str(extra))
+                if indexed_names.intersection(ckpt.get_tensor_names()):
+                    logging.warning(
+                        f"skip {extra.name}: tensors already covered by the index"
+                    )
+                    continue
+                self.pretrain_file_list.append(ckpt)
             return
 
         # standard HF

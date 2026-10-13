@@ -212,10 +212,14 @@ class DecisionHandler(CustomHandler):
             self.weight_key = settings["head_weight"]
             # JEV native layout: the head is lm_head rows of the verbalizer
             # token ids plus inline bias values; no head tensor is
-            # materialized in the checkpoint.
+            # materialized in the checkpoint. Some converted checkpoints
+            # (decider) also carry label_token_ids as metadata next to an
+            # explicit decision-head matrix; only the lm_head case selects
+            # rows by token id.
             self.label_token_ids = (
                 [int(t) for t in settings["label_token_ids"]]
                 if settings.get("label_token_ids")
+                and self.weight_key == "lm_head.weight"
                 else None
             )
             self.inline_bias = (

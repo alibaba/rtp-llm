@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -172,6 +173,87 @@ class TensorIndexTest(unittest.TestCase):
         # After clearing, has_tensor should return False
         all_names = database.get_pretrain_tensor_names()
         self.assertFalse(database.has_tensor(all_names[0]))
+
+
+class IndexedExtrasTest(unittest.TestCase):
+    """Sharded releases: extras beside the index must not duplicate the shards."""
+
+    @staticmethod
+    def _write_indexed_release(tmp):
+        save_file(
+            {"backbone.w1": torch.zeros(1), "backbone.w2": torch.zeros(1)},
+            os.path.join(tmp, "model-00001-of-00002.safetensors"),
+        )
+        save_file(
+            {"backbone.w3": torch.zeros(1)},
+            os.path.join(tmp, "model-00002-of-00002.safetensors"),
+        )
+        weight_map = {
+            "backbone.w1": "model-00001-of-00002.safetensors",
+            "backbone.w2": "model-00001-of-00002.safetensors",
+            "backbone.w3": "model-00002-of-00002.safetensors",
+        }
+        with open(os.path.join(tmp, "model.safetensors.index.json"), "w") as f:
+            json.dump({"weight_map": weight_map}, f)
+
+    def _file_names(self, db):
+        return [os.path.basename(f.file_name) for f in db.pretrain_file_list]
+
+    def test_head_file_beside_index_is_loaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_indexed_release(tmp)
+            save_file(
+                {"decision.head.weight": torch.zeros(1)},
+                os.path.join(tmp, "joint_head.safetensors"),
+            )
+            db = CkptDatabase(tmp)
+            # the shards come out of the index's weight_map set in any
+            # order; only the enumerated extras are guaranteed to follow
+            names = self._file_names(db)
+            self.assertEqual(
+                sorted(names[:-1]),
+                [
+                    "model-00001-of-00002.safetensors",
+                    "model-00002-of-00002.safetensors",
+                ],
+            )
+            self.assertEqual(names[-1], "joint_head.safetensors")
+            self.assertTrue(db.has_tensor("decision.head.weight"))
+
+    def test_consolidated_beside_index_is_skipped(self):
+        # Mistral-Nemo-Instruct-2407 ships consolidated.safetensors next to
+        # the index; loading it would duplicate every backbone tensor and
+        # override the shards in _tensor_index.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_indexed_release(tmp)
+            save_file(
+                {
+                    "backbone.w1": torch.ones(1),
+                    "backbone.w2": torch.ones(1),
+                    "backbone.w3": torch.ones(1),
+                },
+                os.path.join(tmp, "consolidated.safetensors"),
+            )
+            db = CkptDatabase(tmp)
+            self.assertNotIn("consolidated.safetensors", self._file_names(db))
+            all_names = db.get_pretrain_tensor_names()
+            self.assertEqual(len(all_names), len(set(all_names)))
+            self.assertIn(
+                "model-00001", db._tensor_index["backbone.w1"].file_name
+            )
+
+    def test_extra_with_duplicate_tensors_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_indexed_release(tmp)
+            # a reshard remnant: one new tensor plus one the index covers
+            save_file(
+                {"decision.head.weight": torch.zeros(1), "backbone.w1": torch.zeros(1)},
+                os.path.join(tmp, "model.safetensors"),
+            )
+            db = CkptDatabase(tmp)
+            self.assertNotIn("model.safetensors", self._file_names(db))
+            all_names = db.get_pretrain_tensor_names()
+            self.assertEqual(len(all_names), len(set(all_names)))
 
 
 class SafetensorHandleCacheTest(unittest.TestCase):
