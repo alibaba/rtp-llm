@@ -177,3 +177,15 @@ def validate_drain(state, identity, *, terminal_count, command_id):
     if any(state.get(k) != v for k, v in identity.items()):
         raise ValueError("flow drain identity mismatch")
     FlowStatus.decode(state).validate_completion(terminal_count, command_id)
+
+
+def wait_flow_started(control, identity, process, deadline):
+    from runtime.startup import wait_ready
+    def acknowledged():
+        state = read_status(control, identity)
+        if not process.alive():
+            if state.get('state') != 'DRAINED' or process.proc.poll() != 0:
+                raise RuntimeError('client exited before sending acknowledgement\n' + process.tail_log())
+        return state if state.get('state') in {'SENDING', 'DRAINING', 'DRAINED', 'INCOMPLETE'} else None
+    return wait_ready(deadline, 'client/sending acknowledgement', acknowledged,
+                      interval_s=0.1)

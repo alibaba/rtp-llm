@@ -44,7 +44,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             definition = replace(module.CASE, producers=shared.producers, report_views=shared.report_views)
             with mock.patch.object(registry, '_snapshot', snapshot(entry('second_cache', definition, 'second_cache', module_path), include_existing=True)):
                 with mock.patch('scenario.compiler.VICTIM_OFFSETS', (700, 701, 702)), \
-                     mock.patch('runtime.resource_plan.VICTIM_OFFSETS', (700, 701, 702)):
+                     mock.patch('adapters.java_mock_resources.VICTIM_OFFSETS', (700, 701, 702)):
                     first = compile_scenarios([('first', configure_program(original, 'first'))], handlers=handlers())
                     second = compile_scenarios([('second', configure_program(config, 'second'))], handlers=handlers())
                 self.assertEqual([p['stages'] for p in first], [p['stages'] for p in second])

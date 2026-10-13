@@ -1,7 +1,7 @@
 """Publish the cache gate's frozen survivor-window measurements."""
 
 from cases.cache_scale_in.analysis import analyze
-from runtime.observation import evidence_origin
+from artifacts.gate_inputs import evidence_origin
 from monitoring.metric_store import MetricStore, publish, series_row
 from monitoring.archive import export_metrics
 

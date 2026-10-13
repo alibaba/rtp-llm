@@ -107,7 +107,8 @@ class JavaFlowGroup:
             (self.directory / "metrics-ready").write_text(
                 str(int(time.time() * 1000) + 500)
             )
-        from runtime.startup import startup_phase, wait_flow_started
+        from artifacts.startup import startup_phase
+        from adapters.flow_control import wait_flow_started
         with startup_phase(self.directory, 'client/sending', deadline):
             started = wait_flow_started(self.control, self.identity, self.proc, deadline)
         snapshot = PlaybackEvidence.read(self.directory / 'playback.json',

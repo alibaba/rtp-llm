@@ -56,7 +56,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 内部 program document 使用显式 `implementation` 字段携带实现与配置来源；普通 mapping 复制和 JSON 序列化必须保留该字段。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
 
-端口窗口准入、探测与锁由 `runtime.port_windows` 提供，命令入口只解析参数并调用实例编排器。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
+端口窗口准入、探测与锁由 `adapters.port_windows` 提供，命令入口只解析参数并调用实例编排器。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
 
 后台采样由 `runtime.sample_worker` 管理预算、取消和线程退出；服务协议与 epoch 数据源由 `adapters.observation_sources` 提供，`adapters.observation_window` 在线程 join 后冻结 cohort。action 负责参数、资源归属、检查和产物发布。
 
@@ -65,16 +65,18 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 | 目录 | 内容 |
 |---|---|
 | `cases/<case>/` | 该 case 的 program、action、输入合同、纯分析、指标生产、报告与离线重判 |
-| `case_api/` | 作者使用的构建、注册、输入合同与门禁插件 |
-| `scenario/` | YAML 声明与编译、静态校验、实例调度、基础 action、资源句柄、阶段执行与清理 |
-| `runtime/` | deadline、进程、网络及通用资源合同 |
-| `adapters/` | 服务与客户端协议、环境生命周期和启动配置 |
+| `case_api/` | 作者使用的构建、注册、输入与取证扩展合同、门禁插件 |
+| `scenario/` | YAML 声明与编译、静态校验、实例调度、基础 action、资源句柄与取证作用域、阶段执行、清理及最终状态裁决 |
+| `runtime/` | deadline、进程、网络、通用端口区间检查、有界采样与时钟计算 |
+| `adapters/` | 服务与客户端协议、请求账本、Fetch 流消费、环境生命周期、Java mock 资源布局及具体取证适配 |
 | `workload/` | 持续测量策略、请求与 engine 证据关联、采集有效性 |
 | `analysis/` | 可复用统计、只读检查及输入保真度分析，不定义某个 case 的门槛 |
 | `monitoring/`、`reporting/` | 指标查询/归档与图表/spec/bundle 的公共能力 |
-| `traffic/`、`artifacts/` | 流量构造、播放与制品管理 |
+| `traffic/`、`artifacts/` | 流量构造与播放；制品管理、启动记录及冻结证据格式读写 |
 
 归属由语义决定，不由文件名或当前调用数决定：包含特定阶段、门槛、指标输出或报告身份的代码属于 case；同一合同能被不同 case 使用的能力才放在公共组件。注册表可以指向专属实现，公共执行器不按 case 名分支。
+
+运行底座只依赖标准库和包内机制。具体客户端等待调用 `runtime.startup.wait_ready`，协议状态与进程退出码由 `adapters.flow_control.wait_flow_started` 解释；`artifacts.startup.startup_phase` 使用同一 deadline 保存启动耗时。`runtime.resource_plan` 检查通用端口区间，`adapters.java_mock_resources` 定义 Java mock 的保留端口、累计扩容容量、子进程环境及租约投影。
 
 集中归属不合并职责。`analysis.py` 根据显式输入计算，不访问网络、进程或报告；`actions.py` 操作现场并取证；`metrics.py` 发布声明的指标；`report.py` 展示既定结论，不能隐式重判。门禁动作先冻结独立 result 和校验 manifest，再返回共用的 `CheckResult`。数值投影在最终遥测导出后执行，报告在统一的 renderer 阶段生成一次，不重新裁决或改写冻结判定。
 
@@ -84,7 +86,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 资源句柄绑定环境代次。重建环境前清理旧消费者及进程，旧句柄只能显式作为历史证据读取。动态 worker 添加保留尝试预算；移除不返还容量预算。端口租约由父 runner 拥有，子执行器启动前核对范围与最大拓扑。父 runner 将完整 compiled instances 写入 `execution-plan.json`，记录规范化内容摘要与代码、运行配置的文件摘要。子执行器使用父进程提供的摘要验证计划，再验证当前依赖与租约，直接执行冻结步骤，不重新编译场景 YAML。规划后改变场景文件不改变已经冻结的参数；代码或运行配置变化使启动失败，必须重新规划。
 
-`ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
+`ResourceScope` 持有句柄、环境代次、取证适配器和清理栈；`RuntimeContext` 绑定输出引用及实际事件；`StageExecutor` 负责阶段分发与输出检查；`RunFinalizer` 负责证据和报告预算、检查点与结果提交。取证 exporter 返回 `case_api.extension_contracts.ResourceEvidence`，客户端的具体转换位于 `adapters.resource_evidence`，公共资源作用域只校验合同。deadline 位于运行底座。gRPC 客户端持有 channel，stream 持有消费线程，Mock 控制能力只使用所属环境的 HTTP 地址，不另建资源所有者。
 
 阶段使用剩余 deadline，清理使用独立预算并逆序执行。同一资源回调内的独立清理操作使用 `cleanup_all`，逐项尝试并汇总错误，诊断采样器失败不得阻断进程回收。启动部分失败也要回收已登记资源；未退出线程、未回收进程或清理异常不能成为 PASS。普通失败阻断依赖步骤，独立观察应放在最终判定之前。finding 只能声明具体检查，不豁免证据、超时和清理。
 
@@ -96,13 +98,13 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 ## 现场观测与冻结证据
 
-持续时间和轮询由阶段的单调时钟控制；epoch 秒用于关联客户端流水和 Prometheus。`ObservationClock` 冻结观测起点的两种时钟，样本用同一锚点加单调时间差生成 `epoch_s`、`monotonic_s`、`elapsed_s`。已有证据中的毫秒字段与相对 `t` 是格式投影，不形成第二个时钟来源。
+持续时间和轮询由阶段的单调时钟控制；epoch 秒用于关联客户端流水和 Prometheus。`RuntimeContext.start_observation` 记录观测开始事件，并把两种时钟的锚点交给 `runtime.observation.ObservationClock`；样本传入当前单调时间，用同一锚点加时间差生成 `epoch_s`、`monotonic_s`、`elapsed_s`。已有证据中的毫秒字段与相对 `t` 是格式投影，不形成第二个时钟来源。
 
 `RuntimeContext.record_event` 是事件时间的权威记录。证据内事件保存同一记录及相对时间投影，供独立离线重判；stage 的起止记录描述执行生命周期，不能代替采样点或业务事件。具名窗口声明负责边界，测量实现负责 cohort 与统计口径。
 
 采样复用 `poll_samples` 和 `SampleBudget`。`observation.capture` 显式声明样本数与字节上限；超限保留已有现场和错误，证据不完整时不得判 PASS。先保留已获得的失效现场再检查流量状态，允许诊断停止原因；错误样本不能被当作有效门禁证据。HTTP 请求复用 `runtime.network`，timeout 受当前 deadline 或可停止的短请求预算约束。
 
-门禁的获取、终态补全和发布均通过 `artifacts.json_io.write_json` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
+门禁的获取、终态补全和发布均通过 `artifacts.json_io.write_json` 原子更新同一证据文件，崩溃时保留最近的完整版本。公共获取信封包含格式版本、clock、criteria、samples、errors、provenance；业务 payload 保持所属格式的字段与语义。格式版本描述结构，`measurement_policy` 描述统计口径，两者独立。历史时钟字段只由 `artifacts.gate_inputs.evidence_origin` 转换；缺少锚点且没有样本时失败，不补零。
 
 `run_provenance.collect` 收集实际环境代次的启动输入；门禁复用其严格获取路径并冻结业务源码摘要。`adapters.java_flow.evidence_environment` 定义可比较客户端环境中的 run-local 字段排除规则。源文件位置变化只改变摘要，不改变历史证据的重判口径。
 
@@ -124,7 +126,7 @@ Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainRes
 
 ## 结果状态
 
-`result.json.outcome` 分别保存 `execution`、`gate`、`validity` 和 `delivery`。流程异常、业务未达标、证据不足与交付失败分别记录，不用一种错误覆盖其他事实。`runtime.outcome.RunOutcome` 是最终状态的唯一计算规则，父 runner 使用同一规则验证子结果一致性。交付失败仍使任务失败，但不能改变已冻结的门禁 verdict；finding 只匹配明确失败的检查。
+`result.json.outcome` 分别保存 `execution`、`gate`、`validity` 和 `delivery`。流程异常、业务未达标、证据不足与交付失败分别记录，不用一种错误覆盖其他事实。`scenario.outcome.RunOutcome` 是最终状态的唯一计算规则，父 runner 使用同一规则验证子结果一致性。交付失败仍使任务失败，但不能改变已冻结的门禁 verdict；finding 只匹配明确失败的检查。
 
 没有执行有效检查，或只有 `SKIP`，不构成 PASS。`WARNING` 是实际完成的建议性检查；证据不足始终为 ERROR，不受建议性策略豁免。可缺失的测量输出必须显式声明 `nullable_number`，只有伴随证据 ERROR 时才能输出 null；成功结果仍要求实际有限数值。
 

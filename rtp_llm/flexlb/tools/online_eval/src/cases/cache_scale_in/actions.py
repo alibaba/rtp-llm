@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from runtime.observation import ObservationClock, SampleBudget, poll_samples
+from runtime.observation import SampleBudget, poll_samples
 from artifacts.json_io import write_json
 from artifacts.gate_inputs import new_evidence
 from artifacts.provenance import gate_provenance
@@ -69,7 +69,7 @@ def observe(ctx, p, deadline):
     observation = p["observation"]
     p = dict(p["criteria"], flow=p["flow"], gate_input=p["gate_input"])
     flow = ctx.resource(p["flow"], "java_flow")
-    clock = ObservationClock.start(ctx)
+    clock = ctx.start_observation()
     origin = clock.origin_monotonic_s
     budget = SampleBudget(observation["capture"])
     evidence = new_evidence("cache_evidence_schema_version", clock,
@@ -102,7 +102,7 @@ def observe(ctx, p, deadline):
         engines = engine_metric_snapshot(ctx.monitor, p["gate_input"]["fields"],
                                   timeout=min(3, deadline.remaining()))
         state = flow.status()
-        stamp = clock.stamp(ctx)
+        stamp = clock.stamp(ctx.clock())
         row = dict(
             t=stamp["elapsed_s"],
             **stamp,

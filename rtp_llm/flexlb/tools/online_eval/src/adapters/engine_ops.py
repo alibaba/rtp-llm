@@ -17,7 +17,7 @@ from adapters.environment_config import DEFAULT_MASTER_MANAGEMENT_PORT
 from adapters.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
 from runtime.network import http_get_json
 from adapters.mock_engine import MockEngineControl
-from runtime.stream import StreamHandle, StreamSnapshot
+from adapters.stream import StreamHandle, StreamSnapshot
 
 DEFAULT_INPUT_LEN = 2048
 DEFAULT_OUTPUT_LEN = 10

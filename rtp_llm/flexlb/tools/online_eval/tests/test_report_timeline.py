@@ -155,7 +155,7 @@ def test_offline_publication_uses_frozen_clock_and_event_records(tmp_path):
 def test_runtime_freezes_resource_onset_into_evidence_metrics_analysis_and_report(tmp_path):
     import json
     from types import SimpleNamespace
-    from runtime.resource_evidence import ResourceEvidence
+    from case_api.extension_contracts import ResourceEvidence
     from scenario.context import RuntimeContext
     from workload.policy import WorkloadPolicy
 

@@ -56,7 +56,7 @@ def _start(ctx, p, deadline):
         (ctx.artifact_dir / "master-test-control.json").write_text(json.dumps(initial, indent=2))
     directory = ctx.artifact_dir / "flows" / p["group_id"]
     directory.parent.mkdir(exist_ok=True)
-    from runtime.startup import startup_phase
+    from artifacts.startup import startup_phase
     with startup_phase(ctx.artifact_dir, 'traffic/input', deadline):
         trace = materialize(
             directory.parent / (p["group_id"] + ".jsonl"),
@@ -87,7 +87,7 @@ def _start(ctx, p, deadline):
             flow.stop_sending(d)
             flow.drain(d)
 
-    from runtime.resource_evidence import flow_evidence
+    from adapters.resource_evidence import flow_evidence
     handle = ctx.register_resource("java_flow", flow, cleanup=cleanup, evidence=flow_evidence)
     flow.start(trace, environment, deadline,
                target=f"127.0.0.1:{ctx.env.master_http_port + 2}")

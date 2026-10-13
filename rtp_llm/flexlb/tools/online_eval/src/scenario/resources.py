@@ -25,7 +25,7 @@ class ResourceScope:
         return len(self._resources)
 
     def export_evidence(self, profile, deadline):
-        from runtime.resource_evidence import ResourceEvidence
+        from case_api.extension_contracts import ResourceEvidence
         for identity, exporter in self._evidence_exporters.items():
             deadline.check()
             handle, value, _ = self._resources[identity]

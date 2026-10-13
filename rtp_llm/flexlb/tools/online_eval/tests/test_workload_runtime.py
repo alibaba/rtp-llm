@@ -81,7 +81,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
 
     def test_catalog_is_disjoint_and_complete(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )
@@ -104,7 +104,7 @@ class WorkloadRuntimeTests(unittest.TestCase):
 
     def test_quick_suite_is_request_completion_for_every_master_profile(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )

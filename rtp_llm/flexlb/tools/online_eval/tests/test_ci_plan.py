@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def capacity():
-    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
+    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('adapters.java_mock_resources.VICTIM_OFFSETS', (2048, 2049, 2050)):
         yield
 
 

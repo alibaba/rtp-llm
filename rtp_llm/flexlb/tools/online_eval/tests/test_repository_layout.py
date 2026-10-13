@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.pipeline import execute_cases as parallel_runner
 from scenario import instance_runner
-from runtime import port_windows
+from adapters import port_windows
 
 
 class RepositoryLayoutTest(unittest.TestCase):
@@ -67,7 +67,7 @@ class RepositoryLayoutTest(unittest.TestCase):
         from scenario.catalog import handlers
 
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios"), handlers=handlers()
             )

@@ -68,7 +68,7 @@ def test_selectors_are_exclusive_and_suite_is_not_a_filter(argv):
 
 def test_workload_suite_excludes_controls_but_kind_keeps_them():
     docs = load_scenarios(ROOT / 'config/scenarios')
-    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
+    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('adapters.java_mock_resources.VICTIM_OFFSETS', (2048, 2049, 2050)):
         plans = compile_scenarios(docs, 'single-nonbatch', handlers())
     suite = classify(plans, 'workload')
     assert len(suite) == 3

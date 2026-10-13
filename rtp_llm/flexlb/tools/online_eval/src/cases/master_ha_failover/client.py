@@ -121,7 +121,9 @@ class HaReplayClient:
                        terminal_count=len(rows), command_id=self.stop_command)
 
     def start(self, deadline=None) -> None:
-        from runtime.startup import startup_deadline, startup_phase, wait_flow_started
+        from runtime.startup import startup_deadline
+        from artifacts.startup import startup_phase
+        from adapters.flow_control import wait_flow_started
         deadline = startup_deadline(deadline, 120)
         if self.state_sampler is not None:
             self.state_sampler.start(deadline=deadline)

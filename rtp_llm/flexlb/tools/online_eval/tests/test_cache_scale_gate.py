@@ -366,7 +366,7 @@ class CacheGateTest(unittest.TestCase):
 
     def test_real_scenario_compiles_and_preserves_cache_policy(self):
         with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+             mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(ROOT / "config/scenarios/cache_scale_in.yaml"),
                 handlers=handlers(),
@@ -385,7 +385,7 @@ class CacheGateTest(unittest.TestCase):
             changed = copy.deepcopy(case)
             changed["parameters"]["procedure"].update(topology_timeout_s=31, removal_mode=mode)
             with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-                 mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+                 mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
                 plans = compile_scenarios([("test", configure_program(changed, "test"))], handlers=handlers())
             self.assertEqual(len(plans), 4)
         changed["parameters"]["procedure"]["removal_mode"] = "silent"
@@ -482,7 +482,7 @@ class CacheGateTest(unittest.TestCase):
             def compile_case(value):
                 path.write_text(yaml.safe_dump(value))
                 with mock.patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-                     mock.patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+                     mock.patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
                     return compile_scenarios(
                         load_scenarios(path), handlers=handlers()
                     )

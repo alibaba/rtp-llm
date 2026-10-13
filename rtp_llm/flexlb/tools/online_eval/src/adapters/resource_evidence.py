@@ -1,14 +1,6 @@
-"""Explicit resource evidence adapters; execution owns resources, adapters own format."""
+"""Project client resources to the execution evidence contract."""
 
-from dataclasses import dataclass, field
-
-
-@dataclass(frozen=True)
-class ResourceEvidence:
-    requests: dict = field(default_factory=dict)
-    outages: tuple = ()
-    producer: object = None
-    errors: tuple = ()
+from case_api.extension_contracts import ResourceEvidence
 
 
 def flow_evidence(value, profile):
@@ -23,7 +15,7 @@ def flow_evidence(value, profile):
 
 
 def request_evidence(value, profile):
-    from runtime.requests import completeness
+    from adapters.requests import completeness
     rows = value.snapshot_records()
     integrity = completeness(rows)
     return ResourceEvidence(requests=dict(records=rows), producer="python",

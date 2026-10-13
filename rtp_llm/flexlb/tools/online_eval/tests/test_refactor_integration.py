@@ -12,12 +12,12 @@ from scenario.suites import preselect_documents
 ROOT = Path(__file__).resolve().parents[1]
 
 def compile_case(data):
-    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
+    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('adapters.java_mock_resources.VICTIM_OFFSETS', (2048, 2049, 2050)):
         return compile_scenarios([('case.yaml', configure_program(data, 'case.yaml'))], handlers=handlers())
 
 def test_manual_suite_preserves_exact_three_cases_per_profile():
     documents = preselect_documents(load_scenarios(ROOT/'config/scenarios'), 'workload')
-    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('runtime.resource_plan.VICTIM_OFFSETS', (2048, 2049, 2050)):
+    with patch('scenario.compiler.VICTIM_OFFSETS', (2048, 2049, 2050)), patch('adapters.java_mock_resources.VICTIM_OFFSETS', (2048, 2049, 2050)):
         plans = compile_scenarios(documents, handlers=handlers())
     assert {p['id'] for p in plans} == {f'{case}::default::{profile}' for case in ['cache_scale_in', 'master_ha_failover', 'master_performance'] for profile in ['single-nonbatch','batch-window']}
 

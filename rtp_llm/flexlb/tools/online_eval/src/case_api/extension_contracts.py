@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from copy import deepcopy
 from pathlib import Path
 from types import MappingProxyType
@@ -25,6 +25,14 @@ class FinalizationContext:
     @classmethod
     def snapshot(cls, directory, run):
         return cls(Path(directory), MappingProxyType(deepcopy(run)))
+
+
+@dataclass(frozen=True)
+class ResourceEvidence:
+    requests: dict = field(default_factory=dict)
+    outages: tuple = ()
+    producer: object = None
+    errors: tuple = ()
 
 
 class StageValidator(Protocol):

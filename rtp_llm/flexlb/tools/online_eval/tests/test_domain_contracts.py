@@ -131,7 +131,7 @@ def test_freezing_preserves_collection_definition_order(tmp_path):
     from monitoring.collection_plan import instance_plan
     path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
     with patch("scenario.compiler.VICTIM_OFFSETS", (2048, 2049, 2050)), \
-         patch("runtime.resource_plan.VICTIM_OFFSETS", (2048, 2049, 2050)):
+         patch("adapters.java_mock_resources.VICTIM_OFFSETS", (2048, 2049, 2050)):
         plan = ScenarioCompiler(handlers()).compile([(str(path), configure_program(load_document(path), str(path)))])
         codec = ExecutionPlanCodec(dependencies=lambda: {})
         frozen = tmp_path / "plan.json"

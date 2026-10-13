@@ -10,7 +10,7 @@ from analysis.gates import gate_checks
 from cases.master_ha_failover.actions import _client_check
 from reporting.run_context import canonical_spec
 from runtime.deadline import Deadline
-from runtime.outcome import RunOutcome, apply_outcome
+from scenario.outcome import RunOutcome, apply_outcome
 from scenario.context import RuntimeContext
 from scenario.execution_plan import freeze_plan, load_plan
 from scenario.loader import ScenarioError

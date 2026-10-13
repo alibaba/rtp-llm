@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from runtime import port_windows
+from adapters import port_windows
 from scenario.selection_cli import add_selection_arguments, resolve_selection
 
 def main() -> int:

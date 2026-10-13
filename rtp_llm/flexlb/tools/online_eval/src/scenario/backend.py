@@ -154,7 +154,7 @@ class JavaMockBackend:
                 self.owned_processes[mp.pid] = mp
 
     def setup(self, ctx, plan, deadline):
-        from runtime.startup import startup_phase
+        from artifacts.startup import startup_phase
         with startup_phase(ctx.artifact_dir, "environment", deadline):
             return self._setup(ctx, plan, deadline)
 
@@ -309,7 +309,7 @@ class JavaMockBackend:
         )
 
     def start_requests(self, ctx, params, deadline):
-        from runtime.resource_evidence import request_evidence
+        from adapters.resource_evidence import request_evidence
         batch = RequestBatch(ctx, params)
         handle = ctx.register_resource(
             "requests", batch, batch.cleanup, historical=True, evidence=request_evidence

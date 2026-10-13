@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import IO
 
 from runtime.network import PROBE_BIND_HOST, port_in_use
-from runtime.resource_plan import MOCK_WINDOW_LAST, child_port_env, port_intervals
+from adapters.java_mock_resources import MOCK_WINDOW_LAST, child_port_env, port_intervals
 
 MASTER_HTTP_BASE = 18080
 MASTER_PORT_STRIDE = 10

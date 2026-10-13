@@ -489,7 +489,7 @@ class MasterActionsTest(unittest.TestCase):
 
         root = Path(__file__).resolve().parents[1] / "config/scenarios"
         with patch("scenario.compiler.VICTIM_OFFSETS", (700, 701, 702)), \
-             patch("runtime.resource_plan.VICTIM_OFFSETS", (700, 701, 702)):
+             patch("adapters.java_mock_resources.VICTIM_OFFSETS", (700, 701, 702)):
             plans = compile_scenarios(
                 load_scenarios(root / "master_ha_failover.yaml"),
                 handlers={

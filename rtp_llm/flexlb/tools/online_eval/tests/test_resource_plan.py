@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from runtime.resource_plan import (
+from adapters.java_mock_resources import (
     JavaMockBudget,
     LaneLease,
     ResourcePlanError,
@@ -18,14 +18,14 @@ from runtime.resource_plan import (
 class ResourcePlanTest(unittest.TestCase):
     def test_large_explicit_window_covers_topology_and_rejects_overlap(self):
         script = """
-from runtime.resource_plan import *
+from adapters.java_mock_resources import *
 from scenario.lease import validate_lease
 import json, tempfile
 from pathlib import Path
 from scenario import load_scenarios
 from scenario.compiler import compile_scenarios
 from scenario.catalog import handlers
-import runtime.resource_plan as resource_plan
+import adapters.java_mock_resources as resource_plan
 root=Path(resource_plan.__file__).resolve().parents[2]
 plans=compile_scenarios(load_scenarios(root/'config/scenarios/cache_scale_in.yaml'), handlers=handlers())
 assert plans[0]['environment']['n_prefill']==125

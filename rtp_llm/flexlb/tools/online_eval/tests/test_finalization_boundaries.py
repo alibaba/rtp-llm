@@ -8,7 +8,7 @@ import pytest
 from scenario import compile_scenarios
 from scenario.runtime import RuntimeContext, Deadline, execute_instance
 from workload.policy import execute_workload, WorkloadPolicy
-from runtime.resource_evidence import ResourceEvidence
+from case_api.extension_contracts import ResourceEvidence
 from test_scenario_runtime import Clock, Backend, source
 from test_performance_gate import evidence as performance_evidence
 from test_cache_scale_gate import CacheGateTest

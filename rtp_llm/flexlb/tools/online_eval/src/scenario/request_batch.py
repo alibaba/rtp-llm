@@ -3,7 +3,7 @@
 import json
 import threading
 
-from runtime.requests import ClientRecords, request_success
+from adapters.requests import ClientRecords, request_success
 from runtime.deadline import StageTimeout
 from adapters.rpc_error_evidence import error_trailer_evidence
 

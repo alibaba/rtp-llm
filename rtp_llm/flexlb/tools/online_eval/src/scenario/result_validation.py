@@ -1,7 +1,7 @@
 """Revalidate child result identities and nested evidence before aggregation."""
 import json
 from schema_contract import matches_schema
-from runtime.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
+from scenario.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
 
 def error_result(instance, message):
     return {

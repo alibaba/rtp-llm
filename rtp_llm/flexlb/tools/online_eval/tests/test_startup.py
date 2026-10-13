@@ -8,7 +8,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 from runtime.deadline import Deadline, StageTimeout
-from runtime.startup import wait_ready, wait_flow_started, startup_phase
+from runtime.startup import wait_ready
+from artifacts.startup import startup_phase
+from adapters.flow_control import wait_flow_started
 
 
 class Clock:

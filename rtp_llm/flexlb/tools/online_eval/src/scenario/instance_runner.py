@@ -29,11 +29,12 @@ from scenario.instance_plan import (
     order_instances,
     select_instances,
 )
-from runtime.resource_plan import ResourcePlanError, plan_lane_leases
-from runtime import port_windows
+from runtime.resource_plan import ResourcePlanError
+from adapters.java_mock_resources import plan_lane_leases
+from adapters import port_windows
 
 SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
-from runtime.outcome import TERMINAL_STATUSES as STATUSES
+from scenario.outcome import TERMINAL_STATUSES as STATUSES
 from scenario.result_validation import error_result, read_results
 from scenario.timing_store import timing_path, read_timings, write_timings
 
@@ -224,7 +225,7 @@ def _run_segment(index, part, group, lease, args, out, children):
 def _run_lane(index, lane, lease, args, out, children, dispatch=None):
     """One lease, one child per instance; failed cleanup retires this lane."""
     from scenario.lane_safety import cleanup_failure
-    from runtime.port_windows import busy_ports
+    from adapters.port_windows import busy_ports
     results, segments = [], []
     pending = iter(lane)
     failure = None

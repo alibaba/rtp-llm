@@ -14,7 +14,7 @@ from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.loader import ScenarioError
 from scenario.validation import mapping, number, identifier
 from scenario.stage_parameters import StageParameters, decode_parameters
-from runtime.resource_plan import JavaMockBudget
+from adapters.java_mock_resources import JavaMockBudget
 
 
 def json_document(value):
