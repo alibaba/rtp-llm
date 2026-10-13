@@ -1,7 +1,7 @@
 // 手动运行入口：node tests/js/test_multi_curve.js
 const assert = require('node:assert/strict');
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; this.classList={toggle:(name,on)=>{this.toggled={name,on};}}; }
+  constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; this.classes=new Set(); this.classList={toggle:(name,on)=>{if(on)this.classes.add(name);else this.classes.delete(name);}}; }
   appendChild(child) { this.children.push(child); return child; }
   append(...children) { this.children.push(...children); }
   setAttribute(key,value) { this.attributes[key]=value; }
@@ -15,7 +15,7 @@ class Element {
   contains(child) { return this===child||this.children.some(c=>c instanceof Element&&c.contains(child)); }
 }
 const documentClicks=new Set();
-global.document = {createElement:tag=>new Element(tag),createTextNode:text=>text,
+global.document = {createElement:tag=>new Element(tag),createElementNS:(_,tag)=>new Element(tag),createTextNode:text=>text,
   addEventListener:(name,handler)=>{if(name==='click')documentClicks.add(handler);},
   removeEventListener:(name,handler)=>{if(name==='click')documentClicks.delete(handler);}};
 global.Chart = class {
@@ -39,15 +39,22 @@ assert.equal(chart.options.scales.queue.display,false);
 assert.equal(chart.data.datasets[0].data[1].y,null);
 assert.equal(chart.data.datasets[1].data[0].y,1000); // never silently normalize units
 assert.deepEqual(chart.data.datasets[0].borderDash,[6,4]);
-const panel=root.children[0],legend=panel.children[4],hover=panel.children[5];
-assert.equal(legend.children[0].children[0].style.borderTopStyle,'dashed');
-assert.equal(legend.children[1].children[0].style.borderTopStyle,'solid');
-assert.equal(legend.children[0].hidden,false);
-assert.equal(legend.children[1].hidden,true);
-assert.match(hover.children[0].textContent,/avg/);
+const panel=root.children[0],legend=panel.children.find(c=>c.className==='multi-legend'),hover=panel.children.find(c=>c.className==='multi-hover');
+assert.equal(legend.children[0].children[0].children[0].children[0].attributes['stroke-dasharray'],'6 4');
+assert.equal(legend.children[1].children[0].children[0].children[0].attributes['stroke-dasharray'],'');
+assert.equal(legend.children[1].classes.has('is-muted'),true);
+assert.notEqual(legend.children[1].hidden,true); // disabled curve remains clickable
+assert.match(legend.children[0].children[2].children[1].textContent,/平均 45/);
 chart.options.onHover({},[{datasetIndex:0,index:0}]);
 assert.match(hover.children[0].textContent,/t = 0.0 s/);
-assert.match(hover.children[1].children.join(''), /avg 45.*2\/3/);
+assert.match(hover.children[1].textContent,/hit.*当前 70.*平均 45/);
+assert.match(legend.children[0].children[2].children[0].textContent,/当前 70/);
+assert.equal(chart.data.datasets[0].borderWidth,4);
+chart.options.onHover({x:100,y:300},[{datasetIndex:0,index:0,element:{x:100,y:50}}]);
+assert.equal(chart.data.datasets[0].borderWidth,2); // far from curve: do not falsely activate it
+assert.match(hover.children[1].textContent,/移近曲线/);
+chart.options.onHover({},[{datasetIndex:0,index:1}]);
+assert.match(hover.children[1].textContent,/当前 无数据/); // missing point never becomes zero
 const toolbar=root.children[0].children[2];
 const picker=toolbar.children[0],pickerButton=picker.children[0],dropdown=picker.children[1];
 assert.equal(dropdown.hidden,true);
@@ -69,8 +76,9 @@ picker.onkeydown({key:'Escape'});assert.equal(dropdown.hidden,true);
 toolbar.children[1].onclick();
 assert.deepEqual(chart.visible,[false,true]);
 assert.match(pickerButton.textContent,/1\/2/);
-assert.equal(legend.children[0].hidden,true);
-assert.equal(legend.children[1].hidden,false);
+assert.equal(legend.children[0].classes.has('is-muted'),true);
+assert.notEqual(legend.children[0].hidden,true);
+assert.equal(legend.children[1].classes.has('is-muted'),false);
 legend.children[0].onmouseenter();
 assert.equal(chart.data.datasets[1].borderColor,'#65432133');
 legend.children[0].onmouseleave();
@@ -80,10 +88,13 @@ assert.equal(chart.options.scales.queue.display,true);
 choices.children.filter(c=>c.tag==='label')[0].children[1].checked=true;
 choices.children.filter(c=>c.tag==='label')[0].children[1].onchange();
 assert.deepEqual(chart.visible,[true,true]);
-assert.equal(legend.children[0].hidden,false);
+assert.equal(legend.children[0].classes.has('is-muted'),false);
 legend.children[0].ondblclick();assert.deepEqual(chart.visible,[true,false]);
-assert.equal(legend.children[1].hidden,true);
+assert.equal(legend.children[1].classes.has('is-muted'),true);
+assert.notEqual(legend.children[1].hidden,true);
 legend.children[0].ondblclick();assert.deepEqual(chart.visible,[true,true]);
+legend.children[1].onclick();assert.deepEqual(chart.visible,[true,false]);
+legend.children[1].onclick();assert.deepEqual(chart.visible,[true,true]); // restore from retained row
 const range=toolbar.children.find(c=>c.className==='multi-range');
 const [from,to]=range.children.filter(c=>c.tag==='input');
 from.value='3';to.value='7';from.onchange();
@@ -94,6 +105,8 @@ reset.onclick();
 assert.equal(chart.options.scales.x.min,0);assert.equal(chart.options.scales.x.max,10);
 const sibling=FlexMultiCurve.mount(root,{title:'sibling',caption:'',axes:{y:{title:'count'}},series:[]},{timeAxis:{min:0,max:10},events:[]});
 const canvas=panel.children[3].children[0];
+canvas.events.pointerleave();assert.match(hover.children[0].textContent,/将鼠标/);
+assert.equal(chart.data.datasets[0].borderWidth,2);
 const pointer=(x,y=100,id=1)=>({button:0,clientX:x,clientY:y,pointerId:id});
 canvas.events.pointerdown(pointer(260));canvas.events.pointermove(pointer(740));canvas.events.pointerup(pointer(740));
 assert.equal(chart.options.scales.x.min,2);assert.equal(chart.options.scales.x.max,8);

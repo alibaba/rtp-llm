@@ -15,6 +15,10 @@ from reporting.comparison_inputs import load_snapshot
 from reporting.comparison_model import ChartSeries
 from reporting.pairing import event_anchor, shifted_panel
 
+# Solid, dashed, dotted, dash-dot, dash-dot-dot, long dash, short dash, long dash with three dots.
+RUN_LINE_STYLES = ((), (12, 5), (2, 4), (12, 4, 2, 4), (12, 4, 2, 4, 2, 4),
+                   (20, 7), (5, 3), (20, 4, 2, 4, 2, 4, 2, 4))
+
 
 def _leaves(value, prefix=''):
     if isinstance(value, dict) and value:
@@ -109,7 +113,7 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
             curve = copy.deepcopy(source['series'][n])
             name = curve['name']
             curve['name'] = labels[i] + ' · ' + name
-            curve['dash'] = [] if i == 0 else [4 + i * 2, 3]
+            curve['dash'] = list(RUN_LINE_STYLES[i % len(RUN_LINE_STYLES)])
             curve['group'] = labels[i]
             # Metric colors and visibility follow the reference report.
             key = _series_key(source, curve, origins[i])

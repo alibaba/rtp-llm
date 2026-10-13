@@ -31,11 +31,9 @@
     const box = document.createElement('div'); box.className='multi-plot'; box.style.cssText='height:580px;position:relative';
     const canvas = document.createElement('canvas'); box.appendChild(canvas);
     const legend = document.createElement('div'); legend.className='multi-legend'; legend.setAttribute('aria-label','曲线图例');
-    if(panel.series.some(s=>s.name.startsWith('old · ')) && panel.series.some(s=>s.name.startsWith('new · '))) {
-      const key=document.createElement('span');key.className='multi-legend-key';key.textContent='old 虚线 · new 实线';legend.appendChild(key);
-    }
-    const hover = document.createElement('div'); hover.className='multi-hover'; hover.textContent='将鼠标移到曲线上查看样本点详情';
-    wrap.appendChild(box); wrap.appendChild(legend); wrap.appendChild(hover); parent.appendChild(wrap);
+    const hover = document.createElement('div'); hover.className='multi-hover'; hover.setAttribute('aria-live','polite');
+    const legendHeading = document.createElement('div'); legendHeading.className='multi-legend-heading';
+    wrap.appendChild(box); wrap.appendChild(hover); wrap.appendChild(legendHeading); wrap.appendChild(legend); parent.appendChild(wrap);
     const datasets = panel.series.map(s => ({label:s.name, description:s.description||'', group:s.group||'其他',
       data:s.points, yAxisID:s.axis || 'y', unit:s.unit || '',
       borderColor:s.color, backgroundColor:s.color, baseColor:s.color, borderDash:s.dash||[], hidden:!!s.hidden, borderWidth:2, pointRadius:0,
@@ -56,21 +54,39 @@
       ctx.restore();
     }};
     let focused = null;
-    function nearest(dataset,t) {let found=null;dataset.data.forEach(p=>{if(Number.isFinite(p.x)&&(!found||Math.abs(p.x-t)<Math.abs(found.x-t))) found=p;});return found&&Math.abs(found.x-t)<=3?found:null;}
-    function fillHover(t) {
+    const lookup=datasets.map(d=>d.data.filter(p=>Number.isFinite(p.x)).slice().sort((a,b)=>a.x-b.x));
+    const valueCells=[];
+    function nearest(index,t) {
+      const points=lookup[index];let lo=0,hi=points.length;
+      while(lo<hi){const mid=(lo+hi)>>1;if(points[mid].x<t)lo=mid+1;else hi=mid;}
+      const before=points[lo-1],after=points[lo];
+      const found=!before?after:!after?before:Math.abs(before.x-t)<=Math.abs(after.x-t)?before:after;
+      return found&&Math.abs(found.x-t)<=3?found:null;
+    }
+    function fillHover(t,activeIndex=null) {
       lastHover=t;
-      if (hover.replaceChildren) hover.replaceChildren(); else hover.children=[];
-      const heading=document.createElement('strong'); heading.textContent=(t===null?'':('t = '+t.toFixed(1)+' s · '))+'选区 '+number(selection.min)+'–'+number(selection.max)+' s · 有效样本等权 avg（展示统计，不重判）'; hover.appendChild(heading);
-      datasets.forEach((d,i)=>{if(!chart.isDatasetVisible(i)) return;const row=document.createElement('div');row.className='multi-hover-row';
-        const swatch=document.createElement('i');swatch.style.backgroundColor=d.baseColor;row.appendChild(swatch);const p=t===null?null:nearest(d,t),stats=d.statistics(selection.min,selection.max);
-        row.appendChild(document.createTextNode(d.label+' · 当前 '+number(p&&p.y)+' · avg '+number(stats.mean)+(d.unit?' '+d.unit:'')+' · '+stats.count+'/'+stats.total+' 点'));hover.appendChild(row);});
+      hover.replaceChildren();
+      const heading=document.createElement('strong');heading.textContent=t===null?'将鼠标移到曲线上查看时间与当前曲线':'t = '+t.toFixed(1)+' s';hover.appendChild(heading);
+      if(activeIndex!==null){const d=datasets[activeIndex],p=nearest(activeIndex,t),stats=d.statistics(selection.min,selection.max);
+        const row=document.createElement('div');row.className='multi-hover-row';
+        row.textContent=d.label+' · 当前 '+number(p&&p.y)+(d.unit?' '+d.unit:'')+' · 平均 '+number(stats.mean)+(d.unit?' '+d.unit:'');hover.appendChild(row);
+      }else if(t!==null){const row=document.createElement('div');row.textContent='移近曲线查看名称与数值';hover.appendChild(row);}
+      legendHeading.textContent='当前值：'+(t===null?'未悬浮':('t = '+t.toFixed(1)+' s'))+' · 平均值：选区 '+number(selection.min)+'–'+number(selection.max)+' s，有效样本等权平均';
+      datasets.forEach((d,i)=>{if(!valueCells[i])return;const p=t===null?null:nearest(i,t),stats=d.statistics(selection.min,selection.max);
+        valueCells[i].current.textContent='当前 '+number(p&&p.y)+(d.unit?' '+d.unit:'');
+        valueCells[i].average.textContent='平均 '+number(stats.mean)+(d.unit?' '+d.unit:'');
+        valueCells[i].average.title='有效样本 '+stats.count+' / '+stats.total+'；展示统计，不重新判定门禁';});
     }
     const chart = new Chart(canvas, {
       type:'line', data:{datasets}, plugins:[events],
       options:{
         animation:false, responsive:true, maintainAspectRatio:false, parsing:false,
-        interaction:{mode:'nearest',axis:'x',intersect:false}, scales,
-        onHover:(event,active)=>{if(!brush&&active&&active.length){const a=active[0];fillHover(datasets[a.datasetIndex].data[a.index].x);}},
+        interaction:{mode:'nearest',axis:'xy',intersect:false}, scales,
+        onHover:(event,active)=>{if(brush)return;const a=active&&active[0];
+          const inside=Number.isFinite(event.x)&&Number.isFinite(event.y)&&event.x>=chart.chartArea.left&&event.x<=chart.chartArea.right&&event.y>=chart.chartArea.top&&event.y<=chart.chartArea.bottom;
+          const t=inside?chart.scales.x.getValueForPixel(event.x):a?datasets[a.datasetIndex].data[a.index].x:null;
+          const close=a&&(!a.element||!Number.isFinite(event.x)||Math.hypot(a.element.x-event.x,a.element.y-event.y)<=20);
+          focus(close?a.datasetIndex:null);fillHover(t,close?a.datasetIndex:null);},
         plugins:{legend:{display:false},tooltip:{enabled:false,callbacks:{
           title:items=>items.length?'t = '+items[0].parsed.x.toFixed(1)+' s':'',
           label:item=>item.dataset.label+': '+number(item.parsed.y)+(item.dataset.unit?' '+item.dataset.unit:'')
@@ -87,8 +103,15 @@
       label.ondblclick=()=>{const isolated=datasets.every((_,j)=>chart.isDatasetVisible(j)===(j===i));datasets.forEach((_,j)=>chart.setDatasetVisibility(j,isolated||j===i));refresh();};
       choices.appendChild(label);inputs.push(input);legendLabels.push(label);
       const item=document.createElement('button');item.type='button';item.className='multi-legend-item';item.title=d.description;
-      const line=document.createElement('i');line.style.borderTopColor=d.baseColor;line.style.borderTopStyle=d.borderDash.length?'dashed':'solid';item.appendChild(line);
-      item.appendChild(document.createTextNode(d.label));item.onclick=()=>{chart.setDatasetVisibility(i,!chart.isDatasetVisible(i));refresh();};
+      const line=document.createElement('span');line.className='multi-line-swatch';
+      const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 48 12');svg.setAttribute('aria-hidden','true');
+      const stroke=document.createElementNS('http://www.w3.org/2000/svg','line');
+      for(const [key,value] of Object.entries({x1:0,y1:6,x2:48,y2:6,stroke:d.baseColor,'stroke-width':2,'stroke-dasharray':d.borderDash.join(' ')}))stroke.setAttribute(key,String(value));
+      svg.appendChild(stroke);line.appendChild(svg);item.appendChild(line);
+      const name=document.createElement('span');name.className='multi-legend-name';name.textContent=d.label;item.appendChild(name);
+      const values=document.createElement('span');values.className='multi-legend-values';
+      const current=document.createElement('span'),average=document.createElement('span');values.append(current,average);item.appendChild(values);valueCells.push({current,average});
+      item.onclick=()=>{chart.setDatasetVisibility(i,!chart.isDatasetVisible(i));refresh();};
       item.ondblclick=()=>{const isolated=datasets.every((_,j)=>chart.isDatasetVisible(j)===(j===i));datasets.forEach((_,j)=>chart.setDatasetVisibility(j,isolated||j===i));refresh();};
       item.onmouseenter=()=>focus(i);item.onmouseleave=()=>focus(null);
       legend.appendChild(item);plottedLabels.push(item);});
@@ -100,8 +123,12 @@
       if(open) {document.addEventListener('click',closePicker);search.focus();}}
     pickerButton.onclick=()=>setPickerOpen(dropdown.hidden);
     picker.onkeydown=event=>{if(event.key==='Escape') {setPickerOpen(false);pickerButton.focus();}};
-    function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor.slice(0,7)+'33';});[legendLabels,plottedLabels].forEach(labels=>labels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';}));chart.update('none');}
-    function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);plottedLabels[i].hidden=!input.checked;});legend.hidden=!inputs.some(input=>input.checked);pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';if(focused!==null) focus(focused);else chart.update('none');fillHover(lastHover);}
+    function focus(index) {focused=index;datasets.forEach((d,i)=>{d.borderWidth=index===null?2:(i===index?4:1);d.borderColor=index===null||i===index?d.baseColor:d.baseColor.slice(0,7)+'33';});
+      legendLabels.forEach((label,i)=>{label.style.opacity=index===null||i===index?'1':'0.38';});
+      plottedLabels.forEach((label,i)=>{label.style.opacity=(chart.isDatasetVisible(i)?1:0.45)*(index===null||i===index?1:0.38);label.classList.toggle('is-focused',index===i);});chart.update('none');}
+    function refresh() {Object.keys(panel.axes).forEach(axis=>{chart.options.scales[axis].display=datasets.some((d,i)=>d.yAxisID===axis&&chart.isDatasetVisible(i));});
+      inputs.forEach((input,i)=>{input.checked=chart.isDatasetVisible(i);plottedLabels[i].classList.toggle('is-muted',!input.checked);plottedLabels[i].setAttribute('aria-pressed',String(input.checked));});
+      pickerButton.textContent='指标 '+inputs.filter(input=>input.checked).length+'/'+inputs.length+' ▾';focus(focused);fillHover(lastHover,focused);}
     function button(label,action) {const b=document.createElement('button');b.textContent=label;b.onclick=action;toolbar.appendChild(b);}
     Object.entries(panel.presets || {}).forEach(([name,selected])=>button(name,()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,selected.includes(d.label)));refresh();}));
     button('全选',()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,true));refresh();});button('清空',()=>{datasets.forEach((d,i)=>chart.setDatasetVisibility(i,false));refresh();});
@@ -120,6 +147,7 @@
       if(canvas.hasPointerCapture(event.pointerId))canvas.releasePointerCapture(event.pointerId);
       if(Math.abs(selected.end-selected.start)>=6){const x=chart.scales.x,lo=x.getValueForPixel(Math.min(selected.start,selected.end)),hi=x.getValueForPixel(Math.max(selected.start,selected.end));selection.update(lo,hi);}else chart.draw();});
     canvas.addEventListener('pointercancel',()=>{brush=null;chart.draw();});
+    canvas.addEventListener('pointerleave',()=>{if(!brush){focus(null);fillHover(null);}});
     selection.update(selection.min,selection.max);refresh();return chart;
   }
   root.FlexMultiCurve={mount,statistics};

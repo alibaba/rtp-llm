@@ -69,6 +69,12 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual(len({tuple(style) for style in styles}), 3)
         read_bundle(self.output()/'reports/comparison/runs')
 
+    def test_run_line_styles_are_distinct(self):
+        from reporting.comparison import RUN_LINE_STYLES
+        self.assertGreaterEqual(len(RUN_LINE_STYLES), 8)
+        self.assertEqual(len(set(RUN_LINE_STYLES)), len(RUN_LINE_STYLES))
+        self.assertEqual(RUN_LINE_STYLES[0], ())
+
     def test_explicit_event_shifts_only_copies_and_preserves_gaps(self):
         a, b = self.bundle('a', event=10), self.bundle('b', event=15)
         original = json.loads((a/'report-spec.json').read_text())

@@ -29,15 +29,19 @@ h1{margin:0 0 6px;font-size:22px;overflow-wrap:anywhere}
 .multi-choice{display:flex;align-items:center;gap:5px;min-width:0;padding:4px 7px;border-radius:5px;cursor:pointer;transition:opacity .12s,background .12s}
 .multi-choice:hover{background:__REPORT_HOVER_BACKGROUND__}.multi-choice i,.multi-hover-row i{width:10px;height:10px;border-radius:50%;display:inline-block;flex:none}
 .multi-choice input{margin:0}
-.multi-legend{display:flex;flex-wrap:wrap;align-content:flex-start;gap:5px 8px;max-height:104px;overflow:auto;margin:9px 0;padding:8px;border:1px solid var(--border);border-radius:8px}
-.multi-legend[hidden],.multi-legend-item[hidden]{display:none}
-.multi-legend-key{width:100%;order:-1;color:var(--sub);font-size:12px}
-.multi-legend-item{display:inline-flex;align-items:center;gap:6px;border:1px solid transparent;border-radius:5px;background:transparent;padding:3px 6px;color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
-.multi-legend-item:hover{background:__REPORT_HOVER_BACKGROUND__}
-.multi-legend-item i{display:inline-block;width:22px;border-top-width:3px;border-top-style:solid;flex:none}
-.multi-hover{display:flex;flex-wrap:wrap;align-content:flex-start;gap:3px 12px;min-height:48px;max-height:140px;overflow:auto;background:__REPORT_MUTED_BACKGROUND__;border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--sub);font-size:12px}
-.multi-hover strong{width:100%;color:var(--fg)}
-.multi-hover-row{display:flex;align-items:center;gap:7px;min-width:210px;white-space:nowrap}
+.multi-legend{display:flex;flex-direction:column;gap:3px;max-height:360px;overflow:auto;margin:5px 0 9px;padding:8px;border:1px solid var(--border);border-radius:8px}
+.multi-legend-heading{margin-top:9px;color:var(--sub);font-size:12px}
+.multi-legend-item{display:flex;width:100%;align-items:center;gap:9px;border:1px solid transparent;border-radius:5px;background:transparent;padding:6px 8px;color:var(--fg);font:inherit;font-size:12px;cursor:pointer;text-align:left;transition:opacity .12s,background .12s}
+.multi-legend-item:hover,.multi-legend-item.is-focused{background:__REPORT_HOVER_BACKGROUND__}
+.multi-legend-item.is-muted .multi-legend-name{text-decoration:line-through}
+.multi-line-swatch{width:48px;height:12px;flex:none}.multi-line-swatch svg{width:100%;height:100%;display:block}
+.multi-legend-name{min-width:0;overflow-wrap:anywhere}
+.multi-legend-values{margin-left:auto;display:flex;gap:18px;flex:none;font-variant-numeric:tabular-nums;text-align:right}
+.multi-legend-values span{min-width:125px}
+.multi-hover{display:flex;flex-direction:column;gap:5px;min-height:65px;background:__REPORT_MUTED_BACKGROUND__;border:1px solid var(--border);border-radius:8px;padding:9px 11px;color:var(--sub);font-size:12px}
+.multi-hover strong{color:var(--fg)}
+.multi-hover-row{overflow-wrap:anywhere}
+@media(max-width:700px){.multi-legend-item{flex-wrap:wrap}.multi-legend-values{width:100%;padding-left:57px;flex-wrap:wrap;gap:6px 15px}.multi-legend-values span{min-width:0}}
 /* KPI 两行（指标五连 + 结果五连）：wrapper 纵向叠行，每行 grid 随
    行内 chip 数自适应列数（JS 注入 inline grid-template-columns）。 */
 .kpi-stack{display:flex;flex-direction:column;gap:12px;margin:16px 0 12px}
