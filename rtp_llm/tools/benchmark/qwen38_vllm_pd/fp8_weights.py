@@ -76,6 +76,9 @@ def install():
             self.create_args = args
             self.create_kwargs = kwargs.copy()
             super().create_weights(layer, *args, **kwargs)
+            # HC merged projections have padding rows absent from the source.
+            # Uninitialized padding must not participate in the FP8 amax.
+            layer.weight.data.zero_()
 
         def process_weights_after_loading(self, layer):
             if not self.block_quant:
