@@ -110,6 +110,13 @@ public:
         return resource_released_;
     }
 
+    // Set only before the first allocation of a stream that will load its final
+    // linear state from a prefill peer. This must not be inferred from the role
+    // or isContextStream(), which is still true during the initial PD allocation.
+    void setPDDecodeLinearTailOnly(bool enabled) {
+        pd_decode_linear_tail_only_ = enabled;
+    }
+
     // Borrow the owning stream pointer; used by GenerateStateMachine to query
     // async-bookkeeping state without duplicating accessors here. Lifetime is
     // bound by the GenerateStream that owns this StreamCacheResource.
@@ -140,6 +147,7 @@ public:
     }
 
 private:
+    LinearCachePolicy linearCachePolicy(int target_batch_size) const;
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
@@ -156,6 +164,7 @@ private:
     bool                             fake_inited_           = false;
     bool                             resource_released_     = false;
     int                              pending_linear_history_committed_tokens_ = 0;
+    bool                             pd_decode_linear_tail_only_              = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;

@@ -224,6 +224,166 @@ TEST(BlockTreeLoaderTest, PrefixValidatorClipsHostMatchBeforeImageInterior) {
     result.async_context.reset();
 }
 
+TEST(BlockTreeLoaderTest, PrefixValidatorClipsHybridHostMatchWithoutReferencingLinear) {
+    constexpr size_t path_length = 4;
+    auto             full        = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, makeHostPool(1, path_length), nullptr);
+    auto swa = std::make_shared<SWAGroupSet>(
+        2, 1, std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, makeHostPool(1, path_length), nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(2)}, makeHostPool(1, path_length), nullptr);
+    std::vector<GroupSetPtr> groups = {full, swa, linear};
+    BlockTreeCacheConfig     config;
+    config.enable_host_cache = true;
+    config.enable_disk_cache = false;
+    auto cache               = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+    const CacheKeysType                        keys = {100, 200, 300, 400};
+    std::vector<std::vector<GroupSetResource>> resources(path_length, std::vector<GroupSetResource>(groups.size()));
+    for (auto& row : resources) {
+        for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+            row[group_id].host_block = groups[group_id]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_NE(row[group_id].host_block, NULL_BLOCK_IDX);
+        }
+    }
+    ASSERT_TRUE(insertGroupSetResources(*cache, keys, resources));
+    const auto path = cache->tree()->findNode(keys);
+    ASSERT_EQ(path.size(), path_length);
+    std::vector<uint64_t> linear_access_before;
+    for (const auto* node : path) {
+        linear_access_before.push_back(node->group_set_resources[2].candidate_meta.last_access_seq);
+    }
+
+    auto result = cache->match(keys, [](size_t blocks) { return blocks <= 2; }, /*skip_linear=*/true);
+    ASSERT_NE(result.async_context, nullptr);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_EQ(result.async_context->localMatchedBlocks(), 2u);
+    ASSERT_EQ(result.async_context->loadDescs().size(), 4u);
+    for (const auto& desc : result.async_context->loadDescs()) {
+        EXPECT_LT(desc.group_set_id, 2u);
+        EXPECT_LT(desc.path_index, 2u);
+    }
+    EXPECT_EQ(full->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 2u);
+    EXPECT_EQ(swa->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 2u);
+    EXPECT_EQ(linear->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+    for (size_t index = 0; index < path.size(); ++index) {
+        const auto& meta = path[index]->group_set_resources[2].candidate_meta;
+        EXPECT_EQ(meta.last_access_seq, linear_access_before[index]);
+        EXPECT_EQ(meta.hit_count, 0u);
+    }
+    for (const auto& snapshot : result.reuse_time_metrics_snapshots) {
+        EXPECT_NE(snapshot.group_type, CacheGroupType::LINEAR);
+    }
+    result.async_context.reset();
+    EXPECT_EQ(full->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+    EXPECT_EQ(swa->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+}
+
+TEST(BlockTreeLoaderTest, TailOnlyMatchStillRequiresValidPrefixAndSwaWindow) {
+    constexpr size_t path_length = 4;
+    auto             full        = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, makeHostPool(1, path_length), nullptr);
+    auto swa = std::make_shared<SWAGroupSet>(
+        2, 1, std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, makeHostPool(1, path_length), nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(2)}, makeHostPool(1, path_length), nullptr);
+    std::vector<GroupSetPtr> groups = {full, swa, linear};
+    BlockTreeCacheConfig     config;
+    config.enable_host_cache = true;
+    config.enable_disk_cache = false;
+    auto cache               = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+    const CacheKeysType                        keys = {100, 200, 300, 400};
+    std::vector<std::vector<GroupSetResource>> resources(path_length, std::vector<GroupSetResource>(groups.size()));
+    for (size_t index = 0; index < path_length; ++index) {
+        resources[index][0].host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_NE(resources[index][0].host_block, NULL_BLOCK_IDX);
+        if (index < 2) {
+            resources[index][1].host_block = swa->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+            ASSERT_NE(resources[index][1].host_block, NULL_BLOCK_IDX);
+        }
+    }
+    ASSERT_TRUE(insertGroupSetResources(*cache, keys, resources));
+
+    // Missing Linear states reject an ordinary match, but tail-only still
+    // requires the retained SWA window and a valid multimodal prefix boundary.
+    auto ordinary = cache->match(keys);
+    EXPECT_EQ(ordinary.matched_device_blocks, 0u);
+    EXPECT_EQ(ordinary.async_context, nullptr);
+    auto rejected = cache->match(keys, [](size_t blocks) { return blocks > 2; }, /*skip_linear=*/true);
+    EXPECT_EQ(rejected.matched_device_blocks, 0u);
+    EXPECT_EQ(rejected.async_context, nullptr);
+    EXPECT_EQ(full->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+    EXPECT_EQ(swa->hostPool()->referencedBlocksNum(BlockTreeRefType::LOAD), 0u);
+
+    auto accepted = cache->match(keys, [](size_t blocks) { return blocks <= 2; }, /*skip_linear=*/true);
+    ASSERT_NE(accepted.async_context, nullptr);
+    EXPECT_EQ(accepted.async_context->localMatchedBlocks(), 2u);
+    for (const auto& desc : accepted.async_context->loadDescs()) {
+        EXPECT_LT(desc.group_set_id, 2u);
+        EXPECT_LT(desc.path_index, 2u);
+    }
+    accepted.async_context.reset();
+}
+
+class PrefixRecordingStorageBackend: public StorageBackend {
+public:
+    ~PrefixRecordingStorageBackend() override {
+        shutdown();
+    }
+    StorageRequest matched_request;
+
+protected:
+    bool initImpl() override {
+        return true;
+    }
+    StorageMatchResult matchImpl(const StorageRequest& request) override {
+        matched_request = request;
+        return {3u, nullptr};
+    }
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        ADD_FAILURE() << "capacity rejection must precede backend read";
+    }
+    void writeImpl(const StorageRequest&) override {}
+};
+
+TEST(BlockTreeLoaderTest, TailOnlyBackendMatchKeepsPrefixValidatorAndSkipsLinearHandles) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, makeHostPool(1, 4), nullptr);
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, makeHostPool(1, 4), nullptr);
+    std::vector<GroupSetPtr> groups  = {full, linear};
+    auto                     backend = std::make_shared<PrefixRecordingStorageBackend>();
+    BlockTreeCacheConfig     config;
+    config.enable_host_cache   = true;
+    config.enable_disk_cache   = false;
+    config.enable_remote_cache = true;
+    auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config, backend);
+    ASSERT_NE(cache, nullptr);
+    const CacheKeysType keys = {100, 200, 300, 400};
+    auto result  = cache->match(keys, [](size_t blocks) { return blocks <= 1 || blocks >= 4; }, /*skip_linear=*/true);
+    auto context = result.async_context;
+    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->needBackendMatch());
+    size_t materialized_prefix = keys.size();
+    context->setMatchCallback([&](LoadAsyncContext& load, size_t blocks) {
+        materialized_prefix = blocks;
+        EXPECT_EQ(load.backendHandles().size(), 1u);
+        return false;
+    });
+    context->startBackendMatch();
+    context->waitDone();
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(materialized_prefix, 1u);
+    ASSERT_EQ(backend->matched_request.handles.size(), keys.size());
+    for (const auto& handles : backend->matched_request.handles) {
+        ASSERT_EQ(handles.size(), 1u);
+        EXPECT_EQ(handles[0].tag, full->groupTags().front());
+    }
+    result.async_context.reset();
+    context.reset();
+}
+
 TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     constexpr size_t path_length = 4;
     auto             full        = std::make_shared<FullGroupSet>(

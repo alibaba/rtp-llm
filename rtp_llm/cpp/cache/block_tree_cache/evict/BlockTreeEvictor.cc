@@ -178,10 +178,13 @@ void BlockTreeEvictor::onInserted(const BlockTreeInsertResult& result) {
     updateFullCandidate(result.inserted_nodes.empty() ? nullptr : result.inserted_nodes.front()->parent);
 }
 
-void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
+void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path, bool skip_linear) {
     const uint64_t access         = ++access_seq_;
     const int64_t  access_time_us = currentTimeUs();
     for (const GroupSetPtr& group_set : tree_->groupSets()) {
+        if (skip_linear && group_set->groupType() == CacheGroupType::LINEAR) {
+            continue;
+        }
         const size_t group_set_id = group_set->groupSetId();
         const size_t reuse_count  = std::min(group_set->computeReuseBlockCount(path.size()), path.size());
         for (size_t path_index = path.size() - reuse_count; path_index < path.size(); ++path_index) {
