@@ -37,7 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -341,21 +341,21 @@ class GlobalQueueProgressTest {
                             i -> {
                                 BalanceContext context = i.getArgument(0);
                                 CompletableFuture<Response> future = new CompletableFuture<>();
-                                requests.put(context.getRequestId(), future);
+                                requests.put(Long.parseLong(context.getRequestId()), future);
                                 return future;
                             });
-            when(lifecycle.claimAdmissionHandle(anyLong(), any()))
+            when(lifecycle.claimAdmissionHandle(anyString(), any()))
                     .thenAnswer(
                             i -> {
                                 AdmissionHandle mutation = mock(AdmissionHandle.class);
-                                mutations.put(i.getArgument(0), mutation);
+                                mutations.put(Long.parseLong(i.getArgument(0)), mutation);
                                 return mutation;
                             });
             when(router.select(any(), nullable(String.class)))
                     .thenAnswer(
                             i -> {
                                 BalanceContext context = i.getArgument(0);
-                                long id = context.getRequestId();
+                                long id = Long.parseLong(context.getRequestId());
                                 selected.add(id);
                                 onSelection.accept(id);
                                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {

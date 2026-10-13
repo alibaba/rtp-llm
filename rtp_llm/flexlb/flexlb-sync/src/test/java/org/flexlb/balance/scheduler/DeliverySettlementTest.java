@@ -132,7 +132,7 @@ class DeliverySettlementTest {
                                 new EndpointEventProjector(registry)));
         DecodeEndpoint.ReservationHandle reservation;
         try (var pin = decode.tryPinGeneration()) {
-            reservation = decode.reserveUnqueued(pin, 2L, 1L, 1L, 50);
+            reservation = decode.reserveUnqueued(pin, "2", 1L, 1L, 50);
         }
         assertNotNull(reservation);
         Member member = member(2L, 12L, decode, reservation);
@@ -704,7 +704,7 @@ class DeliverySettlementTest {
         reject(member);
         Response response = member.item().future().get(1, TimeUnit.SECONDS);
         assertFalse(response.isSuccess());
-        RequestLifecycleTestSupport.awaitCondition(() -> registry.liveRequestCount() == 0);
+        RequestLifecycleTestSupport.awaitCondition(() -> registry.trackedRequestCount() == 0);
         assertSame(response, member.item().future().join());
         assertEquals(RequestState.Phase.FAILED, member.slot().snapshot().state());
         verify(member.item().decodeEp())
@@ -737,7 +737,7 @@ class DeliverySettlementTest {
                 id,
                 batchId,
                 mock(DecodeEndpoint.class),
-                new DecodeEndpoint.ReservationHandle(1L, id, id));
+                new DecodeEndpoint.ReservationHandle(1L, Long.toString(id), id));
     }
 
     private Member member(
@@ -762,7 +762,7 @@ class DeliverySettlementTest {
                 registry, new RequestLifecycleTestSupport.Registered(item, future));
         var claim = RequestLifecycleTestSupport.claimBatch(registry, item, batchId, () -> true);
         assertNotNull(claim);
-        return new Member(item, registry.requestSlot(id), claim);
+        return new Member(item, registry.requestSlot(Long.toString(id)), claim);
     }
 
     private void reject(Member member) {
