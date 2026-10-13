@@ -1,7 +1,7 @@
 """Case metadata and collection policy validation."""
 import copy
 import math
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 
 KINDS = ("functional", "workload")
 DEFAULT_MONITORING = {

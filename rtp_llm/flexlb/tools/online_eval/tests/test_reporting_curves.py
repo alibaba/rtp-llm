@@ -123,7 +123,7 @@ def test_selected_presets_and_visibility_reach_the_html(tmp_path):
 def test_catalog_additions_do_not_force_unused_collection(name):
     from monitoring.query_plan import load_plan
     from reporting.view_config import view
-    from scenario.loader import ScenarioError
+    from document_io import DocumentError as ScenarioError
 
     data = view(name + '.yaml').to_dict()
     plan = load_plan(name + '.yaml')
@@ -169,7 +169,7 @@ def test_ha_removes_queries_without_consumers_but_keeps_produced_measurements():
 
 def test_unused_curve_declaration_cannot_masquerade_as_presentation():
     from reporting.view_config import view
-    from scenario.loader import ScenarioError
+    from document_io import DocumentError as ScenarioError
 
     data = view('master_performance.yaml').to_dict()
     data['charts']['curves']['unused'] = dict(next(iter(data['charts']['curves'].values())))
@@ -197,7 +197,7 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
 def test_unused_produced_capability_is_omitted_and_frozen_unclassified_output_rejected(name, tmp_path):
     from monitoring.query_plan import load_plan
     from reporting.view_config import view
-    from scenario.loader import ScenarioError
+    from document_io import DocumentError as ScenarioError
 
     plan = load_plan(name + '.yaml')
     definition = next(d for d in plan['produced'].values() if d['value_kind'] == 'gauge')

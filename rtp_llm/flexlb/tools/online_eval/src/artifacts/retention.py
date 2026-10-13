@@ -6,7 +6,7 @@ from pathlib import Path
 
 def prune_tsdb(directory, artifacts, deadline):
     from artifacts.experiment import ExperimentReader
-    from artifacts.archive import file_digest
+    from file_digest import sha256_file
 
     directory = Path(directory).resolve()
     roots = sorted((directory / "telemetry").glob("*/data"))
@@ -25,7 +25,7 @@ def prune_tsdb(directory, artifacts, deadline):
     with ExperimentReader(artifacts["experiment"]) as primary, ExperimentReader(artifacts["raw"]) as raw:
         reference = primary.read_json("raw-attachment.json")
         if (raw.kind != "raw" or Path(artifacts["raw"]).stat().st_size != reference["size"]
-                or file_digest(artifacts["raw"]) != reference["sha256"]):
+                or sha256_file(artifacts["raw"]) != reference["sha256"]):
             raise ValueError("raw attachment checksum mismatch")
         for path in candidates:
             deadline.check()
@@ -34,7 +34,7 @@ def prune_tsdb(directory, artifacts, deadline):
             if name not in owner.entries:
                 raise ValueError("TSDB file was not archived: " + name)
             entry = owner.entries[name]
-            if path.stat().st_size != entry.size or file_digest(path) != entry.sha256:
+            if path.stat().st_size != entry.size or sha256_file(path) != entry.sha256:
                 raise ValueError("TSDB source differs from archive: " + name)
             with owner.open(name):
                 pass  # Verify compressed payload, not only manifest metadata.

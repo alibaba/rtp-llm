@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from traffic.traffic_source import materialize
-from traffic.datasets import read_manifest
+from traffic.datasets import CapturedDataset
 
 
 def main(argv=None):
@@ -24,18 +24,20 @@ def main(argv=None):
     parser.add_argument("--priority", type=int, default=50)
     parser.add_argument("--max-requests", type=int, help="sender projection; keeps the pinned source unchanged")
     args = parser.parse_args(argv)
+    captured = None
     if args.spec:
         spec = json.loads(args.spec.read_text())
         base_dir = args.spec.resolve().parent
     else:
         model = args.lineage_model.resolve()
-        manifest = read_manifest(model)
+        captured = CapturedDataset.read(model)
+        manifest = captured.manifest
         spec = dict(kind="trace", model="prefix_lineage", parameters=dict(
             path=model.name,  count=manifest["count"],
             output_tokens=args.output_tokens, priority=args.priority,
         ))
         base_dir = model.parent
-    materialize(args.out, spec, args.namespace, base_dir, max_requests=args.max_requests)
+    materialize(args.out, spec, args.namespace, base_dir, max_requests=args.max_requests, captured=captured)
     print(args.out.with_suffix(".manifest.json"))
 
 

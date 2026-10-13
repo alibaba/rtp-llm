@@ -7,7 +7,7 @@ import json
 from monitoring.identity import NAME
 from pathlib import Path
 
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.config_data import merge_data
 from scenario.config_data import leaf_paths
 from scenario.config_data import merge_environment

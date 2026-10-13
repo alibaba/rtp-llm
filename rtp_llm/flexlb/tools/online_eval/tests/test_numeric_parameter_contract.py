@@ -20,7 +20,8 @@ from case_api.numeric_parameters import PRIORITY
 from case_api.numeric_parameters import NumberRule
 from case_api.numeric_parameters import narrow_parameters
 from case_api.numeric_parameters import parameter_rules
-from scenario.loader import ScenarioError, load_document
+from document_io import DocumentError as ScenarioError
+from document_io import load_document
 
 ROOT = Path(__file__).resolve().parents[1]
 CASES = ('request_completion', 'master_performance', 'cache_scale_in', 'master_ha_failover')

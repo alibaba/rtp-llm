@@ -13,7 +13,7 @@ from monitoring.publication import publish
 from monitoring.archive import export_metrics
 from monitoring.query_plan import load_plan, plan_hash, definitions
 from reporting.metric_binding import bindings
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 
 
 def definition(**kwargs):
@@ -32,7 +32,7 @@ def archive(root, queries, **kwargs):
 class MetricPlanTest(unittest.TestCase):
     def test_compilation_checks_declared_gate_units_modes_and_labels(self):
         from scenario.program_compiler import configure_program
-        from scenario.loader import load_document
+        from document_io import load_document
         root = Path(__file__).resolve().parents[1]
         config = load_document(root / "config/scenarios/cache_scale_in.yaml")
         for change in [dict(unit="tokens"), dict(mode="evaluated"), dict(labels=[])]:

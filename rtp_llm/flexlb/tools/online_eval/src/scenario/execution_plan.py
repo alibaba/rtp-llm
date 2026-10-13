@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from artifacts.json_io import write_json
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from schema_contract import matches_schema
 from scenario.plan import CompiledInstance, ExecutionPlan
 

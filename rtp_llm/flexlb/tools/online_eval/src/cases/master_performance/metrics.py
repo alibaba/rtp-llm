@@ -2,7 +2,8 @@
 
 from analysis.request_metrics import RequestLedger, describe_calculation
 from cases.master_performance.analysis import analyze, engine_tps_checks
-from monitoring.contracts import implementation_measurement, implementation_identity
+from monitoring.contracts import implementation_measurement
+from implementation_identity import implementation_identity
 from monitoring.metric_store import series_row
 
 

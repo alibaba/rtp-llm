@@ -14,7 +14,7 @@ from types import SimpleNamespace as NS
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 from scenario.backend import JavaMockBackend
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.runtime import Deadline, RuntimeContext
 from scripts.commands.list_cases import instance_directory, select, summarize
 

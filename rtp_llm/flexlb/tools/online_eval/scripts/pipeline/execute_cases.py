@@ -131,8 +131,11 @@ def main() -> int:
     # Lane cap is DERIVED from the stride (not the old fixed 6): the last
     # lane's mock window must stay under 65535; master groups (stride 10)
     # only bind for the truly absurd bases.
-    mbase = port_windows.mock_base()
-    mabase = port_windows.master_base()
+    try:
+        mbase = port_windows.mock_base()
+        mabase = port_windows.master_base()
+    except port_windows.PortAdmissionError as exc:
+        parser.error(str(exc))
     cap = min(
         port_windows.max_lanes(mock_stride, mbase),
         (65535 - 5 - mabase) // port_windows.MASTER_PORT_STRIDE + 1,
@@ -145,7 +148,11 @@ def main() -> int:
 
     from scenario.instance_runner import run_structured
 
-    return run_structured(args)
+    try:
+        return run_structured(args)
+    except port_windows.PortAdmissionError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

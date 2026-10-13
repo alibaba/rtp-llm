@@ -2,7 +2,7 @@
 
 import copy
 from monitoring.identity import METRIC_ID
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.config_data import merge_data
 
 def output(stage, field):

@@ -26,15 +26,20 @@
 {"kind":"synthetic","model":"realistic","version":"1","parameters":{"profile":"<profile-name>","sampling":"joint","seed":42,"count":10000,"output_tokens":420}}
 ```
 
-`traffic.synthetic.derivation` 是统计参数反推入口，导出旧字段与联合池。报告不另写一份参数反推逻辑。
+`traffic.synthetic.derivation` 是类型化统计参数反推库，CLI 位于 `scripts/pipeline/derive_synthetic_profile.py`，导出旧字段与联合池。报告不另写一份参数反推逻辑。
 现有 `capture_frontend_prefix`、`fit_frontend_prefix`、`prefix_lineage`、`datasets/describe_traffic` 和
-`workload_profile` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
+`scripts/commands/profile_workload.py` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
+
+保真度计算由 `analysis.traffic_fidelity` 提供；文件读取、拟合身份审计和生产生成器调用由 `diagnostics.traffic_fidelity` 编排。前缀/LRU 计算由 `analysis.workload_profile.profile` 提供，命令入口为 `scripts/commands/profile_workload.py`。
 
 ## 使用
 
 从 `rtp_llm/flexlb/tools/online_eval` 执行：
 
 ```bash
+# 离线前缀与 LRU 诊断
+python3 scripts/commands/profile_workload.py <token-plan.jsonl> --output <profile.json>
+
 # 固定现有画像，按 SHA 定位拟合源，同时观察其他真实窗口的漂移
 python3 scripts/commands/compare_traffic.py --out /tmp/fidelity --check
 

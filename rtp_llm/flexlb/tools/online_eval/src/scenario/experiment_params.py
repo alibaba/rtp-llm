@@ -3,7 +3,8 @@ import copy
 import json
 from dataclasses import dataclass
 
-from scenario.loader import ScenarioError, strict_pairs, validate_data_tree
+from document_io import DocumentError as ScenarioError
+from document_io import strict_pairs, validate_data_tree
 
 
 @dataclass(frozen=True)

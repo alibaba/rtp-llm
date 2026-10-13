@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
+from adapters.master_evidence import endpoint_loads as read_endpoint_loads, scheduler_inflight, zero_owner_loads, worker_counts
 from adapters.master_control import require_process as _process, master_json as _master_json
 
 
@@ -179,27 +180,6 @@ def owner_clean(count, loads, prefill_max=0, decode_max=0):
     )
 
 
-def _endpoint_loads(data):
-    loads = {}
-    for side in ("prefill", "decode"):
-        rows = data[side + "_endpoints"]
-        if not isinstance(rows, list) or not rows:
-            raise ValueError("missing endpoint ledger observations")
-        values = []
-        for row in rows:
-            key = "inflight_batches" if side == "prefill" else "total_load"
-            if side == "decode" and "total_load" not in row:
-                key = "inflight_requests"
-            value = row[key]
-            if isinstance(value, list) and side == "prefill":
-                value = len(value)
-            if type(value) is not int or value < 0:
-                raise ValueError("invalid endpoint ledger count")
-            values.append(value)
-        loads[side] = values
-    return loads
-
-
 def _ready(ctx, params, deadline):
     expected = {"PREFILL": ctx.env.spec.n_prefill, "DECODE": ctx.env.spec.n_decode}
     decode_max = (
@@ -221,28 +201,8 @@ def _ready(ctx, params, deadline):
             inflight = _master_json(
                 ctx, params["target"], "/rtp_llm/inflight_status", deadline
             )
-            summary = info["worker_summary"]
-            if summary is None:
-                summary = {}
-            if not isinstance(summary, dict):
-                raise ValueError("invalid worker summary")
-            count = inflight["scheduler_inflight"]
-            if type(count) is not int or count < 0:
-                raise ValueError("invalid scheduler inflight count")
-            counts = {}
-            for role in expected:
-                row = summary.get(role)
-                if row is None:
-                    # The role may be absent between removal and rediscovery.
-                    # Preserve unknown; it cannot satisfy readiness.
-                    counts[role] = None
-                    continue
-                if not isinstance(row, dict):
-                    raise ValueError("invalid worker role summary")
-                values = (row["discovered"], row["alive"])
-                if any(type(v) is not int or v < 0 for v in values):
-                    raise ValueError("invalid topology counts")
-                counts[role] = values
+            count = scheduler_inflight(inflight)
+            counts = worker_counts(info, expected)
             samples.append(
                 dict(
                     time_s=ctx.clock(),
@@ -263,7 +223,7 @@ def _ready(ctx, params, deadline):
                 if any(not isinstance(rows, list) for rows in endpoint_rows):
                     raise ValueError("invalid endpoint ledger observations")
                 if all(endpoint_rows):
-                    endpoint_loads = _endpoint_loads(inflight)
+                    endpoint_loads = read_endpoint_loads(inflight)
             samples[-1]["endpoint_loads"] = endpoint_loads
             samples[-1]["bounds"] = {"prefill": prefill_max, "decode": decode_max}
             clean = not params["inflight_zero"] or (
@@ -306,21 +266,8 @@ def _wrap_inflight(ctx, params, deadline):
             raw = _master_json(
                 ctx, params["target"], "/rtp_llm/inflight_status", deadline
             )
-            scheduler = raw["scheduler_inflight"]
-            if type(scheduler) is not int or scheduler < 0:
-                raise ValueError("invalid scheduler inflight count")
-            # Keep strict missing-owner validation, but preserve the legacy
-            # inflight_requests OR total_load fallback when BOTH fields exist.
-            loads = _endpoint_loads(raw)
-            decode = []
-            for row in raw["decode_endpoints"]:
-                for field in ("inflight_requests", "total_load"):
-                    if field in row and (type(row[field]) is not int or row[field] < 0):
-                        raise ValueError("invalid decode inflight count")
-                decode.append(
-                    row.get("inflight_requests", 0) or row.get("total_load", 0)
-                )
-            loads["decode"] = decode
+            scheduler = scheduler_inflight(raw)
+            loads = zero_owner_loads(raw)
             samples.append(
                 dict(
                     time_s=ctx.clock(),

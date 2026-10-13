@@ -9,7 +9,7 @@ from reporting.report_model import ExperimentConditions
 from reporting.renderer import render
 from reporting.components import run_meta
 from reporting.evidence_archive import project, restore, verify_references
-from artifacts.archive import file_digest
+from file_digest import sha256_file
 from artifacts.file_io import write_text
 from schema_contract import matches_schema
 
@@ -126,7 +126,7 @@ def read_bundle(path):
         target = directory / entry["path"]
         if target.resolve().parent != directory.resolve():
             raise ValueError("report file escapes bundle")
-        if file_digest(target) != entry["sha256"]:
+        if sha256_file(target) != entry["sha256"]:
             raise ValueError("report checksum mismatch: " + entry["path"])
     spec = json.loads((directory / "report-spec.json").read_text())
     validate(spec, versioned=True)

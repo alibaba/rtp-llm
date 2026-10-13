@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scenario.backend import BoundedOps
 from scenario.request_batch import RequestBatch
 from scenario.lease import validate_lease
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.runtime import (
     Deadline,
     RuntimeContext,

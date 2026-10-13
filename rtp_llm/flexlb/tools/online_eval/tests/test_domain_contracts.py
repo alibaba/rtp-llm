@@ -8,13 +8,13 @@ import pytest
 
 from scenario.compiler import ScenarioCompiler
 from scenario.execution_plan import ExecutionPlanCodec, _sha
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.plan import ExecutionPlan, CompiledInstance
 from scenario.runtime import ScenarioRunner
 from scenario.stage_parameters import RequestParameters
 from scenario.environment_config import environment
 from scenario.environment_snapshot import EnvironmentSnapshot
-from scenario.backend import make_env_spec
+from scenario.backend_spec import make_env_spec
 from traffic import prefix_lineage, prefix_lineage_v3
 from traffic.lineage_model import LineageExpander, LengthSemantics
 from traffic.playback.intensity import RateCurve, LinearRetentionSchedule, SequenceRetentionSchedule
@@ -127,7 +127,7 @@ def test_freezing_preserves_collection_definition_order(tmp_path):
     from pathlib import Path
     from scenario.program_compiler import configure_program
     from scenario.catalog import handlers
-    from scenario.loader import load_document
+    from document_io import load_document
     from monitoring.collection_plan import instance_plan
     path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
     with patch("scenario.compiler.VICTIM_OFFSETS", (2048, 2049, 2050)), \

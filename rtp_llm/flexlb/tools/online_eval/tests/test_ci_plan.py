@@ -7,7 +7,7 @@ import yaml
 import pytest
 
 from scenario.ci_plan import CiPlanner
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scripts.commands import plan_ci, run_ci
 
 ROOT = Path(__file__).resolve().parents[1]

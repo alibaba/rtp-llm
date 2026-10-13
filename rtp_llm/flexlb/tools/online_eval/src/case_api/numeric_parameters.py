@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from input_contract import NumberRule
-from traffic.contracts import PRIORITY, JAVA_LENGTH
+from traffic.request_rules import PRIORITY, JAVA_LENGTH
 
 
 NONNEGATIVE = NumberRule(integer=False, minimum=0)
@@ -43,7 +43,7 @@ COMMON_NUMBERS = {
 
 
 def parameter_rules(defaults):
-    from scenario.loader import ScenarioError
+    from document_io import DocumentError as ScenarioError
 
     if not isinstance(defaults, Mapping):
         raise ScenarioError("numeric parameter contract must be a mapping")
@@ -64,7 +64,7 @@ def parameter_rules(defaults):
 
 
 def narrow_parameters(rules, refinements):
-    from scenario.loader import ScenarioError
+    from document_io import DocumentError as ScenarioError
 
     if not isinstance(refinements, dict):
         raise ScenarioError("parameter_schema must be a mapping")

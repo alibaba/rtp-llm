@@ -7,12 +7,13 @@ The manifest records exact source hashes. Evidence is never truncated.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
 import zipfile
+
+from file_digest import sha256_file
 
 ARCHIVE_MANIFEST_SCHEMA_VERSION = 1
 PRECOMPRESSED = {".gz", ".zip", ".jar", ".zst", ".xz", ".bz2", ".png", ".jpg"}
@@ -27,14 +28,6 @@ def _secret_like(path: Path) -> bool:
                     "token.yml", ".env"} or any(
         word in name for word in SECRET_WORDS
     )
-
-
-def file_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as fh:
-        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
@@ -68,7 +61,7 @@ def create_archive(output: Path, sources: dict[str, Path], *, kind: str,
                         manifest["omitted"].append({"path": name, "reason": "secret-like filename"})
                         continue
                     size = path.stat().st_size
-                    record = {"path": name, "size": size, "sha256": file_digest(path)}
+                    record = {"path": name, "size": size, "sha256": sha256_file(path)}
                     archive.write(path, name, compress_type=zipfile.ZIP_STORED
                                   if path.suffix.lower() in PRECOMPRESSED else zipfile.ZIP_DEFLATED)
                     record["completeness"] = "full"

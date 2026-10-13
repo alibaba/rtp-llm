@@ -5,7 +5,7 @@ from pathlib import Path
 
 from scenario import load_scenarios, compile_scenarios
 from scenario.catalog import handlers
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.suites import SuiteCatalog, CATALOG, preselect_documents, classify
 
 

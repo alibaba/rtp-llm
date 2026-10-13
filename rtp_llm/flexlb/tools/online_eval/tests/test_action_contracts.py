@@ -14,7 +14,7 @@ from case_registry_fixtures import entry, snapshot
 from cases.master_performance import program as master_performance
 from scenario import ScenarioError, compile_scenarios
 from scenario.catalog import FOUNDATION_HANDLERS, handlers
-from scenario.loader import load_document
+from document_io import load_document
 from scenario.parameters import validate_fields
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -48,6 +48,8 @@ class RepositoryLayoutTest(unittest.TestCase):
             ("scripts/commands/run_cases.py", ["--help"]),
             ("scripts/commands/list_cases.py", ["--help"]),
             ("scripts/commands/compare_runs.py", ["--help"]),
+            ("scripts/commands/compare_traffic.py", ["--help"]),
+            ("scripts/commands/profile_workload.py", ["--help"]),
         ]
         with tempfile.TemporaryDirectory() as cwd:
             for command, arguments in commands:
@@ -105,7 +107,7 @@ class RepositoryLayoutTest(unittest.TestCase):
     def test_source_components_are_unified(self):
         expected = {
             "monitoring", "traffic", "runtime", "cases", "scenario", "adapters",
-            "workload", "analysis", "reporting", "artifacts", "case_api",
+            "workload", "analysis", "reporting", "artifacts", "case_api", "diagnostics",
         }
         self.assertEqual(expected, {p.name for p in (ROOT / "src").iterdir() if p.is_dir()})
         for old_package in ("online_eval", "flexlb_test_framework", "stress", "flexlb_eval"):

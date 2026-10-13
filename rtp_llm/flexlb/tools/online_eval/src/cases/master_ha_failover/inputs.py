@@ -6,7 +6,7 @@ import math
 from case_api.inputs import fields
 from cases.master_ha_failover.analysis import HA_METRICS
 from analysis.checks import validate_comparison
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from case_api.numeric_parameters import SOURCE_NUMBERS
 from case_api.numeric_parameters import OUTPUT_DISTRIBUTION_NUMBERS
 from case_api.numeric_parameters import CAPTURE_NUMBERS

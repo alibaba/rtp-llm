@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from adapters.master_evidence import endpoint_loads
 from scenario.actions import master
 from cases.master_ha_failover import actions as ha
 from scenario.contracts import PlanContext
@@ -335,10 +336,10 @@ class MasterActionsTest(unittest.TestCase):
             "prefill_endpoints": [{"inflight_batches": 2}],
             "decode_endpoints": [{"total_load": 3}],
         }
-        self.assertEqual({"prefill": [2], "decode": [3]}, master._endpoint_loads(data))
+        self.assertEqual({"prefill": [2], "decode": [3]}, endpoint_loads(data))
         for rows in ([], [{}], [{"total_load": -1}], [{"total_load": True}]):
             with self.assertRaises((ValueError, KeyError)):
-                master._endpoint_loads({**data, "decode_endpoints": rows})
+                endpoint_loads({**data, "decode_endpoints": rows})
 
     def test_ha_fails_compilation_for_wrong_environment(self):
         plan = SimpleNamespace(path="stage", environment={})
@@ -535,7 +536,8 @@ class MasterActionsTest(unittest.TestCase):
 
     def test_ha_non_rolling_option_retains_full_outage_checks(self):
         from scenario.program_compiler import configure_program
-        from scenario.loader import load_document, ScenarioError
+        from document_io import load_document
+        from document_io import DocumentError as ScenarioError
 
         path = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         config = load_document(path)

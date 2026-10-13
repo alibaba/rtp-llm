@@ -8,7 +8,8 @@ from unittest import mock
 from scenario.program_compiler import configure_program
 from reporting import discover_reports, load_analysis, read_bundle, write_bundle
 from reporting.view_config import DEFAULT_VIEW, declaration, view
-from scenario.loader import ScenarioError, load_document
+from document_io import DocumentError as ScenarioError
+from document_io import load_document
 from reporting.workload import write_report, write_views
 from reporting.workload_panels import build_panels
 from cases.master_ha_failover.metrics import _prefill_balance_series

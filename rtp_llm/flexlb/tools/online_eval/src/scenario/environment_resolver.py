@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from flexlb_cfg import PROFILE_CAPS, PROFILES, VICTIM_STAGES, ProfileIdentityError, render_env, validate_profile_identity
 from adapters.perf_presets import load_preset_bundle
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from scenario.validation import fail, mapping
 from scenario.master_patch import MasterPatch
 from scenario.environment_declaration import EnvironmentDeclaration

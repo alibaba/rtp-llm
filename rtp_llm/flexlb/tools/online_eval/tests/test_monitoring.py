@@ -16,7 +16,7 @@ from monitoring.session import (
     PrometheusSession,
 )
 from monitoring.query_plan import load_plan, queries_for_targets
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 
 
 class ContractTest(unittest.TestCase):

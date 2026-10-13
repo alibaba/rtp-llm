@@ -5,7 +5,8 @@ import os
 from schema_contract import matches_schema
 
 from adapters.java_mock_resources import MOCK_WINDOW_LAST, WORKER_PORT_CAPACITY
-from scenario.loader import ScenarioError, load_document
+from document_io import DocumentError as ScenarioError
+from document_io import load_document
 
 
 def validate_lease(path, budget, environ=None):

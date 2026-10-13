@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 
 from traffic.playback.configuration import normalize
-from traffic.playback.intensity import integral, poisson_count
-from traffic.output_sampling import output_sampler, event_uniform
+from traffic.playback.intensity import integral
+from traffic.output_sampling import output_sampler
+from traffic.randomness import event_uniform
 from traffic import prefix_lineage, prefix_lineage_v3
 
 
@@ -29,10 +30,6 @@ class PlaybackControlsTest(unittest.TestCase):
         self.assertEqual(integral(curve, 10), 17.5)
         self.assertEqual(integral(curve, 20), 37.5)
         self.assertEqual(integral(curve, 30), 47.5)
-        expected = 100*integral(curve,30)
-        self.assertLess(abs(poisson_count(expected,42)-expected), 5*math.sqrt(expected))
-        self.assertEqual(poisson_count(100,42), poisson_count(100,42))
-        with self.assertRaises(ValueError): poisson_count(1e9,42,limit=3)
         self.assertAlmostEqual(-math.log1p(-event_uniform(0,42 ^ 0xd1b54a32d192ed03)), 1.5354135069822445, places=8)
 
     def test_invalid_combinations_fail_before_launch(self):

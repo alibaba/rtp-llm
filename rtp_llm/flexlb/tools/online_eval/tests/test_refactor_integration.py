@@ -3,7 +3,7 @@ import copy
 from pathlib import Path
 from unittest.mock import patch
 import pytest
-from scenario.loader import load_document
+from document_io import load_document
 from scenario.program_compiler import configure_program
 from scenario import compile_scenarios, load_scenarios
 from scenario.catalog import handlers

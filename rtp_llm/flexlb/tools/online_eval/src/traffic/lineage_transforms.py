@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from traffic.contracts import PRIORITY, JAVA_LENGTH
+from traffic.request_rules import PRIORITY, JAVA_LENGTH
 
 from traffic.lineage_model import LineageExpander, LineageModel
 from traffic.output_sampling import output_sampler, output_semantics
@@ -61,11 +61,14 @@ class LineageProjector:
                             max_requests=max_requests)
 
     def project(self, path, parameters: LineageProjection, namespace, base_dir, *, max_requests=None) -> dict:
+        raw = (Path(base_dir) / parameters.path).read_bytes()
+        return self.project_model(path, parameters, namespace, self.decode(raw),
+                                  source_sha256=hashlib.sha256(raw).hexdigest(), max_requests=max_requests)
+
+    def project_model(self, path, parameters: LineageProjection, namespace, model: LineageModel,
+                      *, source_sha256: str, max_requests=None) -> dict:
         sampler = output_sampler(parameters.to_dict())
         cap = parameters.max_input_tokens
-        raw = (Path(base_dir) / parameters.path).read_bytes()
-        source_sha256 = hashlib.sha256(raw).hexdigest()
-        model = self.decode(raw)
         metadata = model.metadata
         block_size = metadata.block_size
         if type(parameters.count) is not int or len(model.events) != parameters.count:

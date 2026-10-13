@@ -7,7 +7,8 @@ import pytest
 
 from scenario.program_compiler import configure_program
 from scenario.contracts import StageHandler
-from scenario.loader import ScenarioError, load_document
+from document_io import DocumentError as ScenarioError
+from document_io import load_document
 from scenario.stage_compiler import stages
 
 

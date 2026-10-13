@@ -46,14 +46,6 @@ class InstanceRunnerTest(unittest.TestCase):
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)
-        self.addCleanup(self.drop_locks)
-
-    def drop_locks(self):
-        ports._close_window_locks(ports._WINDOW_LOCK_FILES)
-        ports._WINDOW_LOCK_FILES = None
-        if ports._RUN_LOCK_FILE is not None:
-            ports._RUN_LOCK_FILE.close()
-            ports._RUN_LOCK_FILE = None
 
     def args(self, **kwargs):
         values = dict(
@@ -142,7 +134,7 @@ class InstanceRunnerTest(unittest.TestCase):
 
     def test_workload_report_views_are_previewed_and_all_paths_are_printed(self):
         identity = self.data["instances"][0]["id"]
-        from scenario.loader import load_document
+        from document_io import load_document
 
         source = Path(__file__).resolve().parents[1] / "config/scenarios/master_ha_failover.yaml"
         names = load_document(source)["reports"]
@@ -172,7 +164,6 @@ class InstanceRunnerTest(unittest.TestCase):
             path.write_text(json.dumps(result))
             return 0
 
-        self.drop_locks()
         target = self.root / "output/selected-aggregate.json"
         rc, _, _ = self.run_fixture(
             self.args(instances=identity, parallel=1, json=str(target)), spawn=completed_child
@@ -237,7 +228,6 @@ program: default
         )
         for grade, expected in (("strict", "FAIL"), ("loose", "PASS")):
             with self.subTest(grade=grade):
-                self.drop_locks()
                 output = self.root / grade
                 args = self.args(grade=grade, parallel=1, out_dir=str(output))
                 args.dry_run = True
@@ -249,7 +239,6 @@ program: default
                 )
                 self.assertEqual(grade, manifest["grade"])
                 self.assertEqual(grade, manifest["instances"][0]["grade"])
-                self.drop_locks()
                 args.dry_run = False
                 with contextlib.redirect_stdout(io.StringIO()):
                     rc = runner.run_structured(args)
@@ -281,7 +270,6 @@ program: default
     def test_grade_is_identical_for_listing_execution_and_manifest(self):
         for grade in ("strict", "normal", "loose"):
             with self.subTest(grade=grade):
-                self.drop_locks()
                 rc, listing, child = self.run_fixture(self.args(grade=grade))
                 self.assertEqual(0, rc)
                 command = listing.call_args.args[0]
@@ -334,7 +322,9 @@ program: default
         child.assert_not_called()
         self.assertFalse((self.root / "output").exists())
         self.assertFalse((self.root / "timing.json").exists())
-        self.assertIsNone(ports._WINDOW_LOCK_FILES)
+        holders = ports._try_window_lock(18080, 55151, 500, 2)
+        self.assertIsNotNone(holders)
+        ports._close_window_locks(holders)
 
     def test_invalid_budget_fails_before_child_start(self):
         self.data["instances"][0]["resource_budget"]["max_dynamic_additions"] = 200
@@ -516,11 +506,11 @@ program: default
     def test_second_output_owner_fails_before_catalog(self):
         args = self.args()
         Path(args.out_dir).mkdir()
-        ports.acquire_run_lock(Path(args.out_dir))
-        with mock.patch.object(runner, "_catalog") as listing:
-            with self.assertRaisesRegex(SystemExit, "held by another"):
-                runner.run_structured(args)
-            listing.assert_not_called()
+        with ports.acquire_run_lock(Path(args.out_dir)):
+            with mock.patch.object(runner, "_catalog") as listing:
+                with self.assertRaisesRegex(ports.PortAdmissionError, "held by another"):
+                    runner.run_structured(args)
+                listing.assert_not_called()
 
 
     def test_dynamic_idle_lane_claims_work_before_slow_lane_finishes(self):

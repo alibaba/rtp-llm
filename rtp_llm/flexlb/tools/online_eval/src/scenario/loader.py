@@ -1,7 +1,7 @@
 """Load data-only scenarios and invoke their registered builders."""
 
 from pathlib import Path
-from document_io import DocumentError as ScenarioError, load_document, strict_pairs, validate_data_tree
+from document_io import DocumentError as ScenarioError, load_document
 
 
 def load_scenarios(root, *, experiment_params=None):

@@ -9,7 +9,7 @@ import pytest
 from reporting.renderer import render_sections
 from reporting.view_config import view
 from reporting.view_sections import view_details, view_table
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 
 ROOT = Path(__file__).resolve().parents[1]
 VIEWS = sorted(path.name for path in (ROOT / 'config/report_views').glob('*.yaml'))

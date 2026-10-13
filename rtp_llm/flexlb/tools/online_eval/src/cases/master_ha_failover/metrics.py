@@ -87,7 +87,8 @@ def _prefill_balance_series(rows, anchor, fleet_size):
 
 def metric_contract(producer, identity, calculation):
     from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
-    from monitoring.contracts import implementation_measurement, implementation_identity
+    from monitoring.contracts import implementation_measurement
+    from implementation_identity import implementation_identity
     if calculation is not None:
         raise ValueError('HA producer owns its case-specific calculation')
     if producer == 'ha_gates' and identity in {'ha_gate/' + name for name in HA_METRICS}:

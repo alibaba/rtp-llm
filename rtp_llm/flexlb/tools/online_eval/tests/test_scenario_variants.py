@@ -6,10 +6,7 @@ import unittest
 from pathlib import Path
 
 from scenario import ScenarioError, compile_scenarios
-from scenario.backend import (
-    configure_master_sync_log,
-    make_env_spec,
-)
+from scenario.backend_spec import configure_master_sync_log, make_env_spec
 from scenario.contracts import StageHandler
 from test_scenario_compile import scenario
 

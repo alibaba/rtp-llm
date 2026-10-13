@@ -13,7 +13,8 @@ from monitoring.publication import publish
 from monitoring.archive import export_metrics
 from monitoring.producers import produce
 from monitoring.query_plan import definitions, load_plan, validate_export_filter
-from scenario.loader import load_document, ScenarioError
+from document_io import load_document
+from document_io import DocumentError as ScenarioError
 
 ROOT = Path(__file__).resolve().parents[1]
 

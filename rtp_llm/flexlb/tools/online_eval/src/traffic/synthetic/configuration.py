@@ -12,7 +12,8 @@ from itertools import accumulate
 import json
 import math
 
-from traffic.contracts import PRIORITY
+from traffic.request_rules import PRIORITY
+from traffic.lineage_model import prefix_block_size
 
 from traffic.catalog import DEFAULT_PROFILE, profile_path
 
@@ -124,8 +125,7 @@ def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict
     for k in ('families','prefix_blocks','zipf_alpha','cold_fraction'):
         if k not in p:
             raise ValueError('explicit shape or synthetic parameter profile required: '+k)
-    if type(p['block_size']) is not int or p['block_size'] not in (512,1024):
-        raise ValueError('realistic block_size supports 512 or compatibility 1024')
+    p['block_size'] = prefix_block_size(p['block_size'])
     for k in ('families','shared_blocks','prefix_blocks','suffix_blocks','session_requests','session_growth_blocks','priority'):
         if type(p[k]) is not int or p[k] < 0:
             raise ValueError('invalid '+k)
@@ -161,11 +161,11 @@ def resolve(parameters: dict, *, document=None) -> tuple[SyntheticWorkload, dict
         if (p['cold_fraction'] < 1 and not warm) or (p['cold_fraction'] > 0 and not cold):
             raise ValueError('joint pool empty for selected cold fraction')
         if any(not isinstance(v, (list, tuple)) or len(v) != 2 or any(type(x) is not int for x in v)
-               or not 1 <= v[1] <= v[0] <= 2147483647//512 for v in warm):
+               or not 1 <= v[1] <= v[0] <= 2147483647//p['block_size'] for v in warm):
             raise ValueError('invalid joint warm pair')
-        if any(type(v) is not int or not 1 <= v <= 2147483647//512 for v in cold):
+        if any(type(v) is not int or not 1 <= v <= 2147483647//p['block_size'] for v in cold):
             raise ValueError('invalid joint cold length')
-        if p['block_size'] != 512 or pinned or p['shared_blocks'] or p['session_growth_blocks'] or p['session_requests'] != 1:
+        if pinned or p['shared_blocks'] or p['session_growth_blocks'] or p['session_requests'] != 1:
             raise ValueError('joint sampling does not support pinned/global/session overrides')
         if 'input_distribution' in parameters or 'prefix_blocks' in parameters or 'suffix_blocks' in parameters:
             raise ValueError('joint sampling controls lengths and depths; independent shape overrides are invalid')

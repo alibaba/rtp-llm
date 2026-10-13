@@ -281,9 +281,9 @@ class ExperimentReader:
         _verify_gate_inputs(self.entries, self.read_json)
 
     def verify_raw(self, path):
-        from artifacts.archive import file_digest
+        from file_digest import sha256_file
         reference = self.read_json('raw-attachment.json')
-        if Path(path).stat().st_size != reference['size'] or file_digest(path) != reference['sha256']:
+        if Path(path).stat().st_size != reference['size'] or sha256_file(path) != reference['sha256']:
             raise ValueError('raw attachment checksum mismatch')
         with ExperimentReader(path) as raw:
             if raw.kind != 'raw':
@@ -444,13 +444,13 @@ def publish_run(directory, definition, execution, *, analysis=None, deadline=Non
             primary.add_json('completeness.json', dict(missing=missing, omissions=primary.omitted,
                 outcome=execution.get('outcome'), invalid_views=invalid_views,
                 available_views=list(primary.views)), ArtifactRole.EXECUTION)
-        from artifacts.archive import file_digest
-        digest = file_digest(raw.output)
+        from file_digest import sha256_file
+        digest = sha256_file(raw.output)
         raw_output = directory / ('experiment-' + digest + '.raw.zip')
         # Immutable attachment names preserve an earlier committed primary when
         # republishing fails. A primary never points to an overwritten raw ZIP.
         if raw_output.exists():
-            if file_digest(raw_output) != digest:
+            if sha256_file(raw_output) != digest:
                 raise ValueError('raw attachment checksum mismatch')
         else:
             raw.output.replace(raw_output)

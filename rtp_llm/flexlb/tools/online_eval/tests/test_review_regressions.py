@@ -100,7 +100,7 @@ def test_directory_analysis_verifies_bundle_once(tmp_path,monkeypatch):
 def test_uncalibrated_fidelity_profile_retains_unavailable_identity(tmp_path):
     import json
     from test_traffic_fidelity import fixture
-    from analysis.traffic_fidelity import run
+    from diagnostics.traffic_fidelity import run
     raw,profile=fixture();profile["calibration"]={}
     source=tmp_path/"source.xz";source.write_bytes(raw)
     path=tmp_path/"profile.json";path.write_text(json.dumps(profile))

@@ -3,7 +3,7 @@
 import unittest
 
 from scenario import compile_scenarios
-from scenario.backend import make_env_spec
+from scenario.backend_spec import make_env_spec
 from scenario.catalog import handlers
 from scenario.compiler import environment
 from test_scenario_runtime import source

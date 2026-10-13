@@ -8,7 +8,7 @@ import pytest
 
 from reporting.view_config import view
 from reporting.view_model import SubtitleTemplate
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
 from traffic.playback.configuration import PlaybackConfigurationCodec, normalize
 from traffic.synthetic.configuration import IndependentShape, SyntheticWorkload, resolve
 from traffic.synthetic.generator import iter_requests
