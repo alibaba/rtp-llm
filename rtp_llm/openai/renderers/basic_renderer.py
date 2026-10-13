@@ -5,6 +5,7 @@ from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
 import jinja2
+from jinja2 import nodes
 from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from packaging import version
@@ -29,6 +30,29 @@ DEFAULT_CHAT_API_TEMPLATE = (
     "{{ '<|im_start|>assistant\n' }}"
     "{% endif %}"
 )
+
+
+class GenerationExtension(jinja2.ext.Extension):
+    """Pass-through support for the HF chat-template ``generation`` region.
+
+    HF transformers 5.x templates mark assistant generation regions with
+    ``{% generation %} ... {% endgeneration %}`` (consumed there for logit
+    masking). For prompt rendering the region content is emitted verbatim,
+    so this extension only makes the tags parseable; templates without the
+    tag are unaffected.
+    """
+
+    tags = {"generation"}
+
+    def parse(self, parser):
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+        return nodes.CallBlock(self.call_method("_emit"), [], [], body).set_lineno(
+            lineno
+        )
+
+    def _emit(self, caller):
+        return caller()
 
 
 @dataclass
@@ -164,7 +188,11 @@ class BasicRenderer(CustomChatRenderer):
         jinja_env = ImmutableSandboxedEnvironment(
             trim_blocks=True,
             lstrip_blocks=True,
-            extensions=["jinja2.ext.do", "jinja2.ext.loopcontrols"],
+            extensions=[
+                "jinja2.ext.do",
+                "jinja2.ext.loopcontrols",
+                GenerationExtension,
+            ],
         )
         jinja_env.globals["raise_exception"] = raise_exception
         return jinja_env.from_string(chat_template)
