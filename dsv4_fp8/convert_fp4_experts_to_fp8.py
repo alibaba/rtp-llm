@@ -270,6 +270,9 @@ def convert_file(src, dst, device, stats, verify=True):
         temporary_path = temporary.name
     try:
         _convert_file(src, temporary_path, device, stats, verify=verify)
+        # NamedTemporaryFile starts at 0600. Keep checkpoint shard permissions
+        # so publishing atomically does not make a shared model unreadable.
+        shutil.copymode(src, temporary_path)
         os.replace(temporary_path, dst)
     finally:
         if os.path.exists(temporary_path):

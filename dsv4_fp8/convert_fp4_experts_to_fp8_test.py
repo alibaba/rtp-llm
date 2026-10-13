@@ -264,6 +264,11 @@ class ConvertScriptEndToEndTest(unittest.TestCase):
 
             config = self._read_json(os.path.join(dst, "config.json"))
             self.assertEqual(config["expert_dtype"], "fp8")
+            shard = "model-00001-of-00001.safetensors"
+            self.assertEqual(
+                os.stat(os.path.join(dst, shard)).st_mode & 0o777,
+                os.stat(os.path.join(src, shard)).st_mode & 0o777,
+            )
 
             index = self._read_json(os.path.join(dst, "model.safetensors.index.json"))
             # Recomputed from the output, not the copied FP4 figure.
