@@ -178,8 +178,15 @@ public:
     }
 
     // Only used in C++ world.
-    int                  reuseBlockSize() const;
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
+    int  reuseBlockSize() const;
+    void fakeInitKVBlock(size_t reserved_blocks = 0);
+    enum class CachePrepareResult {
+        DONE,
+        WAIT,
+        LACK_MEM
+    };
+    CachePrepareResult prepareCache();
+
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
@@ -233,6 +240,7 @@ public:
     int     seqSizePerBlock() const;
     int     contextLength() const;
     int     prefixLength() const;
+    int     synchronizedPrefixLength() const;
     int     reuseLength() const;
     int     initialReuseLength() const;
     size_t  maxTokenNum() const;

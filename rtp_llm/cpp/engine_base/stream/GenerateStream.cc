@@ -190,6 +190,60 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
     return stream_cache_resource_->cacheKeys(batch_id);
 }
 
+GenerateStream::CachePrepareResult GenerateStream::prepareCache() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    if (hasErrorWithoutLock() || getStatus() == StreamState::FINISHED) {
+        generate_status_->reportEvent(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    if (generate_status_->hasEvent(StreamEvents::CachePrepared)) {
+        return CachePrepareResult::DONE;
+    }
+    if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
+        const auto result = stream_cache_resource_->initKVBlock();
+        if (!result.ok()) {
+            if (absl::IsUnavailable(result)) {
+                stream_cache_resource_->reportMallocRetry();
+                return CachePrepareResult::LACK_MEM;
+            }
+            generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+        } else {
+            const bool loading = stream_cache_resource_->asyncLoadCache();
+            generate_status_->reportEvent(StreamEvents::LoadInitiated);
+            if (loading) {
+                recordLoadingCacheStartTime();
+                return CachePrepareResult::WAIT;
+            }
+        }
+    } else {
+        if (!stream_cache_resource_->loadCacheDone()) {
+            return CachePrepareResult::WAIT;
+        }
+        recordLoadingCacheDoneTime();
+        if (!generate_status_->hasEvent(StreamEvents::LoadInitiated)) {
+            return CachePrepareResult::LACK_MEM;
+        }
+        if (hasErrorWithoutLock()) {
+            generate_status_->reportEvent(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+        if (!(stream_cache_resource_->resourceContext().role_type == RoleType::PREFILL
+              && stream_cache_resource_->isContextStream())) {
+            // Match the synchronous post-load top-up for PDFUSION / PD fallback.
+            const auto result = stream_cache_resource_->incrKVBlock();
+            if (!result.ok()) {
+                if (absl::IsUnavailable(result)) {
+                    return CachePrepareResult::LACK_MEM;
+                }
+                generate_status_->reportEvent(StreamEvents::Error, ErrorCode::MALLOC_FAILED, "LACK MEM");
+            }
+        }
+    }
+    generate_status_->reportEvent(StreamEvents::CachePrepared);
+    return CachePrepareResult::DONE;
+}
+
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
@@ -476,6 +530,11 @@ int GenerateStream::contextLength() const {
 
 int GenerateStream::prefixLength() const {
     return reuse_length_;
+}
+
+int GenerateStream::synchronizedPrefixLength() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return prefixLength();
 }
 
 int GenerateStream::reuseLength() const {
@@ -968,6 +1027,7 @@ const ResourceContext& GenerateStream::resourceContext() const {
 }
 
 size_t GenerateStream::curBlocksNum() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
     return stream_cache_resource_->curBlocksNum();
 }
 
@@ -1451,7 +1511,7 @@ std::string GenerateStream::debugString() const {
     debug_string << "GenerateStream {"
                  << "generate_input:" << generate_input_->debugString() << ", max_seq_len:" << max_seq_len_
                  << ", input_length:" << inputLength() << ", seq_length:" << seqLength()
-                 << ", reuse_length:" << reuse_length_ << ", current_batch_size:" << currentBatchSize()
+                 << ", reuse_length:" << reuseLength() << ", current_batch_size:" << currentBatchSize()
                  << ", next_batch_size:" << nextBatchSize() << ", need_release_resource: " << need_release_resource_
                  << ", sp_edit_search_index: " << sp_edit_search_index_ << ", mtp token indices" << mtp_token_index_
                  << ", contain_propose_token: " << contain_propose_token_ << ", propose_token: " << propose_token_;

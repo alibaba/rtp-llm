@@ -209,6 +209,7 @@ public:
         GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
         Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
         NeedRemoteGenerate = 1 << 4,  // 需要远程生成
+        CachePrepared      = 1 << 5,  // 后台 KV 准备完成，仍需调度准入
     };
 
     void append(EventType event) {
@@ -225,7 +226,7 @@ public:
 
     void clearLoadInitiated() {
         flags_ = static_cast<EventType>(static_cast<uint32_t>(flags_)
-                                        & ~static_cast<uint32_t>(EventType::LoadInitiated));
+                                        & ~static_cast<uint32_t>(EventType::LoadInitiated | EventType::CachePrepared));
     }
 
 private:

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <list>
+#include <thread>
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -24,6 +25,7 @@ public:
                            const int                              max_score_len    = 1);
 
     ~FIFOScheduler() override;
+    absl::Status stop() override;
 
     // Group-aware enqueue: streams enter the dedicated group queues and are
     // co-scheduled at an isolated execution boundary. Falls back to individual
@@ -41,6 +43,14 @@ public:
     std::vector<EngineScheduleInfo::TaskInfo> waitingTaskList() override;
 
 private:
+    void              cachePrepareLoop();
+    bool              async_cache_prepare_enabled_ = false;
+    int               cache_prepare_device_        = 0;
+    std::thread       cache_prepare_thread_;
+    std::mutex        cache_prepare_stop_mutex_;
+    GenerateStreamPtr cache_prepare_blocked_stream_;
+    size_t            cache_prepare_blocked_available_ = 0;
+
     using StreamGroup      = std::list<GenerateStreamPtr>;
     using StreamGroupQueue = std::list<StreamGroup>;
 
