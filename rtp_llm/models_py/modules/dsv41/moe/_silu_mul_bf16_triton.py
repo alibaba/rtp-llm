@@ -192,7 +192,7 @@ def silu_mul_fp8_g32_quant(
     The MXFP8 caller supplies contiguous BF16 [M,2N], with N divisible by
     32. Preserve the BF16 rounding boundary without materializing hidden.
     Quantization honors the existing per-call DSV4_FP8_QUANT_KERNEL policy;
-    auto selects v2 at M*N >= 4Mi elements. Legacy's unused scale-pack bytes
+    auto uses the legacy scale policy for every shape. Unused scale-pack bytes
     are unspecified; this entry initializes them to zero, as v2 does.
     """
     m, two_n = gate_up.shape
@@ -206,7 +206,7 @@ def silu_mul_fp8_g32_quant(
     if m * n == 0:
         return quant, scales
     mode = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-    legacy = mode == "legacy" or (mode == "auto" and m * n < 4 * 1024 * 1024)
+    legacy = mode in ("auto", "legacy")
     apply_clamp = clamp_limit is not None and clamp_limit > 0.0
     _silu_mul_fp8_g32_quant_kernel[(m, triton.cdiv(n, 1024))](
         gate_up,
