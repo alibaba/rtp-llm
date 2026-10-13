@@ -64,12 +64,12 @@ void BlockTreeStorer::publishDeviceLocked(const CacheKeysType&                  
                                           bool                                              is_resident,
                                           size_t&                                           resident_prefix_length) {
     const BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources, false, is_resident);
-    const bool tree_data_mutated = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
-    if (tree_data_mutated || !insert_result.newly_resident_nodes.empty()) {
+    const bool resources_inserted = !insert_result.inserted_nodes.empty() || !insert_result.adopted_nodes.empty();
+    if (resources_inserted || !insert_result.newly_resident_nodes.empty()) {
         evictor_.onInserted(insert_result);
     }
-    if (tree_data_mutated) {
-        settled_(true, true);
+    if (resources_inserted) {
+        settled_(true);
     }
     resident_prefix_length = insert_result.resident_prefix_length;
 }
@@ -226,7 +226,7 @@ size_t BlockTreeStorer::settleLocked(const StoreTask& task, bool publish) {
         evictor_.onInserted(insert_result);
     }
     if (!task.descriptors().empty()) {
-        settled_(insert_result.accepted_resource_count > 0, true);
+        settled_(true);
     }
     return insert_result.accepted_resource_count;
 }

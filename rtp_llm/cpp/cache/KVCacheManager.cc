@@ -4,8 +4,6 @@
 #include <algorithm>
 #include <stdexcept>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <limits>
 #include <numeric>
 
@@ -174,11 +172,6 @@ GroupedCacheLayerLayout projectLayout(const GroupedCacheLayerLayout&       sourc
     return GroupedCacheLayerLayout(std::move(target_topology), std::move(groups));
 }
 
-bool cacheStatusSnapshotEnabled() {
-    const char* env = std::getenv("RTP_LLM_CACHE_STATUS_SNAPSHOT");
-    return env != nullptr && std::strcmp(env, "1") == 0;
-}
-
 void reportCacheOperation(const kmonitor::MetricsReporterPtr&          metrics_reporter,
                           RtpLLMCacheOperationMetricsCollector::OpType operation_type,
                           int64_t                                      begin_time_us) {
@@ -255,14 +248,6 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 }
 
 KVCacheManager::~KVCacheManager() {
-    {
-        std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
-        cache_status_refresh_stopped_ = true;
-    }
-    cache_status_refresh_cv_.notify_all();
-    if (cache_status_refresh_thread_.joinable()) {
-        cache_status_refresh_thread_.join();
-    }
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -655,65 +640,6 @@ size_t KVCacheManager::maxAvailableTokensNum() const {
 }
 
 KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
-    if (need_cache_keys && cacheStatusSnapshotEnabled()) {
-        std::shared_ptr<const KVCacheInfo> snapshot;
-        {
-            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-            snapshot = cache_status_snapshot_;
-        }
-        if (snapshot) {
-            return *snapshot;
-        }
-    }
-    return buildKVCacheInfo(latest_version, need_cache_keys);
-}
-
-void KVCacheManager::refreshKVCacheInfoSnapshot() {
-    if (!coordinator_manager_ || !cacheStatusSnapshotEnabled()) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(cache_status_refresh_mutex_);
-        if (cache_status_refresh_stopped_) {
-            return;
-        }
-        if (!cache_status_refresh_thread_.joinable()) {
-            {
-                std::lock_guard<std::mutex> snapshot_lock(cache_status_snapshot_mutex_);
-                cache_status_snapshot_ = std::make_shared<KVCacheInfo>(buildKVCacheInfo(-1, false));
-            }
-            cache_status_refresh_thread_ = std::thread(&KVCacheManager::cacheStatusRefreshLoop, this);
-        }
-        cache_status_refresh_requested_ = true;
-    }
-    cache_status_refresh_cv_.notify_one();
-}
-
-void KVCacheManager::cacheStatusRefreshLoop() {
-    while (true) {
-        {
-            std::unique_lock<std::mutex> lock(cache_status_refresh_mutex_);
-            cache_status_refresh_cv_.wait(
-                lock, [this] { return cache_status_refresh_stopped_ || cache_status_refresh_requested_; });
-            if (cache_status_refresh_stopped_) {
-                return;
-            }
-            cache_status_refresh_requested_ = false;
-        }
-        // Coalesce requests arriving during construction into one subsequent refresh.
-        // Main's atomic BlockTree key snapshot and FULL-pool capacity projection
-        // remain the source of truth; this worker only moves work off the engine loop.
-        try {
-            auto                        snapshot = std::make_shared<KVCacheInfo>(buildKVCacheInfo(-1, true));
-            std::lock_guard<std::mutex> lock(cache_status_snapshot_mutex_);
-            cache_status_snapshot_ = std::move(snapshot);
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("cache status refresh failed: %s", error.what());
-        }
-    }
-}
-
-KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_cache_keys) const {
     KVCacheInfo info;
     info.version = latest_version;
 
@@ -723,7 +649,7 @@ KVCacheInfo KVCacheManager::buildKVCacheInfo(int64_t latest_version, bool need_c
     }
 
     if (need_cache_keys && block_tree_cache_) {
-        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot();
+        BlockTreeKeySnapshot snapshot = block_tree_cache_->getKeySnapshot(latest_version);
         info.version                  = snapshot.version;
         info.cached_keys              = std::move(snapshot.keys);
     }

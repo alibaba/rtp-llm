@@ -734,7 +734,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 1u);
 
     const auto snapshot_after_success = cache->getKeySnapshot();
-    EXPECT_GT(snapshot_after_success.version, snapshot_after_failure.version);
+    EXPECT_EQ(snapshot_after_success.version, snapshot_after_failure.version);
     EXPECT_EQ(snapshot_after_success.keys, snapshot_before.keys);
     BlockTreeMatchResult disk_match = cache->match({100});
     expectUnpublishedResult(disk_match);
@@ -1106,18 +1106,40 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     auto path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
+    const auto before_drop = cache->getKeySnapshot();
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+    EXPECT_EQ(cache->tree()->size(), 0u);
+    ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), path[1]);
+    EXPECT_EQ(path[1]->parent, nullptr);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
     EXPECT_TRUE(disk_pool->isAllocated(disk_target));
+    EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+    EXPECT_GT(cache->getKeySnapshot().version, before_drop.version);
+
+    resources[0][0].device_blocks = {11};
+    resources[1][0]               = GroupSetResource{};
+    resources[1][0].device_blocks = {12};
+    cache->insert({100, 200}, resources, Tier::DEVICE);
+    ASSERT_EQ(cache->tree()->findNode({100, 200}).size(), 1u);
+    const auto reinserted = cache->getKeySnapshot();
+    EXPECT_EQ(reinserted.keys, (CacheKeysType{100}));
+    EXPECT_EQ(device_pool->refCount(12), 0u);
 
     pausable_copy->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
     EXPECT_FALSE(disk_pool->isAllocated(disk_target));
-    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_EQ(cache->getKeySnapshot().keys, reinserted.keys);
+    EXPECT_EQ(cache->getKeySnapshot().version, reinserted.version);
+
+    cache->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100, 200}));
+    EXPECT_EQ(cache->tree()->findNode({100, 200}).size(), 2u);
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCommit) {
@@ -1146,8 +1168,13 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOAD_PENDING);
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+    ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), path[1]);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
+    const auto after_drop = cache->getKeySnapshot();
+    EXPECT_TRUE(after_drop.keys.empty());
 
     const BlockIdList target_blocks{20};
     device_pool->incRef(target_blocks);
@@ -1156,15 +1183,52 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesPendingLoadAndRejectsCom
     EXPECT_TRUE(context->done());
 
     EXPECT_FALSE(host_pool->isAllocated(host_source));
-    path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_EQ(cache->getKeySnapshot().version, after_drop.version);
 
     context.reset();
     releaseDeviceBlocks(*cache, device_pool, target_blocks);
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, AbortDetachedMultiGroupLoadDeletesPendingNodeOnce) {
+    auto                     host_pool = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    std::vector<GroupSetPtr> groups;
+    for (size_t group_set_id = 0; group_set_id < 2; ++group_set_id) {
+        groups.push_back(std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(group_set_id)}, host_pool, nullptr));
+    }
+    BlockTreeCacheConfig config;
+    config.enable_host_cache = true;
+    auto cache               = makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+    const auto host_free_before = host_pool->freeBlocksNum();
+
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(groups.size()));
+    for (size_t group_set_id = 0; group_set_id < groups.size(); ++group_set_id) {
+        resources[0][group_set_id].device_blocks = {10};
+        resources[1][group_set_id].host_block =
+            groups[group_set_id]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_FALSE(isNullBlockIdx(resources[1][group_set_id].host_block));
+    }
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+    auto result  = cache->match({100, 200});
+    auto context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->loadDescs().size(), 2u);
+    EXPECT_EQ(context->loadDescs()[0].node, context->loadDescs()[1].node);
+    releaseRequestRefsForTest(*cache, result.matched_device_resources);
+
+    ASSERT_EQ(cache->evictForGroup("group0", 1), 1);
+    ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
+    const auto after_drop = cache->getKeySnapshot();
+    EXPECT_TRUE(after_drop.keys.empty());
+
+    ASSERT_TRUE(cache->abortPendingLoad(context));
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
+    EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+    EXPECT_EQ(cache->getKeySnapshot().version, after_drop.version);
 }
 
 TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsItsTarget) {
@@ -1210,9 +1274,13 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
     ASSERT_EQ(path.size(), 2u);
     EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+    ASSERT_EQ(cache->tree()->pending_node_pool_.size(), 1u);
+    EXPECT_EQ(cache->tree()->pending_node_pool_.at(200).get(), path[1]);
     EXPECT_TRUE(path[1]->group_set_resources[0].transfer_detached);
     EXPECT_TRUE(host_pool->isAllocated(host_source));
+    const auto after_drop = cache->getKeySnapshot();
+    EXPECT_TRUE(after_drop.keys.empty());
 
     pausable_copy->release();
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
@@ -1220,12 +1288,9 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightLoadAndDiscardsI
 
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(host_pool->isAllocated(host_source));
-    path = cache->tree()->findNode({100, 200});
-    ASSERT_EQ(path.size(), 2u);
-    EXPECT_TRUE(path[0]->group_set_resources[0].is_empty());
-    EXPECT_TRUE(path[1]->group_set_resources[0].is_empty());
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(path[1]->group_set_resources[0].transfer_detached);
+    EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_EQ(cache->getKeySnapshot().version, after_drop.version);
     EXPECT_EQ(device_pool->refCount(target_blocks.front()), 1u);
 
     context.reset();
@@ -2239,7 +2304,7 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCommittedLoadReturnsFalseAndTransferCom
     EXPECT_TRUE(context->success());
     EXPECT_FALSE(environment->cache->abortPendingLoad(context));
     const auto snapshot_after = environment->cache->getKeySnapshot();
-    EXPECT_GT(snapshot_after.version, snapshot_before.version);
+    EXPECT_EQ(snapshot_after.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
 
     for (const TransferDescriptor& desc : context->loadDescs()) {

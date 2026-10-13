@@ -660,7 +660,7 @@ TEST_F(BlockTreeCacheTest, WatermarkTriggerQpsCountsOneSuccessfulSchedulingRound
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, watermark_tags), 1);
 }
 
-TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndReturnsAllKeys) {
+TEST_F(BlockTreeCacheTest, KeySnapshotTracksKeyVersionAndReturnsAllKeys) {
     const BlockTreeKeySnapshot empty = cache_->getKeySnapshot();
     EXPECT_EQ(empty.version, -1);
     EXPECT_TRUE(empty.keys.empty());
@@ -678,6 +678,14 @@ TEST_F(BlockTreeCacheTest, KeySnapshotTracksMutationVersionAndReturnsAllKeys) {
     const BlockTreeKeySnapshot repeated = cache_->getKeySnapshot();
     EXPECT_EQ(repeated.version, snapshot.version);
     EXPECT_EQ(repeated.keys, snapshot.keys);
+
+    const BlockTreeKeySnapshot unchanged = cache_->getKeySnapshot(snapshot.version);
+    EXPECT_EQ(unchanged.version, snapshot.version);
+    EXPECT_TRUE(unchanged.keys.empty());
+
+    const BlockTreeKeySnapshot changed = cache_->getKeySnapshot(empty.version);
+    EXPECT_EQ(changed.version, snapshot.version);
+    EXPECT_EQ(changed.keys, snapshot.keys);
 }
 
 TEST_F(BlockTreeCacheTest, MatchPartialPath) {
@@ -2758,6 +2766,62 @@ public:
     std::vector<KVCacheEvent> events;
     PublishResult             result{PublishResult::ACCEPTED};
 };
+
+TEST_F(BlockTreeCacheTest, PendingNodeBlocksInsertUntilLoadAbortWithoutAffectingNewParent) {
+    auto device_pool = makeStructuralDevicePool(0);
+    auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
+    auto full        = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_host_cache = true;
+    auto cache               = makeBlockTreeCacheForTest(std::vector<GroupSetPtr>{full}, config);
+    auto publisher           = std::make_shared<RecordingCachePublisher>();
+    cache->setEventPublisher(publisher, {"group0"});
+
+    const BlockIdxType host_source = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(host_source));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {10};
+    resources[1][0].host_block    = host_source;
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
+    auto result  = cache->match({100, 200});
+    auto context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    releaseRequestRefsForTest(*cache, result.matched_device_resources);
+    ASSERT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_TRUE(cache->getKeySnapshot().keys.empty());
+    EXPECT_TRUE(cache->logicalCacheSnapshot().block_keys.empty());
+
+    resources[0][0].device_blocks = {11};
+    resources[1][0]               = GroupSetResource{};
+    resources[1][0].device_blocks = {12};
+    cache->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    const auto version             = cache->getKeySnapshot().version;
+    const auto publication_version = cache->logicalCacheSnapshot().version;
+    const auto event_count         = publisher->events.size();
+
+    // The pending key also blocks lower-tier insertion.
+    const BlockIdxType replacement = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+    ASSERT_FALSE(isNullBlockIdx(replacement));
+    std::vector<std::vector<GroupSetResource>> host_resources(2, std::vector<GroupSetResource>(1));
+    host_resources[1][0].host_block = replacement;
+    EXPECT_FALSE(insertGroupSetResources(*cache, {100, 200}, host_resources));
+    EXPECT_FALSE(host_pool->isAllocated(replacement));
+
+    ASSERT_TRUE(cache->abortPendingLoad(context));
+    EXPECT_FALSE(host_pool->isAllocated(host_source));
+    EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100}));
+    EXPECT_EQ(cache->getKeySnapshot().version, version);
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().version, publication_version);
+    EXPECT_EQ(publisher->events.size(), event_count);
+
+    cache->insert({100, 200}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache->getKeySnapshot().keys, (CacheKeysType{100, 200}));
+    EXPECT_EQ(cache->logicalCacheSnapshot().block_keys, (std::vector<int64_t>{100, 200}));
+}
 
 TEST_F(BlockTreeCacheTest, EventPublicationAddsOnlyAfterHostLoadCompletes) {
     if (!cudaAvailable()) {
