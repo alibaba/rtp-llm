@@ -168,9 +168,12 @@ def quantize_compute_views(model):
     for module in model.modules():
         for name, parameter in list(module.named_parameters(recurse=False)):
             if (
-                parameter.ndim == 2
-                or parameter.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+                parameter.dtype not in (torch.bfloat16, torch.float16, torch.float32)
                 or "scale" in name
+                or (
+                    name == "weight"
+                    and getattr(module, "quant_method", None) is not None
+                )
             ):
                 continue
             weight, scale = hard_fp8(parameter.data)
