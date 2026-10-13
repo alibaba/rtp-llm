@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/TimeUtility.h"
+#include "autil/EnvUtil.h"
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -51,7 +52,12 @@ std::unique_ptr<tap::ProfilerResult> tryDisableProfiler(DisableProfilerFn disabl
 std::atomic<size_t> TorchProfile::count_{0};
 
 TorchProfile::TorchProfile(const std::string& prefix, std::string output_dir):
-    prefix_(prefix), output_dir_(output_dir.empty() ? "." : std::move(output_dir)) {}
+    prefix_(prefix), output_dir_(output_dir.empty() ? "." : std::move(output_dir)) {
+    config_.with_stack = autil::EnvUtil::getEnv("RTP_LLM_TIMELINE_WITH_STACK", false);
+    if (config_.with_stack) {
+        RTP_LLM_LOG_INFO("torch timeline with_stack=true prefix=%s", prefix_.c_str());
+    }
+}
 
 TorchProfile::~TorchProfile() {
     if (!stopped_) {
