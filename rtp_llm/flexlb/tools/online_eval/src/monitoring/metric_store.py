@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 
 import copy
+from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
@@ -24,6 +25,13 @@ def frozen_metric_reads():
         yield
     finally:
         _READ_SESSION.reset(token)
+
+
+@dataclass(frozen=True)
+class MetricReduction:
+    """A scalar and detached evidence from the same selected observations."""
+    value: object
+    evidence: dict
 
 
 class MetricStore:
@@ -118,14 +126,28 @@ class MetricStore:
 
     def reduce(self, metric_id, *, op, **selection):
         """Scalar reduction requires one selected series; fleet aggregation is explicit."""
+        value, _ = self._reduce_selected(metric_id, op=op, **selection)
+        return value
+
+    def reduce_with_evidence(self, metric_id, *, op, **selection):
+        """Select once and detach the definition and observation provenance."""
+        value, rows = self._reduce_selected(metric_id, op=op, **selection)
+        evidence = dict(definition=self.document["definitions"][metric_id],
+            observations=[dict(source=row["source"], epoch=row["epoch"],
+                labels=row["labels"], provenance=row["provenance"], sample_count=len(row["points"]),
+                observed_bounds=[row["points"][0][0], row["points"][-1][0]]) for row in rows])
+        return MetricReduction(value, copy.deepcopy(evidence))
+
+    def _reduce_selected(self, metric_id, *, op, **selection):
         if op not in {"min", "max", "first", "last"}:
             raise MetricContractError("unsupported reduction: " + str(op))
         rows = self.select(metric_id, **selection)
         if len(rows) != 1:
             raise MetricContractError("scalar reduction requires exactly one series")
         values = [v for _, v in rows[0]["points"]]
-        return {"min": min, "max": max, "first": lambda x: x[0],
+        value = {"min": min, "max": max, "first": lambda x: x[0],
                 "last": lambda x: x[-1]}[op](values)
+        return value, rows
 
     def series(self, anchor):
         series, sources = {}, {}

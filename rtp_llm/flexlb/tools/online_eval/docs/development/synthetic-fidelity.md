@@ -30,7 +30,7 @@
 现有 `capture_frontend_prefix`、`fit_frontend_prefix`、`prefix_lineage`、`datasets/describe_traffic` 和
 `scripts/commands/profile_workload.py` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
 
-保真度计算由 `analysis.traffic_fidelity` 提供；文件读取、拟合身份审计和生产生成器调用由 `diagnostics.traffic_fidelity` 编排。前缀/LRU 计算由 `analysis.workload_profile.profile` 提供，命令入口为 `scripts/commands/profile_workload.py`。
+保真度计算由 `analysis.traffic_fidelity` 提供；文件读取、拟合身份审计和生产生成器调用由 `diagnostics.traffic_fidelity` 编排。捕获加载时固定已解码模型和内容 SHA；观察与参数反推共用此快照，不重新读取文件，避免将旧观察与新拟合混用。前缀/LRU 计算由 `analysis.workload_profile.profile` 消费规范化迭代器，`diagnostics.workload_profile.run` 负责读取 token plan，命令入口为 `scripts/commands/profile_workload.py`。
 
 ## 使用
 

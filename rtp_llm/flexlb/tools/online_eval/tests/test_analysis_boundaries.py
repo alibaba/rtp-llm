@@ -46,6 +46,7 @@ def test_moved_responsibilities_have_no_legacy_exports(module, obsolete):
 
 def test_lru_command_uses_the_library_and_rejects_invalid_capacity(tmp_path):
     from analysis.workload_profile import profile
+    from traffic.token_plan import read_token_plan
     trace = tmp_path / 'trace.jsonl'
     trace.write_text(''.join(json.dumps(dict(ts=i, il=4, cache_key_block_size=2,
         input_ids=[1, 2, 3, 4], family='same')) + '\n' for i in range(3)))
@@ -53,7 +54,7 @@ def test_lru_command_uses_the_library_and_rejects_invalid_capacity(tmp_path):
     command = [sys.executable, str(ROOT / 'scripts/commands/profile_workload.py'),
                str(trace), '--output', str(output)]
     subprocess.run(command + ['--capacities', '2', '4'], check=True, cwd=tmp_path)
-    assert json.loads(output.read_text()) == profile(trace, (2, 4))
+    assert json.loads(output.read_text()) == profile(read_token_plan(trace), (2, 4))
     previous = output.read_bytes()
     result = subprocess.run(command + ['--capacities', '0'], cwd=tmp_path, capture_output=True)
     assert result.returncode == 2

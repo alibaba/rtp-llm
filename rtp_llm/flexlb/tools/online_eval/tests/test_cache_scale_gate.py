@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 from traffic.traffic_source import materialize
-from analysis.workload_profile import profile
+from diagnostics.workload_profile import run as profile
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report
 from cases.cache_scale_in.program import GATE as CACHE_GATE

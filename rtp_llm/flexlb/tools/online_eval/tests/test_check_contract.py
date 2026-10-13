@@ -86,3 +86,25 @@ def test_unknown_definition_or_ambiguous_series_remains_a_contract_error():
         data.document["metrics"]["example/value"][0]))
     with pytest.raises(MetricContractError, match="exactly one"):
         metric_check(data)
+
+
+def test_metric_check_selects_once_and_keeps_detached_evidence():
+    from unittest.mock import patch
+    data = store()
+    with patch.object(data, 'select', wraps=data.select) as select:
+        result = metric_check(data, start=10, end=11)
+    assert select.call_count == 1
+    data.document['definitions']['example/value']['unit'] = 'changed'
+    data.document['metrics']['example/value'][0]['provenance']['expression'] = 'changed'
+    assert result.evidence['definition']['unit'] == 'requests'
+    assert result.evidence['observations'][0]['provenance']['expression'] == 'frozen_query'
+
+
+def test_metric_bridge_needs_only_the_public_reduction_interface():
+    from monitoring.metric_store import MetricReduction
+    class Reader:
+        def reduce_with_evidence(self, *args, **kwargs):
+            return MetricReduction(1, dict(definition={'unit': 'requests'}, observations=[]))
+    result = metric_check(Reader())
+    assert result.status == 'PASS'
+    assert result.evidence['definition'] == {'unit': 'requests'}

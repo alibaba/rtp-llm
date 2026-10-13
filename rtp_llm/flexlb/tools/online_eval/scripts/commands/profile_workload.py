@@ -7,7 +7,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
-from analysis.workload_profile import profile, __doc__ as PROFILE_DESCRIPTION
+from analysis.workload_profile import __doc__ as PROFILE_DESCRIPTION
+from diagnostics.workload_profile import run
 
 
 def main():
@@ -18,7 +19,7 @@ def main():
     a = p.parse_args()
     if any(n < 1 for n in a.capacities):
         p.error("capacities must be positive")
-    a.output.write_text(json.dumps(profile(a.trace, a.capacities), indent=2) + "\n")
+    a.output.write_text(json.dumps(run(a.trace, a.capacities), indent=2) + "\n")
 
 
 if __name__ == "__main__":
