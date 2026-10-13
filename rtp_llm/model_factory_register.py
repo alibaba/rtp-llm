@@ -273,6 +273,14 @@ def _register_builtin_lazy_models() -> None:
         ["Qwen3_5ForConditionalGeneration"],
     )
     register_lazy_model(
+        "minicpmv4_7",
+        "rtp_llm.models.minicpmv4_7",
+        ["MiniCPMV4_7ForConditionalGeneration"],
+    )
+    # No architecture claim: Qwen3DSparkModel is already owned by qwen_3_dspark;
+    # the MiniCPM draft is selected by model_type only.
+    register_lazy_model("minicpmv4_7_dspark", "rtp_llm.models.minicpmv4_7_dspark")
+    register_lazy_model(
         "qwen3_next_mtp",
         "rtp_llm.models.qwen3_next.qwen3_next_mtp",
         ["Qwen3NextMTPForCausalLM"],
