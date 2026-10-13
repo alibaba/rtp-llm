@@ -1495,7 +1495,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
 #if USING_CUDA
-            if (lm_head->kernel.dtype() == torch::kBFloat16) {
+            if (lm_head->kernel.dtype() == torch::kFloat8_e4m3fn) {
+                py::gil_scoped_acquire gil;
+                TORCH_CHECK(py::hasattr(py_model_, "compute_fp8_lm_head"), "FP8 LM head requires a scaled consumer");
+                logits = py_model_.attr("compute_fp8_lm_head")(last_hidden).cast<torch::Tensor>();
+            } else if (lm_head->kernel.dtype() == torch::kBFloat16) {
                 logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
             } else
 #endif
@@ -1573,7 +1577,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(lm_head_mm)");
 #if USING_CUDA
-        if (lm_head->kernel.dtype() == torch::kBFloat16) {
+        if (lm_head->kernel.dtype() == torch::kFloat8_e4m3fn) {
+            py::gil_scoped_acquire gil;
+            TORCH_CHECK(py::hasattr(py_model_, "compute_fp8_lm_head"), "FP8 LM head requires a scaled consumer");
+            logits = py_model_.attr("compute_fp8_lm_head")(last_hidden).cast<torch::Tensor>();
+        } else if (lm_head->kernel.dtype() == torch::kBFloat16) {
             logits = torch_ext::cublas_gemm_bf16_bf16_fp32(last_hidden.to(torch::kBFloat16), lm_head->kernel);
         } else
 #endif

@@ -90,6 +90,30 @@ class Qwen4MoeFp4Test(unittest.TestCase):
         for name in (W.moe_w1, W.moe_w2):
             self.assertIsInstance(out[4].sub_weights[name], OnlineModelOptFp4MoeWeight)
 
+    def test_full_fp8_wraps_dense_and_router_but_preserves_nvfp4_experts(self):
+        from rtp_llm.models.qwen4_exp.full_fp8_weight import Qwen4Fp8StorageWeight
+
+        cfg = MoeConfig(expert_num=1)
+        routed = MoeWeight(
+            [
+                MoeAtomicWeight(n, [CkptWeightInfo(n)], config=cfg)
+                for n in (W.moe_w1, W.moe_w2, W.moe_gate)
+            ],
+            config=cfg,
+        )
+        dense = AtomicWeight(W.qwen4_hc_attn_mix_down, [CkptWeightInfo("hc")])
+        global_weight = AtomicWeight(W.embedding, [CkptWeightInfo("embedding")])
+        info = Qwen4MoeFp4WeightInfo([global_weight], [[routed, dense]], full_fp8=True)
+        converted = info.to_quant_weight_info(
+            ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
+        )
+        self.assertIsInstance(converted.weights[0], Qwen4Fp8StorageWeight)
+        self.assertIsInstance(converted.layer_weights[0][1], Qwen4Fp8StorageWeight)
+        children = converted.layer_weights[0][0].sub_weights
+        self.assertIsInstance(children[W.moe_gate], Qwen4Fp8StorageWeight)
+        for n in (W.moe_w1, W.moe_w2):
+            self.assertIsInstance(children[n], OnlineModelOptFp4MoeWeight)
+
     def test_refuses_prequantized_or_wrong_block(self):
         for group, pre in ((32, False), (16, True)):
             with self.assertRaisesRegex(ValueError, "BF16 source and block16"):
