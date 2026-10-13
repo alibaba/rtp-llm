@@ -35,7 +35,7 @@ class PrometheusClient:
 
     def query(self, expression, when=None, timeout=5, *, deadline=None):
         return self.api(
-            "query", timeout=timeout, query=expression, time=when or time.time(),
+            "query", timeout=timeout, query=expression, time=time.time() if when is None else when,
             **({"deadline": deadline} if deadline is not None else {})
         )["result"]
 
@@ -71,6 +71,11 @@ class PrometheusClient:
 
     def metric_rows(self, metric_id, *, source, start, end, deadline=None):
         """Read a declared raw metric with actual scrape times, never lookback filling."""
+        return [row for chunk in self.metric_chunks(metric_id, source=source, start=start,
+                                                   end=end, deadline=deadline) for row in chunk]
+
+    def metric_chunks(self, metric_id, *, source, start, end, deadline=None):
+        """Yield validated chunks so archives retain evidence if a later query fails."""
         definition = self.metric_definition(metric_id)
         if definition.get("mode") != "scrape":
             raise ValueError("raw gate input requires scrape mode: " + metric_id)
@@ -79,17 +84,19 @@ class PrometheusClient:
         if not math.isfinite(start) or not math.isfinite(end) or start >= end:
             raise ValueError("invalid metric query window")
         expression = definition["promql"].replace("${selector}", self.selector(source))
-        rows, cursor = [], start
+        cursor = start
         while cursor < end:
+            if deadline is not None:
+                deadline.check()
             right = min(end, cursor + 60)
-            rows.extend(self.query(expression + f"[{math.ceil((right - cursor) * 1000)}ms]", right,
-                                   **({"deadline": deadline} if deadline is not None else {})))
+            rows = self.query(expression + f"[{math.ceil((right - cursor) * 1000)}ms]", right,
+                              **({"deadline": deadline} if deadline is not None else {}))
+            for row in rows:
+                if set(definition["labels"]) - set(row["metric"]):
+                    raise ValueError("metric lacks required labels: " + metric_id)
+                row["metric_id"] = metric_id
+            yield rows
             cursor = right
-        for row in rows:
-            if set(definition["labels"]) - set(row["metric"]):
-                raise ValueError("metric lacks required labels: " + metric_id)
-            row["metric_id"] = metric_id
-        return rows
 
     def metric_snapshot(self, metric_ids, *, source, timeout=5):
         rows = self.instant(source, timeout)

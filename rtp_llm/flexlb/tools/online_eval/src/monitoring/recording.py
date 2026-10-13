@@ -60,8 +60,10 @@ def record_queries(window, client, *, deadline=None):
                 if definition.get("mode") == "scrape":
                     if right <= cursor:
                         break
-                    rows.extend(client.metric_rows(client.target_kind(source) + "/" + metric,
-                                                 source=source, start=cursor, end=right, deadline=deadline))
+                    for chunk in client.metric_chunks(client.target_kind(source) + "/" + metric,
+                                                      source=source, start=cursor, end=right,
+                                                      deadline=deadline):
+                        rows.extend(chunk)
                 else:
                     data = client.api("query_range", query=expression, start=cursor,
                                     end=right, step=window.interval,

@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from artifacts.json_io import write_json
 from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
 from monitoring.client import PrometheusClient
 from monitoring.archive import export_metrics
@@ -58,6 +59,7 @@ class PrometheusSession:
         self.target_bounds = {}
         self.closed = False
         self.probes = {}
+        self.registration_error = None
 
     def collects(self, kind):
         return bool(self.query_plan["sources"][kind])
@@ -67,32 +69,54 @@ class PrometheusSession:
 
     def add_client_targets(self, targets, *, deadline=None):
         deadline = startup_deadline(deadline, 20)
+        if self.closed or self.registration_error is not None:
+            raise RuntimeError("monitor session cannot register targets after closure or rollback failure")
         if set(targets) & set(self.targets):
             raise ValueError("duplicate monitor target")
         selected = {name: url for name, url in targets.items() if self.collects("client")}
         if not selected:
             return
         path = self.directory / "prometheus.json"
-        config = json.loads(path.read_text())
+        previous_config = json.loads(path.read_text())
+        config = dict(previous_config, scrape_configs=list(previous_config["scrape_configs"]))
         jobs = [scrape_job(self.query_plan, name, url, "client") for name, url in selected.items()]
         config["scrape_configs"].extend(jobs)
-        targets = selected
-        self.targets.update(targets)
-        self.target_kinds.update({name: "client" for name in targets})
-        path.write_text(json.dumps(config))
-        request = urllib.request.Request(
-            self.client.url + "/-/reload", data=b"", method="POST"
-        )
+        previous_targets, previous_kinds = dict(self.targets), dict(self.target_kinds)
+        self.targets.update(selected)
+        self.target_kinds.update({name: "client" for name in selected})
+        reload_attempted = False
+        try:
+            write_json(path, config)
+            reload_attempted = True
+            self._reload(deadline)
+            self._wait_targets(selected, deadline, 'client metrics')
+        except BaseException:
+            # Preserve shared inventory objects used by the query client.
+            self.targets.clear()
+            self.targets.update(previous_targets)
+            self.target_kinds.clear()
+            self.target_kinds.update(previous_kinds)
+            try:
+                write_json(path, previous_config)
+                if reload_attempted:
+                    self._reload(deadline)
+            except BaseException as rollback_error:
+                self.registration_error = rollback_error
+                raise RuntimeError("monitor target registration rollback failed; stop the session") from rollback_error
+            raise
+        for name in selected:
+            self.target_bounds[name] = [time.time(), None]
+
+    def _reload(self, deadline):
+        request = urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST")
         with urllib.request.urlopen(request, timeout=min(5, deadline.remaining())):
             pass
-        self._wait_targets(targets, deadline, 'client metrics')
-        for name in targets:
-            self.target_bounds[name] = [time.time(), None]
+        deadline.check()
 
     def add_probe(self, probe, url, *, deadline=None):
         """A registered on-demand adapter shares this run's scheduler and TSDB."""
         deadline = startup_deadline(deadline, 20)
-        if not self.client.url or self.closed or probe.job in self.probes:
+        if not self.client.url or self.closed or self.registration_error is not None or probe.job in self.probes:
             raise ValueError("probe requires a live Prometheus and a unique source")
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -211,6 +235,10 @@ class PrometheusSession:
                                self.started, self.interval, dict(self.targets),
                                {name: list(bounds) for name, bounds in self.target_bounds.items()})
         result = record_queries(window, self.client, deadline=deadline)
+        if self.registration_error is not None:
+            result["errors"].append(dict(error="monitor target registration rollback failed: "
+                                               + str(self.registration_error)))
+            write_json(self.directory / "queries.json", result)
         if materialize:
             if deadline is not None:
                 deadline.check()

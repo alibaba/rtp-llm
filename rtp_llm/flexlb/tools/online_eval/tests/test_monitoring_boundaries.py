@@ -163,3 +163,211 @@ def test_calculator_identity_is_explicit_and_not_derived_from_method():
         selection=dict(time_basis='arrival', status='all'), bucket_s=1), windows={'measurement'})
     assert contract['measurement']['method'] == 'request_rate'
     assert contract['implementation'] == dict(module='analysis.request_metrics', function='_request_rate')
+
+
+@pytest.mark.parametrize('when, expected', [(0, 0), (12, 12), (None, 1234)])
+def test_query_timestamp_defaults_only_when_absent(when, expected):
+    from monitoring.client import PrometheusClient
+    client = PrometheusClient('http://owned-tsdb', query_plan=load_plan('default.yaml'),
+                              target_kinds={}, max_gap_s=5)
+    with patch.object(client, 'api', return_value={'result': []}) as api, \
+         patch('monitoring.client.time.time', return_value=1234):
+        client.query('up', when=when)
+    assert api.call_args.kwargs['time'] == expected
+
+
+def raw_archive_client(tmp_path):
+    from monitoring.client import PrometheusClient
+    from monitoring.recording import ArchiveWindow
+    plan = dict(sources=dict(mock={'temperature': dict(
+        promql='temperature${selector}', unit='K', value_kind='gauge', labels=['engine'],
+        exported_metrics=['temperature'], mode='scrape', required=True)}, master={}, client={}),
+        produced={})
+    client = PrometheusClient('http://owned-tsdb', query_plan=plan,
+                              target_kinds={'worker': 'mock'}, max_gap_s=5)
+    window = ArchiveWindow(tmp_path, 'test', {}, 1, 1,
+                           {'worker': 'http://exporter/metrics'}, {'worker': [1, 121]})
+    return client, window
+
+
+@pytest.mark.parametrize('failure', [TimeoutError('budget exhausted'),
+                                    RuntimeError('query failed'), 'invalid_labels'])
+def test_raw_archive_keeps_inner_chunks_without_accepting_failed_metric(tmp_path, failure):
+    from monitoring.recording import record_queries
+    from monitoring.contracts import MetricUnavailable
+    client, window = raw_archive_client(tmp_path)
+    first = dict(metric={'__name__': 'temperature', 'engine': 'a'}, values=[[30, '2']])
+    second = (dict(metric={'__name__': 'temperature'}, values=[[90, '3']])
+              if failure == 'invalid_labels' else failure)
+    def samples():
+        return [[first], [second] if failure == 'invalid_labels' else second]
+    with patch.object(client, 'api', return_value={'result': [dict(
+            metric={'__name__': 'up'}, values=[[1, '1'], [121, '1']])]}), \
+         patch.object(client, 'query', side_effect=samples()):
+        result = record_queries(window, client)
+    assert result['queries']['worker/temperature']['result'] == [first]
+    assert len(result['errors']) == 1
+    assert result['errors'][0]['query'] == 'worker/temperature'
+    assert json.loads((tmp_path / 'queries.json').read_text()) == result
+    store = export_metrics(tmp_path)
+    row = store.document['metrics']['mock/temperature'][0]
+    assert row['points'] == [[30, 2.0]] and row['status'] == 'ERROR'
+    with pytest.raises(MetricUnavailable, match='query failed'):
+        store.select('mock/temperature')
+    # The eager gate API must propagate the failure, never return partial data.
+    with patch.object(client, 'query', side_effect=samples()), pytest.raises(
+            (TimeoutError, RuntimeError, ValueError)):
+        client.metric_rows('mock/temperature', source='worker', start=1, end=121)
+
+
+def publication_store(tmp_path):
+    spec = load_plan('master_ha_failover.yaml')['produced']['ha/scheduler_inflight']
+    store = MetricStore(dict(metrics_schema_version=1,
+                            definitions={'ha/scheduler_inflight': spec}, metrics={}))
+    store.save(tmp_path)
+    return store, spec
+
+
+@pytest.mark.parametrize('change', [dict(source=''), dict(source=None), dict(epoch=''),
+                                  dict(epoch=None), dict(epoch=0), dict(labels=[]),
+                                  dict(points=None), dict(points=[1]), dict(points=[[1, 2, 3]])])
+def test_invalid_published_identity_preserves_store_and_artifact(tmp_path, change):
+    from monitoring.publication import publish
+    store, spec = publication_store(tmp_path)
+    previous = (tmp_path / 'metrics.json').read_bytes()
+    valid = dict(epoch='1', source='ha', labels={'master': 'A'}, points=[[1, 2]])
+    with pytest.raises(MetricContractError):
+        publish(store, 'ha/scheduler_inflight', spec, [valid, dict(valid, **change)],
+                producer='ha_evidence', evidence={})
+    assert store.document['metrics'] == {}
+    assert (tmp_path / 'metrics.json').read_bytes() == previous
+    assert MetricStore.read(tmp_path).document['metrics'] == {}
+
+
+def test_invalid_publication_evidence_is_rejected_before_mutation(tmp_path):
+    from monitoring.publication import publish
+    store, spec = publication_store(tmp_path)
+    with pytest.raises(MetricContractError, match='metadata'):
+        publish(store, 'ha/scheduler_inflight', spec,
+                [dict(epoch=1, source='ha', labels={'master': 'A'}, points=[[1, 2]])],
+                producer='ha_evidence', evidence=[])
+    assert store.document['metrics'] == {}
+
+
+def test_save_revalidates_mutated_document_before_replacing_artifact(tmp_path):
+    from monitoring.publication import publish
+    from monitoring.metric_store import frozen_metric_reads
+    store, spec = publication_store(tmp_path)
+    publish(store, 'ha/scheduler_inflight', spec,
+            [dict(epoch=1, source='ha', labels={'master': 'A'}, points=[[1, 2]])],
+            producer='ha_evidence', evidence={})
+    store.save(tmp_path)
+    previous = (tmp_path / 'metrics.json').read_bytes()
+    with frozen_metric_reads():
+        frozen = MetricStore.read(tmp_path)
+        store.document['metrics']['ha/scheduler_inflight'][0]['source'] = ''
+        with pytest.raises(MetricContractError, match='identity'):
+            store.save(tmp_path)
+        assert (tmp_path / 'metrics.json').read_bytes() == previous
+        assert MetricStore.read(tmp_path) is frozen
+        store.document['metrics']['ha/scheduler_inflight'][0]['source'] = 'repaired'
+        store.save(tmp_path)
+        assert MetricStore.read(tmp_path).document['metrics']['ha/scheduler_inflight'][0]['source'] == 'repaired'
+
+
+def registration_session(tmp_path):
+    session = PrometheusSession(tmp_path, {'existing': 'http://exporter/metrics'},
+                                target_kinds={'existing': 'mock'})
+    session.client.url = 'http://owned-tsdb'
+    session.target_bounds['existing'] = [1, None]
+    write_json(tmp_path / 'prometheus.json', {'scrape_configs': [{'job_name': 'existing'}]})
+    return session
+
+
+@pytest.mark.parametrize('phase', ['reload', 'ready'])
+def test_failed_client_registration_restores_config_and_allows_retry(tmp_path, phase):
+    session = registration_session(tmp_path)
+    kinds = session.client.target_kinds
+    config = json.loads((tmp_path / 'prometheus.json').read_text())
+    reload_results = ([OSError('reload failed'), BytesIO(b''), BytesIO(b'')]
+                      if phase == 'reload' else [BytesIO(b''), BytesIO(b''), BytesIO(b'')])
+    ready_results = [None] if phase == 'reload' else [TimeoutError('not ready'), None]
+    with patch('monitoring.session.urllib.request.urlopen', side_effect=reload_results) as reload, \
+         patch.object(session, '_wait_targets', side_effect=ready_results):
+        with pytest.raises((OSError, TimeoutError)):
+            session.add_client_target('new', 'http://client/metrics')
+        assert session.targets == {'existing': 'http://exporter/metrics'}
+        assert session.target_kinds == {'existing': 'mock'}
+        assert session.client.target_kinds is kinds
+        assert session.target_bounds == {'existing': [1, None]}
+        assert json.loads((tmp_path / 'prometheus.json').read_text()) == config
+        assert session.registration_error is None
+        session.add_client_target('new', 'http://client/metrics')
+    assert reload.call_count == 3
+    assert kinds['new'] == 'client'
+    assert set(session.target_bounds) == {'existing', 'new'}
+    assert [job['job_name'] for job in json.loads((tmp_path / 'prometheus.json').read_text())['scrape_configs']] == ['existing', 'new']
+
+
+def test_failed_registration_rollback_marks_session_unusable_and_still_cleans_up(tmp_path):
+    session = registration_session(tmp_path)
+    session.process = Mock()
+    session.process.poll.return_value = None
+    with patch('monitoring.session.urllib.request.urlopen', side_effect=OSError('reload unavailable')):
+        with pytest.raises(RuntimeError, match='rollback failed'):
+            session.add_client_target('new', 'http://client/metrics')
+    assert isinstance(session.registration_error, OSError)
+    assert 'new' not in session.targets and 'new' not in session.target_kinds
+    with pytest.raises(RuntimeError, match='rollback failure'):
+        session.add_client_target('new', 'http://client/metrics')
+    with pytest.raises(ValueError, match='live Prometheus'):
+        session.add_probe(Mock(job='probe-new'), 'http://probe/metrics')
+    session.stop(export=False)
+    session.process.terminate.assert_called_once()
+    assert session.closed
+
+
+def test_registration_rollback_uses_the_original_deadline(tmp_path):
+    session = registration_session(tmp_path)
+    now = [0.0]
+    deadline = Deadline(1, clock=lambda: now[0])
+    def not_ready(*args):
+        now[0] = 1
+        deadline.check()
+    with patch('monitoring.session.urllib.request.urlopen', return_value=BytesIO(b'')) as request, \
+         patch.object(session, '_wait_targets', side_effect=not_ready):
+        with pytest.raises(RuntimeError, match='rollback failed'):
+            session.add_client_target('new', 'http://client/metrics', deadline=deadline)
+    assert request.call_count == 1  # An expired budget cannot authorize a fresh reload.
+    assert isinstance(session.registration_error, TimeoutError)
+    assert set(session.targets) == {'existing'}
+    assert [job['job_name'] for job in json.loads((tmp_path / 'prometheus.json').read_text())['scrape_configs']] == ['existing']
+
+
+def test_config_write_failure_restores_inventory_without_reload(tmp_path):
+    session = registration_session(tmp_path)
+    config = json.loads((tmp_path / 'prometheus.json').read_text())
+    def fail_once(path, data):
+        if any(job['job_name'] == 'new' for job in data['scrape_configs']):
+            raise OSError('disk full')
+        return write_json(path, data)
+    with patch('monitoring.session.write_json', side_effect=fail_once), \
+         patch('monitoring.session.urllib.request.urlopen') as request:
+        with pytest.raises(OSError, match='disk full'):
+            session.add_client_target('new', 'http://client/metrics')
+    request.assert_not_called()
+    assert session.registration_error is None
+    assert set(session.targets) == set(session.target_kinds) == {'existing'}
+    assert json.loads((tmp_path / 'prometheus.json').read_text()) == config
+
+
+def test_rollback_failure_is_frozen_as_an_archive_error(tmp_path):
+    session = registration_session(tmp_path)
+    session.started = 1
+    session.registration_error = OSError('reload unavailable')
+    session.target_bounds['existing'] = [1, 2]
+    with patch.object(session.client, 'api', return_value={'result': []}), \
+         pytest.raises(RuntimeError, match='incomplete Prometheus archive'):
+        session.archive()
+    errors = MetricStore.read(tmp_path).document['errors']
+    assert any('registration rollback failed' in error['error'] for error in errors)

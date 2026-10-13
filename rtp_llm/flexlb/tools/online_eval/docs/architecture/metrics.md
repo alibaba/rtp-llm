@@ -58,7 +58,7 @@ sources:
 | `accuracy` | `request_ledger`、`sampled`、`histogram_estimate` 或 `counter_delta` |
 | `requires_request_identity` | 是否依赖请求身份进行归因、去重或终态核对 |
 
-`produced` 的 `measurement` 和 `implementation` 由计算实现生成，YAML 不接受手写覆盖；加载时校验 producer 输出契约，发布时再次校验。`implementation` 显式记录实际函数的 `module` 和 `function`，源码指纹使用该模块，不从 `measurement.method` 反推实现。公共查询集合显式记录 PromQL 口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
+`produced` 的 `measurement` 和 `implementation` 由计算实现生成，YAML 不接受手写覆盖；加载时校验 producer 输出契约，发布时再次校验。发布、读取和保存共用序列身份与元数据校验；producer 的环境代次为正整数，来源身份非空。发布完成全部序列校验后才更新 store，保存前重新校验可变文档，非法数据不覆盖已有冻结产物。`implementation` 显式记录实际函数的 `module` 和 `function`，源码指纹使用该模块，不从 `measurement.method` 反推实现。公共查询集合显式记录 PromQL 口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
 
 直方图 p99 与逐请求 nearest-rank p99、PromQL 的 lookback 均值与按实际 scrape 时刻计算的整窗引擎等权均值、全 fleet hit ratio 与 survivor 过滤后的 counter 差分分别使用不同 ID。门禁声明自己使用的 ID、单位和时窗，view 选择需要展示的投影，不把相近曲线作为门禁替身。已由请求流水覆盖且没有展示消费者的查询在所属 case 集合中用 `exclude` 去掉；公共默认集合保留供其他用途选择。
 
@@ -143,3 +143,8 @@ case 的 `CaseDefinition.sources` 声明额外数据源能力，由自动发现�
 接口协议与字段语义独立于测试目的时放公共源模块；专属协议解释放 `cases/<case>/`，通过相同注册入口接入公共生命周期。采样新增源遵循 [新增 case](../development/adding-cases.md) 的必要性与字段完整性规则。请求 journal 是事件证据，由注册 producer 按冻结窗口计算，不需要转成逐请求 Prometheus 标签。
 
 session 收尾中的 probe 导出、查询归档和进程退出共享一个截止时间，HTTP 查询及分块循环使用剩余预算。归档失败保留已取得的查询及错误；任何步骤失败仍继续关闭其他资源。预算耗尽时升级终止 Prometheus，并进行有界进程回收；SDK 服务关闭和强制回收属于清理阶段，收尾预算不是操作系统级硬实时保证。
+
+
+原始指标查询逐块验证并归档，后续块查询失败或标签不完整时保留已完成块，同时记录查询错误。离线转换保留这些样本并将对应序列标为 `ERROR`，门禁拒绝读取失败序列；实时 `metric_rows()` 同样传播错误，不返回部分结果作为有效输入。
+
+动态客户端 target 注册包含配置写入、reload 和首次抓取确认。失败时恢复配置与共享 target 清单，恢复成功后允许重试；恢复 reload 使用原截止时间。无法完成恢复时标记 session 注册失败，拒绝继续注册，在归档中记录错误，并继续回收资源。

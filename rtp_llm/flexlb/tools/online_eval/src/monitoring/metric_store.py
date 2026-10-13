@@ -11,7 +11,7 @@ from pathlib import Path
 
 from schema_contract import matches_schema
 from artifacts.json_io import write_json
-from monitoring.contracts import MetricContractError, MetricUnavailable
+from monitoring.contracts import MetricContractError, MetricUnavailable, validate_observation
 
 
 _READ_SESSION = ContextVar('frozen_metric_reads', default=None)
@@ -51,16 +51,7 @@ class MetricStore:
             if not isinstance(observations, list):
                 raise MetricContractError("metric observations must be a list")
             for row in observations:
-                if (not isinstance(row, dict)
-                        or not isinstance(row.get("labels"), dict)
-                        or not isinstance(row.get("provenance"), dict)
-                        or not isinstance(row["provenance"].get("evidence", {}), dict)):
-                    raise MetricContractError("invalid metric observation metadata")
-                if (row.get("metric_id") != metric_id
-                        or any(type(row.get(key)) is not str or not row[key].strip()
-                               for key in ("source", "epoch", "status"))
-                        or not isinstance(row.get("points"), list)):
-                    raise MetricContractError("invalid metric observation identity or fields")
+                validate_observation(row, metric_id)
         self.document = document
 
     @classmethod
@@ -78,6 +69,8 @@ class MetricStore:
         return store
 
     def save(self, directory):
+        # The document is mutable during production; validate before replacement.
+        MetricStore(self.document)
         write_json(Path(directory) / "metrics.json", self.document)
 
     def select(self, metric_id, *, labels=None, start=None, end=None,

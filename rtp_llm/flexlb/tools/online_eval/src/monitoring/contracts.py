@@ -27,3 +27,17 @@ class MetricContractError(ValueError):
 
 class MetricUnavailable(ValueError):
     """Declared data cannot establish a valid measurement."""
+
+
+def validate_observation(row, metric_id):
+    """Shared stored-row contract for publication, reading and saving."""
+    if (not isinstance(row, dict)
+            or not isinstance(row.get("labels"), dict)
+            or not isinstance(row.get("provenance"), dict)
+            or not isinstance(row["provenance"].get("evidence", {}), dict)):
+        raise MetricContractError("invalid metric observation metadata")
+    if (row.get("metric_id") != metric_id
+            or any(type(row.get(key)) is not str or not row[key].strip()
+                   for key in ("source", "epoch", "status"))
+            or not isinstance(row.get("points"), list)):
+        raise MetricContractError("invalid metric observation identity or fields")
