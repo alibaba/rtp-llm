@@ -9,8 +9,8 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,10 +58,10 @@ class RouteServiceTraceTest {
             CompletableFuture<Response> pending = new CompletableFuture<>();
             when(scheduler.submit(any())).thenReturn(pending);
             RouteService service = new RouteService(scheduler,
-                    mock(RecentCacheKeyTraceReporter.class));
+                    mock(TheoryCacheHitReporter.class));
             BalanceContext ctx = new BalanceContext(config);
             Request request = new Request();
-            request.setRequestId(700L);
+            request.setRequestId("700");
             ctx.setRequest(request);
             ctx.setGenerateInputPb(ByteString.copyFromUtf8("input"));
             Span span = mock(Span.class);
@@ -81,10 +81,10 @@ class RouteServiceTraceTest {
         FlexlbConfig config = SchedulingTestConfig.batchConfig();
         RequestScheduler scheduler = mock(RequestScheduler.class);
         RouteService service = new RouteService(scheduler,
-                mock(RecentCacheKeyTraceReporter.class));
+                mock(TheoryCacheHitReporter.class));
         BalanceContext ctx = new BalanceContext(config);
         Request request = new Request();
-        request.setRequestId(701L);
+        request.setRequestId("701");
         ctx.setRequest(request);
         Span span = mock(Span.class);
         when(span.storeInContext(any(Context.class))).thenCallRealMethod();

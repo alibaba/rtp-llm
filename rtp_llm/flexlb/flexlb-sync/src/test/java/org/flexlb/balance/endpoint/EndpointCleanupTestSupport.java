@@ -10,21 +10,25 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.LongPredicate;
+import java.util.function.Predicate;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Real endpoint ledgers for scheduler-directory cleanup tests across package boundaries. */
 public final class EndpointCleanupTestSupport {
     private EndpointCleanupTestSupport() { }
 
-    public static void confirmDecode(DecodeEndpoint endpoint, long requestId) {
+    public static void confirmDecode(DecodeEndpoint endpoint, String requestId) {
         TaskInfo running = new TaskInfo();
         running.setRequestId(requestId);
         running.setPhase(TaskPhase.KV_ALLOCATED);
         WorkerStatusResponse response = new WorkerStatusResponse();
-        response.setRunningTaskInfo(Map.of(Long.toString(requestId), running));
+        response.setRunningTaskInfo(Map.of(requestId, running));
         response.setFinishedTaskInfo(Map.of());
         response.setAvailableKvCacheTokens(10_000L);
         response.setTotalKvCacheTokens(10_000L);
@@ -36,7 +40,7 @@ public final class EndpointCleanupTestSupport {
         private final AtomicLong clock = new AtomicLong(100);
         private final ReentrantLock lock = new ReentrantLock();
         private final PrefillState state = new PrefillState(lock,
-                PrefillActiveIndex.ordered(4, Comparator.comparingLong(ScheduledRequest::requestId)),
+                PrefillActiveIndex.ordered(4, Comparator.comparing(ScheduledRequest::requestId)),
                 clock::get, () -> { });
         private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
 
@@ -46,7 +50,7 @@ public final class EndpointCleanupTestSupport {
 
         public record Owner(ScheduledRequest item, PrefillState.Reservation reservation) { }
 
-        public Owner commit(long requestId, long batchId, long predictedMs) {
+        public Owner commit(String requestId, long batchId, long predictedMs) {
             ScheduledRequest item = mock(ScheduledRequest.class);
             when(item.requestId()).thenReturn(requestId);
             when(item.seqLen()).thenReturn(100L);
@@ -80,7 +84,7 @@ public final class EndpointCleanupTestSupport {
             clock.addAndGet(100L);
         }
 
-        public int sweep(LongPredicate retain) {
+        public int sweep(Predicate<String> retain) {
             return batch ? state.evictExpiredBatches(10L, retain)
                     : state.evictExpiredIndividuals(10L, retain);
         }

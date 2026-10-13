@@ -59,19 +59,19 @@ class RequestLifetimeTest {
         assertEquals(56_000L, visibilityDeadline(emptyWork(1_000L), 20_000L, 1.5, 16_000L).orElseThrow());
         assertEquals(100_000L, visibilityDeadline(emptyWork(1_000L), 20_000L, 1.5, 60_000L).orElseThrow());
         WorkSnapshot preceding = new WorkSnapshot(1_000L, List.of(
-                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
-                new WorkSnapshot.RequestWork(2L, WorkSnapshot.Phase.ENGINE_QUEUED, 3_000L)), List.of(), 0L);
+                new WorkSnapshot.RequestWork("1", WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
+                new WorkSnapshot.RequestWork("2", WorkSnapshot.Phase.ENGINE_QUEUED, 3_000L)), List.of(), 0L);
         assertEquals(68_000L, visibilityDeadline(preceding, 20_000L, 1.5, 16_000L).orElseThrow());
     }
 
     @Test
     void onlyRunningPredecessorsAgeBeforeDelivery() {
         WorkSnapshot preceding = new WorkSnapshot(1_000L, List.of(
-                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
-                new WorkSnapshot.RequestWork(2L, WorkSnapshot.Phase.ENGINE_QUEUED, 7_000L),
-                new WorkSnapshot.RequestWork(3L, WorkSnapshot.Phase.COMMITTED, 3_000L)), List.of(
-                new WorkSnapshot.BatchWork(4L, List.of(4L), WorkSnapshot.Phase.ENGINE_RUNNING, 8_000L),
-                new WorkSnapshot.BatchWork(5L, List.of(5L), WorkSnapshot.Phase.ENGINE_QUEUED, 4_000L)), 0L);
+                new WorkSnapshot.RequestWork("1", WorkSnapshot.Phase.ENGINE_RUNNING, 20_000L),
+                new WorkSnapshot.RequestWork("2", WorkSnapshot.Phase.ENGINE_QUEUED, 7_000L),
+                new WorkSnapshot.RequestWork("3", WorkSnapshot.Phase.COMMITTED, 3_000L)), List.of(
+                new WorkSnapshot.BatchWork(4L, List.of("4"), WorkSnapshot.Phase.ENGINE_RUNNING, 8_000L),
+                new WorkSnapshot.BatchWork(5L, List.of("5"), WorkSnapshot.Phase.ENGINE_QUEUED, 4_000L)), 0L);
         assertEquals(63_500L, visibilityDeadline(preceding, 11_000L, 1, 500L).orElseThrow());
         assertEquals(56_000L, visibilityDeadline(preceding, 11_000L, 1, 11_000L).orElseThrow());
         assertEquals(66_000L, visibilityDeadline(preceding, 11_000L, 1, 31_000L).orElseThrow());
@@ -80,7 +80,7 @@ class RequestLifetimeTest {
     @Test
     void unknownPredecessorsNeverBecomeACompleteEstimate() {
         WorkSnapshot unknownBatch = new WorkSnapshot(1_000L, List.of(), List.of(
-                new WorkSnapshot.BatchWork(1L, List.of(1L), WorkSnapshot.Phase.COMMITTED,
+                new WorkSnapshot.BatchWork(1L, List.of("1"), WorkSnapshot.Phase.COMMITTED,
                         OptionalLong.empty())), 0L);
         for (WorkSnapshot preceding : List.of(unknownWork(1_000L), unknownBatch)) {
             assertTrue(visibilityDeadline(preceding, 20_000L, 2, 60_000L).isEmpty());
@@ -90,7 +90,7 @@ class RequestLifetimeTest {
     @Test
     void combinedWorkSaturatesWithoutWrapping() {
         WorkSnapshot preceding = new WorkSnapshot(1_000L, List.of(
-                new WorkSnapshot.RequestWork(1L, WorkSnapshot.Phase.COMMITTED, Long.MAX_VALUE)), List.of(), 0L);
+                new WorkSnapshot.RequestWork("1", WorkSnapshot.Phase.COMMITTED, Long.MAX_VALUE)), List.of(), 0L);
         assertEquals(Long.MAX_VALUE, visibilityDeadline(preceding, 1L, 2, 60_000L).orElseThrow());
     }
 
@@ -319,10 +319,10 @@ class RequestLifetimeTest {
         try {
             BalanceContext context = RequestLifecycleTestSupport.context(config, 202L);
             var future = registry.register(context);
-            RequestSlot slot = registry.requestSlot(202L);
+            RequestSlot slot = registry.requestSlot("202");
             PrefillEndpoint prefill = mock(PrefillEndpoint.class);
             DecodeEndpoint decode = mock(DecodeEndpoint.class);
-            var reservation = new DecodeEndpoint.ReservationHandle(1L, 202L, 1L);
+            var reservation = new DecodeEndpoint.ReservationHandle(1L, "202", 1L);
             ScheduledRequest item = new ScheduledRequest(context, future, new Response(), prefillServer(), null,
                     prefill, decode, reservation, System.currentTimeMillis());
             RequestLifecycleTestSupport.bind(registry, new RequestLifecycleTestSupport.Registered(item, future));
@@ -528,7 +528,7 @@ class RequestLifetimeTest {
         PrefillEndpoint prefill = mock(PrefillEndpoint.class);
         DecodeEndpoint decode = separateDecode ? mock(DecodeEndpoint.class) : null;
         DecodeEndpoint.ReservationHandle reservation = separateDecode
-                ? new DecodeEndpoint.ReservationHandle(1L, 101L, 1L) : null;
+                ? new DecodeEndpoint.ReservationHandle(1L, "101", 1L) : null;
         ScheduledRequest item = new ScheduledRequest(context, slot.future(), new Response(), prefillServer(), null,
                 prefill, decode, reservation, System.currentTimeMillis());
         synchronized (slot) {

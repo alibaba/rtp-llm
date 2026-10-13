@@ -127,7 +127,7 @@ class PrefillActiveIndexTest {
 
     private static ScheduledRequest item(long id, int priority) {
         var request = mock(ScheduledRequest.class);
-        when(request.requestId()).thenReturn(id);
+        when(request.requestId()).thenReturn(Long.toString(id));
         when(request.enqueueSeq()).thenReturn(id);
         when(request.priority()).thenReturn(priority);
         when(request.seqLen()).thenReturn(10L);

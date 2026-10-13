@@ -7,6 +7,7 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.util.PriorityNormalizer;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -22,7 +23,7 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_RUNNING_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_DECODE_SHADOW_KV_RESERVED;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_COMMIT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_EVICTION_PLAN_COUNT;
-import static org.flexlb.constant.MetricConstant.AUTO_TPM_INFLIGHT_SETTLE_MISS;
+import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PREFILL_QUEUE_DEPTH;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_PRIORITY_PREEMPT_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_REQUEST_COUNT;
@@ -30,6 +31,7 @@ import static org.flexlb.constant.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.constant.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
+import static org.flexlb.constant.MetricConstant.REQUEST_LIFECYCLE_FAILURES_TOTAL;
 
 /**
  * Auto-TPM priority scheduling metrics reporter.
@@ -86,10 +88,12 @@ public class RequestSchedulerReporter {
         monitor.register(AUTO_TPM_CANCEL_TIMEOUT_COUNT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_ENGINE_LOAD, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        monitor.register(AUTO_TPM_INFLIGHT_SETTLE_MISS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT, FlexMetricType.QPS, FlexPriorityType.NORMAL);
+        monitor.register(REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_VICTIM_KV_TOKENS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_RESERVED_COUNT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(AUTO_TPM_DECODE_SHADOW_KV_RESERVED, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        reportLifecycleFailureCounts();
         log.info("RequestSchedulerReporter initialized");
     }
 
@@ -113,14 +117,35 @@ public class RequestSchedulerReporter {
     }
 
     /**
-     * Report an inflight settle miss via {@code auto_tpm.inflight_settle_miss.count}
-     * when finishYielded/PreemptedById found no inflight entry.
+     * Report one Decode preemption attempt rejected by target validation.
      *
-     * @param kind settle kind ("yielded" / "preempted")
+     * @param mode return or rpc
+     * @param reason fixed target-validation reason; never a request ID or error message
      */
-    public void reportInflightSettleMiss(String kind) {
-        monitor.report(AUTO_TPM_INFLIGHT_SETTLE_MISS,
-                FlexMetricTags.of("kind", kind), 1.0);
+    public void reportPreemptionTargetInvalid(String mode, String reason) {
+        monitor.report(AUTO_TPM_PREEMPTION_TARGET_INVALID_COUNT,
+                FlexMetricTags.of("mode", mode, "reason", reason), 1.0);
+    }
+
+    /**
+     * Report a registration or terminal_cleanup failure without interrupting request cleanup.
+     */
+    public void reportLifecycleFailure(String stage) {
+        reportLifecycleFailureCount(stage, 1.0);
+    }
+
+    @Scheduled(fixedRate = 2000)
+    private void reportLifecycleFailureCounts() {
+        reportLifecycleFailureCount("registration", 0.0);
+        reportLifecycleFailureCount("terminal_cleanup", 0.0);
+    }
+
+    private void reportLifecycleFailureCount(String stage, double count) {
+        try {
+            monitor.report(REQUEST_LIFECYCLE_FAILURES_TOTAL, FlexMetricTags.of("stage", stage), count);
+        } catch (Throwable failure) {
+            log.warn("Failed to report request lifecycle failure, stage={}", stage, failure);
+        }
     }
 
     /**
@@ -220,7 +245,8 @@ public class RequestSchedulerReporter {
      * Report one priority preemption via
      * {@code auto_tpm.priority_preempt.count}.
      *
-     * @param stage victim scheduling stage (prefill_queued / decode_reserved)
+     * @param stage victim scheduling stage (prefill_queued / decode_reserved /
+     *              decode_running / decode_cancel)
      */
     public void reportPriorityPreempt(String stage) {
         monitor.report(AUTO_TPM_PRIORITY_PREEMPT_COUNT,

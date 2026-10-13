@@ -1,5 +1,6 @@
 package org.flexlb.service.monitor;
 
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
@@ -11,7 +12,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
-import static org.flexlb.constant.MetricConstant.DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_REQUEST_TOTAL;
+import static org.flexlb.constant.MetricConstant.DECODE_INPUT_KV_RESERVED_TOKENS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATCH_REASON;
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
@@ -20,6 +24,7 @@ import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_LENGTH;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.TRACKED_REQUEST_COUNT;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
@@ -37,6 +42,16 @@ class BatchSchedulerReporterTest {
     @BeforeEach
     void setUp() {
         reporter = new BatchSchedulerReporter(monitor);
+    }
+
+    @Test
+    void workerInflightUsesSeparateRolesAndConfirmationScope() {
+        reporter.reportInflightRequestCount("PREFILL", "prefill:8080", 3);
+        reporter.reportInflightRequestCount("DECODE", "decode:8080", 2);
+        verify(monitor).report(org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT,
+                FlexMetricTags.ofEngine("prefill:8080", "role", "PREFILL", "scope", "worker"), 3.0);
+        verify(monitor).report(org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT,
+                FlexMetricTags.ofEngine("decode:8080", "role", "DECODE", "scope", "worker"), 2.0);
     }
 
     @Test
@@ -84,6 +99,16 @@ class BatchSchedulerReporterTest {
     }
 
     @Test
+    void batch_dispatch_does_not_count_selected_requests_or_cache_hits_twice() {
+        reporter.reportBatchCacheHitMetrics("PREFILL", "10.0.0.1:8080", 120L, 300L);
+
+        FlexMetricTags tags = FlexMetricTags.of("role", "PREFILL", "engineIp", "10.0.0.1:8080");
+        verify(monitor, never()).report(eq(CACHE_HIT_COUNT), any(), anyDouble());
+        verify(monitor).report(CACHE_HIT_RATIO, tags, 0.4);
+        verify(monitor, never()).report(eq(CACHE_REQUEST_TOTAL), any(), anyDouble());
+    }
+
+    @Test
     void should_not_report_dispatch_reason_to_select_detail_metric() {
         reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
 
@@ -122,7 +147,7 @@ class BatchSchedulerReporterTest {
 
         verify(monitor).register(INFLIGHT_MAX_AGE_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
-        verify(monitor).register(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register(DECODE_INPUT_KV_RESERVED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     @Test
@@ -143,6 +168,17 @@ class BatchSchedulerReporterTest {
                 "engineIp", "scheduler",
                 "role", "SCHEDULER");
         verify(monitor).report(INFLIGHT_MAX_AGE_MS, tags, 15_000.0);
+    }
+
+    @Test
+    void should_report_scheduler_inflight_size_by_role() {
+        reporter.reportTrackedRequestCount(RoleType.PREFILL, 3);
+        reporter.reportTrackedRequestCount(RoleType.ENCODER, 2);
+
+        verify(monitor).report(TRACKED_REQUEST_COUNT,
+                FlexMetricTags.of("role", "PREFILL", "engineIp", "scheduler"), 3.0);
+        verify(monitor).report(TRACKED_REQUEST_COUNT,
+                FlexMetricTags.of("role", "ENCODER", "engineIp", "scheduler"), 2.0);
     }
 
     @Test
@@ -169,11 +205,11 @@ class BatchSchedulerReporterTest {
 
     @Test
     void should_report_decode_inflight_hard_kv_reserved_with_decode_role() {
-        reporter.reportDecodeInflightHardKvReserved("10.0.0.2", 8_192L);
+        reporter.reportDecodeInputKvReserved("10.0.0.2", 8_192L);
 
         FlexMetricTags tags = FlexMetricTags.of(
                 "engineIp", "10.0.0.2",
                 "role", "DECODE");
-        verify(monitor).report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, 8_192.0);
+        verify(monitor).report(DECODE_INPUT_KV_RESERVED_TOKENS, tags, 8_192.0);
     }
 }

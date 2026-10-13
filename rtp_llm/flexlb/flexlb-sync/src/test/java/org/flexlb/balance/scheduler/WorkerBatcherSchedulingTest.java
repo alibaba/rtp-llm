@@ -17,6 +17,9 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -176,7 +179,7 @@ class WorkerBatcherSchedulingTest {
                 () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                 .projectionPolicy();
         RouteProjection.Candidate candidate = RouteProjection.project(
-                inputs, new RouteProjection.Probe(22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
+                inputs, new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.selectable(),
                 "a delivery-only wait must leave incoming backlog selectable");
@@ -226,7 +229,7 @@ class WorkerBatcherSchedulingTest {
             finish.countDown();
             var shared = first.get(2, TimeUnit.SECONDS);
             for (var follower : followers) {
-                org.junit.jupiter.api.Assertions.assertSame(shared, follower.get(2, TimeUnit.SECONDS));
+                assertSame(shared, follower.get(2, TimeUnit.SECONDS));
             }
         } finally {
             finish.countDown();
@@ -318,12 +321,138 @@ class WorkerBatcherSchedulingTest {
         }
     }
 
-    private WorkerBatcher runningRuntime(
-            FlexlbConfig config,
-            PrefillEndpoint endpoint,
-            DeliveryStrategy delivery) {
+    @ParameterizedTest
+    @CsvSource({
+            "NON_BATCH,SINGLE,1,0,single_request",
+            "BATCH,SINGLE,1,0,single_request",
+            "NON_BATCH,FIXED_WINDOW,2,60000,batch_full",
+            "BATCH,FIXED_WINDOW,2,60000,batch_full",
+            "NON_BATCH,FIXED_WINDOW,1,0,fixed_window_timeout",
+            "BATCH,FIXED_WINDOW,1,0,fixed_window_timeout"
+    })
+    void committedGroupIsVisibleBeforeDeliveryPublication(String dispatcher,
+                                                          String policy,
+                                                          int count,
+                                                          long windowMs,
+                                                          String expectedReason) throws Exception {
+        FlexlbConfig config = singleConfig();
+        if (dispatcher.equals("NON_BATCH")) {
+            config.setDispatcher(org.flexlb.config.DispatcherConfig.nonBatch());
+        }
+        if (policy.equals("FIXED_WINDOW")) {
+            var decision = SchedulingTestConfig.useFixedWindowDecision(config);
+            decision.setMaxRequests(2);
+            decision.setMaxCollectionWaitMs(windowMs);
+        }
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        when(endpoint.reserveRouteOwnership(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyLong()))
+                .thenAnswer(ignored -> new org.flexlb.balance.endpoint.PrefillState.ReservationResult<>(
+                        org.flexlb.balance.endpoint.PrefillState.CapacityStatus.ACQUIRED,
+                        mock(org.flexlb.balance.endpoint.PrefillState.RouteReservation.class)));
+        DeliveryStrategy delivery = mock(DeliveryStrategy.class);
+        List<org.flexlb.dao.pv.DecisionGroup> published = new CopyOnWriteArrayList<>();
+        when(delivery.prepare(org.mockito.ArgumentMatchers.anyList(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).thenAnswer(invocation -> {
+            List<ScheduledRequest> members = List.copyOf(invocation.getArgument(0));
+            var transaction = mock(DeliveryStrategy.Transaction.class);
+            when(transaction.items()).thenReturn(members);
+            org.mockito.Mockito.doAnswer(ignored -> {
+                for (ScheduledRequest member : members) {
+                    published.add(member.ctx().getDecisionGroup());
+                    member.future().complete(new Response());
+                }
+                return null;
+            }).when(transaction).handoff(
+                    org.mockito.ArgumentMatchers.anyString(),
+                    org.mockito.ArgumentMatchers.anyInt(),
+                    org.mockito.ArgumentMatchers.any());
+            return transaction;
+        });
+        WorkerBatcher runtime = runningRuntime(config, endpoint, delivery);
+        List<ScheduledRequest> requests = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            ScheduledRequest request = item(config, endpoint, 100L + i, 50, System.currentTimeMillis());
+            requests.add(request);
+            assertTrue(runtime.offer(request));
+        }
+        for (ScheduledRequest request : requests) {
+            request.future().get(5, TimeUnit.SECONDS);
+        }
+        assertEquals(count, published.size());
+        String id = published.getFirst().id();
+        assertNotNull(id);
+        for (var group : published) {
+            assertEquals(id, group.id());
+            assertEquals(count, group.committedSize());
+            assertEquals(expectedReason, group.reason());
+            assertEquals(policy, group.policy());
+            assertEquals(dispatcher, group.dispatcher());
+            assertEquals("10.0.0.1", group.worker());
+            assertTrue(group.requestWaitMs() >= 0L);
+        }
+    }
+
+    @Test
+    void windowUpdateInvalidatesProjectionWithoutQueueMutation() {
+        FlexlbConfig initial = fixedConfig();
+        initial.decisionPolicy().setMaxCollectionWaitMs(100L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-projection", stableEndpoint(stableStatus()),
+                current::get, mock(DeliveryStrategy.class), mock(EndpointEventProjector.class));
+        runtimes.add(runtime);
+        runtime.start();
+
+        var before = runtime.captureRouteProjectionInputs();
+        assertEquals(100L, before.queue().constraints().collectionWindowMs());
+        assertSame(before, runtime.captureRouteProjectionInputs());
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxCollectionWaitMs(500L);
+        current.set(updated);
+        var after = runtime.captureRouteProjectionInputs();
+        assertEquals(500L, after.queue().constraints().collectionWindowMs());
+        assertSame(after, runtime.captureRouteProjectionInputs());
+        assertEquals(before.queue().activeItems(), after.queue().activeItems());
+        assertEquals(100L, before.queue().constraints().collectionWindowMs());
+
+        current.set(initial);
+        assertEquals(100L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void existingRuntimeUsesUpdatedWindowOnNextDecision(boolean increaseWindow) throws Exception {
+        FlexlbConfig initial = fixedConfig();
+        initial.decisionPolicy().setMaxPredictedExecutionMs(null);
+        initial.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 0L : 60_000L);
+        AtomicReference<FlexlbConfig> current = new AtomicReference<>(initial);
+        PrefillEndpoint endpoint = stableEndpoint(stableStatus());
+        EventDrivenBlock delivery = new EventDrivenBlock();
+        WorkerBatcher runtime = new WorkerBatcher("hot-window-delivery", endpoint, current::get, delivery,
+                mock(EndpointEventProjector.class));
+        runtimes.add(runtime);
+        runtime.start();
+
+        FlexlbConfig updated = fixedConfig();
+        updated.decisionPolicy().setMaxPredictedExecutionMs(null);
+        updated.decisionPolicy().setMaxCollectionWaitMs(increaseWindow ? 60_000L : 0L);
+        current.set(updated);
+        assertEquals(increaseWindow ? 60_000L : 0L,
+                runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+        assertTrue(runtime.offer(item(initial, endpoint, 77L, 50, System.currentTimeMillis())));
+        if (increaseWindow) {
+            current.set(initial);
+            assertEquals(0L, runtime.captureRouteProjectionInputs().queue().constraints().collectionWindowMs());
+            runtime.signalSchedulingInputsChanged();
+        }
+        await(delivery.firstAttempt);
+    }
+
+    private WorkerBatcher runningRuntime(FlexlbConfig config, PrefillEndpoint endpoint, DeliveryStrategy delivery) {
         WorkerBatcher runtime = new WorkerBatcher(
-                "scheduling-test", endpoint, config, delivery,
+                "scheduling-test", endpoint, () -> config, delivery,
                 mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();
@@ -357,7 +486,7 @@ class WorkerBatcherSchedulingTest {
             int priority,
             long enqueuedAtMs) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setPriority(priority);
         request.setSeqLen(10L);
         BalanceContext context = new BalanceContext(config);
@@ -389,6 +518,7 @@ class WorkerBatcherSchedulingTest {
     private static WorkerStatus stableStatus() {
         WorkerStatus status = mock(WorkerStatus.class);
         when(status.committedEngineObservation()).thenReturn(capacity());
+        when(status.getMetricIpPort()).thenReturn("10.0.0.1");
         return status;
     }
 

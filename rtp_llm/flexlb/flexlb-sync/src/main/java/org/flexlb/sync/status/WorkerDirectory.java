@@ -3,8 +3,9 @@ package org.flexlb.sync.status;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.slf4j.Logger;
 import org.springframework.stereotype.Component;
@@ -28,10 +29,9 @@ import java.util.function.Supplier;
  * hiding it behind a derived capacity value.</p>
  */
 @Component
-public final class WorkerDirectory {
+public final class WorkerDirectory implements WorkerStatusProvider {
 
-    private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>>
-            statusesByRole = new EnumMap<>(RoleType.class);
+    private final Map<RoleType, ConcurrentHashMap<String, WorkerStatus>> statusesByRole = new EnumMap<>(RoleType.class);
     private final EndpointRegistry endpointRegistry;
 
     public WorkerDirectory(EndpointRegistry endpointRegistry) {
@@ -48,6 +48,21 @@ public final class WorkerDirectory {
             return Map.of();
         }
         return Map.copyOf(statusesByRole.get(role));
+    }
+
+    @Override
+    public List<WorkerStatus> getWorkerStatuses(RoleType role, String group) {
+        if (role == null) {
+            return List.of();
+        }
+        List<WorkerStatus> statuses = List.copyOf(
+                statusSnapshot(role).values());
+        if (group == null) {
+            return statuses;
+        }
+        return statuses.stream()
+                .filter(status -> group.equals(status.getGroup()))
+                .toList();
     }
 
     /** Identity check used by asynchronous callbacks under the status lock. */
@@ -73,7 +88,7 @@ public final class WorkerDirectory {
             WorkerStatus discovered = Objects.requireNonNull(
                     discoveredFactory.get(), "discovered status");
             if (discovered.getRole() != role
-                    || !address.equals(discovered.getIpPort())) {
+                    || !address.equals(discovered.getLogicalIpPort())) {
                 throw new IllegalArgumentException(
                         "Discovered WorkerStatus identity does not match directory key");
             }
@@ -244,9 +259,6 @@ public final class WorkerDirectory {
     /** Immutable Decode routing values for one group. */
     public List<DecodeEndpoint.DecodeRoutingView> decodeRoutingSnapshot(
             String group) {
-        // The selector copies this lazy view into its primitive candidate
-        // buffer in one pass. Avoid an intermediate immutable list when no
-        // group filter is needed.
         List<DecodeEndpoint.DecodeRoutingView> snapshots =
                 endpointRegistry.decodeRoutingSnapshot();
         if (group == null || snapshots.isEmpty()) {
@@ -254,8 +266,7 @@ public final class WorkerDirectory {
         }
         ArrayList<DecodeEndpoint.DecodeRoutingView> matching =
                 new ArrayList<>(snapshots.size());
-        for (int index = 0; index < snapshots.size(); index++) {
-            DecodeEndpoint.DecodeRoutingView snapshot = snapshots.get(index);
+        for (DecodeEndpoint.DecodeRoutingView snapshot : snapshots) {
             if (group.equals(snapshot.topology().group())) {
                 matching.add(snapshot);
             }
@@ -317,4 +328,5 @@ public final class WorkerDirectory {
             }
         }
     }
+
 }

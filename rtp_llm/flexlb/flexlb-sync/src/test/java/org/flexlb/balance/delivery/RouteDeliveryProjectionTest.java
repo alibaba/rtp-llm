@@ -33,7 +33,7 @@ class RouteDeliveryProjectionTest {
 
     private static GroupPlanner.Item item(long id, long seqLen) {
         return new GroupPlanner.Item(
-                id, 0, id, 1000L, 1_000_000L, seqLen, 0L);
+                Long.toString(id), 0, id, 1000L, 1_000_000L, seqLen, 0L);
     }
 
     private static GroupPlanner.Plan<GroupPlanner.Item> plan(
@@ -188,18 +188,18 @@ class RouteDeliveryProjectionTest {
     private static final class CountingPredictions
             implements RouteProjection.Predictions {
 
-        private final Map<Long, Integer> itemCalls = new HashMap<>();
-        private Set<Long> failingIds = Set.of();
+        private final Map<String, Integer> itemCalls = new HashMap<>();
+        private Set<String> failingIds = Set.of();
         private int batchDurationCalls;
 
         void failOn(long... ids) {
-            var set = new java.util.HashSet<Long>();
-            for (long id : ids) set.add(id);
+            var set = new java.util.HashSet<String>();
+            for (long id : ids) set.add(Long.toString(id));
             this.failingIds = set;
         }
 
         int itemCalls(long id) {
-            return itemCalls.getOrDefault(id, 0);
+            return itemCalls.getOrDefault(Long.toString(id), 0);
         }
 
         int batchDurationCalls() {
