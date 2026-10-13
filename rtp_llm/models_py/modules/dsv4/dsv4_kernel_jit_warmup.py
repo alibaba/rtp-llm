@@ -2752,7 +2752,6 @@ _WO_A_GROUPED_JIT_WARMED_KEYS: set[tuple] = set()
 # GPU, and the strategy pulls in DeepGEMM and Triton at module scope.
 _GROUPED_FP8_ALIGNMENT = 128
 _GROUPED_FP8_MASKED_TILE = 64
-_GROUPED_FP8_MASKED_MAX_N = 1024
 
 
 def _align_up(value: int, alignment: int) -> int:
@@ -2789,7 +2788,13 @@ def _collect_dsv4_grouped_fp8_moe_shapes(model: Any) -> Dict[tuple[int, ...], di
         )
         if key in shapes:
             continue
-        shapes[key] = {"name": module_name, "ep_size": ep_size, **operands}
+        shapes[key] = {
+            "name": module_name,
+            "ep_size": ep_size,
+            "ll_capacity": int(getattr(module, "_ll_capacity", 0)),
+            "swiglu_limit": float(getattr(cfg, "swiglu_limit", 0.0)),
+            **operands,
+        }
     return shapes
 
 
@@ -2804,8 +2809,21 @@ def _grouped_fp8_masked_m_values(
     ``t_rows = min(max_m, align(N, 64))``, which are the same two values the
     strategy computes.
     """
+    from rtp_llm.models_py.modules.dsv4.grouped_fp8_config import masked_max_n
+
     n_tokens = max(int(tokens_per_rank), 1) * max(int(ep_size), 1)
-    if n_tokens > _GROUPED_FP8_MASKED_MAX_N:
+    if int(ep_size) == 1:
+        # Without an EP exchange budget, smaller capture sizes reach smaller
+        # expected_m and ROWS_PER_E specializations. Warm every 64-row bucket.
+        n_tokens = min(n_tokens, masked_max_n())
+        last = _align_up(n_tokens, _GROUPED_FP8_MASKED_TILE)
+        return tuple(
+            sorted(
+                set(range(_GROUPED_FP8_MASKED_TILE, last + 1, _GROUPED_FP8_MASKED_TILE))
+                | {_align_up(n_tokens, _GROUPED_FP8_ALIGNMENT)}
+            )
+        )
+    if n_tokens > masked_max_n():
         # The strategy refuses the masked layout past this, so nothing to warm.
         return ()
     max_m = _align_up(n_tokens, _GROUPED_FP8_ALIGNMENT)
@@ -2843,12 +2861,25 @@ def _launch_dummy_grouped_fp8_contiguous(
     ).transpose(0, 1)
     gate_up = torch.empty((m_value, two_inter), dtype=torch.bfloat16, device=device)
     m_grouped_fp8_gemm_nt_contiguous((a_fp8, a_scale), (w13, s13), gate_up, m_indices)
-    del a_fp8, a_scale, gate_up
+    del a_fp8, a_scale
 
-    h_fp8 = torch.zeros((m_value, inter), dtype=torch.float8_e4m3fn, device=device)
-    h_scale = torch.zeros(
-        (inter // _GROUPED_FP8_ALIGNMENT, m_value), dtype=torch.float32, device=device
-    ).transpose(0, 1)
+    from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+        _fused_swiglu_enabled,
+        _silu_mul_quant_fp32scale,
+    )
+
+    if _fused_swiglu_enabled():
+        h_fp8, h_scale = _silu_mul_quant_fp32scale(
+            gate_up.unsqueeze(0), inter, info.get("swiglu_limit", 0.0)
+        )
+    else:
+        h_fp8 = torch.zeros((m_value, inter), dtype=torch.float8_e4m3fn, device=device)
+        h_scale = torch.zeros(
+            (inter // _GROUPED_FP8_ALIGNMENT, m_value),
+            dtype=torch.float32,
+            device=device,
+        ).transpose(0, 1)
+    del gate_up
     down = torch.empty((m_value, dim), dtype=torch.bfloat16, device=device)
     m_grouped_fp8_gemm_nt_contiguous((h_fp8, h_scale), (w2, s2), down, m_indices)
 
@@ -2893,12 +2924,33 @@ def _launch_dummy_grouped_fp8_masked(
         masked_m,
         expected_m=m_value,
     )
-    del scatter_out, scatter_out_scale, gate_up
+    del scatter_out, scatter_out_scale
 
-    h_fp8 = torch.zeros((rows, inter), dtype=torch.float8_e4m3fn, device=device)
-    h_scale = torch.zeros(
-        [inter // _GROUPED_FP8_ALIGNMENT, rows], device=device, dtype=torch.float32
-    ).transpose(0, 1)
+    from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
+        _fused_swiglu_enabled,
+        _silu_mul_quant_fp32scale,
+    )
+
+    if _fused_swiglu_enabled():
+        h_fp8, h_scale = _silu_mul_quant_fp32scale(
+            gate_up, inter, info.get("swiglu_limit", 0.0)
+        )
+        # The non-LL runtime slices a 64-row prefix out of 128-row expert
+        # segments. Compile this strided-view variant outside capture too.
+        padded_m = _align_up(m_value, _GROUPED_FP8_ALIGNMENT)
+        if padded_m != m_value:
+            padded = torch.zeros(
+                (experts, padded_m, two_inter), dtype=torch.bfloat16, device=device
+            )
+            _silu_mul_quant_fp32scale(
+                padded[:, :m_value], inter, info.get("swiglu_limit", 0.0)
+            )
+    else:
+        h_fp8 = torch.zeros((rows, inter), dtype=torch.float8_e4m3fn, device=device)
+        h_scale = torch.zeros(
+            [inter // _GROUPED_FP8_ALIGNMENT, rows], device=device, dtype=torch.float32
+        ).transpose(0, 1)
+    del gate_up
     down = torch.zeros((experts, m_value, dim), dtype=torch.bfloat16, device=device)
     m_grouped_fp8_gemm_nt_masked(
         (
@@ -2924,8 +2976,9 @@ def warmup_grouped_fp8_moe_jit(
     Both layouts are warmed. The contiguous one is warmed at a single M: prefill
     runs it at ``sum_e align(count_e, 128)``, which differs on every request and
     does not recompile, so M is not part of its key. The masked one is warmed at
-    the two ``expected_m`` values decode reaches, which *is* a hint the kernel
-    reads.
+    all reachable ``expected_m`` values: two for a fixed EP exchange, every
+    64-row bucket for EP=1, or the actual DeepEP LL receive capacity. The fused
+    SwiGLU specializations are compiled along with their GEMMs.
 
     On the decode role this overlaps with the engine's own pre-capture warmup:
     ``CudaGraphRunner::initCapture`` runs one eager forward with
@@ -2948,9 +3001,16 @@ def warmup_grouped_fp8_moe_jit(
         launches: list[tuple[str, int]] = [
             ("contiguous", _GROUPED_FP8_ALIGNMENT),
         ]
-        for m_value in _grouped_fp8_masked_m_values(
-            tokens_per_rank=tokens_per_rank, ep_size=int(shapes[key]["ep_size"])
-        ):
+        info = shapes[key]
+        ll_capacity = int(info.get("ll_capacity", 0))
+        masked_values = (
+            (ll_capacity * int(info["ep_size"]),)
+            if ll_capacity
+            else _grouped_fp8_masked_m_values(
+                tokens_per_rank=tokens_per_rank, ep_size=int(info["ep_size"])
+            )
+        )
+        for m_value in masked_values:
             launches.append(("masked", m_value))
         plans[key] = tuple(launches)
 

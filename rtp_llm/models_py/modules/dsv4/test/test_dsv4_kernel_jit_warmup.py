@@ -851,6 +851,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         self.assertEqual({split for split, _ in specs}, {1})
 
     def test_mhc_warmup_launches_prenorm_gemm_and_pre_big_fuse(self):
+        sms_patch = mock.patch.object(
+            mhc_prenorm_backend, "device_num_sms", return_value=148
+        )
+        sms_patch.start()
+        self.addCleanup(sms_patch.stop)
         calls = []
         shapes = {
             (24, 16384): {
@@ -878,9 +883,6 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
             old_values["_assert_not_capturing"] = with_patch(
                 "_assert_not_capturing", lambda: None
-            )
-            old_values["_get_deep_gemm_num_sms"] = with_patch(
-                "_get_deep_gemm_num_sms", lambda device: 148
             )
             old_values["_mhc_prenorm_backend"] = with_patch(
                 "_mhc_prenorm_backend", lambda: mhc_prenorm_backend.DEEPGEMM
@@ -935,6 +937,11 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         )
 
     def test_mhc_tilelang_single_warmup_uses_runtime_wrapper(self):
+        sms_patch = mock.patch.object(
+            mhc_prenorm_backend, "device_num_sms", return_value=148
+        )
+        sms_patch.start()
+        self.addCleanup(sms_patch.stop)
         calls = []
         shapes = {
             (24, 16384): {
@@ -962,9 +969,6 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
             )
             old_values["_assert_not_capturing"] = with_patch(
                 "_assert_not_capturing", lambda: None
-            )
-            old_values["_get_deep_gemm_num_sms"] = with_patch(
-                "_get_deep_gemm_num_sms", lambda device: 148
             )
             old_values["_mhc_prenorm_backend"] = with_patch(
                 "_mhc_prenorm_backend", lambda: mhc_prenorm_backend.TILELANG_SINGLE
@@ -1753,16 +1757,21 @@ class GroupedFp8AndWoAWarmupCollectorTest(unittest.TestCase):
             _grouped_fp8_masked_m_values(tokens_per_rank=8, ep_size=8), (64, 128)
         )
 
-    def test_masked_m_values_empty_past_the_refusal_cap(self):
-        """Prefill never masks, so there is nothing to warm for it."""
+    def test_ep1_warms_every_reachable_bucket_up_to_the_capacity(self):
         self.assertEqual(
             _grouped_fp8_masked_m_values(tokens_per_rank=16384, ep_size=4), ()
         )
         self.assertEqual(
-            _grouped_fp8_masked_m_values(tokens_per_rank=1024, ep_size=1), (1024,)
+            _grouped_fp8_masked_m_values(tokens_per_rank=1024, ep_size=1),
+            tuple(range(64, 1025, 64)),
         )
         self.assertEqual(
-            _grouped_fp8_masked_m_values(tokens_per_rank=1025, ep_size=1), ()
+            _grouped_fp8_masked_m_values(tokens_per_rank=1025, ep_size=1),
+            tuple(range(64, 1025, 64)),
+        )
+        self.assertEqual(
+            _grouped_fp8_masked_m_values(tokens_per_rank=129, ep_size=1),
+            (64, 128, 192, 256),
         )
 
     def test_collect_grouped_fp8_shapes(self):
@@ -1862,12 +1871,22 @@ class GroupedFp8AndWoAWarmupCollectorTest(unittest.TestCase):
                 shapes, tokens_per_rank=8, device=torch.device("cpu")
             )
 
+            # LL receives fixed rows from its rounded buffer capacity, not the
+            # requested concurrency. This also warms fused SwiGLU without graphs.
+            for info in shapes.values():
+                info["ll_capacity"] = 64
+            warmup_grouped_fp8_moe_jit(
+                shapes, tokens_per_rank=8, device=torch.device("cpu")
+            )
+
         # conc 8 over ep 4: one contiguous at the 128 alignment, then the two
         # masked expected_m values (t_rows 64 and max_m 128).
-        self.assertEqual(len(seen), 3, seen)
+        self.assertEqual(len(seen), 5, seen)
         self.assertIn("contiguous m=128", seen[0])
         self.assertIn("masked m=64", seen[1])
         self.assertIn("masked m=128", seen[2])
+        self.assertIn("contiguous m=128", seen[3])
+        self.assertIn("masked m=256", seen[4])
 
     def test_grouped_fp8_plan_is_contiguous_only_for_prefill_shapes(self):
         """Past the masked cap only the contiguous launch remains."""

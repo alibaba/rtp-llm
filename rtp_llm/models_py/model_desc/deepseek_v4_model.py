@@ -375,6 +375,9 @@ class DeepSeekV4Model(GptModelBase):
             moe_config=moe_config,
         )
         self._max_generate_batch_size = int(max_generate_batch_size)
+        args.enable_cuda_graph = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
+        )
         assert self._max_generate_batch_size > 0, (
             "max_generate_batch_size must be positive, "
             f"got {self._max_generate_batch_size}"

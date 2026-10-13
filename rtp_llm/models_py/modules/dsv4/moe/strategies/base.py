@@ -26,6 +26,7 @@ class MoeCfg:
     local_expert_end: int
     max_tokens_per_rank: int
     is_decode_role: bool = False
+    enable_cuda_graph: bool = False
 
 
 class RoutedExpertsStrategy(nn.Module):

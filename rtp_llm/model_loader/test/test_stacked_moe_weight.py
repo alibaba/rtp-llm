@@ -6,6 +6,7 @@ Covers:
   - ModelLoader._build_stacked_key_config: stacked key mapping construction
 """
 
+import types
 import unittest
 from typing import Dict, List
 from unittest.mock import MagicMock

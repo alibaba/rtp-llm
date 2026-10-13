@@ -20,6 +20,7 @@ Everything runs on CPU: the converter picks its device from
 
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -281,6 +282,7 @@ class ConvertScriptEndToEndTest(unittest.TestCase):
             self.assertIn("FAILED", proc.stdout)
             self.assertIn("layers.0.ffn.experts.0.w1", proc.stdout)
             self.assertIn("block_span=", proc.stdout)
+            self.assertFalse(os.path.exists(os.path.join(dst, "config.json")))
 
     def test_no_verify_skips_the_check_and_says_so(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -295,12 +297,96 @@ class ConvertScriptEndToEndTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             src, dst = os.path.join(tmp, "fp4"), os.path.join(tmp, "fp8")
             self._make_checkpoint(src, wide_block=False)
+            # Two shards, of which --limit 1 selects only the first.
+            shutil.copy2(
+                os.path.join(src, "model-00001-of-00001.safetensors"),
+                os.path.join(src, "model-00002-of-00002.safetensors"),
+            )
             proc = self._run(src, dst, "--limit", "1")
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             config = self._read_json(os.path.join(dst, "config.json"))
             self.assertNotIn("expert_dtype", config)
             index = self._read_json(os.path.join(dst, "model.safetensors.index.json"))
             self.assertEqual(index["metadata"]["total_size"], 1)
+
+    def test_limit_covering_all_shards_publishes_fp8_metadata(self):
+        for limit in (1, 2):
+            with self.subTest(limit=limit), tempfile.TemporaryDirectory() as tmp:
+                src, dst = os.path.join(tmp, "fp4"), os.path.join(tmp, "fp8")
+                self._make_checkpoint(src, wide_block=False)
+                proc = self._run(src, dst, "--limit", str(limit))
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertEqual(
+                    self._read_json(os.path.join(dst, "config.json"))["expert_dtype"],
+                    "fp8",
+                )
+                index = self._read_json(
+                    os.path.join(dst, "model.safetensors.index.json")
+                )
+                self.assertGreater(index["metadata"]["total_size"], _N * _K)
+
+    def test_already_converted_checkpoint_can_be_processed_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst, rerun = (
+                os.path.join(tmp, name) for name in ("fp4", "fp8", "rerun")
+            )
+            self._make_checkpoint(src, wide_block=False)
+            for source, target in ((src, dst), (dst, rerun)):
+                proc = self._run(source, target)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            for name in (
+                "model-00001-of-00001.safetensors",
+                "config.json",
+                "model.safetensors.index.json",
+            ):
+                with open(os.path.join(dst, name), "rb") as original, open(
+                    os.path.join(rerun, name), "rb"
+                ) as repeated:
+                    self.assertEqual(original.read(), repeated.read(), name)
+
+    def test_failed_shard_conversion_preserves_existing_destination(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._make_checkpoint(tmp, wide_block=False)
+            src = os.path.join(tmp, "model-00001-of-00001.safetensors")
+            dst = os.path.join(tmp, "existing.safetensors")
+            with open(dst, "wb") as handle:
+                handle.write(b"previous complete shard")
+            with mock.patch.object(
+                conv,
+                "convert_expert",
+                side_effect=RuntimeError("conversion interrupted"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "conversion interrupted"):
+                    conv.convert_file(src, dst, "cpu", {})
+            with open(dst, "rb") as handle:
+                self.assertEqual(handle.read(), b"previous complete shard")
+            self.assertFalse(
+                any(name.startswith(".fp8-shard-") for name in os.listdir(tmp))
+            )
+
+    def test_malformed_expert_is_rejected_before_output_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, dst = os.path.join(tmp, "fp4"), os.path.join(tmp, "fp8")
+            self._make_checkpoint(src, wide_block=False)
+            _write_safetensors(
+                os.path.join(src, "model-00001-of-00001.safetensors"),
+                {
+                    "layers.0.ffn.experts.0.w1.weight": (
+                        "I8",
+                        (_N, _K_PACKED),
+                        _pack_codes(_uniform_codes()).tobytes(),
+                    )
+                },
+            )
+            proc = self._run(src, dst)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("missing its UE8M0 scale", proc.stderr)
+            self.assertFalse(os.path.exists(os.path.join(dst, "config.json")))
+            self.assertFalse(
+                os.path.exists(os.path.join(dst, "model-00001-of-00001.safetensors"))
+            )
 
 
 if __name__ == "__main__":

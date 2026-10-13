@@ -42,6 +42,7 @@ import os
 import sys
 import unittest
 from contextlib import contextmanager
+from unittest import mock
 
 import torch
 
@@ -207,6 +208,55 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
                     f"n_tokens={n_tokens}: max|diff|="
                     f"{(y_contig.float() - y_masked.float()).abs().max().item()}",
                 )
+
+    def test_00_startup_warms_smaller_ep1_graph_buckets_and_swiglu(self):
+        from rtp_llm.models_py.modules.dsv4 import dsv4_kernel_jit_warmup as warmup
+        from rtp_llm.models_py.modules.dsv4.moe.strategies import grouped_fp8
+
+        shapes = warmup._collect_dsv4_grouped_fp8_moe_shapes(self.strategy)
+        warmup._GROUPED_FP8_MOE_JIT_WARMED_KEYS.clear()
+        with _env(DSV4_MOE_FUSED_SWIGLU="1", DSV4_MOE_MASKED="1"), mock.patch.object(
+            warmup, "model_warm_up_enabled", return_value=True
+        ), mock.patch.object(
+            grouped_fp8,
+            "_silu_mul_quant_fp32scale",
+            wraps=grouped_fp8._silu_mul_quant_fp32scale,
+        ) as fused:
+            warmup.warmup_grouped_fp8_moe_jit(
+                shapes, tokens_per_rank=129, device=torch.device(self.device)
+            )
+            warmed_rows = {
+                call.args[0].shape[1]
+                for call in fused.call_args_list
+                if call.args[0].shape[0] == _E
+            }
+            self.assertTrue({64, 128, 192, 256}.issubset(warmed_rows), warmed_rows)
+            for n_tokens in (1, 65, 129):
+                with self.subTest(n_tokens=n_tokens):
+                    inputs = _inputs(n_tokens, self.device, seed=8000 + n_tokens)
+                    # The graph runner warms its ordinary scatter/quant kernels
+                    # eagerly; startup must have compiled the grouped GEMMs and
+                    # the ROWS_PER_E-specific fused kernel before that forward.
+                    expected = self.strategy(*inputs)
+                    torch.cuda.synchronize()
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        actual = self.strategy(*inputs)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_configured_capacity_above_1024_matches_eager_and_captures(self):
+        with _env(DSV4_MOE_MASKED_MAX_N="1152", DSV4_MOE_MASKED="1"):
+            inputs = _inputs(1025, self.device, seed=9025)
+            expected = self.strategy(*inputs)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = self.strategy(*inputs)
+            graph.replay()
+            torch.cuda.synchronize()
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
     def test_masked_at_the_cap_agrees_within_fp8_granularity(self):
         """At ``_MASKED_MAX_N`` the two layouts stop being bit-identical.

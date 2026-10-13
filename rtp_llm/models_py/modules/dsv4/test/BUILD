@@ -203,6 +203,20 @@ py_test(
 )
 
 py_test(
+    name = "grouped_fp8_ep_ragged_test",
+    srcs = ["grouped_fp8_ep_ragged_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "4",
+    },
+    tags = ["H20"],
+)
+
+py_test(
     name = "wo_a_sm90_gemm_test",
     srcs = ["wo_a_sm90_gemm_test.py"],
     deps = [

@@ -57,6 +57,7 @@ import os
 import shutil
 import struct
 import sys
+import tempfile
 import time
 
 import numpy as np
@@ -226,6 +227,20 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device, verify=True):
 
 def plan_file(header):
     """Decide the output spec for every tensor, preserving source order."""
+    for name, spec in header.items():
+        if name == "__metadata__" or not is_expert_weight(name, spec):
+            continue
+        scale_name = name[: -len(".weight")] + ".scale"
+        scale = header.get(scale_name)
+        n, packed_k = spec["shape"]
+        if scale is None or not is_expert_scale(scale_name, scale):
+            raise ValueError(f"FP4 expert {name} is missing its UE8M0 scale")
+        if n % FP8_BLOCK or (packed_k * 2) % FP8_BLOCK:
+            raise ValueError(
+                f"FP4 expert {name} shape is not a multiple of {FP8_BLOCK}"
+            )
+        if scale["shape"] != [n, packed_k * 2 // FP4_GROUP]:
+            raise ValueError(f"FP4 expert {name} has an incompatible scale shape")
     plan = []
     for name, spec in header.items():
         if name == "__metadata__":
@@ -233,7 +248,10 @@ def plan_file(header):
         if is_expert_weight(name, spec):
             n, k_packed = spec["shape"]
             plan.append((name, spec, "weight", "F8_E4M3", [n, k_packed * 2]))
-        elif is_expert_scale(name, spec):
+        elif is_expert_scale(name, spec) and is_expert_weight(
+            name[: -len(".scale")] + ".weight",
+            header.get(name[: -len(".scale")] + ".weight", {"dtype": "", "shape": []}),
+        ):
             n, k_groups = spec["shape"]
             k = k_groups * FP4_GROUP
             plan.append(
@@ -245,9 +263,28 @@ def plan_file(header):
 
 
 def convert_file(src, dst, device, stats, verify=True):
+    """Publish a complete shard atomically; a failed conversion keeps dst intact."""
+    with tempfile.NamedTemporaryFile(
+        dir=os.path.dirname(os.path.abspath(dst)), prefix=".fp8-shard-", delete=False
+    ) as temporary:
+        temporary_path = temporary.name
+    try:
+        _convert_file(src, temporary_path, device, stats, verify=verify)
+        os.replace(temporary_path, dst)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+
+def _convert_file(src, dst, device, stats, verify=True):
     header, data_start = read_header(src)
     metadata = header.get("__metadata__")
     plan = plan_file(header)
+    if all(kind == "copy" for _, _, kind, _, _ in plan):
+        # UE8M0 scales are also present in already-converted FP8 checkpoints.
+        # Copy them together with their FP8 weights, without rewriting the pair.
+        shutil.copy2(src, dst)
+        return
 
     out_header = {}
     cursor = 0
@@ -357,13 +394,25 @@ def main():
         help="convert only the first N shards, for a quick check",
     )
     args = ap.parse_args()
+    if args.limit < 0:
+        ap.error("--limit must be non-negative")
+    if os.path.realpath(args.src) == os.path.realpath(args.dst):
+        ap.error("--src and --dst must be different directories")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.dst, exist_ok=True)
 
-    shards = sorted(f for f in os.listdir(args.src) if f.endswith(".safetensors"))
+    all_shards = sorted(f for f in os.listdir(args.src) if f.endswith(".safetensors"))
+    if not all_shards:
+        ap.error("--src contains no safetensors shards")
+    shards = all_shards
     if args.limit:
         shards = shards[: args.limit]
+    partial = len(shards) < len(all_shards)
+    # Reject malformed FP4 pairs before copying checkpoint metadata or shards.
+    for shard in shards:
+        header, _ = read_header(os.path.join(args.src, shard))
+        plan_file(header)
 
     # Everything that is not a shard rides along unchanged, except that the
     # config must now advertise FP8 experts so the loader picks the FP8 path.
@@ -371,6 +420,7 @@ def main():
     # of the checkpoint (encoding/encoding_dsv4.py, inference/) that the loader
     # imports by path, so a converted checkpoint missing them cannot start.
     index_entries = []
+    config_entries = []
     for entry in sorted(os.listdir(args.src)):
         src_path = os.path.join(args.src, entry)
         if entry.endswith(".safetensors"):
@@ -386,18 +436,9 @@ def main():
         if os.path.isdir(src_path):
             shutil.copytree(src_path, dst_path, dirs_exist_ok=True)
         elif entry == "config.json":
-            if args.limit:
-                # A sampled run is not a loadable checkpoint: most shards are
-                # missing, so stamping expert_dtype=fp8 would produce a directory
-                # that claims to be convertible-and-converted and fails much later
-                # inside the loader.
-                shutil.copy2(src_path, dst_path)
-                print("config.json: copied unchanged (--limit: partial output)")
-            else:
-                cfg = json.load(open(src_path))
-                cfg["expert_dtype"] = "fp8"
-                json.dump(cfg, open(dst_path, "w"), indent=2)
-                print("config.json: expert_dtype -> fp8")
+            # The converted marker is published only after all shards and their
+            # exactness checks succeed, never before the first expert is read.
+            config_entries.append((src_path, dst_path))
         else:
             shutil.copy2(src_path, dst_path)
 
@@ -429,7 +470,7 @@ def main():
         )
 
     for src_path, dst_path in index_entries:
-        if args.limit:
+        if partial:
             shutil.copy2(src_path, dst_path)
             print(
                 f"{os.path.basename(src_path)}: copied unchanged (--limit: "
@@ -456,6 +497,19 @@ def main():
             f"{os.path.basename(src_path)}: total_size {old_total} -> {total} "
             f"({total / 2**30:.1f} GiB)"
         )
+
+    if not args.verify or not stats["inexact"]:
+        for src_path, dst_path in config_entries:
+            if partial:
+                shutil.copy2(src_path, dst_path)
+                print("config.json: copied unchanged (--limit: partial output)")
+            else:
+                with open(src_path) as handle:
+                    cfg = json.load(handle)
+                cfg["expert_dtype"] = "fp8"
+                with open(dst_path, "w") as handle:
+                    json.dump(cfg, handle, indent=2)
+                print("config.json: expert_dtype -> fp8")
 
     print(
         f"\nconverted {stats['tensors']} expert weights in {(time.time() - t0) / 60:.1f} min"

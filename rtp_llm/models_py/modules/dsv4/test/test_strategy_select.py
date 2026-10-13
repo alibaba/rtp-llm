@@ -201,7 +201,9 @@ class GroupedFP8CaptureGuardTest(unittest.TestCase):
     def _strategy(self, ep_size: int, max_tokens_per_rank: int) -> GroupedFP8Strategy:
         # MoeCfg is immutable, so the bound is set by rebuilding it.
         cfg = dataclasses.replace(
-            _cfg(ep_size=ep_size), max_tokens_per_rank=max_tokens_per_rank
+            _cfg(ep_size=ep_size),
+            max_tokens_per_rank=max_tokens_per_rank,
+            is_decode_role=True,
         )
         strat = GroupedFP8Strategy(cfg)
         strat._captured_ns = set()
@@ -372,8 +374,9 @@ class GroupedFP8ShouldMaskTest(unittest.TestCase):
             DSV4_MOE_MASKED="0", RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD="1"
         ), mock.patch(self.CAPTURING, return_value=False):
             self.assertTrue(GroupedFP8Strategy._should_mask(8))
-            # Still refused past the cap, and without raising: not capturing yet.
-            self.assertFalse(GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1))
+            # Fail during eager pre-capture warmup, before capture begins.
+            with self.assertRaisesRegex(RuntimeError, "DSV4_MOE_MASKED_MAX_N"):
+                GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1)
 
     def test_pre_capture_flag_off_leaves_the_contiguous_path(self):
         with _env(
@@ -384,8 +387,48 @@ class GroupedFP8ShouldMaskTest(unittest.TestCase):
     def test_capture_past_the_cap_raises(self):
         """Capture cannot express the contiguous path, so this must not fall back."""
         with _env(DSV4_MOE_MASKED="1"), mock.patch(self.CAPTURING, return_value=True):
-            with self.assertRaisesRegex(RuntimeError, "_MASKED_MAX_N"):
+            with self.assertRaisesRegex(RuntimeError, "DSV4_MOE_MASKED_MAX_N"):
                 GroupedFP8Strategy._should_mask(_MASKED_MAX_N + 1)
+
+    def test_configured_capacity_accepts_larger_capture_shapes(self):
+        with _env(DSV4_MOE_MASKED_MAX_N="2048"), mock.patch(
+            self.CAPTURING, return_value=True
+        ):
+            self.assertTrue(GroupedFP8Strategy._should_mask(2048))
+            with self.assertRaisesRegex(RuntimeError, "2049.*2048"):
+                GroupedFP8Strategy._should_mask(2049)
+
+    def test_invalid_capacity_is_rejected_without_cuda(self):
+        for value in ("0", "-1", "not-an-int"):
+            with self.subTest(value=value), _env(
+                DSV4_MOE_MASKED_MAX_N=value
+            ), mock.patch(self.CAPTURING, return_value=True):
+                with self.assertRaisesRegex(ValueError, "DSV4_MOE_MASKED_MAX_N"):
+                    GroupedFP8Strategy._should_mask(1)
+
+    def test_graph_capacity_and_role_are_validated_at_initialization(self):
+        with _env(DSV4_MOE_DEEPEP_LL="0", DSV4_MOE_MASKED_MAX_N="1024"):
+            cfg = dataclasses.replace(
+                _cfg(ep_size=4),
+                max_tokens_per_rank=512,
+                is_decode_role=True,
+                enable_cuda_graph=True,
+            )
+            with self.assertRaisesRegex(ValueError, "DSV4_MOE_MASKED_MAX_N"):
+                GroupedFP8Strategy(cfg)
+            with _env(DSV4_MOE_MASKED_MAX_N="2048"):
+                GroupedFP8Strategy(cfg)
+            cfg = dataclasses.replace(cfg, is_decode_role=False)
+            with self.assertRaisesRegex(ValueError, "DECODE role"):
+                GroupedFP8Strategy(cfg)
+            # EP=1 PDFUSION can capture small decode sizes even when its
+            # prefill capacity is much larger than the masked limit.
+            GroupedFP8Strategy(
+                dataclasses.replace(
+                    _cfg(ep_size=1),
+                    enable_cuda_graph=True,
+                )
+            )
 
 
 if __name__ == "__main__":

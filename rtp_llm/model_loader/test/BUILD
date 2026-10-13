@@ -5,7 +5,7 @@ py_test_deps = [
 py_test(
     name = "test_stacked_moe_weight",
     srcs = ["test_stacked_moe_weight.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm:models"],
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )

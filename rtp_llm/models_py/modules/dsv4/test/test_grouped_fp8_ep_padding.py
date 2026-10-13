@@ -101,6 +101,11 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
                 partial[rank * exchange_rows : (rank + 1) * exchange_rows] * ep
             )
 
+        def sync_count(count, op, group):
+            self.assertIs(op, dist.ReduceOp.MAX)
+            self.assertIs(group, self.group)
+            count.fill_(max(peer[0].shape[0] for peer in peers))
+
         with mock.patch.object(
             grouped_fp8, "_all_gather_cat", side_effect=gather
         ), mock.patch.object(
@@ -111,8 +116,17 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
             dist, "reduce_scatter_tensor", side_effect=scatter
         ) as reduce, mock.patch.object(
             grouped_fp8.F, "pad", wraps=grouped_fp8.F.pad
-        ) as pad:
+        ) as pad, mock.patch.object(
+            dist, "all_reduce", side_effect=sync_count
+        ) as sync:
             output = strategy(*local_inputs)
+        fixed = strategy.cfg.is_decode_role or (
+            0 < strategy.cfg.max_tokens_per_rank * ep <= grouped_fp8._MASKED_MAX_N
+        )
+        if fixed:
+            sync.assert_not_called()
+        else:
+            sync.assert_called_once()
         check.assert_called_once_with(exchange_rows, self.group, local_inputs[0].device)
         reduce.assert_called_once()
         self.assertEqual(tuple(output.shape), tuple(local_inputs[0].shape))
@@ -146,15 +160,27 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
         self.assertEqual(tuple(partials[0].shape), (16, 128))
         self.assertEqual(torch.count_nonzero(partials[0]).item(), 0)
 
-    def test_padding_gate_depends_on_config_not_runtime_rows(self):
+    def test_dynamic_exchange_keeps_a_dummy_row_when_all_ranks_are_empty(self):
         for budget in (0, -1, 257, 8192):
             for n in (0, 1, 2):
                 with self.subTest(budget=budget, rows=n):
                     seen, _, pads = self.exchange(
-                        self.strategy(budget=budget), self.inputs(n), n
+                        self.strategy(budget=budget), self.inputs(n), max(n, 1)
                     )
-                    self.assertEqual(pads, 0)
-                    self.assertTrue(all(tensor.shape[0] == n for tensor in seen))
+                    self.assertEqual(pads, 3 if n == 0 else 0)
+                    self.assertTrue(
+                        all(tensor.shape[0] == max(n, 1) for tensor in seen)
+                    )
+
+    def test_non_decode_large_budget_synchronizes_ragged_rank_rows(self):
+        counts = (0, 1, 2, 0)
+        peers = [self.inputs(n, rank) for rank, n in enumerate(counts)]
+        for rank, n in enumerate(counts):
+            with self.subTest(rank=rank):
+                _, _, pads = self.exchange(
+                    self.strategy(budget=8192, rank=rank), peers[rank], 2, peers
+                )
+                self.assertEqual(pads, 3 if n < 2 else 0)
 
     def test_masked_limit_boundary_uses_total_exchange_rows(self):
         budget = grouped_fp8._MASKED_MAX_N // 4
@@ -221,7 +247,7 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
         gather.assert_not_called()
         check.assert_not_called()
 
-    def test_ll_inputs_size_diagnostic_and_return_are_unchanged(self):
+    def test_ll_skips_the_equal_row_diagnostic(self):
         strategy = self.strategy(ll=True, decode=True)
         inputs = self.inputs(2)
         buffer = object()
@@ -239,7 +265,7 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
         ) as gather:
             output = strategy(*inputs)
         local.assert_called_once_with(*inputs, buffer, 16)
-        check.assert_called_once_with(2, self.group, inputs[0].device)
+        check.assert_not_called()
         torch.testing.assert_close(output, expected.float(), rtol=0, atol=0)
         pad.assert_not_called()
         gather.assert_not_called()
@@ -278,7 +304,7 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
                 ) as scatter:
                     output = strategy(*inputs)
                 dispatched.assert_called_once()
-                check.assert_called_once_with(max(n, 1), self.group, inputs[0].device)
+                check.assert_not_called()
                 gather.assert_not_called()
                 scatter.assert_not_called()
                 self.assertEqual(tuple(output.shape), (n, 128))
@@ -364,11 +390,13 @@ class GroupedFP8EPPaddingTest(unittest.TestCase):
                     ep_size=4,
                     max_tokens_per_rank=512,
                     is_decode_role=decode,
+                    enable_cuda_graph=True,
                 )
                 cfg = create.call_args.args[0]
                 self.assertIs(cfg.is_decode_role, decode)
                 self.assertEqual(cfg.max_tokens_per_rank, 512)
                 self.assertEqual(cfg.expert_dtype, "fp8")
+                self.assertTrue(cfg.enable_cuda_graph)
 
 
 if __name__ == "__main__":

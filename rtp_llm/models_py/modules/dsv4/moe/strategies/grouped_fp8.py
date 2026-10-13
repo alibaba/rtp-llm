@@ -66,8 +66,9 @@ Eager DP decode can have unequal local batch sizes. Non-LL decode roles pad each
 exchange to their fixed ``max_tokens_per_rank`` budget and trim the result back
 to the original rows. Small budgets retain this behavior for callers without
 explicit role metadata. Padding is selected from configuration, never the local
-runtime batch size. Non-decode large-budget exchanges stay unpadded and require
-equal per-rank token counts, as supplied by CP prefill.
+runtime batch size. Non-decode large-budget exchanges synchronize the largest
+local batch, then pad and trim. Prefill chunk plans also synchronize so empty
+ranks join every call.
 """
 
 from __future__ import annotations
@@ -87,6 +88,11 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
+from rtp_llm.models_py.modules.dsv4.grouped_fp8_config import (
+    DEFAULT_MASKED_MAX_N,
+    MASKED_MAX_N_ENV,
+    masked_max_n,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     cuda_graph_warmup_forward_enabled,
 )
@@ -127,7 +133,7 @@ _MASKED_TILE = 64
 # 16k-token prefill chunk would ask for E * 16384 = a million rows. The contiguous layout
 # is the right one there -- at prefill N its per-expert 128-row padding is a few percent,
 # not the 64x it is at decode N.
-_MASKED_MAX_N = 1024
+_MASKED_MAX_N = DEFAULT_MASKED_MAX_N
 
 
 # The fused swiglu+quant kernel below replaces ~8 kernels per MoE layer with 1 and is
@@ -538,6 +544,26 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 "grouped_fp8 decode requires a positive cfg.max_tokens_per_rank "
                 "for its fixed per-rank token budget"
             )
+        if getattr(cfg, "enable_cuda_graph", False):
+            if cfg.ep_size > 1 and not getattr(cfg, "is_decode_role", False):
+                raise ValueError(
+                    "grouped_fp8 EP CUDA graphs require the DECODE role. "
+                    "PREFILL/PDFUSION exchanges synchronize variable token counts; "
+                    "disable CUDA graphs for this role or use PD separation."
+                )
+            required = cfg.max_tokens_per_rank * cfg.ep_size
+            limit = masked_max_n()
+            if (
+                (cfg.ep_size > 1 or getattr(cfg, "is_decode_role", False))
+                and not self._ll_gate(cfg)
+                and required > limit
+            ):
+                raise ValueError(
+                    f"grouped_fp8 CUDA graph requires {required} gathered tokens "
+                    f"but {MASKED_MAX_N_ENV}={limit}. Set {MASKED_MAX_N_ENV} "
+                    f"to at least {required} if HBM permits, lower the per-rank "
+                    f"token budget to {limit // cfg.ep_size}, or disable CUDA graphs."
+                )
         # Routed tensors are popped from ModelWeights without a wake consumer.
         # Tagging their storage alone would leave blank weights after level 2.
         if any(
@@ -656,7 +682,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # token count rather than the bound.
         self._ll_ok = self._ll_gate(cfg)
         if self._ll_ok:
-            _ll_buffer(cfg.ep_size, D, cfg.n_routed_experts)
+            _, self._ll_capacity = _ll_buffer(cfg.ep_size, D, cfg.n_routed_experts)
 
         # Hand the loader's freed blocks back to the driver so KV-pool sizing
         # sees real residual HBM instead of allocator-cached blocks.
@@ -722,8 +748,8 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         self._assert_one_captured_size(N)
 
         if self._ll_ok:
-            if os.environ.get(_EP_CHECK_SIZES_ENV) == "1":
-                self._assert_uniform_token_count(max(N, 1), group, device)
+            # LL dispatch accepts ragged rank-local batches. The equal-row
+            # diagnostic belongs only to all-gather/reduce-scatter exchanges.
             buf, ll_max_tokens = _ll_buffer(ep, D, cfg.n_routed_experts)
             if N > ll_max_tokens:
                 # _ll_gate already established max_tokens_per_rank <=
@@ -759,21 +785,35 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         if (
             not self._ll_ok
             and cfg.max_tokens_per_rank > 0
-            and (cfg.is_decode_role or cfg.max_tokens_per_rank * ep <= _MASKED_MAX_N)
+            and (
+                getattr(cfg, "is_decode_role", False)
+                or cfg.max_tokens_per_rank * ep <= masked_max_n()
+            )
         ):
             exchange_n = cfg.max_tokens_per_rank
-            if N > exchange_n:
+        else:
+            # Independent PREFILL/PDFUSION DP schedulers need not produce equal
+            # batches. Synchronize a scalar before any shape-dependent collective.
+            count = torch.tensor(N, dtype=torch.int64, device=device)
+            dist.all_reduce(count, op=dist.ReduceOp.MAX, group=group)
+            exchange_n = max(int(count.item()), 1)
+            if cfg.max_tokens_per_rank > 0 and exchange_n > cfg.max_tokens_per_rank:
                 raise RuntimeError(
-                    f"grouped_fp8: {N} tokens on this rank exceeds the fixed "
-                    f"all-gather exchange capacity {exchange_n} "
-                    "(cfg.max_tokens_per_rank). The scheduler must respect "
-                    "the declared per-rank token budget."
+                    f"grouped_fp8: synchronized {exchange_n} tokens exceeds "
+                    f"the per-rank exchange capacity {cfg.max_tokens_per_rank}."
                 )
-            if N < exchange_n:
-                padding = (0, 0, 0, exchange_n - N)
-                x = F.pad(x, padding, value=0)
-                weights = F.pad(weights, padding, value=0)
-                indices = F.pad(indices, padding, value=-1)
+        if N > exchange_n:
+            raise RuntimeError(
+                f"grouped_fp8: {N} tokens on this rank exceeds the fixed "
+                f"all-gather exchange capacity {exchange_n} "
+                "(cfg.max_tokens_per_rank). The scheduler must respect "
+                "the declared per-rank token budget."
+            )
+        if N < exchange_n:
+            padding = (0, 0, 0, exchange_n - N)
+            x = F.pad(x, padding, value=0)
+            weights = F.pad(weights, padding, value=0)
+            indices = F.pad(indices, padding, value=-1)
 
         if os.environ.get(_EP_CHECK_SIZES_ENV) == "1":
             self._assert_uniform_token_count(exchange_n, group, device)
@@ -813,7 +853,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 f"count on every rank, got {seen}. The all-gather/reduce-scatter "
                 "combine requires rank-uniform exchange rows. Non-LL decode "
                 "roles and small budgets pad to cfg.max_tokens_per_rank; "
-                "non-decode large budgets remain unpadded."
+                "non-decode large budgets synchronize their largest local batch."
             )
 
     def _local_experts(
@@ -1002,6 +1042,11 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         """
         if self.cfg.ep_size <= 1 or not torch.cuda.is_current_stream_capturing():
             return
+        if not getattr(self.cfg, "is_decode_role", False):
+            raise RuntimeError(
+                "grouped_fp8 EP CUDA graphs require the DECODE role; "
+                "disable CUDA graphs for PREFILL/PDFUSION or use PD separation."
+            )
         seen = self._captured_ns
         if seen is None:
             seen = self._captured_ns = set()
@@ -1047,13 +1092,15 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         """
         capturing = torch.cuda.is_current_stream_capturing()
         if capturing or cuda_graph_warmup_forward_enabled() or _masked_enabled():
-            if n_tokens > _MASKED_MAX_N:
-                if capturing:
+            limit = masked_max_n()
+            if n_tokens > limit:
+                if capturing or cuda_graph_warmup_forward_enabled():
                     raise RuntimeError(
                         f"{GroupedFP8Strategy.name}: CUDA-graph capture needs the masked "
-                        f"layout, but n_tokens={n_tokens} exceeds _MASKED_MAX_N="
-                        f"{_MASKED_MAX_N}; its buffer is n_local_experts * "
-                        "align(n_tokens, 128) rows. Capture decode only, or raise the cap."
+                        f"layout, but n_tokens={n_tokens} exceeds {MASKED_MAX_N_ENV}="
+                        f"{limit}; its buffer is n_local_experts * "
+                        f"align(n_tokens, 128) rows. Set {MASKED_MAX_N_ENV} "
+                        "to a sufficient capacity if HBM permits, or lower concurrency."
                     )
                 return False
             return True
