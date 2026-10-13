@@ -148,9 +148,9 @@ class V41NormQuantTest(unittest.TestCase):
             for mode in ["legacy", "v2", "auto"]:
                 with self.subTest(scale=scale, mode=mode):
                     self.check(x, w, mode=mode)
-        # The discontinuity in auto must be observable on the zero matrix.
+        # auto keeps the same zero scale on both sides of the old threshold.
         w = torch.ones(5120, device="cuda", dtype=torch.bfloat16)
-        for m, selected in [(819, "legacy"), (820, "v2")]:
+        for m, selected in [(819, "legacy"), (820, "legacy")]:
             x = torch.zeros(m, 5120, device="cuda", dtype=torch.bfloat16)
             with self.subTest(m=m):
                 norm, quant, scales = self.check(x, w)
