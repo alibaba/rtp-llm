@@ -6,7 +6,7 @@ modules do not mutate a registry at import time.
 """
 
 from dataclasses import dataclass, field
-from typing import Callable
+from case_api.extension_contracts import StageValidator, StageExecutor
 from analysis.checks import CheckResult
 
 
@@ -20,8 +20,8 @@ class StageHandler:
     """
 
     name: str
-    validate: Callable
-    execute: Callable
+    validate: StageValidator
+    execute: StageExecutor
     outputs: dict[str, str]
     requires: frozenset[str] = frozenset()
     checks: frozenset[str] = frozenset()

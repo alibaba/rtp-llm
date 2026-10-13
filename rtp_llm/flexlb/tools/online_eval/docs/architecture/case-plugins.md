@@ -89,3 +89,13 @@ GATE = GatePlugin(
 `scenario/actions/java_flow.py` 定义阶段合同，`adapters/java_flow.py` 管理客户端会话；`engine_control` action 依赖 `adapters/mock_control.py` 的协议访问。名字相近不表示冗余。新步骤先组合 adapter；只有出现新的现场协议才扩展 adapter。`runtime` 和 `adapters` 不依赖 `scenario`、`cases`、`workload` 或 `reporting`，避免基础能力反向调用业务和调度层。
 
 新增参数组合复用现有 program，仅新增 YAML；新增流程从 `program.py` 开始，按需注册 action；新增测量才增加 analysis 或 producer。无需了解实例调度、归档或 HTML 内部实现。删除能力前检查注册发现、命令入口、配置引用、延迟导入与测试；缺少普通 import 不能单独证明无用。
+
+## 扩展调用边界
+
+`case_api.extension_contracts` 定义作者侧回调 Protocol。builder 接收 `CaseBuilder`；action 的参数校验接收 `PlanContext`，执行接收 `RuntimeContext` 与 `Deadline`，返回 `StageOutput`。领域参数和证据结构由所属 case 校验，Protocol 不代替运行时数据校验。`EvidenceSource` 当前是 Prometheus 证据适配配置工厂，不是任意文件或协议的通用采集插件。
+
+专属视图、检查依赖的 producer 和证据来源必须由消费 case 的 `CASE` 显式声明。共享能力由各使用方声明同一实现；全局发现不是跨 case 的调用授权。默认报告和公共 action 由框架提供。
+
+FINALIZE producer 接收 `FinalizationContext(directory, run)`，而非可写的主分析结果。`run` 顶层只读，嵌套数据是该次调用独立的深拷贝；修改嵌套数据不会影响主结果。producer 返回可 JSON 序列化且不含非有限数值的 metadata mapping，公共层将其写入 `producer_results`。指标发布仍走 `MetricStore`，不能通过返回 metadata 覆盖检查或判定。
+
+编译结果的 `implementation.case_sources` 记录 case 目录全部 Python 文件的相对路径与 SHA256，`case_sources_sha256` 绑定这份确定性清单。它涵盖业务分析、操作及子模块；公共依赖的复现仍需整个仓库代码版本，不能把 case 指纹当作全部代码身份。

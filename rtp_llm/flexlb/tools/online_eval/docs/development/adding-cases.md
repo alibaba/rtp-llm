@@ -280,3 +280,7 @@ PYTHONPATH=src:. python3 -m pytest -q tests
 检查返回共用 `CheckResult`，实际测量与比较在 case 的纯分析能力中完成。发布指标、生成 HTML 属于收尾阶段，不能成为业务检查的前置条件。证据不足返回 `invalid_check` 并保留原因；不要以零代替缺失，也不要用 `SKIP` 宣称通过。
 
 handler 的错误路径同样遵守输出合同。数值在证据不足时可以为空的，声明 `nullable_number`，输出键仍必须存在，并伴随 ERROR 检查；依赖有效数值的普通输出继续使用 `number`。报告附录通过 `view_details`、`view_table` 获得稳定 `case.<id>`，公共检查与有效性区由报告骨架统一添加，不依赖中文标题识别结构。
+
+## 收尾指标扩展
+
+注册为 `ProducerPhase.FINALIZE` 的函数签名是 `execute(directory, context: FinalizationContext) -> dict`。从 `context.run` 读取调用快照，通过返回 metadata 提交自己的诊断信息，不修改主分析结果。自定义视图、producer 和来源必须在所属 `CASE` 声明；复用另一 case 的实现也须显式声明。调用边界和源码指纹见 [Case 插件结构](../architecture/case-plugins.md)。

@@ -107,7 +107,12 @@ from case_api.registry import MetricProducer
 from case_api.registry import ProducerPhase
 from cases.master_ha_failover.metrics import metric_contract
 from case_api.registry import EvidenceSource
-from cases.master_ha_failover.metrics import produce as produce_evidence
+from case_api.extension_contracts import FinalizationContext
+
+
+def produce_evidence(directory, context: FinalizationContext):
+    from cases.master_ha_failover.metrics import produce
+    return produce(directory, context.run)
 from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
 
 CASE = CaseDefinition(

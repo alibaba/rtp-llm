@@ -83,6 +83,18 @@ class CaseRegistry:
     producers: Mapping[str, MetricProducer]
     sources: Mapping[str, EvidenceSource]
 
+    def capability(self, kind, name, *, case):
+        """A case may consume only capabilities it explicitly declares, including shared ones."""
+        fields = {'view': 'report_views', 'producer': 'producers', 'source': 'sources'}
+        if kind not in fields:
+            raise ValueError('unknown capability kind: ' + kind)
+        if case not in self.cases:
+            raise ValueError('unknown case: ' + case)
+        owned = getattr(self.cases[case].definition, fields[kind])
+        if name not in owned:
+            raise ValueError(f'{kind} {name!r} is not declared by case {case!r}')
+        return owned[name]
+
     @classmethod
     def build(cls, cases):
         from scenario.contracts import StageHandler

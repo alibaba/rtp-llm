@@ -158,6 +158,14 @@ def _variant_contract(config, builder, source):
         name = execution["monitoring"].get("query_plan", DEFAULT_PLAN)
         selected = select_plan(load_plan(name), builder.metric_dependencies,
                                [view(report) for report in variant.get("reports", [])])
+        from case_api.registry import registry
+        from monitoring.query_plan import definitions
+        for definition in definitions(selected).values():
+            if definition.get("producer"):
+                registry().capability("producer", definition["producer"], case=config.case)
+            collection = definition.get("collection", {})
+            if collection.get("source"):
+                registry().capability("source", collection["source"], case=config.case)
         validate_export_filter(selected, builder.environment)
         variant["monitoring_query_plan"] = frozen_plan(name, selected)
     return variant
@@ -190,6 +198,10 @@ def _bind_reports(config, variant, source, stages):
         from reporting.view_config import view
 
         for report_name in reports:
+            from case_api.registry import registry
+            from reporting.view_config import DEFAULT_VIEW
+            if report_name != DEFAULT_VIEW:
+                registry().capability("view", report_name, case=config.case)
             presentation = view(report_name)
             from reporting.events import validate_stage_sources
             validate_stage_sources(presentation, {stage["id"] for stage in stages}, source + ".reports")
@@ -202,7 +214,15 @@ def _bind_reports(config, variant, source, stages):
 
 def _implementation(config, module, name):
     program_path = module.path.resolve()
+    case_sources = {
+        str(path.relative_to(program_path.parent)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(program_path.parent.rglob("*.py"))
+    }
     implementation = {
+        "case_sources": case_sources,
+        "case_sources_sha256": hashlib.sha256(
+            json.dumps(case_sources, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
         "configuration": copy.deepcopy(config.declaration),
         "language": "python",
         "program": name,

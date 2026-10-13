@@ -1,5 +1,8 @@
 """Numeric producers are registered Python capabilities with explicit ownership."""
 
+import json
+from case_api.extension_contracts import FinalizationContext
+
 from case_api.registry import registry
 from case_api.registry import ProducerPhase
 from monitoring.metric_store import MetricStore, MetricContractError
@@ -29,4 +32,9 @@ def produce(directory, context):
     for name in sorted(selected):
         capability = registry().producers[name]
         if capability.phase is ProducerPhase.FINALIZE:
-            context.setdefault("producer_results", {})[name] = capability.execute(directory, context)
+            snapshot = FinalizationContext.snapshot(directory, context)
+            metadata = capability.execute(directory, snapshot)
+            if not isinstance(metadata, dict):
+                raise MetricContractError(name + ': finalize producer must return metadata mapping')
+            json.dumps(metadata, allow_nan=False)
+            context.setdefault("producer_results", {})[name] = metadata
