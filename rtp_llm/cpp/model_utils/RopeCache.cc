@@ -53,12 +53,20 @@ torch::Tensor genYarnCache(const int   rope_dim,
     auto  pos_freqs = torch::pow(rope_theta, torch::arange(0, rope_dim, 2, gpu_opts).to(torch::kFloat32) / rope_dim);
     auto  inv_freq_extrapolation = 1.f / pos_freqs;
     auto  inv_freq_interpolation = 1.f / (rope_scale * pos_freqs);
+    // Correction-range endpoints follow HF's find_correction_range:
+    // low_rot = beta_fast (many rotations -> small dim), high_rot = beta_slow
+    // (few rotations -> large dim). The previous (beta_slow, beta_fast) order
+    // inverted the ramp for every standard yarn model (beta_fast=32,
+    // beta_slow=1): low ended up ABOVE high, flipping which frequency band
+    // gets interpolated — gpt-oss is the first model to drive the generic
+    // MHA FusedRope path with yarn (DeepSeek-family models use their own
+    // python rope), which exposed it.
     float low                    = static_cast<float>(std::max(
         0,
-        static_cast<int>(std::floor(yarnFindCorrectionDim(beta_slow, rope_dim, rope_theta, max_position_embeddings)))));
+        static_cast<int>(std::floor(yarnFindCorrectionDim(beta_fast, rope_dim, rope_theta, max_position_embeddings)))));
     float high                   = static_cast<float>(std::min(
         rope_dim - 1,
-        static_cast<int>(std::ceil(yarnFindCorrectionDim(beta_fast, rope_dim, rope_theta, max_position_embeddings)))));
+        static_cast<int>(std::ceil(yarnFindCorrectionDim(beta_slow, rope_dim, rope_theta, max_position_embeddings)))));
     if (std::fabs(low - high) < 1e-6) {
         high += 0.001f;
     }
