@@ -16,6 +16,7 @@ import grpc
 from adapters.environment_config import DEFAULT_MASTER_MANAGEMENT_PORT
 from adapters.proto_utils import encode_unique_key, ensure_proto_modules, ensure_schedule_proto_modules
 from runtime.network import http_get_json
+from adapters.master_control import master_url
 from adapters.mock_engine import MockEngineControl
 from adapters.stream import StreamHandle, StreamSnapshot
 
@@ -335,6 +336,6 @@ class EngineOps(MockEngineControl):
 
     def master_inflight(self) -> Optional[dict]:
         return http_get_json(
-            f"http://127.0.0.1:{self.master_http_port}/rtp_llm/inflight_status",
+            master_url("127.0.0.1", self.master_http_port, "inflight"),
             timeout=5,
         )

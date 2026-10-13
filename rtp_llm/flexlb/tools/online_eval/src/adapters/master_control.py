@@ -4,6 +4,12 @@ import json
 import urllib.request
 
 
+def master_url(host, port, endpoint):
+    """One definition of Master control routes; transport failures remain explicit."""
+    routes = {"info": "master/info", "inflight": "inflight_status"}
+    return f"http://{host}:{port}/rtp_llm/{routes[endpoint]}"
+
+
 def require_process(ctx, target):
     if target == "single":
         if getattr(ctx.env, "masters", {}):

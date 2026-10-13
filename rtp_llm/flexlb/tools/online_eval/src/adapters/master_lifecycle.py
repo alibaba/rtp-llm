@@ -16,6 +16,7 @@ from flexlb_cfg import render_env
 from adapters.environment_config import MasterSpec
 from runtime.java_runtime import JAVA_MODULE_OPTS, resolve_java21
 from adapters.master_artifact import configure_master
+from adapters.master_control import master_url
 from runtime.network import http_post_json, port_accepting
 from runtime.startup import startup_deadline, wait_ready
 from artifacts.startup import startup_phase
@@ -274,7 +275,7 @@ class MasterLifecycle:
                         raise RuntimeError('Master online hook failed')
             def info():
                 status, data = http_post_json(
-                    f'http://{host}:{port}/rtp_llm/master/info', {},
+                    master_url(host, port, 'info'), {},
                     timeout=min(3, deadline.remaining()))
                 return data if status == 200 and isinstance(data, dict) else None
             wait_ready(deadline, f'master/{name}/sync',

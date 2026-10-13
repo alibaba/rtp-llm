@@ -37,7 +37,8 @@ def validate(params, plan):
 
 
 def _master_count(ctx, deadline):
-    from runtime.network import master_url, http_post_json
+    from adapters.master_control import master_url
+    from runtime.network import http_post_json
     code, data = http_post_json(master_url("127.0.0.1", ctx.env.master_http_port, "info"),
                                 {}, timeout=min(3, deadline.remaining()))
     if code != 200 or not isinstance(data, dict):

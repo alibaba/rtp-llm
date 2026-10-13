@@ -2,7 +2,7 @@
 
 import math
 
-from runtime.network import master_url
+from adapters.master_control import master_url
 
 
 STATE_FIELDS = {"http_up", "scheduler_inflight", "prefill_inflight_requests",

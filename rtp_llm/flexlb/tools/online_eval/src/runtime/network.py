@@ -104,12 +104,6 @@ def port_accepting(port: int, host: str = "127.0.0.1") -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
-# JVM servers bind all interfaces; a pre-start loopback-only probe misses
-# listeners on other interfaces. Post-start connection probes use loopback.
+# Wildcard occupancy probes cover listeners on every interface.
+# Post-start connection probes use the caller-selected destination.
 PROBE_BIND_HOST = "0.0.0.0"
-
-
-def master_url(host, port, endpoint):
-    """One definition of Master control routes; transport failures remain explicit."""
-    routes = {"info": "master/info", "inflight": "inflight_status"}
-    return f"http://{host}:{port}/rtp_llm/{routes[endpoint]}"

@@ -28,6 +28,16 @@ def test_runtime_has_no_static_or_lazy_imports_of_callers():
     assert not violations
 
 
+def test_runtime_does_not_embed_master_protocol_routes():
+    violations = []
+    for path in (ROOT / "src/runtime").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if "/rtp_llm/" in node.value:
+                    violations.append((path.name, node.lineno, node.value))
+    assert not violations
+
+
 def test_runtime_mechanisms_load_without_client_or_case_configuration():
     script = """
 import builtins
