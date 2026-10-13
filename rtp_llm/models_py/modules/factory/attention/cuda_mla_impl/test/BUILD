@@ -84,3 +84,13 @@ py_test(
     tags = ["manual"],
     exec_properties = {'gpu': 'H20'},
 )
+
+py_test(
+    name = "glm53_prefill_q_selection_test",
+    srcs = ["glm53_prefill_q_selection_test.py"],
+    deps = [
+        "//rtp_llm/models_py/standalone:py_standalone_testlib",
+    ],
+    tags = ["manual"],
+    exec_properties = {"gpu": "L20D_DEV"},
+)

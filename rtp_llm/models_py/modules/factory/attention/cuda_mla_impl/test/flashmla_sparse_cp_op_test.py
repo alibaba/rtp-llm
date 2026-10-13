@@ -229,7 +229,20 @@ def _tp2_worker(rank: int, nccl_port: int, result_queue: mp.Queue) -> None:
         q1_t = torch.tensor(q1_idx_list, device=dev, dtype=torch.long)
         t0 = torch.index_select(g_topk, 0, q0_t).contiguous()
         t1 = torch.index_select(g_topk, 0, q1_t).contiguous()
-        out = op.forward(g_q, ck, kp, torch.cat([t0, t1], dim=0), bid, kvc, layer_id=0)
+        topk_cat = torch.cat([t0, t1], dim=0)
+        out = op.forward(g_q, ck, kp, topk_cat, bid, kvc, layer_id=0)
+        # Exercise preselected Q through the same real two-rank collectives.
+        out_selected = op.forward(
+            g_q[op.total_local_ids],
+            ck,
+            kp,
+            topk_cat,
+            bid,
+            kvc,
+            layer_id=0,
+            original_q_len=g_q.size(0),
+        )
+        torch.testing.assert_close(out_selected, out, rtol=0, atol=0)
         torch.cuda.synchronize()
         lids = op.total_local_ids
         result_queue.put((rank, lids.cpu().numpy(), out.cpu().float().numpy()))
@@ -585,8 +598,23 @@ class SparseMlaFp8CPOpTest(TestCase):
                 layer_id=0,
                 scatter_out=scatter_out,
             )
+            self.assertIsNone(cp_op._gather, "exercise the paged FP8 attention branch")
+            selected_out = torch.empty_like(scatter_out)
+            out_preselected = cp_op.forward(
+                q[cp_op.total_local_ids],
+                compressed_kv,
+                k_pe,
+                topk_cat,
+                batch_indice_d,
+                kv_cache,
+                layer_id=0,
+                scatter_out=selected_out,
+                original_q_len=total_q_len,
+            )
         torch.cuda.synchronize()
 
+        torch.testing.assert_close(out_preselected, out_cp, rtol=0, atol=0)
+        self.assertEqual(out_preselected.data_ptr(), selected_out.data_ptr())
         self.assertEqual(out_cp.shape, (total_q_len, num_heads, kv_lora_rank))
         self.assertEqual(out_cp.data_ptr(), scatter_out.data_ptr())
 

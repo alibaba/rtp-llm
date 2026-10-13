@@ -784,10 +784,14 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         kv_cache=None,
         layer_id: int = 0,
         scatter_out: Optional[torch.Tensor] = None,
+        original_q_len: Optional[int] = None,
     ) -> torch.Tensor:
-        """CP prefill: all-gather → restore → write to kv_cache → attend on q tokens
-        owned by this rank (q[total_local_ids]). Returns [total_q_len, H, kv_lora_rank]
-        with non-owned positions zero (scattered later by total_local_ids)."""
+        """Attend in total_local_ids order, then restore the original local rows.
+
+        When original_q_len is provided, q has already been selected before the
+        input BMM. It contains only len(total_local_ids) rows, while the output
+        still has original_q_len rows, including zero-filled padding positions.
+        """
         gathered_ckv = all_gather(
             compressed_kv.contiguous(), group=Group.TP, role="mla_ckv"
         )
@@ -822,14 +826,21 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self._gather_sharded_kv_cache(kv_cache, fused_kv)
             return None
 
-        assert q is not None and q.size(0) > 0
+        assert q is not None
+        total_q_len = q.size(0) if original_q_len is None else original_q_len
+        if original_q_len is not None and (
+            q.size(0) != self.total_local_ids.numel() or total_q_len < q.size(0)
+        ):
+            raise ValueError(
+                "Preselected CP Q must match total_local_ids and fit original_q_len"
+            )
+        assert q.size(0) > 0
 
         use_identity_q = (
             self.total_local_ids_is_identity
-            and self.total_local_ids is not None
-            and q.size(0) == self.total_local_ids.size(0)
+            and total_q_len == self.total_local_ids.size(0)
         )
-        if use_identity_q:
+        if original_q_len is not None or use_identity_q:
             q0 = q if q.is_contiguous() else q.contiguous()
         else:
             q0 = q[self.total_local_ids].contiguous()
@@ -840,7 +851,9 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         if use_identity_q:
             return out0
-        out = triton_kv_scatter(out0, self.total_local_ids, q.size(0), out=scatter_out)
+        out = triton_kv_scatter(
+            out0, self.total_local_ids, total_q_len, out=scatter_out
+        )
         return out
 
     def _allocate_fused_kv(self) -> torch.Tensor:
@@ -1272,7 +1285,29 @@ class SparseMlaCpImpl(SparseMlaImpl):
                 q.size(0), self.num_heads, self.kv_lora_rank
             )
 
-        q_transformed = self._apply_input_bmm(q, layer_id, out=q_transform_out)
+        original_q_len = None
+        local_ids = self.fmha_impl.total_local_ids
+        if (
+            q_transform_out is not None
+            and not self.fmha_impl.use_cuda_graph
+            and not self.fmha_impl.total_local_ids_is_identity
+            and local_ids is not None
+            and local_ids.numel() > 0
+            and topk_indices is not None
+            and topk_indices.numel() > 0
+        ):
+            # RoPE above uses the original token positions. Select the narrower
+            # Q (192 + 64), then project directly into the existing workspace
+            # (512 + 64), avoiding a second full-size transformed Q allocation.
+            original_q_len = q.size(0)
+            q_selected = q[local_ids]
+            q_transformed = self._apply_input_bmm(
+                q_selected, layer_id, out=q_transform_out[: local_ids.numel()]
+            )
+            # Drop the 256-wide temporary before attention allocates KV/output.
+            del q_selected
+        else:
+            q_transformed = self._apply_input_bmm(q, layer_id, out=q_transform_out)
         attn_output = self.fmha_impl.forward(
             q_transformed,
             compressed_kv,
@@ -1282,6 +1317,7 @@ class SparseMlaCpImpl(SparseMlaImpl):
             kv_cache,
             layer_id=layer_id,
             scatter_out=scatter_out,
+            original_q_len=original_q_len,
         )
         if attn_output is None:
             return None
