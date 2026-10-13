@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.factory.attention import attn_factory
+from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
 
 
 class _StubAttentionImpl:
@@ -55,6 +56,19 @@ class _GenerationOnlyAttentionImpl(_SafeAttentionImpl):
     cuda_graph_selection_modes = frozenset(
         {attn_factory.CudaGraphSelectionMode.GENERATION_PREFILL_GRAPH}
     )
+
+
+class _NoPrefillCpAttentionImpl(_SafeAttentionImpl):
+    support_parallelism_config = classmethod(
+        FMHAImplBase.support_parallelism_config.__func__
+    )
+
+    @classmethod
+    def support_prefill_cp(cls):
+        return False
+
+    def __init__(self, _configs, _inputs, parallelism_config):
+        self.parallelism_config = parallelism_config
 
 
 class AttentionFactoryGenerationPrefillCudaGraphTest(unittest.TestCase):
@@ -199,6 +213,31 @@ class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
         )
         with self.assertRaises(ValueError):
             self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
+
+
+class AttentionFactoryPrefillCpDecodeTest(unittest.TestCase):
+    def _select(self, is_prefill):
+        config = types.SimpleNamespace(
+            prefill_cp_config=types.SimpleNamespace(is_enabled=lambda: True)
+        )
+        configs = types.SimpleNamespace(rope_config=types.SimpleNamespace(style=None))
+        inputs = types.SimpleNamespace(is_prefill=is_prefill)
+        registry = "PREFILL_MHA_IMPS" if is_prefill else "DECODE_MHA_IMPS"
+        with patch.object(attn_factory, registry, [_NoPrefillCpAttentionImpl]):
+            selected = attn_factory.get_fmha_impl(
+                configs, None, inputs, parallelism_config=config
+            )
+        return selected, config
+
+    def test_decode_with_prefill_cp_keeps_regular_tp_backend(self):
+        selected, config = self._select(is_prefill=False)
+        self.assertIsInstance(selected, _NoPrefillCpAttentionImpl)
+        self.assertIs(selected.parallelism_config, config)
+        self.assertTrue(config.prefill_cp_config.is_enabled())
+
+    def test_prefill_cp_still_rejects_backend_without_cp_support(self):
+        with self.assertRaisesRegex(Exception, "can not find mha type"):
+            self._select(is_prefill=True)
 
 
 if __name__ == "__main__":
