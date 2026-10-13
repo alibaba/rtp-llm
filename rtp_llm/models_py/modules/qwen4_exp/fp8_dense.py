@@ -59,8 +59,11 @@ class Qwen4Fp8Linear(nn.Module):
         rows = x.reshape(-1, x.shape[-1])
         if rows.shape[0] == 0:
             return x.new_empty((*x.shape[:-1], self.weight.shape[0]))
-        scale = rows.float().abs().amax().clamp_min(1e-12).reshape(1) / 448.0
-        quantized = (rows.float() / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            scaled_fp8_per_tensor_quant,
+        )
+
+        quantized, scale = scaled_fp8_per_tensor_quant(rows.contiguous())
         padding = (-rows.shape[0]) % 16
         if padding:
             quantized = F.pad(quantized, (0, 0, 0, padding))
