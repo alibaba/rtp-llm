@@ -713,6 +713,8 @@ class Qwen4ExpModel(Qwen35Model):
             # release pageable copies after this initialization scope finishes.
             for (index, _), shard in zip(shard_pairs, embedding.shards):
                 layer_weights[prefix + str(index)] = shard
+                storage = getattr(self.weight, "_fp8_storage_owner", self.weight)
+                storage.weights[layer_idx][prefix + str(index)] = shard
             conv_weight = layer_weights[W.qwen4_ple_conv_w]
             self.ple_layers[str(layer_idx)] = Qwen4ExpPLELayer(
                 embedding,
