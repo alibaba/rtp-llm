@@ -172,6 +172,9 @@ cc_binary(
     name = "rtp_compute_ops",
     copts = copts(),
     linkopts = [
+        # Native test executables also link this DSO. Without a SONAME their
+        # DT_NEEDED embeds bazel-out/... and cannot resolve it from runfiles.
+        "-Wl,-soname,librtp_compute_ops.so",
         "-Wl,-rpath='$$ORIGIN'",
         "-Wl,-rpath=$(NVSHMEM_DIR)/lib",
         "-L$(NVSHMEM_DIR)/lib",

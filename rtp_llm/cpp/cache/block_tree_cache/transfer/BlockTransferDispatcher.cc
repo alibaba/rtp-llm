@@ -50,6 +50,47 @@ void BlockTransferDispatcher::drainTransfers() const {
     }
 }
 
+bool BlockTransferDispatcher::drainTransfersUntil(std::chrono::steady_clock::time_point deadline) const {
+    for (;;) {
+        std::vector<std::shared_future<void>> completions;
+        {
+            std::lock_guard<std::mutex> lock(completion_mutex_);
+            transfer_completions_.erase(std::remove_if(transfer_completions_.begin(),
+                                                       transfer_completions_.end(),
+                                                       [](const auto& future) {
+                                                           return future.wait_for(std::chrono::seconds(0))
+                                                                  == std::future_status::ready;
+                                                       }),
+                                        transfer_completions_.end());
+            completions = transfer_completions_;
+        }
+        if (completions.empty()) {
+            return true;
+        }
+        for (const auto& completion : completions) {
+            if (completion.wait_until(deadline) != std::future_status::ready) {
+                return false;
+            }
+        }
+        // The callbacks just retired may have submitted the next transfer stage.
+    }
+}
+
+size_t BlockTransferDispatcher::activeTransferCount() const {
+    std::lock_guard<std::mutex> lock(completion_mutex_);
+    return std::count_if(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
+        return future.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
+    });
+}
+
+bool BlockTransferDispatcher::waitForPerRankIdleUntil(std::chrono::steady_clock::time_point deadline) const {
+    return !per_rank_engine_ || per_rank_engine_->waitForIdleUntil(deadline);
+}
+
+size_t BlockTransferDispatcher::pendingPerRankTaskCount() const {
+    return per_rank_engine_ ? per_rank_engine_->pendingTaskCount() : 0;
+}
+
 std::shared_ptr<AsyncContext> BlockTransferDispatcher::executePerRank(TransferTask task) const {
     if (task.expired()) {
         return std::make_shared<CompletedAsyncContext>(
@@ -69,11 +110,13 @@ void BlockTransferDispatcher::runTransfer(TransferTask task, TransferDoneCallbac
     auto completion = std::make_shared<std::promise<void>>();
     {
         std::lock_guard<std::mutex> lock(completion_mutex_);
-        transfer_completions_.erase(
-            std::remove_if(transfer_completions_.begin(), transfer_completions_.end(), [](const auto& future) {
-                return future.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-            }),
-            transfer_completions_.end());
+        transfer_completions_.erase(std::remove_if(transfer_completions_.begin(),
+                                                   transfer_completions_.end(),
+                                                   [](const auto& future) {
+                                                       return future.wait_for(std::chrono::seconds(0))
+                                                              == std::future_status::ready;
+                                                   }),
+                                    transfer_completions_.end());
         transfer_completions_.push_back(completion->get_future().share());
     }
     callback = [completion, done = std::move(callback)](ErrorInfo error) {

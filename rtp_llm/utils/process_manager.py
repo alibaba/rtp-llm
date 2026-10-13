@@ -747,7 +747,12 @@ class ProcessManager:
                 # Unexpected death → escalate to failure shutdown.
                 for proc in self.processes:
                     if not proc.is_alive():
-                        logging.error(f"Process {proc.pid} died unexpectedly")
+                        logging.error(
+                            "Process %s (%s) died unexpectedly with exit code %s",
+                            proc.pid,
+                            proc.name,
+                            proc.exitcode,
+                        )
                 self.failure_detected = True
                 logging.error("Some processes died unexpectedly, terminating all...")
                 self._terminate_processes(drain_timeout=0, staged=False)
@@ -771,23 +776,24 @@ class ProcessManager:
             self._monitor_processes_health()
             self._join_all_processes()
 
-            # All children may have exited before the monitor loop first ran
-            # (race at startup) or during it without tripping the in-loop
-            # dead-detection branch (e.g. simultaneous death between
-            # iterations). Inspect final exitcodes to surface silent crashes
-            # the monitor missed.
-            if not self.shutdown_requested and not self.failure_detected:
-                unexpected_exits = [
-                    (p.name, p.exitcode)
-                    for p in self.processes
-                    if p.exitcode is not None
-                ]
-                if unexpected_exits:
-                    logging.error(
-                        "Children exited without shutdown request: "
-                        f"{unexpected_exits}"
+            # Inspect final child status even during requested shutdown: the
+            # monitor can miss a crash after sending SIGTERM, and a surviving
+            # child after bounded join must not be reported as a clean stop.
+            failed_children = [
+                (p.name, p.exitcode)
+                for p in self.processes
+                if p.is_alive()
+                or (
+                    p.exitcode is not None
+                    and (
+                        not self.shutdown_requested
+                        or not self._is_clean_shutdown_exitcode(p.exitcode)
                     )
-                    self.failure_detected = True
+                )
+            ]
+            if failed_children:
+                logging.error("Children did not stop cleanly: %s", failed_children)
+                self.failure_detected = True
         else:
             logging.info("No processes to monitor")
 

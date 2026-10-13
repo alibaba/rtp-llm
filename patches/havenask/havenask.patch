@@ -47,3 +47,97 @@ index 03ff7ce5..bdaff505 100644
  def genshared(name, lib):
      return native.genrule(
          name = name,
+
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.h
+@@ -42,6 +42,9 @@
+     void Init(MetricsConfig *config);
+     void Stop();
+     bool Started();
++    // Fence publication without invalidating registered metrics. Disabled
++    // snapshots are discarded; wake starts with fresh collectors and sinks.
++    bool SetReportingEnabled(bool enabled);
+
+     void AddSource(MetricsSource *source);
+     void DelSource(const std::string &sourceName);
+@@ -63,6 +66,10 @@
+     void DoSnapshot(const std::set<MetricLevel> &levels, int64_t timeAlignUs);
+
+ private:
++    std::mutex reporting_mutex_;
++    std::mutex snapshot_mutex_;
++    bool reporting_enabled_ = true;
++    MetricsConfig *config_ = nullptr;
+     int timer_interval_us_;
+     int period_us_;
+     int64_t last_trigger_;
+diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
+--- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
++++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsSystem.cpp
+@@ -53,6 +53,7 @@
+ }
+
+ void MetricsSystem::Init(MetricsConfig *config) {
++    config_ = config;
+     if (!initSink(config)) {
+         AUTIL_LOG(ERROR, "sink init fail, metric system event timer stop");
+         return;
+@@ -111,6 +112,35 @@
+     }
+     started_ = false;
+     AUTIL_LOG(INFO, "metrics system stoped");
++}
++
++bool MetricsSystem::SetReportingEnabled(bool enabled) {
++    std::lock_guard<std::mutex> reportingLock(reporting_mutex_);
++    std::lock_guard<std::mutex> snapshotLock(snapshot_mutex_);
++    if (reporting_enabled_ == enabled) {
++        return true;
++    }
++    // SendEvent holds the same mutex through Flush: once this returns no
++    // pre-sleep publication can still reach the transport.
++    {
++        std::lock_guard<std::mutex> queueLock(queue_mutex_);
++        decltype(publish_queue_) empty;
++        publish_queue_.swap(empty);
++    }
++    if (!enabled) {
++        reporting_enabled_ = false;
++        // Destruction closes connections and drops the sink's retry queue.
++        sinks_.clear();
++        return true;
++    }
++    // Include every level, not just this tick's levels. Never replay samples
++    // collected during sleep or dilute QPS with the sleep interval.
++    SampleMetrics(MetricLevelManager::GetLevel(0), autil::TimeUtility::currentTime() / 1000);
++    if (config_ && !initSink(config_)) {
++        return false;
++    }
++    reporting_enabled_ = true;
++    return true;
+ }
+
+ void MetricsSystem::PublishMetrics(MetricsRecords &records) {
+@@ -152,12 +182,20 @@
+ }
+
+ void MetricsSystem::DoSnapshot(const set<MetricLevel> &levels, int64_t timeAlignUs) {
+-    auto records = SampleMetrics(levels, timeAlignUs / 1000);
++    std::lock_guard<std::mutex> snapshotLock(snapshot_mutex_);
++    auto records = SampleMetrics(reporting_enabled_ ? levels : MetricLevelManager::GetLevel(0), timeAlignUs / 1000);
++    if (!reporting_enabled_) {
++        return;
++    }
+     std::lock_guard<std::mutex> lock(queue_mutex_);
+     publish_queue_.push(std::make_pair(timeAlignUs, std::move(records)));
+ }
+
+ void MetricsSystem::SendEvent(int64_t nowUs) {
++    std::lock_guard<std::mutex> reportingLock(reporting_mutex_);
++    if (!reporting_enabled_) {
++        return;
++    }
+     if (nowUs == 0) {
+         nowUs = autil::TimeUtility::currentTime();
+     }

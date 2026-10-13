@@ -96,3 +96,8 @@ class LanguageCppEngine(BaseEngine):
         if self.mm_process_engine is not None:
             self.mm_process_engine.stop()
             self.mm_process_engine = None
+
+    @property
+    def lifecycle_control(self):
+        """Backend lifecycle control, independent of the frontend lifetime."""
+        return self.rtp_llm_op_.ft_op

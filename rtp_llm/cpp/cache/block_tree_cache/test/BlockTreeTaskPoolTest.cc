@@ -51,6 +51,24 @@ TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
+TEST(BlockTreeTaskPoolTest, BoundedDrainTimeoutRetainsRunningAndCompletionWork) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
+    ASSERT_TRUE(pool.start());
+    std::promise<void> release;
+    auto               released = release.get_future().share();
+    ASSERT_TRUE(pool.submit(BlockTreeTaskClass::LOAD, [released] { released.wait(); }));
+    pool.stopAdmission();
+    EXPECT_EQ(pool.pendingTaskCount(), 1u);
+    EXPECT_FALSE(pool.waitForIdleUntil(BlockTreeTaskPool::Clock::now()));
+    std::atomic<bool> settled{false};
+    EXPECT_TRUE(pool.submitCompletion([&] { settled.store(true); }));
+    EXPECT_EQ(pool.pendingTaskCount(), 2u);
+    release.set_value();
+    EXPECT_TRUE(pool.waitForIdleUntil(BlockTreeTaskPool::Clock::now() + std::chrono::seconds(5)));
+    EXPECT_TRUE(settled.load());
+    EXPECT_EQ(pool.pendingTaskCount(), 0u);
+}
+
 TEST(BlockTreeTaskPoolTest, WaitForIdleOnlyTracksTaskBodyNotExternalAsyncCompletion) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
@@ -76,11 +94,9 @@ TEST(BlockTreeTaskPoolTest, CompletionCanArriveAfterIdleAndStopAdmission) {
     BlockTreeTaskPool pool(1, 1, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
     std::function<void()> finish_transfer;
-    std::atomic<bool> settled{false};
+    std::atomic<bool>     settled{false};
     ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
-        finish_transfer = [&] {
-            EXPECT_TRUE(pool.submitCompletion([&] { settled.store(true); }));
-        };
+        finish_transfer = [&] { EXPECT_TRUE(pool.submitCompletion([&] { settled.store(true); })); };
     }));
     pool.waitForIdle();
     pool.stopAdmission();
@@ -92,16 +108,13 @@ TEST(BlockTreeTaskPoolTest, CompletionCanArriveAfterIdleAndStopAdmission) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-
 TEST(BlockTreeTaskPoolTest, ExternalTransfersDoNotConsumeNormalQueueCapacity) {
     BlockTreeTaskPool pool(1, BlockTreeTaskPool::kLoadReservedSlots + 2, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
     std::vector<std::function<void()>> completions;
-    int settled = 0;
+    int                                settled = 0;
     for (int i = 0; i < 8; ++i) {
-        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
-            completions.push_back([&] { ++settled; });
-        }));
+        ASSERT_TRUE(pool.submit(BlockTreeTaskClass::BACKGROUND, [&] { completions.push_back([&] { ++settled; }); }));
         pool.waitForIdle();
     }
     EXPECT_EQ(settled, 0);
@@ -113,7 +126,6 @@ TEST(BlockTreeTaskPoolTest, ExternalTransfersDoNotConsumeNormalQueueCapacity) {
     }
     EXPECT_EQ(settled, 8);
 }
-
 
 TEST(BlockTreeTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
     BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");

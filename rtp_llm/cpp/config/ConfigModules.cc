@@ -451,6 +451,8 @@ std::string RuntimeConfig::to_string() const {
         << "warm_up_with_loss: " << warm_up_with_loss << "\n"
         << "model_warm_up: " << model_warm_up << "\n"
         << "output_dispatcher_worker_count: " << output_dispatcher_worker_count << "\n"
+        << "enable_sleep_mode: " << enable_sleep_mode << "\n"
+        << "sleep_mode_level: " << sleep_mode_level << "\n"
         << "use_batch_decode_scheduler: " << use_batch_decode_scheduler << "\n"
         << "batch_decode_scheduler_config: {\n"
         << batch_decode_scheduler_config.to_string() << "\n}\n"

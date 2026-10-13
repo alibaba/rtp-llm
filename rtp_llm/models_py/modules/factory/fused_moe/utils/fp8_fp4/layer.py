@@ -229,6 +229,37 @@ class Fp8Fp4MoeLayer(nn.Module):
             )
             self._shared_executor.prepare(self.shared_experts)
 
+    def reload_weights(self, weights: Dict[str, torch.Tensor]) -> None:
+        from rtp_llm.model_loader.weight_memory_saver import suppress_weights_region
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.quantized_linear import (
+            create_fp8_linear,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.weight_reload import (
+            copy_tensors_in_place,
+        )
+
+        self.fused_moe.fused_experts.reload_weights(weights)
+        # Canonical gate/shared weights were copied through their ModelWeights
+        # aliases. Packed FP8 scales and the optional BF16 gate cache are derived.
+        cached_gate = getattr(self.gate, "_w_bf16", None)
+        if cached_gate is not None:
+            copy_tensors_in_place(
+                {"gate_bf16": cached_gate},
+                {"gate_bf16": weights[W.moe_gate].to(torch.bfloat16)},
+            )
+        if self.shared_experts is not None:
+            with suppress_weights_region(), torch.inference_mode():
+                for attribute, weight_name, scale_name in (
+                    ("w13", W.ffn_w13, W.ffn_s13),
+                    ("w2", W.ffn_w2, W.ffn_s2),
+                ):
+                    live = getattr(self.shared_experts, attribute)
+                    fresh = create_fp8_linear(weights[weight_name], weights[scale_name])
+                    copy_tensors_in_place(
+                        {"weight": live.weight, "scale": live.weight_scales},
+                        {"weight": fresh.weight, "scale": fresh.weight_scales},
+                    )
+
     def forward(
         self,
         x: torch.Tensor,

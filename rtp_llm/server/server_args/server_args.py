@@ -17,7 +17,10 @@ from rtp_llm.server.server_args.device_resource_group_args import (
     init_device_resource_group_args,
 )
 from rtp_llm.server.server_args.embedding_group_args import init_embedding_group_args
-from rtp_llm.server.server_args.engine_group_args import init_engine_group_args
+from rtp_llm.server.server_args.engine_group_args import (
+    configure_sleep_args,
+    init_engine_group_args,
+)
 from rtp_llm.server.server_args.fifo_scheduler_group_args import (
     init_fifo_scheduler_group_args,
 )
@@ -540,6 +543,10 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
 
     # 解析参数（会自动应用所有配置绑定）
     parsed_args = parser.parse_args(args)
+    try:
+        configure_sleep_args(parsed_args, py_env_configs.runtime_config)
+    except ValueError as error:
+        parser.error(str(error))
     py_env_configs.ft_disable_custom_ar_override = parsed_args.ft_disable_custom_ar
     py_env_configs.server_config.validate_allocator_dump_config()
 

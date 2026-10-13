@@ -1,0 +1,2560 @@
+"""Lifecycle controller regression tests using real generated RPC messages."""
+
+import asyncio
+import threading
+import unittest
+from dataclasses import dataclass, field
+from typing import Any, Dict
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import grpc
+
+from rtp_llm.utils.lifecycle.rpc import ControlRpcTransport
+
+
+@dataclass
+class _SleepBudgetRank:
+    """Deterministic backend model: elapsed times never use wall-clock sleeps."""
+
+    address: str
+    continuation_finish_ms: int
+    state: str = "RUNNING"
+    sleep_epoch: int = 0
+    token: str = ""
+    frozen: bool = False
+    quiesced: bool = False
+    releases: int = 0
+    rollbacks: int = 0
+    budgets: list[tuple[str, int, float]] = field(default_factory=list)
+    commit_budgets: list[tuple[int, float]] = field(default_factory=list)
+
+
+def lifecycle_operation_for_state(state: str) -> str:
+    if state in ("DRAINING", "SUSPENDING"):
+        return "sleep"
+    if state == "WAKING_UP":
+        return "wake_up"
+    if state == "ERROR":
+        return "error"
+    return "none"
+
+
+class _FakeStore:
+    def __init__(self):
+        self.values: Dict[str, str] = {}
+
+    def compare_set(self, key: str, expected: str, desired: str) -> bytes:
+        current = self.values.get(key, "")
+        if current == expected:
+            self.values[key] = desired
+            current = desired
+        return current.encode("utf-8")
+
+
+class LifecycleControllerTest(unittest.IsolatedAsyncioTestCase):
+
+    async def test_idempotent_sleep_pauses_restarted_frontend_reporting(self):
+        from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
+
+        state = reporting.ReportingState(frontend_only=True)
+        controller, pb2 = self._build_controller()
+        stub = controller._rpc.stubs[controller.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=1)
+        )
+        with patch.object(reporting, "_state", state):
+            self.assertEqual(reporting.reporting_epoch(), 0)
+            self.assertEqual(await controller.sleep_serving({}), {"status": "ok"})
+            self.assertEqual(reporting.reporting_epoch(), 1)
+            self.assertEqual(await controller.sleep_serving({}), {"status": "ok"})
+            self.assertEqual(reporting.reporting_epoch(), 1)
+        stub.SleepServing.assert_not_called()
+
+    async def test_idempotent_sleep_cancellation_keeps_lease_until_reporting_pauses(
+        self,
+    ):
+        from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
+
+        state = reporting.ReportingState(frontend_only=True)
+        store = _FakeStore()
+        controller, pb2 = self._build_controller(lifecycle_store=store)
+        controller._rpc.stubs[controller.control_addresses[0]].GetSleepStatus = (
+            AsyncMock(
+                return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=1)
+            )
+        )
+        entered, release = asyncio.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def pause(enabled):
+            loop.call_soon_threadsafe(entered.set)
+            self.assertTrue(release.wait(5))
+            reporting.set_instance_reporting(enabled)
+
+        with patch.object(reporting, "_state", state), patch(
+            "rtp_llm.utils.lifecycle.controller.set_instance_reporting",
+            side_effect=pause,
+        ):
+            task = asyncio.create_task(controller.sleep_serving({}))
+            try:
+                await asyncio.wait_for(entered.wait(), 5)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                self.assertTrue(controller._lifecycle_lock.locked())
+                self.assertTrue(store.values[controller._lifecycle_lease.KEY])
+            finally:
+                release.set()
+                result = await asyncio.wait_for(task, 5)
+            self.assertEqual(result, {"status": "ok"})
+            self.assertEqual(reporting.reporting_epoch(), 1)
+            self.assertEqual(store.values[controller._lifecycle_lease.KEY], "")
+
+    async def test_delayed_status_query_cannot_change_reporting(self):
+        from rtp_llm.aios.kmonitor.python_client.kmonitor import reporting
+
+        for old_state, enabled in (("RUNNING", False), ("SLEEPING", True)):
+            with self.subTest(old_state=old_state):
+                state = reporting.ReportingState(frontend_only=True)
+                state.set_enabled(old_state == "RUNNING")
+                controller, _ = self._build_controller()
+                captured, release = asyncio.Event(), asyncio.Event()
+
+                async def delayed(*args, **kwargs):
+                    snapshot = [{"state": old_state, "sleep_mode_enabled": True}]
+                    captured.set()
+                    await release.wait()
+                    return snapshot
+
+                controller._broadcast_control_rpc = delayed
+                with patch.object(reporting, "_state", state):
+                    task = asyncio.create_task(controller.get_sleep_status())
+                    await captured.wait()
+                    state.set_enabled(enabled)
+                    release.set()
+                    await task
+                    self.assertEqual(reporting.reporting_epoch() % 2 == 0, enabled)
+
+    async def test_partial_wake_failure_never_notifies_metrics_resume(self):
+        controller, pb2 = self._build_controller(control_addresses=["rank-0", "rank-1"])
+        snapshots = [
+            {"address": address, "worker_incarnation": address, "sleep_epoch": 1}
+            for address in controller.control_addresses
+        ]
+        controller._raw_sleep_statuses = AsyncMock(
+            return_value=[
+                {**snapshots[0], "state": "RUNNING"},
+                {**snapshots[1], "state": "ERROR"},
+            ]
+        )
+        controller._call_control_rpc = AsyncMock(return_value={})
+        controller._resume_metrics_after_wake = AsyncMock()
+        result = await controller._converge_commit(
+            "commit wake_up",
+            "WakeUpServing",
+            pb2.WakeUpRequestPB(commit_only=True),
+            600,
+            "WAKING_UP",
+            "RUNNING",
+            snapshots,
+        )
+        self.assertTrue(result["recovery_required"])
+        self.assertEqual(controller._call_control_rpc.await_count, 2)
+        controller._resume_metrics_after_wake.assert_not_awaited()
+
+    async def test_resume_notification_retries_with_each_rank_identity(self):
+        controller, _ = self._build_controller(control_addresses=["rank-0", "rank-1"])
+        statuses = [
+            {
+                "address": "rank-0",
+                "state": "RUNNING",
+                "worker_incarnation": "worker-0",
+                "sleep_epoch": 3,
+            },
+            {
+                "address": "rank-1",
+                "state": "RUNNING",
+                "worker_incarnation": "worker-1",
+                "sleep_epoch": 7,
+            },
+        ]
+        attempts = {"rank-0": 0, "rank-1": 0}
+
+        async def notify(address, rpc, request, timeout_s):
+            rank = statuses[int(address[-1])]
+            self.assertTrue(request.resume_metrics_only)
+            self.assertEqual(request.expected_incarnation, rank["worker_incarnation"])
+            self.assertEqual(request.expected_sleep_epoch, rank["sleep_epoch"])
+            attempts[address] += 1
+            if address == "rank-1" and attempts[address] == 1:
+                return {"address": address, "error": "timeout"}
+            return {"address": address, "status": "ok"}
+
+        controller._call_control_rpc = AsyncMock(side_effect=notify)
+        self.assertEqual(
+            await controller._resume_metrics_after_wake(statuses), {"status": "ok"}
+        )
+        self.assertEqual(attempts, {"rank-0": 1, "rank-1": 2})
+
+    async def test_resume_failure_is_retryable_without_resource_recovery(self):
+        controller, _ = self._build_controller()
+        address = controller.control_addresses[0]
+        statuses = [
+            {
+                "address": address,
+                "state": "RUNNING",
+                "sleep_epoch": 2,
+                "worker_incarnation": "worker",
+            }
+        ]
+        controller._call_control_rpc = AsyncMock(
+            return_value={"address": address, "error": "unavailable"}
+        )
+        result = await controller._resume_metrics_after_wake(statuses)
+        self.assertIn("retry wake_up", result["error"])
+        self.assertNotIn("recovery_required", result)
+        controller._call_control_rpc.return_value = {"address": address, "status": "ok"}
+        self.assertEqual(
+            await controller._resume_metrics_after_wake(statuses), {"status": "ok"}
+        )
+
+    async def test_resume_notification_cancellation_keeps_lifecycle_lease(self):
+        store = _FakeStore()
+        controller, pb2 = self._build_controller(lifecycle_store=store)
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="RUNNING", sleep_epoch=1)
+        )
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def wake(request, **kwargs):
+            if request.resume_metrics_only:
+                entered.set()
+                await release.wait()
+            return pb2.EmptyPB()
+
+        controller._rpc.stubs[address].WakeUpServing = AsyncMock(side_effect=wake)
+        task = asyncio.create_task(controller.wake_up_serving())
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertTrue(controller._lifecycle_lock.locked())
+            self.assertTrue(store.values[controller._lifecycle_lease.KEY])
+        finally:
+            release.set()
+            result = await asyncio.wait_for(task, 5)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(store.values[controller._lifecycle_lease.KEY], "")
+
+    def _build_controller(
+        self,
+        control_addresses=None,
+        expected_control_address_count=None,
+        lifecycle_store=None,
+        require_instance_lease=False,
+    ):
+        import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
+        from rtp_llm.utils.lifecycle import controller as lifecycle_controller
+
+        controller = lifecycle_controller.LifecycleController(
+            ControlRpcTransport({}),
+            control_addresses or ["127.0.0.1:10001"],
+            expected_control_address_count=expected_control_address_count,
+            lifecycle_store=lifecycle_store,
+            require_instance_lease=require_instance_lease,
+        )
+        for address in controller.control_addresses:
+            controller._rpc.channels[address] = MagicMock()
+            controller._rpc.stubs[address] = MagicMock()
+            controller._rpc.stubs[address].QuiesceSleep = AsyncMock(
+                return_value=pb2.SleepQuiesceResponsePB()
+            )
+        return controller, pb2
+
+    def _aio_error(self, code, details):
+        return grpc.aio.AioRpcError(
+            code=code,
+            initial_metadata=grpc.aio.Metadata(),
+            trailing_metadata=grpc.aio.Metadata(),
+            details=details,
+        )
+
+    def _status_pb(self, pb2, **kwargs):
+        defaults = {
+            "quiesce_protocol": 2,
+            "wake_prepare_protocol": 1,
+            "worker_incarnation": "test-worker",
+            "state": "RUNNING",
+            "sleep_mode_enabled": True,
+            "effective": True,
+            "supported_levels": [1],
+            "supported_modes": ["wait", "abort"],
+            "kv_memory_state": "ACTIVE",
+            "device_kv_cache_valid": True,
+            "gpu_resource_state": "ACTIVE",
+        }
+        defaults.update(kwargs)
+        return pb2.SleepStatusResponsePB(**defaults)
+
+    async def _run_freeze_budget_case(
+        self, drain_timeout_ms, continuation_finish_ms, commit_finish_ms=0
+    ):
+        addresses = ["rank-0", "rank-1"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        ranks = [
+            _SleepBudgetRank(addresses[0], 0),
+            _SleepBudgetRank(addresses[1], continuation_finish_ms),
+        ]
+
+        def install(rank):
+            async def status(*args, **kwargs):
+                sleeping = rank.state == "SLEEPING"
+                return self._status_pb(
+                    pb2,
+                    state=rank.state,
+                    worker_incarnation=rank.address,
+                    sleep_epoch=rank.sleep_epoch,
+                    kv_memory_state="PAUSED" if sleeping else "ACTIVE",
+                    device_kv_cache_valid=not sleeping,
+                    gpu_resource_state="RELEASED" if sleeping else "ACTIVE",
+                )
+
+            async def sleep(request, timeout):
+                if request.commit_only:
+                    self.assertTrue(rank.quiesced)
+                    rank.releases += 1
+                    rank.commit_budgets.append((request.timeout_ms, timeout))
+                    rank.state = "SUSPENDING"
+                    # Resource release continues after a transport deadline.
+                    # Model its duration without a wall-clock sleep.
+                    if commit_finish_ms >= timeout * 1000:
+                        raise self._aio_error(
+                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                            "sleep commit RPC deadline",
+                        )
+                    rank.state = "SLEEPING"
+                else:
+                    self.assertTrue(request.drain_only)
+                    self.assertEqual(rank.state, "RUNNING")
+                    rank.budgets.append(("drain", request.timeout_ms, timeout))
+                    rank.token = request.quiesce_token
+                    # Mirror the backend's RUNNING -> DRAINING generation.
+                    rank.sleep_epoch += 1
+                    rank.state = "DRAINING"
+                    # Model roots completing at their own deadline. Freeze must
+                    # still receive a fresh per-stage budget, not a remainder.
+                return pb2.EmptyPB()
+
+            async def quiesce(request, timeout):
+                self.assertEqual(request.token, rank.token)
+                self.assertEqual(rank.state, "DRAINING")
+                if request.freeze_only:
+                    rank.budgets.append(("freeze", request.timeout_ms, timeout))
+                    # Backend drain consumes at most its budget, then needs 1s
+                    # to deliver the result. No real timer/scheduling race is
+                    # needed to distinguish a server timeout from an RPC timeout.
+                    response_ms = (
+                        min(rank.continuation_finish_ms, request.timeout_ms) + 1000
+                    )
+                    if response_ms >= timeout * 1000:
+                        raise self._aio_error(
+                            grpc.StatusCode.DEADLINE_EXCEEDED, "freeze RPC deadline"
+                        )
+                    if rank.continuation_finish_ms > request.timeout_ms:
+                        raise self._aio_error(
+                            grpc.StatusCode.FAILED_PRECONDITION,
+                            "KV continuation drain failed; admission remains closed",
+                        )
+                    rank.frozen = True
+                    return pb2.SleepQuiesceResponsePB()
+                self.assertTrue(all(peer.frozen for peer in ranks))
+                rank.quiesced = True
+                return pb2.SleepQuiesceResponsePB()
+
+            async def wake(request, timeout):
+                self.assertEqual(request.cancel_quiesce_token, rank.token)
+                self.assertEqual(rank.state, "DRAINING")
+                rank.rollbacks += 1
+                rank.state = "RUNNING"
+                rank.frozen = rank.quiesced = False
+                return pb2.EmptyPB()
+
+            stub = controller._rpc.stubs[rank.address]
+            stub.GetSleepStatus = AsyncMock(side_effect=status)
+            stub.SleepServing = AsyncMock(side_effect=sleep)
+            stub.QuiesceSleep = AsyncMock(side_effect=quiesce)
+            stub.WakeUpServing = AsyncMock(side_effect=wake)
+
+        for rank in ranks:
+            install(rank)
+        result = await controller.sleep_serving(
+            {"level": 1, "timeout_ms": drain_timeout_ms}
+        )
+        return result, ranks
+
+    async def test_freeze_preserves_backend_budget_and_rpc_margin_at_boundary(self):
+        for budget_ms in (0, 1, 2500, 60000, 3600000):
+            with self.subTest(budget_ms=budget_ms):
+                result, ranks = await self._run_freeze_budget_case(budget_ms, budget_ms)
+                self.assertEqual(result, {"status": "ok"})
+                rpc_timeout_s = max(60.0, budget_ms / 1000.0 + 30.0)
+                for rank in ranks:
+                    self.assertEqual(
+                        rank.budgets,
+                        [
+                            ("drain", budget_ms, rpc_timeout_s),
+                            ("freeze", budget_ms, rpc_timeout_s),
+                        ],
+                    )
+                    self.assertEqual(rank.state, "SLEEPING")
+                    self.assertEqual(rank.releases, 1)
+                    self.assertEqual(rank.rollbacks, 0)
+
+    async def test_freeze_one_ms_past_budget_rolls_back_all_ranks_without_release(self):
+        for budget_ms in (0, 1, 2500, 60000, 3600000):
+            with self.subTest(budget_ms=budget_ms):
+                result, ranks = await self._run_freeze_budget_case(
+                    budget_ms, budget_ms + 1
+                )
+                self.assertIn("rolled back", result["error"])
+                self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+                self.assertIn("KV continuation drain failed", str(result["details"]))
+                for rank in ranks:
+                    self.assertEqual(rank.state, "RUNNING")
+                    self.assertEqual(rank.releases, 0)
+                    self.assertEqual(rank.rollbacks, 1)
+                    self.assertFalse(rank.frozen)
+                    self.assertFalse(rank.quiesced)
+
+    async def test_freeze_backend_timeout_is_delivered_before_transport_deadline(self):
+        result, ranks = await self._run_freeze_budget_case(60000, 120000)
+        self.assertIn("rolled back", result["error"])
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertIn("KV continuation drain failed", str(result["details"]))
+        self.assertNotIn("freeze RPC deadline", str(result))
+        self.assertEqual([rank.state for rank in ranks], ["RUNNING", "RUNNING"])
+        self.assertEqual([rank.releases for rank in ranks], [0, 0])
+        self.assertEqual([rank.rollbacks for rank in ranks], [1, 1])
+
+    async def test_sleep_commit_deadline_has_floor_and_preserves_long_budget(self):
+        for budget_ms, commit_timeout_s in (
+            (0, 600),
+            (1, 600),
+            (60000, 600),
+            (3600000, 3630),
+        ):
+            with self.subTest(budget_ms=budget_ms):
+                result, ranks = await self._run_freeze_budget_case(
+                    budget_ms, 0, commit_finish_ms=104000
+                )
+                self.assertEqual(result, {"status": "ok"})
+                prepare_timeout_s = max(60.0, budget_ms / 1000.0 + 30.0)
+                for rank in ranks:
+                    self.assertEqual(
+                        rank.budgets,
+                        [
+                            ("drain", budget_ms, prepare_timeout_s),
+                            ("freeze", budget_ms, prepare_timeout_s),
+                        ],
+                    )
+                    self.assertEqual(rank.commit_budgets, [(0, commit_timeout_s)])
+                    self.assertEqual(rank.state, "SLEEPING")
+                    self.assertEqual(rank.releases, 1)
+                    self.assertEqual(rank.rollbacks, 0)
+
+    async def test_backend_coordination_waits_for_all_freeze_acks_without_rounds(self):
+        from rtp_llm.utils.lifecycle.quiesce import prepare_sleep_quiesce
+
+        addresses = ["rank-0", "rank-1", "rank-2", "rank-3"]
+        _, pb2 = self._build_controller(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 2,
+                "worker_incarnation": a,
+                "sleep_epoch": "4",
+            }
+            for a in addresses
+        ]
+        calls = []
+
+        async def drain(address, rpc, request, timeout):
+            self.assertEqual(rpc, "SleepServing")
+            self.assertTrue(request.drain_only)
+            self.assertTrue(request.prepare_only)
+            self.assertEqual(request.expected_incarnation, address)
+            self.assertEqual(request.expected_sleep_epoch, 4)
+            self.assertEqual(request.quiesce_token, "attempt")
+            calls.append(address)
+            return {"address": address}
+
+        async def broadcast(rpc, request, timeout):
+            self.assertCountEqual(calls[:4], addresses)
+            self.assertEqual(rpc, "QuiesceSleep")
+            self.assertEqual(request.token, "attempt")
+            self.assertEqual(request.protocol, 2)
+            self.assertFalse(hasattr(request, "target_round"))
+            if request.freeze_only:
+                # Backend work keeps the request's budget, not the 60s RPC
+                # timeout that includes transport headroom.
+                self.assertEqual(request.timeout_ms, 1000)
+                self.assertEqual(timeout, 60.0)
+                calls.append("freeze")
+                await asyncio.sleep(0)
+                calls.append("all_frozen")
+                return [{"address": a} for a in addresses]
+            self.assertEqual(calls[-1], "all_frozen")
+            calls.append("coordinate")
+            return [{"address": a} for a in addresses]
+
+        results = await prepare_sleep_quiesce(
+            pb2.SleepRequestPB(quiesce_token="attempt", timeout_ms=1000),
+            addresses,
+            statuses,
+            drain,
+            broadcast,
+            60.0,
+        )
+        self.assertFalse(any("error" in r for r in results))
+        self.assertEqual(calls[-1], "coordinate")
+
+    async def test_missing_or_failed_freeze_ack_never_enters_cpu_coordination(self):
+        from rtp_llm.utils.lifecycle.quiesce import prepare_sleep_quiesce
+
+        addresses = ["rank-0", "rank-1"]
+        _, pb2 = self._build_controller(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 2,
+                "worker_incarnation": a,
+                "sleep_epoch": 0,
+            }
+            for a in addresses
+        ]
+
+        async def drain(address, *args):
+            return {"address": address}
+
+        bad_acks = [
+            [{"address": addresses[0]}],
+            [{"address": a, "error": "timeout"} for a in addresses],
+            [{"address": addresses[0]}] * 2,
+        ]
+        for acks in bad_acks:
+            with self.subTest(acks=acks):
+                broadcast = AsyncMock(return_value=acks)
+                results = await prepare_sleep_quiesce(
+                    pb2.SleepRequestPB(quiesce_token="attempt"),
+                    addresses,
+                    statuses,
+                    drain,
+                    broadcast,
+                    60.0,
+                )
+                self.assertTrue(any("error" in r for r in results))
+                broadcast.assert_awaited_once()
+                self.assertTrue(broadcast.await_args.args[1].freeze_only)
+
+    async def test_round_fence_mixed_version_rejected_before_any_drain(self):
+        from rtp_llm.utils.lifecycle.quiesce import prepare_sleep_quiesce
+
+        addresses = ["rank-0", "rank-1"]
+        _, pb2 = self._build_controller(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 2,
+                "worker_incarnation": a,
+                "sleep_epoch": 0,
+            }
+            for a in addresses
+        ]
+        statuses[1]["quiesce_protocol"] = 1
+        drain, broadcast = AsyncMock(), AsyncMock()
+        results = await prepare_sleep_quiesce(
+            pb2.SleepRequestPB(quiesce_token="attempt"),
+            addresses,
+            statuses,
+            drain,
+            broadcast,
+            60.0,
+        )
+        self.assertTrue(any("error" in r for r in results))
+        drain.assert_not_awaited()
+        broadcast.assert_not_awaited()
+
+    async def test_frontend_does_not_require_backend_round_metadata(self):
+        from rtp_llm.utils.lifecycle.quiesce import prepare_sleep_quiesce
+
+        addresses = ["rank-0", "rank-1"]
+        _, pb2 = self._build_controller(control_addresses=addresses)
+        statuses = [
+            {
+                "address": a,
+                "state": "RUNNING",
+                "quiesce_protocol": 2,
+                "worker_incarnation": a,
+                "sleep_epoch": 0,
+            }
+            for a in addresses
+        ]
+
+        async def drain(address, *args):
+            return {"address": address}
+
+        broadcast = AsyncMock(
+            side_effect=[
+                [{"address": a} for a in addresses],
+                [{"address": a} for a in addresses],
+            ]
+        )
+        results = await prepare_sleep_quiesce(
+            pb2.SleepRequestPB(quiesce_token="attempt"),
+            addresses,
+            statuses,
+            drain,
+            broadcast,
+            60.0,
+        )
+        self.assertFalse(any("error" in r for r in results))
+        target = broadcast.await_args_list[-1].args[1]
+        self.assertFalse(target.freeze_only)
+        self.assertEqual(target.protocol, 2)
+        self.assertFalse(hasattr(target, "target_round"))
+
+    async def test_freeze_rpc_failure_rolls_back_with_the_same_token(self):
+        controller, pb2 = self._build_controller()
+        stub = controller._rpc.stubs[controller.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(return_value=self._status_pb(pb2))
+        stub.SleepServing = AsyncMock(return_value=pb2.EmptyPB())
+        stub.WakeUpServing = AsyncMock(return_value=pb2.EmptyPB())
+        stub.QuiesceSleep = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.DEADLINE_EXCEEDED, "freeze timeout"
+            )
+        )
+        result = await controller.sleep_serving({"level": 1})
+        self.assertIn("rolled back", result["error"])
+        stub.SleepServing.assert_awaited_once()
+        token = stub.SleepServing.await_args.args[0].quiesce_token
+        self.assertTrue(token)
+        self.assertEqual(
+            stub.WakeUpServing.await_args.args[0].cancel_quiesce_token, token
+        )
+
+    async def test_cancel_during_freeze_rolls_back_without_committing(self):
+        controller, pb2 = self._build_controller()
+        stub = controller._rpc.stubs[controller.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(return_value=self._status_pb(pb2))
+        stub.SleepServing = AsyncMock(return_value=pb2.EmptyPB())
+        stub.WakeUpServing = AsyncMock(return_value=pb2.EmptyPB())
+        entered = asyncio.Event()
+
+        async def freeze(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        stub.QuiesceSleep = AsyncMock(side_effect=freeze)
+        task = asyncio.create_task(controller.sleep_serving({"level": 1}))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        stub.SleepServing.assert_awaited_once()
+        self.assertEqual(
+            stub.WakeUpServing.await_args.args[0].cancel_quiesce_token,
+            stub.SleepServing.await_args.args[0].quiesce_token,
+        )
+
+    async def test_control_plane_sleep_wake_up_smoke_flow(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "ACTIVE",
+            }
+            for address in addresses
+        }
+        observed_states = []
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address].update(
+                        state="DRAINING",
+                        sleep_epoch=1,
+                        kv_memory_state="ACTIVE",
+                        device_kv_cache_valid=True,
+                        gpu_resource_state="ACTIVE",
+                    )
+                elif request.commit_only:
+                    self.assertEqual(rank_statuses[address]["state"], "DRAINING")
+                    rank_statuses[address].update(
+                        state="SLEEPING",
+                        sleep_epoch=1,
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    )
+                else:
+                    rank_statuses[address].update(state="SLEEPING")
+                observed_states.append(rank_statuses[address]["state"])
+                return pb2.EmptyPB()
+
+            async def wake_up_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    self.assertEqual(rank_statuses[address]["state"], "SLEEPING")
+                    rank_statuses[address].update(
+                        state="WAKING_UP",
+                        kv_memory_state="WAKING_UP",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RESTORING",
+                    )
+                elif request.commit_only:
+                    self.assertEqual(rank_statuses[address]["state"], "WAKING_UP")
+                    rank_statuses[address].update(
+                        state="RUNNING",
+                        kv_memory_state="ACTIVE",
+                        device_kv_cache_valid=True,
+                        gpu_resource_state="ACTIVE",
+                    )
+                else:
+                    rank_statuses[address].update(state="RUNNING")
+                observed_states.append(rank_statuses[address]["state"])
+                return pb2.EmptyPB()
+
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            controller._rpc.stubs[address].SleepServing = AsyncMock(
+                side_effect=sleep_rpc
+            )
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                side_effect=wake_up_rpc
+            )
+
+        initial_status = await controller.get_sleep_status()
+        self.assertEqual(initial_status["state"], "RUNNING")
+        self.assertEqual(lifecycle_operation_for_state(initial_status["state"]), "none")
+
+        sleep_result = await controller.sleep_serving(
+            {"level": 1, "mode": "wait", "timeout_ms": 1000, "reason": "smoke"}
+        )
+        self.assertEqual(sleep_result, {"status": "ok"})
+        self.assertIn("DRAINING", observed_states)
+        self.assertEqual(lifecycle_operation_for_state("DRAINING"), "sleep")
+
+        sleeping_status = await controller.get_sleep_status()
+        self.assertEqual(sleeping_status["state"], "SLEEPING")
+        self.assertEqual(sleeping_status["gpu_resource_state"], "RELEASED")
+        self.assertFalse(bool(sleeping_status["device_kv_cache_valid"]))
+        self.assertEqual(
+            lifecycle_operation_for_state(sleeping_status["state"]), "none"
+        )
+
+        wake_up_result = await controller.wake_up_serving()
+        self.assertEqual(wake_up_result, {"status": "ok"})
+        self.assertIn("WAKING_UP", observed_states)
+        self.assertEqual(lifecycle_operation_for_state("WAKING_UP"), "wake_up")
+
+        running_status = await controller.get_sleep_status()
+        self.assertEqual(running_status["state"], "RUNNING")
+        self.assertEqual(running_status["gpu_resource_state"], "ACTIVE")
+        self.assertTrue(bool(running_status["device_kv_cache_valid"]))
+        self.assertEqual(lifecycle_operation_for_state(running_status["state"]), "none")
+
+        for address in addresses:
+            self.assertEqual(controller._rpc.stubs[address].SleepServing.await_count, 2)
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 3
+            )
+
+    async def test_sleep_and_wake_up_report_action_latency(self):
+        from rtp_llm.metrics import GaugeMetrics
+        from rtp_llm.utils.lifecycle import controller as lifecycle_controller
+
+        controller, _ = self._build_controller()
+        controller._sleep_serving_locked = AsyncMock(return_value={"status": "ok"})
+        controller._wake_up_serving_locked = AsyncMock(return_value={"status": "ok"})
+
+        with patch.object(
+            lifecycle_controller, "_report_metric_if_ready"
+        ) as report_metric:
+            self.assertEqual(await controller.sleep_serving({}), {"status": "ok"})
+            self.assertEqual(await controller.wake_up_serving(), {"status": "ok"})
+
+        self.assertEqual(report_metric.call_count, 2)
+        sleep_call, wake_up_call = report_metric.call_args_list
+        self.assertEqual(sleep_call.args[0], GaugeMetrics.SLEEP_ACTION_RT_METRIC)
+        self.assertGreaterEqual(sleep_call.args[1], 0)
+        self.assertEqual(wake_up_call.args[0], GaugeMetrics.WAKE_UP_ACTION_RT_METRIC)
+        self.assertGreaterEqual(wake_up_call.args[1], 0)
+
+    async def test_sleep_commit_cancellation_is_absorbed_and_reaches_sleeping(self):
+        # Regression: once commit starts the device-memory release is
+        # irreversible. If the driving request is cancelled mid-commit (a stray
+        # channel teardown, a client disconnect, a worker recycle) we must NOT
+        # abandon the transition half-committed -- that leaves the instance with
+        # part of its GPU memory freed and no owner. The commit must be driven
+        # uninterruptibly to the terminal SLEEPING state and still report ok.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "ACTIVE",
+            }
+            for address in addresses
+        }
+        commit_entered = asyncio.Event()
+        release_commit = asyncio.Event()
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address].update(state="DRAINING", sleep_epoch=1)
+                elif request.commit_only:
+                    # Block inside the irreversible commit so the test can cancel
+                    # the driving task while the transition is in flight.
+                    commit_entered.set()
+                    await release_commit.wait()
+                    rank_statuses[address].update(
+                        state="SLEEPING",
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    )
+                return pb2.EmptyPB()
+
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            controller._rpc.stubs[address].SleepServing = AsyncMock(
+                side_effect=sleep_rpc
+            )
+
+        task = asyncio.ensure_future(
+            controller.sleep_serving(
+                {"level": 1, "mode": "wait", "timeout_ms": 1000, "reason": "cancel"}
+            )
+        )
+        await asyncio.wait_for(commit_entered.wait(), timeout=5)
+        # Cancel while the irreversible commit is in flight, then let it finish.
+        task.cancel()
+        await asyncio.sleep(0)
+        release_commit.set()
+
+        result = await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertFalse(task.cancelled())
+        sleeping_status = await controller.get_sleep_status()
+        self.assertEqual(sleeping_status["state"], "SLEEPING")
+        self.assertEqual(sleeping_status["gpu_resource_state"], "RELEASED")
+
+    async def test_sleep_prepare_cancellation_rolls_back_to_running(self):
+        # Regression: prepare only closes admission and drains -- no device
+        # memory is freed, so it is reversible. A cancellation here must roll the
+        # drain back to RUNNING (via a WakeUpServing abort) so the instance keeps
+        # serving, then honor the cancellation.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "ACTIVE",
+            }
+            for address in addresses
+        }
+        prepare_entered = asyncio.Event()
+        release_prepare = asyncio.Event()
+        wake_calls = {"n": 0}
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address].update(state="DRAINING", sleep_epoch=1)
+                    # Block mid-drain so the test can cancel before commit.
+                    prepare_entered.set()
+                    await release_prepare.wait()
+                return pb2.EmptyPB()
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                wake_calls["n"] += 1
+                rank_statuses[address].update(
+                    state="RUNNING", gpu_resource_state="ACTIVE"
+                )
+                return pb2.EmptyPB()
+
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            controller._rpc.stubs[address].SleepServing = AsyncMock(
+                side_effect=sleep_rpc
+            )
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                side_effect=wake_rpc
+            )
+
+        task = asyncio.ensure_future(
+            controller.sleep_serving(
+                {"level": 1, "mode": "wait", "timeout_ms": 1000, "reason": "cancel"}
+            )
+        )
+        await asyncio.wait_for(prepare_entered.wait(), timeout=5)
+        task.cancel()
+
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        self.assertTrue(task.cancelled())
+        # The reversible drain was rolled back on every control rank.
+        self.assertEqual(wake_calls["n"], len(addresses))
+
+    async def test_drain_rollback_keeps_lease_through_repeated_cancellation(self):
+        for level in (1, 2):
+            for prepare_cancelled in (False, True):
+                for cancel_rollback in (False, True):
+                    with self.subTest(
+                        level=level,
+                        prepare_cancelled=prepare_cancelled,
+                        cancel_rollback=cancel_rollback,
+                    ):
+                        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+                        store = _FakeStore()
+                        controller, pb2 = self._build_controller(
+                            control_addresses=addresses,
+                            expected_control_address_count=2,
+                            lifecycle_store=store,
+                        )
+                        states = {address: "RUNNING" for address in addresses}
+                        prepare_entered = asyncio.Event()
+                        rollback_entered = asyncio.Event()
+                        release_rollback = asyncio.Event()
+                        hold_prepare = asyncio.Event()
+
+                        for address in addresses:
+
+                            async def status(*args, address=address, **kwargs):
+                                return self._status_pb(
+                                    pb2, state=states[address], supported_levels=[level]
+                                )
+
+                            async def prepare(
+                                request, *args, address=address, **kwargs
+                            ):
+                                self.assertTrue(request.prepare_only)
+                                self.assertFalse(request.commit_only)
+                                states[address] = "DRAINING"
+                                if address == addresses[1]:
+                                    prepare_entered.set()
+                                    if prepare_cancelled:
+                                        await hold_prepare.wait()
+                                    raise self._aio_error(
+                                        grpc.StatusCode.FAILED_PRECONDITION,
+                                        "drain timed out",
+                                    )
+                                return pb2.EmptyPB()
+
+                            async def rollback(
+                                request, *args, address=address, **kwargs
+                            ):
+                                if address == addresses[1]:
+                                    rollback_entered.set()
+                                    await release_rollback.wait()
+                                states[address] = "RUNNING"
+                                return pb2.EmptyPB()
+
+                            stub = controller._rpc.stubs[address]
+                            stub.GetSleepStatus = AsyncMock(side_effect=status)
+                            stub.SleepServing = AsyncMock(side_effect=prepare)
+                            stub.WakeUpServing = AsyncMock(side_effect=rollback)
+
+                        task = asyncio.create_task(
+                            controller.sleep_serving({"level": level, "timeout_ms": 1})
+                        )
+                        if prepare_cancelled:
+                            await asyncio.wait_for(prepare_entered.wait(), timeout=5)
+                            task.cancel()
+                        await asyncio.wait_for(rollback_entered.wait(), timeout=5)
+                        try:
+                            if cancel_rollback:
+                                for _ in range(2):
+                                    task.cancel()
+                                    await asyncio.sleep(0)
+                            self.assertFalse(task.done())
+                            self.assertTrue(controller._lifecycle_lock.locked())
+                            self.assertTrue(
+                                store.values[controller._lifecycle_lease.KEY]
+                            )
+                        finally:
+                            release_rollback.set()
+                        if prepare_cancelled:
+                            with self.assertRaises(asyncio.CancelledError):
+                                await asyncio.wait_for(task, timeout=5)
+                        else:
+                            result = await asyncio.wait_for(task, timeout=5)
+                            self.assertIn("rolled back", result["error"])
+                            self.assertNotIn("recovery_required", result)
+                        self.assertEqual(set(states.values()), {"RUNNING"})
+                        self.assertEqual(
+                            store.values[controller._lifecycle_lease.KEY], ""
+                        )
+                        self.assertFalse(controller._lifecycle_lock.locked())
+                        next_status = await controller._initial_lifecycle_status(
+                            "wake_up", rank_snapshots=[]
+                        )
+                        self.assertEqual(next_status["state"], "RUNNING")
+                        for address in addresses:
+                            controller._rpc.stubs[
+                                address
+                            ].SleepServing.assert_awaited_once()
+                            controller._rpc.stubs[
+                                address
+                            ].WakeUpServing.assert_awaited_once()
+
+    async def test_drain_rollback_checks_status_and_preserves_both_failures(self):
+        for failure in ("state", "resource", "status_rpc", "rollback_rpc"):
+            with self.subTest(failure=failure):
+                addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+                controller, pb2 = self._build_controller(control_addresses=addresses)
+                for address in addresses:
+                    stub = controller._rpc.stubs[address]
+                    stub.GetSleepStatus = AsyncMock(return_value=self._status_pb(pb2))
+                    stub.SleepServing = AsyncMock(return_value=pb2.EmptyPB())
+                    stub.WakeUpServing = AsyncMock(return_value=pb2.EmptyPB())
+                failing = controller._rpc.stubs[addresses[1]]
+                failing.SleepServing.side_effect = self._aio_error(
+                    grpc.StatusCode.FAILED_PRECONDITION, "drain timed out"
+                )
+                after = self._status_pb(pb2)
+                if failure == "state":
+                    after = self._status_pb(pb2, state="DRAINING")
+                elif failure == "resource":
+                    after = self._status_pb(pb2, device_kv_cache_valid=False)
+                elif failure == "status_rpc":
+                    after = self._aio_error(grpc.StatusCode.UNAVAILABLE, "status lost")
+                else:
+                    failing.WakeUpServing.side_effect = self._aio_error(
+                        grpc.StatusCode.UNAVAILABLE, "rollback lost"
+                    )
+                failing.GetSleepStatus.side_effect = [self._status_pb(pb2), after]
+
+                result = await controller.sleep_serving({"level": 1, "timeout_ms": 1})
+                self.assertTrue(result["recovery_required"])
+                self.assertIn("RECOVERY_REQUIRED", result["error"])
+                self.assertIn("drain timed out", result["details"][0]["error"])
+                self.assertGreaterEqual(len(result["details"]), 2)
+
+    async def test_get_sleep_status_exposes_in_progress_states_for_control_plane(self):
+        cases = [
+            ("DRAINING", "ACTIVE", "sleep"),
+            ("SUSPENDING", "RELEASING", "sleep"),
+            ("WAKING_UP", "RESTORING", "wake_up"),
+        ]
+        for state, gpu_resource_state, operation in cases:
+            with self.subTest(state=state):
+                controller, pb2 = self._build_controller()
+                address = controller.control_addresses[0]
+                controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                    return_value=self._status_pb(
+                        pb2,
+                        state=state,
+                        gpu_resource_state=gpu_resource_state,
+                    )
+                )
+
+                result = await controller.get_sleep_status()
+
+                self.assertEqual(result["state"], state)
+                self.assertEqual(result["gpu_resource_state"], gpu_resource_state)
+                self.assertEqual(
+                    lifecycle_operation_for_state(result["state"]), operation
+                )
+
+    async def test_sleep_serving_broadcasts_all_control_ranks(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].SleepServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=[
+                    self._status_pb(pb2),
+                    self._status_pb(
+                        pb2,
+                        state="SLEEPING",
+                        sleep_epoch=1,
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    ),
+                ]
+            )
+
+        result = await controller.sleep_serving(
+            {"mode": "abort", "timeout_ms": 1000, "reason": "test"}
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(set(result.keys()), {"status"})
+        for address in addresses:
+            stub = controller._rpc.stubs[address]
+            self.assertEqual(stub.SleepServing.await_count, 2)
+            prepare_request = stub.SleepServing.await_args_list[0].args[0]
+            commit_request = stub.SleepServing.await_args_list[1].args[0]
+            self.assertEqual(prepare_request.level, 1)
+            self.assertEqual(prepare_request.mode, "abort")
+            self.assertEqual(prepare_request.timeout_ms, 1000)
+            self.assertEqual(prepare_request.reason, "test")
+            self.assertTrue(prepare_request.prepare_only)
+            self.assertFalse(prepare_request.commit_only)
+            self.assertFalse(commit_request.prepare_only)
+            self.assertTrue(commit_request.commit_only)
+            self.assertEqual(commit_request.timeout_ms, 0)
+
+    async def test_sleep_already_sleeping_is_idempotent_without_a_new_token(self):
+        controller, pb2 = self._build_controller()
+        stub = controller._rpc.stubs[controller.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING")
+        )
+        stub.SleepServing = AsyncMock()
+        self.assertEqual(await controller.sleep_serving({"level": 1}), {"status": "ok"})
+        stub.SleepServing.assert_not_awaited()
+        stub.QuiesceSleep.assert_not_awaited()
+
+    async def test_sleep_serving_phase_rejected_before_status_probe(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+
+        result = await controller.sleep_serving({"phase": "prepare"})
+
+        self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_sleep_serving_prepare_only_rejected_before_status_probe(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+
+        result = await controller.sleep_serving({"prepare_only": True})
+
+        self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        self.assertIn("prepare_only", result["error"])
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_sleep_commit_keeps_waiting_for_a_suspending_rank(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        controller._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        controller._raw_sleep_statuses = AsyncMock(
+            side_effect=[
+                [{**snapshot, "state": "SUSPENDING"}],
+                [{**snapshot, "state": "SLEEPING"}],
+            ]
+        )
+        result = await controller._converge_commit(
+            "commit sleep",
+            "SleepServing",
+            pb2.SleepRequestPB(commit_only=True),
+            1,
+            "DRAINING",
+            "SLEEPING",
+            [snapshot],
+        )
+        self.assertEqual(result, {"status": "ok"})
+
+    async def test_wake_commit_does_not_fail_merely_after_three_fast_retries(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        controller._call_control_rpc = AsyncMock(return_value={})
+        controller._raw_sleep_statuses = AsyncMock(
+            side_effect=[[{**snapshot, "state": "WAKING_UP"}] for _ in range(4)]
+            + [[{**snapshot, "state": "RUNNING"}]]
+        )
+        controller._resume_metrics_after_wake = AsyncMock(return_value={"status": "ok"})
+        result = await controller._converge_commit(
+            "commit wake_up",
+            "WakeUpServing",
+            pb2.WakeUpRequestPB(commit_only=True),
+            1,
+            "WAKING_UP",
+            "RUNNING",
+            [snapshot],
+        )
+        self.assertEqual(result, {"status": "ok"})
+
+    async def test_wake_rejects_initial_rank_without_a_valid_identity(self):
+        for malformed in (
+            {"worker_incarnation": ""},
+            {"worker_incarnation": None},
+            {"sleep_epoch": None},
+            {"sleep_epoch": -1},
+            {"sleep_epoch": "not-an-epoch"},
+            {"sleep_epoch": True},
+        ):
+            with self.subTest(malformed=malformed):
+                controller, _ = self._build_controller()
+                snapshot = {
+                    "address": controller.control_addresses[0],
+                    "worker_incarnation": "original",
+                    "sleep_epoch": "1",
+                    "state": "SLEEPING",
+                    "effective": True,
+                    "wake_prepare_protocol": 1,
+                    **malformed,
+                }
+                controller._raw_sleep_statuses = AsyncMock(return_value=[snapshot])
+                controller._wake_up_to_terminal = AsyncMock(
+                    return_value={"status": "ok"}
+                )
+                result = await controller._wake_up_serving_locked()
+                self.assertTrue(result.get("recovery_required"), result)
+                controller._wake_up_to_terminal.assert_not_awaited()
+
+    async def test_wake_prepare_timeout_is_not_a_prepared_ack(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        controller._call_control_rpc = AsyncMock(
+            return_value={"address": address, "error": "prepare RPC timed out"}
+        )
+        controller._raw_sleep_statuses = AsyncMock(
+            side_effect=[
+                [{**snapshot, "state": "WAKING_UP", "wake_prepared": False}],
+                [
+                    {
+                        **snapshot,
+                        "state": "ERROR",
+                        "last_error": "restore failed",
+                    }
+                ],
+            ]
+        )
+        controller._converge_commit = AsyncMock(return_value={"status": "ok"})
+
+        result = await controller._wake_up_to_terminal(
+            pb2.WakeUpRequestPB(prepare_only=True),
+            pb2.WakeUpRequestPB(commit_only=True),
+            [snapshot],
+        )
+
+        self.assertIn("error", result)
+        controller._converge_commit.assert_not_awaited()
+
+    async def _check_unsupported_wake_prepare_protocol(self, operation):
+        from rtp_llm.utils.lifecycle import controller as lifecycle_controller
+
+        # Both protocol-1 round fencing and valid operation identities already
+        # existed before wake_prepared. They do not establish the new capability.
+        for version in ("missing", 0, 2, -1):
+            for mixed in (False, True):
+                with self.subTest(operation=operation, version=version, mixed=mixed):
+                    addresses = ["rank-0", "rank-1"]
+                    controller, _ = self._build_controller(control_addresses=addresses)
+                    snapshots = [
+                        {
+                            "address": address,
+                            "worker_incarnation": address,
+                            "sleep_epoch": 1,
+                            "quiesce_protocol": 2,
+                            "wake_prepare_protocol": 1,
+                            "wake_prepared": False,
+                            "state": "RUNNING" if operation == "sleep" else "SLEEPING",
+                            "sleep_mode_enabled": True,
+                            "effective": True,
+                            "supported_levels": [1],
+                            "supported_modes": ["wait", "abort"],
+                        }
+                        for address in addresses
+                    ]
+                    unsupported = snapshots[1:] if mixed else snapshots
+                    for snapshot in unsupported:
+                        if version == "missing":
+                            snapshot.pop("wake_prepare_protocol")
+                        else:
+                            snapshot["wake_prepare_protocol"] = version
+                    controller._raw_sleep_statuses = AsyncMock(return_value=snapshots)
+                    controller._wake_up_to_terminal = AsyncMock(
+                        return_value={"status": "ok"}
+                    )
+                    controller._converge_commit = AsyncMock(
+                        return_value={"status": "ok"}
+                    )
+                    controller._call_control_rpc = AsyncMock()
+                    controller._broadcast_control_rpc = AsyncMock()
+                    with patch.object(
+                        lifecycle_controller,
+                        "prepare_sleep_quiesce",
+                        AsyncMock(
+                            return_value=[{"address": address} for address in addresses]
+                        ),
+                    ) as prepare:
+                        result = (
+                            await controller._sleep_serving_locked({"level": 1})
+                            if operation == "sleep"
+                            else await controller._wake_up_serving_locked()
+                        )
+                    self.assertEqual(result.get("grpc_status"), "UNIMPLEMENTED", result)
+                    self.assertFalse(result.get("recovery_required"), result)
+                    self.assertIn("upgrade", str(result).lower())
+                    for snapshot in unsupported:
+                        self.assertIn(snapshot["address"], str(result))
+                    prepare.assert_not_awaited()
+                    controller._wake_up_to_terminal.assert_not_awaited()
+                    controller._converge_commit.assert_not_awaited()
+                    controller._call_control_rpc.assert_not_awaited()
+                    controller._broadcast_control_rpc.assert_not_awaited()
+
+    async def test_sleep_rejects_unsupported_wake_protocol_before_any_drain(self):
+        await self._check_unsupported_wake_prepare_protocol("sleep")
+
+    async def test_wake_rejects_unsupported_wake_protocol_before_any_restore(self):
+        await self._check_unsupported_wake_prepare_protocol("wake")
+
+    async def test_wake_prepared_false_does_not_mean_protocol_unsupported(self):
+        from rtp_llm.utils.lifecycle import controller as lifecycle_controller
+
+        for operation in ("sleep", "wake"):
+            with self.subTest(operation=operation):
+                controller, pb2 = self._build_controller()
+                address = controller.control_addresses[0]
+                sleeping = operation == "wake"
+                controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                    return_value=self._status_pb(
+                        pb2,
+                        state="SLEEPING" if sleeping else "RUNNING",
+                        sleep_epoch=1,
+                        wake_prepared=False,
+                        wake_prepare_protocol=1,
+                    )
+                )
+                controller._wake_up_to_terminal = AsyncMock(
+                    return_value={"status": "ok"}
+                )
+                controller._converge_commit = AsyncMock(return_value={"status": "ok"})
+                with patch.object(
+                    lifecycle_controller,
+                    "prepare_sleep_quiesce",
+                    AsyncMock(return_value=[{"address": address}]),
+                ) as prepare:
+                    result = (
+                        await controller._wake_up_serving_locked()
+                        if sleeping
+                        else await controller._sleep_serving_locked({"level": 1})
+                    )
+                self.assertEqual(result, {"status": "ok"})
+                if sleeping:
+                    controller._wake_up_to_terminal.assert_awaited_once()
+                else:
+                    prepare.assert_awaited_once()
+                    controller._converge_commit.assert_awaited_once()
+
+    async def test_lost_prepare_reply_waits_for_actual_completion(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        controller._call_control_rpc = AsyncMock(
+            return_value={"address": address, "error": "lost reply"}
+        )
+        controller._raw_sleep_statuses = AsyncMock(
+            side_effect=[
+                [{**snapshot, "state": "WAKING_UP", "wake_prepared": False}],
+                [{**snapshot, "state": "WAKING_UP", "wake_prepared": True}],
+            ]
+        )
+        controller._converge_commit = AsyncMock(return_value={"status": "ok"})
+        result = await controller._wake_up_to_terminal(
+            pb2.WakeUpRequestPB(prepare_only=True),
+            pb2.WakeUpRequestPB(commit_only=True),
+            [snapshot],
+        )
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(controller._raw_sleep_statuses.await_count, 2)
+        controller._converge_commit.assert_awaited_once()
+
+    async def _run_slow_wake_prepare(self, status_rounds, elapsed_s=600.1):
+        """Consume the RPC budget without sleeping for ten minutes in a test."""
+        controller, pb2 = self._build_controller(control_addresses=["rank-0", "rank-1"])
+        snapshots = [
+            {"address": address, "worker_incarnation": address, "sleep_epoch": 1}
+            for address in controller.control_addresses
+        ]
+        now = [0.0]
+
+        async def prepare(address, rpc_name, request, timeout_s):
+            self.assertEqual(rpc_name, "WakeUpServing")
+            self.assertEqual(timeout_s, 600)
+            self.assertEqual(request.expected_incarnation, address)
+            self.assertEqual(request.expected_sleep_epoch, 1)
+            now[0] = elapsed_s
+            return {"address": address, "error": "prepare RPC timed out"}
+
+        async def poll_sleep(seconds):
+            self.assertGreater(seconds, 0)
+            now[0] += seconds
+
+        responses = [
+            [{**snapshot, **state} for snapshot, state in zip(snapshots, states)]
+            for states in status_rounds
+        ]
+
+        async def status():
+            # Repeat the last snapshot to exercise a bounded, never-ready peer.
+            return responses.pop(0) if len(responses) > 1 else responses[0]
+
+        controller._call_control_rpc = AsyncMock(side_effect=prepare)
+        controller._raw_sleep_statuses = AsyncMock(side_effect=status)
+        controller._converge_commit = AsyncMock(return_value={"status": "ok"})
+        controller.COMMIT_POLL_INTERVAL_S = 10
+        with patch(
+            "rtp_llm.utils.lifecycle.controller.perf_counter",
+            side_effect=lambda: now[0],
+        ), patch(
+            "rtp_llm.utils.lifecycle.controller.asyncio.sleep", side_effect=poll_sleep
+        ):
+            result = await controller._wake_up_to_terminal(
+                pb2.WakeUpRequestPB(prepare_only=True),
+                pb2.WakeUpRequestPB(commit_only=True),
+                snapshots,
+            )
+        return controller, result, now[0] - elapsed_s
+
+    async def test_slow_wake_prepare_keeps_a_bounded_confirmation_window(self):
+        ready = {"state": "WAKING_UP", "wake_prepared": True}
+        pending = {"state": "WAKING_UP", "wake_prepared": False}
+        for elapsed_s in (599, 600.1):
+            with self.subTest(elapsed_s=elapsed_s):
+                controller, result, waited = await self._run_slow_wake_prepare(
+                    [[ready, pending], [ready, ready]], elapsed_s
+                )
+                self.assertEqual(result, {"status": "ok"})
+                self.assertEqual(controller._raw_sleep_statuses.await_count, 2)
+                controller._converge_commit.assert_awaited_once()
+                self.assertGreater(waited, 0)
+
+    async def test_slow_wake_prepare_confirmation_still_expires(self):
+        pending = {"state": "WAKING_UP", "wake_prepared": False}
+        controller, result, waited = await self._run_slow_wake_prepare(
+            [[pending, pending]]
+        )
+        self.assertTrue(result["recovery_required"])
+        self.assertEqual(len(result["prepare_details"]), 2)
+        self.assertAlmostEqual(waited, 30)
+        controller._converge_commit.assert_not_awaited()
+
+    async def test_slow_wake_prepare_confirmation_preserves_rank_fences(self):
+        ready = {"state": "WAKING_UP", "wake_prepared": True}
+        pending = {"state": "WAKING_UP", "wake_prepared": False}
+        for invalid in (
+            {**ready, "worker_incarnation": "replacement"},
+            {**ready, "sleep_epoch": 2},
+            {"state": "ERROR", "last_error": "restore failed"},
+            {"state": "SLEEPING"},
+        ):
+            with self.subTest(invalid=invalid):
+                controller, result, waited = await self._run_slow_wake_prepare(
+                    [[ready, pending], [ready, invalid]]
+                )
+                self.assertTrue(result["recovery_required"])
+                self.assertEqual(controller._raw_sleep_statuses.await_count, 2)
+                controller._converge_commit.assert_not_awaited()
+
+    async def test_slow_wake_prepare_accepts_an_already_prepared_snapshot(self):
+        ready = {"state": "WAKING_UP", "wake_prepared": True}
+        controller, result, waited = await self._run_slow_wake_prepare([[ready, ready]])
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(waited, 0)
+        controller._converge_commit.assert_awaited_once()
+
+    async def test_prepared_ack_from_replaced_rank_or_epoch_is_rejected(self):
+        for incarnation, epoch in [("replacement", 5), ("original", 6)]:
+            with self.subTest(incarnation=incarnation, epoch=epoch):
+                controller, pb2 = self._build_controller()
+                address = controller.control_addresses[0]
+                original = {
+                    "address": address,
+                    "worker_incarnation": "original",
+                    "sleep_epoch": 5,
+                }
+                controller._call_control_rpc = AsyncMock(
+                    return_value={"address": address, "error": "lost reply"}
+                )
+                controller._raw_sleep_statuses = AsyncMock(
+                    return_value=[
+                        {
+                            "address": address,
+                            "worker_incarnation": incarnation,
+                            "sleep_epoch": epoch,
+                            "state": "WAKING_UP",
+                            "wake_prepared": True,
+                        }
+                    ]
+                )
+                controller._converge_commit = AsyncMock(return_value={"status": "ok"})
+                result = await controller._wake_up_to_terminal(
+                    pb2.WakeUpRequestPB(prepare_only=True),
+                    pb2.WakeUpRequestPB(commit_only=True),
+                    [original],
+                )
+                self.assertTrue(result["recovery_required"])
+                controller._converge_commit.assert_not_awaited()
+                request = controller._call_control_rpc.await_args.args[2]
+                self.assertEqual(request.expected_incarnation, "original")
+                self.assertEqual(request.expected_sleep_epoch, 5)
+
+    async def test_commit_total_deadline_is_bounded_and_reports_incomplete_work(self):
+        from rtp_llm.utils.lifecycle import controller as lifecycle_controller
+
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        snapshot = {
+            "address": address,
+            "worker_incarnation": "original",
+            "sleep_epoch": 1,
+        }
+        controller._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        controller._raw_sleep_statuses = AsyncMock(
+            return_value=[{**snapshot, "state": "SUSPENDING"}]
+        )
+        now = [0.0]
+
+        async def advance(seconds):
+            now[0] += seconds
+
+        with patch.object(
+            lifecycle_controller, "perf_counter", side_effect=lambda: now[0]
+        ), patch.object(
+            lifecycle_controller.asyncio,
+            "sleep",
+            side_effect=advance,
+        ):
+            result = await controller._converge_commit(
+                "commit sleep",
+                "SleepServing",
+                pb2.SleepRequestPB(commit_only=True),
+                0.1,
+                "DRAINING",
+                "SLEEPING",
+                [snapshot],
+            )
+        self.assertTrue(result["recovery_required"])
+        self.assertIn("deadline exceeded", result["error"])
+        self.assertIn("does not prove", result["error"])
+        self.assertAlmostEqual(now[0], 0.3)
+
+    async def test_commit_rejects_duplicate_rank_status_coverage(self):
+        controller, pb2 = self._build_controller(control_addresses=["rank-0", "rank-1"])
+        snapshots = [
+            {"address": address, "worker_incarnation": address, "sleep_epoch": 1}
+            for address in controller.control_addresses
+        ]
+        controller._broadcast_control_rpc_to = AsyncMock(return_value=[])
+        controller._raw_sleep_statuses = AsyncMock(
+            return_value=[
+                {"address": "rank-0", "state": "SLEEPING"},
+                {"address": "rank-0", "state": "SLEEPING"},
+            ]
+        )
+        result = await controller._converge_commit(
+            "commit sleep",
+            "SleepServing",
+            pb2.SleepRequestPB(commit_only=True),
+            1,
+            "DRAINING",
+            "SLEEPING",
+            snapshots,
+        )
+        self.assertTrue(result["recovery_required"])
+        self.assertIn("coverage", result["error"])
+
+    async def test_wake_up_serving_success(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                return_value=self._status_pb(
+                    pb2,
+                    state="RUNNING",
+                    sleep_epoch=1,
+                    kv_memory_state="ACTIVE",
+                    device_kv_cache_valid=False,
+                    gpu_resource_state="ACTIVE",
+                )
+            )
+
+        result = await controller.wake_up_serving()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(set(result.keys()), {"status"})
+        for address in addresses:
+            stub = controller._rpc.stubs[address]
+            self.assertEqual(stub.WakeUpServing.await_count, 3)
+            prepare_request = stub.WakeUpServing.await_args_list[0].args[0]
+            commit_request = stub.WakeUpServing.await_args_list[1].args[0]
+            self.assertTrue(prepare_request.prepare_only)
+            self.assertFalse(prepare_request.commit_only)
+            self.assertFalse(commit_request.prepare_only)
+            self.assertTrue(commit_request.commit_only)
+
+    async def test_wake_up_prepare_cancellation_is_absorbed_and_reaches_running(self):
+        # Wake prepare restores VMM backing and level-2 weights, so it is already
+        # irreversible. Cancellation must not release the lifecycle owner while
+        # ranks are left in WAKING_UP; prepare and commit are one protected unit.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(
+            control_addresses=addresses,
+            expected_control_address_count=len(addresses),
+        )
+        rank_statuses: Dict[str, Dict[str, Any]] = {
+            address: {
+                "state": "SLEEPING",
+                "sleep_epoch": 1,
+                "kv_memory_state": "PAUSED",
+                "device_kv_cache_valid": False,
+                "active_request_count": 0,
+                "active_cache_transfer_count": 0,
+                "gpu_resource_state": "RELEASED",
+            }
+            for address in addresses
+        }
+        prepare_entered = asyncio.Event()
+        release_prepare = asyncio.Event()
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    prepare_entered.set()
+                    await release_prepare.wait()
+                    rank_statuses[address].update(
+                        state="WAKING_UP",
+                        kv_memory_state="ACTIVE",
+                        gpu_resource_state="RESTORING",
+                    )
+                elif request.commit_only:
+                    rank_statuses[address].update(
+                        state="RUNNING",
+                        gpu_resource_state="ACTIVE",
+                    )
+                return pb2.EmptyPB()
+
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                side_effect=wake_rpc
+            )
+
+        task = asyncio.ensure_future(controller.wake_up_serving())
+        await asyncio.wait_for(prepare_entered.wait(), timeout=5)
+        task.cancel()
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        release_prepare.set()
+
+        result = await asyncio.wait_for(task, timeout=5)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertFalse(task.cancelled())
+        for address in addresses:
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 3
+            )
+        running_status = await controller.get_sleep_status()
+        self.assertEqual(running_status["state"], "RUNNING")
+
+    async def test_wake_up_from_uniform_sleeping_state_proceeds(self):
+        # #1 contract (positive): when every control rank reports the SAME
+        # SLEEPING state, wake is a well-defined atomic transition and must
+        # proceed through prepare + commit to RUNNING.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=[
+                    self._status_pb(
+                        pb2,
+                        state="SLEEPING",
+                        sleep_epoch=1,
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    ),
+                    self._status_pb(
+                        pb2,
+                        state="RUNNING",
+                        sleep_epoch=1,
+                        kv_memory_state="ACTIVE",
+                        device_kv_cache_valid=True,
+                        gpu_resource_state="ACTIVE",
+                    ),
+                ]
+            )
+
+        result = await controller.wake_up_serving()
+
+        self.assertEqual(result, {"status": "ok"})
+        for address in addresses:
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 3
+            )
+
+    async def test_wake_up_rejects_mixed_initial_rank_state_as_recovery_required(self):
+        # #1 contract (negative): a mixed PRE-condition -- one rank already
+        # SLEEPING while another is still DRAINING -- is a fault, not a
+        # recoverable divergence. sleep/wake are atomic and level-2 discarded GPU
+        # memory with no backup, so the ranks cannot be reconciled into a known-
+        # good state. wake_up must return RECOVERY_REQUIRED *before* issuing any
+        # prepare RPC (never hang, never silently half-wake); the operator
+        # restarts the instance.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=1)
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="DRAINING", sleep_epoch=1)
+        )
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+
+        result = await controller.wake_up_serving()
+
+        self.assertIn("error", result)
+        self.assertIn("RECOVERY_REQUIRED", result["error"])
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertTrue(result["recovery_required"])
+        self.assertEqual(
+            {detail["address"] for detail in result["details"]}, set(addresses)
+        )
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing.assert_not_awaited()
+
+    async def test_wake_up_serving_phase_rejected_before_status_probe(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+
+        result = await controller.wake_up_serving({"phase": "prepare"})
+
+        self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_wake_up_serving_commit_only_rejected_before_status_probe(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+
+        result = await controller.wake_up_serving({"commit_only": True})
+
+        self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        self.assertIn("commit_only", result["error"])
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_get_sleep_status_returns_full_schema(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(
+                pb2,
+                state="RUNNING",
+                kv_memory_state="ACTIVE",
+                device_kv_cache_valid=True,
+                gpu_resource_state="ACTIVE",
+            )
+        )
+
+        result = await controller.get_sleep_status()
+
+        expected_keys = {
+            "sleep_mode_enabled",
+            "effective",
+            "supported_levels",
+            "supported_modes",
+            "disabled_reason",
+            "state",
+            "sleep_epoch",
+            "kv_memory_state",
+            "device_kv_cache_valid",
+            "active_request_count",
+            "active_cache_transfer_count",
+            "gpu_resource_state",
+            "last_error",
+        }
+        self.assertEqual(expected_keys, set(result.keys()))
+        self.assertEqual(result["state"], "RUNNING")
+
+    async def test_get_sleep_status_disables_sleep_when_control_coverage_incomplete(
+        self,
+    ):
+        controller, pb2 = self._build_controller(
+            control_addresses=["127.0.0.1:10001"],
+            expected_control_address_count=2,
+        )
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2)
+        )
+
+        result = await controller.get_sleep_status()
+
+        self.assertFalse(result["effective"])
+        self.assertEqual(result["supported_levels"], [])
+        self.assertEqual(result["supported_modes"], [])
+        self.assertIn("control address coverage incomplete", result["disabled_reason"])
+
+    async def test_get_sleep_status_refreshes_control_addresses_from_resolver(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(
+            control_addresses=[addresses[0]],
+            expected_control_address_count=2,
+        )
+        controller._control_address_resolver = MagicMock(return_value=addresses)
+        for address in addresses:
+            controller._rpc.channels[address] = MagicMock()
+            controller._rpc.stubs[address] = MagicMock()
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                return_value=self._status_pb(pb2)
+            )
+
+        result = await controller.get_sleep_status()
+
+        self.assertTrue(result["effective"])
+        self.assertEqual(controller.control_addresses, addresses)
+        controller._control_address_resolver.assert_called_once()
+        for address in addresses:
+            controller._rpc.stubs[address].GetSleepStatus.assert_awaited_once()
+
+    async def test_sleep_serving_rejects_when_control_coverage_incomplete(self):
+        controller, pb2 = self._build_controller(
+            control_addresses=["127.0.0.1:10001"],
+            expected_control_address_count=2,
+        )
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2)
+        )
+        controller._rpc.stubs[address].SleepServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+
+        result = await controller.sleep_serving({})
+
+        self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
+        self.assertFalse(result["effective"])
+        self.assertIn("control address coverage incomplete", result["error"])
+        controller._rpc.stubs[address].SleepServing.assert_not_awaited()
+
+    async def test_sleep_serving_returns_unimplemented_when_disabled(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(
+                pb2,
+                sleep_mode_enabled=False,
+                effective=False,
+                supported_levels=[],
+                supported_modes=[],
+                disabled_reason="sleep mode is disabled",
+            )
+        )
+        controller._rpc.stubs[address].SleepServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+
+        result = await controller.sleep_serving({})
+
+        self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
+        self.assertFalse(result["effective"])
+        controller._rpc.stubs[address].SleepServing.assert_not_awaited()
+
+    async def test_sleep_serving_invalid_request_rejected_before_status_probe(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+
+        result = await controller.sleep_serving({"level": "bad"})
+
+        self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_level_zero_reports_backend_capabilities_without_sleep_rpc(self):
+        for levels in ([1], [2], []):
+            with self.subTest(levels=levels):
+                controller, pb2 = self._build_controller()
+                stub = controller._rpc.stubs[controller.control_addresses[0]]
+                stub.GetSleepStatus = AsyncMock(
+                    return_value=self._status_pb(
+                        pb2,
+                        supported_levels=levels,
+                        effective=bool(levels),
+                        sleep_mode_enabled=bool(levels),
+                        supported_modes=["wait", "abort"] if levels else [],
+                        disabled_reason="" if levels else "disabled",
+                    )
+                )
+                stub.SleepServing = AsyncMock()
+
+                result = await controller.sleep_serving({"level": 0})
+
+                self.assertEqual(result["grpc_status"], "UNIMPLEMENTED")
+                self.assertEqual(result["supported_levels"], levels)
+                self.assertEqual(
+                    result["supported_modes"], ["wait", "abort"] if levels else []
+                )
+                stub.GetSleepStatus.assert_awaited_once()
+                stub.SleepServing.assert_not_awaited()
+
+    async def test_level_zero_fails_closed_when_rank_probe_fails(self):
+        controller, _ = self._build_controller()
+        stub = controller._rpc.stubs[controller.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock(
+            side_effect=self._aio_error(grpc.StatusCode.UNAVAILABLE, "rank unreachable")
+        )
+        stub.SleepServing = AsyncMock()
+
+        result = await controller.sleep_serving({"level": 0})
+
+        self.assertTrue(result["recovery_required"])
+        stub.SleepServing.assert_not_awaited()
+
+    async def test_nonempty_tags_rejected_before_status_or_sleep_rpc(self):
+        controller, _ = self._build_controller()
+        stub = controller._rpc.stubs[controller.control_addresses[0]]
+        stub.GetSleepStatus = AsyncMock()
+        stub.SleepServing = AsyncMock()
+        for tags in (["weights"], ["kv_cache"]):
+            result = await controller.sleep_serving({"tags": tags})
+            self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        stub.GetSleepStatus.assert_not_awaited()
+        stub.SleepServing.assert_not_awaited()
+
+    async def test_sleep_serving_invalid_tag_element_rejected_before_status_probe(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+
+        result = await controller.sleep_serving({"tags": ["kv_cache", 1]})
+
+        self.assertEqual(result["grpc_status"], "INVALID_ARGUMENT")
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+
+    async def test_sleep_serving_null_tags_are_treated_as_empty_list(self):
+        controller, pb2 = self._build_controller()
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].SleepServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2),
+                self._status_pb(
+                    pb2,
+                    state="SLEEPING",
+                    sleep_epoch=1,
+                    kv_memory_state="PAUSED",
+                    device_kv_cache_valid=False,
+                    gpu_resource_state="RELEASED",
+                ),
+            ]
+        )
+
+        result = await controller.sleep_serving({"tags": None})
+
+        self.assertEqual(result["status"], "ok")
+        prepare_request = (
+            controller._rpc.stubs[address].SleepServing.await_args_list[0].args[0]
+        )
+        self.assertEqual(list(prepare_request.tags), [])
+
+    async def test_get_sleep_status_reports_non_converged_as_error(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=2)
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="RUNNING", sleep_epoch=1)
+        )
+
+        result = await controller.get_sleep_status()
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertNotIn("state", result)
+
+    async def test_sleep_serving_error_carries_per_rank_status(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        controller._rpc.stubs[addresses[0]].SleepServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2)
+        )
+        controller._rpc.stubs[addresses[0]].WakeUpServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        controller._rpc.stubs[addresses[1]].SleepServing = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "sleep rejected in state WAKING_UP",
+            )
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2)
+        )
+        controller._rpc.stubs[addresses[1]].WakeUpServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+
+        result = await controller.sleep_serving({})
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertEqual(result["details"][0]["address"], addresses[1])
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing.assert_awaited_once()
+            abort_request = controller._rpc.stubs[
+                address
+            ].WakeUpServing.await_args.args[0]
+            self.assertFalse(abort_request.prepare_only)
+            self.assertFalse(abort_request.commit_only)
+
+    async def test_sleep_serving_commit_failure_returns_error_without_abort(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        controller._rpc.stubs[addresses[0]].SleepServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2)
+        )
+        controller._rpc.stubs[addresses[1]].SleepServing = AsyncMock(
+            side_effect=[
+                pb2.EmptyPB(),
+                self._aio_error(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    "releaseRestorableGpuMemory failed",
+                ),
+            ]
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2)
+        )
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+
+        result = await controller.sleep_serving({})
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertTrue(result["recovery_required"])
+        self.assertEqual(
+            {detail["address"] for detail in result["details"]}, set(addresses)
+        )
+        for address in addresses:
+            self.assertEqual(controller._rpc.stubs[address].SleepServing.await_count, 2)
+            controller._rpc.stubs[address].WakeUpServing.assert_not_awaited()
+
+    async def test_sleep_serving_rejects_non_converged_final_state(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].SleepServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="RUNNING", sleep_epoch=0),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+            ]
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="RUNNING", sleep_epoch=0),
+                self._status_pb(pb2, state="RUNNING", sleep_epoch=1),
+            ]
+        )
+
+        result = await controller.sleep_serving({})
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertNotIn("state", result)
+
+    async def test_wake_up_serving_rejects_non_converged_final_state(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+                self._status_pb(pb2, state="RUNNING", sleep_epoch=1),
+            ]
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+            ]
+        )
+
+        result = await controller.wake_up_serving()
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertNotIn("state", result)
+        for address in addresses:
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 2
+            )
+
+    async def test_wake_up_serving_prepare_failure_does_not_commit(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        controller._rpc.stubs[addresses[0]].WakeUpServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=1)
+        )
+        controller._rpc.stubs[addresses[1]].WakeUpServing = AsyncMock(
+            side_effect=self._aio_error(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "restoreRestorableGpuMemory failed",
+            )
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=1)
+        )
+
+        result = await controller.wake_up_serving()
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertTrue(result["recovery_required"])
+        self.assertIn("prepare wake_up", result["error"])
+        self.assertIn("prepare_details", result)
+        for address in addresses:
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 1
+            )
+            prepare_request = controller._rpc.stubs[
+                address
+            ].WakeUpServing.await_args.args[0]
+            self.assertTrue(prepare_request.prepare_only)
+            self.assertFalse(prepare_request.commit_only)
+
+    async def test_wake_up_prepare_rpc_failure_commits_if_all_ranks_prepared(self):
+        # A deadline/transport error may race with a backend that completed the
+        # prepare hook. Require an explicit completion fact for the original
+        # incarnation/epoch, not just the WAKING_UP state.
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        rank_statuses = {address: "SLEEPING" for address in addresses}
+
+        for address in addresses:
+
+            async def get_status(*args, address=address, **kwargs):
+                state = rank_statuses[address]
+                return self._status_pb(
+                    pb2,
+                    state=state,
+                    sleep_epoch=1,
+                    wake_prepared=state == "WAKING_UP",
+                    kv_memory_state="ACTIVE" if state != "SLEEPING" else "PAUSED",
+                    gpu_resource_state=(
+                        "ACTIVE" if state == "RUNNING" else "RESTORING"
+                    ),
+                )
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    rank_statuses[address] = "WAKING_UP"
+                    if address == addresses[1]:
+                        raise self._aio_error(
+                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                            "prepare response timed out",
+                        )
+                elif request.commit_only:
+                    rank_statuses[address] = "RUNNING"
+                return pb2.EmptyPB()
+
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                side_effect=wake_rpc
+            )
+
+        result = await controller.wake_up_serving()
+
+        self.assertEqual(result, {"status": "ok"})
+        for address in addresses:
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 3
+            )
+
+    async def test_wake_up_serving_commit_failure_returns_error(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                return_value=self._status_pb(pb2, state="SLEEPING", sleep_epoch=1)
+            )
+        controller._rpc.stubs[addresses[0]].WakeUpServing = AsyncMock(
+            return_value=pb2.EmptyPB()
+        )
+        controller._rpc.stubs[addresses[1]].WakeUpServing = AsyncMock(
+            side_effect=[
+                pb2.EmptyPB(),
+                self._aio_error(
+                    grpc.StatusCode.FAILED_PRECONDITION, "restartEngine failed"
+                ),
+            ]
+        )
+
+        result = await controller.wake_up_serving()
+
+        self.assertIn("error", result)
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertIn("commit wake_up", result["error"])
+        for address in addresses:
+            self.assertEqual(
+                controller._rpc.stubs[address].WakeUpServing.await_count, 2
+            )
+
+    def _blocking_store_call(self, result):
+        loop = asyncio.get_running_loop()
+        entered = asyncio.Event()
+        resume = threading.Event()
+
+        def call(*args):
+            loop.call_soon_threadsafe(entered.set)
+            if not resume.wait(timeout=3):
+                raise TimeoutError("test did not resume blocking store I/O")
+            return result(*args)
+
+        return call, entered, resume
+
+    async def test_address_resolution_does_not_block_event_loop(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, _ = self._build_controller(expected_control_address_count=2)
+        resolver, entered, resume = self._blocking_store_call(lambda: addresses)
+        controller._control_address_resolver = resolver
+        task = asyncio.create_task(controller._refresh_control_addresses_if_needed())
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            self.assertFalse(task.done())
+            self.assertEqual(len(controller.control_addresses), 1)
+        finally:
+            resume.set()
+            await asyncio.wait_for(task, timeout=2)
+        self.assertEqual(controller.control_addresses, addresses)
+
+    async def test_store_factory_and_cas_do_not_block_event_loop(self):
+        for stage in ("factory", "acquire", "release"):
+            with self.subTest(stage=stage):
+                store = _FakeStore()
+                controller, _ = self._build_controller(lifecycle_store=store)
+                controller._sleep_serving_locked = AsyncMock(
+                    return_value={"status": "ok"}
+                )
+                original_cas = store.compare_set
+                if stage == "factory":
+                    blocking, entered, resume = self._blocking_store_call(lambda: store)
+                    controller._lifecycle_lease._store = None
+                    controller._lifecycle_lease._store_factory = blocking
+                else:
+                    blocking, entered, resume = self._blocking_store_call(original_cas)
+
+                    def compare_set(key, expected, desired):
+                        if (stage == "acquire") == bool(desired):
+                            return blocking(key, expected, desired)
+                        return original_cas(key, expected, desired)
+
+                    store.compare_set = compare_set
+                task = asyncio.create_task(controller.sleep_serving({}))
+                try:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    self.assertFalse(task.done(), stage)
+                finally:
+                    resume.set()
+                    result = await asyncio.wait_for(task, timeout=2)
+                self.assertEqual(result, {"status": "ok"})
+                self.assertEqual(store.values[controller._lifecycle_lease.KEY], "")
+
+    async def test_cancelled_acquisition_releases_late_lease_before_propagating(self):
+        store = _FakeStore()
+        controller, _ = self._build_controller(lifecycle_store=store)
+        blocking, entered, resume = self._blocking_store_call(store.compare_set)
+        store.compare_set = blocking
+        controller._sleep_serving_locked = AsyncMock()
+        task = asyncio.create_task(controller.sleep_serving({}))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()  # A second cancellation must not abandon the cleanup.
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+        finally:
+            resume.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2)
+        controller._sleep_serving_locked.assert_not_awaited()
+        self.assertEqual(store.values[controller._lifecycle_lease.KEY], "")
+        self.assertFalse(controller._lifecycle_lock.locked())
+
+    async def test_cancelled_release_finishes_before_unlocking(self):
+        store = _FakeStore()
+        controller, _ = self._build_controller(lifecycle_store=store)
+        original_cas = store.compare_set
+        blocking, entered, resume = self._blocking_store_call(original_cas)
+
+        def compare_set(key, expected, desired):
+            return (original_cas if desired else blocking)(key, expected, desired)
+
+        store.compare_set = compare_set
+        controller._sleep_serving_locked = AsyncMock(return_value={"status": "ok"})
+        task = asyncio.create_task(controller.sleep_serving({}))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+            self.assertFalse(task.done())
+            self.assertTrue(controller._lifecycle_lock.locked())
+        finally:
+            resume.set()
+            result = await asyncio.wait_for(task, timeout=2)
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(store.values[controller._lifecycle_lease.KEY], "")
+
+    async def test_independent_wrappers_compete_for_instance_lease(self):
+        store = _FakeStore()
+        holder, _ = self._build_controller(lifecycle_store=store)
+        loser, _ = self._build_controller(lifecycle_store=store)
+        address = loser.control_addresses[0]
+        loser._rpc.stubs[address].GetSleepStatus = AsyncMock()
+        loser._rpc.stubs[address].SleepServing = AsyncMock()
+
+        record, error = await holder._acquire_lifecycle_lease("sleep")
+        self.assertFalse(error)
+        result = await loser.sleep_serving({})
+
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertIn("holds the instance lease", result["error"])
+        loser._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+        loser._rpc.stubs[address].SleepServing.assert_not_awaited()
+        await holder._release_lifecycle_lease(record)
+
+    async def test_required_instance_store_unavailable_fails_closed(self):
+        controller, _ = self._build_controller(require_instance_lease=True)
+        address = controller.control_addresses[0]
+        controller._rpc.stubs[address].GetSleepStatus = AsyncMock()
+        controller._rpc.stubs[address].SleepServing = AsyncMock()
+
+        result = await controller.sleep_serving({})
+
+        self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
+        self.assertIn("coordination is unavailable", result["error"])
+        controller._rpc.stubs[address].GetSleepStatus.assert_not_awaited()
+        controller._rpc.stubs[address].SleepServing.assert_not_awaited()
+
+    async def test_instance_lease_release_requires_exact_owner_record(self):
+        store = _FakeStore()
+        holder, _ = self._build_controller(lifecycle_store=store)
+        other, _ = self._build_controller(lifecycle_store=store)
+
+        record, error = await holder._acquire_lifecycle_lease("sleep")
+        self.assertFalse(error)
+        await other._release_lifecycle_lease(other._lifecycle_lease.record("sleep"))
+        self.assertEqual(
+            store.values[holder._lifecycle_lease.KEY],
+            record,
+        )
+
+        await holder._release_lifecycle_lease(record)
+        self.assertEqual(store.values[holder._lifecycle_lease.KEY], "")
+
+    async def test_partial_sleep_commit_retries_only_draining_rank(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].SleepServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="RUNNING"),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+            ]
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="RUNNING"),
+                self._status_pb(pb2, state="DRAINING", sleep_epoch=1),
+                self._status_pb(pb2, state="SLEEPING", sleep_epoch=1),
+            ]
+        )
+
+        result = await controller.sleep_serving({})
+
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(
+            controller._rpc.stubs[addresses[0]].SleepServing.await_count, 2
+        )
+        self.assertEqual(
+            controller._rpc.stubs[addresses[1]].SleepServing.await_count, 3
+        )
+
+    async def test_partial_wake_commit_retries_only_waking_rank(self):
+        addresses = ["127.0.0.1:10001", "127.0.0.1:10009"]
+        controller, pb2 = self._build_controller(control_addresses=addresses)
+        for address in addresses:
+            controller._rpc.stubs[address].WakeUpServing = AsyncMock(
+                return_value=pb2.EmptyPB()
+            )
+        controller._rpc.stubs[addresses[0]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="SLEEPING"),
+                self._status_pb(pb2, state="RUNNING"),
+                self._status_pb(pb2, state="RUNNING"),
+            ]
+        )
+        controller._rpc.stubs[addresses[1]].GetSleepStatus = AsyncMock(
+            side_effect=[
+                self._status_pb(pb2, state="SLEEPING"),
+                self._status_pb(pb2, state="WAKING_UP"),
+                self._status_pb(pb2, state="RUNNING"),
+            ]
+        )
+
+        result = await controller.wake_up_serving()
+
+        self.assertEqual(result, {"status": "ok"})
+        self.assertEqual(
+            controller._rpc.stubs[addresses[0]].WakeUpServing.await_count, 3
+        )
+        self.assertEqual(
+            controller._rpc.stubs[addresses[1]].WakeUpServing.await_count, 4
+        )
+
+    async def test_commit_error_or_unreachable_requires_recovery(self):
+        for terminal in ("ERROR", "UNREACHABLE"):
+            with self.subTest(terminal=terminal):
+                controller, pb2 = self._build_controller()
+                address = controller.control_addresses[0]
+                controller._rpc.stubs[address].SleepServing = AsyncMock(
+                    return_value=pb2.EmptyPB()
+                )
+                terminal_status = (
+                    self._status_pb(pb2, state="ERROR")
+                    if terminal == "ERROR"
+                    else self._aio_error(
+                        grpc.StatusCode.UNAVAILABLE, "rank unavailable"
+                    )
+                )
+                controller._rpc.stubs[address].GetSleepStatus = AsyncMock(
+                    side_effect=[
+                        self._status_pb(pb2, state="RUNNING"),
+                        terminal_status,
+                    ]
+                )
+
+                result = await controller.sleep_serving({})
+
+                self.assertNotEqual(result.get("status"), "ok")
+                self.assertTrue(result["recovery_required"])
+                self.assertIn("RECOVERY_REQUIRED", result["error"])
+
+
+if __name__ == "__main__":
+    unittest.main()
