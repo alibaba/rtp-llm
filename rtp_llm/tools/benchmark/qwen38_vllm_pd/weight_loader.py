@@ -23,53 +23,89 @@ def decode_block_fp8(weight, scale):
     )
 
 
-def expert_weights(source, index, local_expert_ids):
+def expert_inventory(index):
     pattern = re.compile(
         r"((?:model\.language_model|mtp)\.layers\.\d+\.mlp\.experts)\."
-        r"(gate_up_proj|down_proj)$"
+        r"(\d+)\.(gate_proj|up_proj|down_proj)\.weight$"
     )
-    device = torch.device("cuda", torch.cuda.current_device())
-    for name, shard in sorted(index.items()):
+    groups = {}
+    for name in index:
         match = pattern.fullmatch(name)
         if match is None:
             continue
+        prefix, expert, projection = match.groups()
+        if name + "_scale_inv" not in index:
+            raise ValueError(f"Missing source block scale: {name}")
+        groups.setdefault((prefix, int(expert)), {})[projection] = name
+    layers = {prefix for prefix, _ in groups}
+    if len(layers) != 49 or len(groups) != 49 * 512:
+        raise ValueError(
+            f"Incomplete official FP8 expert inventory: {len(layers)} layers, {len(groups)} experts"
+        )
+    for prefix in layers:
+        if {expert for layer, expert in groups if layer == prefix} != set(range(512)):
+            raise ValueError(f"Incomplete expert IDs: {prefix}")
+    for key, group in groups.items():
+        if set(group) != {"gate_proj", "up_proj", "down_proj"}:
+            raise ValueError(f"Incomplete expert projections: {key}")
+    return groups
+
+
+def expert_weights(source, index, local_expert_ids, only_mtp=None):
+    groups = expert_inventory(index)
+    if only_mtp is not None:
+        groups = {
+            key: value
+            for key, value in groups.items()
+            if key[0].startswith("mtp.") == only_mtp
+        }
+    device = torch.device("cuda", torch.cuda.current_device())
+
+    def read(name):
+        with safe_open(str(source / index[name]), framework="pt", device="cpu") as file:
+            weight = file.get_tensor(name).to(device)
         scale_name = name + "_scale_inv"
-        if scale_name not in index:
-            raise ValueError(f"Expert block scale is missing: {name}")
-        prefix, projection = match.groups()
-        with (
-            safe_open(str(source / shard), framework="pt", device="cpu") as weights,
-            safe_open(
-                str(source / index[scale_name]), framework="pt", device="cpu"
-            ) as scales,
-        ):
-            weight_slice = weights.get_slice(name)
-            scale_slice = scales.get_slice(scale_name)
-            if weight_slice.get_shape()[0] != 512:
-                raise ValueError(f"Unexpected expert count: {name}")
-            parts = (
-                ("up_proj", "gate_proj")
-                if projection == "gate_up_proj"
-                else ("down_proj",)
+        with safe_open(
+            str(source / index[scale_name]), framework="pt", device="cpu"
+        ) as file:
+            scale = file.get_tensor(scale_name).to(device)
+        return decode_block_fp8(weight, scale)
+
+    loaded = 0
+    for (prefix, expert), group in sorted(groups.items()):
+        for part in ("gate_proj", "up_proj", "down_proj"):
+            yield f"{prefix}.{expert}.{part}.input_scale", torch.tensor(
+                [32 / 2688], dtype=torch.float32
             )
-            for expert in range(512):
-                for part in parts:
-                    yield f"{prefix}.{expert}.{part}.input_scale", torch.tensor(
-                        [32 / 2688], dtype=torch.float32
-                    )
-                if local_expert_ids is not None and expert not in local_expert_ids:
-                    continue
-                weight = weight_slice[expert].to(device)
-                scale = scale_slice[expert].to(device)
-                decoded = decode_block_fp8(weight, scale)
-                packed, block_scale, global_scale = quantize_expert_to_nvfp4(decoded)
-                packed_parts = packed.chunk(len(parts), 0)
-                scale_parts = block_scale.chunk(len(parts), 0)
-                for part, payload, block in zip(parts, packed_parts, scale_parts):
-                    base = f"{prefix}.{expert}.{part}"
-                    yield base + ".weight", payload.cpu()
-                    yield base + ".weight_scale", block.cpu()
-                    yield base + ".weight_scale_2", global_scale.reshape(1).cpu()
+        if local_expert_ids is not None and expert not in local_expert_ids:
+            continue
+        # RTP quantizes fused up+gate with one global scale; retain that exact
+        # NVFP4 convention instead of separately scaling the two projections.
+        fused = torch.cat([read(group["up_proj"]), read(group["gate_proj"])], dim=0)
+        packed, block_scale, global_scale = quantize_expert_to_nvfp4(fused)
+        for part, payload, block in zip(
+            ("up_proj", "gate_proj"), packed.chunk(2, 0), block_scale.chunk(2, 0)
+        ):
+            base = f"{prefix}.{expert}.{part}"
+            yield base + ".weight", payload.cpu()
+            yield base + ".weight_scale", block.cpu()
+            yield base + ".weight_scale_2", global_scale.reshape(1).cpu()
+        del fused, packed, block_scale, global_scale
+        packed, block_scale, global_scale = quantize_expert_to_nvfp4(
+            read(group["down_proj"])
+        )
+        base = f"{prefix}.{expert}.down_proj"
+        yield base + ".weight", packed.cpu()
+        yield base + ".weight_scale", block_scale.cpu()
+        yield base + ".weight_scale_2", global_scale.reshape(1).cpu()
+        loaded += 1
+    layer_count = 49 if only_mtp is None else (1 if only_mtp else 48)
+    expected = layer_count * (
+        len(local_expert_ids) if local_expert_ids is not None else 512
+    )
+    if loaded != expected:
+        raise ValueError(f"Expert conversion incomplete: {loaded}/{expected}")
+    print("QWEN38_NVFP4_EXPERTS_LOADED", loaded, flush=True)
 
 
 def register():
@@ -133,6 +169,10 @@ def register():
             config = json.loads((source / "config.json").read_text())
             if config["quantization_config"].get("weight_block_size") != [128, 128]:
                 raise ValueError("Official block128 FP8 source is required")
+            index = json.loads((source / "model.safetensors.index.json").read_text())[
+                "weight_map"
+            ]
+            expert_inventory(index)
 
         def get_all_weights(self, model_config, model):
             self.counter_before_loading_weights = time.perf_counter()
@@ -153,7 +193,12 @@ def register():
                 ) as file:
                     for name in sorted(names):
                         yield name, file.get_tensor(name)
-            yield from expert_weights(source, index, self.local_expert_ids)
+            yield from expert_weights(
+                source,
+                index,
+                self.local_expert_ids,
+                only_mtp="MTP" in type(model).__name__,
+            )
 
         def load_weights(self, model, model_config):
             super().load_weights(model, model_config)
