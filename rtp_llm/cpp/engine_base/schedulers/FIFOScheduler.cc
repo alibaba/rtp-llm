@@ -211,8 +211,8 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
                                            size_t                   admitted_max_seq_len,
                                            size_t                   admitted_sequence_count,
                                            const GenerateStreamPtr& candidate) const {
-    // Preserve the historical singleton boundary; checkInputLength() has already
-    // validated the candidate's standalone token cost.
+    // Preserve the historical singleton fast path for all execution modes,
+    // including when the batch token budget is smaller than the prompt or zero.
     if (admitted_stream_count == 0 && candidate->contextLength() + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
@@ -224,25 +224,32 @@ bool FIFOScheduler::fitsPrefillTokenLimits(size_t                   admitted_str
     if (running_token_reserve >= max_batch_tokens_size_) {
         return false;
     }
-    const auto available_tokens = max_batch_tokens_size_ - running_token_reserve;
+    // Admission partitions execution modes before reaching this helper. On this
+    // budget path, only prefill-only batches may fill the cap; generation retains its strict reserve.
+    const bool prefill_only     = isPrefillOnly(candidate);
+    const auto available_tokens = max_batch_tokens_size_ - running_token_reserve - (prefill_only ? 0 : 1);
 
-    // Full logical token cost (including reused prefix) must be strictly below
-    // max_batch_tokens_size_. Subtraction avoids overflow in the sum.
-    if (admitted_tokens >= available_tokens) {
+    // Include reused prefixes. Subtraction avoids overflow in the token sum.
+    if (admitted_tokens > available_tokens) {
         return false;
     }
     const auto candidate_tokens = prefillTokenCostWithCache(candidate);
-    if (candidate_tokens >= available_tokens - admitted_tokens) {
+    if (candidate_tokens > available_tokens - admitted_tokens) {
         return false;
     }
 
     // The model executes prefill as a padded rectangle. Use the full logical
     // sequence length (prefix included) and the real sequence width represented
-    // by currentBatchSize(). Division avoids overflow in max_seq_len * width.
+    // by currentBatchSize(). Division and subtraction avoid overflow in both
+    // max_seq_len * width and the combined sequence count.
     const auto candidate_sequence_count = static_cast<size_t>(candidate->currentBatchSize());
-    const auto sequence_count           = admitted_sequence_count + candidate_sequence_count;
     const auto max_seq_len              = std::max(admitted_max_seq_len, prefillSeqLenWithCache(candidate));
-    return max_seq_len == 0 || sequence_count <= (available_tokens - 1) / max_seq_len;
+    if (max_seq_len == 0) {
+        return true;
+    }
+    const auto max_sequence_count = available_tokens / max_seq_len;
+    return admitted_sequence_count <= max_sequence_count
+           && candidate_sequence_count <= max_sequence_count - admitted_sequence_count;
 }
 
 size_t FIFOScheduler::prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const {

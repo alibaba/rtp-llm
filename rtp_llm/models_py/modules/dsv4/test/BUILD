@@ -59,7 +59,9 @@ _GPU_TESTS = [
         name = name,
         deps = _MODEL_TEST_DEPS + ([
             "//rtp_llm/models_py:tile_kernels_mhc",
-        ] if name == "test_hc_impl" else []),
+        ] if name == "test_hc_impl" else []) + ([
+            "//rtp_llm/models_py:models",
+        ] if name == "test_prefill_fast_path" else []),
     )
     for name in _MODEL_CONTRACT_TESTS + _GPU_TESTS
 ]
@@ -67,7 +69,7 @@ _GPU_TESTS = [
 dsv4_sm100_py_test(
     name = "test_prefill_fast_path_cuda",
     extra_srcs = ["test_prefill_fast_path.py"],
-    deps = _MODEL_TEST_DEPS,
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:models"],
 )
 
 _PERF_TESTS = [
