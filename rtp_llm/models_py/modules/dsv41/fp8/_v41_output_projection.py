@@ -72,10 +72,7 @@ def quantization_scale_min(
         .strip()
         .lower()
     )
-    use_v2 = backend == "v2" or (
-        backend == "auto" and tokens * group_width >= 4 * 1024 * 1024
-    )
-    return 0.0 if use_v2 else 1e-10
+    return 0.0 if backend == "v2" else 1e-10
 
 
 def _quantize_projection_input(o, freqs, weight, workspace=None):

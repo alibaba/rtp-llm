@@ -14,6 +14,7 @@ _TESTS = [
     "test_mhc_lazy_backward",
     "test_prefill_workspace",
     "test_strategy_select",
+    "test_silu_mul_bf16",
 
     "test_native_prefill_inputs",
     "test_mxfp8_dense",

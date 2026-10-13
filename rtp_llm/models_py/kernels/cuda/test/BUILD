@@ -113,3 +113,17 @@ cuda13_sm100_py_test(
     srcs = ["fused_silu_mul_token_quant_batched_test.py"],
     deps = py_test_deps,
 )
+
+py_test(
+    name = "auto_legacy_quant_dispatch_test",
+    srcs = ["auto_legacy_quant_dispatch_test.py"],
+    deps = py_test_deps,
+)
+
+cuda13_sm100_py_test(
+    name = "per_token_group_quant_v3_test",
+    srcs = ["per_token_group_quant_v3_test.py"],
+    main = "per_token_group_quant_v3_test.py",
+    deps = py_test_deps,
+    tags = ["open_skip"],
+)
