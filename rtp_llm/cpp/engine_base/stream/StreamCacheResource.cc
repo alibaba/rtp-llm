@@ -158,7 +158,8 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    remaining_tokens,
                                                                    reserve_step,
                                                                    reuseCache(),
-                                                                   target_batch_size);
+                                                                   target_batch_size,
+                                                                   canReclaimLinearHistory(target_batch_size));
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -426,20 +427,25 @@ void StreamCacheResource::reclaimLinearHistory(int committed_tokens) {
     pending_linear_history_committed_tokens_ = std::max(pending_linear_history_committed_tokens_, committed_tokens);
 }
 
-void StreamCacheResource::drainLinearHistory() {
-    if (pending_linear_history_committed_tokens_ <= 0 || !resource_context_.cache_manager
-        || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim || fake_inited_
-        || resource_released_ || !need_release_resource_ || allocator_load_context_ || isContextStream()
+bool StreamCacheResource::canReclaimLinearHistory(int target_batch_size) const {
+    if (!resource_context_.cache_manager || !resource_context_.cache_manager->cacheConfig().enable_linear_cache_reclaim
+        || fake_inited_ || resource_released_ || !need_release_resource_ || allocator_load_context_
         || stream_->hasErrorWithoutLock() || stream_->hasNumBeams() || batch_kv_cache_resource_->batchSize() != 1
-        || !block_update_mapping_.empty() || stream_->queryPdSep() || pd_kvcache_ref_ || curBlocksNum() == 0) {
+        || target_batch_size != 1 || stream_->maxBatchSize() != 1 || !block_update_mapping_.empty()
+        || resource_context_.role_type != RoleType::PDFUSION || stream_->queryPdSep() || pd_kvcache_ref_) {
+        return false;
+    }
+    // DEVICE publication acquires tree references synchronously. Lower-tier
+    // stores only queue a transfer, so retain the request references there.
+    return !reuseCache() || enableDeviceCache();
+}
+
+void StreamCacheResource::drainLinearHistory() {
+    if (pending_linear_history_committed_tokens_ <= 0 || !canReclaimLinearHistory(stream_->maxBatchSize())
+        || isContextStream() || curBlocksNum() == 0) {
         return;
     }
     const bool reuse_cache = reuseCache();
-    // DEVICE publication acquires tree references synchronously. Lower-tier
-    // stores only queue a transfer, so retain the request references there.
-    if (reuse_cache && !enableDeviceCache()) {
-        return;
-    }
     const int committed_tokens =
         std::min(pending_linear_history_committed_tokens_, std::max(0, stream_->seqLength() - 1));
     updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), seqSizePerBlock());
