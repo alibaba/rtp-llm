@@ -129,6 +129,15 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         return waitDiagnostics;
     }
 
+    int blockedSize() {
+        lock.lock();
+        try {
+            return waitingRequests.size();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /** Enqueue without selecting an endpoint on the ingress thread. */
     boolean offer(
             BalanceContext context,
@@ -564,7 +573,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         try {
             reporter.reportRouteSubmitTimeMs(
                     item.prefill().getRole().name(),
-                    item.prefillEp().getIp(),
+                    item.prefillEp().getStatus().getMetricIpPort(),
                     System.currentTimeMillis() - context.getStartTime());
         } catch (Throwable failure) {
             Logger.warn("Failed to record route-submit telemetry", failure);

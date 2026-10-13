@@ -7,6 +7,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.sync.runner.RunnerTestSupport;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,7 +41,7 @@ class WorkerDirectoryTest {
         var entered = new java.util.concurrent.CountDownLatch(4);
         var release = new java.util.concurrent.CountDownLatch(1);
         var cleaned = new java.util.concurrent.CountDownLatch(5);
-        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        var cache = Mockito.mock(org.flexlb.cache.match.CacheAwareService.class);
         var logger = Mockito.mock(org.slf4j.Logger.class);
         Mockito.doAnswer(call -> {
             entered.countDown();
@@ -101,7 +102,7 @@ class WorkerDirectoryTest {
         var lease = status.tryBeginStatusPoll(1L);
         lease.pollTrace().record(Stage.RPC_COMPLETED, new IllegalStateException("deadline exceeded"));
         lease.close();
-        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        var cache = Mockito.mock(org.flexlb.cache.match.CacheAwareService.class);
         Mockito.doThrow(new IllegalStateException("cache cleanup failed"))
                 .when(cache).removeEngineBlockCache(status, status.trace());
         var logger = Mockito.mock(org.slf4j.Logger.class);
@@ -142,7 +143,7 @@ class WorkerDirectoryTest {
         discover(status);
         var retried = new java.util.concurrent.CountDownLatch(1);
         var attempts = new java.util.concurrent.atomic.AtomicInteger();
-        var cache = Mockito.mock(org.flexlb.cache.service.CacheAwareService.class);
+        var cache = Mockito.mock(org.flexlb.cache.match.CacheAwareService.class);
         Mockito.doAnswer(call -> {
             assertSame(status, workerDirectory.currentOrDiscover(RoleType.PREFILL, status.getIpPort(), () -> {
                 throw new AssertionError("replacement before successful cleanup");
@@ -216,9 +217,9 @@ class WorkerDirectoryTest {
         WorkerStatus matching = status(RoleType.DECODE, "group1", 8080);
         WorkerStatus filtered = status(RoleType.DECODE, "group2", 8081);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, matching.getIpPort(), matching);
+                RoleType.DECODE, matching.getLogicalIpPort(), matching);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, filtered.getIpPort(), filtered);
+                RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
         List<WorkerEndpoint.GenerationPin> result =
                 workerDirectory.captureEndpoints(
@@ -226,7 +227,7 @@ class WorkerDirectoryTest {
         try {
             assertEquals(1, result.size());
             assertSame(matching, result.getFirst().endpoint().getStatus());
-            assertEquals(matching.getIpPort(),
+            assertEquals(matching.getLogicalIpPort(),
                     result.getFirst().endpoint().ipPort());
         } finally {
             closePins(result);
@@ -238,9 +239,9 @@ class WorkerDirectoryTest {
         WorkerStatus first = status(RoleType.PREFILL, "group1", 8080);
         WorkerStatus second = status(RoleType.PREFILL, "group2", 8081);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.PREFILL, first.getIpPort(), first);
+                RoleType.PREFILL, first.getLogicalIpPort(), first);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.PREFILL, second.getIpPort(), second);
+                RoleType.PREFILL, second.getLogicalIpPort(), second);
 
         List<WorkerEndpoint.GenerationPin> result =
                 workerDirectory.captureEndpoints(
@@ -270,7 +271,7 @@ class WorkerDirectoryTest {
     void should_close_filtered_pins_when_no_group_matches() {
         WorkerStatus status = status(RoleType.VIT, "group1", 8080);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.VIT, status.getIpPort(), status);
+                RoleType.VIT, status.getLogicalIpPort(), status);
 
         List<WorkerEndpoint.GenerationPin> result =
                 workerDirectory.captureEndpoints(
@@ -287,15 +288,15 @@ class WorkerDirectoryTest {
         WorkerStatus matching = status(RoleType.DECODE, "groupA", 8080);
         WorkerStatus ungrouped = status(RoleType.DECODE, null, 8081);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, matching.getIpPort(), matching);
+                RoleType.DECODE, matching.getLogicalIpPort(), matching);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
+                RoleType.DECODE, ungrouped.getLogicalIpPort(), ungrouped);
 
         List<String> result = capturedAddresses(
                 RoleType.DECODE, "groupA");
 
-        assertEquals(List.of(matching.getIpPort()), result);
-        assertFalse(result.contains(ungrouped.getIpPort()));
+        assertEquals(List.of(matching.getLogicalIpPort()), result);
+        assertFalse(result.contains(ungrouped.getLogicalIpPort()));
     }
 
     @Test
@@ -303,16 +304,16 @@ class WorkerDirectoryTest {
         WorkerStatus grouped = status(RoleType.DECODE, "groupA", 8080);
         WorkerStatus ungrouped = status(RoleType.DECODE, null, 8081);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, grouped.getIpPort(), grouped);
+                RoleType.DECODE, grouped.getLogicalIpPort(), grouped);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, ungrouped.getIpPort(), ungrouped);
+                RoleType.DECODE, ungrouped.getLogicalIpPort(), ungrouped);
 
         List<String> result = capturedAddresses(
                 RoleType.DECODE, null);
 
         assertEquals(2, result.size());
-        assertTrue(result.contains(grouped.getIpPort()));
-        assertTrue(result.contains(ungrouped.getIpPort()));
+        assertTrue(result.contains(grouped.getLogicalIpPort()));
+        assertTrue(result.contains(ungrouped.getLogicalIpPort()));
     }
 
     @Test
@@ -322,9 +323,9 @@ class WorkerDirectoryTest {
         discover(matching);
         discover(filtered);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, matching.getIpPort(), matching);
+                RoleType.DECODE, matching.getLogicalIpPort(), matching);
         RunnerTestSupport.publishEndpoint(registry,
-                RoleType.DECODE, filtered.getIpPort(), filtered);
+                RoleType.DECODE, filtered.getLogicalIpPort(), filtered);
 
         assertEquals(List.of(matching.getIpPort()),
                 capturedAddresses(
@@ -351,7 +352,7 @@ class WorkerDirectoryTest {
     private void assertRoleEndpoint(RoleType role, int port) {
         WorkerStatus status = status(role, null, port);
         WorkerEndpoint registered = RunnerTestSupport.publishEndpoint(registry,
-                role, status.getIpPort(), status);
+                role, status.getLogicalIpPort(), status);
 
         List<WorkerEndpoint.GenerationPin> selected =
                 workerDirectory.captureEndpoints(role, null);
@@ -384,9 +385,9 @@ class WorkerDirectoryTest {
         discover(decode);
 
         assertSame(prefill, workerDirectory.statusSnapshot(RoleType.PREFILL)
-                .get(prefill.getIpPort()));
+                .get(prefill.getLogicalIpPort()));
         assertSame(decode, workerDirectory.statusSnapshot(RoleType.DECODE)
-                .get(decode.getIpPort()));
+                .get(decode.getLogicalIpPort()));
         assertEquals(2, workerDirectory.discoveredCount());
         assertEquals(1, workerDirectory.discoveredCount(RoleType.PREFILL));
     }
@@ -396,14 +397,32 @@ class WorkerDirectoryTest {
         WorkerStatus status = status(RoleType.VIT, "group", 8080);
         discover(status);
 
-        assertEquals(Map.of(status.getIpPort(), status),
+        assertEquals(Map.of(status.getLogicalIpPort(), status),
                 workerDirectory.statusSnapshot(RoleType.VIT));
         assertThrows(UnsupportedOperationException.class,
                 () -> workerDirectory.statusSnapshot(RoleType.VIT).clear());
     }
 
+    @Test
+    void worker_status_provider_returns_discovered_statuses_by_role_and_group() {
+        WorkerStatus matching = status(RoleType.PREFILL, "group1", 8301);
+        WorkerStatus filtered = status(RoleType.PREFILL, "group2", 8302);
+        WorkerStatus otherRole = status(RoleType.DECODE, "group1", 8303);
+        discover(matching);
+        discover(filtered);
+        discover(otherRole);
+
+        WorkerStatusProvider provider = workerDirectory;
+
+        assertEquals(List.of(matching),
+                provider.getWorkerStatuses(RoleType.PREFILL, "group1"));
+        assertEquals(2,
+                provider.getWorkerStatuses(RoleType.PREFILL, null).size());
+        assertTrue(provider.getWorkerStatuses(null, "group1").isEmpty());
+    }
+
     private void discover(WorkerStatus status) {
         assertSame(status, workerDirectory.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status));
+                status.getRole(), status.getLogicalIpPort(), () -> status));
     }
 }

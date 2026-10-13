@@ -2,8 +2,8 @@ package org.flexlb.sync.synchronizer;
 
 import io.grpc.Status;
 import org.flexlb.balance.scheduler.SchedulingTestConfig;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;

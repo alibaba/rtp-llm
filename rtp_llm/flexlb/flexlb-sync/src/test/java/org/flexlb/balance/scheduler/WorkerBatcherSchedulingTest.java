@@ -18,6 +18,9 @@ import org.flexlb.dao.route.RoleType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -178,7 +181,7 @@ class WorkerBatcherSchedulingTest {
                 () -> 0L, mock(RequestRegistry.class), mock(DeliveryMetrics.class))
                 .projectionPolicy();
         RouteProjection.Candidate candidate = RouteProjection.project(
-                inputs, new RouteProjection.Probe(22L, 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
+                inputs, new RouteProjection.Probe("22", 50, now + 1L, Long.MAX_VALUE, 10L, 0L, 0L),
                 endpoint.getPredictor().evaluator(), projection, now);
         assertTrue(candidate.hasPrediction(),
                 "a delivery-only wait must leave incoming backlog selectable");
@@ -228,7 +231,7 @@ class WorkerBatcherSchedulingTest {
             finish.countDown();
             var shared = first.get(2, TimeUnit.SECONDS);
             for (var follower : followers) {
-                org.junit.jupiter.api.Assertions.assertSame(shared, follower.get(2, TimeUnit.SECONDS));
+                assertSame(shared, follower.get(2, TimeUnit.SECONDS));
             }
         } finally {
             finish.countDown();
@@ -516,7 +519,7 @@ class WorkerBatcherSchedulingTest {
             PrefillEndpoint endpoint,
             DeliveryStrategy delivery) {
         WorkerBatcher runtime = new WorkerBatcher(
-                "scheduling-test", endpoint, config, delivery,
+                "scheduling-test", endpoint, () -> config, delivery,
                 mock(EndpointEventProjector.class));
         runtimes.add(runtime);
         runtime.start();
@@ -550,7 +553,7 @@ class WorkerBatcherSchedulingTest {
             int priority,
             long enqueuedAtMs) {
         Request request = new Request();
-        request.setRequestId(requestId);
+        request.setRequestId(Long.toString(requestId));
         request.setPriority(priority);
         request.setSeqLen(10L);
         BalanceContext context = new BalanceContext(config);
@@ -582,6 +585,7 @@ class WorkerBatcherSchedulingTest {
     private static WorkerStatus stableStatus() {
         WorkerStatus status = mock(WorkerStatus.class);
         when(status.committedEngineObservation()).thenReturn(capacity());
+        when(status.getMetricIpPort()).thenReturn("10.0.0.1");
         return status;
     }
 

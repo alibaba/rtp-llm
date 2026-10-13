@@ -31,7 +31,7 @@ class PrefillRequestCapacityTest {
     private final WorkerStatus schedulingWorker = mock(WorkerStatus.class);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillState state = new PrefillState(lock,
-            PrefillActiveIndex.ordered(16, Comparator.comparingLong(ScheduledRequest::requestId)), () -> { });
+            PrefillActiveIndex.ordered(16, Comparator.comparing(ScheduledRequest::requestId)), () -> { });
 
     @BeforeEach
     void workerIsAvailable() {
@@ -307,13 +307,14 @@ class PrefillRequestCapacityTest {
         when(engine.runningTaskList()).thenReturn(tasks);
         when(engine.waitingQueryLen()).thenReturn(reportedActive);
         when(observation.engine()).thenReturn(engine);
-        when(observation.runningTasks()).thenReturn(tasks);
+        when(observation.activeTasks()).thenReturn(tasks);
         state.reconcileHeartbeat(observation);
     }
 
     private static WorkerStatus.TaskObservation observed(long id) {
-        return new WorkerStatus.TaskObservation(id, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "", 0L,
-                TaskPhase.RUNNING, 0L, PriorityPreemptionProgress.NONE);
+        return new WorkerStatus.TaskObservation(Long.toString(id), 0L, 0L, 0L,
+                0L, 0L, 0L, 0L, 0L, "", 0L, TaskPhase.RUNNING, 0L,
+                PriorityPreemptionProgress.NONE, mock(WorkerStatus.TaskTelemetry.class));
     }
 
     private static ScheduledRequest item(long id) {

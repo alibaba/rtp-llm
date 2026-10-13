@@ -46,7 +46,7 @@ public final class RequestExecution implements Prioritized {
         this.maxInflightBatchesPerPrefillWorker = maxInflightBatchesPerPrefillWorker;
     }
 
-    public long requestId() { return decodeBinding.requestId(); }
+    public String requestId() { return decodeBinding.requestId(); }
 
     @Override
     public int priority() { return decodeBinding.priority(); }

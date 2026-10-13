@@ -8,7 +8,7 @@ import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.balance.scheduler.PlacementKey;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.service.monitor.EngineHealthReporter;

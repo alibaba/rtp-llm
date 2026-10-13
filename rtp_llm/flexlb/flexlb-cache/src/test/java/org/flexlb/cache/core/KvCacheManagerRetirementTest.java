@@ -1,7 +1,7 @@
 package org.flexlb.cache.core;
 
 import org.flexlb.cache.domain.DiffResult;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -68,7 +68,7 @@ class KvCacheManagerRetirementTest {
     void interruptedAdditionRecoversAgainstChangedSnapshot(boolean localFailure) throws Exception {
         var local = spy(new EngineLocalView());
         inject(local, "cacheMetricsReporter", mock(CacheMetricsReporter.class));
-        inject(local, "dynamicIntervalManager", mock(org.flexlb.cache.service.DynamicCacheIntervalService.class));
+        inject(local, "dynamicIntervalManager", mock(org.flexlb.cache.match.localsync.DynamicCacheIntervalService.class));
         var global = spy(new GlobalCacheIndex());
         var manager = manager(local, global);
         // The first snapshot has several changes; failure occurs at an arbitrary key.

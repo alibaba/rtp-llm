@@ -8,12 +8,13 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.delivery.DeliveryStrategy;
 import org.flexlb.balance.scheduler.EndpointEventProjector;
 import org.flexlb.balance.scheduler.PlacementAvailability;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.EndpointTrace.Stage;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -581,13 +582,18 @@ class GrpcWorkerStatusRunnerTest {
                 role, null, "127.0.0.1", 8080, 8081, "test-site");
         WorkerDirectory directory = directory(registry, status);
         WorkerEndpoint endpoint = RunnerTestSupport.publishEndpoint(
-                registry, role, status.getIpPort(), status);
+                registry, role, status.getLogicalIpPort(), status);
         CacheAwareService cache = mock(CacheAwareService.class);
         EngineGrpcService grpc = mock(EngineGrpcService.class);
         when(grpc.getWorkerStatusAsync(
                 anyString(), anyInt(), anyLong(), anyLong(), any()))
-                .thenReturn(CompletableFuture.failedFuture(
-                        io.grpc.Status.UNAVAILABLE.asRuntimeException()));
+                .thenReturn(invalidRole
+                        ? CompletableFuture.completedFuture(EngineRpcService.WorkerStatusPB.newBuilder()
+                                 .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                                 .setRole("DECODE")
+                                 .setStatusVersion(1L).setAlive(true)
+                                 .build())
+                        : CompletableFuture.failedFuture(io.grpc.Status.UNAVAILABLE.asRuntimeException()));
 
         ExpirationCleaner cleaner = new ExpirationCleaner(cache, directory);
         for (int failure = 1; failure <= 3; failure++) {
@@ -599,13 +605,13 @@ class GrpcWorkerStatusRunnerTest {
                     grpc, 5_000L, cache, Runnable::run).run();
             cleaner.retireUnavailableWorkers();
             if (failure < 3) {
-                assertSame(status, directory.statusSnapshot(role).get(status.getIpPort()));
-                assertSame(endpoint, registry.get(role, status.getIpPort()));
+                assertSame(status, directory.statusSnapshot(role).get(status.getLogicalIpPort()));
+                assertSame(endpoint, registry.get(role, status.getLogicalIpPort()));
                 verifyNoInteractions(cache);
             }
         }
 
-        assertNull(registry.get(role, status.getIpPort()));
+        assertNull(registry.get(role, status.getLogicalIpPort()));
         assertTrue(directory.statusSnapshot(role).isEmpty());
         var snapshot = status.trace().snapshot();
         org.junit.jupiter.api.Assertions.assertEquals(3, snapshot.consecutiveFailures());
@@ -620,9 +626,77 @@ class GrpcWorkerStatusRunnerTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"DEADLINE_EXCEEDED,WORKER_STATUS_GRPC_TIMEOUT", "UNAVAILABLE,WORKER_SERVICE_UNAVAILABLE"})
+    void reportsFailedRpcLatencyWithSameWorkerTags(String grpcCode, BalanceStatusEnum expectedError) {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.PREFILL, null, "127.0.0.1", 8080, 8081, "test-site");
+        WorkerDirectory directory = directory(mock(EndpointRegistry.class), status);
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        io.grpc.Status failure = "DEADLINE_EXCEEDED".equals(grpcCode)
+                ? io.grpc.Status.DEADLINE_EXCEEDED : io.grpc.Status.UNAVAILABLE;
+        when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                .thenReturn(CompletableFuture.failedFuture(failure.asRuntimeException()));
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+
+        new GrpcWorkerStatusRunner("test-model", status.getLogicalIpPort(), "test-site", RoleType.PREFILL,
+                null, status, status.tryBeginStatusPoll(), directory, reporter, grpc, 5000L,
+                mock(CacheAwareService.class), Runnable::run).run();
+
+        ArgumentCaptor<Long> latency = ArgumentCaptor.forClass(Long.class);
+        verify(reporter).reportStatusCheckerFail(expectedError, status.getMetricIpPort(), RoleType.PREFILL);
+        verify(reporter).reportStatusCheckFailureLatency(org.mockito.ArgumentMatchers.eq(expectedError),
+                org.mockito.ArgumentMatchers.eq(status.getMetricIpPort()),
+                org.mockito.ArgumentMatchers.eq(RoleType.PREFILL), latency.capture());
+        assertTrue(latency.getValue() >= 0L);
+    }
+
+    @Test
+    void reportsEachObservedStepOnceAcrossPolls() {
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, "test-site");
+        String ipPort = status.getLogicalIpPort();
+        WorkerEndpoint endpoint = mock(WorkerEndpoint.class);
+        EndpointRegistry registry = mock(EndpointRegistry.class);
+        WorkerDirectory directory = directory(registry, status);
+        when(registry.publishPreparedEndpoint(anyString(), any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(2));
+            return new EndpointRegistry.EndpointPublication(endpoint, () -> { });
+        });
+        when(registry.get(RoleType.DECODE, ipPort, status)).thenReturn(endpoint);
+        when(endpoint.applyPreparedStatus(any(), any())).thenAnswer(invocation -> {
+            status.publishPreparedStatus(invocation.getArgument(1));
+            return (Runnable) () -> { };
+        });
+        when(endpoint.observeStatusHeartbeat(any(), any())).thenReturn(() -> { });
+        EngineGrpcService grpc = mock(EngineGrpcService.class);
+        EngineHealthReporter reporter = mock(EngineHealthReporter.class);
+        long[] versions = {1, 2, 2, 3, 4};
+        long[] steps = {0, 42, 42, 42, 43};
+        for (int i = 0; i < versions.length; i++) {
+            var response = EngineRpcService.WorkerStatusPB.newBuilder()
+                    .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE)
+                    .setStatusVersion(versions[i]).setAlive(true);
+            if (steps[i] > 0) {
+                response.setLastStepMetrics(EngineRpcService.WorkerStepMetricsPB.newBuilder()
+                        .setStepId(steps[i]).setTotalScheduledTokens(64).setTokenBudget(32000)
+                        .setBudgetFillRatio(0.002));
+            }
+            when(grpc.getWorkerStatusAsync(anyString(), anyInt(), anyLong(), anyLong(), any()))
+                    .thenReturn(CompletableFuture.completedFuture(response.build()));
+            new GrpcWorkerStatusRunner("test-model", ipPort, "test-site", RoleType.DECODE, null,
+                    status, status.tryBeginStatusPoll(), directory, reporter, grpc, 5000L,
+                    mock(CacheAwareService.class), Runnable::run).run();
+        }
+        var observed = ArgumentCaptor.forClass(WorkerStatus.StepMetrics.class);
+        verify(reporter, org.mockito.Mockito.times(2)).reportWorkerStepMetrics(
+                org.mockito.Mockito.eq(status), observed.capture());
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(42L, 43L),
+                observed.getAllValues().stream().map(WorkerStatus.StepMetrics::stepId).toList());
+    }
+
     @Test
     void newGenerationProjectionRunsOutsideWorkerStatusLock() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus status = RunnerTestSupport.discovered(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
@@ -680,7 +754,6 @@ class GrpcWorkerStatusRunnerTest {
 
     @Test
     void sameVersionResponseProjectsExactEndpointActivity() {
-        String ipPort = "127.0.0.1:8080";
         WorkerStatus status = RunnerTestSupport.alive(
                 RoleType.DECODE, null, "127.0.0.1",
                 8080, 8081, "test-site");
@@ -699,7 +772,7 @@ class GrpcWorkerStatusRunnerTest {
                 .thenReturn(activity);
 
         EngineRpcService.TaskInfoPB task = EngineRpcService.TaskInfoPB.newBuilder()
-                .setRequestId(123L)
+                .setRequestId(123)
                 .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING)
                 .build();
         EngineRpcService.WorkerStatusPB response =
@@ -726,8 +799,8 @@ class GrpcWorkerStatusRunnerTest {
                 ArgumentCaptor.forClass(WorkerStatus.StatusObservation.class);
         verify(endpoint).observeStatusHeartbeat(
                 org.mockito.Mockito.eq(status), observation.capture());
-        assertTrue(observation.getValue().runningTasks().values().stream()
-                .anyMatch(active -> active.requestId() == 123L));
+        assertTrue(observation.getValue().activeTasks().values().stream()
+                .anyMatch(active -> active.requestId().equals("123")));
         assertTrue(projected.get());
         WorkerStatus.PollLease nextPoll = status.tryBeginStatusPoll(1L);
         assertNotNull(nextPoll, "the asynchronous owner must close the exact poll lease");
@@ -738,7 +811,7 @@ class GrpcWorkerStatusRunnerTest {
             EndpointRegistry registry, WorkerStatus status) {
         WorkerDirectory directory = new WorkerDirectory(registry, Runnable::run);
         directory.currentOrDiscover(
-                status.getRole(), status.getIpPort(), () -> status);
+                status.getRole(), status.getLogicalIpPort(), () -> status);
         return directory;
     }
 }

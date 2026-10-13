@@ -12,7 +12,7 @@ import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestRegistry;
 import org.flexlb.balance.scheduler.RouteDeliveryStrategy;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.SchedulerConfig;
@@ -231,7 +231,7 @@ class CostBasedPrefillStrategyBlockerTest {
                     config.setDispatcher(DispatcherConfig.nonBatch());
                     var context = new BalanceContext(config);
                     var request = new Request();
-                    request.setRequestId(1L);
+                    request.setRequestId("1");
                     request.setSeqLen(100L);
                     context.setRequest(request);
                     context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));

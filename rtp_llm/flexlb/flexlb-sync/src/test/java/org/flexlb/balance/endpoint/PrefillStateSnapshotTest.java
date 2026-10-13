@@ -38,9 +38,27 @@ class PrefillStateSnapshotTest {
     private final AtomicLong clock = new AtomicLong(100);
     private final ReentrantLock lock = new ReentrantLock();
     private final PrefillActiveIndex waiting = PrefillActiveIndex.ordered(4,
-            Comparator.comparingLong(ScheduledRequest::requestId));
+            Comparator.comparing(ScheduledRequest::requestId));
     private final PrefillState state = new PrefillState(lock, waiting, clock::get, () -> { });
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
+
+    @Test
+    void inflightExcludesQueuedAndConfirmedWorkerRequests() {
+        enqueue(item(9));
+        assertEquals(0, state.stats().inflightRequests());
+        try (var reservation = state.reserveUnqueuedRoute(item(8), 10, Long.MAX_VALUE).reservation()) {
+            assertEquals(0, state.stats().inflightRequests());
+        }
+        var request = item(1);
+        try (var reservation = state.reserveUnqueuedRoute(request, 10, Long.MAX_VALUE).reservation();
+             var handoff = state.commitRouteGroup(List.of(request), List.of(reservation),
+                     generation.tryAcquireHandoff())) {
+            assertEquals(1, state.stats().inflightRequests());
+        }
+        reconcile(Map.of(), Map.of("1", task(1, TaskPhase.RUNNING, 0, 0)), unused -> 0L);
+        assertEquals(0, state.stats().inflightRequests());
+        assertEquals(1, state.stats().locallyOwnedRequests());
+    }
 
     @Test
     void concurrentReadersShareACompleteImmutableMaterialization() throws Exception {
@@ -61,7 +79,7 @@ class PrefillStateSnapshotTest {
             for (var reader : readers) {
                 assertSame(shared, reader.get(5, TimeUnit.SECONDS));
             }
-            assertEquals(List.of(1L, 2L), shared.requests().stream()
+            assertEquals(List.of("1", "2"), shared.requests().stream()
                     .map(WorkSnapshot.RequestWork::requestId).toList());
             second.close();
             first.close();
@@ -118,7 +136,7 @@ class PrefillStateSnapshotTest {
                 assertTrue(waitingItems().isEmpty());
                 assertEquals(0L, handoff.precedingWork().totalRemainingWorkMs().orElseThrow(),
                         "the selected group's own provisional work is excluded");
-                assertEquals(List.of(1L, 2L), state.committedSnapshot().requests().stream()
+                assertEquals(List.of("1", "2"), state.committedSnapshot().requests().stream()
                         .map(work -> work.requestId()).toList());
                 assertEquals(70L, state.committedSnapshot().knownRemainingWorkMsAt(System.currentTimeMillis()));
             }
@@ -366,7 +384,7 @@ class PrefillStateSnapshotTest {
 
     private static TaskInfo task(long requestId, TaskPhase phase, long errorCode, long executionMs) {
         TaskInfo task = new TaskInfo();
-        task.setRequestId(requestId);
+        task.setRequestId(Long.toString(requestId));
         task.setBatchId(10L);
         task.setPhase(phase);
         task.setErrorCode(errorCode);

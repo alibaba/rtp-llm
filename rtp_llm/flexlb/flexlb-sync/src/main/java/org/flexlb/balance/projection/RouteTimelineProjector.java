@@ -19,7 +19,7 @@ final class RouteTimelineProjector {
     private static final String INVALID_PREDICTION_DETAIL =
             "PREDICTOR_RETURNED_INVALID_VALUE";
     private final PredictionBoundary predictions = new PredictionBoundary();
-    private long requestId;
+    private String requestId;
     private int priority;
     private long enqueueSeq;
     private long enqueuedAtMs;
@@ -33,7 +33,7 @@ final class RouteTimelineProjector {
     }
 
     void reset(
-            long requestId,
+            String requestId,
             int priority,
             long enqueueSeq,
             long enqueuedAtMs,
@@ -153,7 +153,7 @@ final class RouteTimelineProjector {
                 }
                 continue;
             }
-            if (item.requestId() == requestId) {
+            if (item.requestId().equals(requestId)) {
                 return unavailable("INCOMING_ALREADY_ACTIVE");
             }
             eligibleActive.add(item);
@@ -264,7 +264,7 @@ final class RouteTimelineProjector {
     }
 
     private static boolean containsCommittedRequest(
-            WorkSnapshot committed, long requestId) {
+            WorkSnapshot committed, String requestId) {
         return committed.containsRequest(requestId);
     }
 

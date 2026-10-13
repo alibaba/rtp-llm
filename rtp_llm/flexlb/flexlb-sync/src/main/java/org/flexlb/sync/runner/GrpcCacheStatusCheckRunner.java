@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.EndpointTrace.Stage;
@@ -59,11 +59,32 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                                       boolean fullSnapshotDebugMode,
                                       Executor callbackExecutor) {
 
+        this(modelName, ipPort, workerStatus.getGrpcPort(), site, roleType,
+                workerStatus, pollLease, workerDirectory, engineHealthReporter,
+                engineGrpcService, cacheAwareService, cacheIntervalService,
+                requestTimeoutMs, syncCount, syncEngineStatusInterval,
+                fullSnapshotDebugMode, callbackExecutor);
+    }
+
+    public GrpcCacheStatusCheckRunner(String modelName, String ipPort, int workerStatusPort,
+                                      String site, RoleType roleType,
+                                      WorkerStatus workerStatus,
+                                      WorkerStatus.PollLease pollLease,
+                                      WorkerDirectory workerDirectory,
+                                      EngineHealthReporter engineHealthReporter,
+                                      EngineGrpcService engineGrpcService,
+                                      CacheAwareService cacheAwareService,
+                                      DynamicCacheIntervalService cacheIntervalService,
+                                      long requestTimeoutMs,
+                                      LongAdder syncCount,
+                                      Long syncEngineStatusInterval,
+                                      boolean fullSnapshotDebugMode,
+                                      Executor callbackExecutor) {
+
         this.ipPort = ipPort;
-        String[] split = ipPort.split(":");
-        this.ip = split[0];
+        this.ip = workerStatus.getIp();
         this.roleType = roleType;
-        this.grpcPort = CommonUtils.toGrpcPort(Integer.parseInt(split[1]));
+        this.grpcPort = workerStatusPort;
         this.modelName = modelName;
         this.workerStatus = workerStatus;
         this.workerDirectory = Objects.requireNonNull(
@@ -220,14 +241,14 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
-                    modelName, roleType.name(), startTime);
+                    workerStatus, startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(
-                    modelName, workerStatus, successfulIntervalUs);
+                    workerStatus, successfulIntervalUs);
         } catch (Throwable e) {
             pollLease.pollTrace().record(Stage.CACHE_RESPONSE_FAILED, e);
             log("engine cache status check via gRPC exception, msg: " + e.getMessage(), e);
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 
@@ -257,7 +278,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private void logCacheStatusUpdate(CacheStatus cacheStatus, long startTime) {
 
         logger.debug("gRPC Cache Status - {}, role:{}, block_size:{}, version:{}, cacheKeySize:{},"
-                        + " available_kv_cache:{}, total_kv_cache:{}, cost:{}, syncIntervalMs:{}",
+                        + " available_kv_cache:{}, total_kv_cache:{}, cost_us:{}, syncIntervalMs:{}",
                 ipPort,
                 roleType.name(),
                 cacheStatus.getBlockSize(),
@@ -273,7 +294,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         try {
             pollLease.pollTrace().record(Stage.CACHE_INDEX_UPDATE_BEGIN);
             WorkerCacheUpdateResult result =
-                    cacheAwareService.updateEngineBlockCache(workerStatus, pollLease.pollTrace());
+                    cacheAwareService.updateFromWorkerStatus(workerStatus, pollLease.pollTrace());
             if (result != null && result.isSuccess()) {
                 pollLease.pollTrace().record(Stage.CACHE_INDEX_UPDATE_END);
             } else {
@@ -285,7 +306,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         "Cache service returned no update result for {}#{}",
                         ipPort, generationId);
                 engineHealthReporter.reportCacheStatusCheckerFail(
-                        modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+                        workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
                 return null;
             }
             if (!result.isSuccess()) {
@@ -295,9 +316,8 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         generationId,
                         result.getErrorMessage());
                 engineHealthReporter.reportCacheStatusCheckerFail(
-                        modelName,
-                        BalanceStatusEnum.CACHE_UPDATE_FAILED,
-                        roleType);
+                        workerStatus,
+                        BalanceStatusEnum.CACHE_UPDATE_FAILED);
             }
             return result;
         } catch (Exception e) {
@@ -305,7 +325,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             logger.debug("Exception to update worker cache for {}#{}: {}",
                     ipPort, generationId, e.getMessage());
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_UPDATE_FAILED, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_UPDATE_FAILED);
             return null;
         }
     }
@@ -336,10 +356,10 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         // Report specific error based on exception type
         if (ex.getMessage() != null && ex.getMessage().toLowerCase().contains(DEADLINE_EXCEEDED_MESSAGE.toLowerCase())) {
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_GRPC_TIMEOUT, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_GRPC_TIMEOUT);
         } else {
             engineHealthReporter.reportCacheStatusCheckerFail(
-                    modelName, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE, roleType);
+                    workerStatus, BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
         }
     }
 

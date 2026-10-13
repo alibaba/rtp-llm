@@ -152,23 +152,23 @@ class TwinOverloadAdmissionTest {
         for (long id = 1; id <= 9; id++) {
             try (WorkerEndpoint.GenerationPin pin = endpoint.tryPinGeneration()) {
                 assertNotNull(pin);
-                assertNotNull(endpoint.reserve(pin, id, 128L, 256L, 50));
+                assertNotNull(endpoint.reserve(pin, Long.toString(id), 128L, 256L, 50));
             }
         }
         for (long id = 1; id <= 8; id++) {
             DecodeEndpoint.EngineDispatchPermitAcquisition acquisition =
-                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(id), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+                    endpoint.acquireDispatchPermit(endpoint.reservationHandle(Long.toString(id)), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
             assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, acquisition.status());
             assertEquals(DecodeEndpoint.EngineDispatchPermitTransferStatus.TRANSFERRED,
                     acquisition.permit().dispatch());
         }
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.CAPACITY_FULL,
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
+                endpoint.acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.AdmissionCapacity(8L, 90L)).status());
 
         applyStatus(endpoint, tasks(2L, 7, 10L, TaskPhase.RUNNING),
                 tasks(1L, 1, 10L, TaskPhase.RUNNING));
         DecodeEndpoint.EngineDispatchPermitAcquisition resumed =
-                endpoint.acquireDispatchPermit(endpoint.reservationHandle(9L), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
+                endpoint.acquireDispatchPermit(endpoint.reservationHandle("9"), new DecodeEndpoint.AdmissionCapacity(8L, 90L));
         assertEquals(DecodeEndpoint.EngineDispatchPermitAcquireStatus.ACQUIRED, resumed.status());
         assertTrue(resumed.permit().release());
     }
@@ -177,8 +177,9 @@ class TwinOverloadAdmissionTest {
         EndpointTestSupport.TestRequestRuntime runtime = EndpointTestSupport.requestRuntime();
         PrefillEndpoint endpoint = new PrefillEndpoint(
                 EndpointTestSupport.workerStatus(RoleType.PREFILL, "127.0.0.1", 8080, 8090),
-                config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
-                mock(BatchSchedulerReporter.class));
+                () -> config, EndpointTestSupport.routeStrategy(runtime), runtime.events(),
+                mock(BatchSchedulerReporter.class),
+                new org.flexlb.balance.scheduler.PlacementAvailability());
         endpoints.add(endpoint);
         endpoint.startGeneration();
         return endpoint;
@@ -215,7 +216,7 @@ class TwinOverloadAdmissionTest {
 
     private static ScheduledRequest item(PrefillEndpoint endpoint, FlexlbConfig config, long id) {
         Request request = new Request();
-        request.setRequestId(id);
+        request.setRequestId(Long.toString(id));
         request.setSeqLen(128L);
         BalanceContext context = new BalanceContext(config);
         context.setRequest(request);
@@ -232,7 +233,7 @@ class TwinOverloadAdmissionTest {
         Map<String, TaskInfo> result = new LinkedHashMap<>();
         for (long id = firstId; id < firstId + count; id++) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(id);
+            task.setRequestId(Long.toString(id));
             task.setBatchId(batchId);
             task.setPhase(phase);
             task.setInputLength(128L);

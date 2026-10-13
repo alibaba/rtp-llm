@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.dao.master.EndpointTrace.Stage;
+import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 
 import java.util.Objects;
@@ -33,6 +34,11 @@ public class WorkerEndpoint {
                 return thread;
             });
 
+    /**
+     * Returns the underlying {@link WorkerStatus} reference.
+     * Callers read only committed dynamic engine state from it.
+     */
+    @Getter
     private final WorkerStatus status;
     private final EndpointGenerationLifecycle generationLifecycle;
 
@@ -44,8 +50,12 @@ public class WorkerEndpoint {
 
     // ==================== identity (delegated to status) ====================
 
+    /**
+     * Returns the logical worker identity, including the engine index.
+     * Network calls use the separate IP and transport port accessors.
+     */
     public String ipPort() {
-        return status.getIpPort();
+        return status.getLogicalIpPort();
     }
 
     public String getIp() {
@@ -61,14 +71,6 @@ public class WorkerEndpoint {
     }
 
     // ==================== status ====================
-
-    /**
-     * Returns the underlying {@link WorkerStatus} reference.
-     * Callers read only committed dynamic engine state from it.
-     */
-    public WorkerStatus getStatus() {
-        return status;
-    }
 
     /**
      * Reduce one private status observation and publish it at the role's

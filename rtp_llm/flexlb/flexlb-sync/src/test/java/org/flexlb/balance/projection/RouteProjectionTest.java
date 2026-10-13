@@ -27,9 +27,9 @@ class RouteProjectionTest {
     @Test
     void unchangedRunningWorkCanReuseItsEarlierClockBase() {
         WorkSnapshot cached = new WorkSnapshot(13L, List.of(new WorkSnapshot.RequestWork(
-                1L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)), List.of(), 0L);
+                "1", WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L)), List.of(), 0L);
         WorkSnapshot current = new WorkSnapshot(20L, List.of(new WorkSnapshot.RequestWork(
-                1L, WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
+                "1", WorkSnapshot.Phase.ENGINE_RUNNING, 993L)), List.of(), 0L);
         assertEquals(
                 RouteProjection.project(new RouteProjection.Inputs(emptyQueue(20L), current),
                         probe(), new CountingEvaluator(), routeProjection()),
@@ -108,7 +108,7 @@ class RouteProjectionTest {
         return new QueueSnapshot(
                 capturedAtMs,
                 true,
-                Comparator.comparingLong(GroupPlanner.Item::requestId),
+                Comparator.comparing(GroupPlanner.Item::requestId),
                 new GroupPlanner.Constraints(
                         1, 1_000_000L, 1_000_000L, 0L, 30L),
                 List.of(),
@@ -122,7 +122,7 @@ class RouteProjectionTest {
 
     private static RouteProjection.Probe probe() {
         return new RouteProjection.Probe(
-                99L, 50, 13L, Long.MAX_VALUE,
+                "99", 50, 13L, Long.MAX_VALUE,
                 20L, 0L, 0L);
     }
 
