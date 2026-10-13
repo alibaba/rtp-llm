@@ -593,6 +593,9 @@ class AttentionV41FP8(AttentionFP8):
         self.compress_ratio = ratio
         self.skip_post_q_norm = True
         self.v41_config = v41_config
+        # Official sparse MQA uses BF16 head reduction/logits. Keep this
+        # precision change opt-in until model-level accuracy is qualified.
+        self.decode_sparse_mqa = os.environ.get("DSV41_DECODE_SPARSE_MQA", "0") == "1"
         # Read once: changing this policy in a running cache namespace is unsafe.
         self.swa_bounded_replay = bounded_replay_enabled() and self.layer_id >= 21
         # Store a plain dict: registering source modules would create cycles.
@@ -1036,6 +1039,7 @@ class AttentionV41FP8(AttentionFP8):
             self._shared_attention["topk"] = {}
             self._shared_attention["candidates"] = None
             self._shared_attention.pop("candidate_mask", None)
+            self._shared_attention.pop("decode_sparse_plan", None)
             self._shared_attention.pop("prefill_candidate_mask", None)
             self._shared_attention.pop("prefill_sparse_candidates", None)
             self._shared_attention.pop("prefill_sparse_plans", None)
@@ -2678,6 +2682,46 @@ class AttentionV41FP8(AttentionFP8):
         ).view(T, self.index_n_heads, self.index_head_dim)
         weights = F.linear(flat, self.index_weights)
         visible_per_token = (positions + 1) // self.compress_ratio
+        config = self.v41_config
+        candidate_source = int(config.get("candidate_source_layer_id", -1))
+        candidate_blocks = int(config.get("candidate_topk_blocks", 0))
+        candidate_size = int(config.get("candidate_block_size", 0))
+        candidates = shared.get("candidates")
+        if (
+            getattr(self, "decode_sparse_mqa", False)
+            and paged
+            and candidates is not None
+            and self.layer_id > candidate_source
+            and self.kv_source_layer_id == candidate_source
+        ):
+            from . import _v41_sparse_decode as sparse_decode
+
+            if (
+                self.compress_ratio != 1 or candidate_size != 8
+                or self.index_topk != 512 or self.index_n_heads != 32
+                or self.index_head_dim != 128 or keys.pool.shape[1] != 128
+                or keys.logical_entries_per_block != 128
+            ):
+                raise ValueError(
+                    "Sparse reindex requires ratio-1 FP4 pages128, "
+                    "H32/D128, block8, TopK512"
+                )
+            plan = shared.get("decode_sparse_plan")
+            if plan is None:
+                with record_function_range("dsv41.decode.sparse_mqa_plan"):
+                    plan = sparse_decode.make_plan(
+                        candidates, visible_per_token, keys.block_table, query_len=S,
+                    )
+                shared["decode_sparse_plan"] = plan
+            with record_function_range("dsv41.decode.sparse_mqa_select"):
+                output = sparse_decode.select_decode(
+                    q.view(B, S, self.index_n_heads, self.index_head_dim),
+                    weights.view(B, S, self.index_n_heads), self.freqs_cis,
+                    positions.reshape(T), keys.pool, plan,
+                    rope_head_dim=self.rope_head_dim,
+                )
+            shared["topk"] = {self.layer_id: output}
+            return output
         if paged:
             all_logits = decode_indexer.score_decode_indexer(
                 q.view(B, S, self.index_n_heads, self.index_head_dim),
@@ -2697,10 +2741,6 @@ class AttentionV41FP8(AttentionFP8):
             )
             freqs = self.freqs_cis[positions]
             q = fp4_roundtrip(rope_only(q, freqs, self.rope_head_dim))
-        config = self.v41_config
-        candidate_source = int(config.get("candidate_source_layer_id", -1))
-        candidate_blocks = int(config.get("candidate_topk_blocks", 0))
-        candidate_size = int(config.get("candidate_block_size", 0))
         publish = (
             self.layer_id == candidate_source
             and candidate_blocks > 0
