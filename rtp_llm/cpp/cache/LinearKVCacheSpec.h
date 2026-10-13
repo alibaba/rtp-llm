@@ -41,11 +41,9 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         RTP_LLM_CHECK_WITH_INFO(linear.linear_num_key_heads > 0 && linear.linear_num_value_heads > 0,
                                 "LINEAR KVCacheSpecDesc tag=%s requires positive linear head counts",
                                 desc.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(linear.linear_key_head_dim == linear.linear_value_head_dim,
-                                "LINEAR KVCacheSpecDesc tag=%s requires matching head dims: k=%d v=%d",
-                                desc.tag.c_str(),
-                                linear.linear_key_head_dim,
-                                linear.linear_value_head_dim);
+        // key_head_dim (SSM state dim, e.g. dstate) and value_head_dim (e.g. headdim)
+        // may differ (Mamba-2: 128 vs 64). ssm_elems = local_v_heads * K * V stays
+        // correct because each value head owns a K*V state slice.
 
         const auto     seq         = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
         const auto     kernel      = SpecBuilder::kernelSeqSizePerBlock(desc, ctx, seq);

@@ -93,6 +93,19 @@ cc_test(
 )
 
 cc_test(
+    name = "cache_config_relaxation_test",
+    srcs = ["CacheConfigRelaxationTest.cc"],
+    data = [],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    # test_deps -> cache_types -> torch_deps() keeps libtorch_cuda in the link
+    # closure, so like its sibling tests this one needs a GPU node.
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "cache_layer_layout_test",
     srcs = ["CacheLayerLayoutTest.cc"],
     copts = test_copts,

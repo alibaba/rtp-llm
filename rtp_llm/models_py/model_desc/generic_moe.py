@@ -93,8 +93,14 @@ class GenericMoeLayer(nn.Module):
         router_tp_size = router.tp_collective_size
 
         self.num_local_experts = self.num_experts // max(self.ep_size, 1)
+        # Ungated up-only expert layouts (e.g. NemotronH ReLU^2 experts) run
+        # their shared expert in the model descriptor: the framework
+        # DenseMLP shared expert assumes a fused gated w13 projection.
+        self.moe_up_only = config.moe_w1_layout == "up_only"
         self.add_shared_expert = (
-            config.moe_style == 2 and not self.fused_moe.includes_shared_expert
+            config.moe_style == 2
+            and not self.moe_up_only
+            and not self.fused_moe.includes_shared_expert
         )
         if self.add_shared_expert:
             self.shared_expert = DenseMLP(
@@ -222,7 +228,7 @@ class GenericMoeLayer(nn.Module):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            activation="SiGLU",
+            activation="ReLU2" if self.moe_up_only else "SiGLU",
             skip_tp_allreduce=self.use_unified_tp_allreduce,
         )
         if self.shared_expert is not None:

@@ -1207,6 +1207,12 @@ class W:
     linear_attn_out_w = "linear_attn.out_proj.weight"
     linear_attn_out_s = "linear_attn.out_proj.scale"
 
+    # Mamba-2 (NemotronH) weights: in_proj rows [B; C; x; gate; dt]
+    linear_attn_in_proj_w = "linear_attn.in_proj.weight"
+    linear_attn_in_proj_s = "linear_attn.in_proj.scale"
+    linear_attn_conv1d_b = "linear_attn.conv1d.bias"
+    linear_attn_d = "linear_attn.D"
+
     # KDA (Kimi Delta Attention) specific weights
     linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
     # b_proj: [hidden] -> [num_heads], beta gate

@@ -150,6 +150,8 @@ void validateAttentionMetadata(const ModelConfig& model_config) {
         const bool  is_linear      = std::any_of(descs.begin(), descs.end(), [](const KVCacheSpecDesc& desc) {
             return desc.cache_type == KVCacheSpecType::LinearAttention;
         });
+        // NONE covers both full attention and attention-free (empty descs)
+        // layers: only LINEAR is distinguished here, so empty rows pass.
         RTP_LLM_CHECK_WITH_INFO(expects_linear == is_linear,
                                 "hybrid layer %zu attention type does not match cache descriptor type",
                                 layer_id);
@@ -182,8 +184,10 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                             model_config.kv_cache_spec_descs.size(),
                             model_config.num_layers);
     for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
+        // An empty row means the layer is attention-free and owns no cache at
+        // all (e.g. hybrid MoE layers without attention): it joins no cache
+        // group and consumes no block budget.
         const auto& descs = model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)];
-        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "cache config layer %ld has no descs", layer_id);
         for (const auto& desc : descs) {
             if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
@@ -345,9 +349,10 @@ LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCach
                             expected_layer_num);
     LayerKVCacheSpecs layer_specs(layer_descs.size());
     for (size_t layer_id = 0; layer_id < layer_descs.size(); ++layer_id) {
+        // Empty rows (attention-free layers) stay empty: no spec is built and
+        // the layer joins no cache group.
         const auto& descs = layer_descs[layer_id];
-        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "kv_cache_spec_descs layer %zu has no descs", layer_id);
-        auto& specs = layer_specs[layer_id];
+        auto&       specs = layer_specs[layer_id];
         specs.reserve(descs.size());
         for (const auto& desc : descs) {
             specs.push_back(SpecBuilder::build(desc, ctx));

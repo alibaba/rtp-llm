@@ -54,13 +54,16 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.end_expert_id = self.start_expert_id + self.num_experts_per_partition - 1
         self.top_k = config.moe_k
 
-        # w1: [E, 2*inter_size, hidden_size], w2: [E, hidden_size, inter_size]
+        # w1: gated layouts stack [gate/up, 2*inter_size, hidden_size]; the
+        # ungated "up_only" layout stores a plain [inter_size, hidden_size]
+        # up projection (ReLU^2 experts, e.g. NemotronH).
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
         self.E = self.w1.size(0)
-        self.N = self.w1.size(1)  # 2 * inter_size
+        self.N = self.w1.size(1)
         self.K = self.w1.size(2)  # hidden_size
-        self.inter_size = self.N // 2
+        self.up_only = config.moe_w1_layout == "up_only"
+        self.inter_size = self.N if self.up_only else self.N // 2
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -136,11 +139,15 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             compute_type=compute_type,
         )
 
-        # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
-        intermediate2 = torch.empty(
-            M * top_k, self.inter_size, device=device, dtype=dtype
-        )
-        silu_and_mul(intermediate2, intermediate1)
+        # Activation: gated layouts silu_and_mul(intermediate1) → [M*top_k, inter];
+        # ungated up-only layouts apply ReLU^2 elementwise.
+        if self.up_only:
+            intermediate2 = torch.relu(intermediate1).square()
+        else:
+            intermediate2 = torch.empty(
+                M * top_k, self.inter_size, device=device, dtype=dtype
+            )
+            silu_and_mul(intermediate2, intermediate1)
 
         # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)

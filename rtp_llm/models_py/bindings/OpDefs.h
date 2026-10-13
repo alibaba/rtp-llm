@@ -55,6 +55,12 @@ public:
 
     LayerKVCache getLayerCache(int layer_id) const {
         validateLayer(layer_id);
+        // Attention-free layers have no cache groups at all: surface an
+        // explicit error instead of the generic sole-group failure.
+        if (grouped_layout_.topology().layer(layer_id).group_tags.empty()) {
+            throw std::runtime_error("Layer " + std::to_string(layer_id)
+                                     + " is attention-free and has no KV cache groups");
+        }
         const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
         return getLayerCache(layer_id, group.tag);
     }

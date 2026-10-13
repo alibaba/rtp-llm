@@ -131,7 +131,9 @@ void CacheTopology::validateAndBuildIndex() {
                                 "CacheTopology layer index=%zu has layer_id=%d",
                                 layer_index,
                                 layer.layer_id);
-        RTP_LLM_CHECK_WITH_INFO(!layer.group_tags.empty(), "CacheTopology layer=%zu has no cache group", layer_index);
+        // Empty group_tags is legal: the layer is attention-free (e.g. a hybrid
+        // MoE layer without attention) and owns no cache group. Such layers
+        // stay out of every group's layer list, budget, and block tables.
         std::unordered_set<std::string> seen_tags;
         for (const auto& tag : layer.group_tags) {
             RTP_LLM_CHECK_WITH_INFO(tag_to_group_id_.count(tag) != 0,

@@ -314,5 +314,22 @@ TEST(KVCacheLayoutViewTest, MultiGroupRequiresTagAndEnumerationSkipsPlaceholder)
     EXPECT_ANY_THROW(cache.getSeqSizePerBlock("missing"));
 }
 
+TEST(KVCacheLayoutViewTest, AttentionFreeLayerHasNoCacheView) {
+    const auto base       = torch::zeros({2, 64}, torch::TensorOptions().dtype(torch::kFloat16));
+    auto       full_group = makeGroup("full", KVCacheSpecType::MultiHeadAttention, CacheGroupType::FULL, 8, 8, 32, 32);
+
+    // Layer 1 is attention-free: no group tags and no tensors in any group.
+    auto topology = CacheTopology::create({std::move(full_group)}, {{0, {"full"}}, {1, {}}});
+    GroupedCacheLayerLayout::GroupLayouts layouts;
+    layouts.emplace("full", CacheLayerLayout(std::vector<BlockBufferPtrInfo>{{base, {}}, {}}));
+    torch_ext::KVCache cache(GroupedCacheLayerLayout(std::move(topology), std::move(layouts)));
+
+    EXPECT_EQ(cache.layerCount(), 2u);
+    EXPECT_EQ(cache.getLayerCache(0).kv_cache_base.data_ptr(), base.data_ptr());
+    EXPECT_TRUE(cache.getLayerCacheGroups(1).empty());
+    EXPECT_ANY_THROW(cache.getLayerCache(1));
+    EXPECT_ANY_THROW(cache.getLayerCache(1, "full"));
+}
+
 }  // namespace
 }  // namespace rtp_llm

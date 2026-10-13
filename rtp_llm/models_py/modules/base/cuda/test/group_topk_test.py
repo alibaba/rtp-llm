@@ -175,6 +175,20 @@ class MLATest(TestCase):
             ):
                 self._run_mla_test(*params)
 
+    def test_single_group_small_expert_count(self):
+        # NemotronH-style routers: n_group=1 degenerates the group logic to a
+        # plain biased topk; small expert counts (mini checkpoints, E=8) must
+        # stay in range.
+        for num_experts, topk in ((8, 2), (128, 6), (512, 22)):
+            with self.subTest(num_experts=num_experts, topk=topk):
+                self._run_mla_test(
+                    seq_length=16,
+                    num_experts=num_experts,
+                    num_expert_group=1,
+                    topk_group=1,
+                    topk=topk,
+                )
+
     def test_non_finite_scores_use_safe_fallback(self):
         num_experts = self.NUM_EXPERT[0]
         topk = self.TOPK[0]

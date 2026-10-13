@@ -111,6 +111,35 @@ from ctypes import cdll
 
 cdll.LoadLibrary(sysconfig.get_config_var("LIBDIR") + "/libpython3.10.so")
 
+
+def _preload_nvidia_pip_libs() -> None:
+    """Load cudnn/nccl shipped in pip ``nvidia`` wheels before the engine dlopen.
+
+    Bazel keeps each wheel in its own site-packages directory, and dev
+    containers without a system cudnn cannot resolve libth_transformer's
+    DT_NEEDED entries (libcudnn_adv.so.9 / libnccl.so.2).  Loading the
+    libraries explicitly registers their SONAMEs in the process so the
+    subsequent import of libth_transformer_config succeeds.  Environments
+    with a system cudnn are unaffected: the first loaded copy wins and the
+    wheel version matches the torch dependency set.
+    """
+    import glob
+
+    packages = ("nccl", "cudnn")
+    for sys_path_entry in sys.path:
+        for package in packages:
+            lib_dir = os.path.join(sys_path_entry, "nvidia", package, "lib")
+            if not os.path.isdir(lib_dir):
+                continue
+            for so_path in sorted(glob.glob(os.path.join(lib_dir, "*.so*"))):
+                try:
+                    cdll.LoadLibrary(so_path)
+                except OSError as e:
+                    logging.info(f"preload {so_path} skipped: {e}")
+
+
+_preload_nvidia_pip_libs()
+
 try:
     # Alias for backward compatibility
     from libth_transformer_config import (

@@ -34,6 +34,8 @@ struct GroupBase {
 };
 
 // Order is deterministic but carries no business meaning.
+// A layer with empty group_tags is attention-free: it owns no cache, joins no
+// group, and contributes no bytes to any pool or budget.
 struct LayerBase {
     int                      layer_id = -1;
     std::vector<std::string> group_tags;
