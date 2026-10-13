@@ -626,7 +626,20 @@ class NormalEngineCustomOutputTest: public NormalEngineTest {
 protected:
     static void SetUpTestSuite() {
         interpreter_ = std::make_unique<py::scoped_interpreter>();
-        py::module_::import("torch");
+        // Observed on the CI ut-sm8x lane: without these two lines the process
+        // segfaults during "import torch" (deepest frame: hashlib.py
+        // __get_openssl_constructor) or aborts at teardown with glibc heap
+        // corruption (corrupted size vs. prev_size) after the tests pass.
+        // The binary links 3rdparty/3fs's libcrypto.so.1.1 and the sandbox puts
+        // nvidia pip repos on sys.path; blocking the _hashlib import (hashlib
+        // falls back to builtin digests) and dropping those sys.path entries
+        // before importing torch makes the suite run to a clean exit. Exact
+        // in-library corruption mechanics were not traced further.
+        py::exec(R"(
+import os, sys
+sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "nvidia"))]
+sys.modules['_hashlib'] = None
+import torch)");
     }
 
     static void TearDownTestSuite() {

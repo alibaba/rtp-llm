@@ -84,16 +84,16 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
-    GptModelOutputs forward(const GptModelInputs& inputs) override;
-    GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
-    void            releaseBuffers() override;
-    torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
-    torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
-    bool            hasMtpTargetHiddenBuffer() const override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
-    void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    std::string     waitCacheStorePublication() override;
+    GptModelOutputs            forward(const GptModelInputs& inputs) override;
+    GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
+    void                       releaseBuffers() override;
+    torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
+    torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
+    bool                       hasMtpTargetHiddenBuffer() const override;
+    void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
+    void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void                       updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string                waitCacheStorePublication() override;
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
 
@@ -115,11 +115,11 @@ private:
                                                           bool                  skip_final_layernorm,
                                                           size_t                num_valid_tokens = -1);
     // Compact context rows prepared once by input gathering.
-    torch::Tensor                   customOutputIndexes(const GptModelInputs& inputs);
-    void                            initializeCustomOutput();
-    torch::Tensor                   runCustomOutput(const torch::Tensor& rows);
-    torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
-    bool                            shouldCaptureHiddenStates(const GptModelInputs& inputs);
+    torch::Tensor customOutputIndexes(const GptModelInputs& inputs);
+    void          initializeCustomOutput();
+    torch::Tensor runCustomOutput(const torch::Tensor& rows);
+    torch::Tensor tensorHoldHostAndToCuda(const torch::Tensor& tensor);
+    bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
     torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
@@ -174,6 +174,7 @@ private:
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
     bool has_mtp_hidden_buffer_{false};
+    bool supports_micro_batch_{false};
     bool enable_device_perf_{false};
     bool check_nan_{false};
 
@@ -348,10 +349,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_                 = py_instance;
-    if (int(device_props_.enable_layer_micro_batch) && !py::hasattr(py_model_, "forward_micro_batch")) {
-        throw std::runtime_error(
-            "PyWrappedModel: enable_layer_micro_batch requires Python model method forward_micro_batch");
-    }
+    supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
     auto py_initialize_method = py_model_.attr("initialize");
     try {
         py_init_result = py_initialize_method(init_resources);
@@ -363,10 +361,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     if (py::hasattr(py_model_, "custom_output_handler")) {
         initializeCustomOutput();
     }
-    const char* forward_method     = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
-                                     dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
-                                                                                      "forward";
-    py_forward_method_             = py_model_.attr(forward_method);
+    const char* forward_method = dspark_model_role_ == DSparkModelRole::PROPOSE ? "forward_propose" :
+                                 dspark_model_role_ == DSparkModelRole::COMMIT  ? "forward_commit" :
+                                                                                  "forward";
+    py_forward_method_         = py_model_.attr(forward_method);
     if (enable_cuda_graph_ && !params.kv_cache_layer_layout.has_value()) {
         // No published topology means there is no trustworthy model geometry
         // for any graph role (including prefill warmup). Keep the eager path.

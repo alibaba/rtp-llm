@@ -655,7 +655,13 @@ class GrammarValidator:
             )
             return xgr.GrammarCompiler(
                 tokenizer_info,
-                max_threads=self._compile_threads,
+                # xgrammar 0.2.8's multi-thread GrammarCompiler was observed
+                # hanging in sandbox compile workers on loaded CI hosts, so
+                # the sandbox compiles serially; the engine's own compiler
+                # fan-out is unchanged. A serial 248k-vocab structural tag
+                # compile costs a few CPU-seconds, well inside the 30s
+                # admission deadline.
+                max_threads=1,
                 cache_enabled=True,
                 cache_limit_bytes=self._cache_limit_bytes,
             )

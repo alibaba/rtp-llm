@@ -89,7 +89,7 @@ def _check_download(deadline, cancellation_event):
         raise TimeoutError("Media download deadline expired")
 
 
-def request_get(url, headers, *, deadline=None, cancellation_event=None):
+def request_get(url, headers, timeout=None, *, deadline=None, cancellation_event=None):
     global REQUEST_GET
     if REQUEST_GET is None:
         try:
@@ -110,6 +110,8 @@ def request_get(url, headers, *, deadline=None, cancellation_event=None):
                     headers,
                     timeout=max(0.001, min(10, deadline - time.monotonic())),
                 )
+            if timeout is not None:
+                return REQUEST_GET(url, headers, timeout=timeout)
             return REQUEST_GET(url, headers)
         except requests.exceptions.ConnectTimeout:
             if retry_count == CONNECT_TIMEOUT_RETRIES:

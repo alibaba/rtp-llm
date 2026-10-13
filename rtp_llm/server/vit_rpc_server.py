@@ -325,21 +325,35 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
             )
             kmonitor.report(
                 GaugeMetrics.VIT_INPUT_IMAGE_COUNT_METRIC,
-                len(multimodal_inputs.multimodal_inputs),
+                (
+                    len(multimodal_inputs.v41_inputs.images)
+                    if multimodal_inputs.HasField("v41_inputs")
+                    else len(multimodal_inputs.multimodal_inputs)
+                ),
                 tags,
             )
-            converted_inputs = trans_mm_input(multimodal_inputs)
-            cancellation_event = self._register_rpc_completion(context)
             headers = extract_request_headers(dict(context.invocation_metadata() or ()))
-            results = self.engine.get_embedding_result(
-                converted_inputs,
-                timeout_ms=_rpc_timeout_ms(context, 120000),
-                request_id=multimodal_inputs.request_id,
-                cancellation_event=cancellation_event,
-                user_id=headers.get("x-dashscope-uid", ""),
-                service_name=headers.get("x-dashscope-service", ""),
-            )
-            res = merge_embedding_results(results)
+            if multimodal_inputs.HasField("v41_inputs"):
+                multimodal_inputs.timeout_ms = _rpc_timeout_ms(
+                    context, multimodal_inputs.timeout_ms or 120000
+                )
+                res = self.engine.mm_embedding_rpc(
+                    multimodal_inputs,
+                    user_id=headers.get("x-dashscope-uid", ""),
+                    service_name=headers.get("x-dashscope-service", ""),
+                )
+            else:
+                converted_inputs = trans_mm_input(multimodal_inputs)
+                cancellation_event = self._register_rpc_completion(context)
+                results = self.engine.get_embedding_result(
+                    converted_inputs,
+                    timeout_ms=_rpc_timeout_ms(context, 120000),
+                    request_id=multimodal_inputs.request_id,
+                    cancellation_event=cancellation_event,
+                    user_id=headers.get("x-dashscope-uid", ""),
+                    service_name=headers.get("x-dashscope-service", ""),
+                )
+                res = merge_embedding_results(results)
             output_pb = self._transport.transfer(multimodal_inputs, res)
             add_multimodal_feature_hashes(output_pb, res.embeddings, res.feature_hashes)
             kmonitor.report(

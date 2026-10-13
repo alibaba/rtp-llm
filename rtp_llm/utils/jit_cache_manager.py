@@ -21,6 +21,11 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 from rtp_llm.utils import jit_cache_store as store
+from rtp_llm.utils.jit_cache_deep_gemm import (
+    deep_gemm_build_scope,
+    deepjit_entry_files,
+    deepjit_snapshot_files,
+)
 from rtp_llm.utils.jit_cache_env import (
     CacheEnvConfig,
     configure_cache_env,
@@ -28,7 +33,7 @@ from rtp_llm.utils.jit_cache_env import (
 )
 
 SYNC_POLL_S, STOP_TIMEOUT_S = 120.0, 10.0
-RTP_JIT_VERSION, CUDA, ROCM = "v1", "cuda", "rocm"
+RTP_JIT_VERSION, CUDA, ROCM = "v2", "cuda", "rocm"
 LOCKS_DIR, STAGING_DIR = ".locks", ".staging"
 # Fixed path: build artifacts embed absolute paths, so relocating voids snapshots; opt out via --manage_jit_cache.
 LOCAL_JIT_ROOT = Path("/tmp/rtp-llm/.jit_cache")
@@ -160,6 +165,17 @@ def resolve_scope(
                 importlib.metadata.version(p[1:]) if p.startswith("@") else scopes[p]
                 for p in item.scopes
             )
+            if item.name == "deep_gemm":
+                try:
+                    identity = deep_gemm_build_scope(torch_scope)
+                except (OSError, ValueError):
+                    logging.warning(
+                        "JIT_CACHE_FAIL_OPEN: invalid DeepGEMM identity", exc_info=True
+                    )
+                    continue
+                if not identity:
+                    continue
+                parts += (identity,)
             if parts and all(parts):
                 selected.append(item)
                 keys.append("-".join((item.name, *parts)))
@@ -235,6 +251,11 @@ class JitCacheManager(FileSystemEventHandler):
             if item.local_dir in path.parents:
                 with suppress(OSError, ValueError):
                     rel = path.relative_to(item.local_dir).as_posix()
+                    if item.name == "deep_gemm":
+                        if not rel.startswith("cache/"):
+                            return
+                        entry = item.local_dir / "cache" / rel.split("/")[1]
+                        deepjit_entry_files(entry)
                     if item.should_sync(rel, event.event_type, path.stat().st_size):
                         self._dirty.set()
                 return
@@ -308,6 +329,9 @@ class JitCacheManager(FileSystemEventHandler):
     def _snapshot_files(self) -> dict[str, Path]:
         files = {}
         for item in self.scope.components:
+            if item.name == "deep_gemm":
+                files.update(deepjit_snapshot_files(self.scope.root))
+                continue
             for path in item.local_dir.rglob("*"):
                 with suppress(OSError):
                     st, rel = path.lstat(), path.relative_to(item.local_dir).as_posix()

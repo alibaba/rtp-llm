@@ -47,6 +47,7 @@ flashattn = flashattn2 + ["flash-attn-3"]
 requirement(flashinfer)
 requirement(deep)
 requirement(flashmla)
+requirement(["flash-mla-legacy"])
 requirement(rtp_kernel)
 requirement(flashattn)
 
@@ -75,6 +76,18 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
+filegroup(
+    name = "dsv41_jit_sources",
+    srcs = glob([
+        "modules/dsv41/**/*.cu",
+        "modules/dsv41/**/*.cuh",
+        "modules/dsv41/**/*.cc",
+        "modules/dsv41/**/*.h",
+        "modules/dsv41/**/*.LICENSE",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
 py_library(
     name = "modules",
     srcs = glob([
@@ -83,6 +96,7 @@ py_library(
     ]),
     data = [
         ":cutlass_moe_config",
+        ":dsv41_jit_sources",
         ":rocm_fp8_ptpc_hipb_solutions",
     ],
     deps = [
@@ -109,7 +123,7 @@ py_library(
     }) + select({
         # cuda12_arm (kept from main) has no branch here: its lock ships none of these.
         "@//:using_cuda13_x86": ["flash-mla", "fast-hadamard-transform", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": ["flash-mla", "flash-mla-legacy", "tilelang"],
         "@//:using_cuda12_9_x86": flashmla,
         "//conditions:default": [],
     }) + select({

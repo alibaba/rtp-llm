@@ -447,3 +447,35 @@ py_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+py_test(
+    name = "deepseekv41_renderer_test",
+    srcs = ["deepseekv41_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "deepseek_v41_image_renderer_test",
+    srcs = ["deepseek_v41_image_renderer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "v41_recipe_endpoint_test",
+    srcs = ["v41_recipe_endpoint_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "v41_recipe_protocol_test",
+    srcs = ["v41_recipe_protocol_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)

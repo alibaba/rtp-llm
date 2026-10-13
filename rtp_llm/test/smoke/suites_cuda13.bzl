@@ -17,8 +17,7 @@ def cuda13_suites():
     #   smoke_cuda13_arm  SM100_ARM_CU13  GB200        --config=cuda13_arm
     #   smoke_cuda13_x86  SM103 pool      SM103        --config=cuda13 (SM 10.3)
     #
-    # SM103 capacity is the scarce one — a single dedicated node — so x86 carries
-    # the two capacity-sensitive cases that GB200 cannot host.
+    # SM103 carries the Pro checkpoint, which exceeds GB200 memory at EP=4.
     #
     # The x86 cases target the dedicated test pool rather than the shared dev
     # pool: the shared pool is used by other users' work, which left these cases
@@ -26,7 +25,11 @@ def cuda13_suites():
     # to this pipeline.
     # ============================================================================
 
-    # ARM coverage — one consolidated case:
+    # ARM coverage — V4 production regression and V4.1 full-feature CP2/DP2:
+    #   deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm
+    #                          CED bounded replay + DSpark + Engram + verify graph
+    #                          + prefix reuse, CP2 prefill and DP2 decode (TP=1).
+    # Existing V4 coverage:
     #   *_dspark_cprr_async_xgrammar_json
     #                          DSpark speculative decode + CP page-RR ON + CP
     #                          overlap + think mode + Mega MoE SE + PD prefill
@@ -39,13 +42,13 @@ def cuda13_suites():
     # Coverage intentionally dropped on ARM with the retired cases:
     #   - 65k-context run + sequential in-memory cache-hit assertions
     #     (reuse case; the consolidated case runs 8k context)
-    #   - the cp_rr=OFF half of the CP page-RR pair (the x86 *_1m case
-    #     still gates it)
+    #   - cp_rr=OFF
     #   - the non-SE mega_moe long-generation form
     #   - MTP speculative decode (DSpark remains)
     native.test_suite(
         name = "smoke_cuda13_arm",
         tests = [
+            ":deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
             # DSpark speculative decode with CP page-RR. This is the blocking
             # regression for publishing both target and draft SWA_KV before decode
             # dispatch; missing draft publication fails with EC_FAILED_LOAD_BUFFER.
@@ -126,92 +129,10 @@ def cuda13_suites():
         tags = ["manual"],
     )
 
-    # X86 coverage — capacity-sensitive cases:
-    #   *_1m                               1M-token prefill: chunked Mega MoE buffer,
-    #                                      indexer chunked score, int64 row indexing.
-    #                                      Block counts and reserved memory are tuned
-    #                                      against the SM103 node it was recorded on.
-    #   v4_pro_cp4_ep4_basic               DeepSeek-V4-Pro, all advanced features
-    #                                      off — Pro checkpoint regression only.
-    #                                      ~216GB/rank at EP=4, over GB200's ~186GB.
-    #
-    # CP page-RR (--prefill_cp_kv_cache_sharded) is covered both ways:
-    #   ON   *_dspark_cprr_async_xgrammar_json on ARM
-    #   OFF  the x86 *_1m case
-    # The ARM cp_rr=OFF half retired with the reuse-cache case, so the x86 *_1m
-    # case is the only remaining gate for the OFF configuration.
+    # X86 coverage: the Pro checkpoint requires the larger SM103 memory.
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
-            # CP=2/EP=2 prefill + TP=1/EP=1/DP=1 single-card decode PD smoke
-            # targeting 1M context. Single ~1.09M-token LongBench-V2 q62 query
-            # (max_tokens=8) exercises the long-context prefill
-            # (cp_rotate_method=ALL_GATHER) and a minimal decode topology — the
-            # latter relies on the chunked Mega MoE buffer plus indexer chunked
-            # score in this branch to keep decode within a single GPU's HBM.
-            #
-            # CP=2 rather than CP=4: at CP=4 the case wanted 4+1=5 GPUs, which on
-            # an 8-GPU SM103 cannot pack alongside the 4-GPU v4_pro case below, so
-            # the two serialized and the job outgrew its timeout. At CP=2 it needs
-            # 2+1=3 and the pair fits one node. The roles cannot share GPUs
-            # (SMOKE_PD_SHARE_GPU=1): decode is world_size=1 and holds the whole
-            # ~160GB of weights, which does not co-reside with a prefill rank.
-            #
-            # Halving the CP degree doubles each prefill rank's share of the
-            # device blocks (~2.1K of the 6000 in test_block_num, so still far
-            # inside it). ``memory_cache_size_mb`` is per rank and buys host-cache
-            # blocks of the same ~5.94MB as the device ones, so the original 393216
-            # asked for 69432 blocks == a 412GB host pool on each of the two
-            # prefill ranks and the worker's memory cgroup OOM-killed them mid
-            # startup. 49152 gives ~8.2K blocks, twice the ~4.2K-block payload each
-            # rank caches in full (it caches the whole payload rather than a CP
-            # shard, so the requirement is independent of the CP degree).
-            #
-            # The run also exercises the int64 row-indexing fix for long-context
-            # Triton kernels (combine_topk_swa) and the per_token_group_quant_8bit_v2
-            # int64 offset fix landed on this branch — both regress as
-            # ``CUDA_ERROR_ILLEGAL_ADDRESS`` at L3 HCA without the fix.
-            # The golden checks usage and aux_info PD fields, not exact text:
-            # the 8-token continuation is not bit-exact on this path.
-            # The ~1.075M-token request consumes about 4201 logical
-            # 256-token blocks, so 6000 prefill blocks leave roughly 1800 blocks of
-            # GPU headroom for the D2H cache-publication staging buffer. Reserving
-            # 12000 exhausted that headroom: execStagedMemoryCopy failed to allocate
-            # device staging, no cache entry was published, and decode eventually
-            # hit LOAD_CACHE_TIMEOUT.
-            #
-            # ``load_cache_timeout_ms`` stays at the default order of magnitude on
-            # purpose: publishing this ~24GB of KV cache batches into one pinned
-            # staging buffer per submission, so anything slower than 30s means the
-            # producer regressed rather than that the payload is simply large.
-            #
-            # Both roles use the RDMA cache store: the SM103 worker pods carry
-            # InfiniBand devices (``alibabacloud.com/rdma`` on the Drogo roles),
-            # and over TCP this case was observed to blow the 30s decode red line
-            # whenever it co-scheduled with the Pro case on one node. The
-            # framework enables the ACCL/IB registration settings itself when
-            # ``cache_store_rdma_mode=1``.
-            smoke_test(
-                name="v4_flash_pd_cp2ep2_tp1ep1dp1_1m_sm100",
-                task_info="data/model/deepseek_v4/q_r_v4_flash_pd_cp2ep2_tp1ep1dp1_1m_sm100_arm.json",
-                smoke_args={
-                    "prefill": "--load_method scratch --force_cpu_load_weights 1 --max_seq_len 1100000 --enable_cuda_graph 0 --act_type BF16 --tp_size 2 --ep_size 2 --moe_strategy mega_moe_se --world_size 2 --seq_size_per_block 256 --test_block_num 6000 --role_type PREFILL --cache_store_rdma_mode 1 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 49152 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --warm_up 1 --reserver_runtime_mem_mb 65536",
-                    "decode": "--load_method fastsafetensors --max_seq_len 1100000 --enable_cuda_graph 0 --decode_capture_config '1,2,4,8' --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 256 --role_type DECODE --cache_store_rdma_mode 1 --use_local 1 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 16384 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 1 --cp_rotate_method PREFILL_CP --load_cache_timeout_ms 30000 --reserver_runtime_mem_mb 49152",
-                },
-                # The FP8 indexer's prefill score buffer is a dense
-                # ``[chunk_rows, T] fp32`` block; at 1M context with CP=2 the
-                # default 16384 rows want 16.44GiB on top of ~223GiB already
-                # allocated, so halve it. expandable_segments recovers the ~29GiB
-                # the caching allocator holds reserved-but-unallocated by then.
-                envs={
-                    "prefill": [
-                        "DSV4_FP8_INDEXER_SCORE_CHUNK_ROWS=8192",
-                        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
-                    ],
-                    "decode": [],
-                },
-                gpu_type=[cuda13_x86_test_gpu()],
-            ),
             # Only DeepSeek-V4-Pro case. Deliberately plain — no CUDA graph, no PD
             # separation, no speculative decode, no page-RR. The advanced feature
             # matrix is covered on Flash above; this exists so a Pro-specific
