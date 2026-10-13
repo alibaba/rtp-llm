@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include <torch/torch.h>
@@ -18,11 +19,12 @@ public:
     size_t   backingBytes() const;
 
 private:
-    torch::Tensor backing_;
-    uint8_t*      data_{nullptr};
-    int           shared_memory_fd_{-1};
-    size_t        backing_bytes_{0};
-    bool          registered_{false};
+    std::shared_ptr<void> pinned_allocation_;
+    torch::Tensor         backing_;
+    uint8_t*              data_{nullptr};
+    int                   shared_memory_fd_{-1};
+    size_t                backing_bytes_{0};
+    bool                  registered_{false};
 };
 
 }  // namespace rtp_llm

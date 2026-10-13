@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <stdexcept>
 
 #include <sys/mman.h>
@@ -17,10 +18,18 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostMemoryRegistration.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+#if USING_CUDA
+#include <ATen/Context.h>
+#include <cuda_runtime.h>
+#endif
+
 namespace rtp_llm {
 namespace {
 
 enum class HostPinMode {
+#if USING_CUDA
+    CUDA_ALLOCATOR,
+#endif
     ALLOCATOR,
     REGISTER,
     MEMFD_REGISTER
@@ -28,7 +37,14 @@ enum class HostPinMode {
 
 HostPinMode hostPinMode() {
     const char* value = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
-    if (value == nullptr || std::string(value) == "allocator") {
+    if (value == nullptr) {
+#if USING_CUDA
+        return HostPinMode::CUDA_ALLOCATOR;
+#else
+        return HostPinMode::ALLOCATOR;
+#endif
+    }
+    if (std::string(value) == "allocator") {
         return HostPinMode::ALLOCATOR;
     }
     if (std::string(value) == "register") {
@@ -107,10 +123,31 @@ torch::Tensor allocateRegisteredCpuTensor(size_t size_bytes, bool use_memfd, int
 }  // namespace
 
 AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
+    if (alignment == 0) {
+        throw std::invalid_argument("host memory alignment must be positive");
+    }
+    if (usable_bytes > std::numeric_limits<size_t>::max() - alignment
+        || usable_bytes + alignment > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
+        throw std::overflow_error("aligned host memory backing size overflow");
+    }
     backing_bytes_ = usable_bytes + alignment;
     try {
         const auto mode = hostPinMode();
-        if (mode == HostPinMode::ALLOCATOR) {
+#if USING_CUDA
+        // ATen recognizes externally pinned pointers only after CUDA initialization.
+        at::globalContext().lazyInitDevice(at::kCUDA);
+        if (mode == HostPinMode::CUDA_ALLOCATOR) {
+            // Preserve the exact-size default instead of rounding long-lived
+            // pools up through PyTorch's caching host allocator.
+            void*      allocation = nullptr;
+            const auto status     = cudaHostAlloc(&allocation, backing_bytes_, cudaHostAllocDefault);
+            if (status != cudaSuccess) {
+                throw std::runtime_error(cudaGetErrorString(status));
+            }
+            pinned_allocation_.reset(allocation, [](void* ptr) { cudaFreeHost(ptr); });
+        } else
+#endif
+            if (mode == HostPinMode::ALLOCATOR) {
             backing_ =
                 torch::empty({static_cast<int64_t>(backing_bytes_)},
                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
@@ -128,7 +165,7 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
                      usable_bytes,
                      e.what());
     }
-    RTP_LLM_CHECK_WITH_INFO(registered_ || backing_.is_pinned(),
+    RTP_LLM_CHECK_WITH_INFO(pinned_allocation_ || registered_ || backing_.is_pinned(),
                             "host allocation [%s] must use pinned CPU memory",
                             allocation_name.c_str());
 
@@ -138,8 +175,9 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
     backing_.zero_();
 #endif
 
-    const auto raw_base = reinterpret_cast<uintptr_t>(backing_.data_ptr<uint8_t>());
-    data_               = reinterpret_cast<uint8_t*>((raw_base + alignment - 1) / alignment * alignment);
+    const auto raw_base =
+        reinterpret_cast<uintptr_t>(pinned_allocation_ ? pinned_allocation_.get() : backing_.data_ptr<uint8_t>());
+    data_ = reinterpret_cast<uint8_t*>((raw_base + alignment - 1) / alignment * alignment);
 }
 
 AlignedHostMemory::~AlignedHostMemory() {
