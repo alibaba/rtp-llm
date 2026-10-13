@@ -60,8 +60,12 @@ public:
 
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
-    int estimatePeakNeedBlocks(
-        int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const;
+    int estimatePeakNeedBlocks(int                seq_len,
+                               int                common_seq_len,
+                               int                remaining_tokens,
+                               int                reserve_step,
+                               int                target_batch_size,
+                               const std::string& pool_tag = {}) const;
 
     int curBlocksNum() const;
     int mallocFailedTimes() const;

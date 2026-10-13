@@ -23,6 +23,47 @@ class LinearAttentionConfigBindingsTest(TestCase):
 
 
 class KVCacheConfigPickleTest(TestCase):
+    def test_pool_block_weights_binding_defaults_empty_and_preserves_raw_json(self):
+        config = KVCacheConfig()
+        self.assertEqual(config.kv_cache_pool_block_weights, "")
+        raw = '{"full": 8, "linear": 1, "draft-linear": 2}'
+        config.kv_cache_pool_block_weights = raw
+        self.assertEqual(config.kv_cache_pool_block_weights, raw)
+        self.assertIn(f"kv_cache_pool_block_weights: {raw}\n", config.to_string())
+
+    def test_pool_block_weights_round_trip_preserves_other_cache_policies(self):
+        config = KVCacheConfig()
+        config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
+        config.enable_linear_cache_reclaim = True
+        config.reserve_block_ratio = 9
+        config.kv_cache_event_instance_group = "weighted-pools"
+        state = config.__getstate__()
+        self.assertEqual(state[:2], ("KVCacheConfig", 11))
+        self.assertEqual(len(state), 74)
+        self.assertEqual(state[71], config.kv_cache_pool_block_weights)
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.__getstate__(), state)
+        self.assertEqual(
+            restored.kv_cache_pool_block_weights, config.kv_cache_pool_block_weights
+        )
+        self.assertTrue(restored.enable_linear_cache_reclaim)
+        self.assertEqual(restored.reserve_block_ratio, 9)
+        self.assertEqual(restored.kv_cache_event_instance_group, "weighted-pools")
+
+    def test_version_nine_state_keeps_reclaim_and_defaults_pool_weights_empty(self):
+        config = KVCacheConfig()
+        config.enable_linear_cache_reclaim = True
+        config.kv_cache_pool_block_weights = '{"full":8,"linear":1}'
+        state = config.__getstate__()
+        previous = (state[0], 9, *state[2:71])
+        original = tuple(list(previous))
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(previous)
+        self.assertEqual(previous, original)
+        self.assertTrue(restored.enable_linear_cache_reclaim)
+        self.assertEqual(restored.kv_cache_pool_block_weights, "")
+
     def test_linear_cache_reclaim_defaults_off_and_round_trips(self):
         config = KVCacheConfig()
         self.assertFalse(config.enable_linear_cache_reclaim)
@@ -34,7 +75,7 @@ class KVCacheConfigPickleTest(TestCase):
         config = KVCacheConfig()
         config.enable_linear_cache_reclaim = True
         state = config.__getstate__()
-        previous = (state[0], 7, *state[2:-1])
+        previous = (state[0], 7, *state[2:69])
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(previous)
         self.assertFalse(restored.enable_linear_cache_reclaim)
@@ -50,16 +91,18 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 config.enable_linear_cache_reclaim = True
+                config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
-                self.assertEqual(len(state), 73)
-                self.assertEqual(state[:2], ("KVCacheConfig", 10))
+                self.assertEqual(len(state), 74)
+                self.assertEqual(state[:2], ("KVCacheConfig", 11))
                 self.assertEqual(state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[69], enable_crc)
                 self.assertTrue(state[70])
-                self.assertEqual(state[71], 0)
+                self.assertEqual(state[71], '{"full":7,"linear":2}')
                 self.assertEqual(state[72], 0)
+                self.assertEqual(state[73], 0)
                 # setstate must normalize its private slice, not mutate the supplied
-                # version-10 tuple retained by another Python reference.
+                # version-11 tuple retained by another Python reference.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
                 direct.__setstate__(state)
@@ -68,19 +111,21 @@ class KVCacheConfigPickleTest(TestCase):
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertIs(restored.enable_crc, enable_crc)
                 self.assertTrue(restored.enable_linear_cache_reclaim)
+                self.assertEqual(restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}')
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertTrue(restored.enable_disk_cache)
                 self.assertEqual(restored.disk_cache_paths, "/tmp/cache")
                 for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
                     self.assertEqual(getattr(restored, name), value, name)
                 self.assertIn(f"enable_crc: {int(enable_crc)}\n", restored.to_string())
-                # A mainline version-8 state (crc tail, no reclaim) must still
-                # decode with crc preserved and reclaim defaulted off.
+                # A mainline version-8 state (crc tail, no reclaim / pool weights)
+                # must still decode with crc preserved and reclaim defaulted off.
                 crc_only = (state[0], 8, *state[2:70])
                 restored_crc_only = KVCacheConfig.__new__(KVCacheConfig)
                 restored_crc_only.__setstate__(crc_only)
                 self.assertIs(restored_crc_only.enable_crc, enable_crc)
                 self.assertFalse(restored_crc_only.enable_linear_cache_reclaim)
+                self.assertEqual(restored_crc_only.kv_cache_pool_block_weights, "")
 
     def test_version_seven_preserves_events_and_enables_crc_by_default(self):
         source = KVCacheConfig()
@@ -110,6 +155,7 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.block_tree_transfer_worker_count, 7)
         self.assertTrue(restored.enable_crc)
         defaults = KVCacheConfig()
+        self.assertEqual(restored.kv_cache_pool_block_weights, "")
         for name in EVENT_PICKLE_FIELDS:
             self.assertEqual(getattr(restored, name), getattr(defaults, name), name)
 

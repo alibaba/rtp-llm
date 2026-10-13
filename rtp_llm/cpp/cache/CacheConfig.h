@@ -56,12 +56,12 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
-    // Attention-specific configuration
     bool enable_linear_cache_reclaim = false;
     // Reusable tail retention (main #1574): number of trailing blocks kept
     // reusable per group; replaces the old linear_step field.
     int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
-
+    // Deployment sizing only; never part of a cache Spec or group policy identity.
+    std::map<std::string, uint32_t> pool_block_weights;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -186,6 +186,12 @@ public:
     mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
+
+    // Shared by budget estimation and final capacity publication. The
+    // deployment weight scales a pool group's share of the baseline blocks.
+    uint32_t blockWeight(const std::string& tag) const;
+    uint32_t blockNumForGroup(const GroupBase& group, uint32_t baseline) const;
+    uint32_t maxBaselineBlockNum() const;
 
     void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
     void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,
