@@ -27,7 +27,7 @@ public:
     void                     updateMultiSeqStatus(const std::vector<int>& /*src_batch_indices*/) override {}
 
     MtpProcessorCapability mtpCapability() const override {
-        return {MtpProcessorMode::SPEC_VERIFY, {}};
+        return {MtpProcessorMode::SPEC_VERIFY, {}, true};
     }
 
     // Grammar state advances per committed token. It does not publish its own
