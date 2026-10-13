@@ -101,6 +101,9 @@ enum class ErrorCode {
     // AutoTPM Cancel: victim of priority preemption.
     // Maps to HTTP 429 / gRPC RESOURCE_EXHAUSTED upstream.
     PRIORITY_PREEMPTED = 8429,
+
+    // New serving work was rejected by the engine lifecycle admission gate.
+    ENGINE_UNAVAILABLE = 8600,
 };
 
 inline std::string ErrorCodeToString(ErrorCode code) {
@@ -257,6 +260,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "GET_ALL_NODE_STATUS_FAILED";
         case ErrorCode::PRIORITY_PREEMPTED:
             return "PRIORITY_PREEMPTED";
+        case ErrorCode::ENGINE_UNAVAILABLE:
+            return "ENGINE_UNAVAILABLE";
         default:
             return "Error: Unrecognized ErrorCode";
     }

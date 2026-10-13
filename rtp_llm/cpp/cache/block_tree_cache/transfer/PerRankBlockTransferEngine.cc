@@ -92,6 +92,14 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
             load_sizes.completion + background_sizes.completion};
 }
 
+bool PerRankBlockTransferEngine::waitForIdleUntil(std::chrono::steady_clock::time_point deadline) {
+    return load_transfer_task_pool_->waitForIdleUntil(deadline) && transfer_task_pool_->waitForIdleUntil(deadline);
+}
+
+size_t PerRankBlockTransferEngine::pendingTaskCount() const {
+    return load_transfer_task_pool_->pendingTaskCount() + transfer_task_pool_->pendingTaskCount();
+}
+
 std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
     const auto& descriptors = task.descriptors();
     if (descriptors.empty()) {

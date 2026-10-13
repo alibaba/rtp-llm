@@ -132,7 +132,44 @@ void BlockTreeCache::shutdownLoads() {
     loader_.shutdown();
 }
 
+size_t BlockTreeCache::activeWorkCount() const {
+    return task_pool_->pendingTaskCount() + transfer_dispatcher_->activeTransferCount()
+           + transfer_dispatcher_->pendingPerRankTaskCount()
+           + (storage_backend_ ? storage_backend_->activeRequestCount() : 0);
+}
+
+bool BlockTreeCache::quiesceForSleep(std::chrono::steady_clock::time_point deadline) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        quiescing_ = true;
+        storer_.stopAdmissionLocked();
+    }
+    task_pool_->stopAdmission();
+    transfer_dispatcher_->cancelPendingStagingTransfers();
+    if (!loader_.shutdownUntil(deadline)) {
+        return false;
+    }
+    // Task bodies, remote I/O and transfer callbacks are distinct lifetimes.
+    // Drain their settlements too; a timeout must never turn into resource release.
+    do {
+        if (!task_pool_->waitForIdleUntil(deadline)
+            || (storage_backend_ && !storage_backend_->waitForIdleUntil(deadline))
+            || !transfer_dispatcher_->drainTransfersUntil(deadline)
+            || !transfer_dispatcher_->waitForPerRankIdleUntil(deadline) || !task_pool_->waitForIdleUntil(deadline)) {
+            return false;
+        }
+    } while (activeWorkCount() != 0 && std::chrono::steady_clock::now() < deadline);
+    return activeWorkCount() == 0;
+}
+
 TransferResult BlockTreeCache::executeTransfer(TransferTask task) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (quiescing_) {
+            return TransferResult(ErrorInfo(ErrorCode::CANCELLED, "cache is quiescing for sleep"),
+                                  CacheCopyError::NOT_EXECUTED);
+        }
+    }
     auto context = transfer_dispatcher_->executePerRank(std::move(task));
     context->waitDone();
     auto result = context->result();
@@ -147,6 +184,9 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType&               ca
     BlockTreeMatchResult result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (quiescing_) {
+            return result;
+        }
         result = loader_.matchLocked(cache_keys, valid_prefix);
     }
     metrics_reporter_->reportCacheReuseTimeMetrics(result.reuse_time_metrics_snapshots);
@@ -167,6 +207,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
     StorageWriteTask storage_write;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (quiescing_) {
+            return 0;
+        }
         storage_write = storer_.storeLocked(cache_keys, resources, target_tier, is_resident, resident_prefix_length);
     }
     if (storage_write) {
@@ -177,6 +220,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (quiescing_) {
+        return 0;
+    }
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
@@ -279,6 +325,9 @@ void BlockTreeCache::onWorkflowSettledLocked(bool check_watermark) {
 }
 
 void BlockTreeCache::checkWatermark() {
+    if (quiescing_) {
+        return;
+    }
     for (Tier tier : {Tier::DISK, Tier::HOST, Tier::DEVICE}) {
         const auto watermark = config_.watermarkForTier(tier);
         if (!config_.isTierEnabled(tier) || !watermark.enabled()) {

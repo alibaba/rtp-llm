@@ -31,6 +31,8 @@ public:
     virtual std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
     void                                          cancelPendingStagingTransfers();
     BlockTreeQueueSizes                           queueSizes() const;
+    bool                                          waitForIdleUntil(std::chrono::steady_clock::time_point deadline);
+    size_t                                        pendingTaskCount() const;
 
     // Worker count in each direction pool.
     size_t transferWorkerCount() const {

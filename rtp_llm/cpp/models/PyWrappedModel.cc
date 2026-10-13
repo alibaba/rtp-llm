@@ -187,12 +187,17 @@ PyWrappedModel::~PyWrappedModel() {
         graph_runner_.reset();
         // Runners retain Python methods and graph-owned tensors. Drain and
         // destroy them before releasing the model object they reference.
-        py_model_.release();
+        // release() abandons the owning reference without Py_DECREF. That
+        // retains model-held cache writers/reporters past KMonitor shutdown.
+        py_model_ = py::object();
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("C++ error during PyWrappedModel destruction: %s", e.what());
+    }
+    if (cache_store_async_writer_) {
+        cache_store_async_writer_->close();
     }
 }
 

@@ -304,9 +304,13 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionHostToDiskTasksMayUs
     auto       second_context                = engine->execute(makeTransferTask({second}));
     const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
 
+    EXPECT_GE(engine->pendingTaskCount(), 2u);
+    EXPECT_FALSE(engine->waitForIdleUntil(std::chrono::steady_clock::now()));
     io->release();
     first_context->waitDone();
     second_context->waitDone();
+    EXPECT_TRUE(engine->waitForIdleUntil(std::chrono::steady_clock::now() + std::chrono::seconds(5)));
+    EXPECT_EQ(engine->pendingTaskCount(), 0u);
     EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first_context->success());
     EXPECT_TRUE(second_context->success());
@@ -328,9 +332,13 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SameDirectionDiskToHostTasksMayUs
     auto       second_context                = engine->execute(makeTransferTask({second}));
     const bool second_started_before_release = io->waitForBlockedCalls(2, std::chrono::milliseconds(200));
 
+    EXPECT_GE(engine->pendingTaskCount(), 2u);
+    EXPECT_FALSE(engine->waitForIdleUntil(std::chrono::steady_clock::now()));
     io->release();
     first_context->waitDone();
     second_context->waitDone();
+    EXPECT_TRUE(engine->waitForIdleUntil(std::chrono::steady_clock::now() + std::chrono::seconds(5)));
+    EXPECT_EQ(engine->pendingTaskCount(), 0u);
     EXPECT_TRUE(second_started_before_release);
     EXPECT_TRUE(first_context->success());
     EXPECT_TRUE(second_context->success());

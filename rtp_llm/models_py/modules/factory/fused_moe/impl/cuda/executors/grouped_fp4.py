@@ -83,7 +83,7 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         checker.check(config.moe_inter_dim % FP8_BLOCK == 0)
         checker.check(_has_fp8_fp4_grouped_kernel())
 
-    def setup_weights(self, layer_weights: Dict) -> None:
+    def _setup_kernel_weights(self, layer_weights: Dict) -> None:
         """Stack EP-sliced routed-expert tensors into ``[E, ...]`` int8 +
         UE8M0 SF buffers in the layout DeepGEMM's contiguous kernel reads.
 
@@ -139,6 +139,12 @@ class GroupedFp4Executor(Fp8Fp4ExecutorBase):
         # planner sees the real residual HBM rather than what's
         # cached-but-unused inside PyTorch's allocator.
         torch.cuda.empty_cache()
+
+    def sleep_weight_tensors(self):
+        return {
+            name: getattr(self, name)
+            for name in ("_w13", "_w2", "_s13", "_s2", "_s13_dense_t", "_s2_dense_t")
+        }
 
     def dense_gemm_warmup_weights(self):
         """Expose the two dense fallback GEMMs to model-level JIT warmup."""

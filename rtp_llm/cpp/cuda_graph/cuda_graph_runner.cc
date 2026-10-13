@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/KVCachePhysicalMemoryController.h"
 #include "rtp_llm/cpp/cuda_graph/combo_position_ids_validation.h"
 #include "rtp_llm/cpp/cuda_graph/prepared_attention_inputs_guard.h"
 #include "rtp_llm/cpp/cuda_graph/generation_prefill_cuda_graph_replay_metadata.h"
@@ -23,6 +24,37 @@ using namespace torch_ext;
 namespace rtp_llm {
 
 namespace {
+constexpr const char* kCudaGraphVmmTag = "cuda_graph";
+
+class CudaGraphVmmRegionGuard {
+public:
+    CudaGraphVmmRegionGuard() {
+        if (!vmm_backend_.isAvailable()) {
+            return;
+        }
+        // Only allocations made while CUDA stream capture is active may carry
+        // this tag. Tagging warmup/default-pool allocations makes empty_cache()
+        // try to release ranges that VMM pause has already unmapped.
+        active_ = vmm_backend_.beginAllocationRegion(kCudaGraphVmmTag, true);
+        if (active_) {
+            RTP_LLM_LOG_INFO("CUDA graph allocations are tagged under VMM tag '%s'", kCudaGraphVmmTag);
+        }
+    }
+
+    ~CudaGraphVmmRegionGuard() {
+        if (active_) {
+            vmm_backend_.endAllocationRegion();
+        }
+    }
+
+    CudaGraphVmmRegionGuard(const CudaGraphVmmRegionGuard&)            = delete;
+    CudaGraphVmmRegionGuard& operator=(const CudaGraphVmmRegionGuard&) = delete;
+
+private:
+    VmmBackend vmm_backend_;
+    bool       active_{false};
+};
+
 int64_t expandedCaptureBlockTableWidth(const GroupBase& group, size_t physical) {
     const size_t expansion =
         group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, group.kernelBlocksPerKvBlock()) : 1;
@@ -2037,21 +2069,26 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
-            try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
-            } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
-                throw;
-            }
-            graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
-            auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
-            RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined() == outputs.mtp_target_hidden_states.defined(),
-                                    "MTP target hidden output presence changed during CUDA graph capture");
-            if (mtp_target_hidden_states.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.sizes() == outputs.mtp_target_hidden_states.sizes(),
-                                        "MTP target hidden output shape changed during CUDA graph capture");
-                mtp_target_hidden_states.copy_(outputs.mtp_target_hidden_states);
+            {
+                CudaGraphVmmRegionGuard vmm_region_guard;
+                try {
+                    auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
+                    outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                } catch (const py::error_already_set& e) {
+                    RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
+                    throw;
+                }
+                graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+                auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
+                RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined()
+                                            == outputs.mtp_target_hidden_states.defined(),
+                                        "MTP target hidden output presence changed during CUDA graph capture");
+                if (mtp_target_hidden_states.defined()) {
+                    RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.sizes()
+                                                == outputs.mtp_target_hidden_states.sizes(),
+                                            "MTP target hidden output shape changed during CUDA graph capture");
+                    mtp_target_hidden_states.copy_(outputs.mtp_target_hidden_states);
+                }
             }
             graph.capture_end();
         }

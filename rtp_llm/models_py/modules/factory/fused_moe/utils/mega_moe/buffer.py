@@ -12,6 +12,7 @@ The cache key set MUST stay invariant across the refactor — see Phase 1 risk
 """
 
 import logging
+import weakref
 
 import torch
 
@@ -20,6 +21,43 @@ import torch
 # collide; in practice there's only ever one entry per process.
 _MEGA_BUF_CACHE: dict = {}
 _MEGA_OUTPUT_CACHE: dict = {}
+_MEGA_STRATEGY_REGISTRY: weakref.WeakSet = weakref.WeakSet()
+
+
+def register_mega_executor(executor) -> None:
+    _MEGA_STRATEGY_REGISTRY.add(executor)
+
+
+def mega_buffers_graph_baked() -> bool:
+    from rtp_llm.models_py.utils.cuda_graph_state import cuda_graph_baked
+
+    return cuda_graph_baked()
+
+
+def mega_output_buffer_gib() -> float:
+    return (
+        sum(t.numel() * t.element_size() for t in _MEGA_OUTPUT_CACHE.values()) / 1024**3
+    )
+
+
+def release_mega_symm_buffers() -> float:
+    """Release only quiesced, uncaptured routed-Mega buffers and all owners."""
+    if mega_buffers_graph_baked():
+        return 0.0
+    released = 0
+    for key, buffer in list(_MEGA_BUF_CACHE.items()):
+        size = buffer.buffer.numel() * buffer.buffer.element_size()
+        # Keep the entry/references if destroy fails; the lifecycle must fail.
+        buffer.destroy()
+        for executor in list(_MEGA_STRATEGY_REGISTRY):
+            if executor._mega_buf is buffer:
+                executor._mega_buf = None
+        del _MEGA_BUF_CACHE[key]
+        released += size
+    for executor in list(_MEGA_STRATEGY_REGISTRY):
+        executor._mega_y = None
+    _MEGA_OUTPUT_CACHE.clear()
+    return released / 1024**3
 
 
 def estimate_mega_moe_symm_buffer_bytes(

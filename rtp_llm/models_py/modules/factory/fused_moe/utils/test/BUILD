@@ -50,6 +50,13 @@ py_test(
 )
 
 py_test(
+    name = "weight_reload_test",
+    srcs = ["weight_reload_test.py"],
+    deps = ["//rtp_llm/models_py:modules", "//rtp_llm:testlib"],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
     name = "test_mega_moe_jit_warmup",
     srcs = ["test_mega_moe_jit_warmup.py"],
     deps = [

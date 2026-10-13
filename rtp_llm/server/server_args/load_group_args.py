@@ -1,4 +1,4 @@
-from rtp_llm.server.server_args.util import str2bool
+from rtp_llm.server.server_args.util import nonnegative_int, str2bool
 
 
 def init_load_group_args(parser, load_config, model_args):
@@ -13,6 +13,14 @@ def init_load_group_args(parser, load_config, model_args):
         type=str,
         default="auto",
         help="模型权重加载方法",
+    )
+    load_group.add_argument(
+        "--fastsafetensors_reserve_mb",
+        env_name="RTP_FASTSAFETENSORS_RESERVE_MB",
+        bind_to=(load_config, "fastsafetensors_reserve_mb"),
+        type=nonnegative_int,
+        default=2048,
+        help="AUTO 选择 FastSafeTensors 时额外预留的显存（MiB，非负整数，默认 2048）；0 关闭此额外预留，不影响显式加载模式",
     )
     load_group.add_argument(
         "--force_cpu_load_weights",
