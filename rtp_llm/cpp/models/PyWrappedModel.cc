@@ -730,12 +730,14 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "micro_batch_final_norm")
                                     && py_model_.attr("micro_batch_final_norm").cast<bool>(),
                                 "Python forward_micro_batch must declare micro_batch_final_norm=true");
+        RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched(python_forward)");
         py::object py_forward_method = py_model_.attr("forward_micro_batch");
         py::object py_outputs_obj    = py_forward_method(input_list);
         py_model_outputs             = py_outputs_obj.cast<std::vector<PyModelOutputs>>();
     }
 
     if (capture_hidden_states) {
+        RTP_LLM_PROFILE_SCOPE("py_model.capture_microbatch_layout");
         std::string capture_layout_error;
         if (py_model_outputs.size() != input_list.size()) {
             capture_layout_error = "capture output count " + std::to_string(py_model_outputs.size())
@@ -793,6 +795,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                 inputs.combo_tokens.size(0));
         hidden_states = py_model_outputs[0].hidden_states;
     } else {
+        RTP_LLM_PROFILE_SCOPE("py_model.forwardMicroBatched(merge)");
         size_t total_tokens = inputs.combo_tokens.size(0);
         size_t hidden_size  = description_.attention_conf.head_num * description_.attention_conf.size_per_head;
         if (capture_hidden_states) {
@@ -1182,25 +1185,30 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // here and restores it only after the status has been reduced;
             // non-CP uses the same mechanism instead of letting a non-owner
             // silently return a zero fallback while TP0 publishes.
-            auto local_layout_error = hidden_state_capture_publisher_->validatePackedLayout(
-                hidden_states, token_ids.numel(), token_ids.device(), "captured hidden-state");
-            auto layout_status = torch::tensor({local_layout_error.empty() ? int32_t{1} : int32_t{0}},
-                                               torch::TensorOptions().dtype(torch::kInt32).device(token_ids.device()));
-            if (device_props_.tp_size > 1) {
-                layout_status = execAllReduce({layout_status, ReduceOp::Min, false, ParallelMode::TP}).buffer;
-            }
-            if (!local_layout_error.empty() || layout_status.item<int32_t>() == 0) {
-                if (local_layout_error.empty()) {
-                    local_layout_error = "captured hidden-state layout contract violation on another TP rank";
+            {
+                RTP_LLM_PROFILE_SCOPE("py_model.capture_layout_status");
+                auto local_layout_error = hidden_state_capture_publisher_->validatePackedLayout(
+                    hidden_states, token_ids.numel(), token_ids.device(), "captured hidden-state");
+                auto layout_status =
+                    torch::tensor({local_layout_error.empty() ? int32_t{1} : int32_t{0}},
+                                  torch::TensorOptions().dtype(torch::kInt32).device(token_ids.device()));
+                if (device_props_.tp_size > 1) {
+                    layout_status = execAllReduce({layout_status, ReduceOp::Min, false, ParallelMode::TP}).buffer;
                 }
-                hidden_state_capture_publisher_->rejectLayout(std::move(local_layout_error));
-                auto fallback_last_hidden = hidden_state_capture_publisher_->makeFallback(
-                    hidden_states, capture_input_ids.numel(), token_ids.device());
-                return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
-                    callForwardPostLayers(fallback_last_hidden, inputs, true, fallback_last_hidden.size(0))));
+                if (!local_layout_error.empty() || layout_status.item<int32_t>() == 0) {
+                    if (local_layout_error.empty()) {
+                        local_layout_error = "captured hidden-state layout contract violation on another TP rank";
+                    }
+                    hidden_state_capture_publisher_->rejectLayout(std::move(local_layout_error));
+                    auto fallback_last_hidden = hidden_state_capture_publisher_->makeFallback(
+                        hidden_states, capture_input_ids.numel(), token_ids.device());
+                    return with_generation_prefill_cuda_graph_status(attach_mtp_target_hidden_states(
+                        callForwardPostLayers(fallback_last_hidden, inputs, true, fallback_last_hidden.size(0))));
+                }
             }
 
             if (device_props_.enable_prefill_cp && has_context_request) {
+                RTP_LLM_PROFILE_SCOPE("py_model.capture_cp_restore");
                 capture_expected_rows =
                     static_cast<int64_t>(context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params));
                 capture_layout_context = "context parallel restored captured hidden-state";

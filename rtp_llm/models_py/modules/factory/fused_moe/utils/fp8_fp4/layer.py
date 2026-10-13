@@ -15,9 +15,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.shared_expert imp
     combine_routed_and_shared,
     get_shared_expert_executor,
 )
-from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
-    record_function_range,
-)
+from rtp_llm.models_py.utils.profiler import record_function_range
 from rtp_llm.utils.model_weight import W
 
 
