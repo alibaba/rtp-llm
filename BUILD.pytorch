@@ -53,6 +53,9 @@ cc_library(
         "@//:using_cuda13_x86": [
             "torch/lib/libtorch_nvshmem.so",
             "@pip_gpu_cuda13_torch_nvidia_nvshmem_cu13//:site-packages/nvidia/nvshmem/lib/libnvshmem_host.so.3",
+            # Remote workers need not have system NCCL or cuDNN installed.
+            "@pip_gpu_cuda13_torch_nvidia_nccl_cu13//:site-packages/nvidia/nccl/lib/libnccl.so.2",
+            "@pip_gpu_cuda13_torch_nvidia_cudnn_cu13//:site-packages/nvidia/cudnn/lib/libcudnn.so.9",
         ],
         "@//:using_cuda13_arm": [
             "torch/lib/libtorch_nvshmem.so",
@@ -127,8 +130,6 @@ cc_library(
             "-L/usr/local/cuda/extras/CUPTI/lib64",
             "-lcupti",
             "-lcudart",
-            "-lnccl",
-            "-lcudnn",
         ],
         "//conditions:default": [],
     }),
