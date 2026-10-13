@@ -118,6 +118,13 @@ class FullFp8CudaTest(unittest.TestCase):
         self.assertIsNone(module.compute_weight)
         self.assertEqual(module.weight.dtype, torch.float8_e4m3fn)
 
+    def test_dense_quantization_handles_zero_activations(self):
+        weight, scale = quantized(torch.randn(32, 256, device="cuda"))
+        module = Qwen4Fp8Linear(weight, scale)
+        result = module(torch.zeros(1, 256, device="cuda", dtype=torch.bfloat16))
+        self.assertTrue(torch.isfinite(result).all())
+        self.assertEqual(result.count_nonzero().item(), 0)
+
     def test_ple_pinned_owner_replaces_pageable_storage_inventory(self):
         import os
         from unittest.mock import patch
