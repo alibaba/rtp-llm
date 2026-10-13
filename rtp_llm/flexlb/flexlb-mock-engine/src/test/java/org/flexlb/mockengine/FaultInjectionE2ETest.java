@@ -343,7 +343,7 @@ class FaultInjectionE2ETest {
                     "the first enqueue must trigger the configured engine crash");
             AutoTpmE2EHarness.await(
                     () ->
-                            h.scheduler.getInflightSize() == 1
+                            h.scheduler.getTrackedRequestCount() == 1
                                     && prefillEndpoint.getInflightBatchCount() == 1
                                     && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
                     2_000,
@@ -358,7 +358,7 @@ class FaultInjectionE2ETest {
                     "missing ACK stays pending before the request inactivity deadline");
             assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
             if (clientCancellation) {
-                h.scheduler.cancelRequest(9902L, 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancelRequest("9902", 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(
                     0L,
@@ -393,7 +393,7 @@ class FaultInjectionE2ETest {
             assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
             AutoTpmE2EHarness.await(
                     () ->
-                            h.scheduler.getInflightSize() == 0
+                            h.scheduler.getTrackedRequestCount() == 0
                                     && h.decodeEndpoint(0).getInflightCount() == 0,
                     2_000,
                     "TTL must release the crashed request's scheduler and Decode accounting");

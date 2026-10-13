@@ -6,6 +6,7 @@ import io.netty.channel.EventLoopGroup;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -25,8 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>{@code addEngine} creates a brand-new {@code FastRpcService} on a fresh
  *       gRPC port (explicit or auto = current max + 1), registers it in the
  *       services map, starts the gRPC server, and appends it to the discovery
- *       file so a master running {@code LocalServiceDiscovery} picks it up
- *       within one sync interval.</li>
+ *       file for discovery readers in the test harness.</li>
  *   <li>{@code removeEngine} PERMANENTLY detaches the engine, in two modes
  *       (user ruling 2026-09: a PLANNED scale-in under load must not lose or
  *       fail any request):
@@ -58,6 +58,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  * can never interleave and leave the file inconsistent with the services map.
  */
 final class DynamicEngineManager {
+
+    /** Detached-engine outcomes kept for a concurrent remove that resolved late. */
+    private static final int MAX_DETACHED_REMOVALS = 64;
 
     /** Outcome of a successful add — the fields the HTTP response reports. */
     record AddedEngine(String engineName, int grpcPort) {}
@@ -121,6 +124,21 @@ final class DynamicEngineManager {
     private final Map<Integer, CompletableFuture<RemovedEngine>> drainingFutures = new HashMap<>();
 
     /**
+     * Outcomes of engines this control plane already detached (grpc port →
+     * outcome), so a concurrent remove that resolved after the detach joins the
+     * teardown that happened instead of reporting a missing engine. Bounded
+     * because one cluster's control plane outlives many scale-in events.
+     * Guarded by {@link #mutationLock}.
+     */
+    private final Map<Integer, RemovedEngine> detachedRemovals =
+            new LinkedHashMap<>() {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<Integer, RemovedEngine> eldest) {
+                    return size() > MAX_DETACHED_REMOVALS;
+                }
+            };
+
+    /**
      * Monotonic GLOBAL engine index for unique advertisement IPs
      * ({@code --unique-engine-ips}): initialized to the initial engine count
      * (prefill + decode) and never decremented — a removed engine's index is
@@ -168,6 +186,9 @@ final class DynamicEngineManager {
         String roleName = normalizeRole(role);
         synchronized (mutationLock) {
             int grpcPort = resolvePort(explicitPort);
+            // A re-added port is a live engine again: drop the record of its
+            // previous detachment so it can never be replayed for this one.
+            detachedRemovals.remove(grpcPort);
             String engineName = nextEngineName(roleName);
             JavaMockEngineCluster.FastRpcService service =
                     JavaMockEngineCluster.startEngine(
@@ -296,6 +317,25 @@ final class DynamicEngineManager {
         }
     }
 
+    /** Replayable outcome for a port this control plane already detached. */
+    RemovedEngine detachedRemovalByPort(int port) {
+        synchronized (mutationLock) {
+            return detachedRemovals.get(port);
+        }
+    }
+
+    /** Replayable outcome for an engine name this control plane already detached. */
+    RemovedEngine detachedRemovalByEngine(String engineName) {
+        synchronized (mutationLock) {
+            for (RemovedEngine removal : detachedRemovals.values()) {
+                if (engineName.equals(removal.engineName())) {
+                    return removal;
+                }
+            }
+            return null;
+        }
+    }
+
     /**
      * Drainer body (dedicated daemon thread): bounded wait for
      * {@code hasInflightWork()} to clear, then the teardown critical section,
@@ -410,14 +450,17 @@ final class DynamicEngineManager {
                             + e.getMessage(),
                     e);
         }
-        return new RemovedEngine(
-                service.getEngineName(),
-                port,
-                runningAtRemoval,
-                waitingAtRemoval,
-                mode,
-                drained,
-                drainMs);
+        RemovedEngine outcome =
+                new RemovedEngine(
+                        service.getEngineName(),
+                        port,
+                        runningAtRemoval,
+                        waitingAtRemoval,
+                        mode,
+                        drained,
+                        drainMs);
+        detachedRemovals.put(port, outcome);
+        return outcome;
     }
 
     // ────────────────── Internals (mutationLock held) ──────────────────

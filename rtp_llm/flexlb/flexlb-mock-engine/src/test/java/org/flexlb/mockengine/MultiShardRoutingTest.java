@@ -76,7 +76,7 @@ class MultiShardRoutingTest {
                         prefillEngines.get(i % prefillEngines.size());
                 int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
                 EngineRpcService.GenerateInputPB input =
-                        inputWithDecode(requestId++, 10, decodePort);
+                        inputWithDecode(String.valueOf(requestId++), 10, decodePort);
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(batchId++, slot(0, input)));
                 assertEquals(
@@ -198,7 +198,7 @@ class MultiShardRoutingTest {
                         prefillEngines.get(i % prefillEngines.size());
                 int decodePort = decodeEngines.get(i % decodeEngines.size()).getGrpcPort();
                 EngineRpcService.GenerateInputPB input =
-                        inputWithDecode(requestId++, 10, decodePort);
+                        inputWithDecode(String.valueOf(requestId++), 10, decodePort);
                 EngineRpcService.EnqueueBatchResponsePB response =
                         enqueue(prefill, batch(batchId++, slot(0, input)));
                 assertEquals(
