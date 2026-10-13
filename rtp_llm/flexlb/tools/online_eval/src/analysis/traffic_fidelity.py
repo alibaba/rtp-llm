@@ -9,9 +9,11 @@ import math
 from collections import Counter
 from pathlib import Path
 
-from traffic.datasets import distribution, trace_models
-from traffic.prefix_lineage import BLOCK, decode
-from traffic.structure import capture_shape, generated_shape
+from traffic.catalog import trace_models
+from traffic.statistics import distribution
+from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE as BLOCK
+from traffic.codecs import decode, decode_model
+from traffic.structure import model_shape, generated_shape
 from traffic.synthetic.derivation import derive_parameters
 from traffic.synthetic.configuration import resolve
 from traffic.synthetic.generator import iter_requests
@@ -104,9 +106,11 @@ def grade(metrics, limits=None, valid=True):
 
 def load_capture(path):
     path=Path(path); raw=path.read_bytes()
-    metadata,events=decode(raw)
+    model = decode_model(raw)
+    metadata, events = model.to_wire()
+    shape = model_shape(model)
     return dict(path=str(path.resolve()),name=path.stem,sha256=hashlib.sha256(raw).hexdigest(),
-                metadata=metadata,events=events,shape=capture_shape(events))
+                metadata=metadata,events=events,shape=shape)
 
 
 def audit(profile, capture, *, expected=None):

@@ -3,6 +3,7 @@
 import copy
 
 from input_contract import NumberRule
+from traffic.playback.configuration import normalize
 
 PRIORITY = NumberRule(integer=True, minimum=1, maximum=100)
 JAVA_LENGTH = NumberRule(integer=True, minimum=1, maximum=(1 << 31) - 1)
@@ -26,7 +27,6 @@ def java_client_priority(source, client):
 
 def uniform_gate_flow(flow, *, duration_s, trace_duration_s):
     """Validate the shared Java sender contract; case code declares its coverage budget."""
-    from traffic.playback.configuration import normalize
     client, _ = normalize(flow["client"])
     if client.get("SEND_MODE") != "uniform" or client.get("LOOP") != "false":
         raise ValueError("gate requires a nonlooping uniform Java workload")

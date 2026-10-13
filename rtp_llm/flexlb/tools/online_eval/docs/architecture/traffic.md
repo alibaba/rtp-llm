@@ -50,9 +50,22 @@ SHA、token 调整统计。输出长度从独立的 `output_tokens` 指定，不
 
 ```sh
 # 默认生成 v3；v2 仅用于带理由的历史复拟合。
-python3 -m traffic.fit_frontend_prefix --source CAPTURE_DIR --out FIT_DIR \
+python3 scripts/pipeline/fit_frontend_prefix.py --source CAPTURE_DIR --out FIT_DIR \
   --expected-shards SHARD_COUNT --output-tokens 420
 ```
+
+### 采集与数据边界
+
+采集和拟合入口位于 `scripts/pipeline/`。`capture_frontend_prefix.py` 逐行读取日志，
+通过 `CaptureRecord` 校验后写入匿名记录；`fit_frontend_prefix.py` 根据累计前缀摘要
+建立父引用。`CaptureMetadata.block_size` 由文件携带，默认 512，支持 64 至 4096 的
+二次幂；同一次拟合的所有分片必须一致。日志 JSON 损坏时保留已提取记录，但 summary
+标记为不完整，拟合拒绝消费。不完整记录不会占用去重身份。
+
+`traffic.catalog` 负责发现输入文件，`traffic.datasets` 负责 manifest 生成与准入校验，
+`traffic.statistics` 负责观测统计。codec 仅处理存储格式；所有版本解码成
+`LineageModel`，由 `LineageExpander` 统一展开。保真度分析保留前 4K 标签，
+完整标签分配和 v2 丢弃尾块的预留仍遵循同一算法。长度统计保留 v3 的精确 token 数。
 
 ### Realistic
 
@@ -127,7 +140,13 @@ uniform 不自动 wrap。每条 issued/terminal/per_request 记录包含 iterati
   因此 p 是块身份保留率，绝不是跨轮命中率。
 
 token 编号空间耗尽时报错，不能绕回或悄悄碰撞。`REPLAY_UNIQUE_PREFIX` 不用于修改首个 key，场景应使用 playback.identity。
-播放参数写入 flow-input 的 trace manifest 与 Java playback.json。
+播放参数写入 flow-input 的 trace manifest 与 Java playback.json。框架在客户端启动后
+校验 Java 快照的输入 SHA、播放参数、planner 版本和 token stride；不一致立即失败。
+快照嵌入 trace manifest 的 `java_playback`，随运行证据保存。多轮 token relabel 由
+Java 执行，离线复现使用 `PlaybackPlan`，不在 Python 中复制该算法。
+
+Python 日志读取器按需保留事件，并以 `MAX_EVIDENCE_EVENTS` 限制证据容量；超出时
+明确失败。该上限不推演 QPS、lap 数或发送时刻，Java 是调度的唯一执行方。
 
 ## 比较边界
 

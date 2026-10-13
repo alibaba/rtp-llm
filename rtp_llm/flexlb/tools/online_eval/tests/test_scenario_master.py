@@ -41,7 +41,7 @@ class MasterActionsTest(unittest.TestCase):
             {"http": "127.0.0.1:18083", "grpc": "127.0.0.1:18085"},
         ]}, json.loads(path.read_text()))
         frozen = json.loads((runner.out_dir / "flow-input.json").read_text())
-        from traffic.traffic_source import sha256_file
+        from file_digest import sha256_file
         self.assertEqual(sha256_file(Path(runner._overrides["TRACE_FILE"])), frozen["trace"]["sha256"])
         self.assertEqual(runner._overrides, frozen["environment"])
         self.assertEqual(runner.flow_identity["run_id"], frozen["run_id"])

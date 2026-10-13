@@ -56,7 +56,7 @@ class TrafficEntrypointTest(unittest.TestCase):
     def test_java_templates_are_reproducible_from_model(self):
         from scripts.pipeline.derive_master_templates import derive
 
-        from traffic.datasets import model_path
+        from traffic.catalog import model_path
         model = model_path()
         generated = derive(model)
         core = {key: value for key, value in generated.items() if key != "transformations"}

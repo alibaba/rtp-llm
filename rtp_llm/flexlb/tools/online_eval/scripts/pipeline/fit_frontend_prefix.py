@@ -1,4 +1,4 @@
-"""拟合匿名前缀流量；行契约见 traffic.capture_contract。
+"""拟合匿名前缀流量；数据对象见 traffic.capture_model。
 
 保留完整块共享、真实到达时间与精确总长度；残缺尾块不参与匹配。
 """
@@ -6,10 +6,11 @@
 import argparse, collections, gzip, lzma, hashlib, json, math, time, sys
 from pathlib import Path
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from traffic.capture_contract import BLOCK_SIZE, validate_metadata, validate_row
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+from traffic.capture_model import CaptureMetadata, CaptureRecord
 from traffic.codecs import codec_for_version
 from traffic.datasets import build_manifest
+from traffic.lineage_transforms import LineageProjector
 
 
 def main():
@@ -37,18 +38,21 @@ def fit(a):
     if a.model_version == "2" and not (a.v2_reason and a.v2_reason.strip()):
         raise ValueError("--model-version 2 requires --v2-reason for historical refitting")
     codec = codec_for_version(int(a.model_version))
-    from traffic.lineage_transforms import LineageProjector
     encode, write_trace = codec.encode, LineageProjector(codec.decode).write_trace
     a.out.mkdir(parents=True, exist_ok=True)
     rows = []
     sources = {}
+    metadata = None
     for path in sorted(list(a.source.glob("*.jsonl.gz")) + list(a.source.glob("*.jsonl.xz"))):
         summary = json.loads(
             path.with_name(path.name.replace(".jsonl.gz", ".summary.json").replace(".jsonl.xz", ".summary.json")).read_text()
         )
         if hashlib.sha256(path.read_bytes()).hexdigest() != summary["sha256"]:
             raise ValueError("capture checksum mismatch: " + str(path))
-        validate_metadata(summary, str(path) + " summary")
+        current = CaptureMetadata.read(summary, str(path) + " summary")
+        if metadata is not None and current != metadata:
+            raise ValueError("capture metadata differs across shards")
+        metadata = current
         if summary.get("complete") is not True or summary.get("truncated") is not False:
             raise ValueError(f"{path}: incomplete capture; recapture a smaller window or increase budget")
         sources[path.name] = summary
@@ -59,9 +63,11 @@ def fit(a):
                     row = json.loads(line)
                 except ValueError:
                     raise ValueError(f"{location}: invalid JSON") from None
-                validate_row(row, location)
-                row["keys"] = [bytes.fromhex(k) for k in row["keys"]]
+                row = CaptureRecord.read(row, location, metadata=metadata)
                 rows.append(row)
+    if metadata is None:
+        raise ValueError("no capture shards found")
+    block_size = metadata.block_size
     windows = {(v["start"], v["end"]) for v in sources.values()}
     if len(windows) != 1:
         raise ValueError("capture intervals differ")
@@ -75,12 +81,10 @@ def fit(a):
     ):
         raise ValueError("invalid capture/workload parameters")
     missing_count = a.expected_shards - len(sources)
-    rows.sort(key=lambda r: r["ts"])
+    rows.sort(key=lambda r: r.ts)
     if not rows:
         raise ValueError("empty capture")
     seen = {}
-    next_token = 1
-    token_paths = []
     lengths = []
     status = collections.Counter()
     families = collections.Counter()
@@ -88,12 +92,12 @@ def fit(a):
     model = []
     potential = 0
     gaps = []
-    source_origin = rows[0]["ts"]
+    source_origin = rows[0].ts
     duplicate_counts = collections.Counter()
     plan = a.out / "input-plan.jsonl"
     with plan.open("w") as f:
         for i, row in enumerate(rows):
-            keys = row["keys"]
+            keys = [bytes.fromhex(key) for key in row.keys]
             shared = 0
             parent = -1
             # Search deepest known cumulative prefix, then recover its previous owner.
@@ -108,38 +112,33 @@ def fit(a):
             shared = lo
             if shared:
                 parent = seen[keys[shared - 1]]
-                gaps.append(row["ts"] - rows[parent]["ts"])
-            blocks = token_paths[parent][:shared] if parent >= 0 else []
-            fresh = math.ceil(row["il"] / BLOCK_SIZE) - shared
-            blocks.extend(range(next_token, next_token + fresh))
-            next_token += fresh
-            token_paths.append(blocks)
+                gaps.append(row.ts - rows[parent].ts)
             for key in keys:
                 seen[key] = i
-            potential += shared * BLOCK_SIZE
-            lengths.append(row["il"])
-            status[str(row["status"])] += 1
-            families[keys[7] if len(keys) >= 8 else ("short", row["tail_hash"])] += 1
-            duplicate_counts[(row["rid"], row["ts"])] += 1
-            t = int((row["ts"] - source_origin) // 60000)
+            potential += shared * block_size
+            lengths.append(row.il)
+            status[str(row.status)] += 1
+            families[keys[4096 // block_size - 1] if len(keys) >= 4096 // block_size else ("short", row.tail_hash)] += 1
+            duplicate_counts[(row.rid, row.ts)] += 1
+            t = int((row.ts - source_origin) // 60000)
             w = windows.setdefault(
                 t, dict(requests=0, tokens=0, potential_tokens=0, errors=0)
             )
             w["requests"] += 1
-            w["tokens"] += row["il"]
-            w["potential_tokens"] += shared * BLOCK_SIZE
-            w["errors"] += row["status"] != "OK"
-            model.append([row["ts"] - source_origin, row["il"], parent, shared])
+            w["tokens"] += row.il
+            w["potential_tokens"] += shared * block_size
+            w["errors"] += row.status != "OK"
+            model.append([row.ts - source_origin, row.il, parent, shared])
             if i % 20000 == 0:
                 print("fit", i, "nodes", len(seen), flush=True)
     lengths.sort()
     gaps.sort()
     total = sum(lengths)
     model_path = a.out / "lineage-model.xz"
-    raw = encode(model, dict(missing_shard_count=missing_count,source_start=rows[0]['ts'],
-        source_end=rows[-1]['ts'],capture_start=capture_start,capture_end=capture_end,
+    raw = encode(model, dict(missing_shard_count=missing_count,source_start=rows[0].ts,
+        source_end=rows[-1].ts,capture_start=capture_start,capture_end=capture_end,
         source_shards=len(sources),expected_shards=a.expected_shards,
-        **(dict(v2_reason=a.v2_reason) if a.model_version == "2" else {})))
+        **(dict(v2_reason=a.v2_reason) if a.model_version == "2" else {})), block_size=block_size)
     model_path.write_bytes(raw)
     source = json.loads(a.source_info.read_text()) if a.source_info else None
     model_path.with_suffix('.manifest.json').write_text(
@@ -156,8 +155,8 @@ def fit(a):
         missing_shard_count=missing_count,
         sources=sources,
         requests=len(rows),
-        source_start=rows[0]["ts"],
-        source_end=rows[-1]["ts"],
+        source_start=rows[0].ts,
+        source_end=rows[-1].ts,
         source_qps=len(rows) * 1000 / (capture_end - capture_start),
         mean_input_tokens=total / len(rows),
         input_quantiles={
@@ -183,7 +182,7 @@ def fit(a):
             "Missing capture shards: " + str(missing_count),
             "Capture interval: " + str((capture_start, capture_end)),
             "Output cap supplied independently; error-censored outputs are not fitted",
-            "512-token equivalence preserved; sub-block token content not reconstructed",
+            f"{block_size}-token equivalence preserved; sub-block token content not reconstructed",
             "Empirical prefix-lineage event model; no held-out statistical generalization claim",
             "True source timestamps retained; pacing controlled by the client",
         ],

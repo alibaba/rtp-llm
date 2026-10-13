@@ -9,12 +9,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
-from traffic.capture_contract import BLOCK_SIZE as BLOCK
-from traffic.prefix_lineage import expand
-from traffic.codecs import decode
+from traffic.lineage_model import LineageExpander
+from traffic.codecs import decode_model
 from traffic.datasets import read_manifest
-from traffic.traffic_source import sha256_file
-from traffic.datasets import model_path
+from file_digest import sha256_file
+from traffic.catalog import model_path
 
 
 def derive(model, count=128, max_tokens=32768, output_tokens=420):
@@ -22,36 +21,25 @@ def derive(model, count=128, max_tokens=32768, output_tokens=420):
     pinned = read_manifest(model)
     if model.stat().st_size != pinned["bytes"] or sha256_file(model) != pinned["sha256"]:
         raise ValueError("lineage model differs from its pinned manifest")
-    metadata, events = decode(model.read_bytes(), pinned)
+    lineage = decode_model(model.read_bytes(), pinned)
+    metadata, events = lineage.to_wire()
     if metadata["count"] != pinned["count"] or len(events) < count:
         raise ValueError("lineage event count differs from its pinned manifest")
-    if max_tokens < BLOCK or max_tokens % BLOCK or output_tokens < 1:
+    block_size = metadata["block_size"]
+    if max_tokens < block_size or max_tokens % block_size or output_tokens < 1:
         raise ValueError("template limit must be positive and block aligned")
     templates = []
     clipped_count = removed_tokens = 0
-    if metadata["version"] == 2:
-        for _, labels in expand(events[:count]):
-            blocks = labels[:max_tokens // BLOCK]
-            removed = (len(labels) - len(blocks)) * BLOCK
-            clipped_count += removed > 0
-            removed_tokens += removed
-            templates.append(dict(il=len(blocks) * BLOCK, ol=output_tokens, labels=blocks))
-    else:
-        # v3 的残缺尾块是私有标签，长度仍保留实测值。
-        paths, next_label = [], 1
-        for _, length, parent, shared in events[:count]:
-            labels = paths[parent][:shared] if parent >= 0 else []
-            fresh = (length + BLOCK - 1) // BLOCK - shared
-            labels.extend(range(next_label, next_label + fresh))
-            next_label += fresh
-            paths.append(labels)
-            clipped_count += length > max_tokens
-            removed_tokens += max(0, length - max_tokens)
-            length = min(length, max_tokens)
-            templates.append(dict(il=length, ol=output_tokens,
-                                  labels=labels[:(length + BLOCK - 1) // BLOCK]))
+    for request in LineageExpander(lineage):
+        if len(templates) == count:
+            break
+        length = min(request.input_tokens, max_tokens)
+        clipped_count += request.input_tokens > max_tokens
+        removed_tokens += request.input_tokens - length
+        templates.append(dict(il=length, ol=output_tokens,
+                              labels=list(request.block_labels[:(length + block_size - 1) // block_size])))
     return dict(master_template_schema_version=1, source_sha256=pinned["sha256"],
-                block_size=BLOCK, templates=templates,
+                block_size=block_size, templates=templates,
                 transformations=dict(source_sha256=pinned["sha256"],
                     source_requests=len(events), selected_requests=count, applied=[
                     dict(kind="fixture_shape_clip", max_input_tokens=max_tokens,

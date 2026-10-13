@@ -3,21 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import json
 from pathlib import Path
 
+from file_digest import sha256_file
+from traffic.codecs import codec_for_version, decode_model
+from traffic.lineage_transforms import LineageProjector
 from traffic.contracts import PRIORITY, JAVA_LENGTH
 
 from traffic.synthetic.generator import write_trace as write_realistic
-
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 # Generator versions describe algorithms; capture codecs come from their data.
@@ -120,7 +114,6 @@ class SourceSpecification:
             raise ValueError("invalid source specification")
         if result.is_lineage:
             if result.version is not None:
-                from traffic.codecs import codec_for_version
                 if not result.version.isdecimal():
                     raise ValueError("unknown source model/version")
                 codec_for_version(int(result.version))
@@ -134,8 +127,6 @@ class SourceSpecification:
 
     def write_trace(self, path, namespace, base_dir, *, max_requests=None):
         if self.is_lineage:
-            from traffic.codecs import decode_model
-            from traffic.lineage_transforms import LineageProjector
             return LineageProjector(lambda raw: decode_model(raw, expected_version=self.version)).write_trace(
                 path, self.parameters, namespace, base_dir, max_requests=max_requests)
         return SOURCES[(self.kind, self.model, self.version)](

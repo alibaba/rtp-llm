@@ -16,7 +16,7 @@ from traffic.prefix_lineage_v3 import decode
 
 class FrontendPrefixFitTest(unittest.TestCase):
     def test_xz_capture_uses_arrival_cutoff_and_keeps_long_inputs(self):
-        script = Path(__file__).resolve().parents[1] / 'src/traffic/capture_frontend_prefix.py'
+        script = Path(__file__).resolve().parents[1] / 'scripts/pipeline/capture_frontend_prefix.py'
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root/'logs').mkdir()
@@ -32,7 +32,7 @@ class FrontendPrefixFitTest(unittest.TestCase):
             self.assertEqual([r['il'] for r in captured], [32769, 32769])
 
     def test_capture_fit_roundtrip_and_checksum_guard(self):
-        scripts = Path(__file__).resolve().parents[1] / "src/traffic"
+        scripts = Path(__file__).resolve().parents[1] / "scripts/pipeline"
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "logs").mkdir()

@@ -7,7 +7,7 @@ from artifacts.json_io import write_json
 from artifacts.gate_inputs import compact_flow, new_evidence
 from artifacts.gate import gate_check
 from cases.master_performance.inputs import engine_roles
-from traffic.traffic_source import sha256_file
+from file_digest import sha256_file
 from runtime.observation import ObservationClock, SampleBudget, poll_samples
 
 

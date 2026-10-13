@@ -99,7 +99,7 @@ class HaReplayClient:
             runtime["ENDPOINTS_FILE"] = str(env.endpoint_file)
         overrides = bind_environment(settings, runtime)
         self._overrides = overrides
-        from traffic.traffic_source import sha256_file
+        from file_digest import sha256_file
         trace_info = {}
         source_manifest = trace.with_suffix(".manifest.json")
         if source_manifest.is_file():

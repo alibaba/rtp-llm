@@ -63,12 +63,14 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 
 ## 采集契约与归档
 
-[capture_contract.py](../src/traffic/capture_contract.py) 是 capture→fit 行契约的唯一出处，
-声明字段名、类型、可空性、语义及匿名化规格；capture/fit 均执行它的校验。
-行文件和 summary 都记录 `schema_version` 与 `block_size`。块大小在该模块单点声明，
-默认 512；修改后采集、拟合和 codec 同步使用新值，不匹配的历史件会被拒绝，不能混用。
-缺到达时间戳等不可用日志行在 summary 显式计数；契约字段不能静默补齐。
-无 schema 的旧行文件不被自动猜测接纳，需根据真实来源核验契约，不能用拟合件冒充。
+[capture_model.py](../src/traffic/capture_model.py) 定义 `CaptureMetadata` 和 `CaptureRecord`，
+采集和拟合共用解析、类型及范围校验。JSON 只在文件边界读写；缺失观测保留 `null`。
+块大小由采集命令的 `--block-size` 指定，默认 512，支持 64 至 4096 的二次幂；
+行、summary、模型和回放计划均携带该值。消费者读取文件元数据，不通过修改源码常量选择块大小。
+同次拟合的分片必须具有一致的 schema 和块大小，记录必须与所属 summary 一致。
+摘要算法或字段语义变化须升级 schema。流量摘要粒度与引擎 KV 块大小分别声明，不能混用。
+缺到达时间戳、请求身份或 token 的行计入 summary，不伪造数据；损坏 JSON 保留其他有效行，
+但采集标记不完整并报错，拟合拒绝不完整采集。
 
 仓库外按 `<来源>/<UTC起止窗口>/capture/shard-N.jsonl.gz`（或 `.jsonl.xz`）及
 `capture/shard-N.summary.json` 成对归档；分片身份映射和来源信息随窗口保存。
@@ -79,7 +81,7 @@ python3 scripts/pipeline/describe_traffic.py /path/to/model.xz
 不覆盖原始归档，不以拟合件恢复、推算或生成已丢失的精确长度。
 
 采集支持 `--log-dir`、`--log-glob`；运行位置、部署/Pod 定位由外部执行环境负责。
-护栏默认 `--time-budget-s 900 --tail-bytes 16000000`。采集窗口按请求到达时间筛选，完成时间不用于裁剪窗口。
+护栏默认 `--time-budget-s 900`。采集窗口按请求到达时间筛选，完成时间不用于裁剪窗口。
 超预算默认 `--on-budget error` 返回失败，仍写 summary；显式 `truncate` 正常返回，
 但 summary 必须标记 `complete: false`、`truncated: true` 和 `budget_exceeded`。
 fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采集，再分别拟合；
@@ -97,7 +99,7 @@ fit 拒绝不完整窗口。增加预算或分成更小的到达窗口重新采�
 Master 运行形态仍由所选 profile 明确指定。未核验的历史实验配置保持
 `legacy_unverified`，不因为与 Engine 数据放在一起而成为已核验的生产采集。
 
-`prefill_kv_pool_blocks`/`decode_kv_pool_blocks` 是 Java mock 的 KV 池块数；`prefill.memory_cache.capacity_blocks` 是内存前缀树容量；性能 JSON 顶层 `block_size` 是引擎时间模型块口径；capture 行契约的 `BLOCK_SIZE` 是流量前缀摘要块口径。这四者不得以裸称“blocks”混用，也不要求数值相等。mock 的 prefill/decode block-size 是档案里的独立运行参数，读取方必须按各自口径传入。
+`prefill_kv_pool_blocks`/`decode_kv_pool_blocks` 是 Java mock 的 KV 池块数；`prefill.memory_cache.capacity_blocks` 是内存前缀树容量；性能 JSON 顶层 `block_size` 是引擎时间模型块口径；capture 元信息的 `CaptureMetadata.block_size` 是流量前缀摘要块口径。这四者不得以裸称“blocks”混用，也不要求数值相等。mock 的 prefill/decode block-size 是档案里的独立运行参数，读取方必须按各自口径传入。
 
 真实快照的内容变换、记录字段和播放边界以 [流量架构契约](../docs/architecture/traffic.md) 为准。合成画像保留历史格式键 `calibration` 与 `held_out_validated`，目录名不改变旧工件格式或 SHA。
 

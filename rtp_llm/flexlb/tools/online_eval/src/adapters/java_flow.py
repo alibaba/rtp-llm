@@ -7,7 +7,8 @@ from pathlib import Path
 from adapters.flow_control import FlowControlProtocol, FlowStatus, DrainResult
 
 from adapters.client_journal import LiveClientEvents
-from traffic.traffic_source import sha256_file
+from adapters.playback_evidence import PlaybackEvidence
+from file_digest import sha256_file
 from adapters.load_client import client_environment, collection_environment, bind_environment
 
 JAVA_FLOW_INPUT_FIELDS = frozenset({"group_id", "phase_id", "poll_s", "source", "client", "jvm_xms", "jvm_xmx"})
@@ -71,6 +72,8 @@ class JavaFlowGroup:
         semantics = (
             json.loads(source_manifest.read_text()) if source_manifest.exists() else {}
         )
+        if 'sha256' in semantics and semantics['sha256'] != self.trace_manifest['sha256']:
+            raise ValueError('trace manifest SHA256 differs from materialized plan')
         self.trace_manifest.update(semantics)
         self.trace_manifest["playback"] = playback
         env = bind_environment(env, dict(
@@ -106,7 +109,13 @@ class JavaFlowGroup:
             )
         from runtime.startup import startup_phase, wait_flow_started
         with startup_phase(self.directory, 'client/sending', deadline):
-            return wait_flow_started(self.control, self.identity, self.proc, deadline)
+            started = wait_flow_started(self.control, self.identity, self.proc, deadline)
+        snapshot = PlaybackEvidence.read(self.directory / 'playback.json',
+                                         self.trace_manifest['sha256'], env)
+        self.trace_manifest['java_playback'] = snapshot.to_dict()
+        (self.directory / 'flow-input.json').write_text(json.dumps(
+            dict(**self.identity, trace=self.trace_manifest, environment=env), indent=2))
+        return started
 
     def observe_control(self):
         return self.control_protocol.observe(self.proc)

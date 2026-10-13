@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 
+from adapters.client_journal import MAX_EVIDENCE_EVENTS
 from adapters.java_flow import JavaFlowGroup, JAVA_FLOW_INPUT_FIELDS
 from adapters.load_client import client_environment
 from traffic.traffic_source import materialize, SourceSpecification
@@ -66,30 +67,9 @@ def _start(ctx, p, deadline):
         )
     environment, playback = client_environment(java_client_priority(p["source"], p["client"]))
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
-    count = json.loads(trace.with_suffix('.manifest.json').read_text())['request_count']
-    laps = int(environment.get('MAX_LAPS', 0 if environment.get('LOOP')=='true' else 1))
-    from traffic.playback.intensity import integral, poisson_count
-    curve = playback.get('rate_curve')
-    if laps:
-        event_budget = max(50_000, 2*count*laps)
-    elif environment.get('SEND_MODE')=='uniform':
-        rate = float(environment['SEND_MODE_QPS'])
-        modulation = float(environment.get('BURST_FACTOR',1))*(1+float(environment.get('DIURNAL_AMPLITUDE',0)))
-        intensity = rate*modulation*integral(curve,int(environment['DURATION_S']))
-        planned = (poisson_count(intensity, int(environment['PLAYBACK_SEED']))
-                   if playback.get('arrival') == 'poisson' else math.ceil(intensity)+1)
-        event_budget = max(50_000, 2*planned)
-    else:
-        # A finite model can contain coincident timestamps. Use its full cycle
-        # span rather than average rate, including one partial final lap.
-        first = last = None
-        with trace.open() as stream:
-            for line in stream:
-                last = json.loads(line)['ts']
-                if first is None: first=last
-        span_ms=max(1,last-first)+1
-        laps=math.ceil(integral(curve,int(environment['DURATION_S']))*1000*float(environment.get('REPLAY_SPEED',1))/span_ms)+1
-        event_budget=max(50_000,2*count*laps)
+    # This is a retained-evidence ceiling, not a prediction of Java scheduling.
+    # The journal grows on demand and fails explicitly when the ceiling is exceeded.
+    event_budget = MAX_EVIDENCE_EVENTS
     flow = JavaFlowGroup(
         client,
         directory,

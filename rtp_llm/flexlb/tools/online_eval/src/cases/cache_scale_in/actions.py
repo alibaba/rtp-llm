@@ -241,7 +241,7 @@ def check(ctx, p, deadline):
         except ValueError as exc:
             evidence["errors"].append(str(exc))
     attribute_client(evidence, snapshot)
-    from traffic.traffic_source import sha256_file
+    from file_digest import sha256_file
     evidence["client_attribution"]["artifacts"] = [
         dict(path=str(path.resolve()), sha256=sha256_file(path))
         for path in (flow.directory / "client_lifecycle.jsonl", flow.directory / "control/status.json")

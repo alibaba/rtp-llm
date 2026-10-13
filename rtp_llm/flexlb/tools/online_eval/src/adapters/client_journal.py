@@ -4,11 +4,14 @@ import json
 from pathlib import Path
 
 
+MAX_EVIDENCE_EVENTS = 2_000_000
+
+
 class LiveClientEvents:
     """Incremental journal reader; incomplete trailing writes are retried, not lost."""
 
     def __init__(self, path, *, max_events=50_000):
-        if type(max_events) is not int or not 1 <= max_events <= 2_000_000:
+        if type(max_events) is not int or not 1 <= max_events <= MAX_EVIDENCE_EVENTS:
             raise ValueError("live client event budget must be in 1..2000000")
         self.max_events = max_events
         self.path = Path(path)

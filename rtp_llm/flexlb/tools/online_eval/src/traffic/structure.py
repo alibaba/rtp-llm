@@ -1,21 +1,15 @@
 """Input structure shared by parameter derivation and standalone fidelity analysis."""
 from collections import Counter
-from traffic.prefix_lineage import BLOCK
+from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE as BLOCK
+from traffic.lineage_model import LineageModel, LineageExpander
 
 
-def capture_shape(events):
-    # Only the first eight labels are needed for family identity. Avoid expanding
-    # and retaining every full request in a long capture.
-    prefixes, families = [], Counter()
-    next_label = 1
-    for _, blocks, parent, shared, reserve in events:
-        prefix = prefixes[parent][:min(shared, 8)] if parent >= 0 else ()
-        fresh = blocks - shared
-        prefix += tuple(range(next_label, next_label + min(fresh, 8 - len(prefix))))
-        next_label += fresh + reserve
-        prefixes.append(prefix)
-        families[prefix] += 1
-    return dict(blocks=[e[1] for e in events], shared=[e[3] for e in events],
+def model_shape(model):
+    width = 4096 // model.metadata.block_size
+    families = Counter(request.block_labels for request in
+                       LineageExpander(model, retained_blocks=width))
+    return dict(blocks=[e.input_tokens / BLOCK for e in model.events],
+                shared=[e.shared_full_blocks * model.metadata.block_size / BLOCK for e in model.events],
                 families=sorted(families.values(), reverse=True))
 
 
@@ -80,5 +74,5 @@ def generated_shape(rows):
         labels = row['input_token_blocks'][:row['il']//row['cache_key_block_size']]
         blocks.append(row['il'] / BLOCK)
         shared.append(index.observe(labels) * row['cache_key_block_size'] / BLOCK)
-        families[tuple(tuple(v) if isinstance(v, list) else v for v in labels[:8])] += 1
+        families[tuple(tuple(v) if isinstance(v, list) else v for v in labels[:4096 // row['cache_key_block_size']])] += 1
     return dict(blocks=blocks, shared=shared, families=sorted(families.values(), reverse=True))

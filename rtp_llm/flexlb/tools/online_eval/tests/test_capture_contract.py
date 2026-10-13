@@ -12,8 +12,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from traffic.capture_contract import BLOCK_SIZE, FIELDS, SCHEMA_VERSION, validate_row
-from traffic.capture_frontend_prefix import capture, parser
+from dataclasses import fields
+from traffic.capture_model import CaptureRecord, SCHEMA_VERSION
+from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE as BLOCK_SIZE
+from scripts.pipeline.capture_frontend_prefix import capture, parser
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,7 +37,7 @@ class CaptureContractTest(unittest.TestCase):
             return capture(args, **({'clock': clock} if clock else {}))
 
     def fit(self, root):
-        return subprocess.run([sys.executable, str(ROOT/'src/traffic/fit_frontend_prefix.py'),
+        return subprocess.run([sys.executable, str(ROOT/'scripts/pipeline/fit_frontend_prefix.py'),
             '--source', str(root), '--out', str(root/'fit'), '--expected-shards', '1',
             '--output-tokens', '10'], capture_output=True, text=True)
 
@@ -158,14 +160,14 @@ class CaptureContractTest(unittest.TestCase):
             path = root/'pod-0.jsonl.gz'
             with gzip.open(path, 'rt') as stream:
                 original = [json.loads(line) for line in stream]
-            self.assertEqual(set(FIELDS), set(original[0]))
-            validate_row(original[0])
+            self.assertEqual({field.name for field in fields(CaptureRecord)}, set(original[0]))
+            CaptureRecord.read(original[0])
             cases = [('status', None, 'missing required field status'),
                      ('il', '1025', 'illegal type for il'),
                      ('il', True, 'illegal type for il'),
                      ('keys', [], 'keys/il block count mismatch'),
                      ('rid', 'private-id', 'invalid 128-bit digest'),
-                     ('block_size', 1024, 'block_size must be 512')]
+                     ('block_size', 1024, 'keys/il block count mismatch')]
             for key, value, reason in cases:
                 with self.subTest(key=key, value=value):
                     rows = copy.deepcopy(original)
@@ -191,7 +193,7 @@ class CaptureContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             logs = self.fixture(root)
-            script = ROOT/'src/traffic/capture_frontend_prefix.py'
+            script = ROOT/'scripts/pipeline/capture_frontend_prefix.py'
             subprocess.run([sys.executable, str(script), '--start', '1000', '--end', '3000',
                             '--out', 'pod-cwd'], cwd=root, check=True, capture_output=True)
             summary = self.run_capture(root, logs)
@@ -221,17 +223,14 @@ class CaptureContractTest(unittest.TestCase):
                 self.assertEqual(999, summary['stats']['records'])
                 self.assertIn('incomplete capture', self.fit(root).stderr)
 
-    def test_single_block_declaration_controls_capture_fit_and_codec(self):
+    def test_explicit_block_size_survives_capture_fit_and_codec(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            package = root/'src/traffic'
-            shutil.copytree(ROOT/'src/traffic', package, ignore=shutil.ignore_patterns('__pycache__'))
-            contract = package/'capture_contract.py'
-            contract.write_text(contract.read_text().replace('BLOCK_SIZE = 512', 'BLOCK_SIZE = 1024'))
+            package = ROOT/'scripts/pipeline'
             logs = self.fixture(root)
             subprocess.run([sys.executable, str(package/'capture_frontend_prefix.py'),
                 '--start', '1000', '--end', '3000', '--out', str(root/'pod-0'),
-                '--log-dir', str(logs)], check=True, capture_output=True)
+                '--log-dir', str(logs), '--block-size', '1024'], check=True, capture_output=True)
             with gzip.open(root/'pod-0.jsonl.gz', 'rt') as stream:
                 row = json.loads(next(stream))
             self.assertEqual(1, len(row['keys']))
@@ -243,5 +242,50 @@ class CaptureContractTest(unittest.TestCase):
             manifest = json.loads((root/'fit/lineage-model.manifest.json').read_text())
             self.assertEqual(1024, manifest['block_size'])
             from traffic.datasets import read_manifest
-            with self.assertRaisesRegex(ValueError, 'header'):
-                read_manifest(root/'fit/lineage-model.xz')
+            self.assertEqual(1024, read_manifest(root/'fit/lineage-model.xz')['block_size'])
+
+    def test_missing_tokens_do_not_poison_duplicate_detection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root, count=1)
+            path = logs / 'dash_sc_grpc_access_r0_s0.log'
+            valid = json.loads(path.read_text())
+            path.write_text(json.dumps(dict(valid, input_ids=[])) + '\n' + json.dumps(valid) + '\n')
+            summary = self.run_capture(root, logs)
+            self.assertEqual(1, summary['stats']['records'])
+            self.assertEqual(1, summary['stats']['missing_tokens'])
+            self.assertNotIn('duplicate', summary['stats'])
+
+    def test_bad_first_line_preserves_valid_rows_but_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            path = logs / 'dash_sc_grpc_access_r0_s0.log'
+            path.write_text('broken json\n' + path.read_text())
+            with self.assertRaisesRegex(RuntimeError, 'capture incomplete'):
+                self.run_capture(root, logs)
+            summary = json.loads((root / 'pod-0.summary.json').read_text())
+            self.assertEqual(2, summary['stats']['records'])
+            self.assertFalse(summary['complete'])
+            self.assertIn('incomplete capture', self.fit(root).stderr)
+
+    def test_mixed_geometry_shards_rejected_before_fit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            self.run_capture(root, logs)
+            self.run_capture(root, logs, ('--out', str(root / 'pod-1'), '--block-size', '1024'))
+            self.assertIn('metadata differs across shards', self.fit(root).stderr)
+
+    def test_missing_identity_is_reported_without_collapsing_requests(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            logs = self.fixture(root)
+            path = logs / 'dash_sc_grpc_access_r0_s0.log'
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            for row in rows:
+                row.pop('request_id')
+            path.write_text('\n'.join(map(json.dumps, rows)) + '\n')
+            summary = self.run_capture(root, logs)
+            self.assertEqual(2, summary['stats']['missing_request_identity'])
+            self.assertNotIn('duplicate', summary['stats'])

@@ -2,10 +2,12 @@
 import json
 import lzma
 
-from traffic.prefix_lineage import BLOCK, MAX_EVENTS
+from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE, prefix_block_size, MAX_LINEAGE_EVENTS as MAX_EVENTS
+from traffic.lineage_model import LineageModel
 
 
-def validate(events):
+def validate(events, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+    block_size = prefix_block_size(block_size)
     if not isinstance(events, list) or not 1 <= len(events) <= MAX_EVENTS:
         raise ValueError('invalid lineage event count')
     previous = 0
@@ -15,16 +17,16 @@ def validate(events):
         ts, length, parent, shared = event
         if not previous <= ts <= 9223372036854775807 or not 1 <= length <= 2147483647:
             raise ValueError('invalid lineage timestamp/length')
-        if not -1 <= parent < i or not 0 <= shared <= length // BLOCK:
+        if not -1 <= parent < i or not 0 <= shared <= length // block_size:
             raise ValueError('invalid lineage reference')
-        if (parent == -1 and shared) or (parent >= 0 and shared > events[parent][1] // BLOCK):
+        if (parent == -1 and shared) or (parent >= 0 and shared > events[parent][1] // block_size):
             raise ValueError('invalid lineage shared prefix')
         previous = ts
 
 
-def encode(events, provenance=None):
-    validate(events)
-    metadata = dict(version=3, block_size=BLOCK, count=len(events),
+def encode(events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+    validate(events, block_size)
+    metadata = dict(version=3, block_size=block_size, count=len(events),
                     realism='EMPIRICAL_PREFIX_STRUCTURE', tail='EXACT_LENGTH_PRIVATE_PARTIAL_BLOCK',
                     arrival='TRUE_TIMESTAMPS_PACED_BY_CLIENT', provenance=provenance or {})
     return lzma.compress(json.dumps(dict(metadata=metadata, events=events),
@@ -38,9 +40,10 @@ def _decode_payload(raw):
         raise ValueError('invalid or oversized lineage v3 envelope')
     model = json.loads(data)
     metadata, events = model['metadata'], model['events']
-    if metadata.get('version') != 3 or metadata.get('block_size') != BLOCK or metadata.get('count') != len(events):
+    block_size = prefix_block_size(metadata.get('block_size'))
+    if metadata.get('version') != 3 or metadata.get('count') != len(events):
         raise ValueError('invalid lineage v3 header')
-    validate(events)
+    validate(events, block_size)
     return metadata, events
 
 
@@ -48,18 +51,11 @@ class ExactLengthLineageCodec:
     """Decode the persisted format into the common, unit-safe domain model."""
 
     def decode(self, raw):
-        from traffic.lineage_model import LineageModel
         return LineageModel.from_wire(*_decode_payload(raw))
 
-    def encode(self, events, provenance=None):
-        return encode(events, provenance)
+    def encode(self, events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+        return encode(events, provenance, block_size=block_size)
 
 
 def decode(raw):
     return ExactLengthLineageCodec().decode(raw).to_wire()
-
-
-def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
-    from traffic.lineage_transforms import write_trace as project
-    return project(path, parameters, namespace, base_dir, decode=ExactLengthLineageCodec().decode,
-                   max_requests=max_requests)

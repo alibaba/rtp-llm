@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from traffic import datasets
+from traffic import datasets, catalog
 from traffic.codecs import decode
 from traffic.prefix_lineage import encode as encode_v2
 from traffic.prefix_lineage_v3 import encode as encode_v3
@@ -41,7 +41,7 @@ class LineageTransformsTest(unittest.TestCase):
                         'input_length_filter')
 
     def test_bundled_v2_accepts_32k_filter_through_public_materialize(self):
-        model = datasets.model_path()
+        model = catalog.model_path()
         manifest = datasets.read_manifest(model)
         self.assertEqual(manifest['codec']['version'], 2)
         _, events = decode(model.read_bytes(), manifest)

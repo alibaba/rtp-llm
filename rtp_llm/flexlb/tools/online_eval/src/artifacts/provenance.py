@@ -20,7 +20,7 @@ def collect(directory, environments, metadata=None, *, required=()):
         epochs[epoch] = data
     flows = [json.loads(path.read_text()) for path in sorted(Path(directory).glob("**/flow-input.json"))]
     from runtime.paths import MOCK_JAR
-    from traffic.traffic_source import sha256_file
+    from file_digest import sha256_file
     mock_artifact = dict(path=str(MOCK_JAR), sha256=sha256_file(MOCK_JAR)) if Path(MOCK_JAR).is_file() else None
     return dict(environments=epochs, flows=flows, mock_artifact=mock_artifact)
 
@@ -29,7 +29,7 @@ def gate_provenance(ctx, flow, *, source_files, analyzer_file):
     """Freeze the same observed launch inputs for all gates, before collection."""
     from runtime.paths import API_JAR, MOCK_JAR
     from adapters.java_flow import evidence_environment
-    from traffic.traffic_source import sha256_file
+    from file_digest import sha256_file
     from artifacts.gate_inputs import trace_workload_sha
 
     epoch = str(ctx.env_epoch)

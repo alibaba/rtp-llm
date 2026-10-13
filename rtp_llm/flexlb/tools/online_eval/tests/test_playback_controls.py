@@ -1,3 +1,5 @@
+from traffic.lineage_transforms import LineageProjector
+from traffic.codecs import codec_for_version
 import hashlib
 import json
 import math
@@ -68,14 +70,14 @@ class PlaybackControlsTest(unittest.TestCase):
                 root=Path(tmp); model=root/'model.xz'; model.write_bytes(raw)
                 params=dict(path='model.xz',count=100,
                     output_tokens=64,priority=50,output_distribution=dict(kind='discrete',values=[1,16,64],weights=[0,1,3],seed=7))
-                module.write_trace(root/'a',params,'A',root)
-                module.write_trace(root/'b',params,'B',root)
+                LineageProjector(codec_for_version(version).decode).write_trace(root/'a',params,'A',root)
+                LineageProjector(codec_for_version(version).decode).write_trace(root/'b',params,'B',root)
                 a=[json.loads(x) for x in (root/'a').read_text().splitlines()]
                 b=[json.loads(x) for x in (root/'b').read_text().splitlines()]
                 self.assertEqual([r['ol'] for r in a],[r['ol'] for r in b])
                 self.assertEqual(set(r['ol'] for r in a),{16,64})
                 if version==3:
-                    module.write_trace(root/'c',dict(params,max_input_tokens=32768),'C',root,max_requests=20)
+                    LineageProjector(codec_for_version(version).decode).write_trace(root/'c',dict(params,max_input_tokens=32768),'C',root,max_requests=20)
                     c=[json.loads(x) for x in (root/'c').read_text().splitlines()]
                     for row in c: self.assertEqual(row['ol'],a[int(row['rid'].split(':')[-1])]['ol'])
                 self.assertEqual(model.read_bytes(),raw)

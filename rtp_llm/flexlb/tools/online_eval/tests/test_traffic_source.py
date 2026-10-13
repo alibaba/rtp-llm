@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from traffic.traffic_source import materialize,validate_plan,SOURCES
-from traffic.prefix_lineage import encode,decode,expand
+from traffic.prefix_lineage import encode,decode
+from traffic.lineage_model import LineageModel, LineageExpander
 from traffic.playback.configuration import normalize
 
 
@@ -16,7 +17,7 @@ class TrafficSourceTest(unittest.TestCase):
         events=[[0,1537,-1,0],[51,2050,0,2],[999,1025,1,1],[1000,100,-1,0]]
         raw=encode(events,{'missing_pod_indices':[7]})
         meta,decoded=decode(raw)
-        paths=list(expand(decoded))
+        paths=[(r.timestamp_ms, list(r.block_labels)) for r in LineageExpander(LineageModel.from_wire(meta, decoded))]
         self.assertEqual([t for t,_ in paths],[0,51,999,1000])
         self.assertEqual(paths[0][1],[1,2,3])
         self.assertEqual(paths[1][1],[1,2,5,6])

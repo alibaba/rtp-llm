@@ -1,75 +1,11 @@
-"""Discover real captures from files and describe their observed traffic.
-
-Data admission is a user decision, not a registry. Codec and checksums belong
-in the sidecar; defaults identify only the inputs pinned by existing tests.
-"""
+"""Generate and verify self-describing capture manifests against their payload."""
 import hashlib
 import json
-import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from traffic.capture_contract import BLOCK_SIZE as BLOCK
+from traffic.statistics import statistics
 from traffic.codecs import decode
-
-DATA = Path(__file__).resolve().parents[2] / "data"
-DEFAULT_TRACE = "glm-5.3_20260921_1400_15m"
-DEFAULT_PROFILE = DEFAULT_TRACE
-
-
-def trace_models():
-    return {path.stem: path for path in sorted((DATA / "traffic_trace").glob("*.xz"))}
-
-
-def model_path(name=DEFAULT_TRACE):
-    try:
-        return trace_models()[name]
-    except KeyError:
-        raise ValueError(f"unknown traffic model {name!r}") from None
-
-
-def profile_path(name=DEFAULT_PROFILE):
-    for path in (DATA / "synthetic_parameters").glob("*.profile.json"):
-        if path.name == f"{name}.profile.json":
-            return path
-    raise ValueError(f"unknown synthetic parameter profile {name!r}")
-
-
-def distribution(values):
-    ordered = sorted(values)
-    if not ordered:
-        return None
-    return dict(count=len(ordered), min=ordered[0], max=ordered[-1],
-                mean=sum(ordered) / len(ordered),
-                **{f"p{p}": ordered[max(0, math.ceil(len(ordered) * p / 100) - 1)]
-                   for p in (50, 90, 95, 99)})
-
-
-def statistics(events, *, version=2):
-    """Nearest-rank percentiles; sharing describes the DAG, not cache hits."""
-    duration = (events[-1][0] - events[0][0]) / 1000
-    counts = [0] * (int(duration) + 1)
-    for event in events:
-        counts[(event[0] - events[0][0]) // 1000] += 1
-    resolution = 1 if version == 3 else BLOCK
-    inputs = [event[1] * resolution for event in events]
-    shared = [event[3] * BLOCK for event in events]
-    return dict(
-        scope="captured_requests_only_no_missing_shard_extrapolation",
-        request_count=len(events), percentile_method="nearest_rank",
-        arrival=dict(event_span_s=duration,
-                     mean_qps=len(events) / duration if duration else None,
-                     requests_per_second=distribution(counts),
-                     bucket_origin="first_event", bucket_ms=1000,
-                     final_bucket="included_even_if_partial", idle_buckets_included=True),
-        input_tokens=dict(**distribution(inputs), total=sum(inputs), resolution_tokens=resolution),
-        prefix_structure=dict(shared_tokens=distribution(shared),
-                              token_weighted_shared_fraction=sum(shared) / sum(inputs),
-                              requests_with_shared_prefix=sum(value > 0 for value in shared),
-                              parentless_requests=sum(event[2] == -1 for event in events),
-                              interpretation="structural_sharing_not_observed_cache_hit_rate"),
-        output_tokens=None, outcomes=None)
-
 
 def build_manifest(path, source=None):
     path = Path(path)
@@ -88,7 +24,7 @@ def build_manifest(path, source=None):
                     attribution=dict(identity=None, status="unconfirmed", evidence=None),
                     model=dict(name=None, status="unconfirmed", evidence=None)),
                 capture_window=dict(window, timezone="Asia/Shanghai"),
-                statistics=statistics(events, version=metadata["version"]),
+                statistics=statistics(events, version=metadata["version"], block_size=metadata["block_size"]),
                 limitations=[("Input lengths are exact; original text and tokens are absent."
                               if metadata["version"] == 3 else
                               "Input lengths are block aligned; original text and tokens are absent."),

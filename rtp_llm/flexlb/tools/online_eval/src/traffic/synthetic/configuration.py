@@ -14,7 +14,7 @@ import math
 
 from traffic.contracts import PRIORITY
 
-from traffic.datasets import DEFAULT_PROFILE, profile_path
+from traffic.catalog import DEFAULT_PROFILE, profile_path
 
 
 @dataclass(frozen=True)

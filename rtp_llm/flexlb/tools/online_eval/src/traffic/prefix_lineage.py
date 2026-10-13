@@ -7,8 +7,8 @@ import json
 import lzma
 
 MAGIC = b'PFL2\0'
-from traffic.capture_contract import BLOCK_SIZE as BLOCK
-MAX_EVENTS = 1_000_000
+from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE, prefix_block_size, MAX_LINEAGE_EVENTS as MAX_EVENTS
+from traffic.lineage_model import LineageModel
 
 
 def _varint(n):
@@ -37,8 +37,9 @@ def _read(data, offset):
     raise ValueError('invalid lineage varint')
 
 
-def encode(events, provenance=None):
+def encode(events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
     """Convert [relative ms, original input length, parent, shared blocks]."""
+    block_size = prefix_block_size(block_size)
     columns = [bytearray() for _ in range(4)]
     allocation = bytearray((len(events) + 7) // 8)
     total = aligned = short_count = removed = added = 0
@@ -52,21 +53,21 @@ def encode(events, provenance=None):
         ts, il, parent, shared = event
         if not last <= ts <= 9223372036854775807 or not 1 <= il <= 2147483647 or not -1 <= parent < i:
             raise ValueError('invalid lineage ordering/shape')
-        if not 0 <= shared <= il // BLOCK or (parent == -1 and shared) or (parent >= 0 and shared > lengths[parent] // BLOCK):
+        if not 0 <= shared <= il // block_size or (parent == -1 and shared) or (parent >= 0 and shared > lengths[parent] // block_size):
             raise ValueError('invalid lineage parent reference')
-        blocks = max(1, il // BLOCK)
-        if il >= BLOCK and il % BLOCK:
+        blocks = max(1, il // block_size)
+        if il >= block_size and il % block_size:
             allocation[i // 8] |= 1 << (i % 8)
         for col, value in zip(columns, ((ts - last) * 2, blocks, 0 if parent < 0 else i - parent, shared)):
             col.extend(_varint(value))
         total += il
-        aligned += blocks * BLOCK
-        removed += max(0, il - blocks * BLOCK)
-        added += max(0, blocks * BLOCK - il)
-        short_count += il < BLOCK
+        aligned += blocks * block_size
+        removed += max(0, il - blocks * block_size)
+        added += max(0, blocks * block_size - il)
+        short_count += il < block_size
         last = ts
         lengths.append(il)
-    metadata = dict(version=2, block_size=BLOCK, count=len(events),
+    metadata = dict(version=2, block_size=block_size, count=len(events),
                     realism='EMPIRICAL_PREFIX_STRUCTURE', tail='BLOCK_ALIGNED_LOSSY_TOKENS',
                     arrival='TRUE_TIMESTAMPS_PACED_BY_CLIENT',
                     provenance=provenance or {},
@@ -90,8 +91,9 @@ def _decode_payload(raw):
     n, offset = _read(data, len(MAGIC))
     metadata = json.loads(data[offset:offset+n])
     offset += n
+    block_size = prefix_block_size(metadata.get('block_size'))
     count = metadata.get('count')
-    if metadata.get('version') != 2 or metadata.get('block_size') != BLOCK or type(count) is not int or not 1 <= count <= MAX_EVENTS:
+    if metadata.get('version') != 2 or type(count) is not int or not 1 <= count <= MAX_EVENTS:
         raise ValueError('invalid lineage v2 header')
     columns = []
     for _ in range(4):
@@ -112,7 +114,7 @@ def _decode_payload(raw):
     for i, (delta, blocks, distance, shared) in enumerate(zip(*columns)):
         ts += (delta >> 1) ^ -(delta & 1)
         parent = i-distance if distance else -1
-        if ts < 0 or ts > 9223372036854775807 or (events and ts < events[-1][0]) or not 1 <= blocks <= 2147483647//BLOCK:
+        if ts < 0 or ts > 9223372036854775807 or (events and ts < events[-1][0]) or not 1 <= blocks <= 2147483647//block_size:
             raise ValueError('invalid lineage shape/timestamp')
         if not -1 <= parent < i or shared > blocks or (parent == -1 and shared) or (parent >= 0 and shared > events[parent][1]):
             raise ValueError('invalid lineage reference')
@@ -120,36 +122,15 @@ def _decode_payload(raw):
     return metadata, events
 
 
-def expand(events):
-    paths = []
-    next_label = 1
-    for ts, blocks, parent, shared, reserve in events:
-        labels = paths[parent][:shared] if parent >= 0 else []
-        fresh = blocks-shared
-        if next_label + fresh + reserve > 2147483647:
-            raise ValueError('lineage label budget exceeded')
-        labels.extend(range(next_label, next_label+fresh))
-        next_label += fresh + reserve
-        paths.append(labels)
-        yield ts, labels
-
-
 class BlockAlignedLineageCodec:
     """Decode the persisted format into the common, unit-safe domain model."""
 
     def decode(self, raw):
-        from traffic.lineage_model import LineageModel
         return LineageModel.from_wire(*_decode_payload(raw))
 
-    def encode(self, events, provenance=None):
-        return encode(events, provenance)
+    def encode(self, events, provenance=None, *, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+        return encode(events, provenance, block_size=block_size)
 
 
 def decode(raw):
     return BlockAlignedLineageCodec().decode(raw).to_wire()
-
-
-def write_trace(path, parameters, namespace, base_dir, *, max_requests=None):
-    from traffic.lineage_transforms import write_trace as project
-    return project(path, parameters, namespace, base_dir, decode=BlockAlignedLineageCodec().decode,
-                   max_requests=max_requests)

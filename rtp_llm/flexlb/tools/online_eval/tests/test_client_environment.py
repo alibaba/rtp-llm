@@ -59,6 +59,13 @@ def test_collection_policy_is_frozen_and_matches_launch(tmp_path, profile, laten
     trace = tmp_path / 'trace.jsonl'
     trace.write_text('{}\n')
     def acknowledge(*args):
+        snapshot = dict(trace_sha256=flow.trace_manifest['sha256'], offline_plan_supported=True,
+            planner_version='PLAYBACK_LEGACY_V1', token_stride=1, mode='uniform', qps=5,
+            speed=1, max_laps=1, identity='structural-relabel', retain_probability=0, seed=0,
+            burst_factor=1, burst_period_seconds=10, burst_duty=.1, diurnal_amplitude=0,
+            diurnal_period_seconds=86400, ramp_up_seconds=0, num_shards=1, shard_index=0,
+            duration_seconds=10, limit=0)
+        (flow.directory / 'playback.json').write_text(json.dumps(snapshot))
         (flow.control / 'status.json').write_text(json.dumps(dict(flow.identity, state='SENDING')))
         return process, None
     client.run_async.side_effect = acknowledge
@@ -70,6 +77,8 @@ def test_collection_policy_is_frozen_and_matches_launch(tmp_path, profile, laten
     assert frozen['LIVE_CLIENT_EVENTS'] == events
     assert frozen['COLLECTION_PROFILE'] == profile
     assert frozen['GRPC_TARGET'] == '127.0.0.1:1234'
+    recorded = json.loads((flow.directory / 'flow-input.json').read_text())['trace']['java_playback']
+    assert recorded == json.loads((flow.directory / 'playback.json').read_text())
 
 
 def test_runtime_collision_is_an_error():

@@ -9,12 +9,13 @@ import unittest
 from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
-from traffic.prefix_lineage import encode,decode,expand
-from traffic.structure import PrefixIndex,capture_shape,generated_shape
+from traffic.prefix_lineage import encode,decode
+from traffic.lineage_model import LineageModel, LineageExpander
+from traffic.structure import PrefixIndex,model_shape,generated_shape
 from traffic.synthetic.derivation import derive_parameters
 from traffic.synthetic.configuration import resolve
 from traffic.synthetic.generator import iter_requests
-from traffic.datasets import profile_path,trace_models
+from traffic.catalog import profile_path, trace_models
 from analysis.traffic_fidelity import audit,load_capture,run,compare,grade,ks,thresholds
 from reporting.fidelity import render,markdown
 
@@ -48,7 +49,7 @@ class TrafficFidelityTest(unittest.TestCase):
                 expected=max(expected,shared)
             self.assertEqual(expected,index.observe(row),row);seen.append(row)
         events=decode(self.raw)[1]
-        self.assertEqual(sorted(Counter(tuple(p[:8]) for _,p in expand(events)).values(),reverse=True),capture_shape(events)['families'])
+        self.assertEqual(sorted(Counter(r.block_labels[:8] for r in LineageExpander(LineageModel.from_wire(*decode(self.raw)))).values(),reverse=True),model_shape(LineageModel.from_wire(*decode(self.raw)))['families'])
 
     def test_joint_uses_depth_and_is_repeatable(self):
         args=dict(seed=42,count=1000,output_tokens=5,sampling='joint')
@@ -74,7 +75,7 @@ class TrafficFidelityTest(unittest.TestCase):
                 self.assertFalse((root/'fidelity.html').exists())
 
     def test_joint_improves_actual_structure(self):
-        real=capture_shape(decode(self.raw)[1]);metrics={}
+        real=model_shape(LineageModel.from_wire(*decode(self.raw)));metrics={}
         for method in ('joint','independent'):
             p,_=resolve(dict(seed=42,count=10000,output_tokens=1,sampling=method),document=self.profile)
             metrics[method]=compare(real,generated_shape(iter_requests(p,'test')))

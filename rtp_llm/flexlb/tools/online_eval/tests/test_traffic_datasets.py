@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from traffic import datasets
+from traffic import datasets, catalog
 from traffic.prefix_lineage import encode
 from scripts.pipeline.derive_master_templates import derive
 
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class TrafficDatasetsTest(unittest.TestCase):
     def test_bundled_captures_have_reproducible_statistics(self):
-        for name, path in datasets.trace_models().items():
+        for name, path in catalog.trace_models().items():
             with self.subTest(name=name):
                 manifest = datasets.read_manifest(path)
                 rebuilt = datasets.build_manifest(path, manifest['source'])
@@ -32,13 +32,13 @@ class TrafficDatasetsTest(unittest.TestCase):
                 self.assertEqual('real', manifest['data_kind'])
                 self.assertIn('model', manifest['source'])
                 self.assertIn('model', manifest['source'])
-        path = datasets.model_path()
+        path = catalog.model_path()
         digest = datasets.read_manifest(path)['sha256']
         fixture = derive(path)
-        profile = json.loads(datasets.profile_path().read_text())
+        profile = json.loads(catalog.profile_path().read_text())
         self.assertEqual(digest, fixture['source_sha256'])
         self.assertEqual(digest, profile['calibration']['model_sha256'])
-        self.assertEqual(path, (datasets.profile_path().parent / profile['source_capture']).resolve())
+        self.assertEqual(path, (catalog.profile_path().parent / profile['source_capture']).resolve())
         self.assertEqual('synthetic', profile['data_kind'])
 
     def test_observed_statistics_and_manual_source_preservation(self):
@@ -79,8 +79,8 @@ class TrafficDatasetsTest(unittest.TestCase):
             model.parent.mkdir()
             model.write_bytes(encode([[0, 512, -1, 0], [1000, 512, 0, 1]]))
             model.with_suffix('.manifest.json').write_text(json.dumps(datasets.build_manifest(model)))
-            with mock.patch.object(datasets, 'DATA', data):
-                selected = datasets.model_path('custom_capture')
+            with mock.patch.object(catalog, 'DATA', data):
+                selected = catalog.model_path('custom_capture')
                 manifest = datasets.read_manifest(selected)
                 specification = dict(kind='trace', model=manifest['codec']['name'],
                     version=str(manifest['codec']['version']), parameters=dict(
@@ -134,15 +134,15 @@ class TrafficDatasetsTest(unittest.TestCase):
                                            'output_tokens': 420}, 'fixed')
             self.assertEqual('7c4a5e5ee52c54c525d30e21a43bb441704406b0b3f09a68df8ebd8df7fb21c8',
                              hashlib.sha256(path.read_bytes()).hexdigest())
-            self.assertEqual(datasets.read_manifest(datasets.model_path())['provenance'],
+            self.assertEqual(datasets.read_manifest(catalog.model_path())['provenance'],
                              semantics['calibration']['provenance'])
 
     def test_bundled_models_are_selectable_and_materialize(self):
         from traffic.traffic_source import materialize, validate_plan
         with tempfile.TemporaryDirectory() as directory:
-            for name in datasets.trace_models():
+            for name in catalog.trace_models():
                 with self.subTest(name=name):
-                    model = datasets.model_path(name)
+                    model = catalog.model_path(name)
                     manifest = datasets.read_manifest(model)
                     specification = dict(kind='trace', model=manifest['codec']['name'],
                         version=str(manifest['codec']['version']), parameters=dict(

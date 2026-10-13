@@ -11,7 +11,6 @@ from pathlib import Path
 
 from traffic.contracts import PRIORITY, JAVA_LENGTH
 
-from traffic.capture_contract import BLOCK_SIZE as BLOCK
 from traffic.lineage_model import LineageExpander, LineageModel
 from traffic.output_sampling import output_sampler, output_semantics
 
@@ -68,6 +67,7 @@ class LineageProjector:
         source_sha256 = hashlib.sha256(raw).hexdigest()
         model = self.decode(raw)
         metadata = model.metadata
+        block_size = metadata.block_size
         if type(parameters.count) is not int or len(model.events) != parameters.count:
             raise ValueError('lineage model count mismatch')
         selected = excluded = 0
@@ -79,7 +79,7 @@ class LineageProjector:
                     excluded += 1
                     continue
                 out.write(json.dumps(dict(rid=f'{namespace}:{i}', ts=ts, il=length,
-                    ol=sampler(i), priority=parameters.priority, cache_key_block_size=BLOCK,
+                    ol=sampler(i), priority=parameters.priority, cache_key_block_size=block_size,
                     input_token_blocks=list(labels)), separators=(',', ':')) + '\n')
                 selected += 1
                 if max_requests is not None and selected >= max_requests:
