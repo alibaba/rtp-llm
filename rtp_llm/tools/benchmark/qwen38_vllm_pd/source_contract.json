@@ -1,0 +1,26 @@
+{
+  "core_version": "0.30.1rc1.dev256+gd6cce94fd",
+  "scope": "same TP2;full QSA/PLE/GDN state;NIXL overlay;FP8 HC bypasses BF16-only fusion;not upstream admission",
+  "files": [
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py",
+      "source_sha256": "cb21dd347d0151eec0f23be251b0c02ec6fbcb29e4bd69114d0a4ddbbb66298a",
+      "patched_sha256": "18fce4889cb54146e34d9985fee374d96b06cc29b73b2eb8840a61415f76468d"
+    },
+    {
+      "path": "distributed/kv_transfer/kv_connector/v1/nixl/connector.py",
+      "source_sha256": "266939229bb5080c6bffbb03209c28ada916687e76ce2d5927c645b952f8ddc5",
+      "patched_sha256": "25c50616a42308dc81136dd15e561dfb52b243b70e8e3d467a21a2850cd55e49"
+    },
+    {
+      "path": "models/qwen4_exp/nvidia/qsa.py",
+      "source_sha256": "b05df87a20a31e7f3d3374631967a39540407efb55ad4ed31580a3bd10ce4ddc",
+      "patched_sha256": "1e865e4b8e3a3af2717cd5ebc4a990ba3646f1ecbe346965bb00cf955138c0bd"
+    },
+    {
+      "path": "models/qwen4_exp/nvidia/hyperconnection.py",
+      "source_sha256": "3cf42672bbf21b97a070fc8901ddb4eacfa66db4e05913187e5431f9ee905601",
+      "patched_sha256": "f350922d340375a839e8bec643f8c7ba4d2b5edd3825e3397e230d43be79a34e"
+    }
+  ]
+}
