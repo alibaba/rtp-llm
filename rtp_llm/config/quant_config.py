@@ -847,6 +847,7 @@ class ModelOptFp4Config(QuantizationConfig):
         self.mixed_attention = kwargs.get("mixed_attention", False)
         self.activation_amax = kwargs.get("activation_amax", None)
         self.online_cache_dir = kwargs.get("online_cache_dir", None)
+        self.source_fp8_block_size = kwargs.get("source_fp8_block_size", None)
         self.require_contiguous_experts = kwargs.get(
             "require_contiguous_experts", False
         )

@@ -26,6 +26,7 @@ class WeightModule(ABC):
     # Descriptors may keep their output on a fixed device independently of the
     # loader's temporary conversion device and the model's execution device.
     resident_device: Optional[str] = None
+    resident_output_devices: Dict[str, str] = {}
     pinned_memory = False
     lora_base_name = "base_model.model.{}.{}.weight"
     lora_A_suffix = "lora_A"
@@ -203,7 +204,7 @@ class WeightModule(ABC):
                 if isinstance(v, dict):
                     __extract_tensor(v)
                 else:
-                    tensor = v.to(device)
+                    tensor = v.to(self.resident_output_devices.get(k, device))
                     if self.pinned_memory:
                         if tensor.device.type != "cpu":
                             raise ValueError(
@@ -230,7 +231,9 @@ class WeightModule(ABC):
                 if isinstance(v, dict):
                     __extract_tensor(v)
                 else:
-                    flat_res.update({k: v.to(device)})
+                    flat_res.update(
+                        {k: v.to(self.resident_output_devices.get(k, device))}
+                    )
 
         __extract_tensor(processed_tensors)
         shape_info = {k: (v.shape, v.dtype) for k, v in flat_res.items()}

@@ -661,6 +661,7 @@ class Qwen4ExpModel(Qwen35Model):
                 shard_indices=shard_indices,
                 total_shards=total_shards,
                 distributed_reduce=tp_size > 1,
+                weight_scale=layer_weights.get(W.qwen4_ple_ngram_scale),
             )
             # Retain the same pinned owners in the weight/export inventory;
             # release pageable copies after this initialization scope finishes.

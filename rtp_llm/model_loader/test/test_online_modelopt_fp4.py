@@ -39,6 +39,41 @@ class Source(TensorSource):
 
 
 class OnlineNvfp4Test(unittest.TestCase):
+    def test_fp8_source_applies_block_scales_before_nvfp4_quantization(self):
+        original = MoeAtomicWeight(
+            W.moe_w2,
+            [CkptWeightInfo("down.{expert_id}.weight")],
+            process_fun=stack_,
+            config=MoeConfig(expert_num=1),
+        )
+        quant = OnlineModelOptFp4MoeWeight(
+            original,
+            ModelOptFp4Config(
+                bits=4,
+                group_size=16,
+                is_quanted=False,
+                source_fp8_block_size=128,
+            ),
+        )
+        weight = torch.full((128, 256), 2.0).to(torch.float8_e4m3fn)
+        scale = torch.tensor([[0.25, 0.5]])
+        source = Source({"down.0.weight": weight, "down.0.weight_scale_inv": scale})
+        config = SimpleNamespace(
+            compute_dtype=torch.bfloat16,
+            moe_pure_tp_preshard=False,
+            get_selected_experts=lambda layer, count: [0],
+        )
+        names = quant.get_tensor_names(0, config)
+        self.assertEqual(names, set(source.values))
+        result = quant._load_raw_tensor(source, 0, "cpu", config)
+        decoded = weight.float() * scale.repeat_interleave(128, 0).repeat_interleave(
+            128, 1
+        )
+        packed, blocks, alpha = quantize_expert_to_nvfp4(decoded.bfloat16())
+        self.assertTrue(torch.equal(result[quant.kernel.name][0], packed))
+        torch.testing.assert_close(result[quant.scale.name][0].float(), blocks.float())
+        torch.testing.assert_close(result[quant.scale_2.name][0], alpha)
+
     def test_e2m1_ties_and_sign(self):
         x = torch.tensor([0.0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0])
         q = _cast_to_e2m1(x)

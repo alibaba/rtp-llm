@@ -34,6 +34,44 @@ FLOAT4_E2M1_MAX = 6.0
 FLOAT8_E4M3_MAX = 448.0
 NVFP4_BLOCK_SIZE = 16
 
+
+class _Fp8ExpertTensorSource(TensorSource):
+    """Decode one checkpoint expert at a time before online NVFP4 conversion."""
+
+    def __init__(self, base: TensorSource, block_size: int):
+        self.base = base
+        self.block_size = block_size
+
+    def load_tensor(self, name, data_type=torch.bfloat16):
+        scale_name = name + "_scale_inv"
+        if not self.base.has_tensor(scale_name):
+            raise ValueError(f"FP8 expert is missing its block scale: {name}")
+        weights = self.base.load_tensor(name, torch.float8_e4m3fn)
+        scales = self.base.load_tensor(scale_name, torch.float32)
+        if len(weights) != len(scales):
+            raise ValueError("FP8 expert weight/scale source counts disagree")
+        result = []
+        for weight, scale in zip(weights, scales):
+            if weight.ndim != 2 or scale.ndim != 2:
+                raise ValueError("FP8 expert weight and block scale must be matrices")
+            expected = tuple(
+                (size + self.block_size - 1) // self.block_size for size in weight.shape
+            )
+            if tuple(scale.shape) != expected:
+                raise ValueError("FP8 expert block scale geometry disagrees")
+            expanded = scale.repeat_interleave(self.block_size, 0).repeat_interleave(
+                self.block_size, 1
+            )[: weight.shape[0], : weight.shape[1]]
+            result.append((weight.float() * expanded).to(data_type))
+        return result
+
+    def has_tensor(self, name):
+        return self.base.has_tensor(name)
+
+    def get_database(self):
+        return self.base.get_database()
+
+
 _E2M1_BOUNDS = torch.tensor([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0])
 _E2M1_ODD_BOUNDS = _E2M1_BOUNDS[[1, 3, 5]]  # banker-rounding ties
 
@@ -217,6 +255,11 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         self.scale_2 = scale_2
         self.input_scale = input_scale
         self._block_size = max(quant_config.group_size(), NVFP4_BLOCK_SIZE)
+        self._source_fp8_block_size = getattr(
+            quant_config, "source_fp8_block_size", None
+        )
+        if self._source_fp8_block_size not in (None, 128):
+            raise ValueError("online NVFP4 supports only block128 FP8 source weights")
         self._cache = None
         if quant_config.online_cache_dir:
             from rtp_llm.model_loader.nvfp4_cache import Nvfp4ExpertCache
@@ -235,7 +278,10 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
         self, layer_id: Optional[int], load_config: LoadConfig
     ) -> set[str]:
         # Only the kernel sub-weight reads tensors from the checkpoint.
-        return self.kernel.get_tensor_names(layer_id, load_config)
+        names = self.kernel.get_tensor_names(layer_id, load_config)
+        if self._source_fp8_block_size is not None:
+            names |= {name + "_scale_inv" for name in names}
+        return names
 
     def _load_raw_tensor(
         self,
@@ -274,6 +320,12 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
             tensor_source = ExpertTensorSource(
                 tensor_source, self.kernel._build_split_config(layer_id, load_config)
             )
+        if self._source_fp8_block_size is not None:
+            if self.kernel.stacked_ckpt_keys:
+                raise ValueError("FP8 source requires split expert checkpoint keys")
+            tensor_source = _Fp8ExpertTensorSource(
+                tensor_source, self._source_fp8_block_size
+            )
         output = None
         for expert_index, expert_id in enumerate(selected):
 
@@ -304,6 +356,11 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
                         expert=int(expert_id),
                         weight=self.kernel.name,
                         source_templates=[item.name for item in self.kernel.weights],
+                        **(
+                            {"source_format": "fp8-block128"}
+                            if self._source_fp8_block_size is not None
+                            else {}
+                        ),
                     ),
                 )
                 scale_2 = scale_2.reshape(())

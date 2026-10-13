@@ -250,10 +250,28 @@ class Qwen4Exp(Qwen35Moe):
         config._qwen4_gdn_bf16 = str_to_bool(
             os.environ.get("RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL", "false")
         )
-        if str_to_bool(os.environ.get(_MOE_FP4_ENV, "false")):
+        config._qwen4_full_fp8_nvfp4 = str_to_bool(
+            os.environ.get("RTP_LLM_QWEN4_FULL_FP8_NVFP4_EXPERIMENTAL", "false")
+        )
+        config._qwen4_fp8_source = False
+        if config._qwen4_full_fp8_nvfp4:
+            if config._qwen4_gdn_bf16:
+                raise ValueError("full FP8 NVFP4 mode cannot keep GDN BF16 weights")
+            config._qwen4_attention_fp8 = True
+        if config._qwen4_full_fp8_nvfp4 or str_to_bool(
+            os.environ.get(_MOE_FP4_ENV, "false")
+        ):
             root = Path(ckpt_path)
             config_json = json.loads((root / "config.json").read_text())
-            if config_json.get("quantization_config"):
+            if config._qwen4_full_fp8_nvfp4:
+                from rtp_llm.models.qwen4_exp.moe_fp8 import (
+                    validate_moe_fp8_checkpoint,
+                )
+
+                index = json.loads((root / "model.safetensors.index.json").read_text())
+                validate_moe_fp8_checkpoint(config_json, index["weight_map"], root)
+                config._qwen4_fp8_source = True
+            elif config_json.get("quantization_config"):
                 raise ValueError(
                     "Qwen4 online NVFP4 requires an unquantized BF16 source"
                 )
@@ -264,9 +282,12 @@ class Qwen4Exp(Qwen35Moe):
                 activation_amax=32.0,
                 online_cache_dir=os.environ.get("RTP_LLM_QWEN4_NVFP4_CACHE_DIR"),
                 require_contiguous_experts=True,
+                source_fp8_block_size=128 if config._qwen4_fp8_source else None,
             )
             config._qwen4_moe_only_fp4 = True
-        if str_to_bool(os.environ.get(_MOE_FP8_ENV, "false")):
+        if not config._qwen4_full_fp8_nvfp4 and str_to_bool(
+            os.environ.get(_MOE_FP8_ENV, "false")
+        ):
             from rtp_llm.models.qwen4_exp.moe_fp8 import validate_moe_fp8_checkpoint
 
             root = Path(ckpt_path)
@@ -378,7 +399,9 @@ class Qwen4Exp(Qwen35Moe):
         config._extra_weight_param_count = (
             table_params + auxiliary_bf16_params + metadata_params
         )
-        table_bytes = float(table_params * 2)
+        table_bytes = float(
+            table_params * (1 if getattr(config, "_qwen4_full_fp8_nvfp4", False) else 2)
+        )
         replicated_bytes = float(auxiliary_bf16_params * 2 + metadata_params * 8)
         config._extra_weight_bytes = table_bytes + replicated_bytes
         # Size/parameter APIs describe the full checkpoint independently of
@@ -399,6 +422,9 @@ class Qwen4Exp(Qwen35Moe):
                 activation_amax=32.0,
                 online_cache_dir=os.environ.get("RTP_LLM_QWEN4_NVFP4_CACHE_DIR"),
                 require_contiguous_experts=True,
+                source_fp8_block_size=(
+                    128 if getattr(model_config, "_qwen4_fp8_source", False) else None
+                ),
             )
             model_config.quant_algo.setQuantAlgo("modelopt_fp4", 4, 16)
         ple_layer_ids = (
