@@ -130,13 +130,8 @@ def _atomic(path, content):
     temporary.replace(path)
 
 
-def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None, attachments=None):
+def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None):
     """Publish one canonical report; manifest is written last as the commit record."""
-    for name, content in (attachments or {}).items():
-        if (not isinstance(name, str) or not name or Path(name).name != name or "\\" in name
-                or name in {".", "..", "manifest.json", "analysis.json", "report-spec.json", "report.html"}
-                or not isinstance(content, str)):
-            raise ValueError("invalid report attachment path or content")
     validate(spec)
     spec = dict(spec)
     spec["report_spec_schema_version"] = REPORT_SPEC_SCHEMA_VERSION
@@ -171,12 +166,6 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         _atomic(directory / name, content)
         files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
         del content
-    for name, content in (attachments or {}).items():
-        if (not isinstance(name, str) or not name or Path(name).name != name
-                or name in files or "\\" in name or name in {".", "..", "manifest.json"}):
-            raise ValueError("invalid report attachment path")
-        _atomic(directory / name, content)
-        files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
     manifest = dict(
         report_manifest_schema_version=1,
         kind=kind,

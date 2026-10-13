@@ -21,13 +21,10 @@ def shifted_panel(panel, anchor):
         return result
     for event in result.get("events", []):
         event["t"] -= anchor
-    shifted = set()
     for series in result.get("series", []):
-        for field in ("points", "statistics_points"):
-            if series.get(field) is not None and id(series[field]) not in shifted:
-                shifted.add(id(series[field]))
-                for point in series[field]:
-                    point["x"] -= anchor
+        if series.get("points") is not None:
+            for point in series["points"]:
+                point["x"] -= anchor
     return result
 
 
