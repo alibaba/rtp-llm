@@ -56,7 +56,7 @@ try:
         _ROWS_PER_E_FLAT,
         _silu_mul_quant_fp32scale,
     )
-    from rtp_llm.models_py.modules.dsv4.quant_layouts import FP8_BLOCK
+    from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
 except Exception as exc:  # noqa: BLE001 - re-raised as a failure below
     _IMPORT_ERROR = exc
 

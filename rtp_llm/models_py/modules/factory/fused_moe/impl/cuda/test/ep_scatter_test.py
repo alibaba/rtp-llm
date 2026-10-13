@@ -39,9 +39,11 @@ class EpScatterTest(TestCase):
                         counts,
                         starts[repeat],
                         storage[repeat, 128:-128],
+                        m_indices_size=rows,
                         num_experts=experts,
                         BLOCK_E=128,
                         BLOCK_EXPERT_NUM=triton.next_power_of_2(experts),
+                        ALIGN_M=128,
                         num_warps=8,
                     )
                 torch.testing.assert_close(
@@ -117,9 +119,11 @@ class EpScatterTest(TestCase):
             counts,
             starts,
             guard[128:128],
+            m_indices_size=0,
             num_experts=experts,
             BLOCK_E=128,
             BLOCK_EXPERT_NUM=experts,
+            ALIGN_M=128,
             num_warps=8,
         )
         torch.testing.assert_close(starts, counts, rtol=0, atol=0)
