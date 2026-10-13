@@ -245,6 +245,7 @@ TEST(GrammarLogitsProcessorTest, InstanceDeclaresMtpAndCommittedStateContract) {
     auto incremental = makeProcessor(backend, "ab");
 
     EXPECT_EQ(incremental->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);
+    EXPECT_TRUE(incremental->mtpCapability().requires_executor_thread);
     ASSERT_TRUE(incremental->committedOutputLen().has_value());
     EXPECT_EQ(incremental->committedOutputLen().value(), 0);
 }

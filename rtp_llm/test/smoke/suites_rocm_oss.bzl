@@ -137,6 +137,12 @@ def rocm_oss_suites():
                 smoke_args = "--external_model_packages atom.plugin.rtpllm.models --tp_size 2 --ep_size 2 --dp_size 1 --act_type BF16 --seq_size_per_block 64 --max_seq_len 8192 --concurrency_limit 8 --kv_cache_mem_mb 24000 --think_mode enabled --enable_cuda_graph 1",
                 gpu_type = ["MI308X-ROCM7"],
             ),
+            smoke_test(
+                name = "rocm_atom_qwen38_ptpc_fp8_tp2_mtp_cg",
+                task_info = "data/model/qwen38/atom_qwen38_ptpc_fp8_tp2_mtp.json",
+                smoke_args = "--external_model_packages atom.plugin.rtpllm.models --tp_size 2 --ep_size 2 --dp_size 1 --act_type BF16 --seq_size_per_block 64 --max_seq_len 8192 --concurrency_limit 8 --kv_cache_mem_mb 24000 --think_mode enabled --enable_cuda_graph 1 --sp_type mtp --sp_model_type atom_qwen4_exp_mtp --sp_checkpoint_path /mnt/nas1/hf/Qwen3.8-Flash-Next-PTPC-FP8 --gen_num_per_cycle 1",
+                gpu_type = ["MI308X-ROCM7"],
+            ),
         ],
     )
 
