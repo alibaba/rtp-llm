@@ -3,6 +3,8 @@ package org.flexlb.engine.grpc.config;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import io.netty.channel.DefaultSelectStrategyFactory;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollEventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.DefaultThreadFactory;
@@ -70,8 +72,18 @@ public class ChannelConfiguration {
         // than the default unbounded MPSC queue. Load is bounded instead at
         // admission: the dispatch executor's admission permit bounds in-flight
         // EnqueueBatch payloads (see DefaultBatchDispatcher).
+        int threads = config.getInternalRuntime().getGrpcClientEventLoopThreads();
+        if (Epoll.isAvailable()) {
+            return new EpollEventLoopGroup(
+                    threads,
+                    null,
+                    DefaultEventExecutorChooserFactory.INSTANCE,
+                    DefaultSelectStrategyFactory.INSTANCE,
+                    RejectedExecutionHandlers.reject(),
+                    PlatformDependent::newMpscQueue);
+        }
         return new NioEventLoopGroup(
-                config.getInternalRuntime().getGrpcClientEventLoopThreads(),
+                threads,
                 null,
                 DefaultEventExecutorChooserFactory.INSTANCE,
                 SelectorProvider.provider(),
