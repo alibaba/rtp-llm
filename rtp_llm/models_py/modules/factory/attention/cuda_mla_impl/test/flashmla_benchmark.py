@@ -31,9 +31,13 @@ if not check_cuda_version():
     )
     sys.exit(1)
 
-from flash_mla import flash_mla_sparse_fwd, flash_mla_with_kvcache, get_mla_metadata
 from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
 
+from rtp_llm.models_py.utils.flash_mla_legacy import (
+    flash_mla_sparse_fwd,
+    flash_mla_with_kvcache,
+    get_mla_metadata,
+)
 from rtp_llm.ops.compute_ops import rtp_llm_ops
 
 

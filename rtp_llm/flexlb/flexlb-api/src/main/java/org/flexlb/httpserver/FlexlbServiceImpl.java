@@ -682,7 +682,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
         if (ctx != null) {
             engineHealthReporter.reportBalancingService(ctx);
-            reportPrioritySchedule(ctx, response);
+            if (!ctx.getRequest().isVitRouteOnly()) {
+                reportPrioritySchedule(ctx, response);
+            }
         }
     }
 
@@ -885,7 +887,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         request.setPriority(schedulingMetadata.priority());
         ctx.setRequest(request);
         ctx.setSchedulingMetadata(schedulingMetadata);
-        requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
+        if (!pb.getVitRouteOnly()) {
+            requestSchedulerReporter.reportRequest(schedulingMetadata.priority());
+        }
 
         if (!pb.getGenerateInput().isEmpty()) {
             ctx.setGenerateInputPb(pb.getGenerateInput());

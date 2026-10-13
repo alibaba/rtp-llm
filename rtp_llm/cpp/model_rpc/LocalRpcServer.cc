@@ -333,7 +333,7 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
     output.reset();
     try {
         output = QueryConverter::transQuery(&input_pb);
-        if (mm_processor_ != nullptr && output->multimodal_inputs) {
+        if (mm_processor_ != nullptr && (output->multimodal_inputs || output->v41_inputs)) {
             RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
             auto mm_res = updateMultimodalFeaturesWithTrace(output, parent_span, server_context);
             if (!mm_res.ok()) {

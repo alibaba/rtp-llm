@@ -1327,18 +1327,15 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 )
                 self.assertEqual(model.seen_kernel_tables["draft"], [[1, 2]])
 
-    def test_micro_batch_requires_forward_micro_batch_during_initialization(
+    def test_micro_batch_uses_regular_forward_when_entry_point_is_absent(
         self,
     ) -> None:
         model = MissingMicroBatchForwardModel()
-        with self.assertRaisesRegex(
-            Exception,
-            "enable_layer_micro_batch requires Python model method forward_micro_batch",
-        ):
-            run_scenario(model, "micro_batch")
+        result = run_scenario(model, "micro_batch")
 
         self.assertEqual(model.micro_batch_calls, 0)
-        self.assertEqual(_FakeEagleMooncakeStore.instances, [])
+        self.assertEqual(model.forward_calls, 1)
+        self.assertEqual(len(result["records"]), 3)
 
     def test_micro_batch_slices_request_metadata_with_block_rows(self) -> None:
         model = CacheStoreForwardModel()
@@ -1462,9 +1459,27 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         ]
         single_group_tables = [[[1, -1], [2, 3], [4, -1]]]
         for scenario, on_cuda, two_dimensional, tags, tables in (
-            ("micro_batch_split_pinned", False, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_cuda", True, False, ["full", "linear"], multi_group_tables),
-            ("micro_batch_split_single_group", False, False, ["default"], single_group_tables),
+            (
+                "micro_batch_split_pinned",
+                False,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_cuda",
+                True,
+                False,
+                ["full", "linear"],
+                multi_group_tables,
+            ),
+            (
+                "micro_batch_split_single_group",
+                False,
+                False,
+                ["default"],
+                single_group_tables,
+            ),
             ("micro_batch_split_2d", False, True, ["default"], single_group_tables),
         ):
             with self.subTest(scenario=scenario):
@@ -1490,7 +1505,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                         self.assertEqual(tensor.device, source.device)
                         self.assertEqual(tensor.is_pinned(), not on_cuda)
                         self.assertTrue(tensor.is_contiguous())
-                        torch.testing.assert_close(tensor.cpu(), expected.narrow(batch_axis, start, count))
+                        torch.testing.assert_close(
+                            tensor.cpu(), expected.narrow(batch_axis, start, count)
+                        )
                 self.assertEqual(
                     [batch["input_lengths"].tolist() for batch in result["batches"]],
                     [[2, 4], [2]],
@@ -1749,6 +1766,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_cp_validates_before_existing_restore_and_store(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
+            return
         events = []
         _FakeEagleMooncakeStore.events = events
 
@@ -1847,6 +1867,13 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             self.assertEqual(model.micro_batch_calls, 0)
             self.assertEqual(model.capture_flags, [])
             quantizer.assert_not_called()
+
+    def assertRocmContextParallelRejected(self, model, scenario: str) -> None:
+        # Context-parallel input processing is a CUDA-only feature: the production
+        # processor rejects ROCm builds by design. The ROCm lane verifies that
+        # guard; the CUDA lane covers the full CP planning and restore logic.
+        with self.assertRaisesRegex(RuntimeError, "Context parallel not supported on ROCm"):
+            run_scenario(model, scenario)
 
     def test_capture_fp8_passes_per_token_per_layer_scale(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
@@ -2049,6 +2076,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_invalid_num_valid_tokens(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens")
+            return
         layout_statuses = []
 
         def allreduce(tensor, op, mode, dest):
@@ -2069,6 +2099,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_local_layout_before_restore(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(MalformedCaptureLayoutModel(), "capture_cp_malformed_layout")
+            return
         layout_statuses = []
 
         def allreduce(tensor, op, mode, dest):
@@ -2096,6 +2129,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_remote_invalid_rank_skips_restore(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp")
+            return
         layout_reduce_calls = []
 
         def allreduce(tensor, op, mode, dest):
@@ -2123,6 +2159,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_rechecks_width_after_restore(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_malformed_restored_width")
+            return
         layout_statuses = []
 
         def allreduce(tensor, op, mode, dest):
@@ -2214,6 +2253,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
     @_skip_rocm_context_parallel
     def test_capture_context_parallel_uses_original_ids_and_lengths(self) -> None:
+        if os.environ.get("TEST_USING_DEVICE") == "ROCM":
+            self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
+            return
         layout_statuses = []
 
         def allreduce(tensor, op, mode, dest):
@@ -2421,9 +2463,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             operational_failure=1,
             bf16_publish=2,
         )
-        self.assertCaptureStatus(
-            result["capture_metrics"], enabled=1, broken=0
-        )
+        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
 
     def test_capture_fp8_rejects_malformed_quantizer_result(
         self,
@@ -2503,9 +2543,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             operational_failure=1,
             fp8_publish=1,
         )
-        self.assertCaptureStatus(
-            result["capture_metrics"], enabled=1, broken=0
-        )
+        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
 
     def assertNonOwnerCapture(
         self, forward_count: int = 1, *, ignore_deferred_errors: bool = False
@@ -2536,9 +2574,14 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertCaptureStatus(metrics, enabled=0, broken=0)
 
     def test_capture_non_owner_does_not_duplicate_success_metrics(self) -> None:
-        for forward_count, ignore_deferred_errors in ((1, False), (3, False), (3, True)):
+        for forward_count, ignore_deferred_errors in (
+            (1, False),
+            (3, False),
+            (3, True),
+        ):
             with self.subTest(
-                forward_count=forward_count, ignore_deferred_errors=ignore_deferred_errors
+                forward_count=forward_count,
+                ignore_deferred_errors=ignore_deferred_errors,
             ):
                 self.assertNonOwnerCapture(
                     forward_count, ignore_deferred_errors=ignore_deferred_errors
@@ -2732,9 +2775,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertTrue(result["core_dump_restored"])
         self.assertCaptureMetricTypes(result)
         metrics = result["capture_metrics"]
-        self.assertEqual(
-            set(metrics), _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS
-        )
+        self.assertEqual(set(metrics), _CAPTURE_QPS_METRICS | _CAPTURE_STATUS_METRICS)
         failed = int(expected_error is not None)
         self.assertCaptureQps(
             metrics,
@@ -2839,7 +2880,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                 finally:
                     setattr(_FakeEagleMooncakeStore, method_name, original)
 
-    def test_capture_publisher_init_failure_raises_and_closes_partial_store(self) -> None:
+    def test_capture_publisher_init_failure_raises_and_closes_partial_store(
+        self,
+    ) -> None:
         _FakeEagleMooncakeStore.fail_warmup = True
         _FakeEagleMooncakeStore.events = []
         model = CacheStoreForwardModel()
@@ -2972,9 +3015,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
             store_failure=1,
             operational_failure=1,
         )
-        self.assertCaptureStatus(
-            result["capture_metrics"], enabled=1, broken=0
-        )
+        self.assertCaptureStatus(result["capture_metrics"], enabled=1, broken=0)
 
     def test_capture_fail_closed_synchronous_admission_error_fails_current_batch(
         self,
@@ -2988,7 +3029,9 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         store = _FakeEagleMooncakeStore.instances[0]
         self.assertEqual(model.capture_flags, [True, True])
         for hidden_states in result["forward_hidden_states"]:
-            torch.testing.assert_close(hidden_states, torch.full_like(hidden_states, 30))
+            torch.testing.assert_close(
+                hidden_states, torch.full_like(hidden_states, 30)
+            )
         self.assertEqual(store.put_attempts, 2)
         self.assertEqual(
             [put["key"] for put in store.puts],

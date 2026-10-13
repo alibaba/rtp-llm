@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/MMTransportMode.h"
 #include "rtp_llm/cpp/model_rpc/MultimodalPbConverter.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalTypes.h"
 #include "rtp_llm/cpp/multimodal_processor/transport/MMRemoteOutputTransportFactory.h"
@@ -42,6 +43,40 @@ public:
         }
         auto request_pb = MultimodalPbConverter::inputsToPb(mm_inputs, request_id);
         return output_transport_->fetch(ip_port, request_pb, server_context);
+    }
+
+    ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,
+                                                         const std::string&      ip_port,
+                                                         int64_t                 timeout_ms,
+                                                         int64_t                 request_id,
+                                                         grpc::ServerContext*    server_context) override {
+        MultimodalInputsPB request;
+        request.set_timeout_ms(timeout_ms);
+        request.set_request_id(request_id);
+        auto* typed = request.mutable_v41_inputs();
+        typed->set_schema_version(1);
+        auto token_types = inputs.token_types.to(torch::kCPU).to(torch::kInt32).contiguous();
+        auto image_mask  = inputs.image_mask.to(torch::kCPU).to(torch::kBool).contiguous();
+        for (int64_t index = 0; index < token_types.numel(); ++index) {
+            typed->add_token_types(token_types.data_ptr<int32_t>()[index]);
+        }
+        for (int64_t index = 0; index < image_mask.numel(); ++index) {
+            typed->add_image_mask(image_mask.data_ptr<bool>()[index]);
+        }
+        for (const auto& image : inputs.images) {
+            auto* output = typed->add_images();
+            output->set_start(image.start);
+            output->set_n_vit_h(image.n_vit_h);
+            output->set_n_vit_w(image.n_vit_w);
+            TensorPbConvert::torchToPb(output->mutable_patches(), image.patches);
+            auto types = image.types.to(torch::kCPU).to(torch::kInt32).contiguous();
+            for (int64_t index = 0; index < types.numel(); ++index) {
+                output->add_types(types.data_ptr<int32_t>()[index]);
+            }
+            output->set_content_sha256(image.content_sha256);
+            output->set_processor_identity(image.processor_identity);
+        }
+        return output_transport_->fetch(ip_port, request, server_context);
     }
 
 private:

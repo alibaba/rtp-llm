@@ -138,13 +138,12 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     auto  entered_future  = entered_promise->get_future();
     auto* task_pool       = environment->cache->task_pool_.get();
     for (size_t worker = 0; worker < worker_count; ++worker) {
-        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND,
-                               [release_future, entered_count, entered_promise]() {
-                                   if (entered_count->fetch_add(1) + 1 == worker_count) {
-                                       entered_promise->set_value();
-                                   }
-                                   release_future.wait();
-                               })) {
+        if (!task_pool->submit(BlockTreeTaskClass::BACKGROUND, [release_future, entered_count, entered_promise]() {
+                if (entered_count->fetch_add(1) + 1 == worker_count) {
+                    entered_promise->set_value();
+                }
+                release_future.wait();
+            })) {
             FAIL() << "failed to submit background task";
         }
     }
@@ -199,6 +198,31 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
 }
 
+TEST(BlockTreeLoaderTest, PrefixValidatorClipsHostMatchBeforeImageInterior) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)}, makeHostPool(1, 4), nullptr);
+    std::vector<GroupSetPtr> groups = {full};
+    BlockTreeCacheConfig     config;
+    config.enable_device_cache = true;
+    config.enable_host_cache   = true;
+    config.enable_disk_cache   = false;
+    auto cache                 = block_tree_cache_test::makeBlockTreeCacheForTest(groups, config);
+    ASSERT_NE(cache, nullptr);
+    const CacheKeysType                        keys = {100, 200, 300};
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    for (auto& row : resources) {
+        row[0].host_block = full->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_NE(row[0].host_block, NULL_BLOCK_IDX);
+    }
+    ASSERT_TRUE(insertGroupSetResources(*cache, keys, resources));
+    // Prefix lengths two and three end inside one image; four is beyond the
+    // actual cache match. Matching must choose one, not just validate request length.
+    auto result = cache->match({100, 200, 300, 400}, [](size_t blocks) { return blocks <= 1 || blocks >= 4; });
+    ASSERT_NE(result.async_context, nullptr);
+    EXPECT_EQ(result.async_context->localMatchedBlocks(), 1u);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    result.async_context.reset();
+}
 
 TEST(BlockTreeLoaderTest, MatchRefreshesOnlyReusedSuffixForEachGroup) {
     constexpr size_t path_length = 4;

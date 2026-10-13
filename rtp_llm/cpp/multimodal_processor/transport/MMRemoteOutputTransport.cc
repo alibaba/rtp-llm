@@ -9,6 +9,9 @@ namespace rtp_llm {
 
 int64_t
 resolveRpcTimeoutMs(const MultimodalInputsPB& request, int64_t default_rpc_timeout_ms, int64_t rpc_timeout_margin_ms) {
+    if (request.timeout_ms() > 0) {
+        return std::min(request.timeout_ms(), default_rpc_timeout_ms);
+    }
     int64_t max_timeout_ms = 0;
     for (const auto& mm_input : request.multimodal_inputs()) {
         const int64_t configured_timeout_ms = mm_input.mm_preprocess_config().mm_timeout_ms();
@@ -59,7 +62,7 @@ ErrorResult<MultimodalOutput> MMRemoteOutputTransport::fetch(const std::string& 
                                                              grpc::ServerContext* server_context) {
     DeadlineBudget  budget(resolveRpcTimeoutMs(request_pb, default_rpc_timeout_ms_, rpc_timeout_margin_ms_),
                           server_context);
-    DeliveryContext context{endpoint, budget, *control_};
+    DeliveryContext context{endpoint, budget, *control_, control_};
 
     std::vector<MMReceiptReader*> advertised;
     for (auto& reader : readers_) {

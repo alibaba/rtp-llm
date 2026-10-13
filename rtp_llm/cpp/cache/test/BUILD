@@ -109,6 +109,7 @@ cc_test(
     srcs = ["KVCacheLayoutViewTest.cc"],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:kv_cache_specs",
         "//rtp_llm/models_py/bindings:op_defs",
