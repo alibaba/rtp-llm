@@ -215,7 +215,8 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
                                                          int                            remaining_tokens,
                                                          int                            reserve_step,
                                                          bool                           enable_reuse_cache,
-                                                         int                            target_batch_size) const {
+                                                         int                            target_batch_size,
+                                                         bool                           reclaim_history) const {
     if (!batch_kv_cache_resource || batch_kv_cache_resource->batchSize() == 0) {
         return 0;
     }
@@ -223,17 +224,27 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     const int current_batch_size = batch_kv_cache_resource->batchSize();
     const int target_width       = std::max(current_batch_size, target_batch_size);
     const int clamped_common_len = std::clamp(common_seq_len, 0, seq_len);
+    reclaim_history              = reclaim_history && canReclaimLinearHistory(target_width, enable_reuse_cache);
 
     // A fresh resource follows initMalloc's two phases. Each group estimates that exact sequence so Linear groups can
     // distinguish the shared common tail from every sequence's private suffix tail.
     if (batch_kv_cache_resource->curBlocksNum() == 0) {
-        return estimateInitialBatchPeakNeedBlocks(
-            seq_len, clamped_common_len, remaining_tokens, reserve_step, enable_reuse_cache, target_width);
+        return estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                  clamped_common_len,
+                                                  remaining_tokens,
+                                                  reserve_step,
+                                                  enable_reuse_cache,
+                                                  target_width,
+                                                  reclaim_history);
     }
 
     // Initialized sequences have the same layout, and all subsequent growth is private per sequence.
-    const int per_sequence_growth = estimatePeakNeedBlocks(
-        batch_kv_cache_resource->cacheResource(0), seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
+    const int per_sequence_growth = estimatePeakNeedBlocks(batch_kv_cache_resource->cacheResource(0),
+                                                           seq_len,
+                                                           remaining_tokens,
+                                                           reserve_step,
+                                                           enable_reuse_cache,
+                                                           reclaim_history);
 
     // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
     // current partial tail before it can diverge.
@@ -824,19 +835,20 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
+bool CoordinatorCacheManager::canReclaimLinearHistory(int batch_size, bool reuse_cache) const {
+    return config_.enable_linear_cache_reclaim && batch_size == 1 && !(cp_slot_mapper_ && cp_slot_mapper_->isSharded())
+           && (!reuse_cache || (block_tree_cache_ && block_tree_cache_->isDeviceCacheEnabled()));
+}
+
 void CoordinatorCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr& resource,
                                                    int                            committed_tokens,
                                                    bool                           reuse_cache) {
-    if (!config_.enable_linear_cache_reclaim || !resource || resource->batchSize() != 1 || committed_tokens <= 0
-        || (cp_slot_mapper_ && cp_slot_mapper_->isSharded())) {
+    if (!resource || committed_tokens <= 0 || !canReclaimLinearHistory(resource->batchSize(), reuse_cache)) {
         return;
     }
     // Use the same ordering as allocation and prefix lookup. Admission must not
     // observe the interval between publication and dropping request references.
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    if (reuse_cache && (!block_tree_cache_ || !block_tree_cache_->isDeviceCacheEnabled())) {
-        return;
-    }
     std::vector<size_t> ends;
     size_t              publish_end = 0;
     bool                advanced    = false;
@@ -1441,12 +1453,19 @@ int CoordinatorCacheManager::estimatePeakNeedBlocks(const KVCacheResource& kv_ca
                                                     int                    seq_len,
                                                     int                    remaining_tokens,
                                                     int                    reserve_step,
-                                                    bool                   enable_reuse_cache) const {
+                                                    bool                   enable_reuse_cache,
+                                                    bool                   reclaim_history) const {
+    reclaim_history = reclaim_history && canReclaimLinearHistory(/*batch_size=*/1, enable_reuse_cache);
     int need_blocks = 0;
     for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
         const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-        need_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
-            seq_len, kv_cache_resource.blocks(tag), remaining_tokens, reserve_step, enable_reuse_cache);
+        need_blocks +=
+            kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(seq_len,
+                                                                                    kv_cache_resource.blocks(tag),
+                                                                                    remaining_tokens,
+                                                                                    reserve_step,
+                                                                                    enable_reuse_cache,
+                                                                                    reclaim_history);
     }
     return need_blocks;
 }
@@ -1456,11 +1475,18 @@ int CoordinatorCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                                 int  remaining_tokens,
                                                                 int  reserve_step,
                                                                 bool enable_reuse_cache,
-                                                                int  target_batch_size) const {
+                                                                int  target_batch_size,
+                                                                bool reclaim_history) const {
+    reclaim_history = reclaim_history && canReclaimLinearHistory(std::max(1, target_batch_size), enable_reuse_cache);
     int peak_blocks = 0;
     for (const auto& group : kv_cache_groups_) {
-        peak_blocks += group->estimateInitialBatchPeakNeedBlocks(
-            seq_len, common_seq_len, remaining_tokens, reserve_step, enable_reuse_cache, target_batch_size);
+        peak_blocks += group->estimateInitialBatchPeakNeedBlocks(seq_len,
+                                                                 common_seq_len,
+                                                                 remaining_tokens,
+                                                                 reserve_step,
+                                                                 enable_reuse_cache,
+                                                                 target_batch_size,
+                                                                 reclaim_history);
     }
     return peak_blocks;
 }

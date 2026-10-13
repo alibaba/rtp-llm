@@ -540,6 +540,136 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimPreservesBorrowedResourcesAn
     }
 }
 
+TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeForFreshContext) {
+    auto config                        = test::makeSimpleLinearCacheConfig(1, 64, 2, DataType::TYPE_FP16);
+    config.linear_step                 = 1;
+    config.enable_linear_cache_reclaim = true;
+    prepareResourceWithCacheConfig(config, {1, 2}, true, RoleType::PDFUSION, {}, 1, 64);
+    stream_->generateConfig()->reuse_cache = true;
+    auto& resource                         = stream_->streamCacheResource();
+    ASSERT_TRUE(stream_->isContextStream());
+    ASSERT_EQ(resource.curBlocksNum(), 0);
+    const int legacy = cache_manager_->estimatePeakNeedBlocks(
+        resource.batch_kv_cache_resource_, 2, 2, 40, 0, true, 1, /*reclaim_history=*/false);
+    EXPECT_LT(stream_->estimatePeakNeedBlocks(40), legacy);
+    EXPECT_EQ(stream_->estimateInitialNeedBlocks(), 1);
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastPreservesUnsupportedOwnershipModes) {
+    for (int guard = 0; guard < 12; ++guard) {
+        SCOPED_TRACE(guard);
+        prepareLinearHistoryResource();
+        auto& resource = stream_->streamCacheResource();
+        commitLinearHistoryToken();
+        switch (guard) {
+            case 0:
+                stream_->generateConfig()->num_return_sequences = 2;
+                break;
+            case 1:
+                stream_->generateConfig()->variable_num_beams = {1, 2};
+                break;
+            case 2:
+                stream_->generateConfig()->pd_separation = true;
+                break;
+            case 3:
+                stream_->setNeedReleaseResource(false);
+                break;
+            case 4:
+                resource.fake_inited_ = true;
+                break;
+            case 5:
+                resource.resource_released_ = true;
+                break;
+            case 6:
+                resource.allocator_load_context_ = std::make_shared<ImmediateAllocatorContext>(true);
+                break;
+            case 7:
+                resource.block_update_mapping_ = {{"linear", 1, 1}};
+                break;
+            case 8:
+                resource.holdKVCacheForPDSep();
+                break;
+            case 9:
+                resource.resource_context_.enable_device_cache = false;
+                resource.resource_context_.enable_memory_cache = true;
+                break;
+            case 10:
+                resource.resource_context_.role_type = RoleType::PREFILL;
+                break;
+            case 11:
+                resource.resource_context_.role_type = RoleType::DECODE;
+                break;
+        }
+        const int target = stream_->maxBatchSize();
+        int       common = std::min(stream_->completeTokenIdsPtr()->commonSeqLength(), stream_->seqLength());
+        if (target > 1) {
+            common = common / 2 * 2;
+        }
+        const int legacy = cache_manager_->estimatePeakNeedBlocks(resource.batch_kv_cache_resource_,
+                                                                  stream_->seqLength(),
+                                                                  common,
+                                                                  40,
+                                                                  0,
+                                                                  resource.reuseCache(),
+                                                                  target,
+                                                                  false);
+        EXPECT_EQ(stream_->estimatePeakNeedBlocks(40), legacy);
+        stream_->generateConfig()->num_return_sequences = 1;
+        stream_->generateConfig()->variable_num_beams.clear();
+        stream_->setNeedReleaseResource(true);
+        resource.fake_inited_       = false;
+        resource.resource_released_ = false;
+        resource.allocator_load_context_.reset();
+        resource.clearKVBlockUpdateMapping();
+        resource.releaseKVCacheForPDSep();
+        resource.resource_context_.enable_device_cache = true;
+        resource.resource_context_.enable_memory_cache = false;
+        resource.resource_context_.role_type           = RoleType::PDFUSION;
+        stream_->releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimRequiresSingleFutureBatch) {
+    prepareLinearHistoryResource();
+    auto&      resource = stream_->streamCacheResource();
+    const auto before   = resource.kvCache().blocks(0, "linear");
+    // One physical row today does not authorize retirement for a future fork.
+    stream_->generateConfig()->num_return_sequences = 2;
+    ASSERT_EQ(resource.kvCache().batchSize(), 1);
+    ASSERT_EQ(stream_->maxBatchSize(), 2);
+    resource.reclaimLinearHistory(12);
+    stream_->setIsContextStream(false);
+    resource.drainLinearHistory();
+    EXPECT_EQ(resource.kvCache().blocks(0, "linear"), before);
+    stream_->generateConfig()->num_return_sequences = 1;
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryAsyncReservationJoinsOnlyAtPhysicalGrowth) {
+    for (bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        prepareLinearHistoryResource(enabled);
+        commitLinearHistoryToken();
+        ASSERT_TRUE(stream_->streamCacheResource().incrKVBlock().ok());
+        ASSERT_EQ(stream_->seqLength(), 13);
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_EQ(resource.kvCache().blocks(0, "linear").size(), 7u);
+        stream_->incPendingAsyncBookkeeping();
+        // Missing publication must not silently allocate against an unknown
+        // committed watermark when the new forecast policy is active.
+        EXPECT_EQ(stream_->needsAsyncBookkeepingJoinForKvReservation(), enabled);
+        GenerateStream::NormalAsyncDeviceState state;
+        state.next_real_seq_len = 14;
+        stream_->setNormalAsyncDeviceState(state);
+        EXPECT_EQ(resource.singleBatchNeedBlocks(14, 0), 0);
+        EXPECT_FALSE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+        state.next_real_seq_len = 15;
+        stream_->setNormalAsyncDeviceState(state);
+        EXPECT_GT(resource.singleBatchNeedBlocks(15, 0), 0);
+        EXPECT_EQ(stream_->needsAsyncBookkeepingJoinForKvReservation(), enabled);
+        stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+}
+
 TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitchesEnv) {
     {
         autil::EnvGuard env_guard("RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES", "0");

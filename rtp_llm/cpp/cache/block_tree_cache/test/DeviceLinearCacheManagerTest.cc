@@ -471,6 +471,67 @@ TEST_F(DeviceLinearCacheManagerTest, ReclaimRespectsModelTailPolicyAndPartialChe
     EXPECT_EQ(group.historyReclaimEnd(-1), 0u);
 }
 
+TEST_F(DeviceLinearCacheManagerTest, HistoryForecastBoundsDecodeButPreservesPrefillPeak) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 1);
+    ASSERT_TRUE(group.init());
+    const int short_peak = group.estimateInitialBatchPeakNeedBlocks(8, 8, 128, 0, true, 1, true);
+    const int long_peak  = group.estimateInitialBatchPeakNeedBlocks(8, 8, 4096, 0, true, 1, true);
+    EXPECT_EQ(short_peak, long_peak);
+    EXPECT_LE(long_peak, 5);
+    EXPECT_LT(long_peak, group.estimateInitialBatchPeakNeedBlocks(8, 8, 4096, 0, true, 1, false));
+    // A long prompt must be materialized before any decode checkpoint can retire.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(128, 128, 0, 0, true, 1, true), 32);
+    EXPECT_GE(group.estimateInitialBatchPeakNeedBlocks(128, 128, 4096, 0, true, 1, true), 32);
+    // Forecasting history reclaim must not change the off path or batch expansion.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(8, 8, 128, 0, true, 2, true),
+              group.estimateInitialBatchPeakNeedBlocks(8, 8, 128, 0, true, 2, false));
+}
+
+TEST_F(DeviceLinearCacheManagerTest, HistoryForecastCoversRealAllocationWithPinnedInitialBlocks) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    for (const int stride : {1, 2, 3}) {
+        for (const int tail : {1, 3}) {
+            auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+            policy.active_tail_blocks = tail;
+            DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, stride, policy);
+            ASSERT_TRUE(group.init());
+            for (const int reserve : {0, 2}) {
+                for (const int initial : {3, 4, 5}) {
+                    SCOPED_TRACE(::testing::Message() << "stride=" << stride << " tail=" << tail
+                                                      << " reserve=" << reserve << " initial=" << initial);
+                    BlockIds blocks;
+                    ASSERT_TRUE(group.malloc(blocks, initial, true, reserve));
+                    BlockIndicesType pinned;
+                    for (auto block : blocks.blocks()) {
+                        if (!isNullBlockIdx(block)) {
+                            pinned.push_back(block);
+                        }
+                    }
+                    group.reference(pinned);
+                    const int baseline = static_cast<int>(pool->referencedBlocksNum());
+                    const int forecast =
+                        group.estimatePeakNeedBlocks(initial, blocks.blocks(), 128, reserve, true, true);
+                    int observed_peak = baseline;
+                    for (int length = initial + 1; length <= initial + 128; ++length) {
+                        group.reclaimHistory(blocks, group.historyReclaimEnd(length - 1));
+                        ASSERT_TRUE(group.malloc(blocks, length, true, reserve));
+                        observed_peak = std::max(observed_peak, static_cast<int>(pool->referencedBlocksNum()));
+                        group.removeSkippedBlocks(blocks, true, reserve);
+                    }
+                    EXPECT_GE(forecast, observed_peak - baseline);
+                    EXPECT_LE(forecast, 7);
+                    group.unreference(blocks.blocks());
+                    group.unreference(pinned);
+                    EXPECT_EQ(pool->freeBlocksNum(), 9u);
+                }
+            }
+        }
+    }
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

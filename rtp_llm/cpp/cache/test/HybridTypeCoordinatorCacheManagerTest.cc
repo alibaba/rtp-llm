@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -307,14 +308,16 @@ static int estimateBatchPeakForSingleSequence(const CoordinatorCacheManager& all
                                               int                            seq_len,
                                               int                            remaining_tokens,
                                               int                            reserve_step,
-                                              bool                           enable_reuse_cache) {
+                                              bool                           enable_reuse_cache,
+                                              bool                           reclaim_history = false) {
     return allocator.estimateBatchPeakNeedBlocks(batch_resource,
                                                  seq_len,
                                                  /*common_seq_len=*/seq_len,
                                                  remaining_tokens,
                                                  reserve_step,
                                                  enable_reuse_cache,
-                                                 /*target_batch_size=*/1);
+                                                 /*target_batch_size=*/1,
+                                                 reclaim_history);
 }
 
 static size_t countValidBlocks(const BlockIndicesType& blocks) {
@@ -2381,6 +2384,117 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DecodeIncrMallocAppliesSparseClean
     allocator->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(linear_pool->freeBlocksNum(), 6u);
     EXPECT_EQ(full_pool->freeBlocksNum(), 6u);
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastRequiresConfigAndRequestOptIn) {
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        auto config                        = makeTinyHybridConfig();
+        config.enable_linear_cache_reclaim = enabled;
+        config.linear_step                 = 1;
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        auto resource = makeBatchResource(1, config, {});
+
+        const int legacy = estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true);
+        EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, false), legacy);
+        const int forecast = estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, true);
+        if (enabled) {
+            EXPECT_LT(forecast, legacy);
+        } else {
+            EXPECT_EQ(forecast, legacy);
+        }
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastPreservesInitialPrefillPeak) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto resource = makeBatchResource(1, config, {});
+
+    // The complete prompt is allocated before any forward/commit can retire a checkpoint: six blocks per group.
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 0, 0, true, true), 12);
+    EXPECT_GE(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, true), 12);
+    EXPECT_LT(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, true),
+              estimateBatchPeakForSingleSequence(*allocator, resource, 24, 80, 0, true, false));
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastFallsBackForUnsafeLayoutsAndStorage) {
+    struct Case {
+        int  current_width;
+        int  target_width;
+        bool cp_sharded;
+        bool device_cache;
+    };
+    for (const auto& test_case :
+         std::vector<Case>{{1, 2, false, true}, {2, 1, false, true}, {1, 1, true, true}, {1, 1, false, false}}) {
+        SCOPED_TRACE(::testing::Message()
+                     << "current=" << test_case.current_width << " target=" << test_case.target_width
+                     << " cp=" << test_case.cp_sharded << " device_cache=" << test_case.device_cache);
+        auto config                        = makeTinyHybridConfig();
+        config.enable_linear_cache_reclaim = true;
+        config.linear_step                 = 1;
+        auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+        KVCacheConfig kv_config;
+        kv_config.enable_device_cache = test_case.device_cache;
+        allocator->setBlockTreeCacheConfigForTest(kv_config);
+        ASSERT_TRUE(allocator->init());
+        if (test_case.cp_sharded) {
+            allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, 2, config.seq_size_per_block));
+        }
+        auto resource = makeBatchResource(test_case.current_width, config, {});
+        auto estimate = [&](bool reclaim_history) {
+            return allocator->estimateBatchPeakNeedBlocks(
+                resource, 24, 24, 80, 0, true, test_case.target_width, reclaim_history);
+        };
+        EXPECT_EQ(estimate(true), estimate(false));
+
+        // The same guard applies after initial allocation and before a future batch expansion.
+        for (int batch = 0; batch < test_case.current_width; ++batch) {
+            resource->setBatchBlocks(batch, "linear", {1, 2, 3, 4, 5, 6});
+            resource->setBatchBlocks(batch, "full1", {1, 2, 3, 4, 5, 6});
+        }
+        EXPECT_EQ(estimate(true), estimate(false));
+    }
+}
+
+TEST_F(HybridTypeCoordinatorCacheManagerTest, ReclaimPeakForecastDoesNotCreditSharedOrLoadPinnedCurrentBlocks) {
+    auto config                        = makeTinyHybridConfig();
+    config.enable_linear_cache_reclaim = true;
+    config.linear_step                 = 1;
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    ASSERT_TRUE(allocator->init());
+    auto       linear_pool = poolForTag(*allocator, "linear");
+    auto       full_pool   = poolForTag(*allocator, "full1");
+    const auto linear      = allocateReferencedBlocks(linear_pool, 6);
+    const auto full        = allocateReferencedBlocks(full_pool, 6);
+    auto       resource    = makeBatchResource(1, config, {100, 101, 102, 103, 104, 105});
+    resource->mutableBlockIds(0, "linear").assign(linear);
+    resource->mutableBlockIds(0, "full1").assign(full);
+
+    // A second request and an in-flight load keep the current history active even if this request retires it later.
+    linear_pool->incRef(linear);
+    linear_pool->incTreeRef(linear, BlockTreeRefType::LOAD);
+    const auto available_before = allocator->availableBlocksNum();
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 0, 0, true, true), 0);
+    EXPECT_EQ(estimateBatchPeakForSingleSequence(*allocator, resource, 24, 4, 0, true, true), 2);
+    const int forecast = estimateBatchPeakForSingleSequence(*allocator, resource, 24, 40, 0, true, true);
+    // Ten future FULL blocks and at least one future LINEAR allocation cannot use any current-block release credit.
+    EXPECT_GE(forecast, 11);
+    EXPECT_LT(forecast, estimateBatchPeakForSingleSequence(*allocator, resource, 24, 40, 0, true, false));
+    EXPECT_EQ(allocator->availableBlocksNum(), available_before);
+    EXPECT_EQ(resource->blocks(0, "linear"), linear);
+    for (const auto block : linear) {
+        EXPECT_EQ(linear_pool->refCount(block), 3u);
+    }
+
+    linear_pool->decTreeRef(linear, BlockTreeRefType::LOAD);
+    linear_pool->decRef(linear);
+    linear_pool->decRef(linear);
+    full_pool->decRef(full);
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, EstimatePeakNeedBlocks) {

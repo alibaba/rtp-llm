@@ -80,7 +80,8 @@ int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                             const BlockIndicesType& current_block_indices,
                                             int                     remaining_tokens,
                                             int                     reserve_step,
-                                            bool                    enable_reuse_cache) const {
+                                            bool                    enable_reuse_cache,
+                                            bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     int allocated_blocks = 0;
     for (const auto block_index : current_block_indices) {
@@ -94,7 +95,8 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                         int  remaining_tokens,
                                                         int  reserve_step,
                                                         bool enable_reuse_cache,
-                                                        int  target_batch_size) const {
+                                                        int  target_batch_size,
+                                                        bool /*reclaim_history*/) const {
     (void)enable_reuse_cache;
     const int batch_size    = std::max(target_batch_size, 1);
     const int common_blocks = needBlocksNum(common_seq_len, 0);
