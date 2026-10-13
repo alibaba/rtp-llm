@@ -55,7 +55,7 @@ GATE = GatePlugin(
 
 普通现场门禁不调用 `publish()`。它用于已经明确得到判定的离线发布：冻结 → 指标投影 → 校验冻结文件 → 展示。该方法从不隐式调用分析。显式离线重判先经 `load_reinterpretation` 检查源证据与新输出目录，再调用 `evaluate()`，随后发布。报告错误或指标发布错误不会将已冻结 PASS 改写为 FAIL，也不能把已冻结 FAIL 改成 PASS。
 
-报告的共用时间轴、运行信息补充和 bundle 写入由 `reporting.gate_report.write_gate_report` 承担。case 提供业务 spec 与已有来源信息，调用公共发布函数；不复制 run/离线两个分支。报告时间轴与门禁窗口的职责见[报告契约](reporting.md)。
+报告回调收到已校验的 `ViewDefinition`，通过属性访问配置；声明校验器也收到同一对象，区块列数通过 `validate_section_contract` 验证。报告的共用时间轴、运行信息补充和 bundle 写入由 `reporting.gate_report` 承担。case 提供业务 spec 与已有来源信息，明确选择在线 `write_gate_report(..., run=...)` 或离线 `write_archived_gate_report`；装配逻辑保留在公共发布函数中。报告时间轴与门禁窗口的职责见[报告契约](reporting.md)。
 
 分阶段检查直接使用 `StageHandler` 和 `analysis.checks` 的测量/比较接口，不必额外构造一个整体 `GatePlugin`。专属协议来源通过 `CASE.sources` 注册；数据来源与指标合同见[指标契约](metrics.md)。
 

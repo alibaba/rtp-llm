@@ -15,11 +15,11 @@ def build_spec(payload, presentation):
     observations = store.document["metrics"]
     metadata = payload["producer_results"]["ha_evidence"]
     curves = []
-    for curve_id, style in presentation["charts"]["curves"].items():
-        identity = style["metric_id"]
+    for curve_id, style in presentation.charts.curves.items():
+        identity = style.metric_id
         for row in observations.get(identity, []):
             labels = row["labels"]
-            if any(labels.get(k) != v for k,v in style["labels"].items()):
+            if any(labels.get(k) != v for k,v in style.labels):
                 continue
             curves.append(materialize(
                 curve_id, style, row["points"], origin=anchor, labels=labels,
@@ -38,7 +38,7 @@ def build_spec(payload, presentation):
         + [1]
     )
     spec = dict(
-        run_id=payload["id"], title=title(payload["id"]), subtitle=presentation["report"]["subtitle"],
+        run_id=payload["id"], title=title(payload["id"]), subtitle=presentation.report.subtitle,
         timeOriginLabel="秒；t=0 为 workload 运行开始", timeAxis=dict(min=0, max=maximum),
         kpis=[dict(id="case.request_count", label=KPI_LABELS["request_count"], value=metadata["request_count"])],
         panels=panels, sections=sections,
@@ -53,9 +53,9 @@ def build_spec(payload, presentation):
 def write_report(directory, payload, presentation):
     spec = canonical_spec(build_spec(payload, presentation), payload)
     bundle = write_bundle(
-        directory, "run", payload["id"] + "-" + presentation["report"]["id"],
+        directory, "run", payload["id"] + "-" + presentation.report.identity,
         dict(payload, report_view="master_ha_failover.yaml"),
-        spec, meta=provenance_from(payload), producer=presentation["report"]["producer"],
+        spec, meta=provenance_from(payload), producer=presentation.report.producer,
     )
     return bundle / "report.html"
 

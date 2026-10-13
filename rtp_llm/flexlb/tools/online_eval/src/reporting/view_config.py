@@ -6,10 +6,12 @@ from pathlib import Path
 from case_api.registry import view_capabilities
 from reporting.view_schema import (
     validate_bindings, validate_default, validate_monitoring_policy,
-    validate_selected, validate_structure, validate_text,
+    validate_selected, validate_structure, validate_text, validate_panels,
 )
 from scenario.loader import load_document
 from scenario.validation import fail
+from reporting.view_model import ViewDefinition
+from reporting.events import validate_events
 
 VIEWS = Path(__file__).resolve().parents[2] / "config/report_views"
 DEFAULT_VIEW = "default.yaml"
@@ -29,12 +31,18 @@ def view(name):
     if (name == DEFAULT_VIEW) != (kind == "default"):
         fail(path, "default kind is reserved for default.yaml")
     validator(path, data, fail)
-    from reporting.events import validate_events
     validate_events(path, data.get("charts", {}), fail)
+    validate_text(path, data, fail)
+    try:
+        definition = ViewDefinition.read(data)
+    except (ValueError, TypeError) as exc:
+        fail(path, str(exc))
+    if kind == "selected":
+        validate_panels(path, definition, fail)
     query_plan = None
     capability = view_capabilities().get(name)
     if capability is not None:
-        capability.validator(path, data, fail)
+        capability.validator(path, definition, fail)
     if "metrics" in data:
         from monitoring.query_plan import load_plan
 
@@ -42,11 +50,10 @@ def view(name):
     if "curves" in data.get("charts", {}):
         if query_plan is None:
             fail(path, "curves require metrics.query_plan")
-        validate_bindings(path, data, query_plan, fail)
+        validate_bindings(path, definition, query_plan, fail)
     if kind == "selected":
         validate_monitoring_policy(path, data, query_plan, fail)
-    validate_text(path, data, fail)
-    return data
+    return definition
 
 
 def declaration(value, *, kind, path="reports"):

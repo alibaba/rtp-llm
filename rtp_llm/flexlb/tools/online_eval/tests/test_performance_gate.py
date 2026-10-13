@@ -1,3 +1,4 @@
+from reporting.view_model import ViewDefinition
 import copy
 import json
 import subprocess
@@ -367,7 +368,7 @@ class PerformanceGateTest(unittest.TestCase):
         from cases.master_performance.panels import report_panels
         prepare = metric_curves
 
-        presentation = copy.deepcopy(view("master_performance.yaml"))
+        presentation = view("master_performance.yaml").to_dict()
         presentation["charts"]["curves"]["client/actual_send_qps"]["name"] = "YAML sent rate"
         style = presentation["charts"]["curves"].pop("client/actual_send_qps")
         presentation["charts"]["curves"]["sent_curve"] = style
@@ -379,8 +380,8 @@ class PerformanceGateTest(unittest.TestCase):
             archive.write_text(json.dumps(dict(start=100, end=110, step=1, targets={}, queries={
                 "client-flow/actual_send_qps": dict(promql="sum(rate(flexlb_client_actual_send_total[10s]))",
                     result=[dict(metric={}, values=[[100, 7.5], [101, 8.5]])])})))
-            curves, _ = prepare(d, e, analyze(e), presentation)
-        selected = report_panels(curves, e["criteria"], presentation)
+            curves, _ = prepare(d, e, analyze(e), ViewDefinition.read(presentation))
+        selected = report_panels(curves, e["criteria"], ViewDefinition.read(presentation))
         self.assertEqual(selected[1]["series"][0]["name"], "YAML sent rate")
         self.assertEqual(selected[1]["series"][0]["metric_id"], "client/actual_send_qps")
         self.assertEqual(selected[1]["series"][0]["curve_id"], "sent_curve")

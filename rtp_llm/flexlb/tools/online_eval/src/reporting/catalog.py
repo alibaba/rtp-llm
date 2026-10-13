@@ -20,11 +20,6 @@ TONE_TO_COLOR = {
     "secondary": PALETTE[4], "tertiary": PALETTE[6],
     "quaternary": PALETTE[7], "neutral": "#8c8c8c",
 }
-KPI_TONE_COLOR = {
-    "success": PALETTE[1], "danger": PALETTE[3],
-    "warn": PALETTE[2], "warning": PALETTE[2],
-    "info": PALETTE[0], "primary": PALETTE[0],
-}
 
 
 def series_color(tone, index):

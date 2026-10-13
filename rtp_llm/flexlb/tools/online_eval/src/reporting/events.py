@@ -39,7 +39,7 @@ def project_events(presentation, *, origin, phases=(), events=()):
     if type(origin) not in (int, float) or not math.isfinite(origin):
         raise ValueError('event origin must be finite epoch seconds')
     projected = []
-    for identity, declaration in presentation['charts'].get('events', {}).items():
+    for identity, declaration in presentation.charts.events.items():
         source = declaration['source']
         rows = (row for row in phases if row['stage'] == declaration['stage']
                 and row['event'] == declaration['boundary']) if source == 'stage' else (
@@ -61,9 +61,10 @@ def attach_events(spec, presentation, *, origin, phases=(), events=()):
     markers = project_events(presentation, origin=origin, phases=phases, events=events)
     spec['timeOriginEpochS'] = origin
     spec['events'] = markers
-    descriptors = {panel['id']: panel for panel in presentation['charts'].get('panels', [])}
+    descriptors = {panel.id: panel for panel in presentation.charts.panels}
     for panel in spec['panels']:
-        ids = descriptors.get(panel['id'], {}).get('event_ids', presentation['charts'].get('event_ids', []))
+        descriptor = descriptors.get(panel['id'])
+        ids = descriptor.event_ids if descriptor is not None and descriptor.event_ids is not None else presentation.charts.event_ids
         panel['events'] = [copy.deepcopy(event) for event in markers if event['id'] in ids]
     return spec
 
@@ -71,6 +72,6 @@ def attach_events(spec, presentation, *, origin, phases=(), events=()):
 def validate_stage_sources(presentation, stage_ids, path):
     """A missing runtime occurrence is allowed; an unknown configured stage is not."""
     from scenario.validation import fail
-    for identity, declaration in presentation['charts'].get('events', {}).items():
+    for identity, declaration in presentation.charts.events.items():
         if declaration['source'] == 'stage' and declaration['stage'] not in stage_ids:
             fail(path, 'event ' + identity + ' references unknown stage ' + declaration['stage'])

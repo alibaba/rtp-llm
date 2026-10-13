@@ -24,7 +24,7 @@ def test_view_loads_its_metric_plan_once(filename):
 @pytest.mark.parametrize('filename', ['cache_scale_in.yaml', 'master_ha_failover.yaml'])
 @pytest.mark.parametrize('metric_id', [None, [], {}, 'mock/does_not_exist'])
 def test_invalid_metric_binding_reports_configuration_error(filename, metric_id):
-    data = copy.deepcopy(view(filename))
+    data = view(filename).to_dict()
     identity = next(iter(data['charts']['curves']))
     style = data['charts']['curves'][identity]
     if metric_id is None:
@@ -38,7 +38,7 @@ def test_invalid_metric_binding_reports_configuration_error(filename, metric_id)
 
 
 def test_curves_require_an_explicit_plan():
-    data = copy.deepcopy(view('cache_scale_in.yaml'))
+    data = view('cache_scale_in.yaml').to_dict()
     del data['metrics']['query_plan']
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='invalid metric selection fields'):
@@ -53,7 +53,7 @@ def test_curves_require_an_explicit_plan():
     ({'unknown': True}, 'invalid metric presentation'),
 ])
 def test_curve_styles_keep_strict_types_and_whitelists(change, message):
-    data = copy.deepcopy(view('cache_scale_in.yaml'))
+    data = view('cache_scale_in.yaml').to_dict()
     next(iter(data['charts']['curves'].values())).update(change)
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match=message):
@@ -109,7 +109,7 @@ def test_ha_count_and_rate_boundaries():
 
 @pytest.mark.parametrize('filename', ['cache_scale_in.yaml', 'master_ha_failover.yaml'])
 def test_bad_panel_identity_or_binding_has_configuration_error(filename):
-    data = copy.deepcopy(view(filename))
+    data = view(filename).to_dict()
     for field, value, message in [('id', [], 'invalid.*panel'),
                                   ('curve_ids', ['missing'], 'invalid.*panel')]:
         broken = copy.deepcopy(data)

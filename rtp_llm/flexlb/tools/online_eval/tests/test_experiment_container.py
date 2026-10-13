@@ -203,7 +203,7 @@ def test_unrendered_default_view_uses_frozen_declaration_and_metrics(tmp_path):
     analysis = payload(series)
     analysis['statistic_sources'] = sources
     frozen = definition()
-    frozen['views'] = {'default.yaml': view('default.yaml')}
+    frozen['views'] = {'default.yaml': view('default.yaml').to_dict()}
     expected = render(build_spec(analysis, tmp_path))
     published = publish_run(tmp_path, frozen, execution(), analysis=analysis)
     with ExperimentReader(published['experiment']) as reader, \

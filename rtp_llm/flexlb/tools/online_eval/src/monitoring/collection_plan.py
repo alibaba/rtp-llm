@@ -42,9 +42,9 @@ def select_plan(plan, requirements, presentations):
     known = definitions(plan)
     consumers = {"gate": sorted(requirements), "report": [], "diagnostic": []}
     for view in presentations:
-        consumers["report"].extend(style["metric_id"] for style in
-            view.get("charts", {}).get("curves", {}).values())
-        consumers["diagnostic"].extend(view.get("metrics", {}).get("diagnostic_only", []))
+        consumers["report"].extend(style.metric_id for style in
+            view.charts.curves.values())
+        consumers["diagnostic"].extend(view.metrics.diagnostic_only if view.metrics else [])
     consumers = {key: sorted(set(values)) for key, values in consumers.items()}
     demanded = set().union(*map(set, consumers.values()))
     if demanded - set(known):

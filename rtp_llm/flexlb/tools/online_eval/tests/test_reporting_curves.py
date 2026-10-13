@@ -8,31 +8,32 @@ import pytest
 
 from case_api import registry
 from reporting.curves import materialize, project_panels
+from reporting.view_model import ViewDefinition, CurvePresentation
 
 
 def presentation():
-    return {'charts': {'curves': {
+    return ViewDefinition.read({'kind':'selected', 'report':{'subtitle':'test'}, 'sections':{}, 'charts': {'curves': {
         'a': dict(metric_id='metric/a', name='A', group='G', axis='y', unit='ms', color='blue'),
         'b': dict(metric_id='metric/b', name='B', group='G', axis='y', unit='ms', color='red'),
     }, 'panels': [dict(id='p', title='Panel', caption='Observed', empty_caption='Missing',
-        curve_ids=['b', 'a'], axes={'y': dict(title='ms', position='left')})]}}
+        curve_ids=['b', 'a'], axes={'y': dict(title='ms', position='left')})]}})
 
 
 @pytest.mark.parametrize('values,caption', [([], 'Missing'), ([None], 'Missing'),
     ([float('nan'),float('inf')], 'Missing'), ([0], 'Observed 缺少有效曲线：B。')])
 def test_null_nan_and_zero_use_one_empty_panel_rule(values, caption):
     config = presentation()
-    curves = [materialize('a', config['charts']['curves']['a'], list(enumerate(values)))]
+    curves = [materialize('a', config.charts.curves['a'], list(enumerate(values)))]
     assert project_panels(curves, config)[0]['caption'] == caption
 
 
 def test_materialization_and_projection_keep_labels_scaling_provenance_and_order():
     config = presentation()
-    style = dict(config['charts']['curves']['a'], name='{master} · A', group='{master}', scale=1000, source_unit='s')
+    style = dict(config.charts.curves['a'].to_dict(), name='{master} · A', group='{master}', scale=1000, source_unit='s')
     provenance = {'source_type': 'prometheus'}
-    a = materialize('a', style, [[100, .5], [101, None]], origin=100,
+    a = materialize('a', CurvePresentation.read(style), [[100, .5], [101, None]], origin=100,
                     labels={'master': 'A'}, provenance=provenance)
-    b = materialize('b', config['charts']['curves']['b'], [[0, 1]])
+    b = materialize('b', config.charts.curves['b'], [[0, 1]])
     original = copy.deepcopy([a,b])
     panel = project_panels([a,b], config)[0]
     assert [curve['curve_id'] for curve in panel['series']] == ['b', 'a']
@@ -41,7 +42,7 @@ def test_materialization_and_projection_keep_labels_scaling_provenance_and_order
     assert a['provenance'] == provenance
     assert [a,b] == original
     panel['axes']['y']['title'] = 'changed'
-    assert config['charts']['panels'][0]['axes']['y']['title'] == 'ms'
+    assert dict(config.charts.panels[0].axes)['y'].title == 'ms'
 
 
 def test_configuration_gate_lines_do_not_hide_missing_measurements():
@@ -49,11 +50,13 @@ def test_configuration_gate_lines_do_not_hide_missing_measurements():
     from reporting.view_config import view
 
     config = view('master_performance.yaml')
-    config['charts']['curves']['mock/rtp_llm_context_tps_engine_mean/P'].pop('color')
+    raw = config.to_dict()
+    raw['charts']['curves']['mock/rtp_llm_context_tps_engine_mean/P'].pop('color')
+    config = ViewDefinition.read(raw)
     panels = report_panels([], {'engine_tps': {'mock/rtp_llm_context_tps':10}}, config)
     panel = next(p for p in panels if p['id'] == 'engine-tps')
-    descriptor = next(p for p in config['charts']['panels'] if p['id'] == 'engine-tps')
-    assert panel['caption'] == descriptor['empty_caption']
+    descriptor = next(p for p in config.charts.panels if p.id == 'engine-tps')
+    assert panel['caption'] == descriptor.empty_caption
     assert panel['series'][0]['source_type'] == 'configuration'
     assert panel['series'][0]['color']
 
@@ -93,15 +96,16 @@ def test_shared_capability_can_be_reused_by_registered_programs():
 def test_selected_presets_and_visibility_reach_the_html(tmp_path):
     from reporting import write_bundle
 
-    config = presentation()
+    config = presentation().to_dict()
     config['charts']['curves']['b']['hidden'] = True
     config['charts']['curves']['b']['group'] = 'Other'
     config['charts']['panels'][0]['presets'] = {
         'Visible': {'visible': True}, 'Named': {'names': ['B']},
         'Group': {'groups': ['Other']}, 'Substring': {'contains': ['A']},
     }
+    config = ViewDefinition.read(config)
     curves = [materialize(key, style, [[0, 0]])
-              for key, style in config['charts']['curves'].items()]
+              for key, style in config.charts.curves.items()]
     panels = project_panels(curves, config)
     assert panels[0]['presets'] == {
         'Visible': ['A'], 'Named': ['B'], 'Group': ['B'], 'Substring': ['A'],
@@ -121,7 +125,7 @@ def test_catalog_additions_do_not_force_unused_collection(name):
     from reporting.view_config import view
     from scenario.loader import ScenarioError
 
-    data = view(name + '.yaml')
+    data = view(name + '.yaml').to_dict()
     plan = load_plan(name + '.yaml')
     plan['sources']['master']['new_query'] = {'promql': 'new_query'}
     with mock.patch('monitoring.query_plan.load_plan', return_value=plan):
@@ -146,7 +150,7 @@ def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_p
     store = freeze_metrics(tmp_path, name)
     audit = monitoring_audit(store, config)
     assert {row['metric_id'] for row in audit if row['classification'] == 'DIAGNOSTIC_ONLY'} == \
-        set(config['metrics']['diagnostic_only'])
+        set(config.metrics.diagnostic_only)
     store.document['definitions']['master/undeclared'] = {'promql': 'undeclared'}
     with pytest.raises(ValueError, match='unclassified monitoring metric master/undeclared'):
         monitoring_audit(store, config)
@@ -167,7 +171,7 @@ def test_unused_curve_declaration_cannot_masquerade_as_presentation():
     from reporting.view_config import view
     from scenario.loader import ScenarioError
 
-    data = view('master_performance.yaml')
+    data = view('master_performance.yaml').to_dict()
     data['charts']['curves']['unused'] = dict(next(iter(data['charts']['curves'].values())))
     with mock.patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError, match='referenced by a panel'):
@@ -178,13 +182,15 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
     from cases.master_performance.panels import report_panels
     from reporting.view_config import view
 
-    config = view('master_performance.yaml')
+    config = view('master_performance.yaml').to_dict()
     descriptor = next(p for p in config['charts']['panels'] if p['id'] == 'engine-tps')
     descriptor['presets'] = {'Floors': {'groups': ['门禁']}}
+    config = ViewDefinition.read(config)
+    descriptor = next(p for p in config.charts.panels if p.id == 'engine-tps')
     panel = next(p for p in report_panels([], {
         'engine_tps': {'mock/rtp_llm_context_tps': 10}}, config) if p['id'] == 'engine-tps')
     assert panel['presets']['Floors'] == [panel['series'][0]['name']]
-    assert panel['caption'] == descriptor['empty_caption']
+    assert panel['caption'] == descriptor.empty_caption
 
 
 @pytest.mark.parametrize('name', ['cache_scale_in', 'master_performance', 'master_ha_failover'])

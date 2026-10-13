@@ -8,7 +8,7 @@ from pathlib import Path
 
 from reporting.view_config import view
 from reporting import run_meta
-from reporting.gate_report import write_gate_report
+from reporting.gate_report import write_gate_report, write_archived_gate_report
 from reporting.run_context import KPI_LABELS, title
 from reporting.curves import materialize, project_panels
 from reporting.view_sections import view_details, view_table
@@ -27,8 +27,8 @@ def prepare_report(directory, evidence, *, presentation=None):
     from monitoring.metric_store import MetricStore
     from reporting.metric_binding import monitoring_audit
     inventory = monitoring_audit(MetricStore.read(directory), presentation)
-    metric_defs = presentation["charts"]["curves"]
-    diagnostic_only = set(presentation["metrics"]["diagnostic_only"])
+    metric_defs = presentation.charts.curves
+    diagnostic_only = set(presentation.metrics.diagnostic_only)
     curves = []
     audit = []
     found = set()
@@ -50,7 +50,7 @@ def prepare_report(directory, evidence, *, presentation=None):
                 audit.append([identity, "—", "DIAGNOSTIC_ONLY", sources[key]["promql"]])
             continue
         for curve_id, definition in selected_styles:
-            name = definition["name"]
+            name = definition.name
             qualifiers = [str(value) for label, value in sorted(labels.items()) if label not in {"role"}]
             if qualifiers:
                 name += " · " + ", ".join(qualifiers)
@@ -70,7 +70,7 @@ def prepare_report(directory, evidence, *, presentation=None):
     for identity, definition in metric_defs.items():
         kind, metric = identity.split("/", 1)
         if (kind, metric) not in found and identity == "mock/context_completed_qps":
-            audit.append([definition["name"], "0%", "MISSING", "本次归档没有该监控序列"])
+            audit.append([definition.name, "0%", "MISSING", "本次归档没有该监控序列"])
 
     by_id = {curve["metric_id"]: curve for curve in curves}
     def values(metric_id, start=None, end=None):
@@ -107,7 +107,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     rows = evidence["samples"]
     curves = list(prepared["curves"])
     from monitoring.metric_store import MetricStore
-    survivor_style = presentation["charts"]["curves"]["derived/survivor_hit_ratio"]
+    survivor_style = presentation.charts.curves["derived/survivor_hit_ratio"]
     store = MetricStore.read(directory)
     for observation in store.document["metrics"].get("derived/survivor_hit_ratio", []):
         curves.append(materialize(
@@ -122,7 +122,7 @@ def build_spec(directory, evidence, result, prepared, *, presentation=None):
     spec = dict(
         run_id=evidence["provenance"]["instance"],
         title=title(evidence["provenance"]["instance"]),
-        subtitle=presentation["report"]["subtitle"].format(
+        subtitle=presentation.subtitle.render(
             verdict=result["verdict"], monitoring_status=monitoring_status,
             expected_behavior=result.get("expected_behavior", "stable"),
             observed_behavior=result.get("observed_behavior", "unknown")),
@@ -178,6 +178,9 @@ def write_report(directory, evidence, result, prepared=None, *, run=None, presen
             )
         ],
     )
+    if run is None:
+        return write_archived_gate_report(directory, result, presentation, spec,
+            identity="cache-scale-in", producer="cache-gate", meta=meta)
     return write_gate_report(directory, result, presentation, spec,
         identity="cache-scale-in", producer="cache-gate", meta=meta, run=run)
 

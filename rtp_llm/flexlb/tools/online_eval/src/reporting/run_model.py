@@ -48,10 +48,17 @@ class RunValidity:
 
     @classmethod
     def read(cls, workload):
-        return cls(*(workload.get(name) for name in cls.__dataclass_fields__))
+        return cls(runtime_validity=workload.get('runtime_validity'),
+                   telemetry_completeness=workload.get('telemetry_completeness'),
+                   missing_telemetry=workload.get('missing_telemetry'),
+                   telemetry_integrity_errors=workload.get('telemetry_integrity_errors'),
+                   telemetry_diagnostics=workload.get('telemetry_diagnostics'),
+                   telemetry_warnings=workload.get('telemetry_warnings'))
 
     def to_dict(self):
-        return {name: getattr(self, name) for name in self.__dataclass_fields__}
+        return dict(runtime_validity=self.runtime_validity, telemetry_completeness=self.telemetry_completeness,
+                    missing_telemetry=self.missing_telemetry, telemetry_integrity_errors=self.telemetry_integrity_errors,
+                    telemetry_diagnostics=self.telemetry_diagnostics, telemetry_warnings=self.telemetry_warnings)
 
 
 @dataclass(frozen=True)

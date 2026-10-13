@@ -3,6 +3,10 @@
 Oklab matrices: https://bottosson.github.io/posts/oklab/ (public domain).
 """
 import math
+import json
+import colorsys
+from reporting.catalog import series_color
+from reporting.report_model import MeasurementIdentity
 
 
 def to_oklab(color):
@@ -46,3 +50,36 @@ def run_color(color, index, count):
     r, g, b = rgb(index/max(1, count-1))
     encoded = [12.92*v if v <= .0031308 else 1.055*v**(1/2.4)-.055 for v in (r, g, b)]
     return '#' + ''.join(f'{round(v*255):02x}' for v in encoded)
+
+
+# Hue identifies the metric; lightness and sparse point shapes identify runs.
+RUN_MARKERS = ('circle', 'rect', 'triangle', 'rectRot', 'star', 'cross', 'crossRot')
+
+
+def metric_colors(panels):
+    """Keep existing metric hues where possible; separate near hues within a plot."""
+    registry, colors = {}, {}
+    for panel in panels:
+        used = []
+        for n, curve in enumerate(panel.get('series', [])):
+            identity = json.dumps(MeasurementIdentity.read(curve, panel.get('unit')).signature(), sort_keys=True)
+            if identity == 'null':
+                identity = (panel['id'], n)
+            color = registry.get(identity) or curve.get('color') or series_color(curve.get('tone'), n)
+            value = color.lstrip('#')
+            hue, lightness, saturation = colorsys.rgb_to_hls(*(int(value[k:k+2], 16)/255 for k in (0, 2, 4)))
+            distance = lambda h: min((min(abs(h-u), 1-abs(h-u)) for u in used), default=1)
+            if identity not in registry and saturation >= .10 and distance(hue) < .07:
+                hue = max(((hue + k/24) % 1 for k in range(24)), key=distance)
+                color = '#' + ''.join(f'{round(v*255):02x}' for v in colorsys.hls_to_rgb(hue, lightness, saturation))
+            registry.setdefault(identity, color)
+            colors[panel['id'], n] = color
+            if saturation >= .10:
+                used.append(hue)
+    return colors
+
+
+
+def curve_style(metric_color, run_index, run_count):
+    return dict(color=run_color(metric_color, run_index, run_count), dash=[],
+                point_style=RUN_MARKERS[run_index % len(RUN_MARKERS)], marker_count=12)

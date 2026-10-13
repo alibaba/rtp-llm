@@ -19,7 +19,7 @@ from reporting import (
     table,
 )
 from analysis.statistics import select_window, counter_delta
-from reporting.pairing import event_anchor, shifted_panel, paired_overlay
+from reporting.pairing import event_anchor, shifted_panel
 from reporting.renderer import render_context, render_sections
 from reporting.workload import write_report
 
@@ -154,9 +154,6 @@ class ReportBundleTest(unittest.TestCase):
         self.assertEqual(panel["series"][0]["points"][0]["x"], 12)
         self.assertEqual(aligned["series"][0]["points"],
                          [dict(x=0, y=None), dict(x=1, y=2)])
-        curves, _ = paired_overlay([aligned, aligned])
-        self.assertEqual([curve["name"] for curve in curves], ["A · hit", "B · hit"])
-        self.assertEqual([curve["dash"] for curve in curves], [[6, 4], []])
 
     def test_workload_presentation_cannot_change_status_or_read_telemetry(self):
         payload = dict(

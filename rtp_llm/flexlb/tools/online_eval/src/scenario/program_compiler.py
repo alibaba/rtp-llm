@@ -205,7 +205,7 @@ def _bind_reports(config, variant, source, stages):
             presentation = view(report_name)
             from reporting.events import validate_stage_sources
             validate_stage_sources(presentation, {stage["id"] for stage in stages}, source + ".reports")
-            required_plan = presentation.get("metrics", {}).get("query_plan")
+            required_plan = presentation.metrics.query_plan if presentation.metrics else None
             if required_plan and required_plan != variant["execution"]["monitoring"].get("query_plan"):
                 raise ScenarioError(
                     f"{source}.reports: {report_name} requires monitoring query plan {required_plan}"

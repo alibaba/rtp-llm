@@ -116,11 +116,6 @@ def project(root, bundle, analysis, files):
             raise ValueError('bundle series archive checksum mismatch')
         files[name] = dict(path=name, sha256=digest)
         result[_REFERENCE] = EvidenceReference(name, digest, tuple(values)).to_dict()
-    if isinstance(result.get('run'), dict):
-        result['run'] = project(root, bundle, result['run'], files)
-    if isinstance(result.get('runs'), dict):
-        result['runs'] = {label: project(root, bundle, run, files)
-                          for label, run in result['runs'].items()}
     return result
 
 
@@ -140,10 +135,6 @@ def restore(bundle, analysis):
                 or any(not isinstance(value, dict) for value in document['values'].values())):
             raise ValueError('invalid series evidence document')
         result.update(document['values'])
-    if isinstance(result.get('run'), dict):
-        result['run'] = restore(bundle, result['run'])
-    if isinstance(result.get('runs'), dict):
-        result['runs'] = {label: restore(bundle, run) for label, run in result['runs'].items()}
     return result
 
 
@@ -156,8 +147,3 @@ def verify_references(analysis, files):
                 or files[reference.path].get('path') != reference.path
                 or files[reference.path].get('sha256') != reference.sha256):
             raise ValueError('series evidence is not verified by the bundle manifest')
-    if isinstance(analysis.get('run'), dict):
-        verify_references(analysis['run'], files)
-    if isinstance(analysis.get('runs'), dict):
-        for run in analysis['runs'].values():
-            verify_references(run, files)

@@ -1,4 +1,7 @@
 """One run identity and provenance contract for all case report producers."""
+from reporting.timeline import apply
+from reporting.events import attach_events
+
 
 import copy
 
@@ -66,11 +69,9 @@ def canonical_spec(spec, analysis):
     result["sections"] = [checks_section(run), validity_section(run)] + [
         section for section in result.get("sections", [])
         if section.get("id") not in {"run.checks", "run.validity", "case.checks"}]
-    from reporting.timeline import apply
     return apply(result, analysis)
 
 def selected_spec(spec, analysis, presentation):
-    from reporting.events import attach_events
     result = canonical_spec(spec, analysis)
     if (analysis.get('report_timeline') or {}).get('status') == 'UNAVAILABLE':
         return result

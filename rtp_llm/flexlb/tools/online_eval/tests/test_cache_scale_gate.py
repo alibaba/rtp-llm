@@ -1,3 +1,4 @@
+from reporting.view_model import ViewDefinition
 import copy
 import json
 import tempfile
@@ -45,13 +46,13 @@ def metric_spec(directory, evidence, result, prepared):
 
 class CacheGateTest(unittest.TestCase):
     def test_derived_curve_label_comes_from_yaml_presentation(self):
-        template = copy.deepcopy(view("cache_scale_in.yaml"))
+        template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["curves"]["derived/survivor_hit_ratio"]["name"] = "YAML survivor"
         prepared = dict(curves=[], audit=[], sources={}, gaps={}, errors=[],
                         monitoring_status="OK", monitor_warnings=[])
         evidence = self.evidence()
         with tempfile.TemporaryDirectory() as d, mock.patch(
-            "cases.cache_scale_in.report.view", return_value=template
+            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template)
         ):
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
@@ -81,7 +82,7 @@ class CacheGateTest(unittest.TestCase):
         self.assertIn(["master/dispatch_qps", "—", "DIAGNOSTIC_ONLY", "rate(dispatch_total[10s])"], result["audit"])
 
     def test_report_layout_follows_yaml_view(self):
-        template = copy.deepcopy(view("cache_scale_in.yaml"))
+        template = view("cache_scale_in.yaml").to_dict()
         template["charts"]["panels"][0]["title"] = "YAML panel"
         template["charts"]["panels"][0]["curve_ids"] = ["mock/engine_count"]
         prepared = dict(
@@ -91,7 +92,7 @@ class CacheGateTest(unittest.TestCase):
             monitor_warnings=[],
         )
         with tempfile.TemporaryDirectory() as d, mock.patch(
-            "cases.cache_scale_in.report.view", return_value=template
+            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template)
         ):
             evidence = self.evidence()
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
@@ -111,6 +112,7 @@ class CacheGateTest(unittest.TestCase):
         metric_ids = ["mock/cache_hit_ratio", "mock/engine_count", "client/actual_send_qps",
                       "client/success_qps", "client/error_qps", "mock/waiting_avg"]
         curves = [dict(curve_id=metric_id, metric_id=metric_id, name=name,
+                       axis=view("cache_scale_in.yaml").charts.curves[metric_id].axis,
                        points=[dict(x=5, y=None), dict(x=6, y=2)])
                   for metric_id, name in zip(metric_ids, names)]
         panels = project_panels(curves, view("cache_scale_in.yaml"))

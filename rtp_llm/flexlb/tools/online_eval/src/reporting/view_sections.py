@@ -1,18 +1,17 @@
 """Render declared section labels and open state without interpreting results."""
 
 from reporting.core import details, table
-from reporting.view_model import SectionPresentation
 
 
 def view_details(view, key, value):
-    section = SectionPresentation.read(view["sections"][key])
+    section = view.sections[key]
     if section.columns is not None:
         raise ValueError("detail section cannot declare columns: " + key)
     return details(section.title, value, opened=section.opened, identity="case." + key)
 
 
 def view_table(view, key, rows):
-    section = SectionPresentation.read(view["sections"][key])
+    section = view.sections[key]
     columns = section.columns
     if columns is None:
         raise ValueError("table section must declare columns: " + key)

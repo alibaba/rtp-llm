@@ -30,10 +30,10 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_case_metric_ids_and_axes_are_validated(self):
         presentation = view("cache_scale_in.yaml")
         self.assertEqual(
-            presentation["charts"]["panels"][0]["curve_ids"][1], "mock/cache_hit_ratio"
+            presentation.charts.panels[0].curve_ids[1], "mock/cache_hit_ratio"
         )
-        broken = copy.deepcopy(presentation)
-        broken["charts"]["panels"] = [dict(panel) for panel in presentation["charts"]["panels"]]
+        broken = presentation.to_dict()
+        broken["charts"]["panels"] = [panel.to_dict() for panel in presentation.charts.panels]
         broken["charts"]["panels"][0]["axes"] = {"count": {"title": "数量", "position": "left"}}
         with mock.patch("reporting.view_config.load_document", return_value=broken):
             with self.assertRaisesRegex(ScenarioError, "axis is not declared"):
@@ -108,7 +108,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             self.assertAlmostEqual(3.9, spec["timeAxis"]["max"])
             self.assertEqual(11.1, spec["timeOriginEpochS"])
             self.assertEqual(spec["title"], "master_ha_failover : default : batch-window")
-            self.assertEqual(spec["subtitle"], view("master_ha_failover.yaml")["report"]["subtitle"])
+            self.assertEqual(spec["subtitle"], view("master_ha_failover.yaml").report.subtitle)
             default = json.loads((paths["default.yaml"].parent / "report-spec.json").read_text())
             self.assertNotIn("../ha-ha-core/report.html", json.dumps(default["sections"]))
             self.assertEqual(spec["timeAxis"], default["timeAxis"])
@@ -175,21 +175,21 @@ class WorkloadReportViewsTest(unittest.TestCase):
 
     def test_unlabelled_legacy_statistic_is_still_visible(self):
         key = "statistics/1/per_second/e2e_p99"
-        panels = build_panels({key: [[0, 123]]}, {key: dict(unit="ms")})
+        panels = build_panels({key: [[0, 123]]}, {key: dict(unit="ms")}, view(DEFAULT_VIEW))
         self.assertEqual(len(panels), 1)
         self.assertEqual(panels[0]["series"][0]["provenance"]["source_series_key"], key)
 
     def test_full_view_uses_frozen_units_without_metric_name_inference(self):
         key = '1/mock/cache_hit_ratio/{"role":"prefill"}'
         values = [[0, 123], [1, None]]
-        panels = build_panels({key: values}, {key: dict(unit="ms")})
+        panels = build_panels({key: values}, {key: dict(unit="ms")}, view(DEFAULT_VIEW))
         self.assertEqual(panels[0]["axes"], {"y": dict(title="ms", position="left")})
         self.assertEqual(panels[0]["series"][0]["unit"], "ms")
         self.assertEqual(panels[0]["series"][0]["points"],
                          [dict(x=0, y=123), dict(x=1, y=None)])
         self.assertIn("cache_hit_ratio", panels[0]["title"])
         with self.assertRaisesRegex(ValueError, "missing frozen metric unit"):
-            build_panels({key: values}, {})
+            build_panels({key: values}, {}, view(DEFAULT_VIEW))
 
     def test_selected_view_renders_verified_frozen_gate_once(self):
         from cases.cache_scale_in.analysis import analyze
@@ -266,7 +266,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
     def test_performance_report_title_follows_frozen_run_identity(self):
         from cases.master_performance.report import write_report as report
 
-        presentation = view("master_performance.yaml").copy()
+        presentation = view("master_performance.yaml")
         with tempfile.TemporaryDirectory() as d, mock.patch(
             "reporting.view_config.view", return_value=presentation
         ), mock.patch(
@@ -284,7 +284,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             spec = json.loads((bundle / "report-spec.json").read_text())
             self.assertEqual(spec["title"], "master_performance : default : single-nonbatch")
             self.assertEqual([panel["title"] for panel in spec["panels"]],
-                             [panel["title"] for panel in presentation["charts"]["panels"]])
+                             [panel.title for panel in presentation.charts.panels])
             self.assertEqual([panel["id"] for panel in spec["panels"]],
                              ["engine-tps", "client-qps", "latency", "cache-hit",
                               "prefill-batch", "prefill-state"])
