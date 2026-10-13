@@ -6,6 +6,9 @@ option java_outer_classname = "FlexlbScheduleProtocol";
 // FlexLB scheduling control plane. Engine payloads are opaque bytes so this
 // contract can evolve independently from model_rpc_service.proto. Existing
 // field numbers and the FlexlbService method path remain wire-compatible.
+// Clients that only read numeric IDs use request_id. FlexLB uses request_id_str
+// if it is not blank; otherwise it converts request_id to a string.
+// Clients may send either field or both.
 
 enum RequestStatePB {
     REQUEST_STATE_UNSPECIFIED = 0;
@@ -32,10 +35,30 @@ enum CancelReasonPB {
     CANCEL_REASON_DEADLINE_EXCEEDED = 2;
 }
 
+// Roles requested from one Schedule call. An empty list selects all roles
+// configured for the model; callers normally request Encoder separately from
+// the later Prefill/Decode or PDFusion decision.
+enum ScheduleRolePB {
+    SCHEDULE_ROLE_UNSPECIFIED = 0;
+    SCHEDULE_ROLE_ENCODER = 1;
+    SCHEDULE_ROLE_PREFILL = 2;
+    SCHEDULE_ROLE_DECODE = 3;
+    SCHEDULE_ROLE_PDFUSION = 4;
+}
+
+// Unspecified preserves historical Cancel/GetRequestState behavior by
+// addressing the Generation request record.
+enum RequestPhasePB {
+    REQUEST_PHASE_UNSPECIFIED = 0;
+    REQUEST_PHASE_ENCODER = 1;
+    REQUEST_PHASE_GENERATION = 2;
+}
+
 message RequestLifecyclePB {
     int64 request_id = 1;
     RequestStatePB state = 2;
     int64 batch_id = 3;
+    string request_id_str = 4;
 }
 
 message FlexlbScheduleRequestPB {
@@ -70,6 +93,14 @@ message FlexlbScheduleRequestPB {
     FlexlbServerStatusPB selected_vit = 17;
     // Select ViT before media hashes are ready; this query owns no generation lifecycle.
     bool vit_route_only = 18;
+    repeated ScheduleRolePB schedule_roles = 19;
+    // Estimated MM encoder tokens already cached when this Encoder request is
+    // routed. Absent means the client did not provide a cache estimate; zero
+    // means it checked and found no cached encoder tokens.
+    oneof encoder_cache_hit_len_presence {
+        int64 encoder_cache_hit_len = 20;
+    }
+    string request_id_str = 21;
 }
 
 message FlexlbServerStatusPB {
@@ -82,6 +113,13 @@ message FlexlbServerStatusPB {
     string group = 6;
     // FlexLB endpoint generation: reject a pin after worker replacement at the same address.
     int64 worker_generation = 8;
+    // Present only for a multi-engine frontend; zero is a valid selected index.
+    oneof engine_index_presence {
+        int32 engine_index = 9;
+    }
+    // Requests on this Decode engine that must finish cancellation and resource
+    // release before the incoming request executes. Empty means no preemption.
+    repeated string preempt_request_ids = 10;
 }
 
 // Why an incoming request was rejected by the admission decision.  This is
@@ -113,6 +151,8 @@ message FlexlbCancelRequestPB {
     // Single-hop guard only. Every receiver checks local lifecycle ownership;
     // only a hop-zero miss on a follower may be forwarded to the current master.
     int32 forward_hop = 4;
+    RequestPhasePB phase = 5;
+    string request_id_str = 6;
 }
 
 message FlexlbCancelResponsePB {
@@ -126,6 +166,8 @@ message GetRequestStateRequestPB {
     // Same single-hop guard as Schedule. Clients leave this at zero and a
     // FlexLB follower sets it to one before forwarding.
     uint32 forward_hop = 3;
+    RequestPhasePB phase = 4;
+    string request_id_str = 5;
 }
 
 message GetRequestStateResponsePB {

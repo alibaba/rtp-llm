@@ -1,4 +1,4 @@
-package org.flexlb.engine.grpc;
+package org.flexlb.engine.grpc.client;
 
 import org.junit.jupiter.api.Test;
 
@@ -10,24 +10,24 @@ class EngineGrpcClientRetryPolicyTest {
     @Test
     void enqueueBatchDoesNotRetryAmbiguousBrokenConnection() {
         assertFalse(EngineGrpcClient.retriesBrokenConnections(
-                AbstractGrpcClient.ServiceType.BATCH_ENQUEUE));
+                EngineGrpcClient.ServiceType.BATCH_ENQUEUE));
     }
 
     @Test
     void retryPolicyChangeDoesNotDisableReadOnlyRpcRetries() {
         assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                AbstractGrpcClient.ServiceType.WORKER_STATUS));
+                EngineGrpcClient.ServiceType.WORKER_STATUS));
         assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                AbstractGrpcClient.ServiceType.CACHE_STATUS));
+                EngineGrpcClient.ServiceType.CACHE_STATUS));
         assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                AbstractGrpcClient.ServiceType.MULTIMODAL_WORKER_STATUS));
+                EngineGrpcClient.ServiceType.MULTIMODAL_WORKER_STATUS));
         assertTrue(EngineGrpcClient.retriesBrokenConnections(
-                AbstractGrpcClient.ServiceType.MULTIMODAL_CACHE_STATUS));
+                EngineGrpcClient.ServiceType.MULTIMODAL_CACHE_STATUS));
     }
 
     @Test
     void cancelKeepsItsExistingSingleShotPolicy() {
         assertFalse(EngineGrpcClient.retriesBrokenConnections(
-                AbstractGrpcClient.ServiceType.ENGINE_CANCEL));
+                EngineGrpcClient.ServiceType.ENGINE_CANCEL));
     }
 }
