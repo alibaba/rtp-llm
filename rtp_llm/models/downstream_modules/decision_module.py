@@ -645,9 +645,11 @@ class DecisionRenderer(CustomRenderer):
                 "document; image content parts need phase-2 support"
             )
         state = request.state if request.state is not None else request.document
-        # The clef API's state is any JSON value: a JSON-shaped document
-        # string is parsed so the encoder serializes it exactly like the
-        # reference (sorted compact JSON); plain text stays a string.
+        # The clef API's state is any JSON value. A JSON-shaped document
+        # string is parsed so the encoder serializes it exactly like a dict
+        # state would be (sorted compact JSON): /v1/classifier's document is
+        # a string field, and the golden/reference convention treats JSON
+        # documents as structured states, not opaque text.
         if isinstance(state, str):
             try:
                 state = json.loads(state)
