@@ -740,6 +740,11 @@ class ModelLoader:
                 for component in module.get_components():
                     if component.resident_device is not None:
                         result[(layer_id, component.name)] = component.resident_device
+                    for (
+                        name,
+                        resident_device,
+                    ) in component.resident_output_devices.items():
+                        result[(layer_id, name)] = resident_device
         return result
 
     @staticmethod

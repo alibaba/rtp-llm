@@ -42,7 +42,8 @@ class PLEPrefetcher:
         total_shards,
         pointer_table,
         *,
-        max_eager_bytes=256 * 1024 * 1024
+        max_eager_bytes=256 * 1024 * 1024,
+        scale=None,
     ):
         if max_eager_bytes <= 0:
             raise ValueError("PLE prefetch memory budget must be positive")
@@ -50,6 +51,12 @@ class PLEPrefetcher:
         self.shard_indices = shard_indices
         self.total_shards = total_shards
         self.pointer_table = pointer_table
+        self.scale = scale
+        self.output_dtype = (
+            torch.bfloat16
+            if shards[0].dtype == torch.float8_e4m3fn
+            else shards[0].dtype
+        )
         self.device = pointer_table.device
         with torch.cuda.device(self.device):
             self.stream = torch.cuda.Stream(device=self.device)
@@ -75,7 +82,9 @@ class PLEPrefetcher:
             entry = self._eager_slots.get(slot)
             if entry is None or entry[0].shape[0] < capacity:
                 needed = (
-                    capacity * self.shards[0].shape[1] * self.shards[0].element_size()
+                    capacity
+                    * self.shards[0].shape[1]
+                    * torch.empty((), dtype=self.output_dtype).element_size()
                 )
                 if needed > self._max_eager_bytes:
                     return None
@@ -105,7 +114,7 @@ class PLEPrefetcher:
                         capacity,
                         self.shards[0].shape[1],
                         device=self.device,
-                        dtype=self.shards[0].dtype,
+                        dtype=self.output_dtype,
                     ),
                     torch.cuda.Event(external=True),
                     torch.cuda.Event(),
@@ -136,6 +145,7 @@ class PLEPrefetcher:
                 self.total_shards,
                 self.pointer_table,
                 out=out,
+                scale=self.scale,
             )
             ready.record(self.stream)
         return PLEPrefetch(out, ready, self)

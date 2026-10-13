@@ -84,12 +84,17 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
         *,
         cpu_offload: bool = True,
         scale_weight: Optional[CkptWeightInfo] = None,
+        preserve_fp8: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(name, weights, **kwargs)
         self.cpu_offload = cpu_offload
         self.resident_device = "cpu" if cpu_offload else None
         self.scale_weight = scale_weight
+        self.preserve_fp8 = preserve_fp8
+        self.resident_output_devices = (
+            {W.qwen4_ple_ngram_scale: "cpu"} if preserve_fp8 else {}
+        )
 
     def _local_shard_range(self, load_config: LoadConfig) -> range:
         shard_count = len(self.weights)
@@ -136,7 +141,11 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
     ) -> Dict[str, torch.Tensor]:
         if layer_id is None:
             raise ValueError("qwen4_exp PLE n-gram table is a per-layer weight")
-        convert_type = self.data_type or load_config.compute_dtype
+        convert_type = (
+            torch.float8_e4m3fn
+            if self.preserve_fp8
+            else self.data_type or load_config.compute_dtype
+        )
         scale = None
         if self.scale_weight is not None:
             scale = self.scale_weight.merge_fun(
@@ -152,8 +161,13 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
                 raise ValueError(
                     "Qwen4 FP8 PLE requires one finite positive global scale"
                 )
-            scale = scale.to(device=device, dtype=convert_type)
+            if not self.preserve_fp8:
+                scale = scale.to(device=device, dtype=convert_type)
         result: Dict[str, torch.Tensor] = {}
+        if self.preserve_fp8:
+            if scale is None:
+                raise ValueError("FP8 PLE storage requires its checkpoint global scale")
+            result[W.qwen4_ple_ngram_scale] = scale.to(device="cpu")
         for shard_index in self._local_shard_range(load_config):
             ckpt_weight = self.weights[shard_index]
             tensor_name = ckpt_weight.tensor_name(layer_id)
@@ -168,7 +182,7 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
             # Match vLLM's lookup contract: cast FP8 values and the scalar to
             # output dtype, multiply, then retain the BF16 resident shard.
             # This preserves existing PLE gather and graph replay consumers.
-            if scale is not None:
+            if scale is not None and not self.preserve_fp8:
                 shard = shard * scale
             result[f"{self.name}.{shard_index}"] = shard
         return result
@@ -411,7 +425,11 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                             + "layers.{i}.ple.ple_embedding.ngram_embedding.weight_scale"
                         )
                         if getattr(self, "_moe_only_fp8", False) is True
+                        or getattr(self.model_config, "_qwen4_fp8_source", False)
                         else None
+                    ),
+                    preserve_fp8=bool(
+                        getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
                     ),
                 )
             )

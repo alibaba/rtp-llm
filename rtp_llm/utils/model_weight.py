@@ -1490,6 +1490,7 @@ class W:
     qwen4_ple_ngram_offsets = "qwen4.ple.ngram_offsets"
     qwen4_ple_ngram_vocab_sizes = "qwen4.ple.ngram_vocab_sizes"
     qwen4_ple_ngram_shards = "qwen4.ple.ngram_shards"
+    qwen4_ple_ngram_scale = "qwen4.ple.ngram_scale"
 
     # MoE (per-layer)
     v4_ffn_norm = "v4.ffn_norm.weight"

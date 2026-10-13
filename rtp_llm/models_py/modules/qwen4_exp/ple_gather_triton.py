@@ -12,6 +12,7 @@ import triton.language as tl
 def _gather_shards(
     ids_ptr,
     shard_ptrs,
+    scale_ptr,
     out_ptr,
     N: tl.constexpr,
     SHARD_ROWS: tl.constexpr,
@@ -19,6 +20,7 @@ def _gather_shards(
     D: tl.constexpr,
     BD: tl.constexpr,
     BF16: tl.constexpr,
+    FP8: tl.constexpr,
 ):
     rows = tl.program_id(0) * 16 + tl.arange(0, 16)
     cols = tl.arange(0, BD)
@@ -28,7 +30,9 @@ def _gather_shards(
     in_range = (rows < N) & (ids >= 0) & (shard < TOTAL_SHARDS)
     addr = tl.load(shard_ptrs + shard, mask=in_range, other=0)
     valid = in_range & (addr != 0)
-    if BF16:
+    if FP8:
+        base = addr.to(tl.pointer_type(tl.uint8))
+    elif BF16:
         base = addr.to(tl.pointer_type(tl.bfloat16))
     else:
         base = addr.to(tl.pointer_type(tl.float32))
@@ -37,6 +41,10 @@ def _gather_shards(
         mask=valid[:, None] & (cols[None, :] < D),
         other=0,
     )
+    if FP8:
+        values = values.to(tl.float8e4nv, bitcast=True).to(tl.bfloat16) * tl.load(
+            scale_ptr
+        ).to(tl.bfloat16)
     tl.store(
         out_ptr + rows[:, None] * D + cols[None, :],
         values,
@@ -47,7 +55,11 @@ def _gather_shards(
 def is_supported(ids: torch.Tensor, shards: list[torch.Tensor]) -> bool:
     if not ids.is_cuda or torch.version.hip is not None or ids.dtype != torch.int64:
         return False
-    if not shards or shards[0].dtype not in (torch.bfloat16, torch.float32):
+    if not shards or shards[0].dtype not in (
+        torch.bfloat16,
+        torch.float32,
+        torch.float8_e4m3fn,
+    ):
         return False
     shape = shards[0].shape
     return (
@@ -74,6 +86,7 @@ def gather_local(
     pointer_table: torch.Tensor,
     *,
     out: torch.Tensor | None = None,
+    scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return local shard values, leaving remote shard values at zero."""
     if not is_supported(ids, shards):
@@ -85,13 +98,22 @@ def gather_local(
     if pointer_table.device != ids.device or not pointer_table.is_contiguous():
         raise ValueError("PLE pointer table must be contiguous on the ids device")
     ids = ids.contiguous()
+    fp8 = shards[0].dtype == torch.float8_e4m3fn
+    output_dtype = torch.bfloat16 if fp8 else shards[0].dtype
+    if fp8 and (
+        scale is None
+        or scale.device != ids.device
+        or scale.numel() != 1
+        or scale.dtype not in (torch.bfloat16, torch.float32)
+    ):
+        raise ValueError("FP8 PLE gather requires one device-local floating scale")
     shape = (*ids.shape, shards[0].shape[1])
     if out is None:
-        out = torch.empty(shape, device=ids.device, dtype=shards[0].dtype)
+        out = torch.empty(shape, device=ids.device, dtype=output_dtype)
     elif (
         out.shape != shape
         or out.device != ids.device
-        or out.dtype != shards[0].dtype
+        or out.dtype != output_dtype
         or not out.is_contiguous()
     ):
         raise ValueError("PLE gather output must match ids and shard geometry")
@@ -100,6 +122,7 @@ def gather_local(
         _gather_shards[(triton.cdiv(n, 16),)](
             ids,
             pointer_table,
+            scale if fp8 else pointer_table,
             out,
             N=n,
             SHARD_ROWS=shards[0].shape[0],
@@ -107,6 +130,7 @@ def gather_local(
             D=shards[0].shape[1],
             BD=triton.next_power_of_2(shards[0].shape[1]),
             BF16=shards[0].dtype == torch.bfloat16,
+            FP8=fp8,
             num_warps=4,
         )
     return out
@@ -128,12 +152,17 @@ def prepare_cpu_uva_shards(
         raise RuntimeError("PLE CPU UVA requires NVIDIA CUDA")
     if not shards or any(
         shard.device.type != "cpu"
-        or shard.dtype not in (torch.bfloat16, torch.float32)
+        or shard.dtype
+        not in (
+            torch.bfloat16,
+            torch.float32,
+            torch.float8_e4m3fn,
+        )
         or shard.shape != shards[0].shape
         or not shard.is_contiguous()
         for shard in shards
     ):
-        raise ValueError("PLE CPU UVA requires equal contiguous BF16/F32 shards")
+        raise ValueError("PLE CPU UVA requires equal contiguous BF16/F32/FP8 shards")
     if (
         shards[0].ndim != 2
         or not 0 < shards[0].shape[1] <= 256

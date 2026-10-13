@@ -4,8 +4,9 @@ from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
-from rtp_llm.models_py.modules.qwen4_exp.gated_residual import grouped_rms_norm
 from torch import nn
+
+from rtp_llm.models_py.modules.qwen4_exp.gated_residual import grouped_rms_norm
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -39,10 +40,31 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         shard_indices: Optional[List[int]] = None,
         total_shards: Optional[int] = None,
         distributed_reduce: bool = False,
+        weight_scale: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         if not shards:
             raise ValueError("ngram embedding needs at least one shard")
+        self.output_dtype = (
+            torch.bfloat16
+            if shards[0].dtype == torch.float8_e4m3fn
+            else shards[0].dtype
+        )
+        self._cpu_weight_scale = None
+        if shards[0].dtype == torch.float8_e4m3fn:
+            if weight_scale is None or weight_scale.numel() != 1:
+                raise ValueError("FP8 PLE table requires one global scale")
+            if weight_scale.device.type != "cpu":
+                raise ValueError("FP8 PLE scale validation requires a CPU scalar")
+            if not bool(torch.isfinite(weight_scale).all()) or not bool(
+                (weight_scale > 0).all()
+            ):
+                raise ValueError("FP8 PLE scale must be finite and positive")
+            self._cpu_weight_scale = weight_scale.to(dtype=torch.bfloat16)
+            weight_scale = weight_scale.to(
+                device=vocab_sizes.device, dtype=torch.bfloat16
+            )
+        self.register_buffer("weight_scale", weight_scale)
         metadata = {
             "vocab_sizes": vocab_sizes,
             "offsets": offsets,
@@ -154,6 +176,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 )
                 * 1024
                 * 1024,
+                scale=self.weight_scale,
             )
 
     @property
@@ -245,10 +268,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             host = (
                 None
                 if self._cpu_uva_enabled
-                else torch.empty(shape, dtype=self.shards[0].dtype, pin_memory=True)
+                else torch.empty(shape, dtype=self.output_dtype, pin_memory=True)
             )
             device = torch.empty(
-                shape, dtype=self.shards[0].dtype, device=ngram_ids.device
+                shape, dtype=self.output_dtype, device=ngram_ids.device
             )
             self._cpu_graph_buffers[key] = (host, device)
         host, device = self._cpu_graph_buffers[key]
@@ -269,6 +292,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                 self.total_shards,
                 self._cpu_uva_pointers,
                 out=device,
+                scale=self.weight_scale,
             )
             self._cpu_graph_rows = device
             return
@@ -291,7 +315,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if (
             rows.shape != shape
             or rows.device != device
-            or rows.dtype != self.shards[0].dtype
+            or rows.dtype != self.output_dtype
         ):
             raise RuntimeError("PLE CPU graph lookup buffer geometry is stale")
         if self._cpu_graph_prefetch is not None:
@@ -315,6 +339,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     self.shard_indices,
                     self.total_shards,
                     self._cpu_uva_pointers,
+                    scale=self.weight_scale,
                 )
             # Transfer only lookup ids and selected rows. Auxiliary PLE weights
             # and the TP collective stay on the execution device.
@@ -346,6 +371,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                     self.shard_indices,
                     self.total_shards,
                     self._triton_shard_ptrs,
+                    scale=self.weight_scale,
                 )
             if self._graph_gather_required:
                 raise RuntimeError(
@@ -357,10 +383,29 @@ class Qwen4ExpNGramEmbedding(nn.Module):
     def _gather_torch(self, ngram_ids: torch.Tensor) -> torch.Tensor:
         shard_idx = torch.div(ngram_ids, self.shard_rows, rounding_mode="floor")
         row_idx = ngram_ids - shard_idx * self.shard_rows
-        out = self.shards[0].new_zeros(*ngram_ids.shape, self.shards[0].shape[-1])
+        out = torch.zeros(
+            *ngram_ids.shape,
+            self.shards[0].shape[-1],
+            dtype=self.output_dtype,
+            device=ngram_ids.device,
+        )
         for global_index, shard in zip(self.shard_indices, self.shards):
             selected = shard_idx == global_index
-            out[selected] = shard[row_idx[selected]]
+            if shard.dtype == torch.float8_e4m3fn:
+                values = shard.view(torch.uint8)[row_idx[selected]].view(
+                    torch.float8_e4m3fn
+                )
+            else:
+                values = shard[row_idx[selected]]
+            values = values.to(self.output_dtype)
+            if self.weight_scale is not None:
+                scale = (
+                    self._cpu_weight_scale
+                    if values.device.type == "cpu"
+                    else self.weight_scale
+                )
+                values = values * scale
+            out[selected] = values
         return out
 
     def gather(self, ngram_ids: torch.Tensor) -> torch.Tensor:

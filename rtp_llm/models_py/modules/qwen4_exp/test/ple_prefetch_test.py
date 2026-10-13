@@ -12,6 +12,51 @@ from rtp_llm.models_py.modules.qwen4_exp.ple import Qwen4ExpNGramEmbedding
     torch.cuda.is_available() and torch.version.hip is None, "requires NVIDIA CUDA"
 )
 class PLEPrefetchTest(unittest.TestCase):
+    def test_fp8_cpu_table_prefetch_and_graph_use_bf16_selected_rows(self):
+        shards = [
+            (torch.arange(5 * 160).reshape(5, 160) % 32 + i).to(torch.float8_e4m3fn)
+            for i in range(2)
+        ]
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_LLM_QWEN4_PLE_CPU_UVA": "1",
+                "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "1",
+            },
+        ):
+            module = Qwen4ExpNGramEmbedding(
+                shards,
+                torch.tensor([8, 8], dtype=torch.int64, device="cuda"),
+                torch.tensor([0, 8], dtype=torch.int64, device="cuda"),
+                torch.tensor([3, 5], dtype=torch.int64, device="cuda"),
+                ngram_size=2,
+                eos_token_id=0,
+                shard_indices=[1, 3],
+                total_shards=4,
+                distributed_reduce=True,
+                weight_scale=torch.tensor([0.25]),
+            )
+        self.assertTrue(module.supports_prefetch)
+        self.assertTrue(all(t.dtype == torch.float8_e4m3fn for t in module.shards))
+        ids = torch.tensor([5, 16, -1, 0], dtype=torch.int64, device="cuda")
+        expected = module._gather_torch(ids.cpu()).cuda()
+        handle = module.start_prefetch(ids)
+        rows = module.consume_prefetch(handle)
+        self.assertEqual(rows.dtype, torch.bfloat16)
+        torch.testing.assert_close(rows, expected, atol=0, rtol=0)
+        module.finish_prefetch()
+        module._graph_gather_required = True
+        module.prepare_cpu_graph_rows(ids, 1)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = module._gather_local(ids).clone()
+        ids.copy_(torch.tensor([19, 9, 7, 2], dtype=torch.int64, device="cuda"))
+        module.prepare_cpu_graph_rows(ids, 1)
+        graph.replay()
+        torch.testing.assert_close(
+            output, module._gather_torch(ids.cpu()).cuda(), atol=0, rtol=0
+        )
+
     def _module(self, dtype=torch.bfloat16):
         shards = [
             (torch.arange(5 * 160).reshape(5, 160) + i * 1000).to(dtype)
