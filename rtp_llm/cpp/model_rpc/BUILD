@@ -74,7 +74,7 @@ cc_library(
 
 cc_library(
     name = "linear_tp_cache_layout",
-    hdrs = ["LinearTpCacheLayout.h"],
+    hdrs = ["LinearTpCacheLayout.h", "MhaTpCacheLayout.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
 )

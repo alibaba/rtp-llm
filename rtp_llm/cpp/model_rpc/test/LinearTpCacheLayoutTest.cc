@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/LinearTpCacheLayout.h"
+#include "rtp_llm/cpp/model_rpc/MhaTpCacheLayout.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -75,6 +76,57 @@ TEST(LinearTpCacheLayoutTest, ReassemblesStateAndEveryQkvHistoryRow) {
             }
         }
     }
+}
+
+TEST(MhaTpCacheLayoutTest, ReassemblesTwoHeadsForDataAndFp8Scales) {
+    for (size_t peers : {2u, 4u, 8u}) {
+        for (size_t head_bytes : std::vector<size_t>{128u * 256u, 128u * 256u * 2u, 128u * sizeof(float)}) {
+            const size_t         half = 2 * head_bytes;
+            std::vector<uint8_t> reference(2 * half);
+            for (size_t j = 0; j < reference.size(); ++j) {
+                reference[j] = static_cast<uint8_t>((j * 29 + j / 113) % 251);
+            }
+            std::vector<uint8_t> destination(reference.size() + 32, 0xfe);
+            std::vector<uint8_t> naive;
+            size_t               owners = 0;
+            for (size_t peer = 0; peer < peers; ++peer) {
+                if (!mhaTpPeerOwnsHead(peers, 2, peer)) {
+                    continue;
+                }
+                ++owners;
+                const size_t         head = peer / (peers / 2);
+                std::vector<uint8_t> source(2 * head_bytes + 32, 0xfd);
+                std::copy_n(reference.data() + head * head_bytes, head_bytes, source.data());
+                std::copy_n(reference.data() + half + head * head_bytes, head_bytes, source.data() + head_bytes);
+                naive.insert(naive.end(), source.begin(), source.begin() + 2 * head_bytes);
+                for (const auto& slice : mhaTpCacheSlices(half, half, 2, head)) {
+                    ASSERT_LE(slice.source_offset + slice.bytes, 2 * head_bytes);
+                    ASSERT_LE(slice.destination_offset + slice.bytes, reference.size());
+                    std::memcpy(destination.data() + slice.destination_offset,
+                                source.data() + slice.source_offset,
+                                slice.bytes);
+                }
+                EXPECT_TRUE(std::all_of(
+                    source.begin() + 2 * head_bytes, source.end(), [](auto value) { return value == 0xfd; }));
+            }
+            EXPECT_EQ(owners, 2);
+            EXPECT_TRUE(std::equal(reference.begin(), reference.end(), destination.begin()));
+            EXPECT_NE(naive, reference);
+            EXPECT_TRUE(std::all_of(
+                destination.begin() + reference.size(), destination.end(), [](auto value) { return value == 0xfe; }));
+        }
+    }
+}
+
+TEST(MhaTpCacheLayoutTest, RejectsInvalidGeometryAndOverflow) {
+    EXPECT_THROW(mhaTpCacheSlices(64, 64, 0, 0), std::invalid_argument);
+    EXPECT_THROW(mhaTpCacheSlices(65, 64, 2, 0), std::invalid_argument);
+    EXPECT_THROW(mhaTpCacheSlices(64, 64, 2, 2), std::invalid_argument);
+    EXPECT_THROW(mhaTpCacheSlices(0, 64, 2, 0), std::invalid_argument);
+    EXPECT_THROW(mhaTpCacheSlices(std::numeric_limits<size_t>::max() - 1, 64, 2, 0), std::overflow_error);
+    EXPECT_THROW(mhaTpPeerOwnsHead(3, 2, 0), std::invalid_argument);
+    EXPECT_THROW(mhaTpPeerOwnsHead(4, 2, 4), std::invalid_argument);
+    EXPECT_THROW(mhaTpPeerOwnsHead(0, 2, 0), std::invalid_argument);
 }
 
 TEST(LinearTpCacheLayoutTest, RejectsInvalidGeometryBeforeTransfer) {
