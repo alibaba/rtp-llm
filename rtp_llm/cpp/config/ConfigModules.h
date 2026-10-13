@@ -199,6 +199,9 @@ struct KVCacheConfig {
     uint32_t swa_pool_blocks                              = 0;
     // Opt-in request policy; only models declaring history-state reclaim support may enable it.
     bool enable_linear_cache_reclaim = false;
+    // Optional JSON map from cache-group tags to positive pool block-count weights.
+    // Empty preserves the existing pool sizing policy.
+    std::string kv_cache_pool_block_weights = "";
     // Fields merged from PyKvCacheConfig
     int fp8_kv_cache = 0;
     // "auto" preserves a model-declared recurrent-state dtype. Models

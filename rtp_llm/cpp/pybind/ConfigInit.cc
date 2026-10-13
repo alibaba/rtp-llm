@@ -510,6 +510,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
+        .def_readwrite("kv_cache_pool_block_weights", &KVCacheConfig::kv_cache_pool_block_weights)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -578,7 +579,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      10,
+                                      11,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -648,6 +649,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.enable_linear_cache_reclaim,
+                                      self.kv_cache_pool_block_weights,
                                       self.linear_pool_blocks,
                                       self.swa_pool_blocks);
             },
@@ -656,13 +658,21 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 // v8 = enable_crc (index 69, shared with main);
                 // v9 = main's linear_pool_blocks+swa_pool_blocks (size 72)
                 //      or ours enable_linear_cache_reclaim (size 71);
-                // v10 = ours reclaim merged with main's pool budgets (size 73).
+                // v10 = ours + kv_cache_pool_block_weights (size 72);
+                // v11 = merged state with main's pool budgets appended (size 74).
                 // Each step strips its tail fields and steps the version down,
                 // so both families' older states keep decoding unchanged.
-                const py::tuple reclaim_pool_state = t;
-                const bool      has_reclaim_pool_fields =
-                    t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
-                if (has_reclaim_pool_fields) {
+                const py::tuple merged_pool_state = t;
+                const bool has_merged_pool_fields =
+                    t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_merged_pool_fields) {
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
+                const py::tuple pool_weights_state = t;
+                const bool      has_pool_weights_field =
+                    t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_pool_weights_field) {
                     t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
                     t[1] = py::int_(9);
                 }
@@ -809,14 +819,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (has_reclaim_field) {
                     c.enable_linear_cache_reclaim = reclaim_state[70].cast<bool>();
                 }
-                if (has_reclaim_pool_fields) {
-                    // Merged v10 state: our reclaim at 70, main's per-pool
-                    // budgets at 71/72; reuse_cache_tail_blocks keeps its
-                    // shared mid-tuple slot (index 10).
-                    c.reuse_cache_tail_blocks     = reclaim_pool_state[10].cast<int>();
-                    c.enable_linear_cache_reclaim = reclaim_pool_state[70].cast<bool>();
-                    c.linear_pool_blocks          = reclaim_pool_state[71].cast<uint32_t>();
-                    c.swa_pool_blocks             = reclaim_pool_state[72].cast<uint32_t>();
+                if (has_pool_weights_field) {
+                    c.kv_cache_pool_block_weights = pool_weights_state[71].cast<std::string>();
+                }
+                if (has_merged_pool_fields) {
+                    // Merged v11 state: our reclaim fields at 70/71, main's
+                    // per-pool budgets at 72/73; reuse_cache_tail_blocks keeps
+                    // its shared mid-tuple slot (index 10).
+                    c.reuse_cache_tail_blocks     = merged_pool_state[10].cast<int>();
+                    c.enable_linear_cache_reclaim = merged_pool_state[70].cast<bool>();
+                    c.kv_cache_pool_block_weights = merged_pool_state[71].cast<std::string>();
+                    c.linear_pool_blocks          = merged_pool_state[72].cast<uint32_t>();
+                    c.swa_pool_blocks             = merged_pool_state[73].cast<uint32_t>();
                     if (c.reuse_cache_tail_blocks <= 0 || c.linear_pool_blocks == 1 || c.swa_pool_blocks == 1
                         || c.linear_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())
                         || c.swa_pool_blocks > static_cast<uint32_t>(std::numeric_limits<int>::max())) {

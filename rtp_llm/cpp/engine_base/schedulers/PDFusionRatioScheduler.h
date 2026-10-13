@@ -57,6 +57,7 @@ private:
 
     struct AdmissionPeakState;
     void buildAdmissionPeakState();
+    bool tryAddToWeightedAdmissionPeakState(const GenerateStreamPtr& new_stream);
     bool tryAddToAdmissionPeakState(const GenerateStreamPtr& new_stream,
                                     int64_t                  initial_capacity,
                                     int64_t                  lifecycle_capacity);

@@ -323,6 +323,7 @@ cc_library(
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
+        "@rapidjson//:rapidjson",
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",

@@ -383,6 +383,21 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
         self.assertFalse(hasattr(config, "write_cache_sync"))
 
+    @patch.dict(
+        "os.environ",
+        _jit_env(KV_CACHE_POOL_BLOCK_WEIGHTS='{"full":8,"linear":1}'),
+        clear=True,
+    )
+    def test_pool_block_weights_reach_python_runtime_config(self):
+        from_env = setup_args([]).kv_cache_config
+        self.assertEqual(from_env.kv_cache_pool_block_weights, '{"full":8,"linear":1}')
+        raw = '{"full": 3, "linear": 2}'
+        overridden = setup_args(["--kv_cache_pool_block_weights", raw]).kv_cache_config
+        self.assertEqual(overridden.kv_cache_pool_block_weights, raw)
+        disabled = setup_args(["--kv_cache_pool_block_weights", ""]).kv_cache_config
+        self.assertEqual(disabled.kv_cache_pool_block_weights, "")
+        self.assertEqual(PyEnvConfigs().kv_cache_config.kv_cache_pool_block_weights, "")
+
     def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
         import pickle
 
@@ -560,8 +575,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 73)
-        self.assertEqual(state[:2], ("KVCacheConfig", 10))
+        self.assertEqual(len(state), 74)
+        self.assertEqual(state[:2], ("KVCacheConfig", 11))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -597,6 +612,7 @@ class GenerateConfigTest(TestCase):
 
         event_state = state
         state = (state[0], 6, *state[2:64])
+        self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
@@ -670,6 +686,7 @@ class GenerateConfigTest(TestCase):
 
         expected_fields = {
             "enable_crc": "bool",
+            "kv_cache_pool_block_weights": "str",
             "enable_linear_cache_reclaim": "bool",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",
