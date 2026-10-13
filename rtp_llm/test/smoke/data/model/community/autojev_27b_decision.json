@@ -1,0 +1,107 @@
+{
+  "_comment": "autojev-27b decision smoke: linear readout head over chat-template prompts, original release served in place. Golden from the reference readout math on the checkpoint weights.",
+  "model_type": "qwen35_dense",
+  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/autojev-27b",
+  "query_result": [
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "The quarterly report shows revenue up 8% but the churn rate doubled after the pricing change.",
+        "questions": [
+          {
+            "id": "action",
+            "type": "choice",
+            "prompt": "Best next step.",
+            "options": [
+              "revert pricing",
+              "retention campaign",
+              "wait another quarter",
+              "customer survey"
+            ]
+          },
+          {
+            "id": "alarm",
+            "type": "noul",
+            "prompt": "Does this need executive attention now?"
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "action",
+            "probs": {
+              "revert pricing": 0.064344,
+              "retention campaign": 0.554542,
+              "wait another quarter": 0.016838,
+              "customer survey": 0.364276
+            }
+          },
+          {
+            "question_id": "alarm",
+            "probs": {
+              "false": 0.054738,
+              "true": 0.945262
+            }
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "A user asks: is the capital of Australia Sydney or Canberra?",
+        "questions": [
+          {
+            "id": "cap",
+            "type": "choice",
+            "prompt": "Correct capital.",
+            "options": [
+              "Sydney",
+              "Canberra",
+              "Melbourne"
+            ]
+          },
+          {
+            "id": "conf",
+            "type": "score",
+            "prompt": "Answer confidence.",
+            "options": [
+              "very low",
+              "low",
+              "medium",
+              "high",
+              "very high",
+              "certain"
+            ]
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "cap",
+            "probs": {
+              "Sydney": 0.003015,
+              "Canberra": 0.993201,
+              "Melbourne": 0.003784
+            }
+          },
+          {
+            "question_id": "conf",
+            "probs": {
+              "0": 0.004419,
+              "1": 0.005038,
+              "2": 0.006244,
+              "3": 0.070273,
+              "4": 0.214597,
+              "5": 0.699428
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

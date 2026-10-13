@@ -120,8 +120,12 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     model_input.combo_tokens          = torch::empty({token_num}, i32_options);
     model_input.combo_tokens_type_ids = torch::empty({token_num}, i32_options);
     // The shared writer owns the multi-axis layout: see
-    // PositionIdsGenerator::writeComboPositionIds.
+    // PositionIdsGenerator::writeComboPositionIds. The rope index factor is
+    // >= 1 for every loadable config; 0 would mean no position ids at all.
     const int position_id_len_factor = model_config_.attn_config.rope_config.index_factor;
+    RTP_LLM_CHECK_WITH_INFO(position_id_len_factor >= 1,
+                            "rope index_factor must be >= 1, got %d",
+                            position_id_len_factor);
     model_input.combo_position_ids =
         torch::empty({token_num * position_id_len_factor}, i32_options);
     model_input.input_lengths         = torch::empty({batch_size}, i32_options);

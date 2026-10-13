@@ -676,16 +676,24 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
 
             if (ctx.need_cal_position_id) {
-                // The stream position ids are already laid out per-token with
-                // the axis factor; route the copy through the shared combo
-                // writer so this gatherer and the embedding gatherer share one
-                // buffer-geometry contract.
+                // The stream position ids are already interleaved per token
+                // with the axis factor, so the source element count is
+                // token_num * factor; the writer expands per token again.
+                // Convert back to the true token count before handing over.
                 auto context_pos_ids = stream->generateContextPositionIds();
                 int  reuse_offset    = stream->reuseLength() * config_.position_id_len_factor;
+                int32_t source_elements = (int32_t)(context_pos_ids.numel() - reuse_offset);
+                RTP_LLM_CHECK_WITH_INFO(
+                    config_.position_id_len_factor >= 1
+                        && source_elements % config_.position_id_len_factor == 0,
+                    "context position ids element count %d is not a multiple of the "
+                    "rope index factor %d",
+                    source_elements,
+                    (int)config_.position_id_len_factor);
                 PositionIdsGenerator::writeComboPositionIds(
                     ctx.combo_position_ids + (size_t)ctx.token_idx * config_.position_id_len_factor,
                     context_pos_ids.data_ptr<int>() + reuse_offset,
-                    (int32_t)(context_pos_ids.numel() - reuse_offset),
+                    source_elements / (int32_t)config_.position_id_len_factor,
                     (int)config_.position_id_len_factor);
             }
 

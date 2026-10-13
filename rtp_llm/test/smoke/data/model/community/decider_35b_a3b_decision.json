@@ -1,0 +1,107 @@
+{
+  "_comment": "decider-35b-a3b decision smoke: Answer-slot linear head over the packed decider schema, original release served in place. Golden from the checkpoint's own Decider reference API.",
+  "model_type": "qwen35_moe",
+  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/decider-35b-a3b",
+  "query_result": [
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "My card was charged twice for the same purchase.",
+        "questions": [
+          {
+            "id": "dept",
+            "type": "choice",
+            "prompt": "Which department should handle this?",
+            "options": [
+              "billing",
+              "technical",
+              "sales"
+            ]
+          },
+          {
+            "id": "urgent",
+            "type": "choice",
+            "prompt": "How urgent is this?",
+            "options": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "dept",
+            "probs": {
+              "billing": 0.995624,
+              "technical": 0.003283,
+              "sales": 0.001093
+            }
+          },
+          {
+            "question_id": "urgent",
+            "probs": {
+              "low": 0.108616,
+              "medium": 0.387985,
+              "high": 0.503399
+            }
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "The delivery arrived two days late and one item was damaged; packaging was good and support responded quickly.",
+        "questions": [
+          {
+            "id": "action",
+            "type": "choice",
+            "prompt": "What should the merchant do?",
+            "options": [
+              "full refund",
+              "replace the item",
+              "partial refund",
+              "apology only"
+            ]
+          },
+          {
+            "id": "risk",
+            "type": "choice",
+            "prompt": "Churn risk for this customer?",
+            "options": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "action",
+            "probs": {
+              "full refund": 0.003586,
+              "replace the item": 0.575536,
+              "partial refund": 0.406701,
+              "apology only": 0.014177
+            }
+          },
+          {
+            "question_id": "risk",
+            "probs": {
+              "low": 0.30584,
+              "medium": 0.668017,
+              "high": 0.026143
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

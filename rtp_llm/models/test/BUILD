@@ -55,8 +55,26 @@ py_test(
 )
 
 py_test(
+    name = "ffn_lora_wrap_test",
+    srcs = ["ffn_lora_wrap_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "decider_label_cache_test",
+    srcs = ["decider_label_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "clef_decision_module_test",
     srcs = ["clef_decision_module_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "decider_decision_test",
+    srcs = ["decider_decision_test.py"],
     deps = ["//rtp_llm:testlib"],
 )
 

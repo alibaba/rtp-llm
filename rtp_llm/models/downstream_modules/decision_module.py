@@ -353,7 +353,13 @@ class DecisionHandler(CustomHandler):
                             f"got {tuple(w.shape)}"
                         )
                     module.weight.data = w
-                    module.bias.data = state[f"{key}.bias"]
+                    b = state[f"{key}.bias"]
+                    if tuple(b.shape) != (self.proj_dim,):
+                        raise ValueError(
+                            f"pointer head {key}.bias must be "
+                            f"[{self.proj_dim}], got {tuple(b.shape)}"
+                        )
+                    module.bias.data = b
             else:
                 for key, module in (
                     (self.query_weight_key, self.query),
@@ -371,7 +377,13 @@ class DecisionHandler(CustomHandler):
                     (self.key_bias_key, self.key),
                 ):
                     if bias_key:
-                        module.bias.data = tensor_map[bias_key]
+                        bias = tensor_map[bias_key]
+                        if tuple(bias.shape) != (self.proj_dim,):
+                            raise ValueError(
+                                f"pointer head {bias_key} must be "
+                                f"[{self.proj_dim}], got {tuple(bias.shape)}"
+                            )
+                        module.bias.data = bias
             self.query = self.query.to(data_type).eval().to(self.device)
             self.key = self.key.to(data_type).eval().to(self.device)
         else:

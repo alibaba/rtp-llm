@@ -227,6 +227,20 @@ class DecisionHandlerTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 handler.init({"decision_head.weight": torch.randn(2, HIDDEN + 1)})
 
+    def test_pointer_bias_shape_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            config = _config(d, _pointer_block())
+            handler = DecisionHandler(config, _pointer_block())
+            with self.assertRaisesRegex(ValueError, "q.bias"):
+                handler.init(
+                    {
+                        "decision_head.q.weight": torch.randn(PROJ, HIDDEN),
+                        "decision_head.q.bias": torch.randn(PROJ + 1),
+                        "decision_head.k.weight": torch.randn(PROJ, HIDDEN),
+                        "decision_head.k.bias": torch.randn(PROJ),
+                    }
+                )
+
 
 class DecisionRendererTest(unittest.TestCase):
     def test_request_validation(self):

@@ -1,0 +1,165 @@
+{
+  "_comment": "clef decision smoke: joint schema head with systemone responses, served from the release layout (joint_head.safetensors beside the shards). Golden from the reference joint_schema_model implementation.",
+  "model_type": "qwen35_dense",
+  "model_path": "/mnt/hf3fs/3fs/liukan.lk/models/clef-rtp",
+  "query_result": [
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "{\"invoice\": {\"vendor\": \"Acme\", \"total\": 1250.0, \"currency\": \"USD\", \"status\": \"overdue\"}}",
+        "questions": [
+          {
+            "id": "status",
+            "type": "choice",
+            "prompt": "What is the invoice status?",
+            "criteria": {
+              "paid": "Invoice is paid.",
+              "overdue": "Invoice is past due.",
+              "draft": "Not sent."
+            }
+          },
+          {
+            "id": "large",
+            "type": "noul",
+            "prompt": "Is the total above 1000 USD?"
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "status",
+            "probs": {
+              "paid": 0.0035,
+              "overdue": 0.9941,
+              "draft": 0.0024
+            }
+          },
+          {
+            "question_id": "large",
+            "probs": {}
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "Customer review: The delivery arrived two days late and one item was damaged. Packaging was good and support responded quickly.",
+        "questions": [
+          {
+            "id": "sentiment",
+            "type": "choice",
+            "prompt": "Overall tone of the review.",
+            "criteria": {
+              "negative": "Complaints dominate.",
+              "neutral": "Mixed.",
+              "positive": "Praise dominates."
+            }
+          },
+          {
+            "id": "severity",
+            "type": "score",
+            "prompt": "How severe is the issue?",
+            "criteria": [
+              "minor",
+              "moderate",
+              "major",
+              "critical"
+            ]
+          },
+          {
+            "id": "refund",
+            "type": "noul",
+            "prompt": "Should a refund be issued?"
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "sentiment",
+            "probs": {
+              "negative": 0.1535,
+              "neutral": 0.833,
+              "positive": 0.0135
+            }
+          },
+          {
+            "question_id": "severity",
+            "probs": {
+              "0": 0.0679,
+              "1": 0.7797,
+              "2": 0.1339,
+              "3": 0.0186
+            }
+          },
+          {
+            "question_id": "refund",
+            "probs": {}
+          }
+        ]
+      }
+    },
+    {
+      "endpoint": "/v1/classifier",
+      "query": {
+        "document": "{\"sensor\": {\"temp_c\": 82.4, \"rpm\": 3400, \"hours\": 18250}, \"log\": \"vibration rising since Tuesday\"}",
+        "questions": [
+          {
+            "id": "maintain",
+            "type": "choice",
+            "prompt": "Maintenance action.",
+            "criteria": {
+              "inspect": "Schedule inspection.",
+              "replace": "Replace the bearing.",
+              "monitor": "Keep monitoring."
+            }
+          },
+          {
+            "id": "urgent",
+            "type": "noul",
+            "prompt": "Is immediate shutdown required?"
+          },
+          {
+            "id": "wear",
+            "type": "score",
+            "prompt": "Wear level.",
+            "criteria": [
+              "new",
+              "worn",
+              "failing"
+            ]
+          }
+        ]
+      },
+      "result": {
+        "object": "list",
+        "results": [
+          {
+            "question_id": "maintain",
+            "probs": {
+              "inspect": 0.5299,
+              "replace": 0.0613,
+              "monitor": 0.4087
+            }
+          },
+          {
+            "question_id": "urgent",
+            "probs": {}
+          },
+          {
+            "question_id": "wear",
+            "probs": {
+              "0": 0.0525,
+              "1": 0.636,
+              "2": 0.3115
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

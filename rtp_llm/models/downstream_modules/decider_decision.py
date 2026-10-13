@@ -22,12 +22,14 @@ DECIDER_NARROW = 10  # A..J render inline "(A) text"; beyond that the wide form
 DECIDER_LETTERS = "ABCDEFGHIJ"
 DECIDER_CONTEXT_HEADER = "Context:\n"
 
-LABELS_CACHE: Dict[int, Tuple[List[str], List[int]]] = {}
+# The cache holds the tokenizer itself as part of the key so an id() reuse
+# after garbage collection can never hit another tokenizer's table.
+LABELS_CACHE: Dict[Tuple[int, Any], Tuple[List[str], List[int]]] = {}
 
 
 def decider_label_table(tokenizer: Any) -> Tuple[List[str], List[int]]:
     """255 single-token uppercase labels (A..Z, AA..) — prompt.py label_table."""
-    cache_key = id(tokenizer)
+    cache_key = (id(tokenizer), tokenizer)
     if cache_key in LABELS_CACHE:
         return LABELS_CACHE[cache_key]
     import string
