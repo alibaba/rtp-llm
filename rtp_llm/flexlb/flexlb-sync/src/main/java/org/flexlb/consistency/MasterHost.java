@@ -4,7 +4,10 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import org.springframework.core.env.Environment;
 
-/** Shared advertised identity for election and follower forwarding. */
+/**
+ * Routable advertised identity shared by ZooKeeper election and follower forwarding.
+ * This can differ from the server bind address; wildcard addresses are not identities.
+ */
 public final class MasterHost {
     private MasterHost() {}
 

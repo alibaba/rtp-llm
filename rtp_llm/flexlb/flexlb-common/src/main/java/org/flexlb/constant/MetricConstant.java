@@ -311,6 +311,9 @@ public class MetricConstant {
      */
     public static final String CACHE_UPDATE_ENGINE_BLOCK_CACHE_RT = "app.cache.update.engine.block.cache.rt";
 
+    /** Local detach and global index retirement time in milliseconds. */
+    public static final String CACHE_REMOVE_ENGINE_BLOCK_CACHE_RT = "app.cache.remove.engine.block.cache.rt";
+
     /**
      * Cache status check response time
      */
