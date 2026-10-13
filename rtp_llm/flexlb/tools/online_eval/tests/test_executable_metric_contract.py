@@ -13,7 +13,7 @@ from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce, values
 from monitoring.metric_store import MetricContractError, MetricStore, publish, series_row
 from monitoring.query_plan import definitions, load_plan
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 
 ROOT = Path(__file__).resolve().parents[1]
 

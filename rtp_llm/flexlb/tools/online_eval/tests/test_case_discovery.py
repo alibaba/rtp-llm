@@ -9,7 +9,7 @@ import pytest
 
 from case_api import registry
 from scenario.environment_config import environment
-from scenario.backend import make_env_spec
+from scenario.backend_spec import make_env_spec
 from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.config_data import merge_environment
 from reporting.run_context import checks_section, provenance_from
@@ -63,7 +63,7 @@ def test_profile_patch_inherits_other_profiles_and_fields():
 def test_startup_consumes_snapshot_without_reading_preset_again():
     plan = environment({}, 'fixture', 'batch-window')
     frozen = EnvironmentSnapshot.read(plan['rendered'])
-    with mock.patch('scenario.backend.load_preset', side_effect=AssertionError('runtime preset read')):
+    with mock.patch('adapters.perf_presets.load_preset', side_effect=AssertionError('runtime preset read')):
         spec = make_env_spec(plan, 'batch-window', {'master_base': 18080})
     assert spec.raw_config == frozen.master_json
     corrupt = dict(plan['rendered'], master_json='{}')

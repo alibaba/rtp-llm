@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 from case_api.builder import output
 from case_api.inputs import fields
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 
 
 def check_windows(data, *, available, path, single=False):

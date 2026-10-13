@@ -12,7 +12,7 @@ from flexlb_cfg import render_env
 from flexlb_profile_data import load_mock_calibration
 from adapters.perf_presets import ROOT, load_preset, load_performance_file
 from adapters.environment import _write_master_config
-from scenario.backend import make_env_spec
+from scenario.backend_spec import make_env_spec
 from scenario.compiler import environment
 
 FLEXLB = ROOT.parents[1]

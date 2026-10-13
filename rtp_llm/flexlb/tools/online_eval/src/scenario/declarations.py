@@ -7,7 +7,7 @@ from typing import Optional
 
 from scenario.config_data import mapping
 from scenario.config_data import data_only
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.execution_policy import normalize_metadata, normalize_execution, DEFAULT_MONITORING
 from scenario.validation import names
 from flexlb_cfg import PROFILES

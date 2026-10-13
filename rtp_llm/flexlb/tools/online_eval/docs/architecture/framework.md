@@ -56,7 +56,7 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 内部 program document 使用显式 `implementation` 字段携带实现与配置来源；普通 mapping 复制和 JSON 序列化必须保留该字段。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
 
-端口窗口准入、探测与锁由 `adapters.port_windows` 提供，命令入口只解析参数并调用实例编排器。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
+端口窗口准入、探测与锁由 `adapters.port_windows` 提供。`admit_port_window()` 返回包含选定端口、来源、逐 lane 状态、诊断及锁所有权的 `PortAdmission`，不改写参数或进程环境，不打印或退出。父编排器在上下文作用域内持有窗口锁与输出锁，规划失败、执行失败和正常返回都释放所有权；子进程端口环境从选定租约生成。命令入口负责准入错误的退出码和诊断。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
 
 后台采样由 `runtime.sample_worker` 管理预算、取消和线程退出；服务协议与 epoch 数据源由 `adapters.observation_sources` 提供，`adapters.observation_window` 在线程 join 后冻结 cohort。action 负责参数、资源归属、检查和产物发布。
 
@@ -151,3 +151,7 @@ case action 保留自身参数和输出的所有权。公共 core action 使用�
 lineage codec 分别解码 v2 的块对齐格式与 v3 的精确长度格式，返回 `LineageModel`。`LineageEvent` 明确区分 token 长度、共享完整块和额外标签预留；`LineageExpander` 管理父路径及标签预算，`LineageProjector` 校验固定输入并生成请求文件。过滤作用于展开后的事件，保留原始索引和父路径，不改变请求身份或随机采样索引。压缩格式中的版本号描述数据语义，不表示 Python 类的代次。
 
 启动等待共用 stage 的 `Deadline`，不会在端口、服务、拓扑和首采样之间重置预算。单/双 Master 共用进程存活、HTTP、同步与连续拓扑稳定检查；客户端创建进程后必须收到同一 run/group/phase 的发送状态确认，才能进入后续观测。`startup.json` 记录环境、流量输入、监控及发送确认的分项成本；各 case 的固定预热、条件预热和故障稳定期仍由其 YAML 与 program 决定。
+
+严格文件读取由 `scenario.document_io` 提供，共享异常定义在 `scenario.errors`。这两个模块不依赖 program 装载或编译总装；`scenario.loader` 只负责读取 case 数据、应用实验参数和调用注册程序。`scenario.references` 统一 `$ref` 语法及先前 stage 的输出类型解析，契约和冻结参数读取直接复用该规则，不回调 stage 编译实现。
+
+`scenario.backend_spec` 将冻结环境计划转换为受租约约束的启动规格。`EnvManager` 通过显式的环境创建与进程变化回调交付所有权；外部有界清理负责回收时，必须同时提供两个回调。启动和重启失败也记录已产生的进程，保留部分环境供独立清理预算回收。启动负例使用单独的 mock 规格，避免无效 Master 配置阻止 mock 启动或临时修改 live environment 的规格。Master 拓扑和 owner ledger 的证据解码由 `adapters.master_evidence` 提供，readiness、残留上界及收敛判定仍由 action 决定。

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT))
 from scripts.pipeline.ci_selection import add_ci_selection, resolve_ci_selection
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 
 
 def main(argv=None):

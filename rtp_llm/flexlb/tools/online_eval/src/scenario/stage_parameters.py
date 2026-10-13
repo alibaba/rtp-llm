@@ -5,32 +5,13 @@ from dataclasses import dataclass, fields
 import json
 from typing import Protocol, Optional, Union
 
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.validation import mapping
+from scenario.references import OutputReference
 
 
 class StageParameters(Protocol):
     def to_dict(self) -> dict: ...
-
-
-@dataclass(frozen=True)
-class OutputReference:
-    stage_id: str
-    field: str
-
-    @classmethod
-    def read(cls, value):
-        mapping(value, "reference", {"$ref"}, {"$ref"})
-        path = value["$ref"]
-        if type(path) is not str:
-            raise ScenarioError("reference must be a string")
-        parts = path.split(".")
-        if len(parts) != 4 or parts[0] != "stages" or parts[2] != "output":
-            raise ScenarioError("invalid output reference")
-        return cls(parts[1], parts[3])
-
-    def to_dict(self):
-        return {"$ref": f"stages.{self.stage_id}.output.{self.field}"}
 
 
 @dataclass(frozen=True)

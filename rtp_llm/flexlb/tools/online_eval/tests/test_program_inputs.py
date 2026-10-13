@@ -8,7 +8,8 @@ import pytest
 from scenario.program_compiler import configure_program
 from scenario import compile_scenarios
 from scenario.catalog import handlers
-from scenario.loader import ScenarioError, load_document
+from scenario.errors import ScenarioError
+from scenario.document_io import load_document
 
 
 ROOT = Path(__file__).resolve().parents[1]

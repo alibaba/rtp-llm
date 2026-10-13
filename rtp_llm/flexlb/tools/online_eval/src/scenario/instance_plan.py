@@ -94,7 +94,7 @@ def parse_catalog(payload: dict, *, source: str, profile: str) -> list[Instance]
             from scenario.execution_policy import (
                 EXECUTION_BUDGETS, normalize_execution, normalize_metadata,
             )
-            from scenario.loader import ScenarioError
+            from scenario.errors import ScenarioError
 
             try:
                 metadata = normalize_metadata(row.get("metadata"))

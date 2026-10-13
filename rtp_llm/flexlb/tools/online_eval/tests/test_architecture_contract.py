@@ -13,7 +13,7 @@ from runtime.deadline import Deadline
 from scenario.outcome import RunOutcome, apply_outcome
 from scenario.context import RuntimeContext
 from scenario.execution_plan import freeze_plan, load_plan
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.stage_execution import _validate_output
 
 

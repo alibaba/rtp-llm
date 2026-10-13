@@ -9,7 +9,7 @@ import pytest
 from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 from monitoring.query_plan import load_plan
 from reporting.view_config import view
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 
 
 @pytest.mark.parametrize('filename', ['cache_scale_in.yaml', 'master_ha_failover.yaml'])

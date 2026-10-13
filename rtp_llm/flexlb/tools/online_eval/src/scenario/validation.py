@@ -2,7 +2,7 @@
 
 import math
 import re
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 
 ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 

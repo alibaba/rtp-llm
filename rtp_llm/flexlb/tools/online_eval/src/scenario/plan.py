@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 from flexlb_cfg import PROFILES
 from scenario.environment_snapshot import EnvironmentSnapshot
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.validation import mapping, number, identifier
 from scenario.stage_parameters import StageParameters, decode_parameters
 from adapters.java_mock_resources import JavaMockBudget

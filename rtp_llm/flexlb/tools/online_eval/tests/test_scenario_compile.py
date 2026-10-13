@@ -17,7 +17,7 @@ from scenario import (
     compile_scenarios,
     load_scenarios,
 )
-from scenario.loader import load_document
+from scenario.document_io import load_document
 
 
 def scenario():

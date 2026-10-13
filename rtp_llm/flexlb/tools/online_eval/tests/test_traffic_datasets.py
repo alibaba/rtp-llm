@@ -99,7 +99,7 @@ class TrafficDatasetsTest(unittest.TestCase):
                 self.assertEqual('unit-test', provenance['origin'])
 
     def test_existing_scenarios_select_files_without_authored_checksums(self):
-        from scenario.loader import load_document
+        from scenario.document_io import load_document
 
         def sources(node):
             if isinstance(node, dict):

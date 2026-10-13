@@ -8,7 +8,7 @@ from reporting.view_schema import (
     validate_bindings, validate_default, validate_monitoring_policy,
     validate_selected, validate_structure, validate_text, validate_panels,
 )
-from scenario.loader import load_document
+from scenario.document_io import load_document
 from scenario.validation import fail
 from reporting.view_model import ViewDefinition
 from reporting.events import validate_events

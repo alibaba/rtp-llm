@@ -14,7 +14,7 @@ from cases.master_performance.metrics import produce
 from cases.master_performance.panels import prepare_curves, report_panels
 from monitoring.metric_store import MetricContractError, MetricStore
 from monitoring.query_plan import load_plan, queries_for_targets
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from reporting.view_config import view
 from test_performance_gate import evidence
 

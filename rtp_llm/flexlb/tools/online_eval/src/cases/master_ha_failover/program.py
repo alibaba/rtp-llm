@@ -8,7 +8,7 @@ from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 from case_api.builder import output
 from cases.master_ha_failover.inputs import NUMERIC_PARAMETERS
 from cases.master_ha_failover.inputs import read_cycle
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from traffic.contracts import driver
 
 

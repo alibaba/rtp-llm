@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from scenario.loader import ScenarioError, load_document
+from scenario.errors import ScenarioError
+from scenario.document_io import load_document
 from scenario.execution_policy import KINDS, normalize_metadata
 from scenario.validation import mapping, names, identifier, number
 from flexlb_cfg import PROFILES

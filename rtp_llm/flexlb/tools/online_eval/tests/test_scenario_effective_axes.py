@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from flexlb_cfg import render_env
 from scenario import compile_scenarios, load_scenarios
-from scenario.backend import make_env_spec
+from scenario.backend_spec import make_env_spec
 
 
 class EffectiveAxesTests(unittest.TestCase):

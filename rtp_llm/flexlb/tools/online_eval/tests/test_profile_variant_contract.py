@@ -17,7 +17,7 @@ from scenario.environment_declaration import (
     OPTIONAL_SCALARS, environment_fields, optional_scalars,
     variant_environment_fields,
 )
-from scenario.loader import load_document
+from scenario.document_io import load_document
 
 ROOT = Path(__file__).resolve().parents[1]
 

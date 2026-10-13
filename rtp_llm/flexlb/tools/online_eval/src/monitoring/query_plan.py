@@ -5,7 +5,8 @@ from pathlib import Path
 
 from schema_contract import matches_schema
 
-from scenario.loader import ScenarioError, load_document
+from scenario.errors import ScenarioError
+from scenario.document_io import load_document
 
 
 from monitoring.identity import NAME, METRIC_ID, SOURCE_KINDS

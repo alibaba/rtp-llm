@@ -14,11 +14,8 @@ from adapters.java_mock_resources import (
     plan_lane_leases,
 )
 from scenario import compile_scenarios
-from scenario.backend import (
-    BoundedOps,
-    JavaMockBackend,
-    make_env_spec,
-)
+from scenario.backend import BoundedOps, JavaMockBackend
+from scenario.backend_spec import make_env_spec
 from scenario.catalog import handlers
 from scenario.compiler import environment
 from scenario.contracts import StageHandler

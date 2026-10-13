@@ -1,7 +1,7 @@
 """Data-only guards and isolated merges shared by case configuration and variants."""
 
 import copy
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from input_contract import mapping_fields
 
 

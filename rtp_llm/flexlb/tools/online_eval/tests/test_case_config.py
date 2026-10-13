@@ -18,7 +18,7 @@ from scenario import (
     load_scenarios,
 )
 from scenario.catalog import handlers
-from scenario.loader import load_document
+from scenario.document_io import load_document
 
 
 class CaseConfigTest(unittest.TestCase):

@@ -1,11 +1,11 @@
 """Port-window admission, socket preflight and process-lifetime run locks."""
 from __future__ import annotations
 
-import argparse
 import fcntl
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO
 
@@ -34,6 +34,31 @@ PORT_WINDOW_LOCK_DIR = Path("/tmp/flexlb_ft_portlocks")
 PORT_SCAN_MAX_SHIFTS = 32
 
 
+class PortAdmissionError(ValueError):
+    """No safe window or output ownership can be admitted."""
+
+
+@dataclass
+class PortAdmission:
+    master_base: int
+    mock_base: int
+    port_provenance: str
+    lane_port_status: dict[int, str] | None = None
+    warnings: tuple[str, ...] = ()
+    admitted: bool = True
+    _holders: list[IO] = field(default_factory=list, repr=False)
+
+    def close(self):
+        _close_window_locks(self._holders)
+        self._holders.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
 def max_lanes(mock_stride: int, mock_base: int) -> int:
     """Lane cap implied by the mock band: base+stride*(N-1)+151 <= 65535."""
     return (65535 - MOCK_PORT_WINDOW_LAST - mock_base) // mock_stride + 1
@@ -47,9 +72,9 @@ def _env_int(name: str, default: int) -> int:
     try:
         value = int(raw)
     except ValueError:
-        raise SystemExit(f"error: {name}={raw!r} is not an integer")
+        raise PortAdmissionError(f"error: {name}={raw!r} is not an integer")
     if value <= 0:
-        raise SystemExit(f"error: {name}={raw!r} must be positive")
+        raise PortAdmissionError(f"error: {name}={raw!r} must be positive")
     return value
 
 
@@ -65,7 +90,8 @@ def mock_base() -> int:
     return _env_int("FLEXLB_FT_PARALLEL_MOCK_BASE", MOCK_BASE_GRPC_PORT)
 
 
-def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE) -> dict[str, str]:
+def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE,
+             master: int | None = None, mock: int | None = None) -> dict[str, str]:
     """Port-partition env overlay for lane *lane_idx* (0-based).
 
     Every key below is process-global in adapters.environment_config (read at import), so a
@@ -74,27 +100,11 @@ def lane_env(lane_idx: int, mock_stride: int = MOCK_PORT_STRIDE) -> dict[str, st
     the orchestrator's environment.
     """
     return child_port_env(
-        master_base() + MASTER_PORT_STRIDE * lane_idx,
-        mock_base() + mock_stride * lane_idx,
+        (master_base() if master is None else master) + MASTER_PORT_STRIDE * lane_idx,
+        (mock_base() if mock is None else mock) + mock_stride * lane_idx,
     )
 
 
-def _mock_stride_of(args: argparse.Namespace) -> int:
-    """Effective mock stride (CLI --mock-stride, else the 500 default)."""
-    return getattr(args, "mock_stride", None) or MOCK_PORT_STRIDE
-
-
-# ---------------------------------------------------------------------------
-# Port window preflight & machine-level window lock
-
-
-# Holder for the flocks of the SELECTED window in a real (non-dry)
-# run.  Module-level on purpose: an flock lives exactly as long as its
-# open file description, and strong references here keep the file
-# objects (and their fds) alive until interpreter exit — unreferenced
-# holders would be garbage-collected, closing the fds and silently
-# dropping the machine-level mutexes mid-run.
-_WINDOW_LOCK_FILES: list[IO] | None = None
 _WINDOW_LOCK_DIAGNOSTIC = ""
 
 
@@ -278,285 +288,139 @@ def _matrix_tail(mock_base: int, mock_stride: int, n_lanes: int) -> int:
     return mock_base + mock_stride * (n_lanes - 1) + MOCK_PORT_WINDOW_LAST
 
 
-def resolve_port_bases(args: argparse.Namespace) -> None:
-    """Port-window preflight: probe every lane, lock, and pick the bases.
-
-    EXPLICIT mode — FLEXLB_FT_PARALLEL_MASTER_BASE or
-    FLEXLB_FT_PARALLEL_MOCK_BASE (either one, non-empty) pins the pair
-    as a CONTRACT: one candidate, never shifted (half contract, half
-    auto would silently move ports an operator deliberately pinned).
-    Busy or locked → fail fast with a per-lane diagnosis: the run must
-    die BEFORE burning 120s-per-case timeouts, not after (a pinned-but-
-    occupied port once took the whole lane matrix down this way).  A
-    matrix tail crossing LEASE_BAND_FLOOR only WARNS — a leased-but-
-    not-yet-listening lease-band port is invisible to bind probing, so
-    refusing would false-positive.  --dry-run never exits here: it
-    shows the per-lane status and warns that a real run fails fast.
-
-    DEFAULT mode — candidate k shifts the whole matrix DOWN by P
-    strides (master and mock together, uniform direction: shifting
-    master UP would walk into the harness auto-hunt band 18080..18580,
-    shifting mock UP would creep toward the 61000 lease band / 65535
-    ceiling):  m_k = m0 - MASTER_PORT_STRIDE*P*k,  b_k = b0 - stride*P*k.
-    Shifted candidates never overlap each other: master side
-    10*P > 10*(P-1)+5 holds for every P >= 1; mock side
-    stride*P > stride*(P-1)+153  <=>  stride >= 153 (the CLI floor).
-    Gates per candidate, cheapest first: (a) unprivileged range;
-    (b) matrix tail < LEASE_BAND_FLOOR (hard — the online-eval/lease
-    band starts there); (c) the machine-level window locks; (d) every
-    lane's full 159-port window free under a 0.0.0.0 bind probe.
-    First survivor wins; k > 0 injects the shifted bases into
-    os.environ (lane_env / _print_plan / aggregate follow them
-    automatically) with a loud stderr warning.
-
-    Stash on args: port_provenance ("default 18080/55151" | "auto
-    18080/55151 -> 18020/52151 (default window busy)" | "explicit
-    18300/55151") and lane_port_status ({lane: "FREE" | "BUSY(:18080,
-    18082)"}).
-
-    Invariant: main()'s lane-cap check runs BEFORE this function, on
-    the INITIAL bases; shifting moves bases DOWN only, which can only
-    RAISE the cap, so the validated cap stays valid for the shifted
-    matrix.
-
-    Fail-closed: a probe/lock INFRASTRUCTURE exception (not plain
-    busyness — port_in_use *returning True* is the busy signal; note
-    the distinction from port_in_use RAISING) exits instead of running:
-    a false rejection costs minutes (the message names the exact
-    lane/port), a false "all free" costs 120s x N hung cases — hours.
-    --dry-run downgrades it to a warning and omits the status column.
-
-    Window locks: taken before any lane subprocess starts and held
-    until process exit (the module-level holder), so a second
-    instance fails fast instead of trampling this one's sockets.
-    Admission checks interval intersections while holding a shared gate
-    (see _try_window_lock); any overlap with a live run blocks this
-    matrix, including partial and cross-side overlaps.  A resolve
-    that SystemExits holds no lock.  Dry-run side effects: only the
-    /tmp lock dir plus inert lock files (probe-and-release — nothing
-    is held past the call).
-    """
-    global _WINDOW_LOCK_FILES
-    dry = bool(getattr(args, "dry_run", False))
-    n_lanes = args.parallel
-    stride = _mock_stride_of(args)
-    explicit = any(
-        (os.environ.get(key) or "").strip()
-        for key in (
-            "FLEXLB_FT_PARALLEL_MASTER_BASE",
-            "FLEXLB_FT_PARALLEL_MOCK_BASE",
-        )
-    )
-    m0, b0 = master_base(), mock_base()
-
-    def _probe(m: int, b: int) -> dict[int, list[int]]:
-        """Busy ports per lane for the (m, b) matrix (full lane map)."""
-        return {
-            lane: busy_ports(lane_ports(lane, stride, m, b))
-            for lane in range(n_lanes)
-        }
-
-    def _fmt_taken(items: list) -> str:
-        """First 5 entries comma-joined, (+N more) tail when capped."""
-        text = ",".join(str(x) for x in items[:5])
-        if len(items) > 5:
-            text += f" (+{len(items) - 5} more)"
-        return text
-
-    def _busy_note(m: int, b: int, lane: int, taken: list[int]) -> str:
-        head = m + MASTER_PORT_STRIDE * lane
-        parts = []
-        for side, in_master in (("master", True), ("mock", False)):
-            ports = [p for p in taken if (head <= p < head + 6) == in_master]
-            if ports:
-                parts.append(f"{side} {_fmt_taken(ports)}")
-        return f"lane {lane}: {' / '.join(parts)} BUSY"
-
-    def _status_of(probe: dict[int, list[int]]) -> dict[int, str]:
-        return {
-            lane: (f"BUSY(:{_fmt_taken(taken)})" if taken else "FREE")
-            for lane, taken in probe.items()
-        }
-
-    def _infra_fail(exc: Exception, where: str) -> None:
-        if dry:
-            print(
-                f"warning: port-window preflight infrastructure failure "
-                f"({where}: {exc!r}) — dry-run continues without the "
-                "port status column; a real run fails fast here",
-                file=sys.stderr,
-            )
-            return
-        raise SystemExit(
-            f"error: port-window preflight infrastructure failure "
-            f'({where}: {exc!r}) — refusing to run: a false "all free" '
-            "would burn 120s per case on port timeouts"
-        )
-
-    if explicit:
-        args.port_provenance = f"explicit {m0}/{b0}"
-        tail = _matrix_tail(b0, stride, n_lanes)
-        if tail >= LEASE_BAND_FLOOR:
-            print(
-                f"warning: explicit mock matrix tail {tail} >= lease "
-                f"band floor {LEASE_BAND_FLOOR} (mock base {b0}, stride "
-                f"{stride}, {n_lanes} lanes) — crossing the online-eval "
-                "/ lease port band; continuing because a leased-but-not-"
-                "yet-listening port is invisible to bind probing "
-                "(explicit base env is a contract)",
-                file=sys.stderr,
-            )
-        if not (b0 - 1 >= 1024 and m0 >= 1024):
-            detail = (
-                f"base below the privileged floor 1024 (master {m0}, "
-                f"mock window starts {b0 - 1})"
-            )
-            if dry:
-                print(
-                    f"warning: {detail} — dry-run continues, a real run "
-                    "will fail-fast here (explicit base env is a "
-                    "contract)",
-                    file=sys.stderr,
-                )
-                return
-            raise SystemExit(
-                f"error: explicit port window unusable: {detail} "
-                "(explicit base env is a contract, never shifted)"
-            )
-        holders = None
-        try:
-            holders = _try_window_lock(m0, b0, stride, n_lanes)
-            probe = _probe(m0, b0)
-        except Exception as exc:
-            _close_window_locks(holders)
-            _infra_fail(exc, f"explicit window probe (bases {m0}/{b0})")
-            return
-        busy = {lane: taken for lane, taken in probe.items() if taken}
-        args.lane_port_status = _status_of(probe)
-        if holders is None:
-            detail = _window_lock_note(m0, b0, stride, n_lanes)
-        elif busy:
-            detail = "; ".join(
-                _busy_note(m0, b0, lane, taken) for lane, taken in sorted(busy.items())
-            )
-        else:
-            detail = None
-        if detail is not None:
-            _close_window_locks(holders)
-            if dry:
-                print(
-                    f"warning: {detail} — dry-run continues, a real run "
-                    "will fail-fast here (explicit base env is a "
-                    "contract)",
-                    file=sys.stderr,
-                )
-            else:
-                raise SystemExit(
-                    f"error: explicit port window unusable: {detail} "
-                    "(explicit base env is a contract, never shifted)"
-                )
-            return
-        if dry:
-            _close_window_locks(holders)  # probe-and-release
-        else:
-            _WINDOW_LOCK_FILES = holders
-        return
-
-    # DEFAULT mode: walk the shift ladder until a candidate passes every
-    # gate; the FIRST rejection detail feeds the auto-shift warning.
-    rejections: list[str] = []
-    first_detail: str | None = None
-    for k in range(PORT_SCAN_MAX_SHIFTS + 1):
-        m_k = m0 - MASTER_PORT_STRIDE * n_lanes * k
-        b_k = b0 - stride * n_lanes * k
-        tag = f"k={k} bases {m_k}/{b_k}"
-        detail: str | None
-        if not (b_k - 1 >= 1024 and m_k >= 1024):
-            detail = "below the privileged floor 1024"
-        elif _matrix_tail(b_k, stride, n_lanes) >= LEASE_BAND_FLOOR:
-            detail = (
-                f"matrix tail {_matrix_tail(b_k, stride, n_lanes)} "
-                f"enters the lease band >= {LEASE_BAND_FLOOR}"
-            )
-        else:
-            holders = _try_window_lock(m_k, b_k, stride, n_lanes)
-            if holders is None:
-                detail = _window_lock_note(m_k, b_k, stride, n_lanes)
-            else:
-                try:
-                    probe = _probe(m_k, b_k)
-                except Exception as exc:
-                    _close_window_locks(holders)
-                    _infra_fail(exc, f"probe of {tag}")
-                    return
-                busy = {lane: taken for lane, taken in probe.items() if taken}
-                if busy:
-                    _close_window_locks(holders)
-                    detail = "; ".join(
-                        _busy_note(m_k, b_k, lane, taken)
-                        for lane, taken in sorted(busy.items())
-                    )
-                else:
-                    # SELECTED — the only path through every gate.
-                    args.lane_port_status = _status_of(probe)
-                    if k == 0:
-                        args.port_provenance = f"default {m0}/{b0}"
-                    else:
-                        os.environ["FLEXLB_FT_PARALLEL_MASTER_BASE"] = str(m_k)
-                        os.environ["FLEXLB_FT_PARALLEL_MOCK_BASE"] = str(b_k)
-                        args.port_provenance = (
-                            f"auto {m0}/{b0} -> {m_k}/{b_k} " "(default window busy)"
-                        )
-                        print(
-                            f"warning: default port window busy "
-                            f"({first_detail}) — auto-shifting bases "
-                            f"{m0}/{b0} -> {m_k}/{b_k}; pin "
-                            "FLEXLB_FT_PARALLEL_MASTER_BASE / "
-                            "FLEXLB_FT_PARALLEL_MOCK_BASE to make it a "
-                            "contract",
-                            file=sys.stderr,
-                        )
-                    if dry:
-                        _close_window_locks(holders)  # probe-and-release
-                    else:
-                        _WINDOW_LOCK_FILES = holders
-                    return
-        rejections.append(f"{tag}: {detail}")
-        if first_detail is None:
-            first_detail = detail
-    raise SystemExit(
-        "error: no usable port window in "
-        f"{PORT_SCAN_MAX_SHIFTS + 1} auto-shift candidates (k=0.."
-        f"{PORT_SCAN_MAX_SHIFTS}) — "
-        + "; ".join(rejections)
-        + "; pin FLEXLB_FT_PARALLEL_MASTER_BASE / "
-        "FLEXLB_FT_PARALLEL_MOCK_BASE to an explicitly free pair"
-    )
+def _fmt_taken(items):
+    text = ",".join(str(x) for x in items[:5])
+    return text + (f" (+{len(items) - 5} more)" if len(items) > 5 else "")
 
 
-_RUN_LOCK_FILE = None
+def _busy_note(master, lane, taken):
+    head = master + MASTER_PORT_STRIDE * lane
+    parts = []
+    for side, in_master in (("master", True), ("mock", False)):
+        ports = [p for p in taken if (head <= p < head + 6) == in_master]
+        if ports:
+            parts.append(f"{side} {_fmt_taken(ports)}")
+    return f"lane {lane}: {' / '.join(parts)} BUSY"
 
 
-def acquire_run_lock(out_dir: Path) -> None:
-    """Exclusive lock on <out-dir>/.parallel_runner.lock.
-
-    Two orchestrators sharing one --out-dir overwrite each other's
-    lane*/cases.json and run IDENTICAL port windows (same master/mock
-    bases per lane index) — one real double-run measured 39 false
-    failures.  flock is released by the kernel at process exit; the lock
-    file itself is left behind (harmless).
-    """
-    global _RUN_LOCK_FILE
-    lock_path = out_dir / ".parallel_runner.lock"
-    lock_file = open(lock_path, "w")
+def _probe_candidate(master, mock, stride, lanes):
+    """Own reservation until it is admitted or closed, even on probe failure."""
+    holders = _try_window_lock(master, mock, stride, lanes)
+    if holders is None:
+        return [], None, _window_lock_note(master, mock, stride, lanes)
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock_file.close()
-        raise SystemExit(
-            f"error: {lock_path} is held by another parallel_runner "
-            "instance — a second orchestrator on the same --out-dir would "
-            "overwrite lane artifacts and share port windows; rerun with a "
-            "different --out-dir"
-        )
-    _RUN_LOCK_FILE = lock_file
+        probe = {lane: busy_ports(lane_ports(lane, stride, master, mock))
+                 for lane in range(lanes)}
+        busy = {lane: ports for lane, ports in probe.items() if ports}
+        detail = "; ".join(_busy_note(master, lane, ports) for lane, ports in sorted(busy.items()))
+        if detail:
+            _close_window_locks(holders)
+            return [], probe, detail
+        return holders, probe, None
+    except BaseException:
+        _close_window_locks(holders)
+        raise
+
+
+def _admission(master, mock, provenance, holders, probe=None, warnings=(), *,
+               dry_run=False, admitted=True):
+    status = ({lane: f"BUSY(:{_fmt_taken(ports)})" if ports else "FREE"
+               for lane, ports in probe.items()} if probe is not None else None)
+    if dry_run:
+        _close_window_locks(holders)
+        holders = []
+    return PortAdmission(master, mock, provenance, status, tuple(warnings), admitted, holders)
+
+
+def _infrastructure_failure(exc, where, master, mock, provenance, warnings, dry_run):
+    detail = (f"port-window preflight infrastructure failure ({where}: {exc!r})")
+    if not dry_run:
+        raise PortAdmissionError(
+            f"error: {detail} — refusing to run: a false all-free result would burn port timeouts"
+        ) from exc
+    return _admission(master, mock, provenance, [], warnings=[*warnings,
+        f"warning: {detail} — dry-run continues without the port status column; a real run fails fast here"],
+        admitted=False)
+
+
+def admit_port_window(lanes: int, stride: int = MOCK_PORT_STRIDE, *,
+                      master: int = MASTER_HTTP_BASE, mock: int = MOCK_BASE_GRPC_PORT,
+                      explicit: bool = False, dry_run: bool = False) -> PortAdmission:
+    """Reserve and probe one matrix, returning owned locks and diagnostics.
+
+    Explicit bases never shift. Defaults walk downward together and stay
+    below the lease band. Dry-run probes and releases; infrastructure errors
+    never become successful observations. No args, environment or output is
+    mutated, and callers close the result on every exit path.
+    """
+    if type(lanes) is not int or lanes < 1 or type(stride) is not int or stride <= MOCK_PORT_WINDOW_LAST + 1:
+        raise PortAdmissionError("invalid lane count or mock stride")
+    if type(master) is not int or type(mock) is not int:
+        raise PortAdmissionError("port bases must be integers")
+    provenance = f"{'explicit' if explicit else 'default'} {master}/{mock}"
+    warnings = []
+    if explicit:
+        tail = _matrix_tail(mock, stride, lanes)
+        if tail >= LEASE_BAND_FLOOR:
+            warnings.append(f"warning: explicit mock matrix tail {tail} >= lease band floor {LEASE_BAND_FLOOR} "
+                            f"(mock base {mock}, stride {stride}, {lanes} lanes) — continuing because "
+                            "a leased-but-not-listening port is invisible to bind probing (explicit base env is a contract)")
+        if mock - 1 < 1024 or master < 1024:
+            detail = f"base below the privileged floor 1024 (master {master}, mock window starts {mock - 1})"
+            if not dry_run:
+                raise PortAdmissionError(f"error: explicit port window unusable: {detail} (explicit base env is a contract, never shifted)")
+            return _admission(master, mock, provenance, [], warnings=[*warnings,
+                f"warning: {detail} — dry-run continues, a real run will fail-fast here (explicit base env is a contract)"], admitted=False)
+        try:
+            holders, probe, detail = _probe_candidate(master, mock, stride, lanes)
+        except Exception as exc:
+            return _infrastructure_failure(exc, f"explicit window probe (bases {master}/{mock})",
+                                           master, mock, provenance, warnings, dry_run)
+        if detail:
+            if not dry_run:
+                raise PortAdmissionError(f"error: explicit port window unusable: {detail} (explicit base env is a contract, never shifted)")
+            warnings.append(f"warning: {detail} — dry-run continues, a real run will fail-fast here (explicit base env is a contract)")
+        return _admission(master, mock, provenance, holders, probe, warnings,
+                          dry_run=dry_run, admitted=detail is None)
+
+    rejections = []
+    for shift in range(PORT_SCAN_MAX_SHIFTS + 1):
+        m = master - MASTER_PORT_STRIDE * lanes * shift
+        b = mock - stride * lanes * shift
+        tag = f"k={shift} bases {m}/{b}"
+        if b - 1 < 1024 or m < 1024:
+            detail = "below the privileged floor 1024"
+        elif _matrix_tail(b, stride, lanes) >= LEASE_BAND_FLOOR:
+            detail = f"matrix tail {_matrix_tail(b, stride, lanes)} enters the lease band >= {LEASE_BAND_FLOOR}"
+        else:
+            try:
+                holders, probe, detail = _probe_candidate(m, b, stride, lanes)
+            except Exception as exc:
+                return _infrastructure_failure(exc, f"probe of {tag}", master, mock,
+                                               provenance, warnings, dry_run)
+            if detail is None:
+                if shift:
+                    provenance = f"auto {master}/{mock} -> {m}/{b} (default window busy)"
+                    warnings.append(f"warning: default port window busy ({rejections[0]}) — auto-shifting bases "
+                                    f"{master}/{mock} -> {m}/{b}; pin FLEXLB_FT_PARALLEL_MASTER_BASE / "
+                                    "FLEXLB_FT_PARALLEL_MOCK_BASE to make it a contract")
+                return _admission(m, b, provenance, holders, probe, warnings, dry_run=dry_run)
+        rejections.append(f"{tag}: {detail}")
+    raise PortAdmissionError("error: no usable port window in "
+        f"{PORT_SCAN_MAX_SHIFTS + 1} auto-shift candidates (k=0..{PORT_SCAN_MAX_SHIFTS}) — "
+        + "; ".join(rejections) + "; pin FLEXLB_FT_PARALLEL_MASTER_BASE / "
+        "FLEXLB_FT_PARALLEL_MOCK_BASE to an explicitly free pair")
+
+
+def acquire_run_lock(out_dir: Path) -> IO:
+    """Return explicit ownership of the output lock; close on every exit path."""
+    lock_path = out_dir / ".parallel_runner.lock"
+    holder = open(lock_path, "w")
+    try:
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        holder.close()
+        raise PortAdmissionError(f"error: {lock_path} is held by another parallel_runner "
+            "instance — a second orchestrator on the same --out-dir would overwrite "
+            "lane artifacts and share port windows; rerun with a different --out-dir") from exc
+    return holder

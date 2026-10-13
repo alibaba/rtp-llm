@@ -12,7 +12,8 @@ from scenario.program_compiler import configure_program
 from input_contract import mapping_fields
 from runtime.observation import SampleBudget, poll_samples
 from artifacts.gate_inputs import evidence_origin
-from scenario.loader import ScenarioError, load_document
+from scenario.errors import ScenarioError
+from scenario.document_io import load_document
 from scenario.runtime import Deadline, RuntimeContext
 
 ROOT = Path(__file__).resolve().parents[1]

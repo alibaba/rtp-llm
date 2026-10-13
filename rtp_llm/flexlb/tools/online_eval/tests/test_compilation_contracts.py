@@ -8,7 +8,8 @@ import pytest
 from input_contract import mapping_fields
 from scenario.catalog import handlers
 from scenario.compiler import compile_scenarios
-from scenario.loader import ScenarioError, load_scenarios
+from scenario.errors import ScenarioError
+from scenario.loader import load_scenarios
 from scenario.plan import CompiledInstance
 from scenario.suites import classify
 from scenario.validation import mapping

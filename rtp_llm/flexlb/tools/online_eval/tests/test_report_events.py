@@ -9,7 +9,7 @@ import pytest
 
 from reporting.events import attach_events, project_events
 from reporting.view_config import view
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.runtime import RuntimeContext
 from reporting.workload import write_views
 from test_workload_report_views import payload
@@ -141,7 +141,7 @@ def test_view_kind_is_shared_instead_of_case_specific(legacy):
 
 def test_compilation_rejects_event_stage_typo_before_execution():
     from scenario.program_compiler import configure_program
-    from scenario.loader import load_document
+    from scenario.document_io import load_document
     from reporting.view_config import VIEWS
     config = load_document(VIEWS.parent/'scenarios/master_ha_failover.yaml')
     data = view('master_ha_failover.yaml').to_dict()

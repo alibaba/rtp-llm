@@ -16,6 +16,7 @@ import threading
 import time
 import uuid
 import queue
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from artifacts.json_io import write_json
 from pathlib import Path
@@ -331,17 +332,25 @@ def _print_generated_reports(rows):
 
 
 def run_structured(args: argparse.Namespace) -> int:
-    """Keep window -> output lock -> child list -> lane execution ordering."""
-    port_windows.resolve_port_bases(args)
-    stamp = uuid.uuid4().hex
-    out = (
-        Path(args.out_dir).resolve()
-        if args.out_dir
-        else Path(f"/tmp/flexlb_ft_instances_{stamp}")
-    )
-    if not args.dry_run:
-        out.mkdir(parents=True, exist_ok=True)
-        port_windows.acquire_run_lock(out)
+    """Own window and output locks before listing, releasing them on every exit."""
+    explicit = any((os.environ.get(key) or "").strip() for key in (
+        "FLEXLB_FT_PARALLEL_MASTER_BASE", "FLEXLB_FT_PARALLEL_MOCK_BASE"))
+    with port_windows.admit_port_window(args.parallel, args.mock_stride,
+            master=port_windows.master_base(), mock=port_windows.mock_base(),
+            explicit=explicit, dry_run=args.dry_run) as admission:
+        for warning in admission.warnings:
+            print(warning, file=sys.stderr)
+        args.port_provenance = admission.port_provenance
+        args.lane_port_status = admission.lane_port_status
+        out = Path(args.out_dir).resolve() if args.out_dir else Path(f"/tmp/flexlb_ft_instances_{uuid.uuid4().hex}")
+        if not args.dry_run:
+            out.mkdir(parents=True, exist_ok=True)
+        lock = nullcontext() if args.dry_run else port_windows.acquire_run_lock(out)
+        with lock:
+            return _run_admitted(args, out, admission)
+
+
+def _run_admitted(args, out, admission):
     try:
         instances = select_instances(
             _catalog(args), exact_ids=args.instances, categories=args.categories
@@ -359,16 +368,16 @@ def run_structured(args: argparse.Namespace) -> int:
                    [[instance.budget for instance in lane] for lane in lanes])
         leases = plan_lane_leases(
             budgets,
-            master_base=port_windows.master_base(),
-            mock_base=port_windows.mock_base(),
+            master_base=admission.master_base,
+            mock_base=admission.mock_base,
             mock_stride=args.mock_stride,
         )
         for i, lease in enumerate(leases):
             if list(lease.ports()) != port_windows.lane_ports(
-                i, args.mock_stride, port_windows.master_base(), port_windows.mock_base()
+                i, args.mock_stride, admission.master_base, admission.mock_base
             ):
                 raise ResourcePlanError("resource planner and port preflight disagree")
-            if lease.child_env() != port_windows.lane_env(i, args.mock_stride):
+            if lease.child_env() != port_windows.lane_env(i, args.mock_stride, admission.master_base, admission.mock_base):
                 raise ResourcePlanError(
                     "resource planner and child environment disagree"
                 )

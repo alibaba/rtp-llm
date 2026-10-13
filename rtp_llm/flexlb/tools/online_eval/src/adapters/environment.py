@@ -74,7 +74,7 @@ def _pick_master_http_port() -> tuple[int, str]:
     )
 
 
-def _write_master_config(env: "FlexEnv") -> Path:
+def _write_master_config(env: "FlexEnv", spec=None) -> Path:
     """Render the SSOT envelope into run_dir/master_config.json.
 
     Single render, two projections: this file feeds the mock / victim
@@ -83,7 +83,7 @@ def _write_master_config(env: "FlexEnv") -> Path:
     both projections use the selected profile and the same overrides.
     """
     path = env.run_dir / "master_config.json"
-    spec = env.spec
+    spec = env.spec if spec is None else spec
     path.write_text(
         render_process_config(
             spec.master_profile,
@@ -141,7 +141,14 @@ class FlexEnv:
 class EnvManager:
     """Owns the lifecycle of mock/master/victim JVMs; reuses env per spec."""
 
-    def __init__(self, run_root: Path, keep: bool = False, verbose: bool = True):
+    def __init__(self, run_root: Path, keep: bool = False, verbose: bool = True, *,
+                 on_environment=None, on_processes=None, defer_cleanup=False, mock_spec=None):
+        if defer_cleanup and (on_environment is None or on_processes is None):
+            raise ValueError("deferred cleanup requires an explicit environment and process owner")
+        self.on_environment = on_environment
+        self.on_processes = on_processes
+        self.defer_cleanup = defer_cleanup
+        self.mock_spec = mock_spec
         self.master_lifecycle = MasterLifecycle(self._log)
         self.run_root = run_root
         self.keep = keep
@@ -149,6 +156,17 @@ class EnvManager:
         self.current: Optional[FlexEnv] = None
         self._env_seq = 0
         self._zk_ops_instance: Optional["ZkHelperOps"] = None
+
+    def _record_processes(self, env):
+        if self.on_processes is not None:
+            self.on_processes(env)
+
+    def _master_operation(self, operation, env, *args, **kwargs):
+        self._record_processes(env)
+        try:
+            return operation(env, *args, **kwargs)
+        finally:
+            self._record_processes(env)
 
     # -- logging -----------------------------------------------------------
 
@@ -187,6 +205,11 @@ class EnvManager:
         dies mid-way self.current is still None, so the regular teardown()
         would see nothing and leak the JVMs this build already started.
         """
+        self._record_processes(env)
+        if self.defer_cleanup:
+            # The injected owner retains partial and historical processes for
+            # its own separately budgeted teardown; do not clear these refs.
+            return
         for mp in env.load_clients:
             mp.terminate()
         env.load_clients.clear()
@@ -240,6 +263,8 @@ class EnvManager:
         run_dir.mkdir(parents=True, exist_ok=True)
         base = self._pick_base_grpc_port(spec.n_prefill, spec.n_decode)
         env = FlexEnv(spec, run_dir, base)
+        if self.on_environment is not None:
+            self.on_environment(env)
         self._log(
             f"building env '{spec.label}' ({spec.n_prefill}P+{spec.n_decode}D, "
             f"mock_base={base}, master_http={env.master_http_port} "
@@ -279,14 +304,16 @@ class EnvManager:
             # Build failed before self.current was assigned: teardown()
             # would see None and leak the mock/master JVMs already started.
             # Stop the partial env, then re-raise for the caller.
-            self._log(f"env '{spec.label}' build failed — stopping partial env")
+            self._log(f"env '{spec.label}' build failed — finalizing partial env")
             self._stop_env_processes(env)
             raise
+        finally:
+            self._record_processes(env)
         self.current = env
         return env
 
     def _start_mock(self, env: FlexEnv, *, deadline=None) -> None:
-        spec = env.spec
+        spec = self.mock_spec if self.mock_spec is not None else env.spec
         if not MOCK_JAR.is_file():
             raise RuntimeError(
                 f"mock engine jar not found: {MOCK_JAR} (build it first)"
@@ -323,7 +350,7 @@ class EnvManager:
             "--performance",
             str(env.perf_file),
             "--master-config",
-            str(_write_master_config(env)),
+            str(_write_master_config(env, spec)),
             # stdout telemetry (java_mock_stats line every statsIntervalMs):
             # lets the archived mock_engine.log answer "which RPC counters
             # kept moving / stalled" for hang forensics (3c-class issues)
@@ -357,29 +384,29 @@ class EnvManager:
 
 
     def start_master(self, env: FlexEnv, log_name: Optional[str]=None, *, deadline=None) -> ManagedProcess:
-        return self.master_lifecycle.start_master(env, log_name, deadline=deadline)
+        return self._master_operation(self.master_lifecycle.start_master, env, log_name, deadline=deadline)
 
     def stop_master(self, env: FlexEnv, settle_s: float=2.0) -> None:
-        return self.master_lifecycle.stop_master(env, settle_s)
+        return self._master_operation(self.master_lifecycle.stop_master, env, settle_s)
 
     def kill_master9(self, env: FlexEnv) -> None:
-        return self.master_lifecycle.kill_master9(env)
+        return self._master_operation(self.master_lifecycle.kill_master9, env)
 
     # -- HA dual-master orchestration (gated on spec.masters) --------------
 
 
     def start_master_instance(self, env: FlexEnv, mspec: MasterSpec, log_name: Optional[str]=None, *, deadline=None) -> ManagedProcess:
-        return self.master_lifecycle.start_master_instance(env, mspec, log_name, deadline=deadline)
+        return self._master_operation(self.master_lifecycle.start_master_instance, env, mspec, log_name, deadline=deadline)
 
 
     def master_instance_target(self, env: FlexEnv, name: str) -> str:
         return self.master_lifecycle.master_instance_target(env, name)
 
     def kill_master9_instance(self, env: FlexEnv, name: str) -> None:
-        return self.master_lifecycle.kill_master9_instance(env, name)
+        return self._master_operation(self.master_lifecycle.kill_master9_instance, env, name)
 
     def restart_master_instance(self, env: FlexEnv, name: str, *, deadline=None) -> ManagedProcess:
-        return self.master_lifecycle.restart_master_instance(env, name, deadline=deadline)
+        return self._master_operation(self.master_lifecycle.restart_master_instance, env, name, deadline=deadline)
 
     # -- ZK helper (Tier-2/3, gated on spec.zk_consistency) ----------------
 

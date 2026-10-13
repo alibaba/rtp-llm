@@ -11,7 +11,7 @@ from scripts.commands import run_ci
 from scenario.suites import SuiteCatalog, preselect_documents, classify
 from scenario import load_scenarios, compile_scenarios
 from scenario.catalog import handlers
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.ci_plan import CiPlan, CiInstance, CiPlanner
 
 ROOT = Path(__file__).resolve().parents[1]

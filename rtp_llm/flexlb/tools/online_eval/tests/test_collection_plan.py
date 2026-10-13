@@ -13,7 +13,7 @@ from monitoring.collection_plan import collection_plan, physical_metrics, scrape
 from monitoring.query_plan import load_plan
 from monitoring.session import PrometheusSession
 from monitoring.sources import evidence_collector
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 
 
 @pytest.mark.parametrize('name', ['cache_scale_in.yaml', 'master_ha_failover.yaml',

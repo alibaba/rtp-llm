@@ -5,27 +5,14 @@ import math
 from dataclasses import dataclass
 from typing import Callable
 
-from scenario.loader import ScenarioError
+from scenario.errors import ScenarioError
 from scenario.contracts import PlanContext
 from scenario.validation import fail, mapping, identifier, number
 from analysis.checks import validate_comparison
 from scenario.request_parameters import normalize_request_parameters
 
 
-def reference(value, path, outputs, expected=None):
-    mapping(value, path, {"$ref"}, {"$ref"})
-    ref = value["$ref"]
-    if not isinstance(ref, str):
-        fail(path, "$ref must be a string")
-    parts = ref.split(".")
-    if len(parts) != 4 or parts[0] != "stages" or parts[2] != "output":
-        fail(path, "expected stages.<earlier_stage>.output.<field>")
-    kind = outputs.get(parts[1], {}).get(parts[3])
-    if kind is None:
-        fail(path, f"unknown or forward reference {ref!r}")
-    if expected is not None and kind != expected:
-        fail(path, f"reference is {kind}, expected {expected}")
-    return kind
+from scenario.references import reference
 
 
 def _empty_params(params, loc, outputs):

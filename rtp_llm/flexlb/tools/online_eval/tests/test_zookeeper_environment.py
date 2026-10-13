@@ -4,8 +4,8 @@ from types import SimpleNamespace as NS
 from unittest.mock import patch
 import pytest
 from scenario.environment_config import environment
-from scenario.backend import make_env_spec
-from scenario.loader import ScenarioError
+from scenario.backend_spec import make_env_spec
+from scenario.errors import ScenarioError
 from adapters.leadership import LeadershipSnapshot
 from adapters.zookeeper_config import ZooKeeperConfig
 from scenario.actions.master import _leadership

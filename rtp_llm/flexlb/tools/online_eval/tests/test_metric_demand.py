@@ -12,7 +12,7 @@ from monitoring.query_plan import load_plan, plan_hash
 from reporting.view_config import view
 from scenario.catalog import handlers
 from scenario.compiler import compile_scenarios
-from scenario.loader import load_document
+from scenario.document_io import load_document
 
 ROOT = Path(__file__).resolve().parents[1]
 

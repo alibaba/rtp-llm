@@ -19,6 +19,6 @@ def resolve_ci_selection(args):
     plan = CiPlanner().build(args.job, suite=args.suite, profiles=profiles,
                              instances=args.instances, grade=args.grade, experiment_params=getattr(args, "experiment_params", None))
     if not plan.identities(args.worker):
-        from scenario.loader import ScenarioError
+        from scenario.errors import ScenarioError
         raise ScenarioError('selected CI worker has no instances')
     return plan
