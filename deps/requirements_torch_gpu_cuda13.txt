@@ -11,16 +11,24 @@ flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/flash_mla/flash_
 fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl
 fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl
 fast-hadamard-transform@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl
-flashinfer-python@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_python-0.6.12-py3-none-any.whl
-flashinfer-cubin@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260608/flashinfer_cubin-0.6.12-py3-none-any.whl
+# FlashInfer Python, cubins and JIT cache must have matching release versions.
+# CuTe DSL 4.7.1 and Quack 0.6.5 keep compatibility with Protobuf 4.25.
+flashinfer-python[cu13]==0.6.18
+flashinfer-cubin@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_cubin-0.6.18-py3-none-any.whl
+flashinfer-jit-cache@https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.18/flashinfer_jit_cache-0.6.18+cu130-cp39-abi3-manylinux_2_28_x86_64.whl
+nvidia-cutlass-dsl[cu13]==4.7.1
+nvidia-cutlass-dsl-libs-base==4.7.1
+quack-kernels[cu13]==0.6.5
+nvidia-cudnn-frontend==1.26.0
+cuda-tile==1.4.0
+nccl4py==0.3.1
+cuda-core==1.0.1
+cuda-pathfinder==1.6.0
+apache-tvm-ffi==0.1.12
 deep-ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl
 tilelang==0.1.9
-quack-kernels==0.5.3
 flash-attn-4@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn-4/flash_attn_4-0.0.1.dev1%2Bg466a1da7d-py3-none-any.whl
-nvidia-cutlass-dsl==4.6.0.dev0
-nvidia-cutlass-dsl-libs-base@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/nvidia_cutlass_dsl_libs_base-4.6.0.dev0-cp310-cp310-manylinux_2_28_x86_64.whl
 rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel-0.1.0%2B3bc0ca45.cu13sm103a-cp310-cp310-linux_x86_64.whl
-apache-tvm-ffi>=0.1.12,<0.2
 triton==3.6.0
 pynvvideocodec@https://mirrors.aliyun.com/pypi/packages/3d/8b/aa04d63c7b74a1c20a7a1e8de93949a2097af02dc08a7446cfe5ee2faf67/pynvvideocodec-2.2.2-cp310-cp310-manylinux_2_28_x86_64.whl
 
