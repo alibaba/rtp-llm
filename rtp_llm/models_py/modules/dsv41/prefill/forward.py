@@ -462,6 +462,17 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import (
+        prepare_model_gate_routing_metadata,
+    )
+
+    # Tokens already use the rank-local CP order and visual sentinel ids.
+    # Keep these values local: the next request or graph capture must rebuild
+    # them from its own input-id buffer, even when the allocation is reused.
+    routing_metadata = prepare_model_gate_routing_metadata(v4, input_ids)
+    routing_kwargs = (
+        {"routing_metadata": routing_metadata} if routing_metadata is not None else {}
+    )
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     capture_aux = bool(capture_ids)
 
@@ -602,13 +613,21 @@ def forward_layers(
                 if prefill_fast_layer_calls is not None
                 else v4.layers
             )
+            engram_prefetch = getattr(v4, "_engram_lookup_prefetch", None)
             for layer_idx, layer_call in enumerate(layer_calls):
+                if engram_prefetch is not None:
+                    engram_prefetch.before_layer(layer_idx)
                 if layer_idx == 21 and ced_tail is not None:
                     with _profiler.record_function_range("dsv41.ced.compact"):
                         if not ced_in_l20:
                             h, input_ids = ced_tail.compact(
                                 v4, h, input_ids, shared_prefill
                             )
+                        if routing_metadata is not None:
+                            routing_metadata = prepare_model_gate_routing_metadata(
+                                v4, input_ids
+                            )
+                            routing_kwargs = {"routing_metadata": routing_metadata}
                         cp_ctx = ced_tail.context
                         logging.debug(
                             "V4.1 CED compacted: bounded=%s cp=%d rows=%d->%d local_rows=%d",
@@ -665,6 +684,7 @@ def forward_layers(
                                 cu_seqlens,  # [B+1]
                                 kv_cache=kv_cache,
                                 block_tables_by_type=block_tables_by_type,
+                                **routing_kwargs,
                             )  # [T, hc, dim]
                     if shared_prefill is not None:
                         release_v41_prefill_shared(shared_prefill, layer_idx)

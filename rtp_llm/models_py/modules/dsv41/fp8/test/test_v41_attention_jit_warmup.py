@@ -381,11 +381,13 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 try_select_sparse_tokens=Mock(return_value=selected),
             ),
             _v41_indexer_q_triton=SimpleNamespace(
-                is_supported=lambda *args: True,
-                try_fused_indexer_q=lambda *args: (
-                    torch.zeros(1, 1, 32, 64),
-                    torch.ones(1, 1, 32),
-                    torch.ones(1, 1, 32),
+                is_supported=lambda *args, **kwargs: True,
+                try_fused_indexer_q=Mock(
+                    side_effect=lambda *args, weights_out_dtype=torch.float32: (
+                        torch.zeros(1, 1, 32, 64),
+                        torch.ones(1, 1, 32),
+                        torch.ones(1, 1, 32, dtype=weights_out_dtype),
+                    )
                 ),
             ),
             _v41_prefill_candidates=SimpleNamespace(),
@@ -394,6 +396,7 @@ class V41AttentionWarmupCPU(unittest.TestCase):
             _v41_prefill_topk=SimpleNamespace(
                 is_supported=lambda *args: True,
                 try_select_tokens=Mock(return_value=selected),
+                finish_tokens=Mock(),
             ),
             _v41_sparse_prefill_indexer=sparse,
         )
@@ -438,10 +441,41 @@ class V41AttentionWarmupCPU(unittest.TestCase):
                 attn, 32768, "cpu", rows=1, vector_stride=1, vector_offset=0
             )
             meta.try_score_bounds.assert_called_once()
+            fused_calls = (
+                package._v41_indexer_q_triton.try_fused_indexer_q.call_args_list
+            )
+            self.assertEqual(
+                [
+                    call.kwargs.get("weights_out_dtype", torch.float32)
+                    for call in fused_calls
+                ],
+                [torch.float32, torch.bfloat16],
+            )
+            self.assertEqual(
+                indexer.score_indexer_chunk.call_args.args[4].dtype, torch.float32
+            )
+            for call in sparse.score.call_args_list:
+                self.assertEqual(call.args[3].dtype, torch.bfloat16)
             capability.assert_called_once_with("cpu")
             grouped_bounds.launch.assert_called_once()
             grouped_score.assert_called_once()
             mask_tail.launch.assert_called_once()
+            topk = package._v41_prefill_topk
+            self.assertEqual(topk.try_select_tokens.call_count, 6)
+            raw_calls = [
+                c
+                for c in topk.try_select_tokens.call_args_list
+                if c.kwargs.get("filter_finite") is False
+            ]
+            self.assertEqual(len(raw_calls), 2)
+            self.assertEqual(topk.finish_tokens.call_count, 2)
+            for call in raw_calls:
+                self.assertIs(call.kwargs["bounds"], meta.try_score_bounds.return_value)
+                self.assertEqual(call.kwargs["out"].shape, selected.shape)
+                self.assertEqual(call.kwargs["out"].dtype, torch.int32)
+            for call in topk.finish_tokens.call_args_list:
+                self.assertIs(call.args[1], meta.try_score_bounds.return_value[1])
+                self.assertIs(call.args[2], selected)
             # Each visible dtype warms both plain and mixed-request lookup plans.
             self.assertEqual(sparse.prepare_plan.call_count, 8)
             self.assertEqual(

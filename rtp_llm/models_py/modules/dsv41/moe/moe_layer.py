@@ -33,6 +33,7 @@ from rtp_llm.models_py.modules.dsv41.chunk_env import (
 )
 
 from .gate import Gate
+from .routing_metadata import GateRoutingMetadata
 from .shared_expert import (
     W13SharedExpert,
     combine_routed_and_shared,
@@ -277,7 +278,11 @@ class MoE(nn.Module):
         return self._gate_pack_static and (not self._has_visual_tokens)
 
     def _run_chunk(
-        self, x: torch.Tensor, input_ids: torch.Tensor, out: torch.Tensor
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        out: torch.Tensor,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> None:
         if self._use_gate_pack():
             if self._routed_includes_shared:
@@ -306,7 +311,12 @@ class MoE(nn.Module):
                     out.copy_(combined)
             return
         with record_function_range("dsv4.moe.gate"):
-            weights, indices = self.gate(x, input_ids)
+            weights, indices = (
+                self.gate(x, input_ids)
+                if routing_metadata is None
+                else self.gate(x, input_ids, routing_metadata=routing_metadata)
+            )
+
         if self._routed_includes_shared:
             with record_function_range("dsv4.moe.routed_experts"):
                 routed = self._strategy(x, weights, indices)
@@ -329,7 +339,11 @@ class MoE(nn.Module):
                 out.copy_(combined)
 
     def _forward_chunked(
-        self, x: torch.Tensor, input_ids_flat: torch.Tensor, shape: torch.Size
+        self,
+        x: torch.Tensor,
+        input_ids_flat: torch.Tensor,
+        shape: torch.Size,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> torch.Tensor:
         global _CHUNKED_MOE_LOGGED
         T = x.size(0)
@@ -352,17 +366,32 @@ class MoE(nn.Module):
                 x[token_start:token_end],
                 input_ids_flat[token_start:token_end],
                 out[token_start:token_end],
+                routing_metadata=(
+                    routing_metadata.slice(token_start, token_end)
+                    if routing_metadata is not None
+                    else None
+                ),
             )
         return out.view(shape)
 
-    def forward(self, x: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        input_ids: torch.Tensor,
+        *,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
+    ) -> torch.Tensor:
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg = _rt.should_record_layer(self.layer_id)
         shape = x.size()
         if x.dim() != 2 or x.size(1) != self.dim:
             x = x.view(-1, self.dim)
-        input_ids_flat = input_ids if input_ids.dim() == 1 else input_ids.flatten()
+        input_ids_flat = (
+            routing_metadata.input_ids
+            if routing_metadata is not None
+            else input_ids if input_ids.dim() == 1 else input_ids.flatten()
+        )
         dbg_pos = getattr(_rt, "_DBG_GLOBAL_POS", -1)
         dbg_pos_mask = None
         dbg_pos_name = None
@@ -381,7 +410,8 @@ class MoE(nn.Module):
                     x[dbg_pos_mask].contiguous(),
                 )
         if self._should_chunk(x.size(0)):
-            return self._forward_chunked(x, input_ids_flat, shape)
+            return self._forward_chunked(x, input_ids_flat, shape, routing_metadata)
+
         if self._use_gate_pack():
             if self._routed_includes_shared:
                 with record_function_range("dsv4.moe.routed_experts"):
@@ -419,7 +449,11 @@ class MoE(nn.Module):
             if _dbg:
                 self.gate._dbg_prefix = f"L{self.layer_id:02d}_moe_gate"
             try:
-                weights, indices = self.gate(x, input_ids_flat)
+                weights, indices = (
+                    self.gate(x, input_ids_flat)
+                    if routing_metadata is None
+                    else self.gate(x, input_ids_flat, routing_metadata=routing_metadata)
+                )
             finally:
                 if _dbg:
                     self.gate._dbg_prefix = None

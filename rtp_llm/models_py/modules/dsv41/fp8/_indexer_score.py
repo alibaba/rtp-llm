@@ -26,6 +26,7 @@ Caller is responsible for FP8 quantizing Q via
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -89,6 +90,16 @@ def has_fp8_fp4_paged_mqa_logits() -> bool:
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=2)
+def _mqa_accepts_logits_dtype(operation) -> bool:
+    """Older pinned wheels expose an explicit output dtype; newer ones use BF16.
+
+    Pybind publishes its keyword signature in __doc__. Resolve this once per
+    operation without initializing CUDA or probing a live kernel launch.
+    """
+    return "logits_dtype:" in (operation.__doc__ or "")
+
+
 def fp8_fp4_mqa_indexer_score(
     q_payload: torch.Tensor,  # [M, H, 64] int8
     q_sf: torch.Tensor,  # [M, H] int32
@@ -110,15 +121,24 @@ def fp8_fp4_mqa_indexer_score(
 
     # Upstream SM100 now consumes BF16 head weights and emits request-relative
     # BF16 logits. Selectors keep their FP32 tensor ABI, but no longer rely on
-    # the removed clean_logits argument or uninitialized tail values.
+    # the removed clean_logits argument or uninitialized tail values. The
+    # extended API forbids clean_logits for this request-relative output;
+    # normalize_mqa_logits below always writes the full masked selector tensor.
     width = max_seqlen_k if max_seqlen_k > 0 else k_payload.shape[0]
-    scores = _deep_gemm.fp8_fp4_mqa_logits(
+    operation = _deep_gemm.fp8_fp4_mqa_logits
+    options = (
+        {"clean_logits": False, "logits_dtype": torch.bfloat16}
+        if _mqa_accepts_logits_dtype(operation)
+        else {}
+    )
+    scores = operation(
         (q_payload.contiguous(), q_sf.contiguous()),
         (k_payload.contiguous(), k_sf.contiguous()),
         weights.to(torch.bfloat16).contiguous(),
         cu_seqlen_ks.contiguous(),
         cu_seqlen_ke.contiguous(),
-        width,
+        max_seqlen_k=width,
+        **options,
     )
     return normalize_mqa_logits(
         scores, cu_seqlen_ks, cu_seqlen_ke, width, relative=max_seqlen_k > 0
@@ -188,7 +208,13 @@ def fp8_fp4_paged_indexer_score(
     schedule = _deep_gemm.get_paged_mqa_logits_metadata(
         lengths, block_size, _get_num_sms(q_payload.device), indices=request_ids
     )
-    scores = _deep_gemm.fp8_fp4_paged_mqa_logits(
+    operation = _deep_gemm.fp8_fp4_paged_mqa_logits
+    options = (
+        {"clean_logits": False, "logits_dtype": torch.bfloat16}
+        if _mqa_accepts_logits_dtype(operation)
+        else {}
+    )
+    scores = operation(
         (q, sf),
         kv_pool_uint8.unsqueeze(2),
         weights.to(torch.bfloat16).contiguous(),
@@ -197,6 +223,7 @@ def fp8_fp4_paged_indexer_score(
         schedule,
         max_ctx_len,
         indices=request_ids,
+        **options,
     )
     ends = lengths.view(-1)
     return normalize_mqa_logits(

@@ -778,6 +778,31 @@ def _warm_indexer_layout(
         weights = raw_weights.squeeze(1).float()
     else:
         q_fp4, q_sf, weights = (x.squeeze(1) for x in prepared)
+    # Sparse candidate consumers use a distinct BF16 output-pointer JIT
+    # specialization; compiling the dense FP32 variant does not warm it.
+    prepared_sparse = qfusion.try_fused_indexer_q(
+        q,
+        raw_weights,
+        attn.freqs_cis,
+        positions,
+        weights_out_dtype=torch.bfloat16,
+    )
+    _require_launch(
+        prepared_sparse,
+        "fused indexer Q BF16 weights",
+        enabled=qfusion.is_supported(
+            q,
+            raw_weights,
+            attn.freqs_cis,
+            positions,
+            weights_out_dtype=torch.bfloat16,
+        ),
+    )
+    sparse_weights = (
+        prepared_sparse[2].squeeze(1)
+        if prepared_sparse is not None
+        else weights.to(torch.bfloat16)
+    )
     # Also compile the explicit quantizer used for unsupported fused-Q layouts.
     indexer.quantize_indexer_q(q.squeeze(1))
     keys = indexer.PrefillIndexerKeys(
@@ -848,6 +873,20 @@ def _warm_indexer_layout(
                     "dense token TopK",
                     enabled=topk.is_supported(logits, typed_visible),
                 )
+                if cached is not None and selected is not None:
+                    # Candidate publication defers finite filtering to its
+                    # epilogue. Exercise the same adapter with a caller-owned
+                    # output; shapes/strides remain runtime kernel parameters.
+                    raw_output = torch.empty_like(selected)
+                    raw_selected = topk.try_select_tokens(
+                        logits,
+                        typed_visible,
+                        bounds=cached,
+                        out=raw_output,
+                        filter_finite=False,
+                    )
+                    _require_launch(raw_selected, "deferred-filter token TopK")
+                    topk.finish_tokens(logits, cached[1], raw_selected)
     config = attn.v41_config
     count = int(config.get("candidate_topk_blocks", 0))
     block = int(config.get("candidate_block_size", 0))
@@ -939,7 +978,7 @@ def _warm_indexer_layout(
                 torch.zeros((width, 64), dtype=torch.int8, device=device),
                 torch.full((width,), 0x7F7F7F7F, dtype=torch.int32, device=device),
             )
-            logits = sparse.score(q_fp4, q_sf, keys, weights, plan)
+            logits = sparse.score(q_fp4, q_sf, keys, sparse_weights, plan)
             _require_launch(logits, "sparse score")
             selected = deepselect.try_select_sparse_tokens(logits, plan.end)
             _require_launch(selected, "BF16 DeepSelect")
@@ -987,7 +1026,7 @@ def _warm_indexer_layout(
                 )
             _require_launch(batched_plan, "batched sparse index plan")
             batched_logits = sparse.score(
-                q_fp4, q_sf, joined_keys, weights, batched_plan
+                q_fp4, q_sf, joined_keys, sparse_weights, batched_plan
             )
             _require_launch(batched_logits, "batched sparse score")
             selected = deepselect.try_select_sparse_tokens(

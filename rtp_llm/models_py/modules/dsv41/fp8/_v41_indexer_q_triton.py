@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright Alibaba Group Holding Limited
-"""V4.1 indexer Q: gather RoPE, MXFP4 quantization and FP32 head weights.
+"""V4.1 indexer Q: gather RoPE, MXFP4 quantization and scaled head weights.
 
 Adapted from vLLM's per-(token, head) MXFP4 Triton fusion in
 vllm/models/deepseek_v4/common/ops/fused_indexer_q.py. One launch reads
@@ -10,6 +10,9 @@ Necessary RTP differences: complex64 interleaved frequency storage, the
 existing CUDA complex-multiply FMA order, the exact existing quantizer, and
 one combined 1/64 weight multiplier (not two separately rounded factors).
 Those operations reuse RTP helpers. FP4 block scales remain separate.
+Dense scoring consumes FP32 weights; sparse scoring consumes BF16. The
+output pointer dtype fuses the sparse consumer's final rounding into the
+same launch without changing the FP32 scale arithmetic.
 """
 
 from __future__ import annotations
@@ -88,10 +91,13 @@ def is_supported(
     freqs_cis: torch.Tensor,
     positions: torch.Tensor,
     rope_head_dim: int = 64,
+    *,
+    weights_out_dtype: torch.dtype = torch.float32,
 ) -> bool:
-    """Only the production BF16/32-head/MXFP4 decode contract is fused."""
+    """Only the production BF16/32-head/MXFP4 query contract is fused."""
     if (
-        q.device.type != "cuda"
+        weights_out_dtype not in (torch.float32, torch.bfloat16)
+        or q.device.type != "cuda"
         or q.ndim != 4
         or q.shape[2:] != (32, 128)
         or q.shape[0] < 1
@@ -128,18 +134,30 @@ def try_fused_indexer_q(
     freqs_cis: torch.Tensor,
     positions: torch.Tensor,
     rope_head_dim: int = 64,
+    *,
+    weights_out_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-    """Return (int8 Q, packed-int32 SF, FP32 weights), or None to fall back.
+    """Return (int8 Q, packed-int32 SF, scaled weights), or None to fall back.
 
     Weights are the unscaled BF16/FP32 projection. Frequencies are the complete
     complex64 lookup table, positions contain one index for each B*S token.
+    ``weights_out_dtype`` must match the scoring consumer: FP32 for dense
+    prefill/paged decode, BF16 for sparse prefill. Scaling always runs in FP32,
+    then the final store rounds once to the requested dtype.
     Inputs are never modified. Execution/compilation errors are not swallowed.
     """
-    if not is_supported(q, weights, freqs_cis, positions, rope_head_dim):
+    if not is_supported(
+        q,
+        weights,
+        freqs_cis,
+        positions,
+        rope_head_dim,
+        weights_out_dtype=weights_out_dtype,
+    ):
         return None
     payload = torch.empty(*q.shape[:-1], 64, dtype=torch.int8, device=q.device)
     sf = torch.empty(q.shape[:-1], dtype=torch.int32, device=q.device)
-    scaled_weights = torch.empty(q.shape[:-1], dtype=torch.float32, device=q.device)
+    scaled_weights = torch.empty(q.shape[:-1], dtype=weights_out_dtype, device=q.device)
     _fused_indexer_q_rope_fp4_kernel[(q.numel() // 128,)](
         q,
         weights,

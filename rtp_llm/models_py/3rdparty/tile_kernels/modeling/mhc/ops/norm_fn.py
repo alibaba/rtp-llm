@@ -15,11 +15,12 @@ from ....mhc.norm_fn_kernel import (
 class _MHCFnNormwMerge(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: "_MHCFnNormwMerge", fn: torch.Tensor, normw: torch.Tensor
+        ctx: "_MHCFnNormwMerge | None", fn: torch.Tensor, normw: torch.Tensor
     ) -> torch.Tensor:
-        ctx.fn_main_grad = getattr(fn, "main_grad", None)
-        ctx.normw_main_grad = getattr(normw, "main_grad", None)
-        ctx.save_for_backward(fn, normw)
+        if ctx is not None:
+            ctx.fn_main_grad = getattr(fn, "main_grad", None)
+            ctx.normw_main_grad = getattr(normw, "main_grad", None)
+            ctx.save_for_backward(fn, normw)
         out_fn = torch.empty_like(fn)
         _mhc_fn_normw_merge_fwd(*fn.shape)(fn, normw, out_fn)
         return out_fn
@@ -52,7 +53,7 @@ class _MHCFnNormwMerge(torch.autograd.Function):
 class MHCPreNormFn(torch.autograd.Function):
     @staticmethod
     def forward(
-        ctx: "MHCPreNormFn",
+        ctx: "MHCPreNormFn | None",
         x: torch.Tensor,
         fn: torch.Tensor,
         norm_eps: float,
@@ -123,9 +124,10 @@ class MHCPreNormFn(torch.autograd.Function):
             out.view(-1, mhc_mult3),
         )
 
-        ctx.save_for_backward(x, fn, out_mul, sqrsum)
-        ctx.norm_eps = norm_eps
-        ctx.fuse_grad_acc = fuse_grad_acc
+        if ctx is not None:
+            ctx.save_for_backward(x, fn, out_mul, sqrsum)
+            ctx.norm_eps = norm_eps
+            ctx.fuse_grad_acc = fuse_grad_acc
 
         return out
 
@@ -184,6 +186,12 @@ def mhc_pre_norm_fn(
     fuse_grad_acc: bool = True,
     n_splits: int = 16,
 ) -> torch.Tensor:
+    if not torch.is_grad_enabled() and not torch.compiler.is_compiling():
+        if mhc_norm_weight is not None:
+            mhc_fn = _MHCFnNormwMerge.forward(None, mhc_fn, mhc_norm_weight)
+        return MHCPreNormFn.forward(
+            None, residual, mhc_fn, mhc_norm_eps, fuse_grad_acc, n_splits
+        )
     if mhc_norm_weight is not None:
         mhc_fn = _MHCFnNormwMerge.apply(mhc_fn, mhc_norm_weight)
     return MHCPreNormFn.apply(
