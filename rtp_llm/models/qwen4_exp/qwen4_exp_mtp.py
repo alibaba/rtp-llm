@@ -157,11 +157,13 @@ class Qwen4ExpMTP(Qwen4Exp):
             "hidden_size",
             "data_type",
             "enable_fp32_lm_head",
+            "_qwen4_full_fp8_nvfp4",
         )
         mismatches = [
             name
             for name in compatible_fields
-            if getattr(target_config, name) != getattr(draft_model_config, name)
+            if getattr(target_config, name, False)
+            != getattr(draft_model_config, name, False)
         ]
         if mismatches:
             details = ", ".join(
@@ -173,7 +175,14 @@ class Qwen4ExpMTP(Qwen4Exp):
                 "qwen4_exp MTP cannot alias semantically incompatible target "
                 f"weights: {details}"
             )
-        return (W.embedding, W.lm_head)
+        names = (W.embedding, W.lm_head)
+        if getattr(target_config, "_qwen4_full_fp8_nvfp4", False) is True:
+            from rtp_llm.models.qwen4_exp.full_fp8_weight import (
+                FP8_STORAGE_SCALE_SUFFIX,
+            )
+
+            return names + tuple(name + FP8_STORAGE_SCALE_SUFFIX for name in names)
+        return names
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:

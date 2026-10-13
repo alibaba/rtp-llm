@@ -258,6 +258,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
             raise RuntimeError("qwen4_exp MTP model descriptor requires one layer")
         if getattr(model_config, "enable_qwen4_ple", False):
             raise RuntimeError("qwen4_exp MTP model descriptor does not support PLE")
+        weights = self.weight
         self.mtp_input_projection = Qwen4ExpMTPInputProjection(
             weights.get_global_weight(W.multi_tokens_predict_enorm),
             weights.get_global_weight(W.multi_tokens_predict_hnorm),

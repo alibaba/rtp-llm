@@ -469,6 +469,7 @@ class Qwen4ExpPLELayer(nn.Module):
         hidden_size: int,
         conv_kernel_size: int,
         norm_eps: float,
+        projection_scales=None,
     ):
         super().__init__()
         hc_hidden = hc_mult * hidden_size
@@ -495,6 +496,11 @@ class Qwen4ExpPLELayer(nn.Module):
         self.short_conv_state_len = (conv_kernel_size - 1) * self.conv_dilation
         self.key_proj = key_proj
         self.value_proj = value_proj
+        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import make_projection
+
+        scales = projection_scales or (None, None)
+        self.key_projection = make_projection(key_proj, scales[0])
+        self.value_projection = make_projection(value_proj, scales[1])
         self.conv_weight = conv_weight
         self.norm_key = norm_key
         self.norm_query = norm_query
@@ -540,10 +546,19 @@ class Qwen4ExpPLELayer(nn.Module):
 
         branches = (self.hc_mult, self.hidden_size)
         key_normed = self._norm(
-            F.linear(embeddings, self.key_proj), self.norm_key
+            (
+                self.key_projection(embeddings)
+                if self.key_projection is not None
+                else F.linear(embeddings, self.key_proj)
+            ),
+            self.norm_key,
         ).unflatten(-1, branches)
         query_normed = self._norm(hyper_states, self.norm_query).unflatten(-1, branches)
-        value = F.linear(embeddings, self.value_proj)
+        value = (
+            self.value_projection(embeddings)
+            if self.value_projection is not None
+            else F.linear(embeddings, self.value_proj)
+        )
 
         gate = (key_normed * query_normed).sum(dim=-1, keepdim=True) / math.sqrt(
             self.hidden_size

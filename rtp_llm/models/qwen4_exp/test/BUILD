@@ -68,3 +68,10 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
 )
+
+py_test(
+    name = "full_fp8_test",
+    srcs = ["full_fp8_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {'gpu':'RTX_5000_PRO_CU13'},
+)
