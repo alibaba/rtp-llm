@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -735,7 +736,22 @@ void KVCacheManager::allocateAndSync() {
         auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
         auto   block_num_ptr = block_num_t.data_ptr<int>();
         block_num_ptr[local_rank] = config_.block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+        std::vector<torch::Tensor> capacity_tensors{block_num_t};
+        torch::Tensor             shared_bytes_t;
+        if (config_.use_shared_block_pool) {
+            // SharedCacheArena is sized in bytes, independently of block_num.
+            // Synchronize its actual budget before finalizing group capacities:
+            // rank 0 broadcasts slot ids that must fit every rank's backing.
+            RTP_LLM_CHECK_WITH_INFO(
+                config_.shared_cache_bytes > 0
+                    && config_.shared_cache_bytes <= static_cast<size_t>(std::numeric_limits<int64_t>::max()),
+                "invalid shared cache byte budget: %zu",
+                config_.shared_cache_bytes);
+            shared_bytes_t = torch::empty({(int64_t)world_size}, torch::kInt64).pin_memory();
+            shared_bytes_t.data_ptr<int64_t>()[local_rank] = static_cast<int64_t>(config_.shared_cache_bytes);
+            capacity_tensors.push_back(shared_bytes_t);
+        }
+        execAllGather({capacity_tensors, ParallelMode::DP_AND_TP});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
@@ -743,6 +759,15 @@ void KVCacheManager::allocateAndSync() {
             config_.block_num = 1;
         } else {
             config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+        }
+        if (config_.use_shared_block_pool) {
+            const auto* shared_bytes_ptr = shared_bytes_t.data_ptr<int64_t>();
+            const auto  shared_bytes = *std::min_element(shared_bytes_ptr, shared_bytes_ptr + world_size);
+            RTP_LLM_CHECK_WITH_INFO(shared_bytes > 0, "invalid synchronized shared cache byte budget: %ld", shared_bytes);
+            RTP_LLM_LOG_INFO("shared cache bytes synchronized across TP/DP: local=%zu min=%ld",
+                             config_.shared_cache_bytes,
+                             shared_bytes);
+            config_.shared_cache_bytes = static_cast<size_t>(shared_bytes);
         }
     }
     if (config_.use_independent_block_pools) {
