@@ -320,11 +320,32 @@ int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_
 }
 
 int GenerateStream::estimateInitialNeedBlocks() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
     return estimateKVNeedBlocks(/*remaining_tokens=*/0, currentBatchSize());
 }
 
 int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
+    std::lock_guard<std::mutex> lock(*mutex_);
     return estimateKVNeedBlocks(remaining_tokens, maxBatchSize());
+}
+
+void GenerateStream::drainLinearHistoryForAdmission() {
+    const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
+    if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (!stream_cache_resource_->canReclaimLinearHistory(maxBatchSize()) || isContextStream()
+            || stream_cache_resource_->curBlocksNum() == 0) {
+            return;
+        }
+    }
+    // update/specUpdate acquire mutex_ before publishing their committed
+    // watermark. Joining while holding it would deadlock the output worker.
+    waitPendingAsyncBookkeeping();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    stream_cache_resource_->drainLinearHistory();
 }
 
 std::shared_ptr<GenerateInput> GenerateStream::generateInput() const {
@@ -1065,14 +1086,36 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
     }
 
     const auto state = getMtpAsyncDeviceState();
+    const auto state = getMtpAsyncDeviceState();
     // Normal decode can reserve from its published next length while the host
     // commit is pending. Without device input there is no published length:
     // join before allocation reads seqLength(), otherwise a page crossing can
     // leave the next model input with the previous step's shorter block table.
     // MTP publishes its state before claiming the worker, so a nonzero epoch
     // distinguishes its page-table snapshot from normal decode.
+    // With history reclamation, physical growth must follow the host commit:
+    // only then does the retired watermark match the forecast's allocation
+    // boundary. MTP already follows this rule below using its cache snapshot.
     if (state.epoch == 0) {
-        return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+        const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
+        if (!manager || !manager->cacheConfig().enable_linear_cache_reclaim) {
+            return getNormalAsyncDeviceState().next_real_seq_len <= 0;
+        }
+        {
+            std::lock_guard<std::mutex> lock(*mutex_);
+            if (!stream_cache_resource_->canReclaimLinearHistory(maxBatchSize())) {
+                return false;
+            }
+        }
+        const auto& normal_state = getNormalAsyncDeviceState();
+        if (normal_state.epoch == 0 || normal_state.next_real_seq_len <= 0) {
+            return true;
+        }
+        // The scheduler is the sole allocator. Eligible normal streams cannot
+        // fork/remap, and retired NULL slots never need materializing again.
+        return stream_cache_resource_->singleBatchNeedBlocks(normal_state.next_real_seq_len,
+                                                             static_cast<int>(reserve_step_))
+               > 0;
     }
     if (!hasMtpCacheSnapshot(state) || state.next_seq_len_upper_bound <= 0 || stream_cache_resource_ == nullptr) {
         return true;
