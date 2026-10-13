@@ -32,14 +32,15 @@ def test_wildcard_probe_closes_socket_without_listening(occupied):
 
 
 def test_probe_detects_listener_and_releases_free_port():
+    host = "127.0.0.1"
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
-        listener.bind((PROBE_BIND_HOST, 0))
+        listener.bind((host, 0))
         listener.listen(1)
         port = listener.getsockname()[1]
-        assert port_in_use(port, PROBE_BIND_HOST)
-    assert not port_in_use(port, PROBE_BIND_HOST)
+        assert port_in_use(port, host)
+    assert not port_in_use(port, host)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as successor:
-        successor.bind((PROBE_BIND_HOST, port))
+        successor.bind((host, port))
 
 
 def test_post_start_probe_detects_loopback_listener():
