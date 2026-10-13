@@ -97,32 +97,48 @@ def chunk_kda_fwd_kernel_intra_token_parallel(
     m_h = (i_hg * BH + o_h) < H
     m_k = o_k < K
 
-    p_q = tl.make_block_ptr(
-        q + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-    )
-    p_k = tl.make_block_ptr(
-        k + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-    )
-    p_g = tl.make_block_ptr(
-        g + i_t * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-    )
-    p_beta = tl.make_block_ptr(beta + i_t * H, (H,), (1,), (i_hg * BH,), (BH,), (0,))
+    p_q_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
+    p_q_m0 = (p_q_i0 >= 0) & (p_q_i0 < (H))
+    p_q_i1 = tl.arange(0, BK).to(tl.int64) + (0)
+    p_q_m1 = (p_q_i1 >= 0) & (p_q_i1 < (K))
+    p_q = (q + i_t * H * K) + p_q_i0[:, None] * (K) + p_q_i1[None, :] * (1)
+    p_k_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
+    p_k_m0 = (p_k_i0 >= 0) & (p_k_i0 < (H))
+    p_k_i1 = tl.arange(0, BK).to(tl.int64) + (0)
+    p_k_m1 = (p_k_i1 >= 0) & (p_k_i1 < (K))
+    p_k = (k + i_t * H * K) + p_k_i0[:, None] * (K) + p_k_i1[None, :] * (1)
+    p_g_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
+    p_g_m0 = (p_g_i0 >= 0) & (p_g_i0 < (H))
+    p_g_i1 = tl.arange(0, BK).to(tl.int64) + (0)
+    p_g_m1 = (p_g_i1 >= 0) & (p_g_i1 < (K))
+    p_g = (g + i_t * H * K) + p_g_i0[:, None] * (K) + p_g_i1[None, :] * (1)
+    p_beta_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
+    p_beta_m0 = (p_beta_i0 >= 0) & (p_beta_i0 < (H))
+    p_beta = (beta + i_t * H) + p_beta_i0 * (1)
     # [BH, BK]
-    b_q = tl.load(p_q, boundary_check=(0, 1)).to(tl.float32)
-    b_k = tl.load(p_k, boundary_check=(0, 1)).to(tl.float32)
-    b_g = tl.load(p_g, boundary_check=(0, 1)).to(tl.float32)
-    b_k = b_k * tl.load(p_beta, boundary_check=(0,)).to(tl.float32)[:, None]
+    b_q = tl.load(p_q, mask=p_q_m0[:, None] & p_q_m1[None, :], other=0).to(tl.float32)
+    b_k = tl.load(p_k, mask=p_k_m0[:, None] & p_k_m1[None, :], other=0).to(tl.float32)
+    b_g = tl.load(p_g, mask=p_g_m0[:, None] & p_g_m1[None, :], other=0).to(tl.float32)
+    b_k = b_k * tl.load(p_beta, mask=p_beta_m0, other=0).to(tl.float32)[:, None]
 
     for j in range(i_ts, min(i_t + 1, min(T, i_ts + BC))):
-        p_kj = tl.make_block_ptr(
-            k + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-        )
-        p_gj = tl.make_block_ptr(
-            g + j * H * K, (H, K), (K, 1), (i_hg * BH, 0), (BH, BK), (1, 0)
-        )
+        p_kj_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
+        p_kj_m0 = (p_kj_i0 >= 0) & (p_kj_i0 < (H))
+        p_kj_i1 = tl.arange(0, BK).to(tl.int64) + (0)
+        p_kj_m1 = (p_kj_i1 >= 0) & (p_kj_i1 < (K))
+        p_kj = (k + j * H * K) + p_kj_i0[:, None] * (K) + p_kj_i1[None, :] * (1)
+        p_gj_i0 = tl.arange(0, BH).to(tl.int64) + (i_hg * BH)
+        p_gj_m0 = (p_gj_i0 >= 0) & (p_gj_i0 < (H))
+        p_gj_i1 = tl.arange(0, BK).to(tl.int64) + (0)
+        p_gj_m1 = (p_gj_i1 >= 0) & (p_gj_i1 < (K))
+        p_gj = (g + j * H * K) + p_gj_i0[:, None] * (K) + p_gj_i1[None, :] * (1)
         # [BH, BK]
-        b_kj = tl.load(p_kj, boundary_check=(0, 1)).to(tl.float32)
-        b_gj = tl.load(p_gj, boundary_check=(0, 1)).to(tl.float32)
+        b_kj = tl.load(p_kj, mask=p_kj_m0[:, None] & p_kj_m1[None, :], other=0).to(
+            tl.float32
+        )
+        b_gj = tl.load(p_gj, mask=p_gj_m0[:, None] & p_gj_m1[None, :], other=0).to(
+            tl.float32
+        )
 
         b_kgj = b_kj * exp2(b_g - b_gj)
 

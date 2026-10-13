@@ -86,7 +86,7 @@ def get_aiter_envs(name, envs):
             return []
     # relative path to cwd where rtp_llm.start_server is launched in MagaServerManager
     # files in bazel-out/k8-opt/bin
-    return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_aiter/site-packages/aiter_meta/hsa/"]
+    return ["AITER_ASM_DIR=../../../../../../../bin/internal_source/rtp_llm/test/smoke/" + name + ".runfiles/pip_gpu_rocm_torch_amd_aiter/site-packages/aiter_meta/hsa/"]
 
 SMOKE_FRAMEWORK_DEPS = [
     "//rtp_llm/test/utils:maga_server_manager",

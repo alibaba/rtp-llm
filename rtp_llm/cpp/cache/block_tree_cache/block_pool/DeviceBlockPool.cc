@@ -21,6 +21,7 @@
 #include <cuda_runtime.h>
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
+#include <torch/cuda.h>
 #endif
 
 namespace rtp_llm {
@@ -307,6 +308,15 @@ void DeviceBlockPool::initializeCacheBuffer() {
         cache_aligned_buffer_ = torch::empty({static_cast<int64_t>(cfg.total_size_bytes)},
                                              torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
     }
+#if USING_ROCM
+    // Gluon PA can load logically unused V-cache lanes: NaN * 0 is still NaN.
+    // Initialize every backing mode once, before publishing the pool. Finite
+    // writes/reuse preserve this invariant; imported non-finite data does not.
+    cache_aligned_buffer_.zero_();
+    if (cache_aligned_buffer_.is_cuda()) {
+        torch::cuda::synchronize(cache_aligned_buffer_.get_device());
+    }
+#endif
     cache_base_ptr_ = cache_aligned_buffer_.data_ptr();
     RTP_LLM_CHECK_WITH_INFO(cache_base_ptr_ != nullptr,
                             "device block pool [%s] allocate cache aligned buffer is null",

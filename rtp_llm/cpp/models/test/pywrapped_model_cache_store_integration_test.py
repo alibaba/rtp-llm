@@ -51,6 +51,10 @@ if os.environ.get("TEST_USING_DEVICE") == "ROCM":
 _extension = importlib.import_module(
     "rtp_llm.cpp.models.test.libth_pywrapped_model_cache_store_integration_test"
 )
+_skip_rocm_context_parallel = unittest.skipIf(
+    os.environ.get("TEST_USING_DEVICE") == "ROCM",
+    "context parallel is not supported on ROCm",
+)
 PyModelInputs = _extension.PyModelInputs
 PyModelOutputs = _extension.PyModelOutputs
 run_generation_prefill_capture_scenario = (
@@ -1363,10 +1367,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     )
                 )
 
-    @unittest.skipIf(
-        os.environ.get("TEST_USING_DEVICE") == "ROCM",
-        "context parallel is not supported on ROCm",
-    )
+    @_skip_rocm_context_parallel
     def test_context_parallel_publishes_original_lengths_to_every_tag(self) -> None:
         rank_key_sets = []
         for tp_rank in range(2):
@@ -1763,6 +1764,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
+    @_skip_rocm_context_parallel
     def test_capture_cp_validates_before_existing_restore_and_store(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")
@@ -2060,6 +2062,19 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         self.assertEqual(model.micro_batch_calls, 0)
         self.assertEqual(_FakeEagleMooncakeStore.instances, [])
 
+    @unittest.skipUnless(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM",
+        "ROCm-only context-parallel guard",
+    )
+    def test_capture_context_parallel_is_rejected_on_rocm(self) -> None:
+        model = CacheStoreForwardModel()
+        with self.assertRaisesRegex(
+            RuntimeError, "Context parallel not supported on ROCm"
+        ):
+            run_scenario(model, "capture_cp")
+        self.assertEqual(model.forward_calls, 0)
+
+    @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_invalid_num_valid_tokens(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_invalid_num_valid_tokens")
@@ -2082,6 +2097,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
 
         self.assertEqual(layout_statuses, [1])
 
+    @_skip_rocm_context_parallel
     def test_capture_context_parallel_rejects_local_layout_before_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmContextParallelRejected(MalformedCaptureLayoutModel(), "capture_cp_malformed_layout")
@@ -2111,6 +2127,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         hidden_states = result["forward_hidden_states"][0]
         torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
 
+    @_skip_rocm_context_parallel
     def test_capture_context_parallel_remote_invalid_rank_skips_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp")
@@ -2140,6 +2157,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         hidden_states = result["forward_hidden_states"][0]
         torch.testing.assert_close(hidden_states, torch.zeros_like(hidden_states))
 
+    @_skip_rocm_context_parallel
     def test_capture_context_parallel_rechecks_width_after_restore(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmContextParallelRejected(CacheStoreForwardModel(), "capture_cp_malformed_restored_width")
@@ -2233,6 +2251,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         # publication was rejected and the remote-rank error was surfaced.
         self.assertTrue(torch.any(result["forward_hidden_states"][0] != 0).item())
 
+    @_skip_rocm_context_parallel
     def test_capture_context_parallel_uses_original_ids_and_lengths(self) -> None:
         if os.environ.get("TEST_USING_DEVICE") == "ROCM":
             self.assertRocmContextParallelRejected(PositionAwareCaptureModel(), "capture_cp")

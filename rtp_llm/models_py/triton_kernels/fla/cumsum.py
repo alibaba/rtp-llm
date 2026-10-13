@@ -1,8 +1,6 @@
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/ops/utils/cumsum.py
-# -*- coding: utf-8 -*-
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-from typing import Optional
 
 import torch
 import triton
@@ -55,24 +53,28 @@ def chunk_local_cumsum_scalar_kernel(
         bos, eos = i_b * T, i_b * T + T
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
-            s + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,)
-        )
-        p_o = tl.make_block_ptr(
-            o + bos * H + i_h * T, (T,), (1,), (i_t * BT,), (BT,), (0,)
-        )
+        p_s_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_s_m0 = (p_s_i0 >= 0) & (p_s_i0 < (T))
+        p_s = (s + bos * H + i_h * T) + p_s_i0 * (1)
+        p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+        p_o = (o + bos * H + i_h * T) + p_o_i0 * (1)
     else:
-        p_s = tl.make_block_ptr(s + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        p_o = tl.make_block_ptr(o + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))
+        p_s_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_s_m0 = (p_s_i0 >= 0) & (p_s_i0 < (T))
+        p_s = (s + bos * H + i_h) + p_s_i0 * (H)
+        p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+        p_o = (o + bos * H + i_h) + p_o_i0 * (H)
     # [BT]
-    b_s = tl.load(p_s, boundary_check=(0,)).to(tl.float32)
+    b_s = tl.load(p_s, mask=p_s_m0, other=0).to(tl.float32)
     b_o = tl.cumsum(b_s, axis=0)
     if REVERSE:
         b_z = tl.sum(b_s, axis=0)
         b_o = -b_o + b_z[None] + b_s
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0,))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_m0)
 
 
 @triton.heuristics(
@@ -127,55 +129,59 @@ def chunk_local_cumsum_vector_kernel(
         m_s = tl.where(o_i[:, None] >= o_i[None, :], 1.0, 0.0)
 
     if HEAD_FIRST:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
+        p_s_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_s_m0 = (p_s_i0 >= 0) & (p_s_i0 < (T))
+        p_s_i1 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+        p_s_m1 = (p_s_i1 >= 0) & (p_s_i1 < (S))
+        p_s = (
+            (s + (bos * H + i_h * T) * S)
+            + p_s_i0[:, None] * (S)
+            + p_s_i1[None, :] * (1)
         )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h * T) * S,
-            (T, S),
-            (S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
+        p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+        p_o_i1 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+        p_o_m1 = (p_o_i1 >= 0) & (p_o_i1 < (S))
+        p_o = (
+            (o + (bos * H + i_h * T) * S)
+            + p_o_i0[:, None] * (S)
+            + p_o_i1[None, :] * (1)
         )
     else:
-        p_s = tl.make_block_ptr(
-            s + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
+        p_s_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_s_m0 = (p_s_i0 >= 0) & (p_s_i0 < (T))
+        p_s_i1 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+        p_s_m1 = (p_s_i1 >= 0) & (p_s_i1 < (S))
+        p_s = (
+            (s + (bos * H + i_h) * S)
+            + p_s_i0[:, None] * (H * S)
+            + p_s_i1[None, :] * (1)
         )
-        p_o = tl.make_block_ptr(
-            o + (bos * H + i_h) * S,
-            (T, S),
-            (H * S, 1),
-            (i_t * BT, i_s * BS),
-            (BT, BS),
-            (1, 0),
+        p_o_i0 = tl.arange(0, BT).to(tl.int64) + (i_t * BT)
+        p_o_m0 = (p_o_i0 >= 0) & (p_o_i0 < (T))
+        p_o_i1 = tl.arange(0, BS).to(tl.int64) + (i_s * BS)
+        p_o_m1 = (p_o_i1 >= 0) & (p_o_i1 < (S))
+        p_o = (
+            (o + (bos * H + i_h) * S)
+            + p_o_i0[:, None] * (H * S)
+            + p_o_i1[None, :] * (1)
         )
     # [BT, BS]
-    b_s = tl.load(p_s, boundary_check=(0, 1)).to(tl.float32)
+    b_s = tl.load(p_s, mask=p_s_m0[:, None] & p_s_m1[None, :], other=0).to(tl.float32)
     b_o = tl.dot(m_s, b_s, allow_tf32=False)
     if HAS_SCALE:
         b_o *= scale
-    tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
+    tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=p_o_m0[:, None] & p_o_m1[None, :])
 
 
 def chunk_local_cumsum_scalar(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T = g.shape
@@ -213,10 +219,10 @@ def chunk_local_cumsum_vector(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
 ) -> torch.Tensor:
     if head_first:
         B, H, T, S = g.shape
@@ -263,10 +269,10 @@ def chunk_local_cumsum(
     g: torch.Tensor,
     chunk_size: int,
     reverse: bool = False,
-    scale: float = None,
-    cu_seqlens: Optional[torch.Tensor] = None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     head_first: bool = False,
-    output_dtype: Optional[torch.dtype] = torch.float,
+    output_dtype: torch.dtype | None = torch.float,
     **kwargs,
 ) -> torch.Tensor:
     if cu_seqlens is not None:
