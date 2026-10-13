@@ -111,14 +111,17 @@ def install():
     class OnlineFp8Embedding(UnquantizedEmbeddingMethod):
         def process_weights_after_loading(self, layer):
             process_tensor_weight(layer)
+            # The cached unquantized TP shortcut returns raw FP8 rows without
+            # applying our scale. Route TP lookup through embedding() instead.
+            layer.use_fused_embedding = False
 
         def embedding(self, layer, input_):
             if not layer.weight.is_cuda:
                 raise ValueError("Only the separate PLE big table may be on CPU")
             # Main vocabulary lookup stays on the GPU.
             values = F.embedding(input_, layer.weight.view(torch.uint8))
-            values = values.view(torch.float8_e4m3fn).to(torch.bfloat16)
-            return values * layer.qwen_fp8_scale.to(values.device)
+            values = values.view(torch.float8_e4m3fn).float()
+            return (values * layer.qwen_fp8_scale).to(layer.params_dtype)
 
         def apply(self, layer, x, bias=None):
             return scaled_projection(
