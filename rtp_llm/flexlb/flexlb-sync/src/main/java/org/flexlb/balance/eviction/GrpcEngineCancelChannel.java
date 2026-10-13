@@ -4,8 +4,9 @@ import io.grpc.Context;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.preemption.CancelTarget;
-import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.RequestId;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.CompletableFuture;
@@ -47,7 +48,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
 
     @Override
     public CompletableFuture<CancelAck> cancel(
-            CancelTarget target, long requestId, long timeoutMs) {
+            CancelTarget target, String requestId, long timeoutMs) {
         if (target == null || !target.isRoutable()) {
             // No routable endpoint — report the transport-failure branch: the
             // intent never reached the engine, but release is still settled by
@@ -60,7 +61,9 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
 
         try {
             EngineRpcService.CancelRequestPB requestPB =
-                    EngineRpcService.CancelRequestPB.newBuilder().setRequestId(requestId).build();
+                    EngineRpcService.CancelRequestPB.newBuilder()
+                            .setRequestId(RequestId.toEngineRequestId(requestId))
+                            .build();
 
             // Fire-and-forget contract: fork the gRPC Context so that when the
             // caller is a server handler, the server call completing does not

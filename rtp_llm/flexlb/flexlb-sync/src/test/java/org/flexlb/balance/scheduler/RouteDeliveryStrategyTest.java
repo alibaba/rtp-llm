@@ -37,7 +37,7 @@ class RouteDeliveryStrategyTest {
                         1_000L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        99L, WorkSnapshot.Phase.COMMITTED, 25L)),
+                                        "99", WorkSnapshot.Phase.COMMITTED, 25L)),
                         List.of(),
                         0L));
         fixture.slots.commitLostFor(cancelled);
@@ -94,9 +94,9 @@ class RouteDeliveryStrategyTest {
                         1_000L,
                         List.of(
                                 new WorkSnapshot.RequestWork(
-                                        3L, WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L),
+                                        "3", WorkSnapshot.Phase.ENGINE_RUNNING, 1_000L),
                                 new WorkSnapshot.RequestWork(
-                                        4L, WorkSnapshot.Phase.ENGINE_QUEUED, 300L)),
+                                        "4", WorkSnapshot.Phase.ENGINE_QUEUED, 300L)),
                         List.of(),
                         0L));
         AtomicInteger published = new AtomicInteger();

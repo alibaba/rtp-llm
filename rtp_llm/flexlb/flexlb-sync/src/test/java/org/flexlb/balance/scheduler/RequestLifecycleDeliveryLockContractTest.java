@@ -448,7 +448,7 @@ class RequestLifecycleDeliveryLockContractTest {
                 RequestLifecycleTestSupport.claimBatch(
                         lifecycle, registered.item(), 703L, () -> true);
         assertNotNull(claim);
-        RequestSlot original = lifecycle.requestSlot(207L);
+        RequestSlot original = lifecycle.requestSlot("207");
 
         new EndpointEventProjector(lifecycle)
                 .onPrefillStatus(
@@ -492,7 +492,7 @@ class RequestLifecycleDeliveryLockContractTest {
         }
         DecodeEndpoint decode = mock(DecodeEndpoint.class);
         DecodeEndpoint.ReservationHandle reservation =
-                new DecodeEndpoint.ReservationHandle(1L, 208L, 1L);
+                new DecodeEndpoint.ReservationHandle(1L, "208", 1L);
         when(decode.isAcceptedByEngine(reservation)).thenReturn(true);
         BalanceContext context = context(208L);
         CompletableFuture<Response> future = lifecycle.register(context);
@@ -528,7 +528,7 @@ class RequestLifecycleDeliveryLockContractTest {
         } else {
             lifecycle.publishRoute(claim, precedingWork, 30_000L);
         }
-        RequestSlot slot = lifecycle.requestSlot(208L);
+        RequestSlot slot = lifecycle.requestSlot("208");
         synchronized (slot) {
             assertTrue(
                     RequestLifecycleTestSupport.<Boolean>inspect(slot, "decodeOwnsRequestLocked"));
@@ -591,14 +591,14 @@ class RequestLifecycleDeliveryLockContractTest {
                 () -> lifecycle.publishRoute(claim, precedingWork, 10L));
 
         assertTrue(registered.future().join().isSuccess());
-        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState(205L, 0L).state());
+        assertEquals(RequestState.Phase.ACKNOWLEDGED, lifecycle.getRequestState("205", 0L).state());
         // The observation window includes the 10-second handoff grace and is
         // independent of worker-status RPC timing and request inactivity.
         assertTimeoutPreemptively(
                 Duration.ofSeconds(15),
                 () -> {
                     while (!lifecycle
-                            .getRequestState(205L, 0L)
+                            .getRequestState("205", 0L)
                             .detail()
                             .contains("SUSPECTED_LOST")) {
                         Thread.sleep(5L);
@@ -607,6 +607,10 @@ class RequestLifecycleDeliveryLockContractTest {
     }
 
     private void assertQueuedWithoutClaim(long requestId) {
+        assertQueuedWithoutClaim(Long.toString(requestId));
+    }
+
+    private void assertQueuedWithoutClaim(String requestId) {
         RequestState snapshot = lifecycle.getRequestState(requestId, 0L);
         assertEquals(RequestState.Phase.QUEUED, snapshot.state());
         assertEquals(DeliveryClaimKind.NONE, snapshot.deliveryClaimKind());

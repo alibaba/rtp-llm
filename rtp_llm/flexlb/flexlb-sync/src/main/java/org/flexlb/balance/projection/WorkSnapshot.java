@@ -17,6 +17,7 @@ import java.util.OptionalLong;
 public final class WorkSnapshot {
 
     private static final long[] EMPTY_LONGS = new long[0];
+    private static final String[] EMPTY_STRINGS = new String[0];
 
     private final long capturedAtMs;
     private final List<RequestWork> requests;
@@ -24,7 +25,7 @@ public final class WorkSnapshot {
     private final long unknownRequestCount;
     private final long knownNonRunningWorkMs;
     private final long[] runningWorkMs;
-    private final long[] requestIds;
+    private final String[] requestIds;
     private final boolean unknownWork;
 
     public WorkSnapshot(
@@ -64,7 +65,7 @@ public final class WorkSnapshot {
 
         this.knownNonRunningWorkMs = nonRunningMs;
         this.runningWorkMs = runningCount == 0 ? EMPTY_LONGS : new long[runningCount];
-        this.requestIds = requestIdCount == 0 ? EMPTY_LONGS : new long[requestIdCount];
+        this.requestIds = requestIdCount == 0 ? EMPTY_STRINGS : new String[requestIdCount];
         this.unknownWork = hasUnknown;
         int runningIndex = 0;
         int requestIdIndex = 0;
@@ -75,7 +76,7 @@ public final class WorkSnapshot {
             }
         }
         for (BatchWork batch : this.batches) {
-            for (long requestId : batch.requestIds()) {
+            for (String requestId : batch.requestIds()) {
                 requestIds[requestIdIndex++] = requestId;
             }
             if (batch.phase() == Phase.ENGINE_RUNNING && batch.remainingWorkMs().isPresent()) {
@@ -109,7 +110,7 @@ public final class WorkSnapshot {
     }
 
     /** One individually delivered request, identified by request id. */
-    public record RequestWork(long requestId, Phase phase, long remainingWorkMs) {
+    public record RequestWork(String requestId, Phase phase, long remainingWorkMs) {
 
         public RequestWork {
             if (remainingWorkMs < 0L) {
@@ -120,7 +121,7 @@ public final class WorkSnapshot {
 
     /** One EnqueueBatch work unit, identified by batch id and its live members. */
     public record BatchWork(
-            long batchId, List<Long> requestIds, Phase phase, OptionalLong remainingWorkMs) {
+            long batchId, List<String> requestIds, Phase phase, OptionalLong remainingWorkMs) {
 
         public BatchWork {
             requestIds = List.copyOf(requestIds);
@@ -130,7 +131,7 @@ public final class WorkSnapshot {
         }
 
         /** Convenience constructor for a batch with a known work estimate. */
-        public BatchWork(long batchId, List<Long> requestIds, Phase phase, long remainingWorkMs) {
+        public BatchWork(long batchId, List<String> requestIds, Phase phase, long remainingWorkMs) {
             this(batchId, requestIds, phase, OptionalLong.of(remainingWorkMs));
         }
     }
@@ -139,7 +140,7 @@ public final class WorkSnapshot {
         return unknownWork;
     }
 
-    public boolean containsRequest(long requestId) {
+    public boolean containsRequest(String requestId) {
         return Arrays.binarySearch(requestIds, requestId) >= 0;
     }
 

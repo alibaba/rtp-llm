@@ -40,7 +40,7 @@ import static org.mockito.Mockito.when;
 
 /** Resource assertions use real endpoint ledgers, not invocations of mocked release methods. */
 class RequestResourceAccountingTest {
-    private static final long ID = 101L;
+    private static final String ID = "101";
     private static final long HARD_KV = 160L;
     private static final long EXPECTED_KV = 320L;
     private static final long TOTAL_KV = 10_000L;
@@ -136,9 +136,9 @@ class RequestResourceAccountingTest {
                     acquisition.permit().dispatch());
             // Endpoint ownership can advance before its notification reaches the slot.
             f.requests.cancelRequest(ID, 0, CancelReason.CLIENT_CANCELLED);
-            assertEquals(0, f.requests.liveRequestCount());
+            assertEquals(0, f.requests.trackedRequestCount());
             assertEquals(0, f.prefill.getLocallyOwnedRequestCount());
-            assertEquals(HARD_KV, f.decode.routingView().inflightHardKv());
+            assertEquals(HARD_KV, f.decode.routingView().inputKvReserved());
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
             f.decodeStatus(Map.of(), Map.of("101", task(ID)), TOTAL_KV);
             f.assertEmpty();
@@ -169,12 +169,12 @@ class RequestResourceAccountingTest {
             assertEquals(1, f.decode.routingView().engineCapacityUsed());
             assertEquals(
                     0,
-                    f.decode.routingView().inflightHardKv(),
+                    f.decode.routingView().inputKvReserved(),
                     "Engine status replaces the local KV prediction");
             claim.complete(
                     DeliveryResult.uncertain(new IllegalStateException("late transport failure")));
             assertTrue(f.item.future().get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(1, f.requests.liveRequestCount());
+            assertEquals(1, f.requests.trackedRequestCount());
             assertEquals(1, f.decode.resourceSnapshot().runningCount());
             assertEquals(1, f.prefill.getLocallyOwnedRequestCount());
             applyStatus(
@@ -267,8 +267,8 @@ class RequestResourceAccountingTest {
                                     oldReservation,
                                     DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED)
                             .released());
-            assertEquals(HARD_KV * 2, f.decode.routingView().inflightHardKv());
-            assertEquals(EXPECTED_KV * 2, f.decode.routingView().inflightExpectedKv());
+            assertEquals(HARD_KV * 2, f.decode.routingView().inputKvReserved());
+            assertEquals(EXPECTED_KV * 2, f.decode.routingView().inputAndMaxOutputKvReserved());
             assertEquals(replacement, f.decode.reservationHandle(ID));
             f.decode.release(replacement, DecodeEndpoint.ReleaseReason.LOCAL_ROLLBACK);
             f.assertEmpty();
@@ -407,10 +407,10 @@ class RequestResourceAccountingTest {
         }
 
         void assertReserved() {
-            assertEquals(1, requests.liveRequestCount());
+            assertEquals(1, requests.trackedRequestCount());
             assertEquals(1, prefill.getLocallyOwnedRequestCount());
-            assertEquals(HARD_KV, decode.routingView().inflightHardKv());
-            assertEquals(EXPECTED_KV, decode.routingView().inflightExpectedKv());
+            assertEquals(HARD_KV, decode.routingView().inputKvReserved());
+            assertEquals(EXPECTED_KV, decode.routingView().inputAndMaxOutputKvReserved());
         }
 
         void assertHandedOff() {
@@ -423,15 +423,18 @@ class RequestResourceAccountingTest {
         }
 
         void assertEmpty() {
-            assertEquals(0, requests.liveRequestCount(), "request inflight");
+            assertEquals(0, requests.trackedRequestCount(), "request inflight");
             assertEquals(0, prefill.queuedRequestCount(), "Prefill queue membership");
             assertEquals(0, prefill.getLocallyOwnedRequestCount(), "Prefill inflight");
             assertEquals(
                     0, prefill.getIndividuallyTrackedRequestCount(), "Prefill individual lease");
             assertEquals(0, prefill.getInflightBatchCount(), "Prefill batch occupancy");
             var view = decode.resourceSnapshot();
-            assertEquals(0, view.routing().inflightHardKv(), "Decode hard KV reservation");
-            assertEquals(0, view.routing().inflightExpectedKv(), "Decode expected KV reservation");
+            assertEquals(0, view.routing().inputKvReserved(), "Decode hard KV reservation");
+            assertEquals(
+                    0,
+                    view.routing().inputAndMaxOutputKvReserved(),
+                    "Decode expected KV reservation");
             assertEquals(0, view.activeDispatchPermits(), "Decode dispatch permits");
             assertEquals(0, view.queuedCount(), "Decode queued ownership");
             assertEquals(0, view.acceptedCount(), "Decode accepted streams");
@@ -443,7 +446,7 @@ class RequestResourceAccountingTest {
 
         void assertCapacityReusable() {
             try (var pin = decode.tryPinGeneration()) {
-                var next = decode.reserve(pin, 999L, HARD_KV, EXPECTED_KV, 50);
+                var next = decode.reserve(pin, "999", HARD_KV, EXPECTED_KV, 50);
                 assertNotNull(next);
                 var permit = decode.acquireDispatchPermit(next, capacity);
                 assertEquals(
@@ -495,7 +498,7 @@ class RequestResourceAccountingTest {
         }
     }
 
-    private static TaskInfo task(long id) {
+    private static TaskInfo task(String id) {
         var task = new TaskInfo();
         task.setRequestId(id);
         task.setInputLength(HARD_KV);

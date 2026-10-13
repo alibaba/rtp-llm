@@ -44,6 +44,6 @@ class RequestStateTest {
 
     private static RequestState state(
             RequestState.Phase phase, DeliveryClaimKind claim, long batchId) {
-        return new RequestState(1L, phase, claim, batchId, 10L, 11L, "test");
+        return new RequestState("1", 0L, phase, claim, batchId, 10L, 11L, "test");
     }
 }
