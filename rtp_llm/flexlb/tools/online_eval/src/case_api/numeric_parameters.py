@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from input_contract import NumberRule
-from traffic.contracts import PRIORITY, JAVA_LENGTH
+from traffic.request_rules import PRIORITY, JAVA_LENGTH
 
 
 NONNEGATIVE = NumberRule(integer=False, minimum=0)

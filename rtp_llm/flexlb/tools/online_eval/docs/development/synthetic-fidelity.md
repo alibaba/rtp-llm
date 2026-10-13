@@ -26,7 +26,7 @@
 {"kind":"synthetic","model":"realistic","version":"1","parameters":{"profile":"<profile-name>","sampling":"joint","seed":42,"count":10000,"output_tokens":420}}
 ```
 
-`traffic.synthetic.derivation` 是统计参数反推入口，导出旧字段与联合池。报告不另写一份参数反推逻辑。
+`traffic.synthetic.derivation` 是类型化统计参数反推库，CLI 位于 `scripts/pipeline/derive_synthetic_profile.py`，导出旧字段与联合池。报告不另写一份参数反推逻辑。
 现有 `capture_frontend_prefix`、`fit_frontend_prefix`、`prefix_lineage`、`datasets/describe_traffic` 和
 `scripts/commands/profile_workload.py` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
 

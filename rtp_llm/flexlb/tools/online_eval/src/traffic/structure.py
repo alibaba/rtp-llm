@@ -19,11 +19,13 @@ def stratified(values, size):
             for i in range(min(size, len(ordered)))] if len(ordered) >= size else ordered
 
 
-def joint_distribution(events, strata=1024):
+def joint_distribution(model: LineageModel, strata=1024):
+    block = model.metadata.block_size
+    events = [(max(1, e.input_tokens // block), e.shared_full_blocks) for e in model.events]
     return dict(schema_version=1, strata=strata, sort_key=['blocks', 'shared_blocks'],
                 sampling='equal_mass_midpoint_strata',
-                warm_pairs=[list(pair) for pair in stratified([(e[1], e[3]) for e in events if e[3]], strata)],
-                cold_blocks=stratified([e[1] for e in events if not e[3]], strata))
+                warm_pairs=[list(pair) for pair in stratified([(blocks, shared) for blocks, shared in events if shared], strata)],
+                cold_blocks=stratified([blocks for blocks, shared in events if not shared], strata))
 
 
 class PrefixIndex:
