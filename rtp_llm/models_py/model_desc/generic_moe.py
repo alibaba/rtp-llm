@@ -37,6 +37,20 @@ from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
+try:
+    from rtp_llm.models_py.triton_kernels.common.moe_combine import (
+        sigmoid_mul_supported,
+        sigmoid_mul_triton,
+    )
+except Exception:  # pragma: no cover - triton unavailable in this environment
+
+    def sigmoid_mul_supported(
+        gate: torch.Tensor, shared: torch.Tensor
+    ) -> bool:  # noqa: F811
+        return False
+
+    sigmoid_mul_triton = None
+
 logger = logging.getLogger(__name__)
 
 # Router-gate/shared-gate GEMV fusion token ceiling.  The merged [hidden, E+1]
@@ -167,6 +181,10 @@ class GenericMoeLayer(nn.Module):
         self.use_ep_shared_allreduce = (
             self.shared_expert is not None and self.ffn_tp_size > 1 and self.ep_size > 1
         )
+        # EP-shared gate broadcast: the Triton fused sigmoid-mul is
+        # torch.equal to the aten ``sigmoid(gate) * shared`` chain; keep the
+        # aten chain on non-CUDA devices or when Triton is unavailable.
+        self.use_triton_gate_mul = sigmoid_mul_triton is not None and is_cuda()
         self.use_unified_tp_allreduce = (
             self.shared_expert is not None
             and self.ffn_tp_size > 1
@@ -239,6 +257,15 @@ class GenericMoeLayer(nn.Module):
         if self.shared_expert_gate is not None:
             if shared_gate_output is None:
                 shared_gate_output = self.shared_expert_gate(hidden_states)  # [T, 1]
+            if (
+                sigmoid_mul_triton is not None
+                and self.use_triton_gate_mul
+                and sigmoid_mul_supported(shared_gate_output, shared_expert_output)
+            ):
+                # Fused sigmoid + broadcast multiply (one kernel replaces the
+                # strided [T, 1] x [T, H] aten broadcast chain; bit-exact, and
+                # the TP all-reduce below consumes the contiguous result).
+                return sigmoid_mul_triton(shared_gate_output, shared_expert_output)
             return torch.sigmoid(shared_gate_output) * shared_expert_output
         return shared_expert_output
 

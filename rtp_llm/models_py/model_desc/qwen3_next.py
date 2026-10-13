@@ -581,7 +581,13 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 self.head_v_dim,
             )
             use_qk_l2norm_in_kernel = False
-        elif mixed_qkv.shape[0] >= 2048 and self.head_k_dim == self.head_v_dim:
+        elif self.head_k_dim == self.head_v_dim:
+            # Fused split+contiguous at every token count: the former
+            # M >= 2048 threshold left small prefills on torch.split's
+            # strided views, whose input_guard .contiguous() clones cost
+            # 3 kernels per GDN layer (90 kernels / 0.57ms on the 599-token
+            # TP1 prefill trace); scatter_qkv emits one kernel with the same
+            # bytes and a bit-identical layout.
             query, key, value = scatter_qkv(
                 mixed_qkv,
                 self.local_num_k_heads,
