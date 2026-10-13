@@ -2611,6 +2611,7 @@ TEST_F(MtpExecutorTest, testDSparkGammaThreeSpecLogitsVerifyRunsOnAsyncWorker) {
     EXPECT_FALSE(stream->getProposeTokensGpu().defined());
 
     auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
+    EXPECT_FALSE(processor->mtpCapability().requires_executor_thread);
     stream->logits_processor_list_.push_back(processor);
     const auto main_thread_id = std::this_thread::get_id();
 
@@ -3621,6 +3622,7 @@ TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalComm
     EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
 }
 
+#if USING_CUDA
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     // Test invokeMtpDispatchStatePrepare correctness
     const int64_t batch_size = 8;
@@ -3632,11 +3634,9 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     auto next_seq_len = torch::empty({batch_size}, cuda_i32);
     auto hidden_idx   = torch::empty({batch_size}, cuda_i64);
 
-#if USING_CUDA
     invokeMtpDispatchStatePrepare(
         accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
     cudaDeviceSynchronize();
-#endif
 
     // Verify next_seq_len = prev_seq_len + accept_len
     auto expected_next = (prev_seq_len + accept_len).cpu();
@@ -3669,20 +3669,16 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
 
     // Warm up
     for (int i = 0; i < 10; i++) {
-#if USING_CUDA
         invokeMtpDispatchStatePrepare(
             accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
-#endif
     }
     cudaDeviceSynchronize();
 
     // Benchmark batched approach (fused kernel)
     auto start_batched = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < iterations; i++) {
-#if USING_CUDA
         invokeMtpDispatchStatePrepare(
             accept_len, prev_seq_len, next_seq_len, hidden_idx, batch_size, at::cuda::getCurrentCUDAStream().stream());
-#endif
     }
     cudaDeviceSynchronize();
     auto end_batched = std::chrono::high_resolution_clock::now();
@@ -3711,6 +3707,7 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     RTP_LLM_LOG_INFO("[dispatch-bench] scalar:  %ld us total, %.2f us/iter", us_scalar, (double)us_scalar / iterations);
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
+#endif  // USING_CUDA
 
 // MTP-incompatible stateful processor: main's capability contract makes the
 // stream (not the whole engine step) fail, so decodeStep must keep running.

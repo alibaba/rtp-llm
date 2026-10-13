@@ -88,15 +88,26 @@ cc_test(
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/normal_engine/test:mock_engine",
         "//rtp_llm/cpp/testing:device_test_utils",
-        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ] + torch_deps() + cuda13_torch_link_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {"gpu": "L20_CU13"},
-    tags = ["L20_CU13"],
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        ],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+    }) + torch_deps() + cuda13_torch_link_deps,
+    env = select({
+        "@//:using_rocm": {"TEST_USING_DEVICE": "ROCM"},
+        "//conditions:default": {"TEST_USING_DEVICE": "CUDA"},
+    }),
+    exec_properties = select({
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
+        "//conditions:default": {"gpu": "L20_CU13"},
+    }),
+    # Bazel tags are not configurable; exec_properties selects the actual GPU.
+    tags = ["L20_CU13", "MI308X-ROCM7"],
 )

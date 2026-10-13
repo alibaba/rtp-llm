@@ -122,6 +122,17 @@ bool hasSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
     return false;
 }
 
+bool hasExecutorThreadSpecLogitsProcessor(const std::list<GenerateStreamPtr>& streams) {
+    for (const auto& stream : streams) {
+        for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
+            if (processor && processor->mtpCapability().requires_executor_thread) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool hasLinearCacheSnapshotCapacity(const std::list<GenerateStreamPtr>& streams,
                                     int64_t                             table_width,
                                     int                                 max_accept_length,
@@ -1713,8 +1724,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // Both proposal implementations have now produced the same target-verify
     // rows. Launch once here so spec-logits D2H/CPU work overlaps target verify.
+    // XGrammar's mutable matcher must prepare its mask on the executor thread.
+    // Snapshot-based processors can still overlap target verification.
     auto launch_spec_logits_phase = [&]() {
-        if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
+        if (spec_logits_processor_present && !hasExecutorThreadSpecLogitsProcessor(streams) && propose_step_ > 1
+            && draft_token_ids_t.defined()) {
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
             const int64_t expected_verify_tokens =
                 static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
