@@ -665,6 +665,7 @@ TEST(CacheConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
         const auto& policy = config.group(tag).policy;
         EXPECT_EQ(policy.enable_prefix_reuse, enable_prefix_reuse) << tag;
         EXPECT_EQ(policy.active_tail_blocks, active_tail_blocks) << tag;
+        EXPECT_EQ(policy.shared_chunk_state, tag == "hca_state") << tag;
     };
 
     expect_policy("hca_state", false, 1);
@@ -698,6 +699,9 @@ TEST(CacheConfigCreatorTest, SlidingWindowPolicyPropagatesAndSurvivesAggregation
     auto equal_policy = policies.front();
     EXPECT_TRUE(CacheConfig::samePolicy(policies.front(), equal_policy));
     equal_policy.sliding_window_size += 1;
+    EXPECT_FALSE(CacheConfig::samePolicy(policies.front(), equal_policy));
+    equal_policy                    = policies.front();
+    equal_policy.shared_chunk_state = !equal_policy.shared_chunk_state;
     EXPECT_FALSE(CacheConfig::samePolicy(policies.front(), equal_policy));
 
     test::setTestGroupPolicies(config, policies);
@@ -1843,6 +1847,38 @@ TEST(CacheConfigTest, LinearPolicyDefaultsPrefixReuseAndExplicitDisableOverrides
     EXPECT_FALSE(disabled_policy.enable_prefix_reuse);
     EXPECT_EQ(disabled_policy.active_tail_blocks, 1u);
     EXPECT_EQ(disabled_policy.cp_mapping, CpBlockMappingMode::NONE);
+    EXPECT_FALSE(disabled_policy.shared_chunk_state);
+}
+
+TEST(CacheConfigTest, SharedChunkStateFollowsRingPolicyInsteadOfTag) {
+    KVCacheSpecDesc desc;
+    desc.tag               = "renamed_state";
+    desc.cache_type        = KVCacheSpecType::OpaqueState;
+    desc.entry_count_mode  = OpaqueBlockEntryCountMode::STATE_RING;
+    desc.compression_ratio = 128;
+    desc.entry_elems       = 1;
+    desc.entry_dtype       = DataType::TYPE_FP32;
+    desc.reuse             = CacheReusePolicyDesc{false};
+    desc.tail              = CacheTailPolicyDesc{1, false};
+    SpecBuildContext ctx;
+    ctx.seq_size_per_block = 256;
+    GroupBase group;
+    group.tag    = desc.tag;
+    group.spec   = SpecBuilder::build(desc, ctx);
+    group.policy = SpecBuilder::groupPolicy(desc);
+    EXPECT_TRUE(group.policy.shared_chunk_state);
+    EXPECT_EQ(group.chunkCacheBlockCount(1024, 256, false), 0u);
+
+    desc.tag                = "hca_state";
+    desc.state_ring_overlap = 1;
+    group.tag               = desc.tag;
+    group.spec              = SpecBuilder::build(desc, ctx);
+    group.policy            = SpecBuilder::groupPolicy(desc);
+    EXPECT_FALSE(group.policy.shared_chunk_state);
+    EXPECT_EQ(group.chunkCacheBlockCount(1024, 256, false), 2u);
+    desc.state_ring_overlap         = 0;
+    desc.reuse->enable_prefix_reuse = true;
+    EXPECT_FALSE(SpecBuilder::groupPolicy(desc).shared_chunk_state);
 }
 
 TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
@@ -2634,6 +2670,87 @@ TEST_F(DSV4AllocatorTest, CompressedBlockCopyIncludesEveryPageAndPadding) {
         EXPECT_EQ(dst[i], static_cast<uint8_t>(i + 1)) << i;
         EXPECT_EQ(src[i], static_cast<uint8_t>(i + 1)) << i;
         EXPECT_EQ(next[i], 99) << i;
+    }
+}
+
+TEST_F(DSV4AllocatorTest, ChunkMallocReservesSparseBanksOnceAndFreesEachBankOnce) {
+    for (const auto type : {CacheGroupType::LINEAR, CacheGroupType::SWA}) {
+        auto config = makeSimpleHybridMhaCacheConfig(4, 10, 4, DataType::TYPE_FP16);
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            if (group.policy.group_type == CacheGroupType::LINEAR && type == CacheGroupType::SWA) {
+                group.spec                       = makeMhaSpec(group.tag, 4, DataType::TYPE_FP16, 1, 1);
+                group.policy                     = defaultCacheGroupPolicy(type);
+                group.policy.sliding_window_size = 8;
+            }
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+        auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        const auto sparse_group = allocator->cacheGroups().front();
+        ASSERT_EQ(sparse_group->tag(), "linear");
+        const auto pool        = sparse_group->blockPool();
+        const auto free_before = pool->availableBlocksNum();
+        auto       resource    = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        initDsv4BatchGroups(*resource, config);
+        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, 84, 4);
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(20, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+        MallocInfo info{resource, tokens};
+        info.reuse_cache                  = false;
+        info.enable_cache_lookup          = false;
+        info.enable_remove_skipped_blocks = false;
+        info.max_chunk_tokens             = 8;
+        if (type == CacheGroupType::LINEAR) {
+            const auto need = sparse_group->getNeedBlocks(0, 20, 0, 0, false, {2, 3, 4});
+            EXPECT_EQ(need.extra_blocks, 3);
+        }
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const size_t banks = type == CacheGroupType::LINEAR ? 3 : 4;
+        EXPECT_EQ(pool->availableBlocksNum(), free_before - banks);
+        const auto owning = resource->blocks(0, "linear");
+        info.max_chunk_tokens = 0;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        EXPECT_EQ(resource->blocks(0, "linear"), owning);
+        EXPECT_EQ(pool->availableBlocksNum(), free_before - banks);
+        allocator->free(FreeInfo{resource, tokens});
+        EXPECT_EQ(pool->availableBlocksNum(), free_before);
+    }
+}
+
+TEST_F(DSV4AllocatorTest, ChunkMallocReservesSwaBanksUsingCpGroupGeometry) {
+    for (const int cp_size : {1, 2}) {
+        auto config    = makeDSV4CpAllocatorConfig(cp_size);
+        auto allocator = std::make_shared<TestDSV4HybridTypeAllocator>(config, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator->init());
+        const int spb = allocator->seqSizePerBlock();
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(0, cp_size, spb));
+        const int group_spb = config.group("swa_kv").seqSizePerBlock();
+        const int seq_len   = 8 * group_spb;
+        auto      resource  = std::make_shared<BatchKVCacheResource>();
+        resource->resetBatchSize(1);
+        initDsv4BatchGroups(*resource, config);
+        auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, seq_len + spb, spb);
+        auto input             = std::make_shared<GenerateInput>();
+        input->input_ids       = torch::arange(seq_len, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        tokens->init(input);
+        MallocInfo info{resource, tokens};
+        info.enable_cache_lookup          = false;
+        info.reuse_cache                  = false;
+        info.enable_remove_skipped_blocks = false;
+        info.max_chunk_tokens             = 2 * group_spb;
+        ASSERT_TRUE(allocator->malloc(info).success);
+        const auto& owning = resource->blocks(0, "swa_kv");
+        ASSERT_EQ(owning.size(), 8u);
+        EXPECT_EQ(std::count_if(owning.begin(), owning.end(), [](int id) { return id > 0; }), 3);
+        for (size_t pos = 5; pos < owning.size(); ++pos) {
+            EXPECT_GT(owning[pos], 0);
+        }
+        allocator->free(FreeInfo{resource, tokens});
     }
 }
 
