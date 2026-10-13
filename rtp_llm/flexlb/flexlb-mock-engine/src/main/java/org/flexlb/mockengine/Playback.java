@@ -6,18 +6,10 @@ import java.util.Map;
 
 /** Bounded laps with optional whole-lap token translation. Pacing belongs to the sender. */
 final class Playback {
-    static final List<String> RETIRED_CONTROLS = List.of("RATE_CURVE", "ARRIVAL_PROCESS",
-            "LAP_RETAIN_SCHEDULE", "LAP_RETAIN_PROBABILITY", "PLAYBACK_SEED",
-            "BURST_FACTOR", "BURST_PERIOD_SECONDS", "BURST_DUTY", "DIURNAL_AMPLITUDE",
-            "DIURNAL_PERIOD_SECONDS", "GRADIENT", "GRADIENT_START_SPEED", "GRADIENT_MAX_SPEED");
     final int maxLaps;
     final String identity;
 
     Playback(Map<String, String> env, boolean loop, long duration) {
-        for (String field : RETIRED_CONTROLS) {
-            if (!env.getOrDefault(field, "").isBlank())
-                throw new IllegalArgumentException("unsupported playback control: " + field);
-        }
         maxLaps = Integer.parseInt(text(env, "MAX_LAPS", loop ? "0" : "1"));
         if (maxLaps < 0 || (maxLaps == 0 && duration <= 0))
             throw new IllegalArgumentException("loop playback requires max_laps or bounded duration");

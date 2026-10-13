@@ -61,9 +61,7 @@ def test_collection_policy_is_frozen_and_matches_launch(tmp_path, profile, laten
     def acknowledge(*args):
         snapshot = dict(trace_sha256=flow.trace_manifest['sha256'], offline_plan_supported=True,
             planner_version='PLAYBACK_V1', token_stride=1, mode='uniform', qps=5,
-            speed=1, max_laps=1, identity='structural-relabel', retain_probability=0, seed=0,
-            burst_factor=1, burst_period_seconds=10, burst_duty=.1, diurnal_amplitude=0,
-            diurnal_period_seconds=86400, ramp_up_seconds=0, num_shards=1, shard_index=0,
+            speed=1, max_laps=1, identity='structural-relabel', ramp_up_seconds=0, num_shards=1, shard_index=0,
             duration_seconds=10, limit=0)
         (flow.directory / 'playback.json').write_text(json.dumps(snapshot))
         (flow.control / 'status.json').write_text(json.dumps(dict(flow.identity, state='SENDING')))
@@ -94,11 +92,7 @@ def test_content_overrides_are_rejected_before_start(field):
         client_environment(dict(settings(), **{field: '1'}))
 
 
-def test_ambient_retired_controls_are_cleared_and_cannot_be_authored():
-    from adapters.load_client import RETIRED_ENV_FIELDS
-    with mock.patch.dict('os.environ', {key: 'poison' for key in RETIRED_ENV_FIELDS}):
-        frozen = ClientOps(None)._base_env({'PRIORITY': '50'})
-        assert all(frozen[key] == '' for key in RETIRED_ENV_FIELDS)
-    for key in RETIRED_ENV_FIELDS:
-        with pytest.raises(ValueError):
-            client_environment(dict(settings(), **{key: '1'}))
+@pytest.mark.parametrize("field", ["UNKNOWN_SETTING", "RATE_CURVE", "PLAYBACK_SEED"])
+def test_unknown_client_settings_use_standard_validation(field):
+    with pytest.raises(ValueError, match="unknown Java client configuration names"):
+        client_environment(dict(settings(), **{field: "1"}))

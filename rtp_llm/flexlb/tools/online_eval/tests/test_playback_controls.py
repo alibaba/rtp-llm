@@ -24,15 +24,11 @@ class PlaybackControlsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize(dict(playback=dict(mode='uniform', qps=10, max_laps=0)))
 
-    def test_retired_controls_are_rejected_at_both_boundaries(self):
-        from traffic.playback.configuration import RETIRED_ENV_FIELDS
+    def test_unknown_fields_and_invalid_values_are_rejected(self):
         for key in ('arrival', 'rate_curve', 'retain_schedule', 'retain_probability',
                     'seed', 'burst_factor', 'diurnal_amplitude'):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 normalize(dict(playback=dict(mode='uniform', qps=10, **{key: 1})))
-        for key in RETIRED_ENV_FIELDS:
-            with self.subTest(key=key), self.assertRaises(ValueError):
-                normalize(dict(SEND_MODE='uniform', SEND_MODE_QPS='10', **{key: '1'}))
         for mode in ('burst', 'gradient'):
             with self.assertRaises(ValueError):
                 normalize(dict(playback=dict(mode=mode, qps=10)))

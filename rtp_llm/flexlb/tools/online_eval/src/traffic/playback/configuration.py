@@ -56,10 +56,7 @@ ENV_FIELDS = dict(qps='SEND_MODE_QPS', speed='REPLAY_SPEED', max_laps='MAX_LAPS'
                   ramp_up_seconds='RAMP_UP_SECONDS')
 FIELDS = frozenset(PlaybackConfiguration.__dataclass_fields__)
 RAW_FIELDS = set(ENV_FIELDS.values()) | {'SEND_MODE', 'LOOP', 'LAP_IDENTITY'}
-RETIRED_ENV_FIELDS = frozenset({'RATE_CURVE', 'ARRIVAL_PROCESS', 'LAP_RETAIN_SCHEDULE',
-    'LAP_RETAIN_PROBABILITY', 'PLAYBACK_SEED', 'BURST_FACTOR', 'BURST_PERIOD_SECONDS',
-    'BURST_DUTY', 'DIURNAL_AMPLITUDE', 'DIURNAL_PERIOD_SECONDS', 'GRADIENT',
-    'GRADIENT_START_SPEED', 'GRADIENT_MAX_SPEED'})
+
 
 
 class PlaybackConfigurationCodec:
@@ -82,8 +79,6 @@ class PlaybackConfigurationCodec:
 
     @staticmethod
     def from_environment(env):
-        if set(env) & RETIRED_ENV_FIELDS:
-            raise ValueError('unsupported advanced playback controls')
         mode = env.get('SEND_MODE', 'replay')
         if mode not in ('uniform', 'replay'):
             raise ValueError('invalid Java client pacing')
@@ -114,7 +109,7 @@ def normalize(client):
         configuration = PlaybackConfigurationCodec.from_environment(env)
         return env, configuration.to_dict()
     value = env.pop('playback')
-    if set(env) & (RAW_FIELDS | RETIRED_ENV_FIELDS):
+    if set(env) & RAW_FIELDS:
         raise ValueError('playback cannot be combined with raw pacing/loop controls')
     configuration = PlaybackConfigurationCodec.decode(value, duration_s=env.get('DURATION_S', 0))
     env.update(configuration.environment())

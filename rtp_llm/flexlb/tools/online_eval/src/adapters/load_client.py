@@ -1,7 +1,5 @@
 """Java client input validation, runtime-owned settings and launch isolation."""
 
-from traffic.playback.configuration import RETIRED_ENV_FIELDS
-
 LOAD_CLIENT_ENV_VARS = (
     'LIVE_CLIENT_EVENTS',
     'TRACE_FILE',

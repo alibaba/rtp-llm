@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from adapters.load_client import LOAD_CLIENT_ENV_VARS, RETIRED_ENV_FIELDS
+from adapters.load_client import LOAD_CLIENT_ENV_VARS
 from adapters.requests import ClientRecords, request_success
 from adapters.java_client import ClientOps
 
@@ -71,7 +71,7 @@ class SharedRuntimeTests(unittest.TestCase):
             )
         )
         self.assertTrue(names)
-        self.assertFalse(names - (set(LOAD_CLIENT_ENV_VARS) | RETIRED_ENV_FIELDS))
+        self.assertFalse(names - set(LOAD_CLIENT_ENV_VARS))
         self.assertEqual(len(LOAD_CLIENT_ENV_VARS), len(set(LOAD_CLIENT_ENV_VARS)))
         self.assertTrue(all(re.fullmatch(r"[A-Z][A-Z0-9_]*", name) for name in LOAD_CLIENT_ENV_VARS))
 

@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 
 class PlaybackTest {
     @Test void clearedLauncherEnvironmentUsesDefaults() {
-        Playback p=new Playback(Map.of("MAX_LAPS","","LAP_IDENTITY","","PLAYBACK_SEED","","BURST_FACTOR",""),false,30);
+        Playback p=new Playback(Map.of("MAX_LAPS","","LAP_IDENTITY",""),false,30);
         assertEquals(1,p.maxLaps);assertEquals("structural-relabel",p.identity);
     }
     @Test void uniformDoesNotImplyLoopAndLoopRequiresBound() {
@@ -34,9 +34,7 @@ class PlaybackTest {
         assertSame(tokens,none.relabel(tokens,3,8));
         assertSame(tokens,new Playback(Map.of(),true,30).relabel(tokens,0,8));
     }
-    @Test void retiredControlsAndPartialIdentityFailBeforeSending() {
-        for(String field:Playback.RETIRED_CONTROLS)
-            assertThrows(IllegalArgumentException.class,()->new Playback(Map.of(field,"1"),false,30));
+    @Test void invalidIdentityFailsBeforeSending() {
         assertThrows(IllegalArgumentException.class,()->new Playback(Map.of("LAP_IDENTITY","partial"),false,30));
     }
     @Test void uniformAndRampSchedulesKeepTheirExactFormula() {

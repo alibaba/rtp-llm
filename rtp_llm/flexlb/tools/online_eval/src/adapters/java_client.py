@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from runtime.java_runtime import resolve_java21
-from adapters.load_client import LOAD_CLIENT_ENV_VARS, RETIRED_ENV_FIELDS, validate_environment, validate_flow_environment
+from adapters.load_client import LOAD_CLIENT_ENV_VARS, validate_environment, validate_flow_environment
 from runtime.paths import MOCK_JAR
 from runtime.process import ManagedProcess, ProcessOps
 
@@ -28,7 +28,7 @@ class ClientOps:
     def _base_env(self, overrides: dict) -> dict:
         overrides = validate_environment(overrides)
         menv = dict(os.environ)
-        for var in (*LOAD_CLIENT_ENV_VARS, *RETIRED_ENV_FIELDS):
+        for var in LOAD_CLIENT_ENV_VARS:
             menv[var] = ""
         for key, value in overrides.items():
             menv[key] = str(value)
