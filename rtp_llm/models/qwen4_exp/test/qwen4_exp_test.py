@@ -171,6 +171,26 @@ class Qwen4ExpTest(unittest.TestCase):
             self.assertEqual(model.load(skip_python_model=True), "loaded")
         parent_load.assert_called_once_with(skip_python_model=True)
 
+    def test_gdn_bf16_override_is_explicit_and_keeps_attention_fp8(self):
+        flag = "RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL"
+        for value in (None, "0", "1", "true"):
+            with self.subTest(value=value), mock.patch.dict(
+                os.environ,
+                {
+                    "RTP_LLM_QWEN4_MOE_FP4_EXPERIMENTAL": "1",
+                    "RTP_LLM_QWEN4_MOE_FP8_EXPERIMENTAL": "0",
+                    "RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL": "1",
+                },
+            ):
+                if value is None:
+                    os.environ.pop(flag, None)
+                else:
+                    os.environ[flag] = value
+                cfg = Qwen4Exp.create_config(self._temp_dir.name)
+                self.assertEqual(cfg._qwen4_gdn_bf16, value in ("1", "true"))
+                self.assertTrue(cfg._qwen4_attention_fp8)
+                self.assertTrue(cfg._qwen4_moe_only_fp4)
+
     def test_attention_fp8_requires_bf16_source_and_online_moe_fp4(self):
         for moe_enabled, attention_enabled in (("1", "1"), ("0", "1"), ("0", "0")):
             with self.subTest(
