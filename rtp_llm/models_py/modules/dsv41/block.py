@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention import (
 )
 from rtp_llm.models_py.modules.dsv41.hc import build_hc_unit
 from rtp_llm.models_py.modules.dsv41.moe import MoE
+from rtp_llm.models_py.modules.dsv41.moe.routing_metadata import GateRoutingMetadata
 
 _PrefillFastHCImpls = Tuple[Callable, Callable, Callable, Callable]
 
@@ -361,6 +362,7 @@ class Block(nn.Module):
         *,
         _prepared_attn=None,
         _defer_ffn_post: bool = False,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ):
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Both paths share
@@ -427,7 +429,11 @@ class Block(nn.Module):
             _, x_pre, post, comb = fused_mhc
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_in", x_pre)
-        ffn_out = self.ffn(x_pre, input_ids)
+        ffn_out = (
+            self.ffn(x_pre, input_ids)
+            if routing_metadata is None
+            else self.ffn(x_pre, input_ids, routing_metadata=routing_metadata)
+        )
         if _dbg_layer:
             _rt.record_if_level(2, f"L{self.layer_id:02d}_decode_ffn_out", ffn_out)
         if _defer_ffn_post:
@@ -447,6 +453,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> torch.Tensor:
         """Prefill fast path for the FP8 production path.
 
@@ -465,6 +472,11 @@ class Block(nn.Module):
                 cu_seqlens,
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
+                **(
+                    {"routing_metadata": routing_metadata}
+                    if routing_metadata is not None
+                    else {}
+                ),
             )
         return fast_call(
             x,
@@ -473,6 +485,11 @@ class Block(nn.Module):
             cu_seqlens,
             kv_cache=kv_cache,
             block_tables_by_type=block_tables_by_type,
+            **(
+                {"routing_metadata": routing_metadata}
+                if routing_metadata is not None
+                else {}
+            ),
         )
 
     def _forward_prefill_fast_fp8(
@@ -483,6 +500,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,
         kv_cache=None,
         block_tables_by_type=None,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> torch.Tensor:
         """Validated FP8 prefill fast body.
 
@@ -537,7 +555,11 @@ class Block(nn.Module):
             x_pre = _prefill_fast_norm(self.ffn_norm, x_pre)
         else:
             _, x_pre, post, comb = fused_mhc
-        ffn_out = self.ffn(x_pre, input_ids)
+        ffn_out = (
+            self.ffn(x_pre, input_ids)
+            if routing_metadata is None
+            else self.ffn(x_pre, input_ids, routing_metadata=routing_metadata)
+        )
         return ffn_hc_post(ffn_out, residual, post, comb)
 
     def forward_prefill_ced_l20(
@@ -605,6 +627,7 @@ class Block(nn.Module):
         cu_seqlens: torch.Tensor,  # [B+1] int64
         kv_cache=None,
         block_tables_by_type=None,
+        routing_metadata: Optional[GateRoutingMetadata] = None,
     ) -> torch.Tensor:
         """Flat per-block forward — accepts ``[T, hc, dim]`` hidden and 1D
         ``input_ids`` / ``positions`` / ``cu_seqlens``, matching the vLLM
@@ -793,7 +816,11 @@ class Block(nn.Module):
         if _dbg_layer and dbg_pos_mask is not None:
             setattr(self.ffn, "_dbg_positions", dbg_positions)
         try:
-            ffn_out = self.ffn(x_pre, ffn_in_ids)  # [T, dim]
+            ffn_out = (
+                self.ffn(x_pre, ffn_in_ids)
+                if routing_metadata is None
+                else self.ffn(x_pre, ffn_in_ids, routing_metadata=routing_metadata)
+            )  # [T, dim]
         finally:
             if _dbg_layer and hasattr(self.ffn, "_dbg_positions"):
                 setattr(self.ffn, "_dbg_positions", None)

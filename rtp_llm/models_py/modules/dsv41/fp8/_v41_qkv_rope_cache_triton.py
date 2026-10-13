@@ -33,6 +33,7 @@ def _trap():
 @triton.jit(do_not_specialize=["kv_stride", "block_stride", "num_pages", "num_freqs"])
 def _fused_qkv_rope_cache_kernel(
     q,
+    q_out,
     kv,
     weight,
     positions,
@@ -49,6 +50,8 @@ def _fused_qkv_rope_cache_kernel(
     ENTRIES: tl.constexpr,
     EPS: tl.constexpr,
     GATHERED_FREQS: tl.constexpr,
+    APPLY_Q_ROPE: tl.constexpr,
+    PADDED_HEADS: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -64,7 +67,16 @@ def _fused_qkv_rope_cache_kernel(
     cos = tl.load(freqs + frequency_row * 64 + 2 * pair)
     sin = tl.load(freqs + frequency_row * 64 + 2 * pair + 1)
 
-    if tile < tl.cdiv(HEADS, 8):
+    if not APPLY_Q_ROPE and HEADS != PADDED_HEADS and tile < PADDED_HEADS // 2:
+        # Copy Q's 16-channel/head-interleaved layout into the native padded
+        # layout. This shares the KV insert launch, without expanding Wq GEMM.
+        offset = tile * 1024 + tl.arange(0, 1024)
+        head = offset // 16 % PADDED_HEADS
+        chunk = offset // (16 * PADDED_HEADS)
+        source = (chunk * HEADS + head) * 16 + offset % 16
+        q_values = tl.load(q + row * HEADS * 512 + source, head < HEADS, other=0)
+        tl.store(q_out + row * PADDED_HEADS * 512 + offset, q_values)
+    elif APPLY_Q_ROPE and tile < tl.cdiv(HEADS, 8):
         heads = tile * 8 + tl.arange(0, 8)
         q_base = q + (row * HEADS + heads[:, None]) * 512 + 448
         q_real = tl.load(
@@ -184,8 +196,14 @@ def try_fused_qkv_rope_cache(
     *,
     eps: float = 1e-6,
     freqs_cis: torch.Tensor | None = None,
+    apply_q_rope: bool = True,
+    pad_query_heads: int | None = None,
 ) -> FusedQKVRopeCache | None:
     """Apply Q RoPE in place and return BF16 KV plus the selected frequencies.
+
+    ``apply_q_rope=False`` leaves Q unrotated for mega attention. Optional
+    ``pad_query_heads`` pads its chunk-interleaved head layout in this same
+    launch, while Wq itself continues to project only local heads.
 
     Only native V4.1 528-byte cache pages are accepted. Physical slots must be
     unique within the launch; any negative slot skips its store. Invalid
@@ -200,6 +218,23 @@ def try_fused_qkv_rope_cache(
         )
     ):
         return None
+    padded_heads = q.shape[-2] if pad_query_heads is None else pad_query_heads
+    if padded_heads != q.shape[-2] and (
+        apply_q_rope or padded_heads not in (64, 128) or padded_heads < q.shape[-2]
+    ):
+        return None
+    q_out = (
+        q
+        if padded_heads == q.shape[-2]
+        else torch.empty(
+            (*q.shape[:2], padded_heads, 512), dtype=q.dtype, device=q.device
+        )
+    )
+    q_tiles = (
+        triton.cdiv(q.shape[-2], 8)
+        if apply_q_rope
+        else (padded_heads // 2 if padded_heads != q.shape[-2] else 0)
+    )
     kv_out = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
     gathered_freqs = freqs_cis is not None
     if freqs_cis is None:
@@ -207,10 +242,9 @@ def try_fused_qkv_rope_cache(
             (positions.numel(), 32), dtype=torch.complex64, device=q.device
         )
     if positions.numel():
-        _fused_qkv_rope_cache_kernel[
-            (positions.numel(), triton.cdiv(q.shape[-2], 8) + 1)
-        ](
+        _fused_qkv_rope_cache_kernel[(positions.numel(), q_tiles + 1)](
             q,
+            q_out,
             kv,
             kv_norm,
             positions,
@@ -227,7 +261,9 @@ def try_fused_qkv_rope_cache(
             ENTRIES=pool_3d.shape[1],
             EPS=eps,
             GATHERED_FREQS=gathered_freqs,
+            APPLY_Q_ROPE=apply_q_rope,
+            PADDED_HEADS=padded_heads,
             TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
             num_warps=4,
         )
-    return FusedQKVRopeCache(q, kv_out, freqs_cis)
+    return FusedQKVRopeCache(q_out, kv_out, freqs_cis)

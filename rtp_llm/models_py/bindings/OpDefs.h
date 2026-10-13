@@ -355,8 +355,10 @@ struct PyModelInputs {
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
     torch::Tensor        engram_token_windows;
-    bool                 need_all_logits        = true;
-    bool                 need_all_hidden_states = true;
+    // CP-local CPU history owned by normal prefill; undefined for decode and graphs.
+    torch::Tensor engram_token_windows_host;
+    bool          need_all_logits        = true;
+    bool          need_all_hidden_states = true;
 
     // Internal homogeneous-batch signal; not part of the Generate RPC/config surface.
     bool capture_hidden_states = false;

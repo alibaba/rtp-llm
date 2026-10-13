@@ -32,15 +32,36 @@ The V4 group128 defaults retain their original arithmetic.
 from __future__ import annotations
 
 import os
+from functools import lru_cache
 
 import torch
 import triton
 import triton.language as tl
 
 
+@lru_cache(maxsize=None)
+def _device_capability_at_index(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _device_capability(device: torch.device | int | None = None) -> tuple[int, int]:
+    # Resolve an implicit device before caching: torch.cuda.device() may change
+    # the current device, while an initialized device's architecture is fixed.
+    if isinstance(device, int):
+        index = device if device >= 0 else None
+    else:
+        device = None if device is None else torch.device(device)
+        if device is not None and device.type != "cuda":
+            raise ValueError("expected a CUDA device")
+        index = None if device is None else device.index
+    if index is None:
+        index = torch.cuda.current_device()
+    return _device_capability_at_index(index)
+
+
 def _is_blackwell_device(device: torch.device | int | None = None) -> bool:
     try:
-        major, _ = torch.cuda.get_device_capability(device)
+        major, _ = _device_capability(device)
     except Exception:
         return False
     return major >= 10
@@ -343,7 +364,7 @@ def _alloc_output_buffers(
             (n_groups, M, d_per_group), dtype=torch.float8_e4m3fn, device=device
         )
     else:
-        fp8_work = fp8_buf[:, :M, :]
+        fp8_work = fp8_buf if fp8_buf.shape[1] == M else fp8_buf[:, :M, :]
 
     if scale_buf is None:
         scale_work = torch.empty(
@@ -353,7 +374,7 @@ def _alloc_output_buffers(
             (packed_sf_k * tma_M, 1, tma_M),
         )
     else:
-        scale_work = scale_buf[:, :M, :]
+        scale_work = scale_buf if scale_buf.shape[1] == M else scale_buf[:, :M, :]
     return fp8_work, scale_work
 
 
@@ -372,6 +393,7 @@ def fused_inv_rope_fp8_quant(
     heads_per_cta: int | None = None,
     round_rope_to_input_dtype: bool = False,
     scale_min: float = 0.0,
+    _launch_config: tuple[str, str | None, str] | None = None,
 ):
     """Fused inverse-RoPE + block-scaled FP8 quant for wo_a input.
 
@@ -433,7 +455,11 @@ def fused_inv_rope_fp8_quant(
     selected_impl = (
         impl
         if impl is not None
-        else os.environ.get("DSV4_INV_ROPE_FP8_QUANT_IMPL", "optimized")
+        else (
+            os.environ.get("DSV4_INV_ROPE_FP8_QUANT_IMPL", "optimized")
+            if _launch_config is None
+            else _launch_config[0]
+        )
     ).lower()
     if selected_impl == "legacy":
         # complex64 .real / .imag are stride-2 views; .contiguous() is a real
@@ -471,7 +497,11 @@ def fused_inv_rope_fp8_quant(
             num_stages=1,
         )
     elif selected_impl == "optimized":
-        env_heads_per_cta = os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA")
+        env_heads_per_cta = (
+            os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA")
+            if _launch_config is None
+            else _launch_config[1]
+        )
         if heads_per_cta is not None:
             selected_heads_per_cta = heads_per_cta
         elif env_heads_per_cta is not None:
@@ -480,7 +510,11 @@ def fused_inv_rope_fp8_quant(
             selected_heads_per_cta = 8 if _is_blackwell_device(o.device) else 2
         if heads_per_group % selected_heads_per_cta != 0:
             selected_heads_per_cta = 1
-        selected_num_warps = int(os.environ.get("DSV4_INV_ROPE_NUM_WARPS", "2"))
+        selected_num_warps = int(
+            os.environ.get("DSV4_INV_ROPE_NUM_WARPS", "2")
+            if _launch_config is None
+            else _launch_config[2]
+        )
         freqs_ri = torch.view_as_real(freqs_cis_per_b)
         grid = (tma_M, n_groups, heads_per_group // selected_heads_per_cta)
         _fused_inv_rope_fp8_quant_group_heads[grid](

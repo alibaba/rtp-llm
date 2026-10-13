@@ -3,6 +3,18 @@ load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 package(default_visibility = ["//visibility:public"])
 
 _TESTS = [
+    "mega_moe_static_buf_test",
+    "test_dspark_cuda_graph_contract",
+    "test_engram_cpu",
+    "test_engram_cpu_deadline",
+    "test_engram_cpu_native_packed",
+    "test_engram_packed",
+    "test_engram_prefetch",
+    "test_gate_routing_metadata",
+    "test_mhc_lazy_backward",
+    "test_prefill_workspace",
+    "test_strategy_select",
+
     "test_native_prefill_inputs",
     "test_mxfp8_dense",
     "test_deep_gemm_scratch",

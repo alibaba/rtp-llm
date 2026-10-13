@@ -155,9 +155,14 @@ def try_select_batched(
     if grouped is None:
         return False
     publishing = candidates is not None and publish_candidates
+    targets = iter(grouped.split_rows(out))
+    # Keep the score generator directly in the loop: zip/enumerate can retain
+    # its previous yielded tuple while allocating the next score chunk.
     for rows, logits, visible, bounds in grouped.groups(mask_tail=False):
+        target = next(targets)
         count = min(attn.index_topk, logits.shape[1])
-        target = out[rows, :count]
+        if count != target.shape[1]:
+            target = target[:, :count]
         published, selected = False, None
         if publishing:
             published, selected = _try_publish_with_tokens(

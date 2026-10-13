@@ -1,7 +1,8 @@
-"""CPU dispatch contracts and actual SM100 GEMM epilogue regressions."""
+"""CPU dispatch contracts and qualified Blackwell GEMM epilogue regressions."""
 
 import ast
 import ctypes
+import hashlib
 import importlib.util
 import json
 import os
@@ -27,7 +28,7 @@ def _load(name, path):
 op = _load("v41_wo_a_contract", _ROOT / "_v41_wo_a_quant.py")
 
 
-def _metadata(m=33):
+def _metadata(m=33, *, row_major=False):
     device = torch.device("cuda:0")
 
     def tensor(shape, stride, dtype):
@@ -45,7 +46,11 @@ def _metadata(m=33):
 
     aligned = (m + 3) // 4 * 4
     return (
-        tensor((m, 8, 4096), (4096, m * 4096, 1), torch.float8_e4m3fn),
+        tensor(
+            (m, 8, 4096),
+            (32768, 4096, 1) if row_major else (4096, m * 4096, 1),
+            torch.float8_e4m3fn,
+        ),
         tensor((m, 8, 32), (1, aligned * 32, aligned), torch.int32),
     ), (
         tensor((8, 1024, 4096), (1024 * 4096, 4096, 1), torch.float8_e4m3fn),
@@ -54,6 +59,152 @@ def _metadata(m=33):
 
 
 class WoAQuantCPUContractTest(unittest.TestCase):
+    def test_inverse_quant_buffers_elide_full_slices_and_cache_explicit_devices(self):
+        inverse = _load(
+            "v41_inverse_quant_contract",
+            _ROOT.parent / "_fused_inv_rope_fp8_quant_triton.py",
+        )
+        fp8, scales = inverse._alloc_output_buffers(5, 2, 512, 4, torch.device("cpu"))
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as p:
+            actual = inverse._alloc_output_buffers(
+                5, 2, 512, 4, torch.device("cpu"), fp8, scales
+            )
+        self.assertIs(actual[0], fp8)
+        self.assertIs(actual[1], scales)
+        self.assertFalse(any(e.key.startswith("aten::") for e in p.key_averages()))
+        short = inverse._alloc_output_buffers(
+            3, 2, 512, 4, torch.device("cpu"), fp8, scales
+        )
+        self.assertEqual(short[0].shape, (2, 3, 512))
+        self.assertEqual(short[1].stride(), scales.stride())
+        with mock.patch.object(
+            torch.cuda, "get_device_capability", side_effect=[(10, 3), (9, 0)]
+        ) as get_cap:
+            self.assertTrue(inverse._is_blackwell_device(torch.device("cuda:0")))
+            self.assertTrue(inverse._is_blackwell_device(0))
+            with mock.patch.object(torch.cuda, "current_device", return_value=1):
+                self.assertFalse(inverse._is_blackwell_device())
+            with mock.patch.object(torch.cuda, "current_device", return_value=0):
+                self.assertTrue(inverse._is_blackwell_device(torch.device("cuda")))
+            self.assertFalse(inverse._is_blackwell_device(torch.device("cpu")))
+            self.assertEqual(get_cap.call_args_list, [mock.call(0), mock.call(1)])
+
+    def test_output_scale_alias_padding_stride_and_full_range_slice_elision(self):
+        for m in (0, 1, 3, 4, 5, 512):
+            with self.subTest(m=m), torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as profile:
+                q, scales = op._output(m, torch.device("cpu"))
+            padded = (m + 3) // 4 * 4
+            self.assertEqual(q.shape, (m, 8192))
+            self.assertEqual(scales.shape, (m, 64))
+            self.assertEqual(scales.stride(), (1, padded if padded else 1))
+            self.assertEqual(scales.storage_offset(), 0)
+            base = scales._base
+            self.assertEqual(scales.untyped_storage().data_ptr(), base.data_ptr())
+            base.fill_(-1)
+            scales.fill_(17)
+            self.assertTrue(bool((base[:, :m] == 17).all()))
+            self.assertTrue(bool((base[:, m:] == -1).all()))
+            slices = sum(
+                e.count for e in profile.key_averages() if e.key == "aten::slice"
+            )
+            self.assertEqual(slices, int(padded != m))
+
+    def test_inverse_quant_forward_config_and_public_environment_dispatch(self):
+        inverse = _load(
+            "v41_inverse_quant_dispatch",
+            _ROOT.parent / "_fused_inv_rope_fp8_quant_triton.py",
+        )
+        optimized, legacy = mock.MagicMock(), mock.MagicMock()
+        o = torch.empty(3, 8, 512, dtype=torch.bfloat16)
+        freqs = torch.ones(3, 32, dtype=torch.complex64)
+        with mock.patch.object(
+            inverse, "_fused_inv_rope_fp8_quant_group_heads", optimized
+        ), mock.patch.object(
+            inverse, "_fused_inv_rope_fp8_quant_per_head", legacy
+        ), mock.patch.dict(
+            os.environ, {"DSV4_INV_ROPE_FP8_QUANT_IMPL": "legacy"}
+        ):
+            inverse.fused_inv_rope_fp8_quant(
+                o, freqs, 1, 8, 448, 64, _launch_config=("optimized", "4", "2")
+            )
+            options = optimized.__getitem__.return_value.call_args.kwargs
+            self.assertEqual(options["HEADS_PER_CTA"], 4)
+            self.assertEqual(options["num_warps"], 2)
+            legacy.__getitem__.assert_not_called()
+            inverse.fused_inv_rope_fp8_quant(o, freqs, 1, 8, 448, 64)
+            legacy.__getitem__.return_value.assert_called_once()
+
+    def test_quantize_keeps_contiguous_copy_and_restores_leading_dimensions(self):
+        linear_cls = self._linear_class()
+        linear = linear_cls.__new__(linear_cls)
+        torch.nn.Module.__init__(linear)
+        linear.K = 8
+        captured = []
+
+        def quantize(flat, **kwargs):
+            self.assertTrue(flat.is_contiguous())
+            result = flat.clone()
+            captured.append((flat, result))
+            return result, object()
+
+        path = "rtp_llm.models_py.kernels.cuda.fp8_kernel"
+        with mock.patch.dict(
+            sys.modules, {path: SimpleNamespace(sgl_per_token_group_quant_fp8=quantize)}
+        ):
+            inputs = (
+                torch.arange(32).float().view(4, 8),
+                torch.arange(64).float().view(4, 16)[:, ::2],
+                torch.arange(48).float().view(2, 3, 8).transpose(0, 1),
+                torch.arange(32).float().view(2, 16),
+                torch.ones(4, 8, requires_grad=True),
+            )
+            for x in inputs:
+                actual, _ = linear._quantize_input(x)
+                flat, quantized = captured[-1]
+                torch.testing.assert_close(actual, x)
+                self.assertEqual(actual.shape, x.shape)
+                self.assertEqual(flat.shape, (x.numel() // 8, 8))
+                if (
+                    x.ndim == 2
+                    and x.shape[1] == 8
+                    and x.is_contiguous()
+                    and not x.requires_grad
+                ):
+                    self.assertIs(flat, x)
+                    self.assertIs(actual, quantized)
+                elif x.requires_grad:
+                    self.assertIsNot(flat, x)
+                    self.assertIsNot(actual, quantized)
+
+    def test_quantized_exact_shape_keeps_noncontiguous_input_and_out_aliases(self):
+        linear_cls = self._linear_class()
+        linear = linear_cls.__new__(linear_cls)
+        torch.nn.Module.__init__(linear)
+        linear.N, linear.K = 3, 8
+        linear.weight = torch.ones(3, 8)
+        linear.weight_scales = torch.ones(1)
+        q = torch.arange(64).float().view(4, 16)[:, ::2]
+        storage = torch.full((4, 8), -1.0)
+        out = storage[:, 1:7:2]
+
+        def gemm(a, b, output, **kwargs):
+            self.assertIs(a[0], q)
+            self.assertIs(output, out)
+            output.copy_(a[0] @ b[0].T)
+
+        with mock.patch.dict(
+            sys.modules, {"deep_gemm": SimpleNamespace(fp8_fp4_gemm_nt=gemm)}
+        ):
+            self.assertIs(linear.forward_quantized(q, torch.ones(1), out=out), out)
+            torch.testing.assert_close(out, q @ linear.weight.T)
+            self.assertTrue(bool((storage[:, ::2] == -1).all()))
+            with self.assertRaises(RuntimeError):
+                linear.forward_quantized(torch.zeros(2, 16), torch.ones(1))
+
     def test_linear_valid_quantized_calls_keep_output_and_gemm_geometry(self):
         linear_cls = self._linear_class()
         linear = linear_cls.__new__(linear_cls)
@@ -174,6 +325,45 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 self.assertEqual(op._build_library(152, dependencies), arm)
                 self.assertEqual(compile_.call_count, 4)
 
+    def test_vendor_contract_rejects_changed_or_missing_private_headers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "deep_gemm"
+            include = package / "include/deep_gemm"
+            expected = {}
+            for name in op._VENDOR_HASHES:
+                path = include / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                payload = ("verified fixture: " + name).encode()
+                path.write_bytes(payload)
+                expected[name] = hashlib.sha256(payload).hexdigest()
+            nvcc = root / "cuda/bin/nvcc"
+            nvcc.parent.mkdir(parents=True)
+            nvcc.touch()
+            deep_gemm = SimpleNamespace(__file__=str(package / "__init__.py"))
+            with mock.patch.dict(
+                sys.modules, {"deep_gemm": deep_gemm}
+            ), mock.patch.object(op, "_VENDOR_HASHES", expected), mock.patch.object(
+                op, "_nvcc_path", return_value=str(nvcc)
+            ), mock.patch.dict(
+                os.environ, {"CXX": "/fixture/g++"}
+            ), mock.patch.object(
+                op.subprocess,
+                "check_output",
+                return_value="Cuda compilation tools, release 13.2, V13.2.1",
+            ):
+                self.assertIsNotNone(op._dependencies())
+                for name in expected:
+                    with self.subTest(header=name):
+                        path = include / name
+                        payload = path.read_bytes()
+                        path.write_bytes(payload + b"\nchanged")
+                        self.assertIsNone(op._dependencies())
+                        path.unlink()
+                        self.assertIsNone(op._dependencies())
+                        path.write_bytes(payload)
+                self.assertIsNotNone(op._dependencies())
+
     def test_import_does_not_compile_load_or_initialize_cuda(self):
         with mock.patch.object(op.ctypes, "CDLL") as load, mock.patch.object(
             op.subprocess, "run"
@@ -209,10 +399,44 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             self.assertIsNone(op.try_grouped_quant(a, w))
         load.assert_not_called()
 
+    def test_sm103_148_sms_is_supported_but_cold_calls_cannot_compile(self):
+        a, w = _metadata()
+        prop = SimpleNamespace(major=10, minor=3, multi_processor_count=148)
+        with mock.patch.object(
+            torch.cuda, "get_device_properties", return_value=prop
+        ), mock.patch.dict(op._READY, {}, clear=True), mock.patch.object(
+            op, "_load"
+        ) as load:
+            self.assertTrue(op.is_supported(a, w))
+            self.assertIsNone(op.try_grouped_quant(a, w))
+        load.assert_not_called()
+
+    def test_nvcc_discovery_respects_explicit_toolchain_and_local_fallback(self):
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            op.shutil, "which", return_value=None
+        ), mock.patch.object(
+            op.Path,
+            "is_file",
+            autospec=True,
+            side_effect=lambda path: str(path) == "/usr/local/cuda/bin/nvcc",
+        ):
+            self.assertEqual(op._nvcc_path(), "/usr/local/cuda/bin/nvcc")
+            with mock.patch.dict(os.environ, {"CUDA_HOME": "/explicit/missing"}):
+                self.assertIsNone(op._nvcc_path())
+            with mock.patch.dict(os.environ, {"CUDA_PATH": "/usr/local/cuda"}):
+                self.assertEqual(op._nvcc_path(), "/usr/local/cuda/bin/nvcc")
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(
+            op.shutil, "which", return_value="/chosen/bin/nvcc"
+        ):
+            self.assertEqual(op._nvcc_path(), "/chosen/bin/nvcc")
+
     def test_incompatible_layout_dtype_device_and_alignment_fall_back(self):
         changes = (
             (0, "shape", (33, 2, 4096)),
-            (0, "stride", lambda: (32768, 4096, 1)),
+            (0, "stride", lambda: (32784, 4096, 1)),
+            (0, "stride", lambda: (32768, 4096, 2)),
+            (0, "stride", lambda: (0, 4096, 1)),
+            (0, "stride", lambda: (4096, 4096, 1)),
             (0, "dtype", torch.bfloat16),
             (0, "requires_grad", True),
             (1, "stride", lambda: (256, 32, 1)),
@@ -229,10 +453,59 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                     setattr((*a, *w)[index], attr, value)
                     self.assertFalse(op.is_supported(a, w))
 
+    def test_token_major_metadata_and_runtime_tma_strides(self):
+        for m in (4, 24, 4096, 12288):
+            with self.subTest(m=m):
+                a, weight = _metadata(m, row_major=True)
+                output = (
+                    SimpleNamespace(data_ptr=lambda: 512),
+                    SimpleNamespace(data_ptr=lambda: 768),
+                )
+                for tensor in (*a, *weight, *output):
+                    tensor.record_stream = mock.Mock()
+                lib = SimpleNamespace(
+                    v41_wo_a_is_current=mock.Mock(return_value=1),
+                    v41_wo_a_launch=mock.Mock(return_value=0),
+                )
+                handle = object()
+                stream = SimpleNamespace(cuda_stream=123)
+                with mock.patch.dict(
+                    op._READY, {0: (lib, handle)}, clear=True
+                ), mock.patch.object(
+                    op, "_device_supported", return_value=True
+                ), mock.patch.object(
+                    torch.cuda, "device"
+                ), mock.patch.object(
+                    torch.cuda, "current_stream", return_value=stream
+                ), mock.patch.object(
+                    op, "_output"
+                ) as allocate:
+                    self.assertTrue(op.is_supported(a, weight))
+                    self.assertIs(
+                        op.try_grouped_quant(a, weight, out=output, quant_kernel="v2"),
+                        output,
+                    )
+                allocate.assert_not_called()
+                lib.v41_wo_a_launch.assert_called_once_with(
+                    handle,
+                    256,
+                    256,
+                    256,
+                    256,
+                    512,
+                    768,
+                    m,
+                    32768,
+                    4096,
+                    False,
+                    123,
+                )
+
     def test_unverified_architecture_and_sms_fall_back(self):
         for major, minor, sms in (
             (9, 0, 132),
-            (10, 3, 148),
+            (10, 3, 144),
+            (10, 3, 152),
             (10, 0, 151),
             (10, 0, 148),
         ):
@@ -287,7 +560,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             packages[name].__path__ = []
         projection = SimpleNamespace(
             is_supported=mock.Mock(return_value=True),
-            try_grouped_output_quant=mock.Mock(),
+            _try_grouped_output_quant_supported=mock.Mock(),
             grouped_output_projection=mock.Mock(),
         )
         packages["rtp_llm.models_py.modules.dsv41.fp8"]._v41_output_projection = (
@@ -309,7 +582,9 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             ), mock.patch.dict(sys.modules, packages):
                 for operation in vars(projection).values():
                     operation.reset_mock()
-                projection.try_grouped_output_quant.return_value = result_pair
+                projection._try_grouped_output_quant_supported.return_value = (
+                    result_pair
+                )
                 projection.grouped_output_projection.return_value = bf16
                 linear = linear_cls()
                 linear.forward.return_value = linear.forward_quantized.return_value = (
@@ -324,6 +599,9 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                 )
                 actual = namespace["_project_output"](owner, x, freqs, out=output)
                 self.assertIs(actual, output)
+                projection.is_supported.assert_called_once_with(
+                    x, freqs, owner._wo_a_stk_w, owner._wo_a_stk_s
+                )
                 if linear_cls is V41MXFP8Linear and result_pair is not None:
                     linear.forward_quantized.assert_called_once_with(*pair, out=output)
                     linear.forward.assert_not_called()
@@ -333,7 +611,7 @@ class WoAQuantCPUContractTest(unittest.TestCase):
                     linear.forward_quantized.assert_not_called()
                     projection.grouped_output_projection.assert_called_once()
                 if linear_cls is OtherLinear:
-                    projection.try_grouped_output_quant.assert_not_called()
+                    projection._try_grouped_output_quant_supported.assert_not_called()
 
     def test_cpu_and_empty_inputs_fall_back(self):
         x = torch.empty(0, 8, 4096, dtype=torch.float8_e4m3fn)
@@ -417,8 +695,8 @@ class WoAQuantCPUContractTest(unittest.TestCase):
 class WoAQuantCudaTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        if torch.cuda.get_device_capability() != (10, 0):
-            raise unittest.SkipTest("SM100 required")
+        if not op._device_supported(torch.device("cuda", torch.cuda.current_device())):
+            raise unittest.SkipTest("Qualified SM100/SM103 device required")
         import deep_gemm
         from deep_gemm.utils.layout import get_mn_major_tma_aligned_packed_ue8m0_tensor
 
@@ -508,6 +786,66 @@ class WoAQuantCudaTest(unittest.TestCase):
                         op.try_grouped_quant(a, (self.w, self.sw)),
                         self.baseline(a, mode),
                     )
+
+    @torch.inference_mode()
+    def test_token_major_mega_layout_is_bitexact_without_repacking(self):
+        for m in (4, 24, 257, 4096, 12288):
+            original = self.pair(m)
+            token_major = (original[0].contiguous(), original[1])
+            self.assertEqual(token_major[0].stride(), (32768, 4096, 1))
+            self.assertTrue(op.is_supported(token_major, (self.w, self.sw)))
+            for mode in ("legacy", "v2", "auto"):
+                with self.subTest(m=m, mode=mode):
+                    actual = op.try_grouped_quant(
+                        token_major, (self.w, self.sw), quant_kernel=mode
+                    )
+                    self.assert_pair(
+                        actual,
+                        op.try_grouped_quant(
+                            original, (self.w, self.sw), quant_kernel=mode
+                        ),
+                    )
+                    self.assert_pair(actual, self.baseline(original, mode))
+            # Neither accepted ordering implies support for an overlapping
+            # group layout or incorrectly packed scales.
+            bad_layout = token_major[0].as_strided((m, 8, 4096), (32768, 0, 1))
+            self.assertIsNone(
+                op.try_grouped_quant((bad_layout, token_major[1]), (self.w, self.sw))
+            )
+            self.assertIsNone(
+                op.try_grouped_quant(
+                    (token_major[0], token_major[1].contiguous()), (self.w, self.sw)
+                )
+            )
+
+    @torch.inference_mode()
+    def test_token_major_graph_replay_reads_updated_data_and_scales(self):
+        for m in (4, 24):
+            with self.subTest(m=m):
+                pair = self.pair(m)
+                pair = (pair[0].contiguous(), pair[1])
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    self.assertIsNotNone(
+                        op.try_grouped_quant(pair, (self.w, self.sw), quant_kernel="v2")
+                    )
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        captured = op.try_grouped_quant(
+                            pair, (self.w, self.sw), quant_kernel="v2"
+                        )
+                    self.assertIsNotNone(captured)
+                    replacement = self.pair(m, exponent=-3)
+                    pair[0].copy_(replacement[0])
+                    pair[1].copy_(replacement[1])
+                    graph.replay()
+                torch.cuda.current_stream().wait_stream(stream)
+                group_major = (
+                    pair[0].transpose(0, 1).contiguous().transpose(0, 1),
+                    pair[1],
+                )
+                self.assert_pair(captured, self.baseline(group_major, "v2"))
 
     @torch.inference_mode()
     def test_nondefault_stream_and_graph_replay(self):

@@ -25,8 +25,11 @@ import math
 import mmap
 import os
 import shutil
+import threading
+import time
 import uuid
 import weakref
+from concurrent.futures import CancelledError, ThreadPoolExecutor, TimeoutError
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -436,8 +439,9 @@ class _PinnedSharedTable:
             if int(result) != 0:
                 self._lease_finalizer()
                 raise RuntimeError(f"Engram cudaHostRegister failed: {result}")
+        self._lookup_events = []
         self._registration_finalizer = weakref.finalize(
-            self, self._unregister, runtime, self.storage
+            self, self._unregister, runtime, self.storage, self._lookup_events
         )
         if not self.storage.is_pinned():
             self._registration_finalizer()
@@ -451,7 +455,11 @@ class _PinnedSharedTable:
         )
 
     @staticmethod
-    def _unregister(runtime, storage):
+    def _unregister(runtime, storage, lookup_events):
+        # Unlike CUDA allocator tensors, mapped host storage has no record_stream
+        # support. Keep its registration until every asynchronous reader exits.
+        for event in lookup_events:
+            event.synchronize()
         (result,) = runtime.cudaHostUnregister(storage.data_ptr())
         if int(result) != 0:
             logger.warning("Engram cudaHostUnregister failed: %s", result)
@@ -497,11 +505,26 @@ class HostEngramEmbedding:
                 pinned.device
             ).multi_processor_count
 
-    def __call__(self, indices: torch.Tensor, device) -> torch.Tensor:
+    def warmup_prefetch(self, indices: torch.Tensor, device):
+        """Compile and configure the asynchronous lookup during model startup."""
+        from rtp_llm.models_py.modules.dsv41._engram_triton import (
+            warmup_lookup_prefetch_rows,
+        )
+
+        return warmup_lookup_prefetch_rows(*self._uva, indices, self._num_sms)
+
+    def __call__(
+        self, indices: torch.Tensor, device, *, prefetch=False
+    ) -> torch.Tensor:
         if indices.is_cuda:
             from rtp_llm.models_py.modules.dsv41 import _engram_triton
 
-            return _engram_triton.lookup_host_rows(*self._uva, indices, self._num_sms)
+            lookup = (
+                _engram_triton.lookup_prefetch_rows
+                if prefetch
+                else _engram_triton.lookup_host_rows
+            )
+            return lookup(*self._uva, indices, self._num_sms)
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
         valid = indices >= 0
         flat = indices.clamp_min(0).flatten()
@@ -639,6 +662,618 @@ def gated_engram_residual(
     return result if out is None else out.copy_(result)
 
 
+def engram_lookup_prefetch_enabled():
+    return (
+        not engram_cpu_lookup_enabled()
+        and os.getenv("DSV41_ASYNC_ENGRAM_LOOKUP", "0") == "1"
+    )
+
+
+def engram_cpu_lookup_enabled():
+    return os.getenv("DSV41_CPU_ENGRAM_LOOKUP", "0") == "1"
+
+
+def _hash_token_windows_cpu(state, windows, image_token, num_threads=None):
+    """Native token-parallel hash; NumPy remains an independent CPU oracle."""
+    if num_threads is not None:
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import hash_token_windows_cpu
+
+        return hash_token_windows_cpu(
+            windows,
+            state.token_map,
+            state.multipliers,
+            state.primes,
+            state.layout.offsets,
+            pad_id=state.pad_id,
+            image_token=image_token,
+            num_threads=num_threads,
+        )
+    values = windows.detach().numpy().astype(np.int64, copy=False)
+    token_map = state.token_map.numpy()
+    blocked = np.logical_or.accumulate(
+        (values < 0) | (values >= token_map.size) | (values == image_token), axis=1
+    )
+    mapped = token_map[np.clip(values, 0, token_map.size - 1)]
+    mapped = np.where(blocked, state.pad_id, mapped)
+    multipliers = state.multipliers.numpy()
+    primes = state.primes.numpy()
+    offsets = state.layout.offsets.numpy()
+    layout = state.layout
+    hashes = np.empty(
+        (values.shape[0], len(layout.layer_ids), layout.n_hash_cols), dtype=np.int64
+    )
+    rolling = np.zeros((values.shape[0], len(layout.layer_ids)), dtype=np.int64)
+    for shift in range(layout.max_ngram_size):
+        # NumPy int64 multiply wraps like the CPU/CUDA tensor hash, and signed
+        # remainder uses the same nonnegative result for each positive prime.
+        rolling ^= mapped[:, shift, None] * multipliers[None, :, shift]
+        if shift:
+            start, end = (shift - 1) * layout.n_heads, shift * layout.n_heads
+            hashes[:, :, start:end] = (
+                rolling[:, :, None] % primes[None, :, shift - 1]
+                + offsets[None, :, start:end]
+            )
+    return torch.from_numpy(hashes)
+
+
+def _timed_cpu_hash(state, windows, image_token, num_threads, timing):
+    if timing is not None:
+        timing["hash_started_ns"] = time.perf_counter_ns()
+    try:
+        return _hash_token_windows_cpu(state, windows, image_token, num_threads)
+    finally:
+        if timing is not None:
+            timing["hash_finished_ns"] = time.perf_counter_ns()
+
+
+class _EngramCPULookupSlot:
+    """Fixed host storage; request outputs belong to their allocation stream."""
+
+    def __init__(self, module, capacity):
+        from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
+
+        self.embedding = module.embed_tokens
+        self.device = module.q_weight.device
+        self.hash_index = module.layer_hash_index
+        self.heads = module.layout.n_hash_cols
+        self.capacity = capacity
+        self.num_threads = int(os.getenv("DSV41_CPU_ENGRAM_LOOKUP_THREADS", "16"))
+        if not 1 <= self.num_threads <= 16:
+            raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
+        self.collect_timing = os.getenv("DSV41_CPU_ENGRAM_LOOKUP_TIMING", "0") == "1"
+        self.last_timing = None
+        self.deadline_enabled = True
+        self.packed = type(module.wkv) is V41MXFP8Linear
+        self.head_dim = module.layout.head_dim
+        self.width = self.heads * (
+            self.head_dim + self.head_dim // 32 if self.packed else self.head_dim
+        )
+        self.dtype = torch.uint8 if self.packed else torch.bfloat16
+        self.host = torch.empty(
+            (capacity, self.width), dtype=self.dtype, device="cpu", pin_memory=True
+        )
+        self.stream = torch.cuda.Stream(device=self.device)
+        self.copied = torch.cuda.Event()
+        self.allocated = torch.cuda.Event()
+        current = torch.cuda.current_stream(self.device)
+        self.allocated.record(current)
+        self.stream.wait_event(self.allocated)
+        self.copied.record(self.stream)
+
+    def allocate_output(self, count):
+        current = torch.cuda.current_stream(self.device)
+        output = torch.empty(
+            (count, self.width),
+            dtype=getattr(self, "dtype", torch.bfloat16),
+            device=self.device,
+        )
+        # Record before submitting the worker. A later worker-side recording
+        # could include the consumer's wait for copied and create a cycle.
+        self.allocated.record(current)
+        return output, current
+
+    def run(self, hashes, output, submitted_ns=None, work=None):
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import lookup_host_rows_cpu
+
+        with torch.inference_mode(), torch.cuda.device(self.device):
+            try:
+                timing = (
+                    {"submitted_ns": submitted_ns, "started_ns": time.perf_counter_ns()}
+                    if self.collect_timing
+                    else None
+                )
+                if work is not None:
+                    if work.timing is not None:
+                        work.timing.update(timing)
+                    timing = work.timing
+                    self.last_timing = timing
+                    if work.abandoned:
+                        return None
+                ids = torch.from_numpy(
+                    np.ascontiguousarray(hashes.result().numpy()[:, self.hash_index])
+                )
+                if timing is not None:
+                    timing.update(getattr(hashes, "engram_timing", None) or {})
+                if work is not None and work.abandoned:
+                    return None
+                # The host buffer may be overwritten once its preceding H2D
+                # finishes, independently of the previous GPU consumer.
+                self.copied.synchronize()
+                host = self.host[: output.shape[0]]
+                if timing is not None:
+                    timing["lookup_started_ns"] = time.perf_counter_ns()
+                lookup = lookup_host_rows_cpu
+                if getattr(self, "packed", False):
+                    from rtp_llm.models_py.modules.dsv41.engram_cpu import (
+                        lookup_host_rows_cpu_packed,
+                    )
+
+                    lookup = lookup_host_rows_cpu_packed
+                lookup(
+                    self.embedding.weight,
+                    self.embedding.scales,
+                    ids,
+                    host,
+                    num_threads=self.num_threads,
+                )
+                if timing is not None:
+                    timing["lookup_finished_ns"] = time.perf_counter_ns()
+                # Abandonment and copy submission must be one atomic decision.
+                # Once H2D is submitted, consuming it is cheaper than starting
+                # a competing UVA lookup, and its owning stream must join it.
+                if work is None:
+                    self._copy(output, host)
+                else:
+                    with work.lock:
+                        if work.abandoned:
+                            self.last_timing = timing
+                            return None
+                        self._copy(output, host)
+                        work.copy_submitted = True
+                if timing is not None:
+                    timing["copy_submitted_ns"] = time.perf_counter_ns()
+                self.last_timing = timing
+                return output
+            except BaseException:
+                self.stream.synchronize()
+                raise
+
+    def _copy(self, output, host):
+        with torch.cuda.stream(self.stream):
+            self.stream.wait_event(self.allocated)
+            output.copy_(host, non_blocking=True)
+            self.copied.record(self.stream)
+
+    def close(self):
+        self.stream.synchronize()
+
+
+def _close_cpu_lookup(executor, slots):
+    executor.shutdown(wait=True)
+    for slot in slots:
+        slot.close()
+
+
+class EngramCPULookupRuntime:
+    """Startup-owned worker and bounded buffers; request code never compiles."""
+
+    def __init__(self, model, capacity):
+        from rtp_llm.models_py.modules.dsv41.engram_cpu import prepare_cpu_lookup
+
+        prepare_cpu_lookup()
+        self.capacity = min(int(capacity), 32768)
+        self.num_threads = int(os.getenv("DSV41_CPU_ENGRAM_LOOKUP_THREADS", "16"))
+        if not 1 <= self.num_threads <= 16:
+            raise ValueError("DSV41_CPU_ENGRAM_LOOKUP_THREADS must be between 1 and 16")
+        self.retired = []
+        self.slots = {}
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="engram-cpu-lookup"
+        )
+        try:
+            for layer_id, _ in model._engram_layers:
+                module = model.v4.layers[layer_id].engram
+                if layer_id < 20 and module.q_weight.is_cuda:
+                    self.slots[layer_id] = _EngramCPULookupSlot(module, self.capacity)
+            # Initialize the Python worker, native thread team and H2D stream /
+            # events before readiness. Use real CPU hashes and each real table.
+            state = model._engram_hash_state
+            windows = torch.zeros(
+                (self.capacity, state.layout.max_ngram_size), dtype=torch.int32
+            )
+            hashes = self.executor.submit(
+                _hash_token_windows_cpu, state, windows, -2, self.num_threads
+            )
+            for slot in self.slots.values():
+                output, _ = slot.allocate_output(self.capacity)
+                future = self.executor.submit(slot.run, hashes, output)
+                future.result()
+                slot.copied.synchronize()
+                if getattr(slot, "packed", False):
+                    from rtp_llm.models_py.modules.dsv41._engram_packed_triton import (
+                        unpack_packed_rows,
+                    )
+
+                    pair = unpack_packed_rows(output, slot.heads, slot.head_dim)
+                    if pair is None:
+                        raise RuntimeError(
+                            "Engram packed output failed startup qualification"
+                        )
+                    torch.cuda.current_stream(slot.device).synchronize()
+                    del pair
+                # Warm the allocation, copy and events without retaining a
+                # device tensor or a Future holding it after startup.
+                del future, output
+        except BaseException:
+            _close_cpu_lookup(self.executor, self.slots.values())
+            raise
+        self._finalizer = weakref.finalize(
+            self, _close_cpu_lookup, self.executor, tuple(self.slots.values())
+        )
+
+    def close(self):
+        self._finalizer()
+        self.reap()
+
+    def reap(self):
+        """Bound abandoned work to one request; never queue behind old lookups."""
+        pending = []
+        error = None
+        for future in self.retired:
+            if future.done():
+                try:
+                    future.result()
+                except BaseException as exc:
+                    error = error or exc
+            else:
+                pending.append(future)
+        self.retired = pending
+        if error is not None:
+            raise error  # Surface background errors once, including at shutdown.
+        return not pending
+
+    def retire(self, work):
+        self.retired.append(self.executor.submit(work._drain))
+
+
+def prepare_engram_cpu_lookup(model, *, max_m):
+    if not engram_cpu_lookup_enabled() or max_m <= 0:
+        return
+    runtime = getattr(model, "_engram_cpu_runtime", None)
+    if runtime is not None and runtime.capacity >= min(max_m, 32768):
+        return
+    if runtime is not None:
+        runtime.close()
+        model._engram_cpu_runtime = None
+    runtime = EngramCPULookupRuntime(model, max_m)
+    model._engram_cpu_runtime = runtime
+    logger.info(
+        "[DSV41 Engram] CPU lookup ready=True capacity=%d slots=%d "
+        "workers=1 threads=%s pinned_bytes=%d device_bytes=%d",
+        runtime.capacity,
+        len(runtime.slots),
+        tuple(slot.num_threads for slot in runtime.slots.values()),
+        sum(
+            slot.host.numel() * slot.host.element_size()
+            for slot in runtime.slots.values()
+        ),
+        0,  # Device outputs are allocated per request and released after WKV.
+    )
+
+
+class _EngramCPULookupWork:
+    def __init__(self, slot, ids, runtime=None):
+        self.slot, self.ids = slot, ids
+        # The model/request plan owns the runtime. A queued worker must not
+        # become its final owner: finalization on that same worker would call
+        # executor.shutdown(wait=True) and try to join its own thread.
+        self.runtime = weakref.proxy(runtime) if runtime is not None else None
+        self.lock = threading.Lock()
+        self.abandoned = self.copy_submitted = self.retired = False
+        self.timing = None
+        self.future = None
+        self.allocation_stream = None
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.consumed = False
+
+    def submit(self, executor, hashes, count, submitted_ns):
+        if getattr(self.slot, "collect_timing", False):
+            self.timing = {"submitted_ns": submitted_ns}
+            self.slot.last_timing = self.timing
+        output, self.allocation_stream = self.slot.allocate_output(count)
+        if self.runtime is None:
+            self.future = executor.submit(self.slot.run, hashes, output, submitted_ns)
+        else:
+            self.future = executor.submit(
+                self.slot.run, hashes, output, submitted_ns, self
+            )
+
+    def _abandon_before_copy(self):
+        with self.lock:
+            if self.copy_submitted:
+                return False
+            self.abandoned = True
+            self.future.cancel()
+            return True
+
+    def consume(self, ids, hidden):
+        if not (
+            self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and hidden.shape[0] == ids.shape[0]
+            and hidden.device == self.slot.device
+            and torch.cuda.current_stream(hidden.device) == self.allocation_stream
+        ):
+            self.clear()
+            return None
+        started = time.perf_counter_ns() if self.slot.collect_timing else None
+        current = torch.cuda.current_stream(hidden.device)
+        polls = 0
+        if self.runtime is not None and self.slot.deadline_enabled:
+            while not self.future.done():
+                # Query before submitting WKV: completion means the GPU has
+                # reached this consumer, not merely that a wall-clock estimate
+                # expired. No extra event or GPU kernel is needed. Yield the
+                # GIL between probes rather than busy-polling the driver.
+                polls += 1
+                if current.query() and self._abandon_before_copy():
+                    if self.timing is not None:
+                        self.timing.update(
+                            outcome="gpu_deadline_fallback",
+                            consumer_wait_started_ns=started,
+                            consumer_wait_finished_ns=time.perf_counter_ns(),
+                            consumer_stream_queries=polls,
+                        )
+                    self.clear()
+                    return None
+                try:
+                    self.future.result(timeout=0.001)
+                except TimeoutError:
+                    if self.future.done():
+                        # Completion can race the timeout. Retrieve the actual
+                        # result/worker error instead of rethrowing a stale
+                        # wait timeout after a successful completion.
+                        self.future.result()
+                        break
+        rows = self.future.result()
+        if self.slot.last_timing is not None:
+            self.slot.last_timing["consumer_wait_started_ns"] = started
+            self.slot.last_timing["consumer_wait_finished_ns"] = time.perf_counter_ns()
+            self.slot.last_timing["consumer_stream_queries"] = polls
+            self.slot.last_timing["outcome"] = "consumed"
+        current.wait_event(self.slot.copied)
+        self.consumed = True
+        # Join the copy on the allocation's owning stream before returning it.
+        # Dropping the Future lets WKV release the tensor before forward ends;
+        # stream-ordered reuse needs no record_stream allocator polling.
+        self.ids = self.future = None
+        return rows
+
+    def clear(self):
+        self.ids = None
+        if self.runtime is not None and self.future is not None:
+            if not self.retired:
+                self._abandon_before_copy()
+                self.retired = True
+                self.runtime.retire(self)
+            return
+        self._drain()
+
+    def _drain(self):
+        try:
+            if self.future is not None:
+                try:
+                    self.future.result()
+                except CancelledError:
+                    if not self.abandoned:
+                        raise
+                if not self.consumed and (self.copy_submitted or not self.abandoned):
+                    self.slot.copied.synchronize()
+        finally:
+            self.ids = self.future = None
+
+
+class EngramCPULookupPrefetch:
+    """Queue CPU work immediately; one worker serves layers in model order."""
+
+    def __init__(self, model, windows, image_token):
+        self.runtime = getattr(model, "_engram_cpu_runtime", None)
+        self.work = []
+        self.hashes = None
+        if (
+            self.runtime is None
+            or windows is None
+            or windows.is_cuda
+            or windows.dtype not in (torch.int32, torch.int64)
+            or windows.ndim != 2
+            or windows.shape[1] != model._engram_hash_state.layout.max_ngram_size
+            or not 0 < windows.shape[0] <= self.runtime.capacity
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return
+        if isinstance(self.runtime, EngramCPULookupRuntime) and not self.runtime.reap():
+            return
+        timing = (
+            {"hash_submitted_ns": time.perf_counter_ns()}
+            if any(slot.collect_timing for slot in self.runtime.slots.values())
+            else None
+        )
+        self.hashes = self.runtime.executor.submit(
+            _timed_cpu_hash,
+            model._engram_hash_state,
+            windows,
+            image_token,
+            getattr(self.runtime, "num_threads", None),
+            timing,
+        )
+        self.hashes.engram_timing = timing
+        try:
+            for layer_id, slot in self.runtime.slots.items():
+                layer = model.v4.layers[layer_id]
+                ids = layer.engram_hashes
+                if not (
+                    ids is not None
+                    and ids.is_cuda
+                    and ids.device == slot.device
+                    and ids.dtype == torch.int64
+                    and ids.shape == (windows.shape[0], slot.heads)
+                ):
+                    continue
+                if layer.engram._cpu_lookup_work is not None:
+                    raise RuntimeError("Engram CPU lookup is already pending")
+                work = _EngramCPULookupWork(
+                    slot,
+                    layer.engram_hashes,
+                    (
+                        self.runtime
+                        if isinstance(self.runtime, EngramCPULookupRuntime)
+                        else None
+                    ),
+                )
+                self.work.append((layer.engram, work))
+                work.submit(
+                    self.runtime.executor,
+                    self.hashes,
+                    windows.shape[0],
+                    time.perf_counter_ns() if slot.collect_timing else None,
+                )
+                layer.engram._cpu_lookup_work = work
+        except BaseException:
+            self.clear()
+            raise
+
+    def before_layer(self, index):
+        pass
+
+    def clear(self):
+        error = None
+        for module, work in self.work:
+            module._cpu_lookup_work = None
+            try:
+                work.clear()
+            except BaseException as exc:
+                error = error or exc
+        if self.hashes is not None:
+            try:
+                if isinstance(self.runtime, EngramCPULookupRuntime):
+                    # Hold CPU windows/state until hashing finishes without
+                    # blocking the fallback consumer or allowing another batch
+                    # to pile work behind this one.
+                    if not self.hashes.done():
+                        self.runtime.retired.append(self.hashes)
+                    else:
+                        self.hashes.result()
+                else:
+                    self.hashes.result()
+            except BaseException as exc:
+                error = error or exc
+        self.hashes = None
+        self.work = []
+        if error is not None:
+            raise error
+
+
+def _tensor_version(tensor):
+    # Production hashes are fresh inference tensors, immutable for this forward.
+    # Ordinary tensors additionally let us reject an in-place edit before consume.
+    if tensor.is_inference():
+        return None
+    return tensor._version
+
+
+class _EngramLookupWork:
+    """One forward's lookup; CUDA dependencies never imply a host-side wait."""
+
+    def __init__(self, embedding, ids, rows, done):
+        self.embedding = embedding  # Own the custom UVA registration while pending.
+        self.ids = ids
+        self.signature = (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+        self.version = _tensor_version(ids)
+        self.rows = rows
+        self.done = done
+
+    def consume(self, ids, hidden):
+        valid = (
+            self.ids is ids
+            and self.signature
+            == (ids.shape, ids.stride(), ids.storage_offset(), ids.dtype)
+            and self.version == _tensor_version(ids)
+            and self.rows.shape[0] == hidden.shape[0]
+            and self.rows.device == hidden.device
+        )
+        if not valid:
+            self.clear()
+            return None
+        current = torch.cuda.current_stream(hidden.device)
+        current.wait_event(self.done)
+        rows = self.rows
+        rows.record_stream(current)
+        self.rows = self.ids = self.embedding = None
+        return rows
+
+    def clear(self):
+        if self.rows is not None:
+            # Only abandoned/invalid work waits on the CPU. The normal consumer
+            # joins on its stream and record_stream covers the output allocator.
+            self.done.synchronize()
+        self.rows = self.ids = self.embedding = None
+
+
+class EngramLookupPrefetch:
+    """Forward-local, two-layer lookahead with at most one pending lookup.
+
+    Hash tensors must remain immutable for this forward. No lookup result or
+    hash is reused by a later request, including requests reusing tensor storage.
+    Layers in the CED query domain are conservatively left synchronous.
+    """
+
+    def __init__(self, layers):
+        self.layers = tuple(
+            (index, layer.engram, layer.engram_hashes)
+            for index, layer in layers
+            if index < 20 and layer.engram is not None
+        )
+        self.cursor = 0
+        self.pending = None
+
+    def before_layer(self, index):
+        if self.pending is not None:
+            target, module, work = self.pending
+            if work.rows is None:
+                self.pending = None
+            elif target < index:
+                module.clear_lookup_prefetch()
+                self.pending = None
+            else:
+                return
+        while self.cursor < len(self.layers):
+            target, module, ids = self.layers[self.cursor]
+            if target > index + 2:
+                return
+            self.cursor += 1
+            if target < index:
+                continue
+            from rtp_llm.models_py.modules.dsv41 import _profiler
+
+            with _profiler.record_function_range(f"dsv41.engram.prefetch.L{target}"):
+                work = module.prefetch_lookup(ids)
+            if work is not None:
+                self.pending = (target, module, work)
+                return
+
+    def clear(self):
+        if self.pending is not None:
+            _, module, work = self.pending
+            # The module can already have consumed the work; clear is idempotent.
+            module.clear_lookup_prefetch()
+            work.clear()
+            self.pending = None
+        self.layers = ()
+
+
 class Engram(nn.Module):
     def __init__(
         self,
@@ -658,6 +1293,68 @@ class Engram(nn.Module):
         self.register_buffer("q_weight", q_weight, persistent=False)
         self.register_buffer("k_weight", k_weight, persistent=False)
         self.eps = eps
+        self._lookup_stream = None
+        self._lookup_done = None
+        self._lookup_work = None
+        self._cpu_lookup_work = None
+
+    def prepare_lookup_prefetch(self):
+        """Called after lookup JIT warmup, never from a request or capture."""
+        if (
+            not engram_lookup_prefetch_enabled()
+            or not self.q_weight.is_cuda
+            or self.embed_tokens._uva is None
+            or self._lookup_stream is not None
+        ):
+            return
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("Engram prefetch must be initialized before capture")
+        device = self.q_weight.device
+        stream = torch.cuda.Stream(device=device, priority=0)
+        done = torch.cuda.Event()
+        stream.wait_stream(torch.cuda.current_stream(device))
+        done.record(stream)
+        torch.cuda.current_stream(device).wait_event(done)
+        # Register the event once, not once per request. Its latest recording
+        # covers all earlier reads on this stream when the table is destroyed.
+        self.embed_tokens._pinned._lookup_events.append(done)
+        self._lookup_stream, self._lookup_done = stream, done
+
+    def prefetch_lookup(self, hash_ids):
+        if (
+            self._lookup_stream is None
+            or self._lookup_work is not None
+            or not hash_ids.is_cuda
+            or hash_ids.device != self.q_weight.device
+            or hash_ids.dtype != torch.int64
+            or hash_ids.ndim != 2
+            or hash_ids.shape[1] != self.layout.n_hash_cols
+            or not 0 < hash_ids.shape[0] <= 32768
+            or not hash_ids.is_contiguous()
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return None
+        stream = self._lookup_stream
+        stream.wait_stream(torch.cuda.current_stream(hash_ids.device))
+        hash_ids.record_stream(stream)
+        try:
+            with torch.cuda.stream(stream):
+                rows = self.embed_tokens(hash_ids, hash_ids.device, prefetch=True)
+                self._lookup_done.record(stream)
+        except BaseException:
+            # Preserve owners until queued reads have finished, then propagate
+            # the launch/runtime error instead of silently running a fallback.
+            stream.synchronize()
+            raise
+        work = _EngramLookupWork(self.embed_tokens, hash_ids, rows, self._lookup_done)
+        self._lookup_work = work
+        return work
+
+    def clear_lookup_prefetch(self):
+        work = self._lookup_work
+        self._lookup_work = None
+        if work is not None:
+            work.clear()
 
     @classmethod
     def from_checkpoint(cls, config, layer_id: int, checkpoint_path: str, device):
@@ -746,7 +1443,44 @@ class Engram(nn.Module):
         )
 
     def _forward_rows(self, hidden, hash_ids, token_mask, *, out=None):
-        rows = self.embed_tokens(hash_ids, hidden.device).flatten(-2)
+        cpu_work = self._cpu_lookup_work
+        if cpu_work is not None:
+            self._cpu_lookup_work = None
+            rows = cpu_work.consume(hash_ids, hidden)
+            if rows is not None:
+                if rows.dtype == torch.uint8:
+                    from rtp_llm.models_py.modules.dsv41._engram_packed_triton import (
+                        unpack_packed_rows,
+                    )
+
+                    pair = unpack_packed_rows(
+                        rows, self.layout.n_hash_cols, self.layout.head_dim
+                    )
+                    if pair is None:
+                        del rows
+                        return self._forward_rows(hidden, hash_ids, token_mask, out=out)
+                    kv = self.wkv.forward_quantized(*pair)
+                    del pair
+                else:
+                    kv = self.wkv(rows)
+                del rows
+                return gated_engram_residual(
+                    hidden,
+                    kv,
+                    self.q_weight,
+                    self.k_weight,
+                    self.eps,
+                    token_mask,
+                    out=out,
+                )
+        work = self._lookup_work
+        rows = None
+        if work is not None:
+            self._lookup_work = None
+            rows = work.consume(hash_ids, hidden)
+        if rows is None:
+            rows = self.embed_tokens(hash_ids, hidden.device)
+        rows = rows.flatten(-2)
         kv = self.wkv(rows)
         return gated_engram_residual(
             hidden, kv, self.q_weight, self.k_weight, self.eps, token_mask, out=out

@@ -359,6 +359,33 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             block_m_resolver=block_m_resolver,
         )
 
+    def _gate_pack_views(self, tokens):
+        # These tensors already belong to the persistent, sequential MoE
+        # workspace. Cache only the last row count, not request inputs; buffer
+        # replacement invalidates the views on the next access.
+        buf, output = self._mega_buf, self._mega_y
+        cached = getattr(self, "_mega_gate_pack_views", None)
+        if (
+            cached is None
+            or cached[0] is not buf
+            or cached[1] is not output
+            or cached[2] != tokens
+        ):
+            cached = (
+                buf,
+                output,
+                tokens,
+                (
+                    buf.x[:tokens],
+                    buf.x_sf[:tokens],
+                    buf.topk_idx[:tokens],
+                    buf.topk_weights[:tokens],
+                    output[:tokens],
+                ),
+            )
+            self._mega_gate_pack_views = cached
+        return cached[3]
+
     def _maybe_warmup_jit_once(self) -> None:
         if not mega_moe_jit_warmup_enabled():
             return
@@ -559,7 +586,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
-        y = self._mega_y[:T]
+        packed_x, packed_scale, topk_idx, topk_weights, y = self._gate_pack_views(T)
         import deep_gemm
 
         with record_function_range("dsv4.moe.gate_linear_bf16"):
@@ -571,10 +598,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     scores_bf16.contiguous(),
                     input_ids.reshape(-1).contiguous(),
                     gate.tid2eid.contiguous(),
-                    buf.x[:T],
-                    buf.x_sf[:T],
-                    buf.topk_idx[:T],
-                    buf.topk_weights[:T],
+                    packed_x,
+                    packed_scale,
+                    topk_idx,
+                    topk_weights,
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )
@@ -583,10 +610,10 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                     x,
                     scores_bf16.contiguous(),
                     gate.bias.contiguous(),
-                    buf.x[:T],
-                    buf.x_sf[:T],
-                    buf.topk_idx[:T],
-                    buf.topk_weights[:T],
+                    packed_x,
+                    packed_scale,
+                    topk_idx,
+                    topk_weights,
                     route_scale=float(gate.route_scale),
                     norm_eps=1e-12,
                 )

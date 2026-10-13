@@ -32,6 +32,8 @@ layers, never recycled by the allocator) and relies on the
 ``cp._CP_ROLE_*``.
 """
 
+import os
+
 import torch
 
 
@@ -128,6 +130,25 @@ class PrefillWorkspace:
         union_bytes = max(self._q_bytes, cp_region_bytes)
         union_bytes = ((union_bytes + align - 1) // align) * align
         self._union = torch.empty(union_bytes, dtype=torch.uint8, device=device)
+        self._q_view = (
+            self._union[: self._q_bytes]
+            .view(torch.bfloat16)
+            .view(self._q_rows, self._q_dim)
+        )
+        self._q_head_views = {}
+        self._output_quant_buffers = {}
+        # Forward-local policy: honor changes between requests without reading
+        # the environment once per chunk and layer. No device data is retained
+        # beyond this workspace's existing lifetime.
+        self.fp8_quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto")
+        self.inv_rope_quant_config = (
+            os.environ.get("DSV4_INV_ROPE_FP8_QUANT_IMPL", "optimized"),
+            os.environ.get("DSV4_INV_ROPE_HEADS_PER_CTA"),
+            os.environ.get("DSV4_INV_ROPE_NUM_WARPS", "2"),
+        )
+        # Only the latest attention metadata is retained. Replacing the query
+        # domain (including CED) drops its old views; no Q/K activation is cached.
+        self._attention_metadata = None
         # Cache fixed role sub-regions once so hot getters cannot cross into a
         # neighboring gather/restore buffer even when caller metadata drifts.
         self._gather_main_region = self._union[
@@ -146,11 +167,98 @@ class PrefillWorkspace:
     def prefill_q(self, num_tokens: int) -> torch.Tensor:
         """``[num_tokens, q_dim]`` bf16 view at the front of the union buffer."""
         num_tokens = int(num_tokens)
-        return (
-            self._union[: self._q_bytes]
-            .view(torch.bfloat16)
-            .view(self._q_rows, self._q_dim)[:num_tokens]
+        return self._q_view if num_tokens == self._q_rows else self._q_view[:num_tokens]
+
+    def prefill_q_head_views(self, rows: int, heads: int, dim: int, rope_dim: int):
+        """Cache only views of owned Q scratch, including a short final chunk."""
+        key = (rows, heads, dim, rope_dim)
+        cached = self._q_head_views.get(key)
+        if cached is None:
+            if not 0 <= rows <= self._q_rows or heads * dim != self._q_dim:
+                raise ValueError("prefill Q shape exceeds workspace capacity")
+            if not 0 <= rope_dim <= dim:
+                raise ValueError("RoPE dimension exceeds the Q head width")
+            flat = self.prefill_q(rows)
+            headed = flat.view(rows, heads, dim)
+            cached = (flat, headed, headed[..., dim - rope_dim :])
+            self._q_head_views[key] = cached
+        return cached
+
+    def output_projection_quant_buffers(self, rows: int, groups: int, width: int):
+        """Reuse dead Q storage for the current V4.1 output quantizer.
+
+        The caller must have submitted the chunk's final Q consumer on the
+        same stream, and finish output projection before producing the next Q.
+        This is the V4.1 chunk loop's existing storage-reuse ordering. These
+        views never escape that loop; no allocation or stream event is added.
+        """
+        key = (rows, groups, width)
+        cached = self._output_quant_buffers.get(key)
+        if cached is not None:
+            return cached
+        if (
+            rows <= 0
+            or rows > self._q_rows
+            or groups <= 0
+            or width <= 0
+            or width % 128
+            or groups * width != self._q_dim
+        ):
+            raise ValueError("output projection shape does not match Q workspace")
+        padded_rows = (rows + 3) // 4 * 4
+        packed_width = width // 128
+        fp8_bytes = groups * rows * width
+        scale_bytes = groups * padded_rows * packed_width * 4
+        if fp8_bytes + scale_bytes > self._q_bytes:
+            raise ValueError("output quantization exceeds Q workspace capacity")
+        fp8 = (
+            self._union[:fp8_bytes].view(torch.float8_e4m3fn).view(groups, rows, width)
         )
+        scales = self._union[fp8_bytes : fp8_bytes + scale_bytes].view(torch.int32)
+        scales = scales.as_strided(
+            (groups, rows, packed_width),
+            (packed_width * padded_rows, 1, padded_rows),
+        )
+        cached = (fp8, scales)
+        self._output_quant_buffers[key] = cached
+        return cached
+
+    def clear_attention_metadata(self) -> None:
+        """Release old-domain metadata before a CED transition allocates its plan."""
+        self._attention_metadata = None
+
+    def attention_metadata(self, freqs, indices, lengths, rows, chunk_rows):
+        """Reuse final metadata views within this forward's current query domain."""
+        cached = self._attention_metadata
+        sources = (freqs, indices, lengths)
+        geometry = (rows, chunk_rows)
+        cacheable = not any(t.requires_grad for t in sources)
+        if (
+            cacheable
+            and cached is not None
+            and cached[1] == geometry
+            and all(a is b for a, b in zip(cached[0], sources))
+        ):
+            return cached[2]
+        self._attention_metadata = None
+        if rows < 0 or chunk_rows <= 0:
+            raise ValueError(
+                "attention metadata needs nonnegative rows and positive chunks"
+            )
+        for name, tensor in zip(("freqs", "indices", "lengths"), sources):
+            if tensor.ndim == 0 or tensor.shape[0] < rows:
+                raise ValueError(f"attention {name} must contain at least {rows} rows")
+        indices_3d = indices.unsqueeze(1) if indices.ndim == 2 else indices
+        chunks = []
+        for tensor in (freqs, indices_3d, lengths):
+            live = tensor if tensor.shape[0] == rows else tensor[:rows]
+            chunks.append((live,) if rows <= chunk_rows else live.split(chunk_rows))
+        result = tuple(chunks)
+        # Production runs in inference_mode. Avoid retaining a caller's graph
+        # if this utility is exercised with differentiable tensors elsewhere.
+        if cacheable:
+            self._attention_metadata = (sources, geometry, result)
+        return result
 
     def cp_gather_main(self, rows: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
         """``[rows, dim]`` view of the main compressor's CP gather buffer."""
