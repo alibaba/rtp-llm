@@ -4,9 +4,27 @@
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
+
 namespace rtp_llm {
 
 AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, const std::string& allocation_name) {
+#if USING_CUDA
+    // These long-lived pools must not be rounded up to power-of-two sizes by
+    // PyTorch's caching host allocator, which can exceed the configured budget.
+    void*      allocation = nullptr;
+    const auto status     = cudaHostAlloc(&allocation, usable_bytes + alignment, cudaHostAllocDefault);
+    if (status != cudaSuccess) {
+        RTP_LLM_FAIL("allocate pinned host memory failed, allocation=%s usable_bytes=%zu error=%s",
+                     allocation_name.c_str(),
+                     usable_bytes,
+                     cudaGetErrorString(status));
+    }
+    pinned_allocation_.reset(allocation, [](void* ptr) { cudaFreeHost(ptr); });
+    const auto raw_base = reinterpret_cast<uintptr_t>(allocation);
+#else
     try {
         backing_ = torch::empty({static_cast<int64_t>(usable_bytes + alignment)},
                                 torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
@@ -26,7 +44,8 @@ AlignedHostMemory::AlignedHostMemory(size_t usable_bytes, size_t alignment, cons
 #endif
 
     const auto raw_base = reinterpret_cast<uintptr_t>(backing_.data_ptr<uint8_t>());
-    data_               = reinterpret_cast<uint8_t*>((raw_base + alignment - 1) / alignment * alignment);
+#endif
+    data_ = reinterpret_cast<uint8_t*>((raw_base + alignment - 1) / alignment * alignment);
 }
 
 uint8_t* AlignedHostMemory::data() const {
