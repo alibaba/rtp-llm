@@ -1,7 +1,6 @@
-"""V4.1 streamed Q projection, RoPE numerical boundaries and scratch lifetime."""
+"""V4.1 chunked Q projection and Mega Attention scratch lifetime."""
 
 import os
-import sys
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -9,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4 import chunk_env, prefill_workspace
 from rtp_llm.models_py.modules.dsv4.fp8 import attention_v41 as attention
 from rtp_llm.models_py.modules.dsv4.fp8.attention import PrefillQKV
@@ -21,6 +21,7 @@ class PrefillQMemoryTest(unittest.TestCase):
             dim=5,
             _project_prefill_q=Mock(),
             _prefill_output_all_reduce=Mock(),
+            _mega_attention=SimpleNamespace(prefill=Mock()),
         )
         qr = torch.zeros(9, 4, dtype=torch.bfloat16)
         workspace = PrefillWorkspace(
@@ -30,12 +31,10 @@ class PrefillQMemoryTest(unittest.TestCase):
             torch.ones(9, 2, dtype=torch.complex64),
             torch.zeros(9, 1, dtype=torch.int32),
             torch.ones(9, dtype=torch.int32),
+            torch.arange(9, dtype=torch.int32),
         )
-        mla = Mock()
-        with patch.object(attention, "_FLASH_MLA_SPARSE_Q_CHUNK", 4), patch.dict(
-            sys.modules, {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=mla)}
-        ):
-            for source in range(3):
+        with patch.object(attention, "_FLASH_MLA_SPARSE_Q_CHUNK", 4):
+            for source in range(4):
                 for rows in (0, 4, 8):
                     values = list(sources)
                     values[source] = values[source][:rows]
@@ -45,7 +44,11 @@ class PrefillQMemoryTest(unittest.TestCase):
                         attention.AttentionV41FP8._prefill_sparse_attention(
                             owner,
                             SimpleNamespace(qr=qr),
-                            SimpleNamespace(freqs_cis=values[0], workspace=workspace),
+                            SimpleNamespace(
+                                freqs_cis=values[0],
+                                position_ids=values[3],
+                                workspace=workspace,
+                            ),
                             kv=torch.empty(1, 1, 8),
                             indices=values[1],
                             topk_length=values[2],
@@ -53,7 +56,7 @@ class PrefillQMemoryTest(unittest.TestCase):
                         )
         owner._project_prefill_q.assert_not_called()
         owner._prefill_output_all_reduce.assert_not_called()
-        mla.assert_not_called()
+        owner._mega_attention.prefill.assert_not_called()
 
     def test_workspace_capacity_is_chunk_bounded_despite_stale_switch(self):
         with patch.object(chunk_env, "FLASH_MLA_SPARSE_Q_CHUNK", 4):
@@ -88,16 +91,18 @@ class PrefillQMemoryTest(unittest.TestCase):
         owner.wq_b = project
         owner._prefill_output_all_reduce = Mock()
 
-        def output_project(o, freqs, *, out):
+        def output_project(_attn, pair, *, out):
+            o = pair.data
             events.append(("output", len(o)))
             attention.apply_rotary_emb(
-                o[..., -owner.rope_head_dim :].unsqueeze(0), freqs, inverse=True
+                o[..., -owner.rope_head_dim :].unsqueeze(0), pair.scales, inverse=True
             )
-            out.copy_(F.linear(o.flatten(1), wo))
+            return out.copy_(F.linear(o.flatten(1), wo))
 
-        owner._prefill_output_proj_into = output_project
         angles = torch.randn(rows * 2, owner.rope_head_dim // 2)
-        freqs = torch.polar(torch.ones_like(angles), angles)[::2]
+        table = torch.polar(torch.ones_like(angles), angles)
+        positions = torch.arange(rows, dtype=torch.int32) * 2
+        freqs = table[::2]
         indices = (torch.arange(rows) % 7).view(rows, 1, 1).int()
         lengths = (torch.arange(rows) % 3 != 1).int()
         kv = torch.randn(7, 1, 8).bfloat16()
@@ -113,15 +118,30 @@ class PrefillQMemoryTest(unittest.TestCase):
                 None,
             )
 
+        def mega_prefill(_attn, q, token_positions, kv, indices, lengths):
+            # Model the fusion boundary: Q is unrotated on entry, and output
+            # projection consumes the pair without applying Q RoPE again.
+            chunk_freqs = table[token_positions.long()]
+            q = attention.rope_only(q.clone(), chunk_freqs, owner.rope_head_dim)
+            o = mla(q=q, kv=kv, indices=indices, topk_length=lengths)[0]
+            return attention.MegaAttentionOutput(o, chunk_freqs)
+
+        owner._mega_attention = SimpleNamespace(
+            prefill=mega_prefill, project=output_project
+        )
+
         reference_q = F.linear(qr, wq).view(rows, 2, 8)
         attention.rope_only(reference_q, freqs, 4)
         reference_o = mla(q=reference_q, kv=kv, indices=indices, topk_length=lengths)[0]
         reference = torch.empty(rows, owner.dim, dtype=torch.bfloat16)
-        output_project(reference_o, freqs, out=reference)
+        output_project(
+            owner, attention.MegaAttentionOutput(reference_o, freqs), out=reference
+        )
         events.clear()
 
         common = SimpleNamespace(
             freqs_cis=freqs,
+            position_ids=positions,
             workspace=PrefillWorkspace(
                 torch.device("cpu"),
                 q_rows=min(rows, 4),
@@ -132,12 +152,6 @@ class PrefillQMemoryTest(unittest.TestCase):
         )
         with ExitStack() as stack:
             stack.enter_context(patch.object(attention, "_FLASH_MLA_SPARSE_Q_CHUNK", 4))
-            stack.enter_context(
-                patch.dict(
-                    sys.modules,
-                    {"flash_mla": SimpleNamespace(flash_mla_sparse_fwd=mla)},
-                )
-            )
             result = owner._prefill_sparse_attention(
                 PrefillQKV(qr=qr, q=None, kv_full=kv[:, 0]),
                 common,
@@ -163,48 +177,9 @@ class PrefillQMemoryTest(unittest.TestCase):
                 ):
                     self._case(rows)
 
-    def test_cpu_rope_falls_back_and_empty_does_not_launch(self):
-        x = torch.tensor([[[1, 2, 3, 4]]], dtype=torch.bfloat16)
-        freqs = torch.tensor([[1j]], dtype=torch.complex64)
-        with patch.object(attention, "rope_only_inplace") as kernel:
-            result = attention._prefill_q_rope(x, freqs, 2)
-            self.assertIs(result, x)
-            self.assertEqual(result.tolist(), [[[1, 2, -4, 3]]])
-            empty = x[:0]
-            self.assertIs(attention._prefill_q_rope(empty, freqs[:0], 2), empty)
-        kernel.assert_not_called()
-
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
-class PrefillQRopeCudaTest(unittest.TestCase):
-    def test_inplace_rope_matches_bf16_eager_with_strided_frequencies(self):
-        torch.manual_seed(9)
-        for rows, heads in ((0, 128), (1, 128), (17, 7), (257, 128)):
-            for strided in (False, True):
-                with self.subTest(rows=rows, heads=heads, strided=strided):
-                    base = torch.randn(
-                        rows, heads, 512, device="cuda", dtype=torch.bfloat16
-                    )
-                    angles = torch.randn(rows * 2, 64, device="cuda")
-                    freqs = torch.polar(torch.ones_like(angles), angles)[::2, ::2]
-                    if not strided:
-                        freqs = freqs.contiguous()
-                    expected = base.clone()
-                    # Keep the eager algorithm as the independent test oracle.
-                    if rows:
-                        attention.rope_only(expected, freqs, 64)
-                    actual = base.clone()
-                    pointer = actual.data_ptr()
-                    # The removed A/B switch must not disable the in-place path.
-                    with patch.dict(os.environ, {"DSV41_PREFILL_Q_ROPE_INPLACE": "0"}):
-                        result = attention._prefill_q_rope(actual, freqs, 64)
-                    self.assertIs(result, actual)
-                    self.assertEqual(actual.data_ptr(), pointer)
-                    torch.testing.assert_close(
-                        actual[..., :-64], base[..., :-64], rtol=0, atol=0
-                    )
-                    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-
+class PrefillQProjectionCudaTest(unittest.TestCase):
     def test_real_mxfp8_q_projection_is_identical_across_chunk_boundaries(self):
         if torch.cuda.get_device_capability()[0] < 10:
             self.skipTest("MXFP8 Q projection requires SM100")
@@ -229,10 +204,7 @@ class PrefillQRopeCudaTest(unittest.TestCase):
                 qr = torch.randn(rows, q_rank, device="cuda", dtype=torch.bfloat16)
                 qr[121:128].zero_()
                 qr[-3:].zero_()
-                angles = torch.randn(rows * 2, 32, device="cuda")
-                freqs = torch.polar(torch.ones_like(angles), angles)[::2]
                 expected = owner._lin(owner.wq_b, qr).view(rows, 64, 512)
-                attention.rope_only(expected, freqs, 64)
                 workspace = PrefillWorkspace(
                     torch.device("cuda"),
                     q_rows=chunk_rows,
@@ -240,28 +212,12 @@ class PrefillQRopeCudaTest(unittest.TestCase):
                     reserve_cp=False,
                     align_bytes=1,
                 )
-                with patch.dict(os.environ, {"DSV41_PREFILL_Q_ROPE_INPLACE": "1"}):
-                    for start in range(0, rows, chunk_rows):
-                        end = min(start + chunk_rows, rows)
-                        actual = owner._project_prefill_q(
-                            qr[start:end], freqs[start:end], workspace
-                        )
-                        torch.testing.assert_close(
-                            actual, expected[start:end], rtol=0, atol=0
-                        )
-
-    def test_rope_does_not_allocate_a_q_sized_temporary(self):
-        q = torch.randn(1025, 128, 512, device="cuda", dtype=torch.bfloat16)
-        angles = torch.randn(1025, 32, device="cuda")
-        freqs = torch.polar(torch.ones_like(angles), angles)
-        with patch.dict(os.environ, {"DSV41_PREFILL_Q_ROPE_INPLACE": "1"}):
-            attention._prefill_q_rope(q, freqs, 64)
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()
-            allocated = torch.cuda.memory_allocated()
-            attention._prefill_q_rope(q, freqs, 64)
-            torch.cuda.synchronize()
-            self.assertLess(torch.cuda.max_memory_allocated() - allocated, 1 << 20)
+                for start in range(0, rows, chunk_rows):
+                    end = min(start + chunk_rows, rows)
+                    actual = owner._project_prefill_q(qr[start:end], workspace)
+                    torch.testing.assert_close(
+                        actual, expected[start:end], rtol=0, atol=0
+                    )
 
 
 if __name__ == "__main__":

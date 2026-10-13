@@ -1,9 +1,9 @@
-"""DeepSeek V4.1 shared global attention over RTP's typed CP/PD pools.
+"""DeepSeek V4.1 Mega Attention over RTP's typed CP/PD pools.
 
-The initial eager implementation deliberately shares the established SWA and
-FlashMLA kernels with V4. Global compression is non-overlapping (ratio 1/2),
-and index keys are projected from its normalized, pre-RoPE latent. Only source
-layers write global pools; consumers reuse source KV and index selections.
+FlashMLA fuses Q RoPE, sparse attention, inverse output RoPE and FP8 casting.
+Global compression is non-overlapping (ratio 1/2), and index keys are projected
+from its normalized, pre-RoPE latent. Only source layers write global pools;
+consumers reuse source KV and index selections.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from bisect import bisect_left
 
 import torch
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
-from rtp_llm.models_py.modules.dsv4._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv4.attn_type import (
     CSA_KV,
     CSA_STATE,
@@ -58,6 +58,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_triton import (
     FP4_GLOBAL_ENTRY_BYTES,
     FP4_INDEXER_ENTRY_BYTES,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._v41_mega_attention import (
+    MegaAttention,
+    MegaAttentionOutput,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     _ATTN_TYPE_ENUM_BY_INT,
@@ -431,25 +435,6 @@ def rope_only(x, freqs, rope_dim):
     return x
 
 
-def _prefill_q_rope(x, freqs, rope_dim):
-    """Rotate the BF16 projection in place without an FP32 Q-sized temporary."""
-    if x.numel() == 0 or rope_dim == 0:
-        return x
-    if (
-        x.is_cuda
-        and x.dtype == torch.bfloat16
-        and x.is_contiguous()
-        and freqs.device == x.device
-        and freqs.dtype == torch.complex64
-        and freqs.shape == (x.shape[0], rope_dim // 2)
-        and 0 < rope_dim <= x.shape[-1]
-        and rope_dim % 2 == 0
-    ):
-        rope_only_inplace(x[..., -rope_dim:], freqs)
-        return x
-    return rope_only(x, freqs, rope_dim)
-
-
 def fp8_roundtrip(x):
     scale = (x.float().abs().amax(-1, keepdim=True) / 448.0).clamp_min(1e-12)
     return (x.float() / scale).to(torch.float8_e4m3fn).float() * scale
@@ -643,16 +628,7 @@ class AttentionV41FP8(AttentionFP8):
         self._pool_spec[CSA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[HCA_KV] = (torch.uint8, FP4_GLOBAL_ENTRY_BYTES)
         self._pool_spec[INDEXER_KV] = (torch.uint8, FP4_INDEXER_ENTRY_BYTES)
-        self._wo_a_groups_v41 = torch.nn.ModuleList()
-        scale_block = self.wo_a_w.shape[1] // self.wo_a_s.shape[1]
-        for group in range(self.n_groups):
-            begin, end = group * self.o_lora_rank, (group + 1) * self.o_lora_rank
-            self._wo_a_groups_v41.append(
-                _v4_fp8_linear(
-                    self.wo_a_w[begin:end].contiguous(),
-                    self.wo_a_s[begin // scale_block : end // scale_block].contiguous(),
-                )
-            )
+        self._mega_attention = None
 
     def can_fuse_prefill_attn_norm_input_quant(self, x, norm_weight) -> bool:
         # Small eager inputs regressed in the standalone wrapper benchmark.
@@ -682,42 +658,23 @@ class AttentionV41FP8(AttentionFP8):
         norm, quantized, scales = result
         return norm, (quantized, scales)
 
-    def _project_output(self, o, freqs, out=None):
-        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_output_projection
+    def init_rope_cache(self, device=None):
+        super().init_rope_cache(device=device)
+        if self._mega_attention is None:
+            self._mega_attention = MegaAttention.create(self)
+        else:
+            self._mega_attention.refresh_rope(self)
 
-        if o.ndim != 3 or o.shape[1:] != (self.n_heads, self.head_dim):
-            o = o.reshape(-1, self.n_heads, self.head_dim)
-        if _v41_output_projection.is_supported(
-            o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
-        ):
-            from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
+    def reload_sleep_computed_weights(self, seen_freqs=None, seen_cos_sin=None):
+        super().reload_sleep_computed_weights(seen_freqs, seen_cos_sin)
+        if self._mega_attention is not None:
+            self._mega_attention.reload(self)
 
-            if type(self.wo_b) is V41MXFP8Linear:
-                quantized = _v41_output_projection.try_grouped_output_quant(
-                    o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
-                )
-                if quantized is not None:
-                    return self.wo_b.forward_quantized(*quantized, out=out)
-
-            projected = _v41_output_projection.grouped_output_projection(
-                o, freqs, self._wo_a_stk_w, self._wo_a_stk_s
-            )
-            return self.wo_b(projected, out=out)
-        apply_rotary_emb(
-            o[..., -self.rope_head_dim :].unsqueeze(0), freqs, inverse=True
-        )
-        grouped = o.reshape(o.shape[0], self.n_groups, -1)
-        projected = torch.stack(
-            [
-                linear(grouped[:, g].contiguous())
-                for g, linear in enumerate(self._wo_a_groups_v41)
-            ],
-            dim=1,
-        )
-        return self.wo_b(projected.flatten(1), out=out)
+    def _project_output(self, o: MegaAttentionOutput, out=None):
+        return self._mega_attention.project(self, o, out=out)
 
     def _prefill_output_proj_into(self, o, freqs_cis, *, out):
-        self._project_output(o, freqs_cis, out=out)
+        self._project_output(o, out=out)
 
     def _ensure_freqs_cis_bound(self):
         # V4.1 has no independent compressor module or nested index compressor.
@@ -906,18 +863,17 @@ class AttentionV41FP8(AttentionFP8):
         finally:
             self.compress_ratio = ratio
 
-    def _project_prefill_q(self, qr, freqs_cis, workspace):
+    def _project_prefill_q(self, qr, workspace):
         rows = qr.shape[0]
         q_out = workspace.prefill_q(rows)
         if q_out.shape != (rows, self.n_heads * self.head_dim):
             q_out = q_out.view(rows, self.n_heads * self.head_dim)
         if rows == 0:
             return q_out.view(rows, self.n_heads, self.head_dim)
-        with record_function_range("dsv41.prefill.q_lora_b_rope"):
-            q = self._lin(self.wq_b, qr, out=q_out).view(
+        with record_function_range("dsv41.prefill.q_lora_b"):
+            return self._lin(self.wq_b, qr, out=q_out).view(
                 rows, self.n_heads, self.head_dim
             )
-            return _prefill_q_rope(q, freqs_cis, self.rope_head_dim)
 
     def _prefill_sparse_attention(
         self, qkv, common, *, kv, indices, topk_length, profile_name
@@ -928,8 +884,6 @@ class AttentionV41FP8(AttentionFP8):
             out = qkv.qr.new_empty((0, self.dim))
             self._prefill_output_all_reduce(out)
             return out
-        from flash_mla import flash_mla_sparse_fwd
-
         out = torch.empty((rows, self.dim), dtype=torch.bfloat16, device=qkv.qr.device)
         chunk = _FLASH_MLA_SPARSE_Q_CHUNK
         freqs_chunks, index_chunks, length_chunks = common.workspace.attention_metadata(
@@ -937,22 +891,25 @@ class AttentionV41FP8(AttentionFP8):
         )
         qr_chunks = (qkv.qr,) if rows <= chunk else qkv.qr.split(chunk)
         out_chunks = (out,) if rows <= chunk else out.split(chunk)
-        for qr, target, freqs, indices_chunk, lengths in zip(
-            qr_chunks, out_chunks, freqs_chunks, index_chunks, length_chunks
+        positions = common.position_ids.reshape(-1).to(dtype=torch.int32)
+        if positions.numel() != rows:
+            raise ValueError("Mega Attention requires one position_id per query row")
+        position_chunks = (positions,) if rows <= chunk else positions.split(chunk)
+        for qr, target, freqs, token_positions, indices_chunk, lengths in zip(
+            qr_chunks,
+            out_chunks,
+            freqs_chunks,
+            position_chunks,
+            index_chunks,
+            length_chunks,
         ):
-            q = self._project_prefill_q(qr, freqs, common.workspace)
+            q = self._project_prefill_q(qr, common.workspace)
             with record_function_range(profile_name):
-                o, _, _ = flash_mla_sparse_fwd(
-                    q=q,
-                    kv=kv,
-                    indices=indices_chunk,
-                    sm_scale=self.softmax_scale,
-                    attn_sink=self.attn_sink,
-                    topk_length=lengths,
+                o = self._mega_attention.prefill(
+                    self, q, token_positions, kv, indices_chunk, lengths
                 )
             with record_function_range("dsv4.fp8.attn.prefill.output_proj"):
                 self._prefill_output_proj_into(o, freqs, out=target)
-            dispose_tensor(o)
         self._prefill_output_all_reduce(out)
         return out
 
@@ -2764,6 +2721,7 @@ class AttentionV41FP8(AttentionFP8):
         self._begin_forward()
         B, S, _ = x.shape
         T = B * S
+        mega = self._mega_attention
         positions, freqs = decode_rope_metadata(
             self._shared_attention, self.freqs_cis, metadata.position_ids[:T]
         )
@@ -2785,6 +2743,7 @@ class AttentionV41FP8(AttentionFP8):
                 freqs_cis=freqs,
                 swa_pool=self._pool_view_3d_fp8(SWA_KV),
                 swa_slots=None if swa_slots is None else swa_slots[:T],
+                apply_q_rope=False,
             )
             if not qkv.swa_written:
                 self._decode_write_swa_fp8(qkv.kv, B, S, metadata)
@@ -2792,41 +2751,29 @@ class AttentionV41FP8(AttentionFP8):
             if global_work is not None:
                 global_work.finish()
         if not self.compress_ratio:
-            o = self._forward_decode_swa_only(qkv.q, B, S, metadata)
+            o = mega.decode(
+                self,
+                qkv.q,
+                metadata.position_ids[:T],
+                self._pool_view_3d_fp8(SWA_KV),
+                metadata.swa_global_slots[:T],
+            )
         else:
             if self.is_kv_source and global_work is None:
                 self._produce_global_decode(x, positions, req, starts)
             selected = self._select_indices_decode(
                 x, qkv.qr, positions, qkv.qr_quantized
             )
-            from rtp_llm.models_py.modules.dsv4.fp8._v41_fp4_decode_attn import (
-                fp4_dual_decode_attention,
-            )
-            from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
-                get_or_build_sched_meta,
-            )
-
             slots = self._decode_global_slots(selected, metadata.req_id_per_token[:T])
-            o = fp4_dual_decode_attention(
-                q=qkv.q,
-                swa_pool_3d=self._pool_view_3d_fp8(SWA_KV),
-                global_pool_3d=self._source_pool(self._global_region()),
-                attn_sink=self.attn_sink,
-                swa_topk_3d=metadata.swa_global_slots[:T]
-                .view(B, S, self.window_size)
-                .contiguous(),
-                global_topk_3d=slots.int().view(B, S, self.index_topk).contiguous(),
-                swa_block_table=metadata.pool_block_tables[SWA_KV][:B],
-                sched_meta=get_or_build_sched_meta(
-                    metadata,
-                    batch_size=B,
-                    q_len=S,
-                    num_heads=self.n_heads,
-                    topk=self.window_size,
-                    extra_attn_type=self._global_region(),
-                ),
-                fp8_op=self._get_fp8_decode_op(),
+            o = mega.decode(
+                self,
+                qkv.q,
+                metadata.position_ids[:T],
+                self._pool_view_3d_fp8(SWA_KV),
+                metadata.swa_global_slots[:T],
+                self._source_pool(self._global_region()),
+                slots.int(),
             )
-        out = self._project_output(o, qkv.freqs_cis)
+        out = self._project_output(o)
         self._prefill_output_all_reduce(out)
         return out.view(B, S, self.dim)

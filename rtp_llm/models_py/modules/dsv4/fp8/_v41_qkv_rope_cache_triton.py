@@ -49,6 +49,7 @@ def _fused_qkv_rope_cache_kernel(
     ENTRIES: tl.constexpr,
     EPS: tl.constexpr,
     GATHERED_FREQS: tl.constexpr,
+    APPLY_Q_ROPE: tl.constexpr,
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -64,7 +65,7 @@ def _fused_qkv_rope_cache_kernel(
     cos = tl.load(freqs + frequency_row * 64 + 2 * pair)
     sin = tl.load(freqs + frequency_row * 64 + 2 * pair + 1)
 
-    if tile < tl.cdiv(HEADS, 8):
+    if APPLY_Q_ROPE and tile < tl.cdiv(HEADS, 8):
         heads = tile * 8 + tl.arange(0, 8)
         q_base = q + (row * HEADS + heads[:, None]) * 512 + 448
         q_real = tl.load(
@@ -184,8 +185,9 @@ def try_fused_qkv_rope_cache(
     *,
     eps: float = 1e-6,
     freqs_cis: torch.Tensor | None = None,
+    apply_q_rope: bool = True,
 ) -> FusedQKVRopeCache | None:
-    """Apply Q RoPE in place and return BF16 KV plus the selected frequencies.
+    """Return normalized/rotated KV and write its cache; optionally rotate Q.
 
     Only native V4.1 528-byte cache pages are accepted. Physical slots must be
     unique within the launch; any negative slot skips its store. Invalid
@@ -208,7 +210,7 @@ def try_fused_qkv_rope_cache(
         )
     if positions.numel():
         _fused_qkv_rope_cache_kernel[
-            (positions.numel(), triton.cdiv(q.shape[-2], 8) + 1)
+            (positions.numel(), triton.cdiv(q.shape[-2], 8) + 1 if apply_q_rope else 1)
         ](
             q,
             kv,
@@ -227,6 +229,7 @@ def try_fused_qkv_rope_cache(
             ENTRIES=pool_3d.shape[1],
             EPS=eps,
             GATHERED_FREQS=gathered_freqs,
+            APPLY_Q_ROPE=apply_q_rope,
             TRAP_INVALID_KV_ACCESS=trap_invalid_kv_access_enabled(),
             num_warps=4,
         )

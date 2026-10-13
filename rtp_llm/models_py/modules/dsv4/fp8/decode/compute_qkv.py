@@ -73,6 +73,7 @@ def decode_compute_qkv(
     *,
     swa_pool: torch.Tensor | None = None,
     swa_slots: torch.Tensor | None = None,
+    apply_q_rope: bool = True,
 ) -> DecodeQKV:
     """Decode Q/KV path — RMSNorm + LoRA Q + KV linear + fused RMSNorm-RoPE.
 
@@ -126,13 +127,15 @@ def decode_compute_qkv(
             swa_slots,
             eps=attn.eps,
             freqs_cis=freqs_cis,
+            apply_q_rope=apply_q_rope,
         )
         if fused is not None:
             return DecodeQKV(qr, fused.q, fused.kv, fused.freqs_cis, qr_quantized, True)
-    if getattr(attn, "skip_post_q_norm", False):
-        _apply_v41_q_rope(q, freqs_cis, rd)
-    else:
-        q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
+    if apply_q_rope:
+        if getattr(attn, "skip_post_q_norm", False):
+            _apply_v41_q_rope(q, freqs_cis, rd)
+        else:
+            q = fused_rmsnorm_rope(q, None, freqs_cis, rd, eps=attn.eps)
 
     # KV path (single MQA head) — per-token RoPE using the same table lookup.
     kv = fused_rmsnorm_rope(
