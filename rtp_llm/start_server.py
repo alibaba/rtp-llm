@@ -5,6 +5,12 @@ import sys
 import time
 import traceback
 
+# Apply before torch/native imports can allocate memory or start worker threads.
+if __name__ == "__main__":
+    from rtp_llm.utils.numa import configure_numa_interleave
+
+    configure_numa_interleave()
+
 import requests
 import torch
 
