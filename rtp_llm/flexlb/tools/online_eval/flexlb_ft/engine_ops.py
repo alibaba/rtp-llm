@@ -445,8 +445,10 @@ class EngineOps:
     def _copy_role_addrs(self, input_pb, response) -> None:
         del input_pb.generate_config.role_addrs[:]
         for status in response.server_status:
+            role = self.pb2.RoleAddrPB.RoleType.Value(status.role)
             input_pb.generate_config.role_addrs.add(
-                role=status.role,
+                role=role,
+                role_str=status.role,
                 ip=status.server_ip,
                 http_port=status.http_port,
                 grpc_port=status.grpc_port,

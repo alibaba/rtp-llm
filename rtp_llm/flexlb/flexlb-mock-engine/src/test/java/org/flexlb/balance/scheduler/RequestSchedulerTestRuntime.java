@@ -11,6 +11,7 @@ import org.flexlb.balance.eviction.EngineCancelChannel;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
@@ -73,7 +74,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 new EvictionManager(
                         requestReporter,
                         cancelChannel,
-                        new DecodePreemptionCoordinator(cancelChannel, lifecycle),
+                        new DecodePreemptionCoordinator(cancelChannel, lifecycle, requestReporter),
                         lifecycle,
                         batchReporter);
         this.router =
@@ -199,7 +200,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                 case PREFILL, PDFUSION ->
                         SelectedRole.prefill(pin, status, Math.max(0L, status.getPrefillTime()));
                 case DECODE -> SelectedRole.decode(pin, status);
-                case VIT -> SelectedRole.stateless(pin, status);
+                case VIT, ENCODER -> SelectedRole.stateless(pin, status);
                 case FRONTEND ->
                         throw new IllegalArgumentException("FRONTEND cannot be a worker route");
             };
@@ -228,11 +229,12 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                     new CostBasedPrefillStrategy(
                             workers,
                             org.mockito.Mockito.mock(
-                                    org.flexlb.cache.service.CacheAwareService.class),
+                                    org.flexlb.cache.match.CacheAwareService.class),
                             org.mockito.Mockito.mock(
                                     org.flexlb.service.monitor.EngineHealthReporter.class)),
                     new DecodeSelector(workers),
                     new RandomStrategy(workers),
+                    org.mockito.Mockito.mock(EncoderStrategy.class),
                     configs,
                     emptyModelMeta());
         }
