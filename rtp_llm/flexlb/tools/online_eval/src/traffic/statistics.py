@@ -1,6 +1,6 @@
 """Observed arrival, length and structural sharing statistics."""
 import math
-from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE, prefix_block_size
+from traffic.lineage_model import LineageModel, LengthSemantics
 
 def distribution(values):
     ordered = sorted(values)
@@ -12,16 +12,17 @@ def distribution(values):
                    for p in (50, 90, 95, 99)})
 
 
-def statistics(events, *, version=2, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
+def statistics(model: LineageModel):
     """Nearest-rank percentiles; sharing describes the DAG, not cache hits."""
-    block_size = prefix_block_size(block_size)
-    duration = (events[-1][0] - events[0][0]) / 1000
+    events = model.events
+    block_size = model.metadata.block_size
+    duration = (events[-1].timestamp_ms - events[0].timestamp_ms) / 1000
     counts = [0] * (int(duration) + 1)
     for event in events:
-        counts[(event[0] - events[0][0]) // 1000] += 1
-    resolution = 1 if version == 3 else block_size
-    inputs = [event[1] * resolution for event in events]
-    shared = [event[3] * block_size for event in events]
+        counts[(event.timestamp_ms - events[0].timestamp_ms) // 1000] += 1
+    resolution = 1 if model.metadata.tail == LengthSemantics.EXACT else block_size
+    inputs = [event.input_tokens for event in events]
+    shared = [event.shared_full_blocks * block_size for event in events]
     return dict(
         scope="captured_requests_only_no_missing_shard_extrapolation",
         request_count=len(events), percentile_method="nearest_rank",
@@ -34,6 +35,6 @@ def statistics(events, *, version=2, block_size=DEFAULT_PREFIX_BLOCK_SIZE):
         prefix_structure=dict(shared_tokens=distribution(shared),
                               token_weighted_shared_fraction=sum(shared) / sum(inputs),
                               requests_with_shared_prefix=sum(value > 0 for value in shared),
-                              parentless_requests=sum(event[2] == -1 for event in events),
+                              parentless_requests=sum(event.parent_index == -1 for event in events),
                               interpretation="structural_sharing_not_observed_cache_hit_rate"),
         output_tokens=None, outcomes=None)

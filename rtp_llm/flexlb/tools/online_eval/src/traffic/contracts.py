@@ -2,11 +2,8 @@
 
 import copy
 
-from input_contract import NumberRule
+from traffic.request_rules import PRIORITY
 from traffic.playback.configuration import normalize
-
-PRIORITY = NumberRule(integer=True, minimum=1, maximum=100)
-JAVA_LENGTH = NumberRule(integer=True, minimum=1, maximum=(1 << 31) - 1)
 
 
 def source_priority(source):

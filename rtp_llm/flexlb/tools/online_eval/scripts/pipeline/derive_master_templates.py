@@ -10,18 +10,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from traffic.lineage_model import LineageExpander
-from traffic.codecs import decode_model
-from traffic.datasets import read_manifest
-from file_digest import sha256_file
+from traffic.datasets import CapturedDataset
 from traffic.catalog import model_path
 
 
 def derive(model, count=128, max_tokens=32768, output_tokens=420):
     model = Path(model)
-    pinned = read_manifest(model)
-    if model.stat().st_size != pinned["bytes"] or sha256_file(model) != pinned["sha256"]:
-        raise ValueError("lineage model differs from its pinned manifest")
-    lineage = decode_model(model.read_bytes(), pinned)
+    capture = CapturedDataset.read(model)
+    pinned = capture.manifest
+    lineage = capture.model
     metadata, events = lineage.to_wire()
     if metadata["count"] != pinned["count"] or len(events) < count:
         raise ValueError("lineage event count differs from its pinned manifest")

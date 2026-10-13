@@ -69,7 +69,7 @@ python3 scripts/pipeline/fit_frontend_prefix.py --source CAPTURE_DIR --out FIT_D
 
 ### Realistic
 
-`seed`、`count` 必须指定；block_size 默认 512，1024 为兼容值。输入/输出
+`seed`、`count` 必须指定；block_size 默认 512，支持 64 至 4096 的二次幂。输入/输出
 分布通过 `{values: [...], weights: [...]}` 独立采样；可用离散混合分布或
 经验分位点作为 values。输出必须显式给 `output_distribution` 或
 `output_tokens`，没有从故障窗口捏造默认值。
@@ -83,7 +83,7 @@ session_growth_blocks。生成输入使用紧凑块编码；
 合成参数画像保存经验长度分布、族集中度、冷比例和共享深度。生成方式：
 
 ```sh
-python3 -m traffic.synthetic.derivation --model lineage-model.xz \
+python3 scripts/pipeline/derive_synthetic_profile.py --model lineage-model.xz \
   --fit-report fit-report.json --out profile.json
 ```
 
@@ -163,3 +163,19 @@ A/B 检查 codec、realism、tail、arrival 与身份策略，不一致时提示
 `traffic/playback/` 负责回放配置与强度模型。`PlaybackConfigurationCodec` 将 YAML 或 Java 环境变量解析为同一个 `PlaybackConfiguration`，统一校验数值、枚举、圈数及随机种子；Java 环境与归档描述都是该对象的边界投影。Java 仍负责实际发送、节奏与循环。
 
 捕获、谱系编码及投影模块保留在 `traffic/`，按输入契约、格式版本和转换职责划分；模块大小不决定是否单独拆文件。`analysis/workload_profile.py` 提供离线前缀/LRU 诊断，`reporting/fidelity.py` 负责保真度报告渲染。命令入口和库调用都是有效依赖，不能只根据运行时导入数判断文件是否无用。
+
+## 类型化标定与准入复用
+
+`request_rules` 只定义请求数值范围；`contracts` 只做驱动、priority 与门禁覆盖对账。
+合成配置和真实投影不依赖播放配置。`randomness.event_uniform` 是稳定的事件索引随机数
+原语；输出采样和 Java 随机算法对齐使用此口径，不改变已有种子序列。
+
+`CapturedDataset.read` 校验 sidecar 与文件并返回已解码模型和输入 SHA。
+模板生成、显式 lineage 物化及 profile 标定消费此快照，不再重复读取解压同一标本。
+快照的路径、版本及请求数量必须与物化来源一致；报告记录实际消费快照的 SHA。
+统计和标定接收 `LineageModel`，长度直接来自事件字段，块口径来自模型元信息。
+
+采集、lineage 和合成生成器支持 64 至 4096 的二次幂块大小。
+标定结果的 `lineage_tree_top5_share` 描述父引用树中的请求集中度；fit 报告的
+`family_4k_top5_share` 描述相同前 4K 前缀的请求集中度，两者不得作为同一指标比较。
+入库旧 profile 的 `family_top5_share` 按其原有 lineage 树语义解释，不修改固定输入。

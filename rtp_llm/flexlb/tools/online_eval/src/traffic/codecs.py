@@ -48,13 +48,3 @@ def decode_model(raw: bytes, manifest=None, *, expected_version: str | None = No
 
 def decode(raw, manifest=None):
     return decode_model(raw, manifest).to_wire()
-
-
-def block_events(metadata, events):
-    """将 v3 投影为结构分析的完整块和私有尾块预留，不伪造精确长度。"""
-    if metadata["version"] == 2:
-        return events
-    # 结构画像仍按完整块建模；短请求占一个私有标签，精确长度分布由调用方另存。
-    block = metadata["block_size"]
-    return [(ts, max(1, length // block), parent, shared, int(length >= block and length % block != 0))
-            for ts, length, parent, shared in events]

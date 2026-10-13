@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 from traffic.prefix_lineage import encode,decode
 from traffic.lineage_model import LineageModel, LineageExpander
+from traffic.codecs import decode_model
 from traffic.structure import PrefixIndex,model_shape,generated_shape
 from traffic.synthetic.derivation import derive_parameters
 from traffic.synthetic.configuration import resolve
@@ -26,7 +27,7 @@ def fixture():
         blocks=rng.randint(20,500);shared=0 if i%10==0 else int(blocks*.85)
         events.append([i,blocks*512,i%32 if shared else -1,shared])
     raw=encode(events,dict(source_start=0,source_end=4031))
-    return raw,derive_parameters(raw,{},None)
+    return raw,derive_parameters(decode_model(raw),{},None,model_sha256=hashlib.sha256(raw).hexdigest())
 
 
 class TrafficFidelityTest(unittest.TestCase):
@@ -87,7 +88,8 @@ class TrafficFidelityTest(unittest.TestCase):
         for fields in (dict(input_distribution=dict(values=[512],weights=[1])),dict(shared_blocks=1),dict(sampling='unknown')):
             args=dict(seed=1,count=2,output_tokens=1,sampling='joint');args.update(fields)
             with self.assertRaises(ValueError): resolve(args,document=self.profile)
-        prof=derive_parameters(encode([[0,512,-1,0],[1,1024,-1,0]]),{},None)
+        raw=encode([[0,512,-1,0],[1,1024,-1,0]])
+        prof=derive_parameters(decode_model(raw),{},None,model_sha256=hashlib.sha256(raw).hexdigest())
         p,_=resolve(dict(seed=1,count=20,output_tokens=1,sampling='joint'),document=prof)
         self.assertEqual(0,sum(generated_shape(iter_requests(p,'x'))['shared']))
 

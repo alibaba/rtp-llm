@@ -1,4 +1,5 @@
 """版本路由和精确长度在各入口的一致性。"""
+import hashlib
 import json
 import lzma
 import tempfile
@@ -38,7 +39,7 @@ class CodecRoutingTest(unittest.TestCase):
                 sidecar = model.with_suffix('.manifest.json')
                 sidecar.write_text(json.dumps(manifest))
                 self.assertEqual(manifest, datasets.read_manifest(model))
-                profile = derive_parameters(raw, {}, None, manifest)
+                profile = derive_parameters(decode_model(raw, manifest), {}, None, model_sha256=hashlib.sha256(raw).hexdigest())
                 self.assertEqual((1539 if version == 3 else 2048) / 3,
                                  profile['calibration']['targets']['mean_input_tokens'])
                 templates = derive(model, count=3)['templates']

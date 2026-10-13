@@ -107,10 +107,10 @@ def grade(metrics, limits=None, valid=True):
 def load_capture(path):
     path=Path(path); raw=path.read_bytes()
     model = decode_model(raw)
-    metadata, events = model.to_wire()
+    metadata = model.metadata.to_dict()
     shape = model_shape(model)
     return dict(path=str(path.resolve()),name=path.stem,sha256=hashlib.sha256(raw).hexdigest(),
-                metadata=metadata,events=events,shape=shape)
+                metadata=metadata,shape=shape,model=model)
 
 
 def audit(profile, capture, *, expected=None):
@@ -125,7 +125,11 @@ def audit(profile, capture, *, expected=None):
             continue
         checks['parameters.'+key]=profile['parameters'].get(key)==value
     for key,value in expected['calibration']['targets'].items():
-        checks['targets.'+key]=calibration.get('targets',{}).get(key)==value
+        target = calibration.get('targets', {}).get(key)
+        if key == 'lineage_tree_top5_share' and key not in calibration.get('targets', {}):
+            # Pinned schema 1/2 profiles used the generic name for this same tree statistic.
+            target = calibration.get('targets', {}).get('family_top5_share')
+        checks['targets.'+key] = target == value
     checks['source_sha256']=calibration.get('model_sha256')==capture['sha256']
     checks['provenance']=calibration.get('provenance')==capture['metadata']['provenance']
     embedded=capture['metadata']['provenance'].get('fit_report_sha256')
@@ -136,8 +140,9 @@ def audit(profile, capture, *, expected=None):
 
 
 def calibrate_capture(capture):
-    raw=Path(capture['path']).read_bytes()
-    return derive_parameters(raw, {}, capture['metadata']['provenance'].get('fit_report_sha256'))
+    return derive_parameters(capture['model'], {},
+                             capture['metadata']['provenance'].get('fit_report_sha256'),
+                             model_sha256=capture['sha256'])
 
 
 def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, limits=None, progress=None):
@@ -166,7 +171,7 @@ def run(profile_file, capture_paths=None, *, seed=42, count=None, refit=False, l
             if method=='joint' and 'joint_distribution' not in selected['parameters']:
                 methods[method]=dict(status='UNAVAILABLE', reason='profile has no joint distribution; recalibrate explicitly')
                 continue
-            parameters=dict(seed=seed,count=count or len(cap['events']),output_tokens=420,sampling=method)
+            parameters=dict(seed=seed,count=count or cap['model'].metadata.count,output_tokens=420,sampling=method)
             if progress:
                 progress(f"{cap['name']}: {method}, {parameters['count']} requests")
             resolved,_=resolve(parameters,document=selected)

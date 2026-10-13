@@ -6,7 +6,6 @@ from enum import Enum
 from typing import Union
 import json
 import math
-from traffic.output_sampling import event_uniform
 
 
 class ArrivalProcess(str, Enum):
@@ -204,15 +203,3 @@ def from_env(env):
 
 def integral(curve, seconds):
     return RateCurve.read(curve or [[0, 1]]).integral(seconds)
-
-
-def poisson_count(intensity, seed, limit=1_000_000):
-    """Exact seeded finite-window count; refuses workloads beyond evidence capacity."""
-    total = 0.0
-    for index in range(limit + 1):
-        # Separate arrival randomness from output-length draws with the same user seed.
-        u = event_uniform(index, seed ^ 0xd1b54a32d192ed03)
-        total += -math.log1p(-u) if u else 2.0**-53
-        if total >= intensity:
-            return index
-    raise ValueError('Poisson plan exceeds evidence event capacity; shorten duration or lower rate')

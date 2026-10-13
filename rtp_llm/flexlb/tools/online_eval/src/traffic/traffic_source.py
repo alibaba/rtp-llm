@@ -8,8 +8,9 @@ from pathlib import Path
 
 from file_digest import sha256_file
 from traffic.codecs import codec_for_version, decode_model
-from traffic.lineage_transforms import LineageProjector
-from traffic.contracts import PRIORITY, JAVA_LENGTH
+from traffic.lineage_transforms import LineageProjector, LineageProjection
+from traffic.datasets import CapturedDataset
+from traffic.request_rules import PRIORITY, JAVA_LENGTH
 
 from traffic.synthetic.generator import write_trace as write_realistic
 
@@ -125,15 +126,25 @@ class SourceSpecification:
     def is_lineage(self):
         return (self.kind, self.model) == ("trace", "prefix_lineage")
 
-    def write_trace(self, path, namespace, base_dir, *, max_requests=None):
+    def write_trace(self, path, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None):
+        if captured is not None and not self.is_lineage:
+            raise ValueError('captured dataset requires a lineage source')
         if self.is_lineage:
-            return LineageProjector(lambda raw: decode_model(raw, expected_version=self.version)).write_trace(
-                path, self.parameters, namespace, base_dir, max_requests=max_requests)
+            projector = LineageProjector(lambda raw: decode_model(raw, expected_version=self.version))
+            if captured is not None:
+                parameters = LineageProjection.read(self.parameters)
+                if (Path(base_dir) / parameters.path).resolve() != captured.path:
+                    raise ValueError('captured dataset path differs from source')
+                if self.version is not None and self.version != str(captured.model.metadata.version):
+                    raise ValueError('source version disagrees with model contents')
+                return projector.project_model(path, parameters, namespace, captured.model,
+                    source_sha256=captured.sha256, max_requests=max_requests)
+            return projector.write_trace(path, self.parameters, namespace, base_dir, max_requests=max_requests)
         return SOURCES[(self.kind, self.model, self.version)](
             path, self.parameters, namespace, base_dir, max_requests=max_requests)
 
 
-def materialize(path, specification, namespace, base_dir, *, max_requests=None):
+def materialize(path, specification, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None):
     source = SourceSpecification.read(specification)
     if max_requests is not None and (type(max_requests) is not int or max_requests < 1):
         raise ValueError("max_requests must be a positive integer")
@@ -142,7 +153,7 @@ def materialize(path, specification, namespace, base_dir, *, max_requests=None):
         raise ValueError("request plan destination must be fresh")
     temporary = path.with_suffix(path.suffix + ".pending")
     try:
-        semantics = source.write_trace(temporary, namespace, base_dir, max_requests=max_requests)
+        semantics = source.write_trace(temporary, namespace, base_dir, max_requests=max_requests, captured=captured)
         resolved_source = dict(specification)
         if source.is_lineage:
             resolved_source["version"] = str(semantics["source_codec"]["version"])
@@ -168,4 +179,6 @@ def materialize(path, specification, namespace, base_dir, *, max_requests=None):
         return path
     finally:
         temporary.unlink(missing_ok=True)
-        temporary.with_suffix(".manifest.json").unlink(missing_ok=True)
+        pending_manifest = temporary.with_suffix(".manifest.json")
+        if pending_manifest != path.with_suffix(".manifest.json"):
+            pending_manifest.unlink(missing_ok=True)
