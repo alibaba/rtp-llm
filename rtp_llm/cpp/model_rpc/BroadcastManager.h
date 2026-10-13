@@ -17,6 +17,7 @@ namespace rtp_llm {
 enum class BroadcastDeadlinePolicy {
     FATAL_ABORT,
     EXIT_WITHOUT_CORE,
+    RETURN_FAILURE,
 };
 
 template<typename RequestPB, typename ResponsePB>
@@ -123,23 +124,26 @@ public:
                                             status.error_message().c_str(),
                                             ctx->server_addr.c_str());
                     }
-                    RTP_LLM_LOG_ERROR("broadcast rpc timeout, exit_without_core=1 operation_id=%lu timeout_ms=%d "
-                                      "rank=%d elapsed_ms=%ld err=%d(%s) addr=%s state=%s request=[%s]",
-                                      operation_id_,
-                                      ctx->timeout_ms,
-                                      rank,
-                                      elapsed_ms,
-                                      status.error_code(),
-                                      status.error_message().c_str(),
-                                      ctx->server_addr.c_str(),
-                                      completionStateStringLocked().c_str(),
-                                      ctx->request.DebugString().c_str());
-                    Logger::getEngineLogger().flush();
-                    Logger::getStackTraceLogger().flush();
-                    Logger::getAccessLogger().flush();
-                    std::fflush(stdout);
-                    std::fflush(stderr);
-                    std::_Exit(EXIT_FAILURE);
+                    if (deadline_policy_ == BroadcastDeadlinePolicy::EXIT_WITHOUT_CORE) {
+                        RTP_LLM_LOG_ERROR("broadcast rpc timeout, exit_without_core=1 operation_id=%lu timeout_ms=%d "
+                                          "rank=%d elapsed_ms=%ld err=%d(%s) addr=%s state=%s request=[%s]",
+                                          operation_id_,
+                                          ctx->timeout_ms,
+                                          rank,
+                                          elapsed_ms,
+                                          status.error_code(),
+                                          status.error_message().c_str(),
+                                          ctx->server_addr.c_str(),
+                                          completionStateStringLocked().c_str(),
+                                          ctx->request.DebugString().c_str());
+                        Logger::getEngineLogger().flush();
+                        Logger::getStackTraceLogger().flush();
+                        Logger::getAccessLogger().flush();
+                        std::fflush(stdout);
+                        std::fflush(stderr);
+                        std::_Exit(EXIT_FAILURE);
+                    }
+                    deadline_exceeded_.store(true);
                 }
                 if (!status.ok()) {
                     RTP_LLM_LOG_WARNING("broadcast rpc failed, rank=%d elapsed_ms=%ld err=%d(%s) addr=%s state=%s",
@@ -167,6 +171,10 @@ public:
 
     bool success() const {
         return all_request_success_.load();
+    }
+
+    bool deadlineExceeded() const {
+        return deadline_exceeded_.load();
     }
 
     std::vector<ResponsePB> responses() const {
@@ -214,6 +222,7 @@ private:
     std::atomic<int>                               finished_count_{0};
     std::atomic<bool>                              already_done_{false};
     std::atomic<bool>                              all_request_success_{false};
+    std::atomic<bool>                              deadline_exceeded_{false};
     bool                                           grpc_status_failure_seen_{false};
     BroadcastDeadlinePolicy                        deadline_policy_{BroadcastDeadlinePolicy::FATAL_ABORT};
     uint64_t                                       operation_id_{0};

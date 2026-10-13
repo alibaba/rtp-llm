@@ -304,6 +304,32 @@ TEST_F(BroadcastManagerTest, Broadcast_MemoryDeadline_ExitsWithoutCore) {
     }
 }
 
+TEST_F(BroadcastManagerTest, Broadcast_DeadlineCanReturnFailure) {
+    auto service = std::make_unique<TestRpcService>();
+    service->setSleepMillis(200);
+    auto server = std::make_unique<TestRpcServer>(std::move(service));
+    ASSERT_TRUE(server->start());
+
+    auto manager = std::make_unique<BroadcastManager>(
+        std::vector<std::string>{"127.0.0.1:" + std::to_string(server->listenPort())});
+    ASSERT_TRUE(manager->init());
+    std::vector<FunctionRequestPB> requests(manager->workerNum());
+    auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& ctx,
+                       const FunctionRequestPB&                    req,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(ctx.get(), req, cq); };
+    auto                           result   = manager->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, /*timeout_ms=*/50, rpc_call, BroadcastDeadlinePolicy::RETURN_FAILURE);
+    ASSERT_NE(result, nullptr);
+
+    result->waitDone();
+    EXPECT_FALSE(result->success());
+    EXPECT_TRUE(result->deadlineExceeded());
+
+    manager.reset();
+    server->shutdown();
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_CqFailure_PreservesOriginalFailBehavior) {
     using ResultT = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
     auto worker   = std::make_shared<ResultT::WorkerRpcContext>();

@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -49,9 +50,10 @@ void releaseHostMemoryCache() {
 #endif
 }
 
-bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig& pd_sep_config, const CacheStoreConfig& cache_store_config) {
-    const char* remote_cache_gdr_value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY");
-    const bool  remote_cache_gdr = remote_cache_gdr_value != nullptr && std::atoi(remote_cache_gdr_value) != 0;
+bool shouldUseCudaMallocKVCacheBacking(const PDSepConfig&      pd_sep_config,
+                                       const CacheStoreConfig& cache_store_config,
+                                       const KVCacheConfig&    kv_cache_config) {
+    const bool remote_cache_gdr = kv_cache_config.enable_remote_cache && remoteCacheGdrEnabled();
     // Only PD cache-store RDMA registers KV cache as user MR.  Keep the
     // raw cudaMalloc backing out of direct KVCacheManager users and non-RDMA
     // paths so PyTorch allocator behavior is unchanged elsewhere.
@@ -427,7 +429,8 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
 }
 
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    const bool use_cuda_malloc_block_pool = shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config);
+    const bool use_cuda_malloc_block_pool =
+        shouldUseCudaMallocKVCacheBacking(pd_sep_config, cache_store_config, kv_cache_config);
     if (propose_params_ && propose_params_->draftModel()) {
         auto config = CacheConfigCreator::createSpConfig(model_config_,
                                                          propose_params_->getEngineInitParams().model_config_,

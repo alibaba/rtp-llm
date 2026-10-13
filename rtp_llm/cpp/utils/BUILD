@@ -21,6 +21,7 @@ cc_library(
     hdrs = [
         "AssertUtils.h",
         "Logger.h",
+        "RemoteCacheConfig.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
@@ -29,6 +30,7 @@ cc_library(
     srcs = [
         "AssertUtils.cc",
         "Logger.cc",
+        "RemoteCacheConfig.cc",
         "Exception.cc"
     ],
     deps = [

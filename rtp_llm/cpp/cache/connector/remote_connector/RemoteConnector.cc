@@ -3,11 +3,14 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
 #include <sstream>
+#include <unistd.h>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -21,11 +24,6 @@ bool hostMemfdRegistrationConfigured(const KVCacheConfig& kv_cache_config) {
     const char* pin_mode_env     = std::getenv("RTP_LLM_HOST_BLOCK_POOL_PIN_MODE");
     const bool  memfd_configured = pin_mode_env != nullptr && std::string(pin_mode_env) == "memfd_register";
     return kv_cache_config.enable_memory_cache && memfd_configured;
-}
-
-bool remoteCacheGdrConfigured() {
-    const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY");
-    return value != nullptr && std::atoi(value) != 0;
 }
 
 struct MatchMetricsHelper {
@@ -446,8 +444,10 @@ bool RemoteConnector::init() {
                              memory_registrations.host.size);
         }
     }
-    if (remoteCacheGdrConfigured()) {
+    if (init_params_->kv_cache_config.enable_remote_cache && remoteCacheGdrEnabled()) {
         RTP_LLM_CHECK_WITH_INFO(allocator_ != nullptr, "RemoteCache GDR requires a KV cache allocator");
+        const long page_size = sysconf(_SC_PAGESIZE);
+        RTP_LLM_CHECK_WITH_INFO(page_size > 0, "failed to query host page size for RemoteCache GDR registration");
         for (const auto& block_pool : allocator_->allBlockPools()) {
             if (!block_pool || block_pool->where() != MemoryType::MEMORY_GPU) {
                 continue;
@@ -457,6 +457,13 @@ bool RemoteConnector::init() {
             RTP_LLM_CHECK_WITH_INFO(block_pool->getBaseAddress() != nullptr
                                         && block_pool->getAllocationSizeBytes() > 0,
                                     "invalid GPU block pool registration span");
+            RTP_LLM_CHECK_WITH_INFO(
+                reinterpret_cast<uintptr_t>(block_pool->getBaseAddress()) % static_cast<size_t>(page_size) == 0
+                    && block_pool->getAllocationSizeBytes() % static_cast<size_t>(page_size) == 0,
+                "RemoteCache GDR registration span must be page aligned: base=%p size=%zu page_size=%ld",
+                block_pool->getBaseAddress(),
+                block_pool->getAllocationSizeBytes(),
+                page_size);
             memory_registrations.gpu.push_back({block_pool->getBaseAddress(),
                                                 block_pool->getAllocationSizeBytes(),
                                                 block_pool->getCudaDeviceId()});
@@ -837,11 +844,15 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
                        grpc::CompletionQueue*                      completion_queue) {
         return stub->AsyncExecuteFunction(context.get(), request, completion_queue);
     };
-    auto broadcast_result =
-        broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, get_broadcast_timeout_, rpc_call);
+    auto broadcast_result = broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, get_broadcast_timeout_, rpc_call, BroadcastDeadlinePolicy::RETURN_FAILURE);
     broadcast_result->waitDone();
     if (!broadcast_result->success()) {
         quarantineConnectorResource(resource);
+        if (broadcast_result->deadlineExceeded()) {
+            async_context->setErrorInfo(
+                ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "remote cache read broadcast timed out"));
+        }
         RTP_LLM_LOG_WARNING("Read completion unknown after grpc failure, trace_id [%s]", match_trace_id.c_str());
         async_context->setState(RemoteConnectorState::State::RCS_ERROR);
         return;
@@ -1020,13 +1031,15 @@ void RemoteConnector::asyncWriteCommonTask(
     };
     const int64_t broadcast_begin_us = currentTimeUs();
     auto broadcast_result = broadcaster_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-        requests, put_broadcast_timeout_, rpc_call);
+        requests, put_broadcast_timeout_, rpc_call, BroadcastDeadlinePolicy::RETURN_FAILURE);
     broadcast_result->waitDone();
     helper.collector.remote_write_broadcast_time_us = currentTimeUs() - broadcast_begin_us;
     if (!broadcast_result->success()) {
         quarantineConnectorResource(connector_resource);
         RTP_LLM_LOG_WARNING("Write completion unknown after grpc failure, trace_id [%s]", trace_id.c_str());
-        finish_failed_write();
+        finish_failed_write(broadcast_result->deadlineExceeded()
+                                ? ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "remote cache write broadcast timed out")
+                                : ErrorInfo::OkStatus());
         return;
     }
 

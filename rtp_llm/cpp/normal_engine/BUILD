@@ -28,6 +28,7 @@ cc_library(
         "//rtp_llm/cpp/distribute:rpc_cpu_tp_broadcaster_hdr",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
+        "//rtp_llm/cpp/utils:core_utils",
     ] + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
