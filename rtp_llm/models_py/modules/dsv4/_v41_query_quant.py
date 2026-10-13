@@ -95,8 +95,9 @@ def try_project_quantized_qkv(attn, x):
         return None
     quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
     elements = (x.numel() // x.shape[-1]) * attn.q_lora_rank
-    # The v2 producer has different zero/tiny-scale semantics. Let the native
-    # consumer select it (and validate unknown settings) on the original path.
+    # Preserve the existing fusion range; large auto inputs use the original
+    # norm path and public quantization entry, which also follows legacy rules.
+    # Explicit v2 and unknown settings are handled by the original consumer.
     if quant_kernel not in ("auto", "legacy") or (
         quant_kernel == "auto" and elements >= 4 * 1024 * 1024
     ):

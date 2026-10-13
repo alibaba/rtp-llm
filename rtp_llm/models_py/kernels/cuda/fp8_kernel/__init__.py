@@ -12,9 +12,11 @@ from .fp8_kernel import (
     scaled_fp8_per_tensor_quant,
     scaled_fp8_per_token_quant,
     sgl_per_token_group_quant_fp8,
+    sgl_per_token_group_quant_fp8_v3,
 )
 
 __all__ = [
+    "sgl_per_token_group_quant_fp8_v3",
     "sgl_per_token_group_quant_fp8",
     "scaled_fp8_per_tensor_quant",
     "scaled_fp8_per_token_quant",

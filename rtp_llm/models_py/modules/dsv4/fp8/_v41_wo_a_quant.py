@@ -92,7 +92,7 @@ def _legacy(m, mode):
         .strip()
         .lower()
     )
-    return mode == "legacy" or (mode == "auto" and m * 8192 < 4 * 1024 * 1024)
+    return mode in ("auto", "legacy")
 
 
 def _nvcc_path():

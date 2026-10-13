@@ -192,9 +192,9 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
         self.assert_exact(actual, expected, gate_up.shape[1] // 2)
         return actual
 
-    def test_shapes_clamps_and_auto_boundary(self):
+    def test_shapes_clamps_and_quant_modes(self):
         torch.manual_seed(51)
-        # 1820*2304 < 4Mi <= 1821*2304; 2048*2048 hits it exactly.
+        # Include both sides of the former 4Mi-element auto boundary.
         for rows, width in (
             (0, 2304),
             (1, 32),
@@ -209,10 +209,24 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
                 for mode in ("legacy", "v2", "auto"):
                     with self.subTest(rows=rows, width=width, clamp=clamp, mode=mode):
                         self.check(gate_up, clamp, mode)
-        for rows, selected in ((1820, "legacy"), (1821, "v2")):
-            gate_up = torch.zeros(rows, 4608, device="cuda", dtype=torch.bfloat16)
-            actual = self.check(gate_up, 10.0, "auto")
-            self.assert_exact(actual, self.reference(gate_up, 10.0, selected), 2304)
+
+    def test_auto_keeps_legacy_scales_across_former_size_boundary(self):
+        # Zero Q alone cannot distinguish the policies: check packed scales too.
+        for rows, width in ((1820, 2304), (1821, 2304), (2048, 2048), (3072, 2304)):
+            with self.subTest(rows=rows, width=width):
+                gate_up = torch.zeros(
+                    rows, 2 * width, device="cuda", dtype=torch.bfloat16
+                )
+                actual = self.check(gate_up, 10.0, "auto")
+                self.assert_exact(
+                    actual, self.reference(gate_up, 10.0, "legacy"), width
+                )
+                scales = actual[1].clone(memory_format=torch.contiguous_format)
+                codes = scales.view(torch.uint8)[:, : width // 32]
+                # legacy floor: ceil(log2(1e-10)) + UE8M0 bias = -33 + 127.
+                self.assertTrue(bool((codes == 94).all()))
+                # Explicit v2 retains its distinct tiny-value scale semantics.
+                self.check(gate_up, 10.0, "v2")
 
     def test_scale_rounding_signed_zero_and_dynamic_range(self):
         groups = []
@@ -263,7 +277,7 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
                 with self.subTest(mode=mode, clamp=clamp):
                     self.check(gate_up, clamp, mode)
 
-    def test_bf16_only_and_input_contracts(self):
+    def test_bf16_only_buffers_empty_input_and_contiguous_slices(self):
         gate_up = torch.ones(3, 4608, device="cuda", dtype=torch.bfloat16)
         out = torch.empty(3, 2304, device="cuda", dtype=torch.bfloat16)
         self.bf16(gate_up, out=out)
@@ -272,16 +286,15 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
             torch, "empty", side_effect=AssertionError("unexpected allocation")
         ):
             self.assertIs(self.bf16(gate_up, out=out), out)
+        self.assertTrue(torch.equal(out, _ref_chain(gate_up, 0.0)))
         with patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL="invalid"):
-            with self.assertRaisesRegex(ValueError, "DSV4_FP8_QUANT_KERNEL"):
-                self.fused(gate_up)
             self.assertEqual(self.fused(gate_up[:0])[0].shape, (0, 2304))
-        for source in (gate_up[:, ::2], gate_up.t()):
-            for operation in (self.bf16, self.fused):
-                with self.assertRaisesRegex(ValueError, "contiguous"):
-                    operation(source)
+        # Forward checks were removed in 77275c0e6f: callers supply contiguous
+        # BF16 input and a valid mode; rejection of invalid input is not an API.
         # A contiguous slice with a nonzero storage offset is still supported.
-        self.check(gate_up[1:], 10.0, "v2")
+        for mode in ("legacy", "v2", "auto"):
+            with self.subTest(mode=mode):
+                self.check(gate_up[1:], 10.0, mode)
 
     def test_graph_replay_on_side_stream(self):
         stream = torch.cuda.Stream()

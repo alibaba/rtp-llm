@@ -335,17 +335,20 @@ class WoAQuantCPUContractTest(unittest.TestCase):
         self.assertEqual(fresh._READY, {})
         self.assertEqual(fresh._LIBRARIES, {})
 
-    def test_quant_knob_is_live_and_uses_flattened_wo_b_width(self):
-        for mode, small, large in (
-            ("auto", True, False),
-            ("legacy", True, True),
-            ("v2", False, False),
+    def test_quant_knob_is_live_and_independent_of_flattened_size(self):
+        for mode, legacy in (
+            ("auto", True),
+            ("legacy", True),
+            ("v2", False),
         ):
             with self.subTest(mode=mode), mock.patch.dict(
                 os.environ, {"DSV4_FP8_QUANT_KERNEL": mode}
             ):
-                self.assertEqual(op._legacy(511, None), small)
-                self.assertEqual(op._legacy(512, None), large)
+                # The former 4Mi-element boundary was M=512 at WO-B's K=8192.
+                for rows in (511, 512, 3072):
+                    self.assertEqual(op._legacy(rows, None), legacy)
+                    self.assertTrue(op._legacy(rows, "auto"))
+                    self.assertFalse(op._legacy(rows, "v2"))
 
     def test_supported_metadata_and_unprepared_fallback_never_load(self):
         a, w = _metadata()
