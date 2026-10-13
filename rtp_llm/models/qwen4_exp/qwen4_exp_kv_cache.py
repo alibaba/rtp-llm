@@ -26,6 +26,7 @@ from typing import List
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
     CacheGroupType,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
@@ -221,6 +222,23 @@ def build_qwen4_exp_kv_cache_spec_descs(
         hybrid_types,
         KVCacheSpecType.MHA,
     )
+    # The fixed state pools still occupy GPU memory and must reserve their full
+    # allocation before sizing paged pools. Block zero is the dummy slot.
+    blocks_env = os.environ.get("RTP_LLM_QWEN4_LINEAR_CACHE_BLOCKS", "0")
+    try:
+        fixed_blocks = int(blocks_env)
+    except ValueError as error:
+        raise ValueError("Qwen linear cache blocks must be an integer") from error
+    if fixed_blocks != 0 and not 2 <= fixed_blocks <= 2**32 - 1:
+        raise ValueError("Qwen linear cache blocks must be 0 or in [2, 2**32 - 1]")
+    if fixed_blocks:
+        for layer in layer_descs:
+            for desc in layer:
+                if desc.cache_type == KVCacheSpecType.LINEAR:
+                    capacity = CacheCapacityPolicyDesc()
+                    capacity.explicit_block_num = fixed_blocks
+                    capacity.charge_to_paged_budget = True
+                    desc.capacity = capacity
     hc_hidden = config.hidden_size * config.hc_mult
     for layer_idx in ple_layer_indices:
         if not 0 <= layer_idx < len(layer_descs):
