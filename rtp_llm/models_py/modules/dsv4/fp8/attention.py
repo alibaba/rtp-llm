@@ -33,7 +33,6 @@ from deep_gemm.utils.layout import (  # noqa: E402
     get_mn_major_tma_aligned_packed_ue8m0_tensor,
 )
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
@@ -81,7 +80,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, Compres
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
-from rtp_llm.models_py.modules.factory.linear import LinearFactory
+from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.utils.memory import dispose_tensor
 
 
@@ -290,8 +289,6 @@ def _build_suffix_cp_sliced_slot_mapping(
     return torch.where(valid, slot, torch.full_like(slot, -1)).contiguous()
 
 
-_V4_FP8_BLOCK_CFG = Fp8BlockWiseQuantConfig()
-
 _DSV4_FP8_KV_ENTRY_BYTES = 584
 
 # Call sites whose first byte-sliced (CP-RR) SWA cache write has been logged.
@@ -383,27 +380,6 @@ def _prepare_wo_a_stacked(
     scale_rep = scale_fp32.index_select(-2, idx).contiguous()  # [G, R, K/128]
     s_stk = get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
     return w_stk, s_stk
-
-
-def _v4_fp8_linear(w: torch.Tensor, s: torch.Tensor):
-    """Build a CudaFp8DeepGEMMLinear from raw V4 FP8 weight + scale tensors.
-
-    Repacks the UE8M0 ``float8_e8m0fnu`` scale into DeepGEMM's int32
-    TMA-aligned packed layout when needed. Framework descriptor path may
-    deliver the scale already packed (dtype int32) — we no-op then."""
-    assert s is not None, "expected non-null FP8 scale"
-    if s.dtype == torch.float8_e8m0fnu:
-        s = _repack_v4_fp8_scale_to_int32(s)
-    # LinearFactory.create_linear_from_weights consumes a (weights_dict,
-    # weight_key, scale_key) triple — feed it a one-shot dict so the
-    # factory plumbing is unchanged.
-    local = {"_w": w, "_s": s}
-    return LinearFactory.create_linear_from_weights(
-        local,
-        "_w",
-        "_s",
-        quant_config=_V4_FP8_BLOCK_CFG,
-    )
 
 
 def _v4_fp8_linear_from_dict(weights: dict, weight_key: str, scale_key: str):

@@ -216,6 +216,20 @@ py_test(
     tags = ["H20"],
 )
 
+py_test(
+    name = "fp8_linear_sm90_test",
+    srcs = ["fp8_linear_sm90_test.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {
+        "gpu": "H20",
+        "gpu_count": "1",
+    },
+    tags = ["H20"],
+)
+
 # Host-only: the scale unpack and the weight regrouping are plain tensor algebra,
 # so they carry no CUDA or DeepGEMM dependency and run in the default lane.
 py_test(
