@@ -103,7 +103,7 @@ class _StageCompiler:
             fail(loc + ".action", f"action {action!r} belongs to cases {sorted(descriptor.owners)!r}")
         try:
             params = descriptor.validate(params, PlanContext(
-                loc + ".params", dict(self.outputs), copy.deepcopy(self.environment), self.profiles,
+                loc + ".params", dict(self.outputs), copy.deepcopy(self.environment), self.profiles, self.case,
             ))
         except ScenarioError:
             raise

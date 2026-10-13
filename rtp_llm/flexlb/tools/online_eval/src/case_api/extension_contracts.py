@@ -21,10 +21,11 @@ class FinalizationContext:
     """One producer's isolated snapshot; returned metadata is published by the caller."""
     directory: Path
     run: Mapping[str, object]
+    deadline: object = None
 
     @classmethod
-    def snapshot(cls, directory, run):
-        return cls(Path(directory), MappingProxyType(deepcopy(run)))
+    def snapshot(cls, directory, run, deadline=None):
+        return cls(Path(directory), MappingProxyType(deepcopy(run)), deadline)
 
 
 @dataclass(frozen=True)
@@ -68,7 +69,7 @@ class FinalizeProducer(Protocol):
 
 
 class SourceFactory(Protocol):
-    def __call__(self, environment: dict, fields: set[str]) -> dict: ...
+    def __call__(self, environment: object, fields: set[str]) -> dict: ...
 
 
 def validate_call(function, argument_count, path):
@@ -77,3 +78,23 @@ def validate_call(function, argument_count, path):
         signature(function).bind(*(object() for _ in range(argument_count)))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: callable must accept {argument_count} positional arguments: {exc}") from exc
+
+
+class SnapshotReader(Protocol):
+    def read(self, deadline: Deadline) -> object: ...
+
+
+class SnapshotFactory(Protocol):
+    def __call__(self, services: object, params: dict) -> SnapshotReader: ...
+
+
+class RuntimeClient(Protocol):
+    def cleanup(self, deadline: Deadline) -> None: ...
+
+
+class RuntimeClientFactory(Protocol):
+    def __call__(self, services: object, params: dict, deadline: Deadline) -> RuntimeClient: ...
+
+
+class EvidenceExporter(Protocol):
+    def __call__(self, client: object, profile: str, deadline: Deadline) -> ResourceEvidence: ...

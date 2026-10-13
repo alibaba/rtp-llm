@@ -16,6 +16,8 @@ class RuntimeContext(ResourceScope):
         self.wall_clock = wall_clock if wall_clock is not None else lambda: time.time()
         super().__init__(clock, sleeper, enforce_deadlines)
         self.env = self.ops = None
+        from case_api.runtime_capabilities import RuntimeCapabilities
+        self.services = RuntimeCapabilities(self)
         self.outputs = {}
         self.report_events = []
 

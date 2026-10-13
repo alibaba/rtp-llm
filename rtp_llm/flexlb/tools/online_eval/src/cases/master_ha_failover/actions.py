@@ -87,7 +87,7 @@ def _ha_start(ctx, params, deadline):
     from artifacts.startup import startup_phase
     with startup_phase(ctx.artifact_dir, 'traffic/input', deadline):
         client = HaReplayClient(
-            ctx.backend.manager,
+            ctx.services.environment,
             ctx.env,
             directory,
             "traffic",
@@ -113,7 +113,8 @@ def _ha_start(ctx, params, deadline):
                 else {}
             ),
         )
-    def export_client(value, profile):
+    def export_client(value, profile, deadline):
+        deadline.check()
         from case_api.extension_contracts import ResourceEvidence
         snapshot = value.evidence_snapshot()
         manifest = snapshot if profile == "diagnostic" else {
@@ -268,7 +269,7 @@ def _client_check(ctx, params, deadline):
     target = None
     prefill_pool = ()
     if metric == "target_share":
-        target = ctx.backend.manager.master_instance_target(ctx.env, params["target"])
+        target = ctx.services.environment.master_instance_target(ctx.env, params["target"])
     elif metric == "prefill_max_share":
         from adapters.mock_control import topology_pools
 

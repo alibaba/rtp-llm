@@ -42,10 +42,14 @@ def validate_snapshot(params, plan):
     if not isinstance(params, dict) or set(params) - allowed:
         _error(plan, "unknown snapshot parameters")
     sources = params.get("sources")
+    available = set(SOURCES)
+    if plan.case:
+        from case_api.registry import registry
+        available.update(registry().cases[plan.case].definition.snapshot_sources)
     if (
         not isinstance(sources, list)
         or not sources
-        or any(not isinstance(s, str) or s not in SOURCES for s in sources)
+        or any(not isinstance(s, str) or s not in available for s in sources)
     ):
         _error(plan, "sources must be a nonempty supported source list")
     if len(set(sources)) != len(sources):

@@ -9,7 +9,7 @@ from monitoring.metric_store import MetricStore
 from monitoring.contracts import MetricContractError
 
 
-def produce(directory, context):
+def produce(directory, context, *, deadline=None):
     store = MetricStore.read(directory)
     selected = {definition["producer"] for definition in store.document["definitions"].values()
                 if "producer" in definition}
@@ -19,8 +19,12 @@ def produce(directory, context):
     for name in sorted(selected):
         capability = registry().producers[name]
         if capability.phase is ProducerPhase.FINALIZE:
-            snapshot = FinalizationContext.snapshot(directory, context)
+            snapshot = FinalizationContext.snapshot(directory, context, deadline)
+            if deadline is not None:
+                deadline.check()
             metadata = capability.execute(directory, snapshot)
+            if deadline is not None:
+                deadline.check()
             if not isinstance(metadata, dict):
                 raise MetricContractError(name + ': finalize producer must return metadata mapping')
             json.dumps(metadata, allow_nan=False)

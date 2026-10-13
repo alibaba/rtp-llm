@@ -116,7 +116,7 @@ def test_new_resource_evidence_needs_no_policy_branch(tmp_path):
     policy.attach(ctx)
     ctx.env_epoch = 7
     ctx.register_resource("new_transport", object(), historical=True,
-        evidence=lambda value, profile: ResourceEvidence(
+        evidence=lambda value, profile, deadline: ResourceEvidence(
             requests=dict(records=[dict(rid="new", status="ok")]), producer="new_worker",
             outages=(dict(source="7/new", started_epoch_s=10, ended_epoch_s=11, reason="test"),)))
     # Ignore duck-typed methods unless a resource explicitly declares an exporter.

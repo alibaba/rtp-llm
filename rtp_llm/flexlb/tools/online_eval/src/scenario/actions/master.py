@@ -59,7 +59,8 @@ def _fault(ctx, params, deadline):
     fault = MasterFault(params["target"], params["mode"], process, ctx.clock())
     fault.started_epoch_s = time.time()
     epoch = ctx.env_epoch
-    def export_fault(value, profile):
+    def export_fault(value, profile, deadline):
+        deadline.check()
         from case_api.extension_contracts import ResourceEvidence
         if not value.injected:
             return ResourceEvidence()

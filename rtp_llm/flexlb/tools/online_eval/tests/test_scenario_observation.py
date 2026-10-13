@@ -21,6 +21,7 @@ from adapters.observation_window import Observer
 
 
 class Plan:
+    case = ""
     path = "stages.observe"
 
     def reference(self, value, kind):

@@ -91,9 +91,8 @@ class JavaFlowGroup:
             )
         )
         deadline.check()
-        self.proc, _ = self.client.run_async(
-            env, self.directory, self.directory / "client.log"
-        )
+        from adapters.client_session import launch_client
+        self.proc, _ = launch_client(self.client, env, self.directory, self.directory / "client.log", deadline)
         if self.monitor is not None:
             target_path = self.directory / "metrics-target.json"
             self._wait_control(

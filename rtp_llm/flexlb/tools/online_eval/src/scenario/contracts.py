@@ -56,6 +56,7 @@ class PlanContext:
     outputs: dict
     environment: dict = field(default_factory=dict)
     profiles: tuple[str, ...] = ()
+    case: str = ""
 
     @property
     def env(self):

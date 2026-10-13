@@ -3,7 +3,8 @@
 from case_api.extension_contracts import ResourceEvidence
 
 
-def flow_evidence(value, profile):
+def flow_evidence(value, profile, deadline):
+    deadline.check()
     snapshot = value.evidence_snapshot()
     manifest = snapshot if profile == "diagnostic" else {
         k: v for k, v in snapshot.items() if k not in ("records", "issued", "unfinished")}
@@ -14,7 +15,8 @@ def flow_evidence(value, profile):
         errors=tuple(snapshot["errors"] or ["incomplete request journal"]) if not snapshot["complete"] else ())
 
 
-def request_evidence(value, profile):
+def request_evidence(value, profile, deadline):
+    deadline.check()
     from adapters.requests import completeness
     rows = value.snapshot_records()
     integrity = completeness(rows)

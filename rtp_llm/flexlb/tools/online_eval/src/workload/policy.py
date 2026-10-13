@@ -281,7 +281,7 @@ class WorkloadPolicy:
             produce_gate_metrics(program, ctx.artifact_dir)
         analysis = analyze_report(ctx.artifact_dir, result, payload)
         from monitoring.producers import produce
-        produce(ctx.artifact_dir, analysis)
+        produce(ctx.artifact_dir, analysis, deadline=deadline)
         from monitoring.metric_store import MetricStore
         analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(
             self.anchor["epoch_s"])

@@ -129,9 +129,8 @@ class HaReplayClient:
         if self.state_sampler is not None:
             self.state_sampler.start(deadline=deadline)
         try:
-            self.proc, self.out_dir = self._client.run_async(
-                self._overrides, self.out_dir, self.log_file, label=self.name
-            )
+            from adapters.client_session import launch_client
+            self.proc, self.out_dir = launch_client(self._client, self._overrides, self.out_dir, self.log_file, deadline, label=self.name)
             with startup_phase(self.out_dir, "client/sending", deadline):
                 wait_flow_started(self.control, self.flow_identity, self.proc, deadline)
         except Exception as start_error:

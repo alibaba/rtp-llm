@@ -34,6 +34,7 @@ class Sources:
             raise DebugUnavailable("snapshot requires setup")
         self.master_port = self.env.master_http_port
         self.mock_port = self.env.mock_http_port
+        self.custom = {name: ctx.services.snapshot(name, params) for name in params["sources"] if name not in SOURCES}
         self.records = None
         for kind in ("requests", "flow"):
             if kind in params:
@@ -65,7 +66,10 @@ class Sources:
                     raise DebugUnavailable(
                         "environment changed; old cohort is not sampled from the new environment"
                     )
-                if name == "master_debug":
+                if name in self.custom:
+                    sample["data"] = self.custom[name].read(deadline)
+                    json.dumps(sample["data"], allow_nan=False)
+                elif name == "master_debug":
                     result = DebugClient(
                         f"http://127.0.0.1:{self.master_port}",
                         timeout_s=min(5.0, deadline.remaining()),
@@ -94,16 +98,8 @@ class Sources:
                             "Master snapshot has partial/busy/truncated components"
                         )
                 elif name == "client_records":
-                    records = self.records.snapshot_records()
-                    if not isinstance(records, list) or any(
-                        not isinstance(r, dict)
-                        or not matches_schema(r, "client_record_schema_version", 1)
-                        or r.get("env_epoch") != self.epoch
-                        or type(r.get("wire_request_id")) is not int
-                        or type(r.get("attempt")) is not int
-                        for r in records
-                    ):
-                        raise DebugUnavailable("invalid or stale client_records v1")
+                    from case_api.client_records import read_records
+                    records = read_records(self.records, deadline, self.epoch)
                     sample["data"] = records  # Includes every nonterminal attempt.
                 else:
                     route = "snapshot" if name == "engine_snapshot" else "requests"

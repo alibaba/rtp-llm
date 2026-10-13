@@ -29,7 +29,7 @@ class ResourceScope:
         for identity, exporter in self._evidence_exporters.items():
             deadline.check()
             handle, value, _ = self._resources[identity]
-            snapshot = exporter(value, profile)
+            snapshot = exporter(value, profile, deadline)
             if not isinstance(snapshot, ResourceEvidence):
                 raise TypeError("resource exporter must return ResourceEvidence")
             deadline.check()

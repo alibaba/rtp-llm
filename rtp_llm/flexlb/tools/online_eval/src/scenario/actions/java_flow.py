@@ -64,7 +64,7 @@ def _start(ctx, p, deadline):
             max_requests=p.get("max_requests"),
         )
     environment = java_client_priority(p["source"], p["client"])
-    client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
+    client = ctx.services.environment.client_operations(p["jvm_xms"], p["jvm_xmx"])
     # This is a retained-evidence ceiling, not a prediction of Java scheduling.
     # The journal grows on demand and fails explicitly when the ceiling is exceeded.
     event_budget = MAX_EVIDENCE_EVENTS
