@@ -9,10 +9,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+
 from rtp_llm.utils.model_weight import W
 
 _ENABLE_ENV = "RTP_LLM_GLM5_CMP"
-_DISABLE_ATTENTION_POST_MOE_PRE_ENV = "RTP_LLM_GLM5_DISABLE_ATTENTION_POST_MOE_PRE"
 _SUPPORTED_MODEL_TYPES = frozenset(("glm_5", "glm_5_mtp"))
 logger = logging.getLogger(__name__)
 
@@ -28,15 +28,6 @@ def resolve_glm5_cmp_enabled() -> bool:
     if value in ("0", "false", "no", "off", ""):
         return False
     raise ValueError(f"invalid {_ENABLE_ENV}={value!r}")
-
-
-def resolve_attention_post_moe_pre_disabled() -> bool:
-    value = os.environ.get(_DISABLE_ATTENTION_POST_MOE_PRE_ENV, "0").strip().lower()
-    if value in ("1", "true", "yes", "on"):
-        return True
-    if value in ("0", "false", "no", "off", ""):
-        return False
-    raise ValueError(f"invalid {_DISABLE_ATTENTION_POST_MOE_PRE_ENV}={value!r}")
 
 
 def _is_capturing() -> bool:
@@ -136,7 +127,9 @@ class Glm5Cmp:
         self._events: _StreamEvents | None = None
         self._packed_head_gate_weight: torch.Tensor | None = None
         self._draft_prefill_clone = False
-        self.disable_attention_post_moe_pre = resolve_attention_post_moe_pre_disabled()
+        self.disable_attention_post_moe_pre = not getattr(
+            self.self_attn, "fuse_kernels_enabled", True
+        )
         self._disabled_reason = self._static_disabled_reason()
         self._moe_prepack_disabled_reason = None
         self._moe_prepack_abi_validated = False
@@ -187,19 +180,8 @@ class Glm5Cmp:
             not self.is_moe_layer
             or self._router_weight is None
             or getattr(self.mlp, "correction_bias", None) is None
-            or not callable(
-                getattr(
-                    getattr(self.mlp, "fused_moe", None),
-                    "prepacked_input_views",
-                    None,
-                )
-            )
-            or not callable(
-                getattr(
-                    getattr(self.mlp, "fused_moe", None),
-                    "forward_prepacked",
-                    None,
-                )
+            or not getattr(
+                getattr(self.mlp, "fused_moe", None), "supports_prepacked_input", False
             )
             or not (
                 self.mlp.shared_expert is not None
@@ -869,7 +851,6 @@ def should_enable_glm5_cmp(
         logger.info("GLM5 CMP activated for %d layers", layer_num)
         if getattr(cmp, "disable_attention_post_moe_pre", False):
             logger.info(
-                "GLM5 CMP attention_post_moe_pre disabled by %s",
-                _DISABLE_ATTENTION_POST_MOE_PRE_ENV,
+                "GLM5 CMP attention_post_moe_pre disabled by fusion configuration"
             )
     return True

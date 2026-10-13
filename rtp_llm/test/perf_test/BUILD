@@ -991,3 +991,20 @@ test_suite(
     ],
     tags = ["manual"],
 )
+
+load("//rtp_llm/test/perf_test:suites_cu13_glm5x.bzl", "cu13_glm5x_perf_suites")
+
+cu13_glm5x_perf_suites()
+
+# GLM5.x policy is opt-in through its dedicated entry; other perf suites do not use it.
+py_library(
+    name = "glm5x_perf_lib",
+    srcs = ["glm5x_perf.py"],
+    deps = [":perf_test_lib"],
+)
+
+py_test(
+    name = "glm5x_perf_test",
+    srcs = ["glm5x_perf_test.py"],
+    deps = [":glm5x_perf_lib", ":perf_test_lib"],
+)

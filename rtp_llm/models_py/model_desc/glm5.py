@@ -1,4 +1,3 @@
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -6,6 +5,7 @@ from typing import Any, Dict, Optional
 import torch
 from torch import nn
 
+from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import get_layer_caches_for_groups
@@ -20,12 +20,14 @@ from rtp_llm.models_py.modules import (
     MlaAttention,
     RMSResNorm,
 )
-from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
-from rtp_llm.models_py.modules.glm5_mega_moe.factory import (
-    MEGA_MOE_STRATEGIES,
-    create_mega_moe_wrapper,
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
 )
-from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import MegaMoeWrapper
+from rtp_llm.models_py.modules.factory.fused_moe.factory import FusedMoeFactory
+from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
+    synchronized_moe_chunk_plan,
+)
+from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import (
     Glm5Cmp,
     resolve_glm5_cmp_enabled,
@@ -65,18 +67,16 @@ class Glm5MoeLayer(GenericMoeLayer):
         layer_idx: int = 0,
     ):
         self.layer_idx = layer_idx
+        self.strategy_name = moe_config.moe_strategy
+        self.chunking_enabled = True
+        self._is_decode_role = parallelism_config.role_type == RoleType.DECODE
         cp_prefill_enabled = (
             parallelism_config.role_type != RoleType.DECODE
             and parallelism_config.prefill_cp_config.is_enabled()
         )
-        default_gate_chunk_rows = (
+        self.gate_chunk_rows = (
             8192 if config.model_type == "glm_5" and cp_prefill_enabled else 0
         )
-        self.gate_chunk_rows = int(
-            os.environ.get("GLM5_MOE_GATE_CHUNK_ROWS", str(default_gate_chunk_rows))
-        )
-        if self.gate_chunk_rows < 0:
-            raise ValueError("GLM5_MOE_GATE_CHUNK_ROWS must be non-negative")
         super().__init__(
             config,
             parallelism_config,
@@ -98,20 +98,24 @@ class Glm5MoeLayer(GenericMoeLayer):
             return super()._create_fused_moe(
                 weights, moe_config, max_generate_batch_size, enable_cuda_graph
             )
-        return create_mega_moe_wrapper(
+        adapter = MoEConfigAdapter(
             self.config,
             self.parallelism_config,
-            weights,
             moe_config,
-            layer_idx=self.layer_idx,
+            quant_config=self.config.quant_config,
+            enable_cuda_graph=enable_cuda_graph,
+            layer_id=self.layer_idx,
             max_generate_batch_size=max_generate_batch_size,
+            mega_moe_policy=MegaMoeExecutionPolicy(
+                activation_clamp=(
+                    float(self.config.swiglu_limit)
+                    if self.config.swiglu_limit > 0
+                    else None
+                ),
+            ),
         )
-
-    def _supports_unified_tp_allreduce(self) -> bool:
-        return (
-            not isinstance(self.fused_moe, MegaMoeWrapper)
-            and super()._supports_unified_tp_allreduce()
-        )
+        adapter.has_shared_expert_gate = weights.get(W.shared_expert_gate) is not None
+        return FusedMoeFactory().create_fused_moe(adapter, weights)
 
     def _gate_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self.gate_chunk_rows > 0 and hidden_states.shape[0] > 0:
@@ -126,6 +130,9 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.config = self.config
         clone.parallelism_config = self.parallelism_config
         clone.layer_idx = self.layer_idx
+        clone.strategy_name = self.strategy_name
+        clone.chunking_enabled = self.chunking_enabled
+        clone._is_decode_role = self._is_decode_role
         clone.hidden_dim = self.hidden_dim
         clone.ffn_dim = self.ffn_dim
         clone.num_experts = self.num_experts
@@ -134,7 +141,7 @@ class Glm5MoeLayer(GenericMoeLayer):
         clone.gate = self.gate
         clone.select_topk = self.select_topk
         clone.fake_balance_expert = self.fake_balance_expert
-        if isinstance(self.fused_moe, MegaMoeWrapper):
+        if self.fused_moe.supports_cuda_graph_clone:
             clone.fused_moe = self.fused_moe.clone_for_cuda_graph(
                 share_mega_buf=share_mega_buf
             )
@@ -589,37 +596,49 @@ class Glm5ModelBase(CpMtpHiddenHandoff, GenericMoeModel):
         default_fmha = (
             fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
         )
-        enable_cmp = should_enable_glm5_cmp(
-            self.layers,
-            self.layer_num,
-            hidden_states,
-            default_fmha,
-            self.kv_cache,
-            force_reuse_topk_indices=force_reuse_topk_indices,
+        attention_inputs = getattr(default_fmha, "attn_inputs", None)
+        is_decode = attention_inputs is not None and (
+            not attention_inputs.is_prefill
+            or bool(getattr(attention_inputs, "is_target_verify", False))
+            or bool(getattr(attention_inputs, "is_draft_extend", False))
         )
-        residual = torch.zeros_like(hidden_states)
-        for idx, layer in enumerate(self.layers[: self.layer_num]):
-            caches = None
-            if self.kv_cache is not None:
-                tags = (
-                    ("default", "indexer_kv")
-                    if isinstance(layer.self_attn, MlaAttention)
-                    and layer.self_attn.has_indexer
-                    else ("default",)
-                )
-                caches = get_layer_caches_for_groups(self.kv_cache, idx, tags)
-            result = layer(
+        with synchronized_moe_chunk_plan(
+            self.layers[: self.layer_num],
+            hidden_states.size(0),
+            hidden_states.device,
+            is_decode_forward=is_decode,
+        ):
+            enable_cmp = should_enable_glm5_cmp(
+                self.layers,
+                self.layer_num,
                 hidden_states,
-                residual,
-                fmha_impl,
-                kv_cache=caches,
-                prev_topk_indices=prev_topk_indices,
-                enable_cmp=enable_cmp,
+                default_fmha,
+                self.kv_cache,
                 force_reuse_topk_indices=force_reuse_topk_indices,
             )
-            hidden_states, residual = result.hidden_states, result.residual
-            prev_topk_indices = result.topk_indices
-        return DecodeLayerOutput(hidden_states, residual, prev_topk_indices)
+            residual = torch.zeros_like(hidden_states)
+            for idx, layer in enumerate(self.layers[: self.layer_num]):
+                caches = None
+                if self.kv_cache is not None:
+                    tags = (
+                        ("default", "indexer_kv")
+                        if isinstance(layer.self_attn, MlaAttention)
+                        and layer.self_attn.has_indexer
+                        else ("default",)
+                    )
+                    caches = get_layer_caches_for_groups(self.kv_cache, idx, tags)
+                result = layer(
+                    hidden_states,
+                    residual,
+                    fmha_impl,
+                    kv_cache=caches,
+                    prev_topk_indices=prev_topk_indices,
+                    enable_cmp=enable_cmp,
+                    force_reuse_topk_indices=force_reuse_topk_indices,
+                )
+                hidden_states, residual = result.hidden_states, result.residual
+                prev_topk_indices = result.topk_indices
+            return DecodeLayerOutput(hidden_states, residual, prev_topk_indices)
 
 
 class Glm5MoeModel(Glm5ModelBase):

@@ -284,6 +284,44 @@ class FusedMoe(torch.nn.Module):
         return self.fused_experts.topk_ids_dtype
 
     @property
+    def supports_cuda_graph_clone(self) -> bool:
+        return callable(getattr(self.fused_experts, "clone_for_cuda_graph", None))
+
+    @property
+    def supports_prepacked_input(self) -> bool:
+        return callable(
+            getattr(self.fused_experts, "prepacked_input_views", None)
+        ) and callable(getattr(self.fused_experts, "forward_prepacked", None))
+
+    def clone_for_cuda_graph(self, *, share_mega_buf: bool = False) -> "FusedMoe":
+        if not self.supports_cuda_graph_clone:
+            raise RuntimeError(
+                f"{self.strategy_name} does not support graph workspace cloning"
+            )
+        return FusedMoe(
+            self.router,
+            self.fused_experts.clone_for_cuda_graph(share_mega_buf=share_mega_buf),
+            self.expert_num,
+            self.strategy_name,
+        )
+
+    def prepacked_input_views(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self.supports_prepacked_input:
+            raise RuntimeError(
+                f"{self.strategy_name} does not support prepacked inputs"
+            )
+        return self.fused_experts.prepacked_input_views(tokens)
+
+    def forward_prepacked(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self.supports_prepacked_input:
+            raise RuntimeError(
+                f"{self.strategy_name} does not support prepacked inputs"
+            )
+        return self.fused_experts.forward_prepacked(hidden_states)
+
+    @property
     def supports_gate_pack(self) -> bool:
         return bool(
             self.router.supports_gate_pack and self.fused_experts.supports_gate_pack

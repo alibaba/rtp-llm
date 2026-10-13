@@ -9,14 +9,22 @@ Tests:
 
 import argparse
 import asyncio
+import json
 import os
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.test.perf_test.batch_decode_test import _run_decode, _run_prefill
-from rtp_llm.test.perf_test.dataclass import PerfTestConfig
+from rtp_llm.test.perf_test.dataclass import (
+    MetricState,
+    PerfTestConfig,
+    TableType,
+    TestResultMetrics,
+    create_metrics_table,
+)
 from rtp_llm.test.perf_test.perf_config import prepare_config as _prepare_config
 from rtp_llm.test.perf_test.perf_utils import (
     auto_generate_bs_list as _auto_generate_bs_list,
@@ -220,6 +228,55 @@ class TestRunDecode(unittest.TestCase):
         self.assertEqual(c2[0][3], [256])
 
     @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
+    def test_decode_grid_json_preserves_all_input_lengths(self, mock_grid):
+        def run_grid(port, dp_size, batch_sizes, input_lengths, queries, **kwargs):
+            runner = MagicMock()
+            runner.run.return_value = [
+                MetricState(
+                    length,
+                    batch_size,
+                    TestResultMetrics(
+                        total_requests=batch_size * dp_size,
+                        success_requests=batch_size * dp_size,
+                        fail_requests=0,
+                        avg_decode_time=float(length),
+                    ),
+                )
+                for length in input_lengths
+                for batch_size in batch_sizes
+            ]
+            # Each real GridRunner writes this same filename before returning.
+            create_metrics_table(
+                TableType.Decode,
+                runner.run.return_value,
+                kwargs["dump_json_path"],
+                {"dp_size": dp_size, "tp_size": kwargs.get("tp_size", 1)},
+                "Decode Result",
+            )
+            return runner
+
+        mock_grid.side_effect = run_grid
+        with tempfile.TemporaryDirectory() as output_dir:
+            _run_decode(
+                8000,
+                4,
+                _make_args(target_tpot=0),
+                self._grid_config(),
+                {128: "q128", 256: "q256"},
+                {"max_kv_tokens": 2048},
+                dump_json_path=output_dir,
+                tp_size=1,
+            )
+            with open(os.path.join(output_dir, "Decode_Result.json")) as f:
+                result = json.load(f)
+        self.assertEqual(
+            {(row["input_len"], row["batch_size"]) for row in result["metrics"]},
+            {(128, 1), (128, 8), (128, 16), (256, 1), (256, 8)},
+        )
+        self.assertEqual(result["model_info"], {"dp_size": 4, "tp_size": 1})
+        self.assertTrue(all(row["success_rate"] == 1 for row in result["metrics"]))
+
+    @patch("rtp_llm.test.perf_test.batch_decode_test.GridRunner")
     def test_decode_grid_kv_skip(self, MockGridRunner):
         """All BS filtered out -> input_len is skipped entirely."""
         args = _make_args(target_tpot=0)
@@ -413,9 +470,7 @@ class TestOfflineBenchConfig(unittest.TestCase):
     def test_validate_num_return_sequences(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineBenchConfig
 
-        with self.assertRaisesRegex(
-            ValueError, "num_return_sequences must be >= 1"
-        ):
+        with self.assertRaisesRegex(ValueError, "num_return_sequences must be >= 1"):
             OfflineBenchConfig(num_return_sequences=0).validate()
 
 
@@ -429,9 +484,7 @@ class TestOfflineFailurePolicy(unittest.TestCase):
     def test_rejects_zero_successful_requests(self):
         from rtp_llm.test.perf_test.offline_runner import OfflineMetrics
 
-        metrics = OfflineMetrics(
-            total_submitted=2, success_requests=0, fail_requests=2
-        )
+        metrics = OfflineMetrics(total_submitted=2, success_requests=0, fail_requests=2)
         with self.assertRaisesRegex(RuntimeError, "no requests succeeded"):
             metrics.raise_if_all_requests_failed()
 
@@ -1506,10 +1559,7 @@ class TestOfflineBenchMain(unittest.TestCase):
     def test_all_failed_requests_raise_from_entry_point_and_stop_server(self):
         import rtp_llm.test.perf_test.offline_bench_test as offline_bench
         import rtp_llm.test.perf_test.offline_runner as offline_runner_module
-        from rtp_llm.test.perf_test.offline_runner import (
-            OfflineMetrics,
-            OfflineRunner,
-        )
+        from rtp_llm.test.perf_test.offline_runner import OfflineMetrics, OfflineRunner
 
         server = MagicMock(port=12345)
         failed_metrics = OfflineMetrics(

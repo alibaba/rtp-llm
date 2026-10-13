@@ -535,11 +535,6 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
-        # When True, the MoE atomic weights (moe_w1, moe_w2) skip FP8_PER_BLOCK
-        # quantization in the loader and stay in compute dtype (BF16). This is
-        # used by the mega_moe path which performs its own internal BF16->FP4
-        # conversion in MegaMoeWrapper.
-        self.skip_moe = kwargs.get("skip_moe", False)
         self.scale_fmt = kwargs.get("scale_fmt", None)
 
     @classmethod
@@ -1067,12 +1062,6 @@ DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
     group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
     is_quanted=False,
 )
-DEFAULT_FP8_BLOCK_WISE_NO_MOE_QUANT_CONFIG = Fp8BlockWiseQuantConfig(
-    bits=8,
-    group_size=Fp8BlockWiseQuantConfig.DEFAULT_FP8_QUANT_BLOCK_SIZE,
-    is_quanted=False,
-    skip_moe=True,
-)
 DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG = Fp8PerChannelCompressedQuantConfig(
     bits=8, is_quanted=False
 )
@@ -1109,7 +1098,6 @@ preset_quant_config = {
     "FP8": DEFAULT_FP8_PER_TENSOR_QUANT_CONFIG,
     "FP8_DYNAMIC_PER_TENSOR": DEFAULT_FP8_DYNAMIC_PER_TENSOR_QUANT_CONFIG,
     "FP8_PER_BLOCK": DEFAULT_FP8_BLOCK_WISE_QUANT_CONFIG,
-    "FP8_PER_BLOCK_NO_MOE": DEFAULT_FP8_BLOCK_WISE_NO_MOE_QUANT_CONFIG,
     "FP8_PER_CHANNEL_COMPRESSED": DEFAULT_FP8_PER_CHANNEL_COMPRESSED_QUANT_CONFIG,
     "FP8_PER_CHANNEL_QUARK": DEFAULT_FP8_PER_CHANNEL_QUARK_QUANT_CONFIG,
     "QUARKMXFP4": DEFAULT_QUARK_MXFP4_QUANT_CONFIG,

@@ -116,5 +116,91 @@ class OpenaiComparerGraphStatusTest(unittest.TestCase):
         )
 
 
+class OpenaiComparerHealthTest(unittest.TestCase):
+    def setUp(self):
+        helper = OpenaiComparerGraphStatusTest()
+        helper.setUp()
+        self.comparer = helper.comparer
+        self.golden = helper.golden
+        self.config = {
+            "skip_choices": True,
+            "skip_usage": True,
+            "output_health_check": {"min_content_chars": 5},
+        }
+        self.comparer.qr_info["compare_config"] = self.config
+
+    def check_response(self, payload):
+        self.comparer.compare_result(
+            self.comparer.format_result({}),
+            self.comparer.format_result(payload),
+        )
+
+    def test_empty_expected_result_accepts_healthy_response(self):
+        self.check_response(copy.deepcopy(self.golden))
+
+    def test_skip_choices_does_not_bypass_health_checks(self):
+        for content in ("", "bad", "abc\x01def"):
+            with self.subTest(content=content):
+                payload = copy.deepcopy(self.golden)
+                payload["choices"][0]["message"]["content"] = content
+                with self.assertRaises(SmokeException):
+                    self.check_response(payload)
+
+    def test_usage_threshold_is_checked_even_with_skip_usage(self):
+        self.config["output_health_check"]["min_completion_tokens"] = 2
+        with self.assertRaises(SmokeException):
+            self.check_response(copy.deepcopy(self.golden))
+
+    def test_exact_repetition_boundary_is_rejected(self):
+        self.config["output_health_check"]["repeat_window"] = 3
+        payload = copy.deepcopy(self.golden)
+        payload["choices"][0]["message"]["content"] = "abcdefghijklmnop" * 3
+        with self.assertRaises(SmokeException):
+            self.check_response(payload)
+
+    def test_reasoning_only_response_is_checked(self):
+        payload = copy.deepcopy(self.golden)
+        payload["choices"][0]["message"].update(
+            content="", reasoning_content="valid reasoning"
+        )
+        self.check_response(payload)
+
+    def test_required_and_forbidden_substrings(self):
+        health = self.config["output_health_check"]
+        health["required_substrings"] = ["same"]
+        health["required_substrings_any"] = ["output", "alternative"]
+        self.check_response(copy.deepcopy(self.golden))
+        health["forbidden_substrings"] = ["output"]
+        with self.assertRaises(SmokeException):
+            self.check_response(copy.deepcopy(self.golden))
+
+    def test_cache_reuse_and_mtp_aux_metrics(self):
+        self.config["aux_info_health_check"] = {
+            "min_reuse_len": 64,
+            "min_prefill_total_reuse_len": 64,
+            "min_decode_total_reuse_len": 64,
+            "min_tokens_per_iter": 2,
+            "required_pd_sep": True,
+        }
+        payload = copy.deepcopy(self.golden)
+        payload["aux_info"] = {
+            "reuse_len": 64,
+            "prefill_total_reuse_len": 64,
+            "decode_total_reuse_len": 64,
+            "output_len": 64,
+            "iter_count": 16,
+            "pd_sep": True,
+        }
+        self.check_response(payload)
+        for field, value in (("reuse_len", 0), ("iter_count", 64), ("pd_sep", False)):
+            bad = copy.deepcopy(payload)
+            bad["aux_info"][field] = value
+            with self.subTest(field=field), self.assertRaises(SmokeException):
+                self.check_response(bad)
+        payload.pop("aux_info")
+        with self.assertRaises(SmokeException):
+            self.check_response(payload)
+
+
 if __name__ == "__main__":
     unittest.main()

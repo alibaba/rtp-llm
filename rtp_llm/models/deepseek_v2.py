@@ -5,6 +5,7 @@ import os
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight, MlaConfig
@@ -585,6 +586,12 @@ class DeepSeekV2(BaseModel):
         )
         indexer_desc.compression_ratio = 1
         descs = model_config.kv_cache_spec_descs
+        if (
+            model_config.model_type == "glm_5"
+            and descs
+            and not dsa_layer_has_indexer(model_config, 0)
+        ):
+            raise ValueError("DSA layer 0 cannot share Indexer KV before a full layer")
         for layer_idx, layer_descs in enumerate(descs):
             # GLM shared-topk layers never write an indexer cache. Publishing
             # descriptors for them makes PD decode wait for nonexistent keys.
@@ -761,7 +768,7 @@ class DeepSeekV2(BaseModel):
             config.layernorm_eps = config_json.get("rms_norm_eps", 1e-06)
             config.has_moe_norm = config_json.get("norm_topk_prob", False)
             config.moe_style = 2 if n_shared_experts > 0 else 1
-            config.swiglu_limit = float(config_json.get("swiglu_limit", 10.0))
+            config.swiglu_limit = float(config_json.get("swiglu_limit", 0.0))
 
             moe_step = config_json.get("moe_layer_freq", 1)
             first_k_dense_replace = config_json["first_k_dense_replace"]
@@ -787,9 +794,6 @@ class DeepSeekV2(BaseModel):
                 config.index_share_for_mtp_iteration = bool(
                     config_json.get("index_share_for_mtp_iteration", False)
                 )
-
-                architectures = config_json.get("architectures") or []
-                config._is_glm52_architecture = "GlmMoeDsaForCausalLM" in architectures
 
     @staticmethod
     def get_weight_cls():

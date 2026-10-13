@@ -27,9 +27,11 @@ from rtp_llm.test.perf_test.cache_grid_runner import (
     PrefixPromptFactory,
     _post_prefill,
 )
+from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import FEATURE_NAMES
 from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import (
-    FEATURE_NAMES,
     build_parser as build_formula_parser,
+)
+from rtp_llm.test.perf_test.deepseek_v4_prefill_formula_fit import (
     formula_text,
     load_observations,
     run_fit,
@@ -38,10 +40,7 @@ from rtp_llm.test.perf_test.generate_prefill_3d_chart import (
     load_rows,
     render_cold_miss_2d,
 )
-from rtp_llm.test.perf_test.perf_config import (
-    _apply_engine_env,
-    _apply_run_overrides,
-)
+from rtp_llm.test.perf_test.perf_config import _apply_engine_env, _apply_run_overrides
 from rtp_llm.test.perf_test.perf_utils import write_test_info
 
 
@@ -120,8 +119,7 @@ class BatchDecodeTest(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                case["cache_len"] == 0
-                or case["cache_len"] + 4096 <= case["input_len"]
+                case["cache_len"] == 0 or case["cache_len"] + 4096 <= case["input_len"]
                 for case in cases
             )
         )
@@ -231,9 +229,7 @@ class BatchDecodeTest(unittest.TestCase):
                 measure_runs=1,
                 cache_commit_tail_tokens=4,
             ).run()
-            checkpoint = json.loads(
-                (Path(tmp) / "cache_grid_results.json").read_text()
-            )
+            checkpoint = json.loads((Path(tmp) / "cache_grid_results.json").read_text())
 
         self.assertEqual([row["status"] for row in rows], ["ok", "failed"])
         self.assertEqual(checkpoint["recorded_cases"], 2)
@@ -258,9 +254,7 @@ class BatchDecodeTest(unittest.TestCase):
                 measure_runs=1,
                 cache_commit_tail_tokens=4,
             ).run()
-            checkpoint = json.loads(
-                (Path(tmp) / "cache_grid_results.json").read_text()
-            )
+            checkpoint = json.loads((Path(tmp) / "cache_grid_results.json").read_text())
 
         self.assertEqual([row["status"] for row in rows], ["failed", "failed"])
         self.assertEqual(checkpoint["recorded_cases"], 2)
@@ -349,9 +343,7 @@ class BatchDecodeTest(unittest.TestCase):
                 ensure_ascii=True,
             ).encode("utf-8")
         ).hexdigest()
-        records = [
-            {**metric, "run_fingerprint": fingerprint} for metric in metrics
-        ]
+        records = [{**metric, "run_fingerprint": fingerprint} for metric in metrics]
         return {
             "schema_version": 2,
             "mode": "prefix_cache_grid",
@@ -404,9 +396,7 @@ class BatchDecodeTest(unittest.TestCase):
                 run_config={"model": "same"},
             )
             rows = resumed.run()
-            checkpoint = json.loads(
-                (Path(tmp) / "cache_grid_results.json").read_text()
-            )
+            checkpoint = json.loads((Path(tmp) / "cache_grid_results.json").read_text())
 
         post.assert_called_once()
         self.assertEqual({row["status"] for row in rows}, {"ok"})
@@ -586,9 +576,7 @@ class BatchDecodeTest(unittest.TestCase):
                 measure_runs=1,
                 cache_commit_tail_tokens=4,
                 run_config={
-                    "engine_args": _redact_argv(
-                        ["--max_batch_tokens_size", "65536"]
-                    )
+                    "engine_args": _redact_argv(["--max_batch_tokens_size", "65536"])
                 },
             )
             higher_token_limit = CacheGridRunner(
@@ -599,9 +587,7 @@ class BatchDecodeTest(unittest.TestCase):
                 measure_runs=1,
                 cache_commit_tail_tokens=4,
                 run_config={
-                    "engine_args": _redact_argv(
-                        ["--max_batch_tokens_size", "131072"]
-                    )
+                    "engine_args": _redact_argv(["--max_batch_tokens_size", "131072"])
                 },
             )
 
@@ -793,9 +779,7 @@ class BatchDecodeTest(unittest.TestCase):
             "api_key",
         ):
             with self.subTest(credential_name=credential_name):
-                checkpoint = (
-                    f"https://models.example.test/model#{credential_name}=fragment-secret"
-                )
+                checkpoint = f"https://models.example.test/model#{credential_name}=fragment-secret"
                 redacted = _redact_argv(["--checkpoint_path", checkpoint])
                 self.assertRegex(redacted[1], r"^sha256:[0-9a-f]{64}$")
                 self.assertNotIn("fragment-secret", json.dumps(redacted))
@@ -963,9 +947,7 @@ class BatchDecodeTest(unittest.TestCase):
 
                 with patch.dict(
                     sys.modules, {"transformers": transformers_module}
-                ), patch(
-                    "rtp_llm.config.log_config.setup_logging"
-                ), patch(
+                ), patch("rtp_llm.config.log_config.setup_logging"), patch(
                     "rtp_llm.test.perf_test.batch_decode_test.parse_args",
                     return_value=(args, remaining),
                 ), patch(
@@ -1020,13 +1002,9 @@ class BatchDecodeTest(unittest.TestCase):
             )
 
             def record_status(*unused_args, **kwargs):
-                events.append(
-                    (kwargs["status"], kwargs.get("effective_max_seq_len"))
-                )
+                events.append((kwargs["status"], kwargs.get("effective_max_seq_len")))
 
-            with patch(
-                "rtp_llm.config.log_config.setup_logging"
-            ), patch(
+            with patch("rtp_llm.config.log_config.setup_logging"), patch(
                 "rtp_llm.test.perf_test.batch_decode_test.parse_args",
                 return_value=(args, remaining),
             ), patch(
@@ -1050,7 +1028,7 @@ class BatchDecodeTest(unittest.TestCase):
                 "rtp_llm.test.perf_test.batch_decode_test.create_query",
                 return_value={8: "query"},
             ), patch(
-                "rtp_llm.test.perf_test.batch_decode_test._run_prefill"
+                "rtp_llm.test.perf_test.grid_runner.GridRunner.run", return_value=[]
             ), patch(
                 "rtp_llm.test.perf_test.batch_decode_test.collect_timeline_files"
             ), patch(
@@ -1187,15 +1165,11 @@ class BatchDecodeTest(unittest.TestCase):
         }
         first_config = {
             **common_runtime,
-            "cases": [
-                {"case_id": 1, "batch_size": 1, "input_len": 16, "cache_len": 0}
-            ],
+            "cases": [{"case_id": 1, "batch_size": 1, "input_len": 16, "cache_len": 0}],
         }
         second_config = {
             **common_runtime,
-            "cases": [
-                {"case_id": 2, "batch_size": 1, "input_len": 24, "cache_len": 0}
-            ],
+            "cases": [{"case_id": 2, "batch_size": 1, "input_len": 24, "cache_len": 0}],
         }
         with tempfile.TemporaryDirectory() as tmp:
             first = Path(tmp) / "shard-1.json"

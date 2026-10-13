@@ -40,6 +40,7 @@ contention noise, not a real loss zone.
 import torch
 import triton
 import triton.language as tl
+
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     create_per_token_group_quant_fp8_output_scale,
 )
@@ -214,6 +215,7 @@ def _baseline_strided_rmsnorm_fp8_quant(
     scale_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import flashinfer.norm
+
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     normed = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
@@ -235,6 +237,7 @@ def _baseline_strided_rmsnorm_fp8_quant_with_bf16_output(
     scale_ue8m0: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     import flashinfer.norm
+
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 
     bf16_out = flashinfer.norm.rmsnorm(x.contiguous(), weight, eps=eps)
@@ -259,7 +262,7 @@ def fused_strided_rmsnorm(
     weight: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """RMSNorm over a (possibly strided) 2-D input. Returns bf16 normed output.
+    """RMSNorm over a (possibly strided) 2-D input, preserving its dtype.
 
     Args:
         x:      [T, H] strided OK. ``x.stride(0)`` is read inside the kernel.
@@ -268,17 +271,17 @@ def fused_strided_rmsnorm(
         eps:    RMSNorm epsilon.
 
     Returns:
-        bf16 normed output, contiguous shape ``[T, H]``.
+        Normed output with input dtype, contiguous shape ``[T, H]``.
 
     Falls back to ``.contiguous() + flashinfer.norm.rmsnorm`` for ``H > 8192``
-    or when ``x.stride(-1) != 1``.
+    or when ``x.stride(-1) != 1`` or the input is not bf16.
     """
     assert x.dim() == 2
     assert weight.dim() == 1 and weight.shape[0] == x.shape[1]
     T, H = x.shape
 
     block_n = triton.next_power_of_2(H)
-    if block_n > MAX_INREG_H or x.stride(-1) != 1:
+    if x.dtype != torch.bfloat16 or block_n > MAX_INREG_H or x.stride(-1) != 1:
         return _baseline_strided_rmsnorm(x, weight, eps)
 
     bf16_out = torch.empty((T, H), dtype=torch.bfloat16, device=x.device)

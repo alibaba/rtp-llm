@@ -1,7 +1,9 @@
+load("//rtp_llm/test/smoke:suites_cu13_glm5x.bzl", "cu13_glm5x_suites")
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 load("@arch_config//:arch_select.bzl", "cuda13_x86_test_gpu")
 
 def cuda13_suites():
+    cu13_glm5x_suites()
     # ============================================================================
     # DeepSeek-V4 smoke — minimal production-config coverage
     #
@@ -133,6 +135,7 @@ def cuda13_suites():
     native.test_suite(
         name = "smoke_cuda13_x86",
         tests = [
+            ":smoke_cu13_glm5x",
             # Only DeepSeek-V4-Pro case. Deliberately plain — no CUDA graph, no PD
             # separation, no speculative decode, no page-RR. The advanced feature
             # matrix is covered on Flash above; this exists so a Pro-specific

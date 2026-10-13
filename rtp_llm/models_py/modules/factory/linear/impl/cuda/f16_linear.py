@@ -1,18 +1,12 @@
-"""CUDA F16 (non-quantized) Linear implementation.
+"""CUDA F16 (non-quantized) Linear implementation."""
 
-When USE_ONLINE_FP4GEMM=1, layers with K%128==0 are deferred to
-CudaOnlineMxfp4Linear for online MXFP4 quantization + mm_fp4 GEMM.
-"""
-
-import os
 from typing import Optional
 
 import torch
-from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.ops import HWKernelConfig
 from torch.nn import functional as F
 
-_MXFP4_ONLINE = os.environ.get("USE_ONLINE_FP4GEMM", "0") == "1"
+from rtp_llm.models_py.modules.factory.linear import LinearBase
+from rtp_llm.ops import HWKernelConfig
 
 
 class CudaF16Linear(LinearBase):
@@ -30,9 +24,6 @@ class CudaF16Linear(LinearBase):
     ) -> bool:
         if weight_scales is not None:
             return False
-        if _MXFP4_ONLINE and weight.dtype in (torch.bfloat16, torch.float16):
-            if weight.dim() == 2 and weight.shape[0] % 128 == 0:
-                return False
         return True
 
     def __init__(

@@ -10,6 +10,76 @@ from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 
 
 class IndexerPagedContractTest(unittest.TestCase):
+    def test_stable_topk_dispatch_respects_architecture(self):
+        for sm10x in (False, True):
+            with (
+                self.subTest(sm10x=sm10x),
+                patch.object(indexer_op, "is_sm10x", return_value=sm10x),
+            ):
+                operator = indexer_op.IndexerOp(1, 128, 512, 0, stable_topk=True)
+                self.assertEqual(
+                    operator._paged_topk_backend,
+                    "topk_v3_tie_break" if sm10x else "dsv4_persistent",
+                )
+                self.assertEqual(
+                    operator._prefill_topk_backend,
+                    "topk_v3_tie_break" if sm10x else "dsv4_per_row",
+                )
+
+    def test_paged_logits_keeps_legacy_fallback(self):
+        operator = self.make_operator()
+        lengths = torch.tensor([7, 11], dtype=torch.int32)
+        inputs = SimpleNamespace(
+            kv_cache_kernel_block_id_device=torch.zeros(2, 1, dtype=torch.int32)
+        )
+        params = SimpleNamespace(expanded_seq_lens=lengths, kvlen_d=lengths)
+        cache = SimpleNamespace(
+            seq_size_per_block=64,
+            kv_cache_base=torch.zeros(1, 64 * 132, dtype=torch.uint8),
+        )
+        for sm10x in (False, True):
+            with (
+                self.subTest(sm10x=sm10x),
+                patch.object(indexer_op, "is_sm10x", return_value=sm10x),
+                patch.object(indexer_op, "deep_gemm", None),
+                patch.object(
+                    indexer_op,
+                    "legacy_fp8_paged_mqa_logits",
+                    return_value=torch.zeros(2, 64),
+                ) as legacy,
+                patch.object(
+                    indexer_op, "_get_topk_workspace", return_value=torch.empty(0)
+                ),
+            ):
+                result = operator._get_topk_paged(
+                    torch.zeros(2, 2, 128), torch.ones(2, 2, 1), cache, params, inputs
+                )
+                self.assertEqual(result.shape, (2, 2))
+                legacy.assert_called_once()
+                torch.testing.assert_close(legacy.call_args.args[3].flatten(), lengths)
+
+    def test_score_workspace_is_bounded_for_long_contexts(self):
+        for keys in (128, 32768, 262144, 1048576):
+            rows = indexer_op._fp8_mqa_logits_chunk_rows(32768, keys)
+            padded_keys = ((keys + 255) // 256) * 256
+            self.assertGreater(rows, 0)
+            self.assertLessEqual(rows * padded_keys * 4, 256 * 1024 * 1024)
+        self.assertEqual(indexer_op._fp8_mqa_logits_chunk_rows(1, 32768), 1)
+
+    def test_resolved_fusion_policy_controls_cp_and_sparse_mla(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+            SparseMlaImpl,
+        )
+
+        module = Indexer.__new__(Indexer)
+        nn.Module.__init__(module)
+        attention = SparseMlaImpl.__new__(SparseMlaImpl)
+        for enabled in (False, True):
+            module._fuse_kernels_enabled = enabled
+            self.assertEqual(module._prefill_cp_fused_quant_enabled(), enabled)
+            attention.configure_fusion(SimpleNamespace(enable_fuse_kernels=enabled))
+            self.assertEqual(attention._fuse_qk_rope_cat_cache_mla, enabled)
+
     def make_indexer(self, *, fuse=True, cp=False):
         module = Indexer.__new__(Indexer)
         nn.Module.__init__(module)
@@ -106,6 +176,8 @@ class IndexerPagedContractTest(unittest.TestCase):
         return operator
 
     def test_stable_topk_equal_scores_padding_and_graph_replay(self):
+        if not indexer_op.is_sm10x():
+            self.skipTest("stable TopK kernels require SM10x")
         operator = indexer_op.IndexerOp(1, 128, 512, 0, stable_topk=True)
         self.assertEqual(operator._paged_topk_backend, "topk_v3_tie_break")
         self.assertEqual(operator._prefill_topk_backend, "topk_v3_tie_break")
@@ -163,6 +235,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         logits = torch.zeros(rows, 128)
         kernel = Mock(return_value=logits)
         with (
+            patch.object(indexer_op, "is_sm10x", return_value=True),
             patch.object(
                 indexer_op, "deep_gemm", SimpleNamespace(fp8_paged_mqa_logits=kernel)
             ),
@@ -215,6 +288,7 @@ class IndexerPagedContractTest(unittest.TestCase):
         )
         kernel = Mock(return_value=torch.zeros(10, 192))
         with (
+            patch.object(indexer_op, "is_sm10x", return_value=True),
             patch.object(
                 indexer_op, "deep_gemm", SimpleNamespace(fp8_paged_mqa_logits=kernel)
             ),

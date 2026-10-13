@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
+from torch import nn
+
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeLayer, GenericMoeModel
 from rtp_llm.models_py.model_desc.generic_moe_mtp import GenericMoeMTPModel
 from rtp_llm.models_py.model_desc.glm5 import (
@@ -12,14 +14,23 @@ from rtp_llm.models_py.model_desc.glm5 import (
 )
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import MlaAttention
-from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import FusedMoe
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe_runtime import (
     MegaMoeWrapper,
     SharedExpertMegaMoeWrapper,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.prepared_mega_moe import (
+    PreparedMegaMoeExecutor,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.prepared_mega_moe import (
+    PreparedMegaMoeRouter,
 )
 from rtp_llm.models_py.modules.hybrid.glm5_cmp import Glm5Cmp
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 
 class RecordingLayer(nn.Module):
@@ -99,9 +110,28 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                         self.assertIs(linear.call_args.kwargs["quant_config"], quant)
                         self.assertIsNone(linear.call_args.kwargs["hw_kernel_config"])
 
+    def test_mtp_indexer_sharing_is_selected_by_model_capability(self):
+        from rtp_llm.models_py.model_desc.generic_moe_mtp import (
+            _mtp_indexer_share_active,
+        )
+
+        model = SimpleNamespace(index_share_for_mtp_iteration=True)
+        parallel = SimpleNamespace(
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: False)
+        )
+        self.assertTrue(_mtp_indexer_share_active(model, parallel, 1, 512))
+        self.assertFalse(_mtp_indexer_share_active(model, parallel, 2, 512))
+        self.assertFalse(_mtp_indexer_share_active(model, parallel, 1, 0))
+        parallel.prefill_cp_config.is_enabled = lambda: True
+        self.assertFalse(_mtp_indexer_share_active(model, parallel, 1, 512))
+        parallel.prefill_cp_config.is_enabled = lambda: False
+        model.index_share_for_mtp_iteration = False
+        self.assertFalse(_mtp_indexer_share_active(model, parallel, 1, 512))
+
     def make_moe_layer(self, *, fused_shared=False, cp_prefill=False, ffn_tp_size=1):
         config = SimpleNamespace(
             model_type="glm_5",
+            swiglu_limit=0.0,
             hidden_size=4,
             inter_size=8,
             expert_num=256,
@@ -130,6 +160,15 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
         kernel.forward_prepacked = Mock(return_value=torch.full((3, 4), 2.0))
         backend.mega_moe = kernel
         backend.expert_num = 256
+        executor = object.__new__(PreparedMegaMoeExecutor)
+        executor.runtime = backend
+        executor.includes_shared_expert = fused_shared
+        backend = FusedMoe(
+            PreparedMegaMoeRouter(SimpleNamespace(tp_size=1), FusedMoEQuantConfig()),
+            executor,
+            256,
+            "mega_moe",
+        )
         package = "rtp_llm.models_py.model_desc.generic_moe."
         with (
             patch(
@@ -142,8 +181,12 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 package + "DenseMLP", return_value=Mock(return_value=torch.ones(3, 4))
             ),
             patch(
-                "rtp_llm.models_py.model_desc.glm5.create_mega_moe_wrapper",
+                "rtp_llm.models_py.model_desc.glm5.FusedMoeFactory.create_fused_moe",
                 return_value=backend,
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.glm5.MoEConfigAdapter",
+                return_value=SimpleNamespace(),
             ),
         ):
             layer = Glm5MoeLayer(
@@ -206,7 +249,7 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             torch.zeros(3, 4), torch.zeros(3, 8), torch.ones(3, 8)
         )
         torch.testing.assert_close(result, torch.full((3, 4), 2.0))
-        layer.fused_moe.mega_moe.forward_prepacked.assert_called_once()
+        layer.fused_moe.fused_experts.runtime.mega_moe.forward_prepacked.assert_called_once()
 
     def test_graph_clone_preserves_common_routing_and_collective_state(self):
         layer = self.make_moe_layer(ffn_tp_size=2)

@@ -500,6 +500,7 @@ class BaseModel(object):
             database.dump_lora_info()
 
         weights_info: ModelDeployWeightInfo = self.get_weight_cls()(
+            moe_strategy=self.moe_config.moe_strategy,
             model_config=self.model_config,
             parallelism_config=self.parallelism_config,
             hw_kernel_config=self.hw_kernel_config,

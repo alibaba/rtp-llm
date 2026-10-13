@@ -69,7 +69,6 @@ def _env_enabled(name: str) -> bool:
 # Resolve once at import. Production sets the flag before the worker starts;
 # avoiding an os.environ lookup in every layer keeps the dispatcher negligible.
 _OPT_ENABLED = _env_enabled("GLM5_CP_OPT")
-_PYNCCL_VALIDATE = _env_enabled("GLM5_CP_PYNCCL_VALIDATE")
 
 
 class _NCCLLib:
@@ -592,8 +591,6 @@ def all_gather_into_tensor(
     # Full Python-side validation is useful while bringing up a new shape, but
     # costs a meaningful fraction of an 11-us pynccl launch. Production relies
     # on the fixed GLM5 call-site contracts; opt in when diagnosing a new path.
-    if _PYNCCL_VALIDATE:
-        _validate_all_gather(output, input, process_group)
     gather_stream = stream or torch.cuda.current_stream(input.device)
     lib, comm = _require_comm(process_group, input.device)
     lib.all_gather(
@@ -646,8 +643,6 @@ def all_gather(
         all_gather_into_tensor(output, input, group=process_group)
         return output
 
-    if _PYNCCL_VALIDATE:
-        _validate_all_gather(output, input, process_group)
     assert gather_stream is not None
     _pynccl_symm_all_gather(output, input, gather_stream, process_group)
     return output

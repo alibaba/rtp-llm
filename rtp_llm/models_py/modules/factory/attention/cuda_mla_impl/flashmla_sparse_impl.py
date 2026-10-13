@@ -48,6 +48,7 @@ from rtp_llm.models_py.triton_kernels.sparse_mla.block_index_to_global import (
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
 )
+from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -283,15 +284,9 @@ class SparseMlaFp8Op(SparseMlaOp):
         # it on first call, then reuses it for the rest of the forward.
         self._reset_sched_meta(int(mla_params.batch_indice_h.shape[0]) * self.num_heads)
 
-        # Gather path: only for prefill, gated by env var.
-        gather_enabled = (
-            os.environ.get("USE_GATHER_PATH", "0") == "1"
-            and attn_inputs is not None
-            and getattr(attn_inputs, "is_prefill", False)
-            and not _is_multi_token_decode(attn_inputs)
-            and not self.use_cuda_graph
-        )
-        self._gather = self._build_gather_workspace() if gather_enabled else None
+        # Replicated caches use paged attention directly. Sharded CP caches
+        # override this choice when their layout requires gathering.
+        self._gather = None
 
     def _build_gather_workspace(self) -> Optional[_GatherWorkspace]:
         """Slice the prefill indptr and record the gather layout.
@@ -526,6 +521,10 @@ class SparseMlaImpl(MlaImplBase):
         # — do not inline.
         self.create_params(attn_inputs)
 
+    def configure_fusion(self, hw_kernel_config) -> None:
+        """Use the same resolved fusion policy as the model's MLA/Indexer layers."""
+        self._fuse_qk_rope_cat_cache_mla = fuse_kernels_enabled(hw_kernel_config)
+
     def create_params(self, attn_inputs: PyAttentionInputs) -> None:
         """Allocate fmha_params and run the first prepare(). Override hook."""
         self.fmha_params = rtp_llm_ops.SparseMlaParams()
@@ -542,6 +541,9 @@ class SparseMlaImpl(MlaImplBase):
         the captured schedule tensor address stable, so replay updates it in
         place instead of replacing the tensor object.
         """
+        # Other architectures use the legacy/shape-probing indexer entry.
+        if not is_sm10x():
+            return
         if not (
             _is_multi_token_decode(attn_inputs)
             or not bool(getattr(attn_inputs, "is_prefill", False))

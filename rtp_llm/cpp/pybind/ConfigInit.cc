@@ -2157,8 +2157,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("extra_data_path", &ModelConfig::extra_data_path)
         .def_readwrite("local_extra_data_path", &ModelConfig::local_extra_data_path)
         .def_readwrite("index_share_for_mtp_iteration", &ModelConfig::index_share_for_mtp_iteration)
-        .def_readwrite("enable_glm52_shared_indexer_kv_cache", &ModelConfig::enable_glm52_shared_indexer_kv_cache)
-        .def_readwrite("glm52_indexer_kv_slot_mapping", &ModelConfig::glm52_indexer_kv_slot_mapping)
         .def_readwrite("model_type", &ModelConfig::model_type)
         .def_readwrite("ptuning_path", &ModelConfig::ptuning_path)
         .def_readwrite("mm_model_config", &ModelConfig::mm_model_config)

@@ -30,7 +30,6 @@ class ModelArgs:
         "phy2log_path",
         "enable_fp32_lm_head",
         "enable_output_vocab_pruning",
-        "enable_glm52_shared_indexer_kv_cache",
     ]
 
     def __init__(self):
@@ -62,4 +61,3 @@ class ModelArgs:
         # LM head precision
         self.enable_fp32_lm_head: Optional[bool] = None
         self.enable_output_vocab_pruning: bool = False
-        self.enable_glm52_shared_indexer_kv_cache: bool = False

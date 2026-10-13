@@ -1,4 +1,3 @@
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -55,9 +54,9 @@ class Indexer(nn.Module):
         # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
         # out of the forward path so it's free at decode (no env / config
         # lookup per token).
+        self._fuse_kernels_enabled = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_logits_head_gate = (
-            fuse_kernels_enabled(hw_kernel_config)
-            and fused_logits_head_gate is not None
+            self._fuse_kernels_enabled and fused_logits_head_gate is not None
         )
 
         self.index_n_heads = attn_config.indexer_head_num
@@ -145,6 +144,7 @@ class Indexer(nn.Module):
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
             stable_topk=stable_topk,
+            enable_fuse_kernels=self._fuse_kernels_enabled,
         )
 
     def _prefill_cp_enabled(self) -> bool:
@@ -153,9 +153,7 @@ class Indexer(nn.Module):
         return self.parallelism_config.prefill_cp_config.is_enabled()
 
     def _prefill_cp_fused_quant_enabled(self) -> bool:
-        return os.environ.get(
-            "DSV4_CP_PREFILL_INDEXER_FUSED_QUANT", "1"
-        ).strip().lower() in ("1", "true", "yes", "on")
+        return self._fuse_kernels_enabled
 
     def _is_sparse_prefill_cp(self, attention_inputs: Any) -> bool:
         return not _is_decode_phase(attention_inputs) and self._prefill_cp_enabled()

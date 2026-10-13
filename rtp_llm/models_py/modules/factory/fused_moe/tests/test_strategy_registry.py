@@ -71,6 +71,33 @@ def _config(strategy: str, quant_config=None) -> MoEConfigAdapter:
 
 
 class StrategyRegistryDiagnosticsTest(unittest.TestCase):
+    def test_all_prepared_recipes_use_the_public_registry(self):
+        from rtp_llm.config.mega_moe import MEGA_MOE_STRATEGIES, MegaMoeExecutionPolicy
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.prepared_mega_moe import (
+            CudaPreparedMegaMoeStrategy,
+        )
+
+        registry = StrategyRegistry()
+        # The overlapping legacy names must remain available to DSv4.
+        registry.register(CudaMegaMoeStrategy())
+        for name in MEGA_MOE_STRATEGIES:
+            registry.register(CudaPreparedMegaMoeStrategy(name))
+        for name in MEGA_MOE_STRATEGIES:
+            with self.subTest(strategy=name):
+                config = _config(name)
+                config.mega_moe_policy = MegaMoeExecutionPolicy()
+                config.n_shared_experts = 1
+                config.has_shared_expert_gate = False
+                chosen = registry.get_strategy(config)
+                self.assertIsInstance(chosen, CudaPreparedMegaMoeStrategy)
+                self.assertEqual(chosen.strategy_name, name)
+                self.assertFalse(
+                    chosen.create_router(config).supports_skip_tp_allreduce
+                )
+                config.world_size = 2
+                with self.assertRaises(ValueError):
+                    registry.get_strategy(config)
+
     def test_no_quant_cpp_runtime_conditions_run_in_regular_ci(self):
         def conditions_pass(quant_config) -> bool:
             checker = ConditionChecker("CudaNoQuantCppStrategy.check_conditions()")
