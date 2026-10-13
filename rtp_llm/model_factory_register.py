@@ -260,6 +260,9 @@ def _register_builtin_lazy_models() -> None:
     )
     register_lazy_model("qwen3_coder_moe", "rtp_llm.models.qwen_v3_moe")
     register_lazy_model(
+        "gpt_oss", "rtp_llm.models.gpt_oss.gpt_oss", ["GptOssForCausalLM"]
+    )
+    register_lazy_model(
         "qwen3_next", "rtp_llm.models.qwen3_next.qwen3_next", ["Qwen3NextForCausalLM"]
     )
     register_lazy_model(

@@ -1,0 +1,166 @@
+{
+ "model_type": "gpt_oss",
+ "model_path": "/mnt/fuse/smoke-test/hf/openai--gpt-oss-20b--6cee5e81ee83917806bbde320786a8fb61efebee",
+ "query_result": [
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Please explain what the CAP theorem states, covering consistency, availability and partition tolerance."
+     }
+    ],
+    "max_tokens": 48,
+    "temperature": 0.0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "PLACEHOLDER_GOLDEN",
+       "name": null,
+       "reasoning_content": "PLACEHOLDER_GOLDEN",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 0,
+     "total_tokens": 0,
+     "completion_tokens": 0
+    }
+   }
+  },
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Please explain what the CAP theorem states, covering consistency, availability and partition tolerance."
+     }
+    ],
+    "max_tokens": 48,
+    "temperature": 0.0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "PLACEHOLDER_GOLDEN",
+       "name": null,
+       "reasoning_content": "PLACEHOLDER_GOLDEN",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 0,
+     "total_tokens": 0,
+     "completion_tokens": 0
+    }
+   }
+  },
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Please explain what the CAP theorem states, covering consistency, availability and partition tolerance."
+     },
+     {
+      "role": "assistant",
+      "content": " "
+     },
+     {
+      "role": "user",
+      "content": "Now give one concrete example of choosing between consistency and availability."
+     }
+    ],
+    "max_tokens": 48,
+    "temperature": 0.0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "PLACEHOLDER_GOLDEN",
+       "name": null,
+       "reasoning_content": "PLACEHOLDER_GOLDEN",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 0,
+     "total_tokens": 0,
+     "completion_tokens": 0
+    }
+   }
+  },
+  {
+   "query": {
+    "prompt": "Shared prefix for cache reuse testing: the quick brown fox jumps over the lazy dog near the riverbank every single morning while the birds sing loudly in the tall green trees.",
+    "generate_config": {
+     "max_new_tokens": 8,
+     "top_k": 1
+    }
+   },
+   "result": {
+    "response": "PLACEHOLDER_GOLDEN"
+   }
+  },
+  {
+   "query": {
+    "prompt_batch": [
+     "Shared prefix for cache reuse testing: the quick brown fox jumps over the lazy dog near the riverbank every single morning while the birds sing loudly in the tall green trees.",
+     "Shared prefix for cache reuse testing: the quick brown fox jumps over the lazy dog near the riverbank every single morning while the birds sing loudly in the tall green trees. Sometimes it rains instead.",
+     "A completely different prompt about database indexes and query planning."
+    ],
+    "generate_config": {
+     "max_new_tokens": 8,
+     "top_k": 1
+    }
+   },
+   "result": {
+    "response_batch": [
+     {
+      "response": "PLACEHOLDER_GOLDEN"
+     },
+     {
+      "response": "PLACEHOLDER_GOLDEN"
+     },
+     {
+      "response": "PLACEHOLDER_GOLDEN"
+     }
+    ]
+   }
+  }
+ ]
+}

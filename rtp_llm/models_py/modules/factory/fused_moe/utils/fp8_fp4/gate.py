@@ -1,14 +1,17 @@
 """Routing gate with optional hash-based expert selection.
 
-Per-token routing scores + top-k expert selection. Three score functions:
+Per-token routing scores + top-k expert selection. Four score functions:
   - "softmax"      -> scores.softmax(-1)
   - "sigmoid"      -> scores.sigmoid()
   - "sqrtsoftplus" -> sqrt(softplus(scores))
+  - "topk_softmax" -> top-k on raw biased logits, softmax over the selected
+                      values only (gpt-oss; weights already sum to 1)
 
 For first ``n_hash_layers`` of the network, routing is deterministic via a
 ``tid2eid`` lookup (token id -> [n_activated_experts] expert ids); ``bias`` is
 None. Otherwise routing picks top-k from biased scores; weights are pulled
-from un-biased scores.
+from un-biased scores (except ``topk_softmax``, where bias is part of both
+ranking and the selected-value softmax).
 
 Optional fused-Triton fast path for ``score_func='sqrtsoftplus' + non-hash``
 (see ``_use_fused_gate``); env-gated by ``MOE_GATE_FUSED`` (default ON).
@@ -272,6 +275,31 @@ class Gate(nn.Module):
                 route_scale=float(self.route_scale),
                 norm_eps=1e-12,
             )
+
+        if self.score_func == "topk_softmax":
+            # gpt-oss router: ranking uses the raw logits WITH bias, and the
+            # routing weights are softmax over only the k selected values
+            # (they sum to 1 by construction — no renormalization, and bias
+            # is part of the softmax input, unlike the noaux_tc split).
+            logits = scores if self.bias is None else scores + self.bias
+            row_is_finite = torch.isfinite(logits).all(dim=-1)
+            safe_logits = torch.nan_to_num(
+                logits,
+                nan=-float("inf"),
+                posinf=-float("inf"),
+                neginf=-float("inf"),
+            )
+            indices = safe_logits.topk(self.topk, dim=-1)[1]
+            top_value = logits.gather(1, indices)
+            weights = torch.softmax(top_value, dim=-1)
+            # Non-finite router rows fall back to uniform weights so
+            # quantization/dispatch kernels never consume NaN/Inf.
+            weights = torch.where(
+                row_is_finite.unsqueeze(-1),
+                weights,
+                1.0 / float(self.topk),
+            )
+            return weights * float(self.route_scale), indices
 
         if self.score_func == "softmax":
             scores = scores.softmax(dim=-1)

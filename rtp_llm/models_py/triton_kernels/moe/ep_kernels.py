@@ -464,10 +464,16 @@ def ep_gather(
     input_index: torch.Tensor,
     output_tensor: torch.Tensor,
 ):
+    # BLOCK_D must be a power of two (tl.arange). Prefer the historical 512;
+    # fall back to the largest power-of-two divisor of the hidden size for
+    # models like gpt-oss (D=2880 -> 64) so the kernel covers any
+    # 64-divisible model dim.
+    hidden_size = input_tensor.shape[1]
     BLOCK_D = 512  # block size of quantization
+    while BLOCK_D > 64 and hidden_size % BLOCK_D != 0:
+        BLOCK_D //= 2
     num_warps = 2
     num_tokens = output_tensor.shape[0]
-    hidden_size = input_tensor.shape[1]
     assert hidden_size % BLOCK_D == 0
     grid = (triton.cdiv(hidden_size, BLOCK_D), min(num_tokens, 1024))
     _fwd_kernel_ep_gather[grid](

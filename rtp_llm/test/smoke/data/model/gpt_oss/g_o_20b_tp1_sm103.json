@@ -1,0 +1,70 @@
+{
+ "model_type": "gpt_oss",
+ "model_path": "/mnt/nas1/hf/gpt-oss-20b",
+ "query_result": [
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Introduce the CAP theorem in two sentences."
+     }
+    ],
+    "max_tokens": 96,
+    "temperature": 0.0,
+    "top_p": 0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "reasoning_content": "We need to give a concise introduction in two sentences. The CAP theorem states that in a distributed system, you can only have at most two of Consistency, Availability, Partition tolerance. Provide two sentences. Let's craft: \"The CAP theorem, also known as Brewer's theorem, states that a distributed data store can simultaneously provide only two of the following three guarantees: Consistency, Availability, and Partition tolerance. In practice, system designers must choose which two properties to",
+       "partial": false
+      },
+      "finish_reason": "length"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 75,
+     "total_tokens": 171,
+     "completion_tokens": 96,
+     "completion_tokens_details": {
+      "audio_tokens": null,
+      "reasoning_tokens": 93
+     }
+    }
+   }
+  },
+  {
+   "query": {
+    "prompt_batch": [
+     "The capital of France is",
+     "The capital of France is",
+     "Water boils at a temperature of"
+    ],
+    "generate_config": {
+     "max_new_tokens": 12,
+     "top_k": 1
+    }
+   },
+   "result": {
+    "response_batch": [
+     {
+      "response": " Paris.\"\n    },\n    {\n        \"question\": \"What"
+     },
+     {
+      "response": " Paris.\"\n    },\n    {\n        \"question\": \"What"
+     },
+     {
+      "response": " 100°C at standard atmospheric pressure.\n\nThe statement \""
+     }
+    ]
+   }
+  }
+ ]
+}

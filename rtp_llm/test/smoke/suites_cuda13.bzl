@@ -129,6 +129,8 @@ def cuda13_suites():
         tags = ["manual"],
     )
 
+
+
     # X86 coverage: the Pro checkpoint requires the larger SM103 memory.
     native.test_suite(
         name = "smoke_cuda13_x86",
@@ -147,6 +149,37 @@ def cuda13_suites():
                 task_info="data/model/deepseek_v4/q_r_v4_pro_cp4_sm100_arm.json",
                 smoke_args="--load_method scratch --max_seq_len 8192 --enable_cuda_graph 0 --act_type BF16 --tp_size 4 --dp_size 1 --ep_size 4 --moe_strategy mega_moe_se --world_size 4 --seq_size_per_block 256 --fp8_kv_cache 1 --use_deepep_moe 1 --use_deepep_low_latency 0 --cp_rotate_method ALL_GATHER --concurrency_limit 1 --max_context_batch_size 1 --reserver_runtime_mem_mb 20480",
                 envs=["DG_JIT_CPP_STANDARD=20"],
+                gpu_type=[cuda13_x86_test_gpu()],
+            ),
+            # gpt-oss (20b/120b, MXFP4 experts): the native DeepGEMM
+            # fp8xfp4 lane on SM103 (tp1 golden set, reuse-cache
+            # three-scenario case, and the 120b variant).
+            smoke_test(
+                name="gptoss_20b_tp1_sm103",
+                task_info="data/model/gpt_oss/g_o_20b_tp1_sm103.json",
+                smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 200000 --reserver_runtime_mem_mb 16384",
+                gpu_type=[cuda13_x86_test_gpu()],
+            ),
+            # Reuse-cache three-scenario coverage (adapt-model skill
+            # 2026-10-14 requirement): cold baseline, identical re-send
+            # (full hit), same-prefix-new-suffix continuation, and a
+            # seeding request followed by a mixed hit/miss batch. gpt-oss
+            # is text-only, so the multimodal partial-match scenario maps
+            # to the prefix-continuation partial hit. Block size 16 is the
+            # proven reuse granularity (qwen25 pattern); kernel block must
+            # divide it, so no explicit kernel_seq_size_per_block.
+            smoke_test(
+                name="gptoss_20b_reuse_sm103",
+                task_info="data/model/gpt_oss/g_o_20b_reuse_sm103.json",
+                smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 16 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 20480 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096",
+                gpu_type=[cuda13_x86_test_gpu()],
+            ),
+            smoke_test(
+                name="gptoss_120b_tp1_sm103",
+                task_info="data/model/gpt_oss/g_o_120b_tp1_sm103.json",
+                # 120b: ~61GB packed weights on one B300 (275GB) — size the KV
+                # pool to fit weights + runtime reserve.
+                smoke_args="--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 180000 --reserver_runtime_mem_mb 16384",
                 gpu_type=[cuda13_x86_test_gpu()],
             ),
         ],

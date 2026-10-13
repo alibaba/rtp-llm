@@ -131,6 +131,8 @@ test_suite(
         ":smoke_sm100_moe",
         ":smoke_sm120_dense",
         ":smoke_sm120_moe",
+        ":smoke_h20_gptoss",
+        ":smoke_sm120_gptoss",
     ],
 )
 

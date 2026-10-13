@@ -1,4 +1,4 @@
-from typing import NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional
 
 import flashinfer
 import torch
@@ -313,7 +313,55 @@ def _init_prefill_cg_params(
 # ---------------------------------------------------------------------------
 
 
-class FlashInferTRTLLMPrefillOp(object):
+class _LayerAttnExtrasMixin(object):
+    """Per-layer attention sinks / sliding window for trtllm-gen kernels.
+
+    gpt-oss (and dsv4-family) models carry per-head attention sinks that
+    enter the softmax denominator only (``out = sum e^x V / (sum e^x +
+    e^sink_h)``) and alternate sliding/full attention layers. flashinfer's
+    trtllm-gen prefill/decode kernels accept both natively
+    (``sinks``/``window_left``); this mixin lets a model register the
+    per-layer values once — keyed by layer_idx — and every forward then
+    looks them up. Unregistered layers keep the defaults (no sink, no
+    window), so non-sink models are unaffected.
+
+    Registration is idempotent and pointer-stable (weights never move), so
+    replaying it on each ``prepare_fmha_impl`` is safe, including under
+    CUDA graph capture.
+    """
+
+    def _init_layer_attn_extras(self) -> None:
+        self._layer_sinks: Dict[int, torch.Tensor] = {}
+        self._layer_window_left: Dict[int, int] = {}
+
+    def register_layer_attn_extras(
+        self,
+        layer_sinks: Dict[int, Optional[torch.Tensor]],
+        layer_window_left: Dict[int, int],
+    ) -> None:
+        """Register per-layer sinks (``[head_num]`` tensor) and window_left.
+
+        ``window_left`` semantics follow flashinfer: the inclusive left
+        window size, ``-1`` disables the window. The sinks tensor is stored
+        raw — the pinned flashinfer (0.6.9) documents ``List[Tensor]`` on
+        the python wrapper, but its tvm-ffi binding (argument 22,
+        ``Optional[DLTensor*]``) rejects a list.
+        """
+        for layer_idx, sinks in layer_sinks.items():
+            if sinks is None:
+                self._layer_sinks.pop(layer_idx, None)
+            else:
+                self._layer_sinks[int(layer_idx)] = sinks
+        for layer_idx, window_left in layer_window_left.items():
+            self._layer_window_left[int(layer_idx)] = int(window_left)
+
+    def _attn_extras(self, layer_idx: int):
+        sinks = self._layer_sinks.get(layer_idx)
+        window_left = self._layer_window_left.get(layer_idx, -1)
+        return sinks, window_left
+
+
+class FlashInferTRTLLMPrefillOp(_LayerAttnExtrasMixin):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -326,6 +374,7 @@ class FlashInferTRTLLMPrefillOp(object):
         self.local_head_kv_num = attn_configs.kv_head_num
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.workspace_buffer = get_trt_workspace_buffer()
+        self._init_layer_attn_extras()
 
     def __del__(self):
         release_trt_workspace_buffer(self.workspace_buffer)
@@ -386,6 +435,7 @@ class FlashInferTRTLLMPrefillOp(object):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
+        layer_idx: int = -1,
     ) -> torch.Tensor:
         dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
@@ -405,6 +455,7 @@ class FlashInferTRTLLMPrefillOp(object):
                 self.head_dim,
             )
 
+        sinks, window_left = self._attn_extras(layer_idx)
         o = flashinfer.prefill.trtllm_batch_context_with_kv_cache(
             query=q,
             kv_cache=kv_cache.kv_cache_base,
@@ -418,16 +469,16 @@ class FlashInferTRTLLMPrefillOp(object):
             batch_size=fmha_params.batch_size,
             cum_seq_lens_q=fmha_params.cu_seqlens,
             cum_seq_lens_kv=fmha_params.cu_kv_seqlens,
-            window_left=-1,
-            # TODO: add attention_sink operation or nvfp4 scale factor if needed
-            sinks=None,
+            window_left=window_left,
+            # per-head sinks (denominator-only softmax column; gpt-oss)
+            sinks=sinks,
             out_dtype=o_type,  # model_runner.dtype
         )
 
         return o.view(-1, self.local_head_num * self.head_dim).to(q_type)
 
 
-class FlashInferTRTLLMDecodeOp(object):
+class FlashInferTRTLLMDecodeOp(_LayerAttnExtrasMixin):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -440,6 +491,7 @@ class FlashInferTRTLLMDecodeOp(object):
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
         self.workspace_buffer = get_trt_workspace_buffer()
+        self._init_layer_attn_extras()
 
     def __del__(self):
         release_trt_workspace_buffer(self.workspace_buffer)
@@ -505,6 +557,7 @@ class FlashInferTRTLLMDecodeOp(object):
         q: torch.Tensor,
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
+        layer_idx: int = -1,
     ) -> torch.Tensor:
         dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
@@ -526,6 +579,7 @@ class FlashInferTRTLLMDecodeOp(object):
                 self.head_dim,
             )
 
+        sinks, window_left = self._attn_extras(layer_idx)
         # Call TRT-LLM kernel
         # raw_out: like q, [bs, acc_q_len, num_q_heads, head_dim] but with output dtype
         o = flashinfer.decode.trtllm_batch_decode_with_kv_cache(
@@ -537,9 +591,9 @@ class FlashInferTRTLLMDecodeOp(object):
             max_seq_len=fmha_params.max_seq_len,
             bmm1_scale=bmm1_scale,
             bmm2_scale=bmm2_scale,
-            window_left=-1,
-            # TODO: add attention_sink operation or nvfp4 scale factor if needed
-            sinks=None,
+            window_left=window_left,
+            # per-head sinks (denominator-only softmax column; gpt-oss)
+            sinks=sinks,
             out_dtype=o_type,  # model_runner.dtype
             q_len_per_req=q.shape[0] // fmha_params.seq_lens.shape[0],
         )
@@ -583,6 +637,14 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         fmha_impl = FlashInferTRTLLMPrefillOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
+    def register_layer_attn_extras(
+        self,
+        layer_sinks: Dict[int, Optional[torch.Tensor]],
+        layer_window_left: Dict[int, int],
+    ) -> None:
+        """Forward per-layer sinks/window registration to the inner op."""
+        self.fmha_impl.register_layer_attn_extras(layer_sinks, layer_window_left)
+
     def forward(
         self,
         qkv: torch.Tensor,
@@ -597,7 +659,9 @@ class FlashInferTRTLLMPrefillImpl(FMHAImplBase):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return self.fmha_impl.forward(
+            fmha_input, kv_cache, self.fmha_params, layer_idx=layer_idx
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
@@ -649,6 +713,14 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
+    def register_layer_attn_extras(
+        self,
+        layer_sinks: Dict[int, Optional[torch.Tensor]],
+        layer_window_left: Dict[int, int],
+    ) -> None:
+        """Forward per-layer sinks/window registration to the inner op."""
+        self.fmha_impl.register_layer_attn_extras(layer_sinks, layer_window_left)
+
     def forward(
         self,
         qkv: torch.Tensor,
@@ -663,7 +735,9 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return self.fmha_impl.forward(
+            fmha_input, kv_cache, self.fmha_params, layer_idx=layer_idx
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg
@@ -725,6 +799,14 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
+    def register_layer_attn_extras(
+        self,
+        layer_sinks: Dict[int, Optional[torch.Tensor]],
+        layer_window_left: Dict[int, int],
+    ) -> None:
+        """Forward per-layer sinks/window registration to the inner op."""
+        self.fmha_impl.register_layer_attn_extras(layer_sinks, layer_window_left)
+
     def forward(
         self,
         qkv: torch.Tensor,
@@ -739,7 +821,9 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         common.apply_write_cache_store(
             self.write_cache_store_impl, self.attn_inputs, kv_cache
         )
-        return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
+        return self.fmha_impl.forward(
+            fmha_input, kv_cache, self.fmha_params, layer_idx=layer_idx
+        )
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         p = self._cg

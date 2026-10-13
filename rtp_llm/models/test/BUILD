@@ -41,3 +41,59 @@ py_test(
         "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
     }),
 )
+
+py_test(
+    name = "gpt_oss_config_test",
+    srcs = ["gpt_oss_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
+    name = "gpt_oss_math_test",
+    srcs = ["gpt_oss_math_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    # triton kernel test: pin to a real GPU pool
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "SM103_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
+)
+
+py_test(
+    name = "gpt_oss_weights_compare_test",
+    srcs = ["gpt_oss_weights_compare_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    # loads the real 13.8GB checkpoint; skips when GPT_OSS_CKPT is absent
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "SM103_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
+)
+
+py_test(
+    name = "gpt_oss_moe_synth_test",
+    srcs = ["gpt_oss_moe_synth_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "SM103_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
+)
+
+py_test(
+    name = "gpt_oss_bf16_moe_test",
+    srcs = ["gpt_oss_bf16_moe_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    target_compatible_with = _DSV4_CUDA13_ONLY,
+    exec_properties = select({
+        "@//:using_cuda13_x86": {"gpu": "SM103_CU13", "gpu_count": "1"},
+        "@//:using_cuda13_arm": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+        "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+    }),
+)

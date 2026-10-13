@@ -133,6 +133,14 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
         cfg = self.cfg
         w13 = layer_weights.pop(W.moe_w1)
         s13 = layer_weights.pop(W.moe_s1)
+        # gpt-oss-style checkpoints carry raw U8 scale bytes (declared uint8
+        # so the loader never numerically casts them); bit-view them as UE8M0
+        # like the grouped-fp4 executor does.
+        if s13.dtype == torch.uint8:
+            s13 = s13.view(torch.float8_e8m0fnu)
+        s2 = layer_weights.pop(W.moe_s2)
+        if s2.dtype == torch.uint8:
+            s2 = s2.view(torch.float8_e8m0fnu)
         inter = cfg.moe_inter_dim
         layout = cfg.moe_w1_layout
         gate_w, up_w = split_moe_w13_gate_up(w13, inter, layout)
@@ -141,7 +149,7 @@ class LocalLoopExecutor(Fp8Fp4ExecutorBase):
             "w1_w": gate_w,
             "w1_s": gate_s,
             "w2_w": layer_weights.pop(W.moe_w2),
-            "w2_s": layer_weights.pop(W.moe_s2),
+            "w2_s": s2,
             "w3_w": up_w,
             "w3_s": up_s,
         }

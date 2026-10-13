@@ -54,6 +54,9 @@ class Fp8Fp4MoeRuntimeConfig:
         route_scale: float = 1.0,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        swiglu_alpha: float = 1.0,
+        swiglu_up_shift: float = 0.0,
+        moe_quant_method: Optional[str] = "FP8_FP4",
     ) -> None:
         if expert_num % max(ep_size, 1) != 0:
             raise ValueError(
@@ -92,6 +95,19 @@ class Fp8Fp4MoeRuntimeConfig:
         self.warmup_include_capacity = bool(warmup_include_capacity)
         self.route_scale = float(route_scale)
         self.swiglu_limit = float(swiglu_limit)
+        # Gated-activation variant: gate * sigmoid(alpha*gate) * (up + shift).
+        # Defaults (1.0 / 0.0) are exactly SiLU*up (DeepSeek-style SwiGLU);
+        # gpt-oss uses alpha=1.702, up_shift=1.0.
+        self.swiglu_alpha = float(swiglu_alpha)
+        self.swiglu_up_shift = float(swiglu_up_shift)
+        # None selects the generic (unquantized) strategy lane — e.g. the
+        # gpt-oss BF16-dequant fallback on GPUs without native MXFP4 GEMM.
+        if moe_quant_method not in (None, "FP8_FP4"):
+            raise ValueError(
+                "moe_quant_method must be 'FP8_FP4' or None (generic lane), "
+                f"got {moe_quant_method!r}"
+            )
+        self.moe_quant_method = moe_quant_method
         self.ep_size = int(ep_size)
         self.ep_rank = int(ep_rank)
         self.n_local_experts = self.physical_expert_num // max(self.ep_size, 1)
@@ -119,6 +135,12 @@ class Fp8Fp4MoeRuntimeConfig:
         self.moe_config = SimpleNamespace(
             moe_strategy=self.moe_strategy,
             use_deepep_low_latency=False,
+            # Fields the generic (quant=None) strategy conditions read on
+            # moe_config; server defaults for a non-DeepEP single-instance
+            # deployment (config_resolver falls back to use_all_gather=True).
+            use_all_gather=True,
+            use_deepep_moe=False,
+            use_mori_ep=False,
         )
 
 
@@ -151,6 +173,9 @@ class Fp8Fp4MoeLayer(nn.Module):
         warmup_include_capacity: bool = False,
         moe_w1_layout: str = "up_gate",
         physical_expert_num: Optional[int] = None,
+        swiglu_alpha: float = 1.0,
+        swiglu_up_shift: float = 0.0,
+        moe_quant_method: Optional[str] = "FP8_FP4",
     ) -> None:
         super().__init__()
         if n_shared_experts < 0:
@@ -192,6 +217,9 @@ class Fp8Fp4MoeLayer(nn.Module):
             route_scale=route_scale,
             moe_w1_layout=moe_w1_layout,
             physical_expert_num=physical_expert_num,
+            swiglu_alpha=swiglu_alpha,
+            swiglu_up_shift=swiglu_up_shift,
+            moe_quant_method=moe_quant_method,
         )
         self.fused_moe = FusedMoeFactory().create_fused_moe(
             runtime_config, layer_weights

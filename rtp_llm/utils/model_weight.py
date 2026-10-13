@@ -1073,6 +1073,66 @@ def transpose_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
     )
 
 
+def _byte_rearrange_view(t: torch.Tensor) -> tuple:
+    """FP8 dtypes lack cat/reshape kernels; view them as uint8 for
+    byte-level rearrangement. Returns (tensor, original_dtype_or_None)."""
+    if t.dtype in (
+        torch.float8_e8m0fnu,
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+    ):
+        return t.view(torch.uint8), t.dtype
+    return t, None
+
+
+def deinterleave_stack_moe_w1(ts: List[torch.Tensor]) -> torch.Tensor:
+    """gpt-oss stacked expert rows are gate/up interleaved (even=gate, odd=up).
+
+    Reorders rows into [gate; up] blocks (the canonical moe_w1 layout) and
+    flattens any packed tail dims (e.g. FP4 blocks [N, K/32, 16] -> [N, K/2]).
+    Works for weight blocks, UE8M0 scales, and expert biases alike: anything
+    whose first dim stacks experts and whose row dim interleaves gate/up.
+    """
+    stacked_tensor = torch.stack(ts, dim=0)
+    stacked_tensor, orig_dtype = _byte_rearrange_view(stacked_tensor)
+    if stacked_tensor.dim() == 2:
+        # per-expert bias vectors: [E, N] with interleaved rows
+        gate = stacked_tensor[:, 0::2]
+        up = stacked_tensor[:, 1::2]
+        out = torch.cat([gate, up], dim=1).contiguous()
+    else:
+        flat = stacked_tensor.reshape(
+            stacked_tensor.shape[0], stacked_tensor.shape[1], -1
+        )
+        gate = flat[:, 0::2, :]
+        up = flat[:, 1::2, :]
+        out = torch.cat([gate, up], dim=1).contiguous()
+    if orig_dtype is not None:
+        out = out.view(orig_dtype)
+    return out
+
+
+def flatten_stack_moe(ts: List[torch.Tensor]) -> torch.Tensor:
+    """Stack per-expert tensors and flatten tail dims: [N, K/32, 16] -> [N, K/2].
+
+    gpt-oss down-proj ships packed blocks/scales per expert as 3D [N, K/32, 16]
+    (or 2D [N, K/32] scales); the canonical moe_w2/moe_s2 layout is flat
+    [E, N, K/2] / [E, N, K/32] like DeepSeek V4.
+    """
+    stacked_tensor = torch.stack(ts, dim=0)
+    stacked_tensor, orig_dtype = _byte_rearrange_view(stacked_tensor)
+    if stacked_tensor.dim() == 2:
+        out = stacked_tensor.contiguous()
+    else:
+        out = stacked_tensor.reshape(
+            stacked_tensor.shape[0], stacked_tensor.shape[1], -1
+        ).contiguous()
+    if orig_dtype is not None:
+        out = out.view(orig_dtype)
+    return out
+
+
 def convert_down_proj_(ts: List[torch.Tensor]) -> torch.Tensor:
     tensor = identity(ts)
     return tensor.permute(0, 2, 1).contiguous()
@@ -1190,6 +1250,9 @@ class W:
     qk_ln_gamma = "self_attention_weights.qk_layernorm.gamma"
     attn_o_w = "self_attention_weights.attention_output_weight.kernel"
     attn_o_b = "self_attention_weights.attention_output_weight.bias"
+    # per-head attention sink logit (enters the softmax denominator only,
+    # numerator dropped); shape [head_num]. gpt-oss/dsv4 lineage.
+    attn_sink = "self_attention_weights.attention_sink"
     post_ln_gamma = "post_layernorm_weights.gamma"
     post_ln_beta = "post_layernorm_weights.beta"
     linear_bias_slopes = "linear_bias_slopes"

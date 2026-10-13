@@ -192,6 +192,28 @@ class KimiDetector(BaseReasoningFormatDetector):
         )
 
 
+class HarmonyChannelDetector(BaseReasoningFormatDetector):
+    """Detector for the gpt-oss harmony channel format.
+
+    Assistant turns emit an optional ``analysis`` channel (reasoning) then a
+    ``final`` channel (content):
+      <|channel|>analysis<|message|>REASONING<|end|>
+      <|channel|>final<|message|>CONTENT<|return|>
+
+    Reasoning is everything before the final-channel marker (force_reasoning
+    covers turns that start emitting analysis content with no leading marker
+    and turns that go straight to final).
+    """
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = True):
+        super().__init__(
+            "<|channel|>analysis<|message|>",
+            "<|channel|>final<|message|>",
+            force_reasoning=force_reasoning,
+            stream_reasoning=stream_reasoning,
+        )
+
+
 class ReasoningParser:
     """
     Parser that handles both streaming and non-streaming scenarios for extracting
@@ -207,6 +229,7 @@ class ReasoningParser:
         "deepseek-r1": DeepSeekR1Detector,
         "deepseek-v3": Qwen3Detector,
         "glm45": Qwen3Detector,
+        "gpt-oss": HarmonyChannelDetector,
         "kimi": KimiDetector,
         "kimi_k2": Qwen3Detector,
         "qwen3": Qwen3Detector,

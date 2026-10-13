@@ -17,6 +17,9 @@ def _silu_and_mul_kernel(
     output_row_stride: tl.int32,
     # Meta-parameter for tuning
     BLOCK_SIZE_N: tl.constexpr,
+    ACT_ALPHA: tl.constexpr = 1.0,
+    UP_SHIFT: tl.constexpr = 0.0,
+    ACT_LIMIT: tl.constexpr = 0.0,
 ):
     pid_b = tl.program_id(axis=0)  # Batch dimension
     pid_n_block = tl.program_id(axis=1)  # N-dimension block
@@ -34,18 +37,39 @@ def _silu_and_mul_kernel(
     gate = tl.load(gate_ptrs, mask=mask)
     value = tl.load(value_ptrs, mask=mask)
 
-    silu_gate = gate * tl.sigmoid(gate.to(tl.float32))
-    output = silu_gate * value
+    if ACT_ALPHA == 1.0 and UP_SHIFT == 0.0 and ACT_LIMIT == 0.0:
+        # Exact legacy SiLU*up path (bit-identical activation math).
+        silu_gate = gate * tl.sigmoid(gate.to(tl.float32))
+        output = silu_gate * value
+    else:
+        # Gated variant (gpt-oss: alpha=1.702, shift=1, limit=7):
+        # clamp(gate, max=L) * sigmoid(alpha*gate) * (clamp(up, -L, L) + shift)
+        # — same clamp convention as the fp8-fp4 path's silu_mul_fp8_quant.
+        gate_f32 = gate.to(tl.float32)
+        up_f32 = value.to(tl.float32)
+        if ACT_LIMIT > 0.0:
+            gate_f32 = tl.minimum(gate_f32, ACT_LIMIT)
+            up_f32 = tl.minimum(tl.maximum(up_f32, -ACT_LIMIT), ACT_LIMIT)
+        act = gate_f32 * (1.0 / (1.0 + tl.exp(-ACT_ALPHA * gate_f32)))
+        output = act * (up_f32 + UP_SHIFT)
 
     tl.store(output_ptrs, output, mask=mask)
 
 
 def silu_and_mul(
-    output_tensor: torch.Tensor, input_tensor: torch.Tensor
+    output_tensor: torch.Tensor,
+    input_tensor: torch.Tensor,
+    act_alpha: float = 1.0,
+    up_shift: float = 0.0,
+    act_limit: float = 0.0,
 ) -> torch.Tensor:
     """
     Computes SiLU(gate) * value in a fused Triton kernel.
     Assumes input_tensor has shape [B, 2*N] and is contiguous.
+
+    ``act_alpha``/``up_shift``/``act_limit`` select the gated variant
+    ``clamp(gate, ±limit) * sigmoid(alpha*gate) * (up + shift)``; the
+    defaults keep the exact legacy SiLU*value math.
     """
     B, D = input_tensor.shape
     assert D % 2 == 0, "Last dimension must be even (2*N)"
@@ -64,6 +88,9 @@ def silu_and_mul(
         input_tensor.stride(0),
         output_tensor.stride(0),
         BLOCK_SIZE_N=BLOCK_SIZE_N,
+        ACT_ALPHA=act_alpha,
+        UP_SHIFT=up_shift,
+        ACT_LIMIT=act_limit,
     )
     return output_tensor
 

@@ -1,0 +1,76 @@
+{
+ "model_type": "gpt_oss",
+ "model_path": "/mnt/nas1/hf/gpt-oss-120b",
+ "query_result": [
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Introduce the CAP theorem in two sentences."
+     }
+    ],
+    "max_tokens": 96,
+    "temperature": 0.0,
+    "top_p": 0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "name": null,
+       "reasoning_content": "We need to introduce CAP theorem in two sentences. Provide concise explanation. Probably mention consistency, availability, partition tolerance, trade-offs. Two sentences.",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "stop",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 75,
+     "total_tokens": 108,
+     "completion_tokens": 33,
+     "completion_tokens_details": {
+      "audio_tokens": null,
+      "reasoning_tokens": 29
+     },
+     "prompt_tokens_details": null
+    }
+   }
+  },
+  {
+   "query": {
+    "prompt_batch": [
+     "The capital of France is",
+     "The capital of France is",
+     "Water boils at a temperature of"
+    ],
+    "generate_config": {
+     "max_new_tokens": 12,
+     "top_k": 1
+    }
+   },
+   "result": {
+    "response_batch": [
+     {
+      "response": " Paris.\n\nGreat! If you have any more questions or"
+     },
+     {
+      "response": " Paris.\n\nGreat! If you have any more questions or"
+     },
+     {
+      "response": " 100°C (212°F) at sea level.\n\n"
+     }
+    ]
+   }
+  }
+ ]
+}

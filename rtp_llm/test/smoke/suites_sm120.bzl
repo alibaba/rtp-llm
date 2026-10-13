@@ -75,3 +75,24 @@ def sm120_suites():
             ),
         ],
     )
+
+    # gpt-oss (20b) — sm12x bring-up on the BF16-dequant lane (MXFP4 has no
+    # sm120 compute path here; the model dequantizes experts at layer build).
+    native.test_suite(
+        name = "smoke_sm120_gptoss",
+        tests = [
+            smoke_test(
+                name = "gptoss_20b_tp1_sm120",
+                task_info = "data/model/gpt_oss/g_o_20b_tp1_sm120.json",
+                # ~27GB BF16-dequant weights on the 72GB RTX PRO 5000.
+                smoke_args = "--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 24000 --reserver_runtime_mem_mb 16384",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+            smoke_test(
+                name = "gptoss_20b_reuse_sm120",
+                task_info = "data/model/gpt_oss/g_o_20b_reuse_sm120.json",
+                smoke_args = "--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 16 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 24000 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096",
+                gpu_type = ["RTX_5000_PRO_CU13"],
+            ),
+        ],
+    )

@@ -57,6 +57,16 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         # w1: [E, 2*inter_size, hidden_size], w2: [E, hidden_size, inter_size]
         self.w1 = weights[W.moe_w1]
         self.w2 = weights[W.moe_w2]
+        # Optional per-expert biases (gpt-oss): gate_up bias added after GEMM1
+        # (pre-activation), down bias after GEMM2 (pre route-weight combine).
+        self.b1 = weights.get(W.moe_b1, None)
+        self.b2 = weights.get(W.moe_b2, None)
+        # Gated-activation variant (defaults keep exact SiLU*up math):
+        # gate * sigmoid(alpha*gate) * (up + shift) with the fp8-fp4 path's
+        # clamp convention (gate max=L, up ±L).
+        self.act_alpha = float(getattr(config, "swiglu_alpha", 1.0) or 1.0)
+        self.up_shift = float(getattr(config, "swiglu_up_shift", 0.0) or 0.0)
+        self.act_limit = float(getattr(config, "swiglu_limit", 0.0) or 0.0)
         self.E = self.w1.size(0)
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
@@ -135,14 +145,27 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             config=config1,
             compute_type=compute_type,
         )
+        if self.b1 is not None:
+            # Per-expert gate_up bias (gpt-oss): add after GEMM1, before
+            # activation. Rows of intermediate1 follow flat_topk_ids.
+            intermediate1 = intermediate1 + self.b1[flat_topk_ids].to(dtype)
 
         # Activation: silu_and_mul(intermediate1) → intermediate2 [M*top_k, inter]
         intermediate2 = torch.empty(
             M * top_k, self.inter_size, device=device, dtype=dtype
         )
-        silu_and_mul(intermediate2, intermediate1)
+        silu_and_mul(
+            intermediate2,
+            intermediate1,
+            act_alpha=self.act_alpha,
+            up_shift=self.up_shift,
+            act_limit=self.act_limit,
+        )
 
-        # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]
+        # GEMM2: intermediate2 @ w2.T → out [M*top_k, K]. Without a down bias
+        # the route weight is folded in here (legacy path, unchanged); with a
+        # per-expert down bias (gpt-oss) the weight moves to the combine so
+        # the bias lands pre-weight, matching the fp8-fp4 executor's math.
         out = torch.empty(M * top_k, K, device=device, dtype=dtype)
         invoke_fused_moe_kernel(
             intermediate2,
@@ -153,13 +176,17 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
             sorted_token_ids2,
             expert_ids2,
             num_tokens_post_padded2,
-            mul_routed_weight=True,
+            mul_routed_weight=self.b2 is None,
             top_k=1,
             config=config2,
             compute_type=compute_type,
         )
-
-        # Sum reduce over top_k: out is [M*top_k, K], reshape and sum
-        output = out.view(M, top_k, K).sum(dim=1)
+        if self.b2 is not None:
+            out = out + self.b2[flat_topk_ids].to(dtype)
+            # Sum reduce over top_k with route weights applied post-bias.
+            output = (out.view(M, top_k, K) * topk_weights.unsqueeze(-1)).sum(dim=1)
+        else:
+            # Legacy sum reduce: route weights already applied in GEMM2.
+            output = out.view(M, top_k, K).sum(dim=1)
 
         return CombineForwardPayload(fused_expert_output=output)

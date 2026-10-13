@@ -62,6 +62,8 @@ def _silu_mul_fp8_quant_packed_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    ACT_ALPHA: tl.constexpr,  # sigmoid slope on gate; 1.0 == SiLU
+    UP_SHIFT: tl.constexpr,  # additive shift on up; 0.0 == legacy
 ):
     N_2: tl.constexpr = N // 2
 
@@ -104,7 +106,15 @@ def _silu_mul_fp8_quant_packed_kernel(
                 act_f32 = tl.minimum(act_f32, clamp_limit)
                 mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
 
-            y = (act_f32 / (1.0 + tl.exp(-act_f32))) * mul_f32
+            # ACT_ALPHA=1.0, UP_SHIFT=0.0 keeps the exact legacy SiLU*up
+            # expression (bit-identical); other values express the gpt-oss
+            # gated variant: gate * sigmoid(alpha*gate) * (up + shift).
+            if ACT_ALPHA == 1.0 and UP_SHIFT == 0.0:
+                y = (act_f32 / (1.0 + tl.exp(-act_f32))) * mul_f32
+            else:
+                y = (
+                    act_f32 * (1.0 / (1.0 + tl.exp(-ACT_ALPHA * act_f32)))
+                ) * (mul_f32 + UP_SHIFT)
             # Round through bf16 to match the legacy unfused path's precision
             # (legacy: hidden = (F.silu(gate) * up).to(bfloat16), then quant
             # reads from bf16 not fp32). Without this the outputs differ at
@@ -155,6 +165,8 @@ def _silu_mul_fp8_quant_packed_split_kernel(
     GROUP_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
+    ACT_ALPHA: tl.constexpr,  # sigmoid slope on gate; 1.0 == SiLU
+    UP_SHIFT: tl.constexpr,  # additive shift on up; 0.0 == legacy
 ):
     pid_pack = tl.program_id(0).to(tl.int64)
     pid_m = tl.program_id(1).to(tl.int64)
@@ -190,7 +202,12 @@ def _silu_mul_fp8_quant_packed_split_kernel(
                 gate = tl.minimum(gate, clamp_limit)
                 up = tl.clamp(up, -clamp_limit, clamp_limit)
 
-            y = (gate / (1.0 + tl.exp(-gate))) * up
+            if ACT_ALPHA == 1.0 and UP_SHIFT == 0.0:
+                y = (gate / (1.0 + tl.exp(-gate))) * up
+            else:
+                y = (gate * (1.0 / (1.0 + tl.exp(-ACT_ALPHA * gate)))) * (
+                    up + UP_SHIFT
+                )
             y = y.to(tl.bfloat16).to(tl.float32)
 
             absmax = tl.max(tl.abs(y), axis=1)
@@ -218,14 +235,20 @@ def silu_mul_fp8_quant_packed(
     group_size: int = 128,
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
+    act_alpha: float = 1.0,
+    up_shift: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Fuse SiLU + clamp + mul + per-token-group FP8 quant + UE8M0 packed scale.
+    """Fuse gated activation + clamp + mul + FP8 quant + UE8M0 packed scale.
 
     Args:
       gate_up: ``[M, 2*inter]`` BF16 contiguous. Gate in [:inter], up in [inter:].
       clamp_limit: SwiGLU clamp threshold; ``0`` (or ≤0) disables clamp.
       group_size: per-token quant group size.
       output_q: optional pre-allocated FP8 output buffer.
+      act_alpha: sigmoid slope on the gate, ``gate * sigmoid(alpha*gate)``;
+        ``1.0`` (default) is exactly SiLU. gpt-oss uses 1.702.
+      up_shift: additive shift on up, ``(up + shift)``; ``0.0`` (default)
+        keeps legacy semantics. gpt-oss uses ``+1``.
 
     Returns:
       out_fp8: ``[M, inter]`` torch.float8_e4m3fn.
@@ -296,6 +319,8 @@ def silu_mul_fp8_quant_packed(
         GROUP_SIZE=group_size,
         BLOCK_M=BLOCK_M,
         HAS_CLAMP=has_clamp,
+        ACT_ALPHA=act_alpha,
+        UP_SHIFT=up_shift,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -310,6 +335,8 @@ def silu_mul_fp8_quant_packed_from_parts(
     group_size: int = 128,
     output_q: Optional[torch.Tensor] = None,
     output_scale: Optional[torch.Tensor] = None,
+    act_alpha: float = 1.0,
+    up_shift: float = 0.0,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Same fused activation+quant path as :func:`silu_mul_fp8_quant_packed`,
     but reads gate/up from two contiguous BF16 GEMM outputs.
@@ -373,6 +400,8 @@ def silu_mul_fp8_quant_packed_from_parts(
         GROUP_SIZE=group_size,
         BLOCK_M=BLOCK_M,
         HAS_CLAMP=has_clamp,
+        ACT_ALPHA=act_alpha,
+        UP_SHIFT=up_shift,
         num_warps=max(4, group_size // 32),
         num_stages=2,
     )

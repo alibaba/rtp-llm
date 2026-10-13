@@ -1,0 +1,408 @@
+{
+ "model_type": "gpt_oss",
+ "model_path": "/mnt/nas1/hf/gpt-oss-20b",
+ "query_result": [
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Please explain what the CAP theorem states, covering consistency, availability and partition tolerance."
+     }
+    ],
+    "max_tokens": 48,
+    "temperature": 0.0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "name": null,
+       "reasoning_content": "The user asks: \"Please explain what the CAP theorem states, covering consistency, availability and partition tolerance.\" They want an explanation of the CAP theorem, covering consistency, availability, and partition tolerance. So we need to explain the",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 83,
+     "total_tokens": 131,
+     "completion_tokens": 48,
+     "completion_tokens_details": {
+      "audio_tokens": null,
+      "reasoning_tokens": 45
+     },
+     "prompt_tokens_details": null
+    },
+    "aux_info": {
+     "cost_time": 45801.099,
+     "iter_count": 48,
+     "prefix_len": 0,
+     "input_len": 83,
+     "output_len": 48,
+     "step_output_len": 48,
+     "first_token_cost_time": 43124.084,
+     "wait_time": 0.453,
+     "pd_sep": false,
+     "cum_log_probs": [],
+     "beam_responses": [],
+     "softmax_probs": [],
+     "reuse_len": 0,
+     "local_reuse_len": 0,
+     "remote_reuse_len": 0,
+     "memory_reuse_len": 0,
+     "disk_reuse_len": 0,
+     "prefill_total_reuse_len": 0,
+     "prefill_local_reuse_len": 0,
+     "prefill_remote_reuse_len": 0,
+     "prefill_memory_reuse_len": 0,
+     "prefill_disk_reuse_len": 0,
+     "decode_total_reuse_len": 0,
+     "decode_local_reuse_len": 0,
+     "decode_remote_reuse_len": 0,
+     "decode_memory_reuse_len": 0,
+     "decode_disk_reuse_len": 0,
+     "multimodal_lengths": {},
+     "speculative_draft_rounds": 0,
+     "speculative_accepted_tokens_per_pos": [],
+     "generation_prefill_cuda_graph_status": "not_requested",
+     "role_addrs": [],
+     "aux_string": ""
+    }
+   }
+  },
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Please explain what the CAP theorem states, covering consistency, availability and partition tolerance."
+     }
+    ],
+    "max_tokens": 48,
+    "temperature": 0.0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "name": null,
+       "reasoning_content": "The user asks: \"Please explain what the CAP theorem states, covering consistency, availability and partition tolerance.\" They want an explanation of the CAP theorem, covering consistency, availability, and partition tolerance. So we need to explain the",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 83,
+     "total_tokens": 131,
+     "completion_tokens": 48,
+     "completion_tokens_details": {
+      "audio_tokens": null,
+      "reasoning_tokens": 45
+     },
+     "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cached_tokens": 80,
+      "image_tokens": null,
+      "video_tokens": null
+     }
+    },
+    "aux_info": {
+     "cost_time": 1619.495,
+     "iter_count": 48,
+     "prefix_len": 0,
+     "input_len": 83,
+     "output_len": 48,
+     "step_output_len": 48,
+     "first_token_cost_time": 81.818,
+     "wait_time": 0.215,
+     "pd_sep": false,
+     "cum_log_probs": [],
+     "beam_responses": [],
+     "softmax_probs": [],
+     "reuse_len": 80,
+     "local_reuse_len": 80,
+     "remote_reuse_len": 0,
+     "memory_reuse_len": 0,
+     "disk_reuse_len": 0,
+     "prefill_total_reuse_len": 0,
+     "prefill_local_reuse_len": 0,
+     "prefill_remote_reuse_len": 0,
+     "prefill_memory_reuse_len": 0,
+     "prefill_disk_reuse_len": 0,
+     "decode_total_reuse_len": 0,
+     "decode_local_reuse_len": 0,
+     "decode_remote_reuse_len": 0,
+     "decode_memory_reuse_len": 0,
+     "decode_disk_reuse_len": 0,
+     "multimodal_lengths": {},
+     "speculative_draft_rounds": 0,
+     "speculative_accepted_tokens_per_pos": [],
+     "generation_prefill_cuda_graph_status": "not_requested",
+     "role_addrs": [],
+     "aux_string": ""
+    }
+   }
+  },
+  {
+   "endpoint": "/v1/chat/completions",
+   "query": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "Please explain what the CAP theorem states, covering consistency, availability and partition tolerance."
+     },
+     {
+      "role": "assistant",
+      "content": " "
+     },
+     {
+      "role": "user",
+      "content": "Now give one concrete example of choosing between consistency and availability."
+     }
+    ],
+    "max_tokens": 48,
+    "temperature": 0.0,
+    "top_k": 1
+   },
+   "result": {
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "name": null,
+       "reasoning_content": "We need to give a concrete example of choosing between consistency and availability. The CAP theorem says you can only have two of the three: consistency, availability, partition tolerance. In practice, when a network partition occurs, you must",
+       "function_call": null,
+       "tool_calls": null,
+       "partial": false,
+       "tool_call_id": null
+      },
+      "finish_reason": "length",
+      "logprobs": null
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 106,
+     "total_tokens": 154,
+     "completion_tokens": 48,
+     "completion_tokens_details": {
+      "audio_tokens": null,
+      "reasoning_tokens": 45
+     },
+     "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cached_tokens": 80,
+      "image_tokens": null,
+      "video_tokens": null
+     }
+    },
+    "aux_info": {
+     "cost_time": 1548.759,
+     "iter_count": 48,
+     "prefix_len": 0,
+     "input_len": 106,
+     "output_len": 48,
+     "step_output_len": 48,
+     "first_token_cost_time": 38.304,
+     "wait_time": 0.22,
+     "pd_sep": false,
+     "cum_log_probs": [],
+     "beam_responses": [],
+     "softmax_probs": [],
+     "reuse_len": 80,
+     "local_reuse_len": 80,
+     "remote_reuse_len": 0,
+     "memory_reuse_len": 0,
+     "disk_reuse_len": 0,
+     "prefill_total_reuse_len": 0,
+     "prefill_local_reuse_len": 0,
+     "prefill_remote_reuse_len": 0,
+     "prefill_memory_reuse_len": 0,
+     "prefill_disk_reuse_len": 0,
+     "decode_total_reuse_len": 0,
+     "decode_local_reuse_len": 0,
+     "decode_remote_reuse_len": 0,
+     "decode_memory_reuse_len": 0,
+     "decode_disk_reuse_len": 0,
+     "multimodal_lengths": {},
+     "speculative_draft_rounds": 0,
+     "speculative_accepted_tokens_per_pos": [],
+     "generation_prefill_cuda_graph_status": "not_requested",
+     "role_addrs": [],
+     "aux_string": ""
+    }
+   }
+  },
+  {
+   "query": {
+    "prompt": "Shared prefix for cache reuse testing: the quick brown fox jumps over the lazy dog near the riverbank every single morning while the birds sing loudly in the tall green trees.",
+    "generate_config": {
+     "max_new_tokens": 8,
+     "top_k": 1
+    }
+   },
+   "result": {
+    "response": " The quick brown fox jumps over the lazy",
+    "aux_info": {
+     "input_len": 34,
+     "prefix_len": 0,
+     "reuse_len": 0,
+     "local_reuse_len": 0,
+     "remote_reuse_len": 0,
+     "memory_reuse_len": 0,
+     "disk_reuse_len": 0,
+     "prefill_total_reuse_len": 0,
+     "prefill_local_reuse_len": 0,
+     "prefill_remote_reuse_len": 0,
+     "prefill_memory_reuse_len": 0,
+     "prefill_disk_reuse_len": 0,
+     "decode_total_reuse_len": 0,
+     "decode_local_reuse_len": 0,
+     "decode_remote_reuse_len": 0,
+     "decode_memory_reuse_len": 0,
+     "decode_disk_reuse_len": 0,
+     "output_len": 8,
+     "step_output_len": 8,
+     "iter_count": 8,
+     "iter_count_tolerance": null,
+     "cum_log_probs": [],
+     "beam_responses": [],
+     "pd_sep": false,
+     "softmax_probs": [],
+     "generation_prefill_cuda_graph_status": "not_requested"
+    }
+   }
+  },
+  {
+   "query": {
+    "prompt_batch": [
+     "Shared prefix for cache reuse testing: the quick brown fox jumps over the lazy dog near the riverbank every single morning while the birds sing loudly in the tall green trees.",
+     "Shared prefix for cache reuse testing: the quick brown fox jumps over the lazy dog near the riverbank every single morning while the birds sing loudly in the tall green trees. Sometimes it rains instead.",
+     "A completely different prompt about database indexes and query planning."
+    ],
+    "generate_config": {
+     "max_new_tokens": 8,
+     "top_k": 1
+    }
+   },
+   "result": {
+    "response_batch": [
+     {
+      "response": " The quick brown fox jumps over the lazy",
+      "aux_info": {
+       "input_len": 34,
+       "prefix_len": 0,
+       "reuse_len": 32,
+       "local_reuse_len": 32,
+       "remote_reuse_len": 0,
+       "memory_reuse_len": 0,
+       "disk_reuse_len": 0,
+       "prefill_total_reuse_len": 0,
+       "prefill_local_reuse_len": 0,
+       "prefill_remote_reuse_len": 0,
+       "prefill_memory_reuse_len": 0,
+       "prefill_disk_reuse_len": 0,
+       "decode_total_reuse_len": 0,
+       "decode_local_reuse_len": 0,
+       "decode_remote_reuse_len": 0,
+       "decode_memory_reuse_len": 0,
+       "decode_disk_reuse_len": 0,
+       "output_len": 8,
+       "step_output_len": 8,
+       "iter_count": 8,
+       "iter_count_tolerance": null,
+       "cum_log_probs": [],
+       "beam_responses": [],
+       "pd_sep": false,
+       "softmax_probs": [],
+       "generation_prefill_cuda_graph_status": "not_requested"
+      }
+     },
+     {
+      "response": " The quick brown fox jumps over the lazy",
+      "aux_info": {
+       "input_len": 39,
+       "prefix_len": 0,
+       "reuse_len": 32,
+       "local_reuse_len": 32,
+       "remote_reuse_len": 0,
+       "memory_reuse_len": 0,
+       "disk_reuse_len": 0,
+       "prefill_total_reuse_len": 0,
+       "prefill_local_reuse_len": 0,
+       "prefill_remote_reuse_len": 0,
+       "prefill_memory_reuse_len": 0,
+       "prefill_disk_reuse_len": 0,
+       "decode_total_reuse_len": 0,
+       "decode_local_reuse_len": 0,
+       "decode_remote_reuse_len": 0,
+       "decode_memory_reuse_len": 0,
+       "decode_disk_reuse_len": 0,
+       "output_len": 8,
+       "step_output_len": 8,
+       "iter_count": 8,
+       "iter_count_tolerance": null,
+       "cum_log_probs": [],
+       "beam_responses": [],
+       "pd_sep": false,
+       "softmax_probs": [],
+       "generation_prefill_cuda_graph_status": "not_requested"
+      }
+     },
+     {
+      "response": " The user wants to know how to determine",
+      "aux_info": {
+       "input_len": 11,
+       "prefix_len": 0,
+       "reuse_len": 0,
+       "local_reuse_len": 0,
+       "remote_reuse_len": 0,
+       "memory_reuse_len": 0,
+       "disk_reuse_len": 0,
+       "prefill_total_reuse_len": 0,
+       "prefill_local_reuse_len": 0,
+       "prefill_remote_reuse_len": 0,
+       "prefill_memory_reuse_len": 0,
+       "prefill_disk_reuse_len": 0,
+       "decode_total_reuse_len": 0,
+       "decode_local_reuse_len": 0,
+       "decode_remote_reuse_len": 0,
+       "decode_memory_reuse_len": 0,
+       "decode_disk_reuse_len": 0,
+       "output_len": 8,
+       "step_output_len": 8,
+       "iter_count": 8,
+       "iter_count_tolerance": null,
+       "cum_log_probs": [],
+       "beam_responses": [],
+       "pd_sep": false,
+       "softmax_probs": [],
+       "generation_prefill_cuda_graph_status": "not_requested"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}

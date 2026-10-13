@@ -661,6 +661,27 @@ def h20_oss_suites():
         ],
     )
 
+    # gpt-oss (20b/120b) — sm90 bring-up on the BF16-dequant lane (MXFP4 has
+    # no sm90 compute path; the model dequantizes experts at layer build).
+    native.test_suite(
+        name = "smoke_h20_gptoss",
+        tests = [
+            smoke_test(
+                name = "gptoss_20b_tp1_h20",
+                task_info = "data/model/gpt_oss/g_o_20b_tp1_h20.json",
+                # ~27GB BF16-dequant weights on 96GB H20.
+                smoke_args = "--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 2048 --kernel_seq_size_per_block 64 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 40000 --reserver_runtime_mem_mb 16384",
+                gpu_type = ["H20_CU13"],
+            ),
+            smoke_test(
+                name = "gptoss_20b_reuse_h20",
+                task_info = "data/model/gpt_oss/g_o_20b_reuse_h20.json",
+                smoke_args = "--load_method scratch --act_type BF16 --warm_up 0 --seq_size_per_block 16 --tp_size 1 --max_seq_len 8192 --kv_cache_mem_mb 40000 --reserver_runtime_mem_mb 16384 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 4096",
+                gpu_type = ["H20_CU13"],
+            ),
+        ],
+    )
+
     native.test_suite(
         name = "smoke_h20_jit_remote_cache",
         tests = ["//rtp_llm/utils/test:jit_cache_deepseek_v2_lite"],
