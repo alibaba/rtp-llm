@@ -991,3 +991,73 @@ test_suite(
     ],
     tags = ["manual"],
 )
+
+# SCRATCH measurement targets (uncommitted; revert after long-context run)
+
+
+
+
+
+# CI-measurement variants (staged checkpoint path; measurement branch only).
+py_test(
+    name = "lfm2_shortctx_clean_ci",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/LiquidAI--d1-3B--051bcc464b01b9f92942b364d9586b0ef5912432",
+        "--model_type", "lfm2_vl",
+        "--input_len_min", "128",
+        "--input_len_max", "512",
+        "--output_len_min", "64",
+        "--output_len_max", "256",
+        "--concurrency_limit", "8",
+        "--seq_size_per_block", "2048",
+        "--enable_cuda_graph", "1",
+        "--enable_fp32_lm_head", "false",
+    ],
+    tags = ["manual"],
+)
+
+py_test(
+    name = "lfm2_longctx_clean_ci",
+    main = "offline_bench_test.py",
+    srcs = ["offline_bench_test.py"],
+    timeout = "eternal",
+    exec_properties = {
+        "gpu": "SM103_CU13",
+        "gpu_count": "1",
+    },
+    deps = [
+        "//rtp_llm:pyodps",
+        "//rtp_llm:testlib",
+        "//rtp_llm/test/perf_test:perf_test_lib",
+    ],
+    data = ["//rtp_llm:sdk"],
+    args = [
+        "--checkpoint_path", "/mnt/fuse/smoke-test/hf/LiquidAI--d1-3B--051bcc464b01b9f92942b364d9586b0ef5912432",
+        "--model_type", "lfm2_vl",
+        "--input_len_min", "30000",
+        "--input_len_max", "31000",
+        "--output_len_min", "96",
+        "--output_len_max", "96",
+        "--concurrency_limit", "2",
+        "--total_requests", "2",
+        "--seq_size_per_block", "2048",
+        "--enable_cuda_graph", "1",
+        "--enable_fp32_lm_head", "false",
+        "--profile",
+        "--profile_steps", "5",
+    ],
+    tags = ["manual"],
+)
