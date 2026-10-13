@@ -8,8 +8,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from monitoring.metric_store import (
-    MetricStore, MetricContractError, MetricUnavailable, export_metrics, publish,
+    MetricStore, MetricContractError, MetricUnavailable, publish,
 )
+from monitoring.archive import export_metrics
 from monitoring.query_plan import load_plan, plan_hash, definitions
 from reporting.metric_binding import bindings
 from scenario.loader import ScenarioError
@@ -86,7 +87,7 @@ class MetricPlanTest(unittest.TestCase):
     def test_live_raw_reader_preserves_scrape_clock_and_checks_labels(self):
         from monitoring.session import PrometheusSession
         session = PrometheusSession("unused", {"mock":"http://unused/metrics"},
-                                    query_plan="master_performance.yaml")
+                                    query_plan="master_performance.yaml", target_kinds={'mock': 'mock'})
         row = dict(metric=dict(__name__="rtp_llm_context_tps", role="prefill",
                               engine_name="P0", engine_incarnation="one"), values=[[1.7, "9"]])
         with patch.object(session, "query", return_value=[row]) as query:
@@ -105,7 +106,7 @@ class MetricArtifactTest(unittest.TestCase):
     def test_ha_windows_keep_their_own_source_provenance(self):
         from types import SimpleNamespace
         from cases.master_ha_failover.metrics import produce_gates, gate_labels
-        from monitoring.metric_store import export_metrics
+        from monitoring.archive import export_metrics
         with tempfile.TemporaryDirectory() as d:
             export_metrics(d, load_plan("master_ha_failover.yaml")).save(d)
             checks = []

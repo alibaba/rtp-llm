@@ -176,7 +176,7 @@ class ReportBundleTest(unittest.TestCase):
         )
         original = copy.deepcopy(payload)
         with tempfile.TemporaryDirectory() as d, patch(
-            "monitoring.session.archived_series",
+            "monitoring.metric_store.MetricStore.series",
             side_effect=AssertionError("renderer read telemetry"),
         ):
             result = write_report(d, payload)

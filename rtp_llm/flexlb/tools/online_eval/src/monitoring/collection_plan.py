@@ -1,13 +1,12 @@
 """Physical dependencies and per-source scrape policy, without case branches."""
 
+import copy
 import re
 from urllib.parse import urlsplit, parse_qs
 
-from monitoring.query_plan import SOURCE_KINDS
-
-
-def source_kind(name):
-    return "mock" if name == "mock" else "client" if name.startswith("client-") else "master"
+from monitoring.identity import SOURCE_KINDS
+from monitoring.query_plan import DEFAULT_PLAN, load_plan, definitions, plan_hash
+from monitoring.sources import selected_sources
 
 
 def physical_metrics(plan, kind):
@@ -19,7 +18,6 @@ def physical_metrics(plan, kind):
 
 
 def collection_plan(plan):
-    from monitoring.sources import selected_sources
 
     return dict(
         prometheus={kind: dict(metric_ids=[kind + "/" + name for name in queries],
@@ -36,8 +34,6 @@ def select_plan(plan, requirements, presentations):
     of them. Default views display the selected archive; they add no demand.
     Producer input dependencies must be declared by the program via metric().
     """
-    import copy
-    from monitoring.query_plan import definitions
 
     known = definitions(plan)
     consumers = {"gate": sorted(requirements), "report": [], "diagnostic": []}
@@ -60,16 +56,13 @@ def select_plan(plan, requirements, presentations):
 
 
 def frozen_plan(name, plan):
-    from monitoring.query_plan import plan_hash
     return dict(name=name, sha256=plan_hash(plan), definition=plan, collection=collection_plan(plan))
 
 
 def instance_plan(instance):
     """Execution uses the compiled selection, never reloads a larger catalog."""
-    from monitoring.query_plan import load_plan, DEFAULT_PLAN
     frozen = instance.get("implementation", {}).get("monitoring_query_plan")
     if frozen is not None:
-        from monitoring.query_plan import plan_hash
         if frozen["sha256"] != plan_hash(frozen["definition"]):
             raise ValueError("frozen monitoring plan hash mismatch")
         if frozen["collection"] != collection_plan(frozen["definition"]):

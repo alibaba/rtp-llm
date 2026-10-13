@@ -8,7 +8,8 @@ from analysis.time_buckets import TimeBuckets
 from cases.master_ha_failover.analysis import row_ts_ms
 from cases.master_ha_failover.metrics import _request_series, produce as produce_ha
 from cases.master_performance.metrics import produce as produce_performance, values
-from monitoring.metric_store import MetricContractError, MetricStore, MetricUnavailable, export_metrics, publish, series_row
+from monitoring.metric_store import MetricContractError, MetricStore, MetricUnavailable, publish, series_row
+from monitoring.archive import export_metrics
 from monitoring.query_plan import definitions, load_plan, queries_for_targets
 
 
@@ -63,7 +64,7 @@ def test_python_prometheus_producer_does_not_become_a_query():
     metric = 'derived/survivor_hit_ratio'
     assert definitions(plan)[metric]['source_type'] == 'prometheus'
     assert definitions(plan)[metric]['measurement']['accuracy'] == 'counter_delta'
-    queries, _ = queries_for_targets(plan, {'mock': ''}, lambda name: '{job="' + name + '"}', 1)
+    queries, _ = queries_for_targets(plan, {'mock': ''}, lambda name: '{job="' + name + '"}', 1, target_kinds={'mock': 'mock'})
     assert 'mock/survivor_hit_ratio' not in queries
     assert set(queries) == {'mock/up'} | {'mock/' + name for name in plan['sources']['mock']}
 
@@ -72,7 +73,7 @@ def test_python_prometheus_producer_does_not_become_a_query():
 def test_request_ledgers_exclude_sampled_twins_from_actual_query_plan(name):
     plan = load_plan(name + '.yaml')
     queries, _ = queries_for_targets(plan, {'client-flow': '', 'master-A': ''},
-                                     lambda name: '{job="' + name + '"}', 1)
+                                     lambda name: '{job="' + name + '"}', 1, target_kinds={'client-flow': 'client', 'master-A': 'master'})
     for metric in (('actual_send_qps', 'success_qps', 'error_qps') if name == 'master_ha_failover' else ()) + (
                    'completed_qps', 'ttft_p99_seconds', 'total_p99_seconds'):
         assert 'client-flow/' + metric not in queries

@@ -1,3 +1,4 @@
+from monitoring.metric_store import MetricStore
 """Public measurements have consumers; sampled trends cannot replace exact gates."""
 
 import copy
@@ -64,7 +65,7 @@ def test_performance_public_scalars_have_checks_or_coverage_consumers():
 
 def test_client_trends_are_real_queries_without_journal_twins():
     plan = load_plan('master_performance.yaml')
-    queries, _ = queries_for_targets(plan, {'client-flow': ''}, lambda _: '{job="client-flow"}', 1)
+    queries, _ = queries_for_targets(plan, {'client-flow': ''}, lambda _: '{job="client-flow"}', 1, target_kinds={'client-flow': 'client'})
     for identity in CLIENT_CURVES:
         assert 'client-flow/'+identity.partition('/')[2] in queries
     assert {identity for identity in plan['produced'] if identity.startswith('request/')} == {'request/ttft_p99_ms'}

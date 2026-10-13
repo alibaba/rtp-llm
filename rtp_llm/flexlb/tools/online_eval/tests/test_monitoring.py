@@ -1,5 +1,7 @@
 """Real TSDB checks: no snapshot fallback or private scrape loop."""
 
+from monitoring.metric_store import MetricStore
+
 import json
 import os
 import shutil
@@ -12,9 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 from monitoring.session import (
     PrometheusSession,
-    archived_series,
 )
-from monitoring.telemetry import http_text
 from monitoring.query_plan import load_plan, queries_for_targets
 from scenario.loader import ScenarioError
 
@@ -24,8 +24,7 @@ class ContractTest(unittest.TestCase):
         plan = load_plan("default.yaml")
         queries, required = queries_for_targets(
             plan, {"mock": "", "client-sample": "", "master-a": ""},
-            lambda source: '{job="' + source + '"}', 1,
-        )
+            lambda source: '{job="' + source + '"}', 1, target_kinds={'mock': 'mock', 'client-sample': 'client', 'master-a': 'master'})
         self.assertIn("master-a/dispatch_qps", queries)
         self.assertIn("mock/running_avg", required)
         self.assertIn("mock/waiting_avg", required)
@@ -46,13 +45,12 @@ class ContractTest(unittest.TestCase):
                                 {"mock": "mock"})
         queries, _ = queries_for_targets(
             plan, {"worker": ""}, lambda source: '{job="' + source + '"}', 1,
-            {"worker": "client"},
-        )
+            {"worker": "client"})
         self.assertIn("worker/schedule_p99_seconds", queries)
 
     def test_prefill_batch_size_uses_histogram(self):
         with tempfile.TemporaryDirectory() as tmp:
-            session = PrometheusSession(tmp, {"mock": "http://unused/metrics"})
+            session = PrometheusSession(tmp, {"mock": "http://unused/metrics"}, target_kinds={'mock': 'mock'})
             session.started = time.time() - 1
             with patch.object(session, "api", return_value={"result": []}):
                 with self.assertRaisesRegex(RuntimeError, "incomplete Prometheus archive"):
@@ -67,7 +65,7 @@ class ContractTest(unittest.TestCase):
 
     def test_schedule_response_query_uses_current_api_timer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            session = PrometheusSession(tmp, {"master": "http://unused/prometheus"})
+            session = PrometheusSession(tmp, {"master": "http://unused/prometheus"}, target_kinds={'master': 'master'})
             session.started = time.time() - 1
             with patch.object(session, "api", return_value={"result": [{"metric": {}, "values": []}]}):
                 session.archive()
@@ -80,7 +78,7 @@ class ContractTest(unittest.TestCase):
         from cases.cache_scale_in.observation import engine_metric_snapshot
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
-                                    query_plan="cache_scale_in.yaml")
+                                    query_plan="cache_scale_in.yaml", target_kinds={'mock': 'mock'})
         labels = dict(role="prefill", engine_name="P0", engine_incarnation="one",
                       engine_ip="127.0.0.1", grpc_port="7000")
         monitor.instant = Mock(return_value=[
@@ -100,7 +98,7 @@ class ContractTest(unittest.TestCase):
         from cases.cache_scale_in.observation import engine_metric_snapshot
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
-                                    query_plan="cache_scale_in.yaml")
+                                    query_plan="cache_scale_in.yaml", target_kinds={'mock': 'mock'})
         monitor.instant = Mock(return_value=[])
         with self.assertRaisesRegex(ValueError, "undeclared"):
             engine_metric_snapshot(monitor, {"running": dict(metric="mock/unknown", labels=dict(role="prefill"))})
@@ -113,7 +111,7 @@ class ContractTest(unittest.TestCase):
                 json.dumps({"samples": [{"waiting": 999, "running": 999}]})
             )
             with self.assertRaises(FileNotFoundError):
-                archived_series(tmp, 0)
+                MetricStore.read(tmp).series(0)
 
     def test_missing_query_is_reported_as_monitor_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -124,9 +122,9 @@ class ContractTest(unittest.TestCase):
                 "start": 1, "end": 2, "step": 1,
                 "targets": {}, "queries": {}, "errors": [],
             }))
-            from monitoring.metric_store import export_metrics
+            from monitoring.archive import export_metrics
             export_metrics(tmp)
-            _, _, _, errors = archived_series(tmp, 0)
+            _, _, _, errors = MetricStore.read(tmp).series(0)
             self.assertEqual(errors, [{
                 "source": "1", "query": "master/completions_qps",
                 "error": "monitor series absent", "severity": "diagnostic",
@@ -137,7 +135,7 @@ class ContractTest(unittest.TestCase):
             os.environ, {"PROMETHEUS_BIN": ""}
         ), patch("shutil.which", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "Prometheus is required"):
-                PrometheusSession(tmp, {"mock": "http://127.0.0.1:1/metrics"}).start()
+                PrometheusSession(tmp, {"mock": "http://127.0.0.1:1/metrics"}, target_kinds={'mock': 'mock'}).start()
 
 
 @unittest.skipUnless(
@@ -167,14 +165,17 @@ class RealPrometheusTest(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 session = PrometheusSession(
-                    Path(tmp) / "telemetry" / "1", {"mock": url}, 0.2, 1
+                    Path(tmp) / "telemetry" / "1", {"mock": url}, 0.2, 1,
+                    target_kinds={'mock': 'mock'},
                 )
                 try:
                     session.start()
                     time.sleep(0.5)
-                    self.assertIn("rtp_llm_running_stream_size", http_text(url))
+                    self.assertTrue(any(row["metric"]["__name__"] == "rtp_llm_running_stream_size"
+                                        for row in session.instant("mock")))
                     self.assertEqual(session.query('unused_large_metric{job="mock"}'), [])
-                    self.assertNotIn("unused_large_metric", http_text(url))
+                    self.assertFalse(any(row["metric"]["__name__"] == "unused_large_metric"
+                                         for row in session.instant("mock")))
                     self.assertTrue(session.query('up{job="mock"}'))
                     session.query_plan["sources"]["mock"]["raw_context_tps"] = dict(
                         promql="rtp_llm_context_tps${selector}", mode="scrape", unit="tokens/s",
@@ -201,11 +202,9 @@ class RealPrometheusTest(unittest.TestCase):
                     state["bad"] = True
                     time.sleep(0.5)
                     with self.assertRaisesRegex(RuntimeError, "unavailable"):
-                        http_text(url)
+                        session.instant("mock")
                     session.archive()
-                    series, sources, gaps, errors = archived_series(
-                        tmp, session.started
-                    )
+                    series, sources, gaps, errors = MetricStore.read(tmp).series(session.started)
                     self.assertTrue(gaps)
                     self.assertTrue(all(error["severity"] == "diagnostic" for error in errors))
                     self.assertTrue(
@@ -219,8 +218,6 @@ class RealPrometheusTest(unittest.TestCase):
                 finally:
                     session.stop(export=False)
                 self.assertIsNotNone(session.process.poll())
-                from monitoring import telemetry
-                self.assertNotIn(url, telemetry._REGISTRY)
         finally:
             server.shutdown()
             server.server_close()
@@ -228,10 +225,10 @@ class RealPrometheusTest(unittest.TestCase):
 
 
 def test_archive_can_defer_numeric_conversion_to_finalization(tmp_path):
-    session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'})
+    session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'}, target_kinds={'mock': 'mock'})
     session.started = time.time() - 1
     with patch.object(session, 'api', return_value={'result': [{'metric': {}, 'values': []}]}), \
-         patch('monitoring.metric_store.export_metrics', side_effect=AssertionError('conversion during cleanup')):
+         patch('monitoring.archive.export_metrics', side_effect=AssertionError('conversion during cleanup')):
         session.archive(materialize=False)
     assert (tmp_path / 'queries.json').is_file()
     assert not (tmp_path / 'metrics.json').exists()

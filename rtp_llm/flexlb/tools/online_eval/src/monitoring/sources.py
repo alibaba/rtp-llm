@@ -5,7 +5,6 @@ from pathlib import Path
 import inspect
 
 from case_api.registry import registry
-from monitoring.probe import PrometheusEvidence
 
 
 def selected_sources(plan):
@@ -31,12 +30,13 @@ def selected_sources(plan):
         path = Path(inspect.getfile(capability.factory))
         spec["implementation"] = dict(module=capability.factory.__module__, factory=capability.factory.__name__,
                                       label=capability.label, transport="prometheus",
-                                      collector_sha256=hashlib.sha256(Path(inspect.getfile(PrometheusEvidence)).read_bytes()).hexdigest(),
+                                      collector_sha256=hashlib.sha256(Path(__file__).with_name("probe.py").read_bytes()).hexdigest(),
                                       sha256=hashlib.sha256(path.read_bytes()).hexdigest())
     return selected
 
 
 def evidence_collector(plan, source, environment, path, **options):
+    from monitoring.probe import PrometheusEvidence
     selected = selected_sources(plan)
     if source not in selected:
         raise ValueError("evidence source is not selected: " + source)

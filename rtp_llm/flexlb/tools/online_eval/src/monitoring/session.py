@@ -17,52 +17,28 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from monitoring import telemetry
-from monitoring.query_plan import DEFAULT_PLAN
-from monitoring.collection_plan import scrape_job, source_kind, collection_plan
-
-def _finite(value):
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
-def exposition(rows):
-    lines = []
-    for row in rows:
-        labels = dict(row["metric"])
-        name = labels.pop("__name__")
-        for key in ("job", "instance"):
-            labels.pop(key, None)
-        suffix = ",".join(f"{k}={json.dumps(v)}" for k, v in sorted(labels.items()))
-        lines.append(f"{name}{{{suffix}}} {row['value'][1]}")
-    return "\n".join(lines) + "\n"
+from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
+from monitoring.client import PrometheusClient
+from monitoring.archive import archive_session
+from runtime.deadline import Deadline
+from runtime.cleanup import cleanup_all
+from runtime.startup import startup_deadline, wait_ready
+from monitoring.collection_plan import scrape_job, collection_plan
 
 
-class PrometheusSource:
-    """Exporter-shaped view of owned Prometheus samples for live checks."""
-
-    def __init__(self, session, name, url):
-        self.session, self.name, self.url = session, name, url
-
-    def read(self, timeout=5):
-        return exposition(self.session.instant(self.name, timeout=timeout))
-
-
-class PrometheusSession:
+class PrometheusSession(PrometheusClient):
     def __init__(self, directory, targets, interval_s=1, max_gap_s=5, binary=None,
                  query_plan=DEFAULT_PLAN, target_kinds=None, metric_plan=None):
-        from monitoring.query_plan import load_plan
 
         self.directory = Path(directory).resolve()
         self.query_plan_name = query_plan
         self.query_plan = metric_plan if metric_plan is not None else load_plan(query_plan)
-        kinds = dict(target_kinds) if target_kinds is not None else {name: source_kind(name) for name in targets}
+        kinds = dict(target_kinds) if target_kinds is not None else {}
         if set(kinds) != set(targets) or set(kinds.values()) - set(self.query_plan["sources"]):
             raise ValueError("target kinds must identify every Prometheus target")
         self.targets = {name: url for name, url in targets.items() if self.collects(kinds[name])}
         self.target_kinds = {name: kinds[name] for name in self.targets}
         self.collection_plan = collection_plan(self.query_plan)
-        from monitoring.query_plan import plan_hash
         self.query_plan_sha256 = plan_hash(self.query_plan)
         self.interval, self.max_gap = float(interval_s), float(max_gap_s)
         if (
@@ -74,7 +50,6 @@ class PrometheusSession:
             binary or os.environ.get("PROMETHEUS_BIN") or shutil.which("prometheus")
         )
         self.process = None
-        self.views = []
         self.started = self.monotonic = None
         self.url = None
         self.log = None
@@ -85,60 +60,10 @@ class PrometheusSession:
     def collects(self, kind):
         return bool(self.query_plan["sources"][kind])
 
-    def api(self, endpoint, timeout=5, **params):
-        url = self.url + "/api/v1/" + endpoint + "?" + urllib.parse.urlencode(params)
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            data = json.load(response)
-        if data.get("status") != "success" or data.get("warnings"):
-            raise RuntimeError("Prometheus query failed or incomplete: " + str(data))
-        return data["data"]
-
-    def query(self, expression, when=None, timeout=5):
-        return self.api(
-            "query", timeout=timeout, query=expression, time=when or time.time()
-        )["result"]
-
-    def selector(self, name):
-        if name not in self.targets:
-            raise ValueError("unknown monitored source " + name)
-        return "{job=" + json.dumps(name) + "}"
-
-    def instant(self, name, timeout=5):
-        selector = self.selector(name)
-        now = time.time()
-        health = self.query("up" + selector, now, timeout)
-        if len(health) != 1 or health[0]["value"][1] != "1":
-            raise RuntimeError("Prometheus target unavailable: " + name)
-        rows = self.query(f"{selector}[{round(self.max_gap * 1000)}ms]", now, timeout)
-        if not any(r["metric"].get("__name__") == "up" for r in rows):
-            raise RuntimeError("Prometheus target stale: " + name)
-        latest_scrape = max(
-            r["values"][-1][0] for r in rows if r["metric"].get("__name__") == "up"
-        )
-        return [
-            dict(metric=r["metric"], value=r["values"][-1])
-            for r in rows
-            if r["values"][-1][0] == latest_scrape
-            and not r["metric"]["__name__"].startswith(("up", "scrape_"))
-        ]
-
-    def raw(self, name, start, end):
-        # Range-vector queries preserve scrape timestamps; query_range would
-        # repeat old gauges via lookback and hide gaps. Bound each response.
-        cursor = start
-        while cursor < end:
-            right = min(end, cursor + 60)
-            span = max(0.001, right - cursor)
-            yield self.query(
-                f"{self.selector(name)}[{math.ceil(span * 1000)}ms]", right
-            )
-            cursor = right
-
     def add_target(self, name, url, *, deadline=None):
         self.add_targets({name: url}, deadline=deadline)
 
     def add_targets(self, targets, *, deadline=None):
-        from runtime.startup import startup_deadline
         deadline = startup_deadline(deadline, 20)
         if set(targets) & set(self.targets):
             raise ValueError("duplicate monitor target")
@@ -164,7 +89,6 @@ class PrometheusSession:
 
     def add_probe(self, probe, url, *, deadline=None):
         """A registered on-demand adapter shares this run's scheduler and TSDB."""
-        from runtime.startup import startup_deadline
         deadline = startup_deadline(deadline, 20)
         if not self.url or self.closed or probe.job in self.probes:
             raise ValueError("probe requires a live Prometheus and a unique source")
@@ -182,7 +106,6 @@ class PrometheusSession:
         with urllib.request.urlopen(urllib.request.Request(self.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())):
             pass
         self._write_session()
-        from runtime.startup import wait_ready
         def ready():
             if probe.error is not None:
                 raise RuntimeError('probe startup failed: ' + str(probe.error)) from probe.error
@@ -194,7 +117,6 @@ class PrometheusSession:
         self.target_bounds[name][1] = ended or time.time()
 
     def _wait_targets(self, targets, deadline, phase):
-        from runtime.startup import startup_deadline, wait_ready
         deadline = startup_deadline(deadline, 15)
         def ready():
             try:
@@ -208,7 +130,6 @@ class PrometheusSession:
         wait_ready(deadline, phase, ready, interval_s=0.1)
 
     def start(self, *, deadline=None):
-        from runtime.startup import startup_deadline
         deadline = startup_deadline(deadline, 30)
         deadline.check()
         if self.started is not None:
@@ -255,7 +176,6 @@ class PrometheusSession:
             stderr=subprocess.STDOUT,
         )
         try:
-            from runtime.startup import startup_deadline, wait_ready
             deadline = startup_deadline(deadline, 30)
             def ready():
                 if self.process.poll() is not None:
@@ -268,13 +188,6 @@ class PrometheusSession:
                 except OSError:
                     return False
             wait_ready(deadline, 'prometheus/http', ready, interval_s=0.05)
-            with telemetry._REGISTRY_LOCK:
-                if any(url in telemetry._REGISTRY for url in self.targets.values()):
-                    raise RuntimeError("monitor endpoint already has an owner")
-                for name, url in self.targets.items():
-                    view = PrometheusSource(self, name, url)
-                    telemetry._REGISTRY[url] = view
-                    self.views.append(view)
             self._wait_targets(self.targets, deadline, 'prometheus/first scrape')
             self.started, self.monotonic = time.time(), time.monotonic()
             self._write_session()
@@ -291,148 +204,32 @@ class PrometheusSession:
                               for name, probe in self.probes.items()}, started_epoch_s=self.started,
             interval_s=self.interval, retention_time="24h", retention_size="1GB"), indent=2))
 
-    def metric_definition(self, metric_id):
-        from monitoring.query_plan import definitions
-        from monitoring.metric_store import MetricContractError
-        definition = definitions(self.query_plan).get(metric_id)
-        if definition is None or "promql" not in definition:
-            raise MetricContractError("undeclared Prometheus metric: " + metric_id)
-        return definition
-
-    def metric_rows(self, metric_id, *, source, start, end):
-        """Read a declared raw metric with actual scrape times, never lookback filling."""
-        definition = self.metric_definition(metric_id)
-        if definition.get("mode") != "scrape":
-            raise ValueError("raw gate input requires scrape mode: " + metric_id)
-        if self.target_kind(source) != definition["source_kind"]:
-            raise ValueError("metric source kind mismatch: " + metric_id)
-        if not math.isfinite(start) or not math.isfinite(end) or start >= end:
-            raise ValueError("invalid metric query window")
-        expression = definition["promql"].replace("${selector}", self.selector(source))
-        rows, cursor = [], start
-        while cursor < end:
-            right = min(end, cursor + 60)
-            rows.extend(self.query(expression + f"[{math.ceil((right - cursor) * 1000)}ms]", right))
-            cursor = right
-        for row in rows:
-            if set(definition["labels"]) - set(row["metric"]):
-                raise ValueError("metric lacks required labels: " + metric_id)
-            row["metric_id"] = metric_id
-        return rows
-
-    def metric_snapshot(self, metric_ids, *, source, timeout=5):
-        rows = self.instant(source, timeout)
-        result = []
-        for identity in metric_ids:
-            definition = self.metric_definition(identity)
-            if definition.get("mode") != "scrape" or self.target_kind(source) != definition["source_kind"]:
-                raise ValueError("snapshot requires a raw metric with matching source kind")
-            name = definition["promql"].split("${selector}")[0]
-            for row in rows:
-                if row["metric"].get("__name__") == name:
-                    if set(definition["labels"]) - set(row["metric"]):
-                        raise ValueError("metric lacks required labels: " + identity)
-                    result.append(dict(row, metric_id=identity))
-        return result
-
-    def target_kind(self, source):
-        if source not in self.targets:
-            raise ValueError("unknown monitored source: " + source)
-        return self.target_kinds[source]
-
-    def archive(self, *, materialize=True):
-        end = time.time()
-        from monitoring.query_plan import queries_for_targets
-
-        queries, required_queries = queries_for_targets(
-            self.query_plan, self.targets, self.selector, self.interval,
-            self.target_kinds,
-        )
-        result = dict(
-            missing_queries=[],
-            query_plan=self.query_plan_name,
-            query_plan_sha256=self.query_plan_sha256,
-            backend="prometheus",
-            metric_plan=self.query_plan,
-            collection_plan=self.collection_plan,
-            target_kinds={source: self.target_kind(source) for source in self.targets},
-            start=self.started,
-            end=end,
-            step=self.interval,
-            targets=self.targets,
-            target_bounds=self.target_bounds,
-            queries={},
-            errors=[],
-        )
-        for key, expression in queries.items():
-            rows = []
-            # API query_range has a maximum point count; chunk long experiments.
-            start, target_end = self.target_bounds.get(
-                key.split("/", 1)[0], [self.started, end]
-            )
-            query_end = target_end or end
-            cursor = start
-            try:
-                while cursor <= query_end:
-                    right = min(query_end, cursor + self.interval * 1000)
-                    source, metric = key.split("/", 1)
-                    definition = self.query_plan["sources"][self.target_kind(source)].get(metric, {})
-                    if definition.get("mode") == "scrape":
-                        if right <= cursor:
-                            break
-                        rows.extend(self.metric_rows(self.target_kind(source) + "/" + metric,
-                                                     source=source, start=cursor, end=right))
-                    else:
-                        data = self.api("query_range", query=expression, start=cursor,
-                                        end=right, step=self.interval)
-                        rows.extend(data["result"])
-                    cursor = right if definition.get("mode") == "scrape" and right < query_end else right + self.interval
-                result["queries"][key] = dict(promql=expression, result=rows)
-                if not rows:
-                    result["missing_queries"].append(key)
-                    if key in required_queries:
-                        result["errors"].append(
-                            dict(query=key, error="required monitor series absent")
-                        )
-            except Exception as exc:
-                result["errors"].append(dict(query=key, error=str(exc)))
-        (self.directory / "queries.json").write_text(
-            json.dumps(result, separators=(",", ":"))
-        )
-        from monitoring.metric_store import export_metrics
-        root = self.directory.parent.parent if self.directory.parent.name == "telemetry" else self.directory
-        if materialize:
-            export_metrics(root)
-        if result["errors"]:
-            raise RuntimeError("incomplete Prometheus archive")
+    def archive(self, *, materialize=True, deadline=None):
+        return archive_session(self, materialize=materialize, deadline=deadline)
 
     def stop(self, timeout=10, export=True, *, materialize=True):
+        deadline = Deadline(time.monotonic() + timeout)
+        operations = [(name, lambda probe=probe: probe.stop(deadline=deadline))
+                      for name, probe in self.probes.items()]
+        if not self.closed and export and (self.process is not None and self.process.poll() is None
+                or self.started is not None and not any(self.query_plan["sources"].values())):
+            operations.append(("Prometheus archive", lambda: self.archive(materialize=materialize, deadline=deadline)))
+        operations.append(("Prometheus process", lambda: self._stop_process(deadline)))
+        if self.log:
+            operations.append(("Prometheus log", self.log.close))
         try:
-            from runtime.cleanup import cleanup_all
-            operations = [(name, lambda probe=probe: probe.stop(timeout=timeout))
-                          for name, probe in self.probes.items()]
-            if not self.closed and export and (self.process is not None and self.process.poll() is None
-                    or self.started is not None and not any(self.query_plan["sources"].values())):
-                operations.append(("Prometheus archive", lambda: self.archive(materialize=materialize)))
             cleanup_all(operations)
         finally:
             self.closed = True
-            if self.process is not None and self.process.poll() is None:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=max(0.1, timeout))
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.process.wait()
-                    raise TimeoutError("Prometheus exceeded shutdown budget")
-            with telemetry._REGISTRY_LOCK:
-                for view in self.views:
-                    if telemetry._REGISTRY.get(view.url) is view:
-                        del telemetry._REGISTRY[view.url]
-            if self.log:
-                self.log.close()
 
-
-def archived_series(directory, anchor):
-    from monitoring.metric_store import MetricStore
-    return MetricStore.read(directory).series(anchor)
+    def _stop_process(self, deadline):
+        if self.process is None or self.process.poll() is not None:
+            return
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=deadline.remaining())
+        except (subprocess.TimeoutExpired, TimeoutError):
+            self.process.kill()
+            # Reap after escalation even if the cooperative budget has expired.
+            self.process.wait(timeout=1)
+            raise TimeoutError("Prometheus exceeded shutdown budget")

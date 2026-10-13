@@ -1,7 +1,7 @@
 """Selectable request and archived Prometheus views; never affect gate decisions."""
 
 
-from monitoring.session import archived_series
+from monitoring.metric_store import MetricStore
 from reporting.curves import materialize, project_panels, apply_panel_presets
 from reporting.catalog import PALETTE
 
@@ -35,7 +35,7 @@ def prepare_curves(directory, evidence, presentation):
                     "逐请求证据；cohort 和完成窗口由指标生产器冻结，不替代整窗门禁 p99",
                     labels=row["labels"], provenance=row["provenance"])
 
-    series, sources, gaps, errors = archived_series(directory, lo / 1000)
+    series, sources, gaps, errors = MetricStore.read(directory).series(lo / 1000)
     for key, points in series.items():
         if "promql" not in sources[key]:
             continue

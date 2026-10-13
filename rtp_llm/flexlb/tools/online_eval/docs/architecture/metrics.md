@@ -58,7 +58,7 @@ sources:
 | `accuracy` | `request_ledger`、`sampled`、`histogram_estimate` 或 `counter_delta` |
 | `requires_request_identity` | 是否依赖请求身份进行归因、去重或终态核对 |
 
-`produced` 的 `measurement` 由计算实现生成，YAML 不接受手写覆盖；加载时校验 producer 输出契约，发布时再次校验。公共查询集合显式记录 PromQL 口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
+`produced` 的 `measurement` 和 `implementation` 由计算实现生成，YAML 不接受手写覆盖；加载时校验 producer 输出契约，发布时再次校验。`implementation` 显式记录实际函数的 `module` 和 `function`，源码指纹使用该模块，不从 `measurement.method` 反推实现。公共查询集合显式记录 PromQL 口径。`request_ledger` 表示对已核实流水计算，不保证流水天然完整；完整性和时窗覆盖仍决定测量有效性。来源或精度标签都不能独自决定门禁是否 PASS。
 
 直方图 p99 与逐请求 nearest-rank p99、PromQL 的 lookback 均值与按实际 scrape 时刻计算的整窗引擎等权均值、全 fleet hit ratio 与 survivor 过滤后的 counter 差分分别使用不同 ID。门禁声明自己使用的 ID、单位和时窗，view 选择需要展示的投影，不把相近曲线作为门禁替身。已由请求流水覆盖且没有展示消费者的查询在所属 case 集合中用 `exclude` 去掉；公共默认集合保留供其他用途选择。
 
@@ -110,6 +110,10 @@ calculation:
 
 只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
 
+声明层的 `monitoring.contracts` 校验测量元数据，`monitoring.producer_contract` 解析注册能力的输出契约，不执行 producer 或导入指标存储。`monitoring.producers` 只负责收尾阶段的执行调度。`monitoring.archive` 将查询归档转换成完整的 `MetricStore`，校验成功后才原子替换 `metrics.json`；转换失败保留上一份有效产物。离线报告和有效性检查直接使用 `MetricStore.read(...).series(...)`。
+
+新建 session 和展开查询时必须显式提供每个 target 的来源种类，不能通过实例名称猜测。旧归档缺少 `target_kinds` 时，名称推断仅保留在归档转换边界。`monitoring.client` 提供 TSDB 查询，`monitoring.session` 管理进程、配置和资源注册，`monitoring.archive` 负责归档。
+
 所有 `sources` 查询必须用 `exported_metrics` 列出依赖的物理指标名称；`mode: scrape` 的依赖必须与原始 selector 一致。`environment.metric_whitelist` 是 Java exporter 的暴露过滤器，query plan 是查询选择，两者不合并。编译期检查显式过滤器及其 profile 覆盖不会排除所选查询的依赖；未声明过滤覆盖时保留 Java 策略，运行时仍需按查询的 `required` 和覆盖契约核验实际数据。
 
 视图 YAML 的 `curves` 用本地曲线 ID 声明 `metric_id` 和 `labels` 选择，并设置名称、颜色、轴和换算；面板用 `curve_ids` 选曲线。Python program 用 `case.metric(id)` 声明依赖，编译时拒绝未定义 ID。运行时 `MetricStore.select` 显式选择标签与时间窗、检查样本数及最大间隔，`reduce` 只对单条已选序列归约；缺失数据抛出 `MetricUnavailable`，定义冲突抛出 `MetricContractError`，均不能补零。
@@ -128,8 +132,10 @@ calculation:
 
 case 的 `CaseDefinition.sources` 声明额外数据源能力，由自动发现的公共注册快照收集，选中的指标决定启动哪些能力和字段。源协议可声明必需的完整性字段，例如 Master 状态需要同时保留 HTTP 可回读状态。普通时序复用 exporter；现有只读 HTTP 接口通过 `monitoring.probe.PrometheusEvidence` 接入官方 `prometheus_client` custom collector。SDK 只负责本地 exposition 服务，Prometheus 触发 scrape 时才调用有超时和响应字节上限的适配器，没有 Python 定时采集线程，也不新建第二套 TSDB。每个 probe 与原生 exporter 使用同一个 run 所有的 Prometheus；没有原生查询但选中 probe 时仍启动 Prometheus，只有请求流水等无需 scrape 的计划才不启动它。
 
-适配器只执行一次严格字段投影，不创建线程、写文件或回退到日志。接口不可达本身是观测时，可以显式产出可达性 0，其余字段缺失；成功响应的坏 JSON、缺字段、非有限数报错。probe 启动必须完成一次成功 scrape 才开始发流。SDK 的 `up` 表示适配器 exporter 是否成功，Master 的 HTTP 可回读是另一条源端观测，不能混淆；坏响应和样本/字节预算超限会在启动或收尾显式失败。
+通用 HTTP JSON 读取放在 `adapters.http_json`。适配器只执行一次严格字段投影，不创建线程、写文件或回退到日志。接口不可达本身是观测时，可以显式产出可达性 0，其余字段缺失；成功响应的坏 JSON、缺字段、非有限数报错。probe 启动必须完成一次成功 scrape 才开始发流。SDK 的 `up` 表示适配器 exporter 是否成功，Master 的 HTTP 可回读是另一条源端观测，不能混淆；坏响应和样本/字节预算超限会在启动或收尾显式失败。
 
 收尾先结束适配器读取，再从 TSDB 按实际 scrape 时间导出选中字段。`*.prometheus.json` 保留原始查询、时间边界、源地址与错误，协议证据 JSONL 从这些样本生成；producer 再按冻结定义落入统一 `metrics.json`。不使用 PromQL lookback 补断档。物理来源仍是 `debug_api`，传输记录为 `prometheus`，不会因为用了 SDK 就改成生产 Master 原生指标。exporter、采集错误与收尾由共同资源所有者管理，结束 probe 后再关闭 TSDB；失败时仍尝试保存其他采集证据并回收所有进程。
 
 接口协议与字段语义独立于测试目的时放公共源模块；专属协议解释放 `cases/<case>/`，通过相同注册入口接入公共生命周期。采样新增源遵循 [新增 case](../development/adding-cases.md) 的必要性与字段完整性规则。请求 journal 是事件证据，由注册 producer 按冻结窗口计算，不需要转成逐请求 Prometheus 标签。
+
+session 收尾中的 probe 导出、查询归档和进程退出共享一个截止时间，HTTP 查询及分块循环使用剩余预算。归档失败保留已取得的查询及错误；任何步骤失败仍继续关闭其他资源。预算耗尽时升级终止 Prometheus，并进行有界进程回收；SDK 服务关闭和强制回收属于清理阶段，收尾预算不是操作系统级硬实时保证。

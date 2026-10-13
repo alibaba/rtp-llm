@@ -136,7 +136,7 @@ def test_catalog_additions_do_not_force_unused_collection(name):
 
 @pytest.mark.parametrize('name', ['cache_scale_in', 'master_performance', 'master_ha_failover'])
 def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_path):
-    from monitoring.metric_store import export_metrics
+    from monitoring.archive import export_metrics
     from monitoring.query_plan import load_plan
     from reporting.metric_binding import monitoring_audit
     from reporting.view_config import view

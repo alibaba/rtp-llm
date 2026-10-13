@@ -24,7 +24,7 @@ def test_standard_probe_archives_scrape_times_and_preserves_master_outage(tmp_pa
     from monitoring.probe import PrometheusEvidence
     # Only produced measurements selected: this must still start the shared TSDB.
     plan = select_plan(load_plan('master_ha_failover.yaml'), {'ha/http_up': {}}, [])
-    session = PrometheusSession(tmp_path/'telemetry/1', {}, interval_s=.1, metric_plan=plan)
+    session = PrometheusSession(tmp_path/'telemetry/1', {}, interval_s=.1, metric_plan=plan, target_kinds={})
     session.start()
     calls = []
     state = {'up': 1}
@@ -62,7 +62,7 @@ def test_standard_probe_archives_scrape_times_and_preserves_master_outage(tmp_pa
 def test_standard_probe_bad_payload_survives_sdk_http_error_as_run_failure(tmp_path):
     from monitoring.probe import PrometheusEvidence
     plan = select_plan(load_plan('master_ha_failover.yaml'), {'ha/http_up': {}}, [])
-    session = PrometheusSession(tmp_path/'telemetry/1', {}, interval_s=.1, metric_plan=plan)
+    session = PrometheusSession(tmp_path/'telemetry/1', {}, interval_s=.1, metric_plan=plan, target_kinds={})
     session.start()
     def invalid(**kw):
         raise ValueError('missing required debug field')
@@ -107,7 +107,7 @@ def test_registered_http_projection_is_scraped_and_only_selected_fields_are_requ
         servers.append(server)
         threads.append(thread)
     plan = select_plan(load_plan('master_ha_failover.yaml'), {'ha/scheduler_inflight': {}}, [])
-    session = PrometheusSession(tmp_path/'telemetry/1', {}, interval_s=.1, metric_plan=plan)
+    session = PrometheusSession(tmp_path/'telemetry/1', {}, interval_s=.1, metric_plan=plan, target_kinds={})
     probe = None
     try:
         session.start()

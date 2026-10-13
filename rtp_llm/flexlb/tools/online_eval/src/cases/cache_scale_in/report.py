@@ -15,16 +15,14 @@ from reporting.view_sections import view_details, view_table
 
 
 def prepare_report(directory, evidence, *, presentation=None):
-    from monitoring.session import archived_series
+    from monitoring.metric_store import MetricStore
     from reporting.view_config import view
     from statistics import median
 
     rows = evidence["samples"]
     anchor = evidence_origin(evidence)
-    series, sources, gaps, errors = archived_series(directory, anchor)
-    archive_paths = sorted(Path(directory).glob("telemetry/*/queries.json"))
+    series, sources, gaps, errors = MetricStore.read(directory).series(anchor)
     presentation = presentation if presentation is not None else view("cache_scale_in.yaml")
-    from monitoring.metric_store import MetricStore
     from reporting.metric_binding import monitoring_audit
     inventory = monitoring_audit(MetricStore.read(directory), presentation)
     metric_defs = presentation["charts"]["curves"]
@@ -86,8 +84,8 @@ def prepare_report(directory, evidence, *, presentation=None):
     success = values("client/success_qps", baseline_start, baseline_end)
     failures = values("client/error_qps", baseline_start, baseline_end)
     monitor_warnings = [str(error) for error in errors]
-    if not archive_paths:
-        monitor_warnings.append("缺少 Prometheus queries.json 归档；监控曲线不可用")
+    if not any('promql' in source for source in sources.values()):
+        monitor_warnings.append("缺少冻结的 Prometheus 样本；监控曲线不可用")
     if sent and success and median(sent) > 0 and median(success) / median(sent) < 0.9:
         monitor_warnings.append(
             f"缩容前客户端成功率偏低：success/send 中位数 {median(success) / median(sent):.1%}"

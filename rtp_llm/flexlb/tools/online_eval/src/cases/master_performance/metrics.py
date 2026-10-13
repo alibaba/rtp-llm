@@ -2,7 +2,7 @@
 
 from analysis.request_metrics import RequestLedger, describe_calculation
 from cases.master_performance.analysis import analyze, engine_tps_checks
-from monitoring.measurement import implementation_measurement
+from monitoring.contracts import implementation_measurement, implementation_identity
 from monitoring.metric_store import series_row
 
 
@@ -31,12 +31,12 @@ def metric_contract(producer, identity, calculation):
         raise ValueError('unknown performance metric: ' + identity)
     engine_keys = {name + suffix for name in ENGINE_METRICS for suffix in ('_scrape_engine_mean', '_engine_count')}
     if key in engine_keys:
-        return dict(source_type='prometheus', measurement=implementation_measurement(
+        return dict(source_type='prometheus', implementation=implementation_identity(engine_tps_checks), measurement=implementation_measurement(
             engine_tps_checks, population='measurement_window_engine_incarnations',
             accuracy='sampled', request_identity=False))
     for population, keys in GATE_POPULATIONS.items():
         if key in keys:
-            return dict(source_type='client_journal', measurement=implementation_measurement(
+            return dict(source_type='client_journal', implementation=implementation_identity(analyze), measurement=implementation_measurement(
                 analyze, population=population, accuracy='request_ledger', request_identity=True))
     raise ValueError('unknown performance metric: ' + identity)
 
@@ -62,7 +62,8 @@ def values(evidence, definitions=None):
 
 
 def produce(directory, evidence, result):
-    from monitoring.metric_store import MetricContractError, MetricStore, export_metrics, publish
+    from monitoring.metric_store import MetricContractError, MetricStore, publish
+    from monitoring.archive import export_metrics
     from pathlib import Path
     if not (Path(directory) / "metrics.json").is_file():
         export_metrics(directory)

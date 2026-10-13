@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 
 from runtime.observation import SampleBudget
+from runtime.deadline import Deadline
+from monitoring.metric_store import atomic_json
 
 
 class PrometheusEvidence:
@@ -84,21 +86,30 @@ class PrometheusEvidence:
             raise
         return self
 
-    def _close_server(self):
+    def _close_server(self, deadline=None):
         if self.server is not None:
             self.server.shutdown()
             self.server.server_close()
-            self.thread.join(timeout=5)
+            self.thread.join(timeout=max(0, deadline.expires_at - deadline.clock()) if deadline else 5)
             if self.thread.is_alive():
                 raise TimeoutError('probe HTTP server did not stop')
             self.server = None
+            if deadline is not None:
+                deadline.check()
 
-    def stop(self, timeout=5):
+    def stop(self, timeout=5, *, deadline=None):
         if self.closed:
             if self.error is not None:
                 raise RuntimeError('probe collection failed: ' + str(self.error)) from self.error
             return
-        if not self.lock.acquire(timeout=max(0, timeout)):
+        deadline = deadline or Deadline(time.monotonic() + timeout)
+        try:
+            acquired = self.lock.acquire(timeout=deadline.remaining())
+        except TimeoutError:
+            self._close_server(deadline)
+            raise
+        if not acquired:
+            self._close_server(deadline)
             raise TimeoutError('probe adapter did not finish')
         try:
             self.closed, self.ended = True, time.time()
@@ -106,49 +117,53 @@ class PrometheusEvidence:
             self.lock.release()
         try:
             if self.started is not None:
-                self._export(time.monotonic() + timeout)
+                self._export(deadline)
         except Exception as exc:
             self.error = self.error or exc
             raise
         finally:
-            self._close_server()
+            self._close_server(deadline)
         if self.error is not None:
             raise RuntimeError('probe collection failed: ' + str(self.error)) from self.error
 
     def _export(self, deadline):
         """Preserve real scrape timestamps and missing fields in a frozen artifact."""
-        from monitoring.metric_store import atomic_json
         from importlib.metadata import version
         samples, queries = {}, []
         cursor = self.started
-        while cursor < self.ended:
-            right = min(cursor + 60, self.ended)
-            expression = '{job=' + json.dumps(self.job) + '}[' + str(math.ceil((right-cursor)*1000)) + 'ms]'
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError("probe archive exceeded shutdown budget")
-            result = self.session.query(expression, right, timeout=min(5, remaining))
-            queries.append(dict(promql=expression, end=right, result=result))
-            for series in result:
-                metric = series['metric']['__name__']
-                if metric == 'up':
-                    if any(float(value) != 1 for _, value in series['values']):
-                        self.error = self.error or ValueError('probe exporter scrape failed')
-                    continue
-                field = next((key for key, name in self.names.items() if name == metric), None)
-                if field is None:
-                    continue
-                identity = series['metric'][self.label]
-                for timestamp, value in series['values']:
-                    number = float(value)
-                    if not math.isfinite(number):
-                        raise ValueError('non-finite probe archive')
-                    row = samples.setdefault((timestamp, identity), dict(epoch_s=timestamp,
-                                                                       **{self.label: identity}))
-                    if field in row and row[field] != number:
-                        raise ValueError('conflicting probe samples')
-                    row[field] = number
-            cursor = right
+        failure = None
+        try:
+            while cursor < self.ended:
+                right = min(cursor + 60, self.ended)
+                expression = '{job=' + json.dumps(self.job) + '}[' + str(math.ceil((right-cursor)*1000)) + 'ms]'
+                remaining = deadline.remaining()
+                if remaining <= 0:
+                    raise TimeoutError("probe archive exceeded shutdown budget")
+                result = self.session.query(expression, right, timeout=min(5, remaining), deadline=deadline)
+                queries.append(dict(promql=expression, end=right, result=result))
+                for series in result:
+                    metric = series['metric']['__name__']
+                    if metric == 'up':
+                        if any(float(value) != 1 for _, value in series['values']):
+                            self.error = self.error or ValueError('probe exporter scrape failed')
+                        continue
+                    field = next((key for key, name in self.names.items() if name == metric), None)
+                    if field is None:
+                        continue
+                    identity = series['metric'][self.label]
+                    for timestamp, value in series['values']:
+                        number = float(value)
+                        if not math.isfinite(number):
+                            raise ValueError('non-finite probe archive')
+                        row = samples.setdefault((timestamp, identity), dict(epoch_s=timestamp,
+                                                                           **{self.label: identity}))
+                        if field in row and row[field] != number:
+                            raise ValueError('conflicting probe samples')
+                        row[field] = number
+                cursor = right
+        except Exception as exc:
+            failure = exc
+            self.error = self.error or exc
         if not samples and self.error is None:
             self.error = ValueError('probe archive contains no samples')
         frozen = dict(sdk=dict(name='prometheus-client', version=version('prometheus-client')), transport='prometheus', source=self.source, fields=self.fields,
@@ -159,3 +174,5 @@ class PrometheusEvidence:
         with self.path.open('w') as stream:
             for key in sorted(samples):
                 stream.write(json.dumps(samples[key], allow_nan=False) + '\n')
+        if failure is not None:
+            raise failure

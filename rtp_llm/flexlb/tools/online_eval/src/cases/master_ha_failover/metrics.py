@@ -86,7 +86,7 @@ def _prefill_balance_series(rows, anchor, fleet_size):
 
 def metric_contract(producer, identity, calculation):
     from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
-    from monitoring.measurement import implementation_measurement
+    from monitoring.contracts import implementation_measurement, implementation_identity
     if calculation is not None:
         raise ValueError('HA producer owns its case-specific calculation')
     if producer == 'ha_gates' and identity in {'ha_gate/' + name for name in HA_METRICS}:
@@ -105,7 +105,7 @@ def metric_contract(producer, identity, calculation):
             raise ValueError('unknown HA evidence metric: ' + identity)
     else:
         raise ValueError('unknown HA metric: ' + identity)
-    contract = dict(source_type=source, measurement=implementation_measurement(function,
+    contract = dict(source_type=source, implementation=implementation_identity(function), measurement=implementation_measurement(function,
         population=population, accuracy='sampled' if source == 'debug_api' else 'request_ledger',
         request_identity=source == 'client_journal'))
     if source == 'debug_api':

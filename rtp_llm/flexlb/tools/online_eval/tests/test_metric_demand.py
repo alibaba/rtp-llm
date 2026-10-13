@@ -50,7 +50,8 @@ def test_case_compilation_freezes_variant_gate_chart_and_diagnostic_consumers():
 
 
 def test_producer_does_not_reload_full_catalog_or_publish_unselected_outputs(tmp_path):
-    from monitoring.metric_store import export_metrics, MetricStore
+    from monitoring.metric_store import MetricStore
+    from monitoring.archive import export_metrics
     from cases.master_performance.metrics import produce
     from test_performance_gate import evidence
     from cases.master_performance.analysis import analyze

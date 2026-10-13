@@ -26,7 +26,8 @@ def load_reinterpretation(parser, args, analyzer_path):
 
 def import_metrics(destination, source):
     """Copy frozen metrics and convert raw archives, always writing at destination."""
-    from monitoring.metric_store import MetricStore, export_metrics
+    from monitoring.metric_store import MetricStore
+    from monitoring.archive import export_metrics
 
     destination, source = Path(destination), Path(source)
     destination.mkdir(parents=True, exist_ok=True)

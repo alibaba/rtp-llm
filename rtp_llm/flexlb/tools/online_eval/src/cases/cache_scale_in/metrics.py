@@ -2,11 +2,12 @@
 
 from cases.cache_scale_in.analysis import analyze
 from runtime.observation import evidence_origin
-from monitoring.metric_store import MetricStore, export_metrics, publish, series_row
+from monitoring.metric_store import MetricStore, publish, series_row
+from monitoring.archive import export_metrics
 
 
 def metric_contract(producer, identity, calculation):
-    from monitoring.measurement import implementation_measurement
+    from monitoring.contracts import implementation_measurement, implementation_identity
     if producer != 'cache_windows' or calculation is not None:
         raise ValueError('cache producer owns its survivor-window calculation')
     if identity == 'derived/survivor_hit_ratio':
@@ -18,7 +19,7 @@ def metric_contract(producer, identity, calculation):
         source, population, accuracy = 'prometheus', 'baseline_initial_fleet_and_post_survivors', 'counter_delta'
     else:
         raise ValueError('unknown cache metric: ' + identity)
-    return dict(source_type=source, measurement=implementation_measurement(analyze,
+    return dict(source_type=source, implementation=implementation_identity(analyze), measurement=implementation_measurement(analyze,
                 population=population, accuracy=accuracy, request_identity=source == 'client_journal'))
 
 

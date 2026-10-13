@@ -45,7 +45,7 @@ def master_state_fields(data, fields=STATE_FIELDS - {"http_up"}):
 
 def master_adapters(env, fields):
     """Case-owned protocol interpretation, with public lifecycle and field selection."""
-    from monitoring.collectors import HttpJsonAdapter
+    from adapters.http_json import HttpJsonAdapter
     if not fields or not fields <= STATE_FIELDS:
         raise ValueError("unknown Master state fields")
     def adapter(name, spec):

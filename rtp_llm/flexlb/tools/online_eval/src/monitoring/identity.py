@@ -4,3 +4,5 @@ import re
 
 NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 METRIC_ID = re.compile(r"[a-z][a-z0-9_]*/[a-z][a-z0-9_]*\Z")
+
+SOURCE_KINDS = ("mock", "client", "master")

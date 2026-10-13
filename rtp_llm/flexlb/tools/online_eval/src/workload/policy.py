@@ -267,7 +267,7 @@ class WorkloadPolicy:
         )
         result["workload"]["collection_profile"] = self.profile
         result["workload"]["monitor_backend"] = "prometheus"
-        from monitoring.metric_store import export_metrics
+        from monitoring.archive import export_metrics
         metric_plan = instance_plan(ctx.instance)
         metric_store = export_metrics(ctx.artifact_dir, metric_plan)
         metric_store.document["run"] = dict(id=result["id"],

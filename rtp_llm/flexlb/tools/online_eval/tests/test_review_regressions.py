@@ -155,7 +155,8 @@ def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec)
 @pytest.mark.parametrize("metrics", [{}, {"x": [dict(metric_id="x", epoch="1", source="P",
     labels={}, points=[[10, 2], [11, None]], status="PRESENT", provenance={})]}])
 def test_minimal_metric_store_exports_without_optional_diagnostics(metrics, tmp_path):
-    from monitoring.metric_store import MetricStore, export_metrics
+    from monitoring.metric_store import MetricStore
+    from monitoring.archive import export_metrics
     store=MetricStore(dict(metrics_schema_version=1,definitions={"x":dict(unit="count")},metrics=metrics))
     series,sources,gaps,errors=store.series(10)
     assert gaps=={} and errors==[]
@@ -228,7 +229,7 @@ def test_published_contract_errors_keep_the_original_cause(tmp_path,monkeypatch,
     def contract(*args):
         if kind=="mismatch":return {}
         raise failure
-    monkeypatch.setattr("monitoring.producers.output_contract",contract)
+    monkeypatch.setattr("monitoring.producer_contract.output_contract",contract)
     with pytest.raises(MetricContractError) as raised:
         publish(store,"derived/survivor_hit_ratio",definition,[],producer="cache_windows",evidence={})
     if kind=="value_error":

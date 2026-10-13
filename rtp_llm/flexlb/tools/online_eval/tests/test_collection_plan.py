@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from monitoring.collectors import HttpJsonAdapter
+from adapters.http_json import HttpJsonAdapter
 from monitoring.probe import PrometheusEvidence
 from monitoring.collection_plan import collection_plan, physical_metrics, scrape_job
 from monitoring.query_plan import load_plan
@@ -53,7 +53,7 @@ def test_physical_whitelists_follow_case_plan_and_keep_all_query_dependencies():
 
 def test_unused_targets_are_not_scraped_or_waited_on(tmp_path):
     session = PrometheusSession(tmp_path, {'mock': 'http://local:1/metrics',
-        'master-A': 'http://unused:2/metrics'}, query_plan='master_ha_failover.yaml')
+        'master-A': 'http://unused:2/metrics'}, query_plan='master_ha_failover.yaml', target_kinds={'mock': 'mock', 'master-A': 'master'})
     assert set(session.targets) == {'mock'}
     with patch.object(session, 'instant') as read, patch('urllib.request.urlopen') as http:
         session.add_targets({'client-unused': 'http://unused:3/metrics'})
@@ -66,8 +66,8 @@ def test_only_evidence_plan_needs_no_prometheus_binary(tmp_path):
     plan = load_plan('master_ha_failover.yaml')
     plan['sources'] = dict(mock={}, client={}, master={})
     plan['produced'] = {key: spec for key, spec in plan['produced'].items() if 'collection' not in spec}
-    with patch('monitoring.query_plan.load_plan', return_value=plan), patch('shutil.which', return_value=None):
-        session = PrometheusSession(tmp_path, {}, binary='', query_plan='master_ha_failover.yaml')
+    with patch('shutil.which', return_value=None):
+        session = PrometheusSession(tmp_path, {}, binary='', metric_plan=plan, target_kinds={})
     session.start()
     session.stop()
     assert session.process is None

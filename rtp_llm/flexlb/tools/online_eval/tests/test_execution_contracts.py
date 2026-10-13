@@ -168,7 +168,7 @@ def test_ha_sampler_budget_failure_is_reported_at_join(tmp_path):
     sampler = evidence_collector(load_plan("master_ha_failover.yaml"), "master_inflight", env,
                                   tmp_path/"states.jsonl", session=NS(interval=.1),
                                   limits=dict(max_samples=1, max_bytes=10000))
-    with patch("monitoring.collectors.urllib.request.urlopen", side_effect=OSError("offline")):
+    with patch("adapters.http_json.urllib.request.urlopen", side_effect=OSError("offline")):
         list(sampler.collect())
         with pytest.raises(ValueError, match="budget exceeded"):
             list(sampler.collect())

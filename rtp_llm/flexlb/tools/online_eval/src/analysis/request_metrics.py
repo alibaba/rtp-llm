@@ -8,6 +8,7 @@ from typing import Callable
 
 from analysis.statistics import percentile_nr
 from input_contract import finite_number, mapping_fields
+from monitoring.contracts import implementation_identity
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ def describe_calculation(spec, *, windows):
             raise ValueError('unknown request calculation field')
     if calculator.percentile and (not finite_number(spec['percentile']) or not 0 < spec['percentile'] <= 1):
         raise ValueError('calculation.percentile must be in (0,1]')
-    return dict(source_type='client_journal', unit=calculator.unit, value_kind='gauge', labels=[],
+    return dict(source_type='client_journal', implementation=implementation_identity(calculator.evaluate), unit=calculator.unit, value_kind='gauge', labels=[],
                 measurement=dict(method=spec['calculator'],
                     population=window + ':' + selection['time_basis'] + ':' + selection['status'],
                     accuracy='request_ledger', requires_request_identity=True))

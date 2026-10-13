@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def prepare_report(directory, evidence):
-    from monitoring.metric_store import export_metrics
+    from monitoring.archive import export_metrics
     from monitoring.query_plan import load_plan
     export_metrics(directory, load_plan("cache_scale_in.yaml"))
     return read_report(directory, evidence)
@@ -310,7 +310,7 @@ class CacheGateTest(unittest.TestCase):
             self.assertIn("缺少有效曲线", spec["panels"][0]["caption"])
             self.assertNotIn("P cache hit ratio", curves)
             self.assertEqual(spec["summary"]["kpis"][1]["value"], "WARN")
-            self.assertIn("缺少 Prometheus queries.json 归档",
+            self.assertIn("缺少冻结的 Prometheus 样本",
                           html)
             self.assertEqual(analyze(e), result)
 

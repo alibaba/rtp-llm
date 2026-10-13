@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from monitoring.metric_store import export_metrics
+from monitoring.archive import export_metrics
 from monitoring.query_plan import load_plan
 
 

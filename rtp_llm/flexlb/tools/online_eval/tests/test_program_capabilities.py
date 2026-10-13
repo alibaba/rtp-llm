@@ -63,7 +63,7 @@ class ProgramCapabilitiesTest(unittest.TestCase):
             write_bundle(root, 'run', 'ordinary', {}, spec)
             result = dict(id='fixture', status='PASS', cleanup=[], stages=[dict(id='check', checks=[dict(id='ok', status='PASS')])], workload=dict(runtime_validity='VALID'))
             evidence = dict(clock_anchor=dict(epoch_s=0), phases=[])
-            with mock.patch('monitoring.session.archived_series', return_value=({}, {}, {}, [])):
+            with mock.patch('monitoring.metric_store.MetricStore.read', return_value=mock.Mock(series=mock.Mock(return_value=({}, {}, {}, [])))):
                 payload = analyze_report(root, result, evidence)
             self.assertNotIn('gate_reports', payload)
             self.assertNotIn('gate_report', payload)

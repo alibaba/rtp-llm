@@ -8,7 +8,7 @@ from tests.ha_fixtures import client_resource
 from workload.validity import analyze_report as read_analysis
 
 def analyze_report(directory, result, evidence):
-    from monitoring.metric_store import export_metrics
+    from monitoring.archive import export_metrics
     export_metrics(directory)
     return read_analysis(directory, result, evidence)
 

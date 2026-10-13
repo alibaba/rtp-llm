@@ -78,7 +78,7 @@ class WorkloadReportViewsTest(unittest.TestCase):
             from reporting.timeline import freeze
             declaration = load_document(ROOT / "config/scenarios/master_ha_failover.yaml")["reporting"]
             analysis["report_timeline"] = freeze(declaration, events=analysis["events"], phases=analysis["phases"])
-            from monitoring.metric_store import export_metrics
+            from monitoring.archive import export_metrics
             from monitoring.query_plan import load_plan
             from monitoring.producers import produce
             from metric_fixtures import freeze_metrics

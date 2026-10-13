@@ -107,11 +107,9 @@ def bounded_collection_gaps(series, gaps, max_gap_s):
 
 def analyze_report(directory, result, evidence):
     directory = Path(directory)
-    from monitoring.session import archived_series
+    from monitoring.metric_store import MetricStore
 
-    series, statistic_sources, source_gaps, monitor_errors = archived_series(
-        directory, evidence["clock_anchor"]["epoch_s"]
-    )
+    series, statistic_sources, source_gaps, monitor_errors = MetricStore.read(directory).series(evidence["clock_anchor"]["epoch_s"])
     # Logs, request journals and debug API snapshots are dedicated-test evidence.
     # They cannot silently supply a missing performance curve.
     gaps = {

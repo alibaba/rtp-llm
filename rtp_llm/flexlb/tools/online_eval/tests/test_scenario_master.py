@@ -138,7 +138,7 @@ class MasterActionsTest(unittest.TestCase):
                     decode_endpoints=[{"master_queued": 1, "confirmed_running": 6}])).encode())
             raise OSError("Master offline")
 
-        with patch("monitoring.collectors.urllib.request.urlopen", side_effect=fetch):
+        with patch("adapters.http_json.urllib.request.urlopen", side_effect=fetch):
             families = list(sampler.collect())
         rows = [{"master": name, **{field: next(sample.value for sample in family.samples
                   if sample.labels["master"] == name) for field, family in zip(sampler.fields, families)
@@ -168,7 +168,7 @@ class MasterActionsTest(unittest.TestCase):
             time.sleep,
         )
         from monitoring.session import PrometheusSession
-        self.ctx.monitor = PrometheusSession(self.tmp.name, {"mock": "http://unused/metrics"}, query_plan="master_ha_failover.yaml")
+        self.ctx.monitor = PrometheusSession(self.tmp.name, {"mock": "http://unused/metrics"}, query_plan="master_ha_failover.yaml", target_kinds={'mock': 'mock'})
         self.ctx.ops = Mock()
         self.ctx.ops.master_target.return_value = "master"
         self.ctx.env_epoch = 1
