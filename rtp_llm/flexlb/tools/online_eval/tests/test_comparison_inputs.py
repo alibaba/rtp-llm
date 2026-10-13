@@ -23,7 +23,8 @@ def bundle(tmp_path, name, *, panel='latency', extra=False, points=None):
         spec['panels'][0]['series'].append(dict(name='Queue', metric_id='queue', unit='ms', points=[{'x': 5, 'y': 4}]))
     return write_bundle(tmp_path / name, 'run', name, {'verdict': 'PASS', 'criteria': {'limit': 20}}, spec,
         meta=run_meta({'id': name}, implementation={'commit': name}, configuration={'profile': name},
-                      workload={'trace': 'same'}, environment={'cores': 32}))
+                      workload={'trace': 'same'}, environment={'cores': 32},
+                      clock={'origin_kind': 'observation_start'}))
 
 
 def experiment(tmp_path, source, *, name='experiment'):
@@ -44,7 +45,7 @@ def report(output):
 
 def test_mixed_zip_and_bundle_named_reference_and_series_level_pairing(tmp_path):
     a = bundle(tmp_path, 'a', extra=True)
-    b = bundle(tmp_path, 'b', panel='different-layout')
+    b = bundle(tmp_path, 'b')
     archive = experiment(tmp_path, b)
     output = tmp_path / 'comparison'
     result = compare([a, archive], output, labels=['single', 'batch'], baseline='batch', alignment_event='scale')
@@ -142,3 +143,52 @@ def test_attachment_validation_fails_before_publication(tmp_path):
             write_bundle(tmp_path / 'invalid', 'run', 'invalid', {}, {'panels': []},
                          attachments={filename: 'payload'})
     assert not (tmp_path / 'invalid').exists()
+
+
+def test_default_preserves_multi_metric_layout_visibility_and_display_range(tmp_path):
+    a = bundle(tmp_path, 'a', extra=True, points=[{'x': -100, 'y': None}, {'x': 10, 'y': 9}])
+    b = bundle(tmp_path, 'b', extra=True)
+    result = compare([a, b], tmp_path / 'out')
+    spec = report(tmp_path / 'out')
+    assert spec['timeAxis'] == {'min': 0, 'max': 20}
+    assert spec['timeOriginLabel'] == 'observation start'
+    assert result['time_alignment']['status'] == 'NOT_REQUESTED'
+    assert len(spec['panels']) == 1
+    panel = spec['panels'][0]
+    assert panel['id'] == 'overlay:latency'
+    assert [curve['metric_id'] for curve in panel['series']] == ['request/latency', 'request/latency', 'queue', 'queue']
+    assert panel['series'][0]['points'][0] == {'x': -100, 'y': None}
+    assert panel['timeAxis'] == {'min': 0, 'max': 20}
+    assert '指标 · Queue' in panel['presets']
+    assert 'run · A' in panel['presets']
+
+
+def test_different_panel_ids_do_not_implicitly_map_even_with_same_metric(tmp_path):
+    compare([bundle(tmp_path, 'a'), bundle(tmp_path, 'b', panel='different')], tmp_path / 'out')
+    assert len(report(tmp_path / 'out')['panels']) == 2
+    assert all(p['id'].startswith('run-') for p in report(tmp_path / 'out')['panels'])
+
+
+def test_clock_semantics_required_and_separate_ranges_preserved(tmp_path):
+    a, b = bundle(tmp_path, 'a'), bundle(tmp_path, 'b')
+    spec = json.loads((b / 'report-spec.json').read_text())
+    spec['run_meta']['clock'] = None
+    spec['timeAxis'] = {'min': 100, 'max': 150}
+    unknown = write_bundle(tmp_path / 'unknown', 'run', 'unknown', {}, spec, meta=spec['run_meta'])
+    compare([a, unknown], tmp_path / 'out')
+    panels = report(tmp_path / 'out')['panels']
+    assert len(panels) == 2
+    assert panels[0]['timeAxis'] == {'min': 0, 'max': 20}
+    assert panels[1]['timeAxis'] == {'min': 100, 'max': 150}
+
+
+def test_selected_baseline_sets_layout_and_display_range(tmp_path):
+    a, b = bundle(tmp_path, 'a'), bundle(tmp_path, 'b', extra=True)
+    spec = json.loads((b / 'report-spec.json').read_text())
+    spec['timeAxis'] = {'min': 3, 'max': 15}
+    other = write_bundle(tmp_path / 'other', 'run', 'other', {}, spec, meta=spec['run_meta'])
+    compare([a, other], tmp_path / 'out', labels=['a', 'b'], baseline='b')
+    result = report(tmp_path / 'out')
+    assert result['timeAxis'] == {'min': 3, 'max': 15}
+    assert len(result['panels']) == 1
+    assert len(result['panels'][0]['series']) == 3

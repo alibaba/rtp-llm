@@ -169,6 +169,8 @@ def render(spec):
                 "axisLabels": p.get("axisLabels"),
                 "events": p.get("events"),
                 "timeX": bool(p.get("timeX")),
+                "timeAxis": p.get("timeAxis"),
+                "timeSelectionKey": p.get("timeSelectionKey"),
                 "yMax": p.get("yMax"),
                 "axes": p.get("axes", {}),
                 "presets": p.get("presets", {}),

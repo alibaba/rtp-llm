@@ -14,8 +14,11 @@
   }
   function mount(parent, panel, context) {
     const domain=context.timeAxis;
-    const selection=parent._flexTimeSelection||(parent._flexTimeSelection={min:domain.min,max:domain.max,listeners:[],
-      update(lo,hi){if(!Number.isFinite(lo)||!Number.isFinite(hi)||hi<=lo)return;this.min=Math.max(domain.min,lo);this.max=Math.min(domain.max,hi);if(this.max<=this.min){this.min=domain.min;this.max=domain.max;}this.listeners.forEach(f=>f(this.min,this.max));}});
+    const selections=parent._flexTimeSelections||(parent._flexTimeSelections=new Map());
+    const selectionKey=context.selectionKey || "default";
+    const selection=selections.get(selectionKey)||{min:domain.min,max:domain.max,listeners:[],
+      update(lo,hi){if(!Number.isFinite(lo)||!Number.isFinite(hi)||hi<=lo)return;this.min=Math.max(domain.min,lo);this.max=Math.min(domain.max,hi);if(this.max<=this.min){this.min=domain.min;this.max=domain.max;}this.listeners.forEach(f=>f(this.min,this.max));}};
+    selections.set(selectionKey,selection);
     const wrap = document.createElement('section'); wrap.className = 'panel multi-curve'; wrap.style.gridColumn = '1 / -1';
     const title = document.createElement('h3'); title.textContent = panel.title; wrap.appendChild(title);
     const caption = document.createElement('p'); caption.textContent = panel.caption; wrap.appendChild(caption);

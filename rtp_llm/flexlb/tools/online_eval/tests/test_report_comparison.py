@@ -39,7 +39,7 @@ class ReportComparisonTest(unittest.TestCase):
                                        series=[dict(name='bar', points=[dict(x='x', y=2)])]))
         return write_bundle(self.root/name, 'run', 'fixture', result, spec,
                             meta=run_meta(dict(id=name), configuration=configuration or dict(scheduler='same'),
-                                          workload=dict(sha256='same'), environment=dict(fetch=True)),
+                                          workload=dict(sha256='same'), environment=dict(fetch=True), clock={'origin_kind': 'run_start'}),
                             producer='fixture')
 
     def output(self, name='comparison'):
@@ -78,7 +78,7 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual([p['x'] for p in panels[0]['series'][0]['points']], [-5, 0, 15])
         self.assertEqual([p['x'] for p in panels[0]['series'][1]['points']], [-10, -5, 10])
         self.assertIsNone(panels[0]['series'][0]['points'][1]['y'])
-        self.assertEqual(self.spec()['timeAxis']['min'], -15)
+        self.assertEqual(self.spec()['timeAxis']['min'], -10)
         self.assertEqual(json.loads((a/'report-spec.json').read_text()), original)
 
     def test_differences_missing_panels_and_invalid_runs_are_not_execution_errors(self):
@@ -124,7 +124,8 @@ class ReportComparisonTest(unittest.TestCase):
                 id='metric', title='metric', timeX=True, axes={'y': dict(title='count')},
                 series=[dict(name='metric', metric_id='metric', points=[dict(x=t,y=v) for t,v in zip(times,[3,None,4])])],
             )])
-            paths.append(write_bundle(self.root/name, 'run', name, {}, spec))
+            paths.append(write_bundle(self.root/name, 'run', name, {}, spec,
+                meta=run_meta({'id': name}, clock={'origin_kind': 'run_start'})))
         compare(paths, self.output())
         series = self.spec()['panels'][0]['series']
         self.assertEqual([p['x'] for p in series[0]['points']], [1, 2, 12])
