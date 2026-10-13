@@ -132,9 +132,9 @@ class JavaFlowGroup:
         )
         return state
 
-    def _wait(self, predicate, deadline, message):
+    def _wait(self, predicate, deadline, message, *, observe=None):
         while True:
-            state = self.status()
+            state = (observe or self.status)()
             if predicate(state):
                 return state
             if state["process_returncode"] is not None:
@@ -145,7 +145,7 @@ class JavaFlowGroup:
             time.sleep(min(self.poll_s, remaining))
 
     def stop_sending(self, deadline):
-        state = self.status()
+        state = self.control_status()
         if state.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"}:
             return state
         from adapters.flow_control import stop_sending
@@ -154,6 +154,7 @@ class JavaFlowGroup:
             lambda s: s.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"},
             deadline,
             "flow did not stop accepting new trace records",
+            observe=self.control_status,
         )
 
     def drain(self, deadline):

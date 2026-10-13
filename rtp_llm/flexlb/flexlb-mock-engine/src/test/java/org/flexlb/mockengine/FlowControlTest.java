@@ -22,10 +22,29 @@ class FlowControlTest {
         flow.publish("DRAINING", 4, 3, 1);
         var status = JSON.readTree(directory.resolve("status.json").toFile());
         assertEquals("s1", status.path("applied_command_id").asText());
+        assertEquals("stop_command", status.path("sending_end_reason").asText());
         assertEquals(3, status.path("outstanding").asInt());
         assertFalse(flow.awaitDue(System.nanoTime() + 60_000_000_000L));
         flow.publish("DRAINED", 4, 4, 4);
         assertEquals(0, JSON.readTree(directory.resolve("status.json").toFile()).path("outstanding").asInt());
+    }
+
+    @Test void naturalBoundaryDoesNotAcknowledgeLateStop() throws Exception {
+        FlowControl flow = new FlowControl(directory, "run", "group", "formal");
+        flow.publish("SENDING", 1, 1, 0);
+        assertFalse(JSON.readTree(directory.resolve("status.json").toFile()).has("sending_end_reason"));
+        // Stop arrives after the last sending-loop check and is never applied.
+        assertFalse(flow.stopRequested());
+        Files.writeString(directory.resolve("stop.json"), """
+                {"run_id":"run","group_id":"group","operation":"stop_sending","command_id":"late"}
+                """);
+        flow.publish("DRAINING", 1, 1, 0);
+        flow.publish("DRAINED", 1, 1, 1);
+        var status = JSON.readTree(directory.resolve("status.json").toFile());
+        assertEquals("natural", status.path("sending_end_reason").asText());
+        assertFalse(status.has("applied_command_id"));
+        assertEquals(1, status.path("terminal").asInt());
+        assertEquals(0, status.path("outstanding").asInt());
     }
 
     @Test void controlledTraceDoesNotSilentlyRepairShapeOrKeys() throws Exception {

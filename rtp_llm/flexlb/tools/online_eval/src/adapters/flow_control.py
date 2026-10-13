@@ -33,4 +33,8 @@ def validate_drain(state, identity, *, terminal_count, command_id):
             or state["submitted"] != state["terminal"] or state["terminal"] != terminal_count):
         raise ValueError("flow did not retain every submitted terminal result")
     if command_id is not None and state.get("applied_command_id") != command_id:
-        raise ValueError("flow ended before accepting the stop command")
+        # A finite producer can reach its own boundary while stop is in flight.
+        # Only explicit natural completion can substitute for this command's ACK.
+        if (state.get("sending_end_reason") != "natural"
+                or state.get("applied_command_id") is not None):
+            raise ValueError("flow ended before accepting the stop command")

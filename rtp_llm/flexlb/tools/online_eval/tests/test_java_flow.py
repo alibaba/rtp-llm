@@ -10,6 +10,44 @@ from traffic.synthetic.generator import write_trace
 
 
 class JavaFlowTest(unittest.TestCase):
+    def test_natural_completion_racing_stop_retains_drain_checks(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as d:
+            flow = JavaFlowGroup(None, d, run_id="r", group_id="g", phase_id="p", poll_s=0.01)
+            flow.control.mkdir()
+            flow.proc = SimpleNamespace(proc=SimpleNamespace(poll=lambda: 0))
+            sending = dict(**flow.identity, state="SENDING", process_returncode=None)
+            drained = dict(**flow.identity, state="DRAINED", sending_end_reason="natural",
+                           submitted=1, terminal=1, process_returncode=0,
+                           observed_terminal=1, unfinished_ids=[])
+            # The producer finishes after the first observation but before reading stop.json.
+            flow.control_status = Mock(side_effect=[sending, drained])
+            flow.status = Mock(side_effect=AssertionError("stop must not parse the journal"))
+            flow.stop_sending(Deadline(1))
+            self.assertTrue((flow.control / "stop.json").exists())
+            flow.status = Mock(return_value=drained)
+            self.assertEqual(flow.drain(Deadline(1))["terminal"], 1)
+            for invalid in (dict(drained, observed_terminal=0),
+                            dict(drained, unfinished_ids=["pending"]),
+                            dict(drained, process_returncode=1)):
+                flow.status.return_value = invalid
+                with self.assertRaises(RuntimeError):
+                    flow.drain(Deadline(1))
+
+    def test_unacknowledged_stop_requires_explicit_natural_completion(self):
+        from adapters.flow_control import validate_drain
+        identity = dict(run_id="r", group_id="g")
+        state = dict(**identity, state="DRAINED", submitted=1, terminal=1)
+        for extra in ({}, {"sending_end_reason": "stop_command"},
+                      {"sending_end_reason": "natural", "applied_command_id": "other"}):
+            with self.assertRaisesRegex(ValueError, "accepting the stop"):
+                validate_drain(dict(state, **extra), identity, terminal_count=1, command_id="s")
+        validate_drain(dict(state, applied_command_id="s"), identity,
+                       terminal_count=1, command_id="s")
+        with self.assertRaisesRegex(ValueError, "retain every"):
+            validate_drain(dict(state, sending_end_reason="natural", terminal=0), identity,
+                           terminal_count=0, command_id="s")
+
     def test_control_observation_does_not_parse_request_journal(self):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as d:

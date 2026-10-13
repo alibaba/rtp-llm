@@ -100,6 +100,8 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `adapters.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
 
+Java 流量在停止发送后的状态中记录 `sending_end_reason`：`stop_command` 表示接受控制命令，`natural` 表示到达自身时长或输入边界。stop 使用轻量控制状态，不解析请求日志；drain 独立校验进程成功退出及所有提交请求的终态完整性。stop 与自然结束并发时，显式自然结束可以替代命令确认；未知结束原因或确认了其他命令仍视为协议错误，不能仅凭进程退出认定排空成功。
+
 ## 收尾与持久化
 
 `execution.timeout_s` 约束阶段执行，`cleanup_timeout_s` 单独保留资源清理预算。workload 清理后，证据导出与分析受 `finalize_timeout_s` 约束，报告生成受 `report_timeout_s` 约束；所有实例的压缩工件交付受 `archive_timeout_s` 约束，父 runner 的进程预算包含这些收尾时间。执行、取证或报告失败后仍尝试归档已有证据；归档失败只影响交付状态，不修改门禁与运行有效性。同步工作受主线程中断式期限保护，资源导出同时检查合作式 deadline。

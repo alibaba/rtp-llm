@@ -71,6 +71,9 @@ final class FlowControl {
         row.put("started", started);
         row.put("terminal", terminal);
         row.put("outstanding", Math.max(0, submitted - terminal));
+        if (!"SENDING".equals(state) && !"STARTING".equals(state)) {
+            row.put("sending_end_reason", stopCommand == null ? "natural" : "stop_command");
+        }
         if (!"SENDING".equals(state) && !"STARTING".equals(state) && stopCommand != null) {
             row.put("applied_command_id", stopCommand);
         }
