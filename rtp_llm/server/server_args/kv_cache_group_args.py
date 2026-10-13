@@ -158,6 +158,18 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         ),
     )
     kv_cache_group.add_argument(
+        "--kv_cache_pool_block_weights",
+        env_name="KV_CACHE_POOL_BLOCK_WEIGHTS",
+        bind_to=(kv_cache_config, "kv_cache_pool_block_weights"),
+        type=str,
+        default="",
+        help=(
+            "按 cache group tag 设置 pool block 数量权重的 JSON 对象，权重为正整数；"
+            "例如 {\"full\":8,\"linear\":1}。权重表示 block 数量比例而非显存比例，"
+            "空字符串保持默认分配策略。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--ssm_state_dtype",
         env_name="SSM_STATE_DTYPE",
         bind_to=(kv_cache_config, "ssm_state_dtype"),

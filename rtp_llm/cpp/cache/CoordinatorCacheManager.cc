@@ -99,6 +99,21 @@ bool CoordinatorCacheManager::init() {
         reserve_block_num_ = 0;
     }
 
+    for (size_t id = 0; id < group_block_pools_.size(); ++id) {
+        const auto& pool = group_block_pools_[id];
+        if (pool) {
+            const auto& group = config_.groups()[id];
+            RTP_LLM_LOG_INFO("cache pool capacity: pool_name=%s tag=%s weight=%u physical_blocks=%u "
+                             "usable_blocks=%zu bytes=%zu reserve_blocks=%zu",
+                             pool->poolName().c_str(),
+                             group.tag.c_str(),
+                             config_.blockWeight(group.tag),
+                             group.block_num,
+                             pool->totalBlocksNum(),
+                             pool->getTotalSizeBytes(),
+                             reserveBlocksForPool(id));
+        }
+    }
     return true;
 }
 
@@ -229,7 +244,8 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
                                                          int                            reserve_step,
                                                          bool                           enable_reuse_cache,
                                                          int                            target_batch_size,
-                                                         LinearCachePolicy              linear_cache_policy) const {
+                                                         LinearCachePolicy              linear_cache_policy,
+                                                         const std::string&             pool_tag) const {
     if (!batch_kv_cache_resource || batch_kv_cache_resource->batchSize() == 0) {
         return 0;
     }
@@ -240,6 +256,37 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     if (linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED
         && !canReclaimLinearHistory(target_width, enable_reuse_cache)) {
         linear_cache_policy = LinearCachePolicy::KEEP_HISTORY;
+    }
+
+    if (!pool_tag.empty()) {
+        const auto  group_id = groupIdForTag(pool_tag);
+        const auto& group    = kv_cache_groups_.at(group_id);
+        const bool  group_reuse =
+            reuseCacheForGroup(enable_reuse_cache, config_.group(pool_tag).policy.group_type, linear_cache_policy);
+        const bool reclaim_history  = linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED;
+        const int  group_seq_len    = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, pool_tag, seq_len);
+        const int  group_common_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, pool_tag, clamped_common_len);
+        const int  group_future_seq =
+            cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, pool_tag, seq_len + std::max(remaining_tokens, 0));
+        const int group_remaining = std::max(group_future_seq - group_seq_len, 0);
+        if (batch_kv_cache_resource->curBlocksNum() == 0) {
+            return group->estimateInitialBatchPeakNeedBlocks(group_seq_len,
+                                                             group_common_len,
+                                                             group_remaining,
+                                                             reserve_step,
+                                                             group_reuse,
+                                                             target_width,
+                                                             reclaim_history);
+        }
+        const int growth      = group->estimatePeakNeedBlocks(group_seq_len,
+                                                         batch_kv_cache_resource->cacheResource(0).blocks(pool_tag),
+                                                         group_remaining,
+                                                         reserve_step,
+                                                         group_reuse,
+                                                         reclaim_history);
+        const int expanded    = target_width - current_batch_size;
+        const int tail_copies = expanded > 0 && seq_len % seqSizePerBlock() != 0 ? expanded : 0;
+        return target_width * growth + tail_copies;
     }
 
     // A fresh resource follows initMalloc's two phases. Each group estimates that exact sequence so Linear groups can
@@ -349,6 +396,17 @@ int CoordinatorCacheManager::deviceCacheMetricTokensPerBlock() const {
         return cp_slot_mapper_->virtualBlockSize();
     }
     return seqSizePerBlock();
+}
+
+std::vector<KVCachePoolCapacity> CoordinatorCacheManager::poolCapacities() const {
+    std::vector<KVCachePoolCapacity> result;
+    for (size_t id = 0; id < group_block_pools_.size(); ++id) {
+        const auto& pool = group_block_pools_[id];
+        if (pool) {
+            result.push_back({config_.groupTags()[id], pool->availableBlocksNum(), reserveBlocksForPool(id)});
+        }
+    }
+    return result;
 }
 
 std::vector<KVCachePoolMetricsSnapshot> CoordinatorCacheManager::poolMetricsSnapshots() const {

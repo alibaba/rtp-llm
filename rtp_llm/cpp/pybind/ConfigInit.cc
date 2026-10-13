@@ -507,6 +507,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
+        .def_readwrite("kv_cache_pool_block_weights", &KVCacheConfig::kv_cache_pool_block_weights)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
         .def_readwrite("kv_cache_mem_mb", &KVCacheConfig::kv_cache_mem_mb)
@@ -575,7 +576,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      8,
+                                      9,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -643,9 +644,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_instance_group,
                                       self.kv_cache_event_instance_id,
                                       self.kv_cache_event_host_ip_port,
-                                      self.enable_linear_cache_reclaim);
+                                      self.enable_linear_cache_reclaim,
+                                      self.kv_cache_pool_block_weights);
             },
             [](py::tuple t) {
+                const py::tuple pool_weights_state = t;
+                const bool      has_pool_weights_field =
+                    t.size() == 71 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
+                if (has_pool_weights_field) {
+                    t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
+                    t[1] = py::int_(8);
+                }
                 const py::tuple reclaim_state = t;
                 const bool      has_reclaim_field =
                     t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
@@ -764,6 +773,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 if (has_reclaim_field) {
                     c.enable_linear_cache_reclaim = reclaim_state[69].cast<bool>();
+                }
+                if (has_pool_weights_field) {
+                    c.kv_cache_pool_block_weights = pool_weights_state[70].cast<std::string>();
                 }
                 return c;
             }));
