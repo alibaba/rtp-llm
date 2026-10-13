@@ -33,15 +33,16 @@ def adapt_split_moe_weights(
         dtype=routed_w1.dtype,
         device=routed_w1.device,
     )
+    scale_rows = routed_s1.size(-2)
     combined_s13 = torch.empty(
-        (expert_count, 2 * moe_inter_dim, routed_s1.size(-1)),
+        (expert_count, 2 * scale_rows, routed_s1.size(-1)),
         dtype=routed_s1.dtype,
         device=routed_s1.device,
     )
     combined_w13[:, :moe_inter_dim].copy_(routed_w1)
     combined_w13[:, moe_inter_dim:].copy_(routed_w3)
-    combined_s13[:, :moe_inter_dim].copy_(routed_s1)
-    combined_s13[:, moe_inter_dim:].copy_(routed_s3)
+    combined_s13[:, :scale_rows].copy_(routed_s1)
+    combined_s13[:, scale_rows:].copy_(routed_s3)
     weights[W.moe_w1] = combined_w13
     weights[W.moe_s1] = combined_s13
     weights[W.moe_w2] = weights.pop(weight_names["routed_down"])

@@ -42,22 +42,21 @@ _stub_package(
 import rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup as warmup_module
 from rtp_llm.models_py.modules.dsv4 import mhc_prenorm_backend
 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
+    _align_up,
     _collect_dsv4_batched_fp8_einsum_shapes,
     _collect_dsv4_branch_kernel_configs,
     _collect_dsv4_dense_gemm_shapes,
     _collect_dsv4_fp8_mqa_logits_shapes,
+    _collect_dsv4_grouped_fp8_moe_shapes,
     _collect_dsv4_mhc_head_fused_shapes,
     _collect_dsv4_mhc_prenorm_shapes,
-    _compute_mhc_prenorm_num_split,
+    _collect_dsv4_wo_a_grouped_shapes,
     _cp_direct_gather_batch_warmup_sizes,
     _cp_padded_tokens_per_rank_bound,
     _cp_restore_batch_warmup_sizes,
     _dense_gemm_m_grid,
     _dist_rank,
     _generate_dense_gemm_warmup_m_grid,
-    _align_up,
-    _collect_dsv4_grouped_fp8_moe_shapes,
-    _collect_dsv4_wo_a_grouped_shapes,
     _generate_mhc_prenorm_warmup_specs,
     _grouped_fp8_masked_m_values,
     _mhc_prenorm_backend,
@@ -75,9 +74,9 @@ from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
     warmup_dsv4_fp8_swa_slot_dequant_jit,
     warmup_fp8_mqa_logits_jit,
     warmup_grouped_fp8_moe_jit,
-    warmup_wo_a_grouped_jit,
     warmup_mhc_head_fused_jit,
     warmup_mhc_prenorm_gemm_jit,
+    warmup_wo_a_grouped_jit,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp4 import (
     GroupedFp4Executor,
@@ -1585,11 +1584,31 @@ class MhcPrenormBackendResolutionTest(unittest.TestCase):
         ("deepgemm", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
         ("DeepGEMM", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
         ("dg", mhc_prenorm_backend.DEEPGEMM, mhc_prenorm_backend.DEEPGEMM),
-        ("tilelang", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
-        ("single", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
-        (" TileLang_Single ", mhc_prenorm_backend.TILELANG_SINGLE, mhc_prenorm_backend.TILELANG_SINGLE),
-        ("splitk", mhc_prenorm_backend.TILELANG_SPLITK, mhc_prenorm_backend.TILELANG_SPLITK),
-        ("tilelang_splitk", mhc_prenorm_backend.TILELANG_SPLITK, mhc_prenorm_backend.TILELANG_SPLITK),
+        (
+            "tilelang",
+            mhc_prenorm_backend.TILELANG_SINGLE,
+            mhc_prenorm_backend.TILELANG_SINGLE,
+        ),
+        (
+            "single",
+            mhc_prenorm_backend.TILELANG_SINGLE,
+            mhc_prenorm_backend.TILELANG_SINGLE,
+        ),
+        (
+            " TileLang_Single ",
+            mhc_prenorm_backend.TILELANG_SINGLE,
+            mhc_prenorm_backend.TILELANG_SINGLE,
+        ),
+        (
+            "splitk",
+            mhc_prenorm_backend.TILELANG_SPLITK,
+            mhc_prenorm_backend.TILELANG_SPLITK,
+        ),
+        (
+            "tilelang_splitk",
+            mhc_prenorm_backend.TILELANG_SPLITK,
+            mhc_prenorm_backend.TILELANG_SPLITK,
+        ),
         ("bogus", "bogus", "bogus"),
     )
 
@@ -1615,9 +1634,7 @@ class MhcPrenormBackendResolutionTest(unittest.TestCase):
         sentinel = "sentinel_backend"
         original = mhc_prenorm_backend.resolve_backend
         mhc_prenorm_backend.resolve_backend = lambda: sentinel
-        self.addCleanup(
-            setattr, mhc_prenorm_backend, "resolve_backend", original
-        )
+        self.addCleanup(setattr, mhc_prenorm_backend, "resolve_backend", original)
         os.environ[mhc_prenorm_backend.BACKEND_ENV] = "tilelang_single"
         self.assertEqual(_mhc_prenorm_backend(), sentinel)
 
@@ -1658,9 +1675,7 @@ class MhcPrenormBackendResolutionTest(unittest.TestCase):
         """
         original = mhc_prenorm_backend.device_num_sms
         mhc_prenorm_backend.device_num_sms = lambda device=None: 137
-        self.addCleanup(
-            setattr, mhc_prenorm_backend, "device_num_sms", original
-        )
+        self.addCleanup(setattr, mhc_prenorm_backend, "device_num_sms", original)
         seen = {}
 
         def spy(**kwargs):

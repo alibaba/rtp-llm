@@ -28,6 +28,7 @@ class _CudaFp8Fp4Strategy(MoeStrategy):
     def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
         checker.check(config.moe_strategy in ("auto", cls.strategy_name))
         checker.check(config.moe_quant_method == "FP8_FP4")
+        checker.check(getattr(config, "expert_dtype", "fp4") == "fp4")
         checker.check(not config.has_redundant_experts)
         checker.check((config.ep_size > 1) == cls.requires_ep)
         if cls.requires_shared:
@@ -125,3 +126,31 @@ class CudaLocalLoopStrategy(_CudaFp8Fp4Strategy):
         )
 
         return LocalLoopExecutor
+
+
+class CudaGroupedFp8Strategy(MoeStrategy):
+    """Select converted FP8 experts on Hopper for either local or EP execution."""
+
+    supported_moe_quant_method = "FP8_FP4"
+    strategy_name = "grouped_fp8"
+
+    @classmethod
+    def check_conditions(cls, checker: Any, config: MoEConfigAdapter) -> None:
+        checker.check(config.moe_strategy in ("auto", cls.strategy_name))
+        checker.check(config.moe_quant_method == "FP8_FP4")
+        checker.check(getattr(config, "expert_dtype", "fp4") == "fp8")
+        checker.check(not config.has_redundant_experts)
+
+    def get_attributes(self) -> StrategyAttributes:
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.grouped_fp8 import (
+            GroupedFp8Executor,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.fp8_fp4_router import (
+            Fp8Fp4Router,
+        )
+
+        return StrategyAttributes(
+            router_class=Fp8Fp4Router,
+            executor_class=GroupedFp8Executor,
+            quant_config=FusedMoEQuantConfig(quant_dtype="fp8", block_shape=[128, 128]),
+        )

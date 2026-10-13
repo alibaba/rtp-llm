@@ -11,7 +11,9 @@ class TestFp8GemmNtDefaults(TestCase):
         def fake_impl(*args, **kwargs):
             captured.update(kwargs)
 
-        with patch.object(deepgemm_wrapper, "_fp8_gemm_nt_impl", fake_impl), patch.object(
+        with patch.object(
+            deepgemm_wrapper, "_fp8_gemm_nt_impl", fake_impl
+        ), patch.object(
             deepgemm_wrapper,
             "is_deep_gemm_e8m0_used",
             return_value=uses_e8m0,

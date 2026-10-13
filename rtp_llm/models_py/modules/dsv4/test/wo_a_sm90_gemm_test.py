@@ -110,9 +110,9 @@ class WoASm90Test(unittest.TestCase):
                     self.assertTrue(
                         torch.equal(
                             w[h].reshape(-1).view(torch.uint8),
-                            weight_fp8[h * R : (h + 1) * R].reshape(-1).view(
-                                torch.uint8
-                            ),
+                            weight_fp8[h * R : (h + 1) * R]
+                            .reshape(-1)
+                            .view(torch.uint8),
                         ),
                         f"weight group {h} is not rows [{h * R}, {(h + 1) * R})",
                     )
@@ -155,9 +155,7 @@ class WoASm90Test(unittest.TestCase):
         w_exps = torch.randint(124, 131, (G * R // 128, K // 128), generator=gen).to(
             self.device
         )
-        weight, weight_scale = prepare_wo_a_grouped(
-            weight_fp8, _e8m0(w_exps), G, R, K
-        )
+        weight, weight_scale = prepare_wo_a_grouped(weight_fp8, _e8m0(w_exps), G, R, K)
 
         out = wo_a_grouped_gemm(o_fp8, o_scale_packed, weight, weight_scale)
         self.assertEqual(tuple(out.shape), (M, G, R))

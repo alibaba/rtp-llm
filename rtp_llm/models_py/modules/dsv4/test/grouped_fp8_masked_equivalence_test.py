@@ -147,9 +147,11 @@ def _contiguous_side_pinned():
 def _inputs(n_tokens: int, device: str, seed: int):
     g = torch.Generator(device="cpu").manual_seed(seed)
     x = (torch.randn(n_tokens, _D, generator=g) * 0.5).to(device).to(torch.bfloat16)
-    idx = torch.stack(
-        [torch.randperm(_E, generator=g)[:_TOPK] for _ in range(n_tokens)]
-    ).to(device).to(torch.int64)
+    idx = (
+        torch.stack([torch.randperm(_E, generator=g)[:_TOPK] for _ in range(n_tokens)])
+        .to(device)
+        .to(torch.int64)
+    )
     w = torch.rand(n_tokens, _TOPK, generator=g).to(device).to(torch.float32)
     return x, w, idx
 
@@ -333,7 +335,6 @@ class GroupedFP8MaskedEquivalenceTest(unittest.TestCase):
         first = self.strategy._local_experts_masked(x, w, idx, 0).clone()
         second = self.strategy._local_experts_masked(x, w, idx, 0)
         self.assertTrue(torch.equal(first, second))
-
 
 
 if __name__ == "__main__":

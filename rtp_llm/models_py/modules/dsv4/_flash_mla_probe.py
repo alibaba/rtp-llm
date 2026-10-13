@@ -25,10 +25,12 @@ FLASH_MLA_AVAILABLE = False
 FLASH_MLA_IMPORT_ERROR: BaseException | None = None
 
 try:
-    from flash_mla import (
-        flash_mla_with_kvcache,  # type: ignore[import-not-found]  # noqa: F401
+    from rtp_llm.models_py.utils.flash_mla_legacy import (  # type: ignore[import-not-found]  # noqa: F401
+        flash_mla_with_kvcache,
     )
-    from flash_mla import get_mla_metadata  # type: ignore[import-not-found]  # noqa: F401
+    from rtp_llm.models_py.utils.flash_mla_legacy import (  # type: ignore[import-not-found]  # noqa: F401
+        get_mla_metadata,
+    )
 
     FLASH_MLA_AVAILABLE = True
 except (

@@ -59,10 +59,6 @@ from rtp_llm.models_py.modules.dsv4.cp import (
     cp_padded_local_kv_lens,
 )
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_merge import merge_lse_output
-from rtp_llm.models_py.modules.dsv4.fp8._wo_a_sm90 import (
-    prepare_wo_a_grouped,
-    wo_a_grouped_gemm,
-)
 from rtp_llm.models_py.modules.dsv4.fp8._cp_attention_shard import (
     build_swa_cp_local_indices,
     prefer_raw_q_merge_attention_conservative,
@@ -76,6 +72,10 @@ from rtp_llm.models_py.modules.dsv4.fp8._pool_reader import (
 from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     CPByteSlicedSlotCompaction,
     build_cp_byte_sliced_slot_compaction,
+)
+from rtp_llm.models_py.modules.dsv4.fp8._wo_a_sm90 import (
+    prepare_wo_a_grouped,
+    wo_a_grouped_gemm,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
@@ -2026,9 +2026,7 @@ class AttentionFP8(nn.Module):
         M, G, _K = o_fp8.shape
         R = self.o_lora_rank
         if not is_deep_gemm_e8m0_used():
-            out = wo_a_grouped_gemm(
-                o_fp8, o_scale, self._wo_a_grp_w, self._wo_a_grp_s
-            )
+            out = wo_a_grouped_gemm(o_fp8, o_scale, self._wo_a_grp_w, self._wo_a_grp_s)
             return out.view(B, S, G, R)
         out = torch.empty(M, G, R, dtype=torch.bfloat16, device=o_fp8.device)
         deep_gemm.fp8_einsum(

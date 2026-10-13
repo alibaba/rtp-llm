@@ -353,9 +353,7 @@ class TestWriteCompressedKDecode(unittest.TestCase):
     def test_all_slots_negative_noop(self):
         """All slots -1 → buffer must remain unchanged."""
         device = torch.device("cpu")
-        cmp_buf = torch.full(
-            (2, 4, 4), 17.0, dtype=torch.bfloat16, device=device
-        )
+        cmp_buf = torch.full((2, 4, 4), 17.0, dtype=torch.bfloat16, device=device)
         original = cmp_buf.clone()
         k_state = _tagged(3, 4, base=900.0, device=device)
         slot = torch.tensor([-1, -1, -1], dtype=torch.int32, device=device)

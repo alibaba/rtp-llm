@@ -72,9 +72,9 @@ def _mhc_pre_norm_fn_fwd_mul(
     token_block: int = 32,
     hidden_block: int = 256,
 ) -> tilelang.JITKernel:
-    assert 0 < mhc_mult3 <= 32, (
-        f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
-    )
+    assert (
+        0 < mhc_mult3 <= 32
+    ), f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
     num_tokens = T.dynamic("num_tokens")
     assert rms_group_size % hidden_block == 0
 
@@ -176,9 +176,9 @@ def _mhc_pre_norm_fn_fwd_mul_splitk(
     versus 4.10-4.45e-04 for the single-block kernel, because each accumulation
     chain is 64x shorter.
     """
-    assert 0 < mhc_mult3 <= 32, (
-        f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
-    )
+    assert (
+        0 < mhc_mult3 <= 32
+    ), f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
     num_tokens = T.dynamic("num_tokens")
     assert rms_group_size % hidden_block == 0
     n_blk = rms_group_size // hidden_block
@@ -196,9 +196,11 @@ def _mhc_pre_norm_fn_fwd_mul_splitk(
         sqrsum: T.Tensor[(n_splits, num_tokens, n_rms_group), T.float32],
     ) -> None:
         _ = mhc_mult3
-        with T.Kernel(
-            T.ceildiv(num_tokens, token_block), n_rms_group, n_splits
-        ) as (pid_x, pid_y, pid_s):
+        with T.Kernel(T.ceildiv(num_tokens, token_block), n_rms_group, n_splits) as (
+            pid_x,
+            pid_y,
+            pid_s,
+        ):
             out_frag = T.alloc_fragment((token_block, 32), T.float32)
             sqrsum_part = T.alloc_fragment((token_block, 4), T.float32)
             T.clear(out_frag)
@@ -355,9 +357,9 @@ def _mhc_pre_norm_fn_bwd_mul(
     token_block: int = 128,
     hidden_block: int = 128,
 ) -> tilelang.JITKernel:
-    assert 0 < mhc_mult3 <= 32, (
-        f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
-    )
+    assert (
+        0 < mhc_mult3 <= 32
+    ), f"mhc_mult3={mhc_mult3} must be positive and fit the 32-wide store fragment"
     num_tokens = T.dynamic("num_tokens")
     assert rms_group_size % hidden_block == 0
 

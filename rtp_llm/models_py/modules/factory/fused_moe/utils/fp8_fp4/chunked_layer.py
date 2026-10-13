@@ -190,6 +190,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             moe_w1_layout=moe_w1_layout,
             has_shared_expert_gate=has_shared_expert_gate,
             physical_expert_num=n_physical_experts,
+            is_decode_role=is_decode_role,
         )
         self.strategy_name = self._moe.strategy_name
 

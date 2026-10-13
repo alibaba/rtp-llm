@@ -22,14 +22,13 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4._flash_mla_probe import flash_mla_available
 from rtp_llm.models_py.modules.dsv4.decode.fp8_kv_quant_decode_op import (
     ENTRY_BYTES,
     NOPE_DIM,
     ROPE_DIM,
     dequantize_v4_kv_slot,
 )
-
-from rtp_llm.models_py.modules.dsv4._flash_mla_probe import flash_mla_available
 
 # Availability comes from the shared probe: this file and its sibling each carried a
 # copy of the same two imports, the same except tuple and the same reasoning, so

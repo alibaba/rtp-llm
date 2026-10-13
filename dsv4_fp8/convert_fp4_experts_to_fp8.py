@@ -65,13 +65,29 @@ import torch
 # e2m1: 4-bit code -> value. Signed zero collapses to 0.0, which is what the
 # reference unpacker in rtp_llm/models_py/modules/dsv4/qlinear.py produces too.
 FP4_LUT = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
-     -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
     dtype=torch.float32,
 )
 
-FP4_GROUP = 32          # columns per UE8M0 scale in the source layout
-FP8_BLOCK = 128         # square block per UE8M0 scale in the target layout
+FP4_GROUP = 32  # columns per UE8M0 scale in the source layout
+FP8_BLOCK = 128  # square block per UE8M0 scale in the target layout
 UE8M0_BIAS = 127
 # e4m3 tops out at 448. Its largest FP4 input is 6, so the block scale may lift a
 # block by at most 2^6 before overflow. Aiming the block max into (2^7, 2^8]
@@ -80,10 +96,21 @@ UE8M0_BIAS = 127
 E4M3_HEADROOM_EXP = 8
 
 DTYPE_ITEMSIZE = {
-    "F8_E4M3": 1, "F8_E8M0": 1, "I8": 1, "U8": 1, "BOOL": 1,
-    "F16": 2, "BF16": 2, "I16": 2, "U16": 2,
-    "F32": 4, "I32": 4, "U32": 4,
-    "F64": 8, "I64": 8, "U64": 8,
+    "F8_E4M3": 1,
+    "F8_E8M0": 1,
+    "I8": 1,
+    "U8": 1,
+    "BOOL": 1,
+    "F16": 2,
+    "BF16": 2,
+    "I16": 2,
+    "U16": 2,
+    "F32": 4,
+    "I32": 4,
+    "U32": 4,
+    "F64": 8,
+    "I64": 8,
+    "U64": 8,
 }
 
 
@@ -161,10 +188,14 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device, verify=True):
     )
     biased = block_exp + UE8M0_BIAS
     if int(biased.min()) < 0 or int(biased.max()) > 255:
-        raise ValueError(f"block exponent {int(block_exp.min())}..{int(block_exp.max())} escapes UE8M0")
+        raise ValueError(
+            f"block exponent {int(block_exp.min())}..{int(block_exp.max())} escapes UE8M0"
+        )
 
     inv = torch.exp2(-block_exp.float())
-    scaled = dequant * inv.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(FP8_BLOCK, 1)
+    scaled = dequant * inv.repeat_interleave(FP8_BLOCK, 0).repeat_interleave(
+        FP8_BLOCK, 1
+    )
     quant = scaled.to(torch.float8_e4m3fn)
 
     exact_fraction, max_rel_err, worst_span = None, None, None
@@ -182,7 +213,9 @@ def convert_expert(weight_bytes, scale_bytes, n, k_packed, device, verify=True):
         finite = torch.where(blocks.abs() > 0, blocks.abs(), torch.inf)
         block_min = finite.amin(dim=(1, 3))
         span = torch.where(
-            torch.isfinite(block_min) & (amax > 0), amax / block_min, torch.ones_like(amax)
+            torch.isfinite(block_min) & (amax > 0),
+            amax / block_min,
+            torch.ones_like(amax),
         )
         worst_span = float(span.max())
 
@@ -203,7 +236,9 @@ def plan_file(header):
         elif is_expert_scale(name, spec):
             n, k_groups = spec["shape"]
             k = k_groups * FP4_GROUP
-            plan.append((name, spec, "scale", "F8_E8M0", [n // FP8_BLOCK, k // FP8_BLOCK]))
+            plan.append(
+                (name, spec, "scale", "F8_E8M0", [n // FP8_BLOCK, k // FP8_BLOCK])
+            )
         else:
             plan.append((name, spec, "copy", spec["dtype"], spec["shape"]))
     return plan
@@ -305,14 +340,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
-    ap.add_argument("--no-verify", dest="verify", action="store_false",
-                    help="skip the per-tensor exactness check (default: on). Only "
-                         "for re-running a checkpoint already verified once -- "
-                         "without it, an inexact rewrite produces a checkpoint "
-                         "that looks fine and serves wrong numbers")
+    ap.add_argument(
+        "--no-verify",
+        dest="verify",
+        action="store_false",
+        help="skip the per-tensor exactness check (default: on). Only "
+        "for re-running a checkpoint already verified once -- "
+        "without it, an inexact rewrite produces a checkpoint "
+        "that looks fine and serves wrong numbers",
+    )
     ap.set_defaults(verify=True)
-    ap.add_argument("--limit", type=int, default=0,
-                    help="convert only the first N shards, for a quick check")
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="convert only the first N shards, for a quick check",
+    )
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -379,15 +422,19 @@ def main():
             verify=args.verify,
         )
         out_gb = os.path.getsize(os.path.join(args.dst, shard)) / 2**30
-        print(f"[{i}/{len(shards)}] {shard}  {out_gb:.2f} GiB  "
-              f"{time.time() - t1:.1f}s  (total {(time.time() - t0) / 60:.1f}m)",
-              flush=True)
+        print(
+            f"[{i}/{len(shards)}] {shard}  {out_gb:.2f} GiB  "
+            f"{time.time() - t1:.1f}s  (total {(time.time() - t0) / 60:.1f}m)",
+            flush=True,
+        )
 
     for src_path, dst_path in index_entries:
         if args.limit:
             shutil.copy2(src_path, dst_path)
-            print(f"{os.path.basename(src_path)}: copied unchanged (--limit: "
-                  "weight_map still names shards that were not converted)")
+            print(
+                f"{os.path.basename(src_path)}: copied unchanged (--limit: "
+                "weight_map still names shards that were not converted)"
+            )
             continue
         index = json.load(open(src_path))
         total = 0
@@ -405,10 +452,14 @@ def main():
                 f"not converted: {sorted(missing)[:5]}"
             )
         json.dump(index, open(dst_path, "w"), indent=2)
-        print(f"{os.path.basename(src_path)}: total_size {old_total} -> {total} "
-              f"({total / 2**30:.1f} GiB)")
+        print(
+            f"{os.path.basename(src_path)}: total_size {old_total} -> {total} "
+            f"({total / 2**30:.1f} GiB)"
+        )
 
-    print(f"\nconverted {stats['tensors']} expert weights in {(time.time() - t0) / 60:.1f} min")
+    print(
+        f"\nconverted {stats['tensors']} expert weights in {(time.time() - t0) / 60:.1f} min"
+    )
     if not stats["verified"]:
         if not args.verify:
             print(
@@ -424,8 +475,10 @@ def main():
             )
         return 0
 
-    print(f"exactness: mean {stats['exact_sum'] / stats['verified']:.6f}, "
-          f"worst tensor {stats['exact_min']:.6f}, max rel err {stats['rel_max']:.3e}")
+    print(
+        f"exactness: mean {stats['exact_sum'] / stats['verified']:.6f}, "
+        f"worst tensor {stats['exact_min']:.6f}, max rel err {stats['rel_max']:.3e}"
+    )
     print(
         f"largest in-block dynamic range: {stats['span_max']:.4g} "
         f"= 2^{math.log2(max(stats['span_max'], 1.0)):.2f} "

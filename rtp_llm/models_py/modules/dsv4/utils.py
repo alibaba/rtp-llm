@@ -22,9 +22,7 @@ def _repack_v4_fp8_scale_to_int32(scale: torch.Tensor) -> torch.Tensor:
     return get_mn_major_tma_aligned_packed_ue8m0_tensor(scale_rep)
 
 
-def _v4_fp8_scale_relabelled_fp32(
-    w: torch.Tensor, scale: torch.Tensor
-) -> tuple:
+def _v4_fp8_scale_relabelled_fp32(w: torch.Tensor, scale: torch.Tensor) -> tuple:
     """SM90 counterpart of ``_repack_v4_fp8_scale_to_int32``.
 
     The int32-packed UE8M0 scale layout is a Blackwell recipe:

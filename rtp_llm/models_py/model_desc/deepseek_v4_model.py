@@ -955,8 +955,8 @@ class DeepSeekV4Model(GptModelBase):
                 from rtp_llm.models_py.modules.dsv4.dsv4_kernel_jit_warmup import (
                     _collect_dsv4_batched_fp8_einsum_shapes,
                     _collect_dsv4_dense_gemm_shapes,
-                    _collect_dsv4_grouped_fp8_moe_shapes,
                     _collect_dsv4_fp8_mqa_logits_shapes,
+                    _collect_dsv4_grouped_fp8_moe_shapes,
                     _collect_dsv4_mhc_head_fused_shapes,
                     _collect_dsv4_mhc_prenorm_shapes,
                     _collect_dsv4_wo_a_grouped_shapes,

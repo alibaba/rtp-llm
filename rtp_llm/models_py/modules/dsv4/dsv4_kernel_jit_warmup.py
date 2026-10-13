@@ -2841,9 +2841,7 @@ def _launch_dummy_grouped_fp8_contiguous(
     a_scale = torch.zeros(
         (dim // _GROUPED_FP8_ALIGNMENT, m_value), dtype=torch.float32, device=device
     ).transpose(0, 1)
-    gate_up = torch.empty(
-        (m_value, two_inter), dtype=torch.bfloat16, device=device
-    )
+    gate_up = torch.empty((m_value, two_inter), dtype=torch.bfloat16, device=device)
     m_grouped_fp8_gemm_nt_contiguous((a_fp8, a_scale), (w13, s13), gate_up, m_indices)
     del a_fp8, a_scale, gate_up
 
@@ -2987,9 +2985,7 @@ def warmup_grouped_fp8_moe_jit(
                 _run_deepgemm_warmup_launch_with_retry(
                     "DSV4 GroupedFP8",
                     f"{info['name']} {layout} m={m_value} key={key}",
-                    partial(
-                        launcher, info=info, m_value=m_value, device=device
-                    ),
+                    partial(launcher, info=info, m_value=m_value, device=device),
                     device=device,
                 )
             _sync_cuda(device)
@@ -2998,9 +2994,7 @@ def warmup_grouped_fp8_moe_jit(
     t0 = time.time()
     _run_deepgemm_warmup_launches_serialized("DSV4 GroupedFP8", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 GroupedFP8] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 GroupedFP8] JIT warmup done in %.2fs", time.time() - t0)
     _GROUPED_FP8_MOE_JIT_WARMED_KEYS.add(warmup_key)
 
 
@@ -3042,9 +3036,7 @@ def _launch_dummy_wo_a_grouped(
     # The packed int32 UE8M0 activation scale fused_inv_rope_fp8_quant emits: one
     # word per four K-blocks, rounded up.
     words = -(-(k_local // _GROUPED_FP8_ALIGNMENT) // 4)
-    o_scale = torch.zeros(
-        (m_value, groups, words), dtype=torch.int32, device=device
-    )
+    o_scale = torch.zeros((m_value, groups, words), dtype=torch.int32, device=device)
     wo_a_grouped_gemm(o_fp8, o_scale, weight, scale)
 
 
@@ -3109,7 +3101,5 @@ def warmup_wo_a_grouped_jit(
     t0 = time.time()
     _run_deepgemm_warmup_launches_serialized("DSV4 woA-grouped", _run_warmup_launches)
     if rank == 0:
-        logging.info(
-            "[DSV4 woA-grouped] JIT warmup done in %.2fs", time.time() - t0
-        )
+        logging.info("[DSV4 woA-grouped] JIT warmup done in %.2fs", time.time() - t0)
     _WO_A_GROUPED_JIT_WARMED_KEYS.add(warmup_key)

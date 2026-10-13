@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
     shared_expert_mode,
     strict_fused_moe_enabled,
@@ -25,8 +26,6 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync impo
 from rtp_llm.models_py.modules.factory.fused_moe.utils.profiler import (
     record_function_range,
 )
-
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import is_deep_gemm_e8m0_used
 
 from .expert import require_silu_mul_split
 from .quantized_linear import create_fp8_linear

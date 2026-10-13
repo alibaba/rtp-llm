@@ -80,8 +80,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint")
     parser.add_argument("--shards", type=int, default=3)
-    parser.add_argument("--tensors", type=int, default=4,
-                        help="routed-expert tensors sampled per shard")
+    parser.add_argument(
+        "--tensors", type=int, default=4, help="routed-expert tensors sampled per shard"
+    )
     args = parser.parse_args()
 
     shards = sorted(glob.glob(os.path.join(args.checkpoint, "*.safetensors")))

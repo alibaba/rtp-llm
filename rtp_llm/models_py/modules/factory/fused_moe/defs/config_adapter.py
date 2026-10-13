@@ -55,6 +55,7 @@ class MoEConfigAdapter:
         self.moe_topk_group = model_config.moe_topk_group
         self.hidden_size = model_config.hidden_size
         self.dim = self.hidden_size
+        self.expert_dtype = getattr(model_config, "expert_dtype", "fp4")
         # The generic adapter is not layer-bound. Executors with per-layer
         # state receive a typed runtime config from their layer implementation.
         self.layer_id = -1

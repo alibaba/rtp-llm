@@ -88,9 +88,7 @@ def _run_tilelang_splitk_gemm(
     ``_run_tilelang_single_gemm`` this does not narrow the buffers to ``[:1]``.
     """
     fn = round_to_tf32(fn)
-    kernel = _mhc_pre_norm_fn_fwd_mul_splitk(
-        mhc_mult3, 1, mhc_hidden_size, n_splits
-    )
+    kernel = _mhc_pre_norm_fn_fwd_mul_splitk(mhc_mult3, 1, mhc_hidden_size, n_splits)
     kernel(
         residual_flat.view(-1, mhc_hidden_size),
         fn,

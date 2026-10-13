@@ -254,7 +254,9 @@ def test_non_current_cuda_device():
         op = getattr(rtp_llm_ops, op_name)
         out = _run_op(op, logits, lengths, k=512, max_seq_len=2048)
         torch.cuda.synchronize(logits.device)
-        assert torch.cuda.current_device() == 0, f"{op_name} leaked its CUDA device guard"
+        assert (
+            torch.cuda.current_device() == 0
+        ), f"{op_name} leaked its CUDA device guard"
         _assert_equiv(out, logits, lengths, k=512, tag=f"{op_name} non-current device")
 
 

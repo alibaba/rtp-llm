@@ -128,9 +128,8 @@ def wo_a_grouped_gemm(
     the pair from :func:`prepare_wo_a_grouped`.  Returns ``[M, G, R]``
     bf16.
     """
-    from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
-
     import deep_gemm
+    from deep_gemm.utils.layout import get_mn_major_tma_aligned_tensor
 
     M, G, K = o_fp8.shape
     R = weight.shape[1]

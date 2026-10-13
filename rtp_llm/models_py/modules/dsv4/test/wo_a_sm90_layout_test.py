@@ -106,9 +106,7 @@ class UnpackUe8m0Int32ScaleTest(unittest.TestCase):
         self.assertLess(int(packed[0, 0]), 0, "test setup: word should be negative")
         got = unpack_ue8m0_int32_scale(packed, 4)
         self.assertTrue(
-            torch.equal(
-                got, torch.tensor([[1.0, 1.0, 1.0, 2.0]], dtype=torch.float32)
-            ),
+            torch.equal(got, torch.tensor([[1.0, 1.0, 1.0, 2.0]], dtype=torch.float32)),
             got,
         )
 

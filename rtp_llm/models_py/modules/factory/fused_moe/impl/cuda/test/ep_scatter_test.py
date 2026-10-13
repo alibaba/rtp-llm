@@ -60,7 +60,9 @@ class EpScatterTest(TestCase):
                 ids = (
                     torch.arange(tokens * 2, device="cuda") % (experts + 1) - 1
                 ).reshape(tokens, 2)
-                counts = torch.bincount(ids[ids >= 0], minlength=experts).to(torch.int32)
+                counts = torch.bincount(ids[ids >= 0], minlength=experts).to(
+                    torch.int32
+                )
                 aligned = (counts + 127) // 128 * 128
                 rows = int(aligned.sum())
                 expected_starts = aligned.cumsum(0).to(torch.int32) - aligned
@@ -76,10 +78,20 @@ class EpScatterTest(TestCase):
                 m_indices = torch.full((rows,), -1, device="cuda", dtype=torch.int32)
                 out_indices = torch.full_like(ids, -1)
                 ep_scatter(
-                    x, scales, ids, aligned, starts, out, out_scales, m_indices, out_indices
+                    x,
+                    scales,
+                    ids,
+                    aligned,
+                    starts,
+                    out,
+                    out_scales,
+                    m_indices,
+                    out_indices,
                 )
                 valid = ids >= 0
-                source_rows = torch.arange(tokens, device="cuda")[:, None].expand_as(ids)
+                source_rows = torch.arange(tokens, device="cuda")[:, None].expand_as(
+                    ids
+                )
                 source_rows = source_rows[valid]
                 destinations = out_indices[valid]
                 torch.testing.assert_close(

@@ -124,9 +124,7 @@ class MhcPrenormSplitKTest(unittest.TestCase):
             n_splits, t, 1, mult3, dtype=torch.float32, device=self.device
         )
         sq = torch.empty(n_splits, t, 1, dtype=torch.float32, device=self.device)
-        self.nfk._mhc_pre_norm_fn_fwd_mul_splitk(mult3, 1, h, n_splits)(
-            x, fn, out, sq
-        )
+        self.nfk._mhc_pre_norm_fn_fwd_mul_splitk(mult3, 1, h, n_splits)(x, fn, out, sq)
         # This is the reduction _mhc_pre_big_fuse performs over the split axis.
         return out[:, :, 0].sum(0), sq[:, :, 0].sum(0)
 
@@ -142,9 +140,7 @@ class MhcPrenormSplitKTest(unittest.TestCase):
         for tokens in (2, 8, 16, 32, 33, 96):
             for n_splits in (4, 16, 64):
                 with self.subTest(tokens=tokens, n_splits=n_splits):
-                    x = self._inputs(
-                        tokens, _H, seed=1000 + tokens * 31 + n_splits
-                    )
+                    x = self._inputs(tokens, _H, seed=1000 + tokens * 31 + n_splits)
                     o_s, q_s = self._single(x, fn, _MULT3, _H)
                     o_k, q_k = self._splitk(x, fn, _MULT3, _H, n_splits)
                     o_ref, q_ref = self._reference(x, fn)

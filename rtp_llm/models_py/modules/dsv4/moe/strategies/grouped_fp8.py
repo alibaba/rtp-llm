@@ -86,6 +86,10 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     m_grouped_fp8_gemm_nt_masked,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
+    cuda_graph_warmup_forward_enabled,
+)
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     ep_gather,
     ep_scatter,
@@ -93,9 +97,7 @@ from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
 )
 from rtp_llm.models_py.utils.math import align
 
-from ..warmup_sync import cuda_graph_warmup_forward_enabled
-from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
-from ...quant_layouts import FP8_BLOCK
+from .base import MoeCfg, RoutedExpertsStrategy
 
 # Set to 1 to verify equal exchange row counts, after any fixed-budget padding.
 # Off by default because the check needs a device->host sync per layer. CP shards
@@ -176,15 +178,30 @@ _ll_buffer_state = None
 
 
 def _masked_enabled() -> bool:
-    return os.environ.get(_MASKED_ENV, "0").strip().lower() in ("1", "true", "on", "yes")
+    return os.environ.get(_MASKED_ENV, "0").strip().lower() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    )
 
 
 def _deepep_ll_enabled() -> bool:
-    return os.environ.get(_DEEPEP_LL_ENV, "0").strip().lower() in ("1", "true", "on", "yes")
+    return os.environ.get(_DEEPEP_LL_ENV, "0").strip().lower() in (
+        "1",
+        "true",
+        "on",
+        "yes",
+    )
 
 
 def _fused_swiglu_enabled() -> bool:
-    return os.environ.get(_FUSED_SWIGLU_ENV, "1").strip().lower() not in ("0", "false", "off", "no")
+    return os.environ.get(_FUSED_SWIGLU_ENV, "1").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
 
 
 @functools.cache
@@ -357,7 +374,6 @@ def _all_gather_cat(tensor: torch.Tensor, ep: int, group) -> torch.Tensor:
     return out
 
 
-
 # ---------------------------------------------------------------------------
 # Fused clamp + SiLU + multiply + per-token-group FP8 quant, FP32 scale.
 #
@@ -380,18 +396,18 @@ def _all_gather_cat(tensor: torch.Tensor, ep: int, group) -> torch.Tensor:
 # ``scale = max(absmax, eps) / fp8_max``.
 @triton.jit(do_not_specialize=["M"])
 def _silu_mul_fp8_quant_fp32scale_kernel(
-    input_ptr,          # [M, 2*inter] bf16, gate in [:inter], up in [inter:]
-    output_q_ptr,       # [M, inter] fp8 e4m3fn
-    output_scale_ptr,   # [M, inter/GROUP_SIZE] fp32, stride (1, M): M-major
+    input_ptr,  # [M, 2*inter] bf16, gate in [:inter], up in [inter:]
+    output_q_ptr,  # [M, inter] fp8 e4m3fn
+    output_scale_ptr,  # [M, inter/GROUP_SIZE] fp32, stride (1, M): M-major
     M,
-    input_stride_e,     # gate_up.stride(0): the gap between groups
-    input_stride_m,     # gate_up.stride(1)
+    input_stride_e,  # gate_up.stride(0): the gap between groups
+    input_stride_m,  # gate_up.stride(1)
     ROWS_PER_E: tl.constexpr,
     output_q_stride_m,
     output_scale_stride_k,
     clamp_limit,
-    N: tl.constexpr,            # 2 * inter
-    NUM_GROUPS: tl.constexpr,   # inter // GROUP_SIZE
+    N: tl.constexpr,  # 2 * inter
+    NUM_GROUPS: tl.constexpr,  # inter // GROUP_SIZE
     eps: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
@@ -401,8 +417,8 @@ def _silu_mul_fp8_quant_fp32scale_kernel(
 ):
     N_2: tl.constexpr = N // 2
 
-    pid_g = tl.program_id(0).to(tl.int64)   # which 128-wide quant group
-    pid_m = tl.program_id(1).to(tl.int64)   # which BLOCK_M row tile
+    pid_g = tl.program_id(0).to(tl.int64)  # which 128-wide quant group
+    pid_m = tl.program_id(1).to(tl.int64)  # which BLOCK_M row tile
     m_offset = pid_m * BLOCK_M
     if m_offset >= M:
         return
@@ -444,8 +460,10 @@ def _silu_mul_fp8_quant_fp32scale_kernel(
     y_q = tl.clamp(y / scale[:, None], fp8_min, fp8_max)
 
     out_q_ptrs = (
-        output_q_ptr + (m_offset + offs_m[:, None]) * output_q_stride_m
-        + n_offset + offs_n[None, :]
+        output_q_ptr
+        + (m_offset + offs_m[:, None]) * output_q_stride_m
+        + n_offset
+        + offs_n[None, :]
     )
     tl.store(out_q_ptrs, y_q.to(output_q_ptr.dtype.element_ty), mask=row_mask[:, None])
 
@@ -453,9 +471,7 @@ def _silu_mul_fp8_quant_fp32scale_kernel(
     tl.store(scale_ptrs, scale, mask=row_mask)
 
 
-def _silu_mul_quant_fp32scale(
-    gate_up3: torch.Tensor, inter: int, clamp_limit: float
-):
+def _silu_mul_quant_fp32scale(gate_up3: torch.Tensor, inter: int, clamp_limit: float):
     """``[E, T, 2*inter]`` bf16 -> (``[E*T, inter]`` fp8, ``[E*T, inter/128]`` fp32 M-major).
 
     Takes the 3D view rather than a flattened one on purpose: the caller passes
@@ -496,7 +512,11 @@ def _silu_mul_quant_fp32scale(
         rows_per_e,
         q.stride(0),
         scale.stride(1),
-        float(torch.tensor(clamp_limit, dtype=gate_up3.dtype)) if clamp_limit > 0 else 0.0,
+        (
+            float(torch.tensor(clamp_limit, dtype=gate_up3.dtype))
+            if clamp_limit > 0
+            else 0.0
+        ),
         N=2 * inter,
         NUM_GROUPS=num_groups,
         eps=1e-4,
@@ -508,7 +528,7 @@ def _silu_mul_quant_fp32scale(
     )
     return q, scale
 
-@register_strategy
+
 class GroupedFP8Strategy(RoutedExpertsStrategy):
     name = "grouped_fp8"
 
@@ -518,11 +538,12 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 "grouped_fp8 decode requires a positive cfg.max_tokens_per_rank "
                 "for its fixed per-rank token budget"
             )
-        from rtp_llm.model_loader.weight_memory_saver import is_enabled
-
         # Routed tensors are popped from ModelWeights without a wake consumer.
         # Tagging their storage alone would leave blank weights after level 2.
-        if is_enabled():
+        if any(
+            os.environ.get(key, "0").strip().lower() in ("1", "true", "yes", "on")
+            for key in ("ENABLE_SLEEP_MODE", "RTP_LLM_WEIGHT_MEMORY_SAVER")
+        ):
             raise RuntimeError(
                 "grouped_fp8 does not support sleep mode: routed-expert weights "
                 "do not yet implement sleep reclamation and in-place wake reload. "
@@ -538,15 +559,10 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
 
     @classmethod
     def can_handle(cls, cfg: MoeCfg) -> bool:
-        """Deliberately does NOT check whether the checkpoint's experts are FP8.
+        """Check SM90 kernels, block alignment, and the EP process group.
 
-        ``MoeCfg`` carries no dtype and threading one through Block/MoE would
-        buy nothing: on SM90 this is the only strategy that can run routed
-        experts at all (``grouped_fp4`` and ``mega`` require SM100,
-        ``local_loop`` — and therefore ``deepep``, which composes it — hardcodes
-        FP4 storage). So claiming the slot and failing in ``setup_weights`` with
-        "convert the checkpoint" is strictly better than declining and letting
-        ``local_loop`` die inside an FP4 kernel.
+        The common factory checks FP8 storage before selecting this backend.
+        Standalone callers still receive dtype/shape errors in setup_weights.
         """
         if not (
             cfg.dim % FP8_BLOCK == 0
@@ -592,7 +608,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             raise TypeError(
                 f"{self.name} needs FP8 routed experts, got {stacked_w1_w.dtype}. "
                 "Convert the checkpoint with dsv4_fp8/convert_fp4_experts_to_fp8.py, "
-                "or force an FP4 strategy via DSV4_MOE_STRATEGY."
+                "or force an FP4 strategy via MOE_STRATEGY."
             )
         # Guards the EP contract explicitly. If the loader ever stopped slicing,
         # the mismatch would otherwise surface as a silently wrong expert range
@@ -604,13 +620,17 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
                 f"{stacked_w1_w.shape[0]}."
             )
 
-        self._w13 = torch.empty((E, 2 * inter, D), dtype=torch.float8_e4m3fn, device=device)
+        self._w13 = torch.empty(
+            (E, 2 * inter, D), dtype=torch.float8_e4m3fn, device=device
+        )
         self._w13[:, :inter].copy_(stacked_w1_w)
         self._w13[:, inter:].copy_(stacked_w3_w)
         self._w2 = stacked_w2_w.contiguous()
 
         self._s13 = torch.empty(
-            (E, 2 * inter // FP8_BLOCK, D // FP8_BLOCK), dtype=torch.float32, device=device
+            (E, 2 * inter // FP8_BLOCK, D // FP8_BLOCK),
+            dtype=torch.float32,
+            device=device,
         )
         self._s13[:, : inter // FP8_BLOCK].copy_(stacked_w1_s.to(torch.float32))
         self._s13[:, inter // FP8_BLOCK :].copy_(stacked_w3_s.to(torch.float32))
@@ -739,10 +759,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         if (
             not self._ll_ok
             and cfg.max_tokens_per_rank > 0
-            and (
-                cfg.is_decode_role
-                or cfg.max_tokens_per_rank * ep <= _MASKED_MAX_N
-            )
+            and (cfg.is_decode_role or cfg.max_tokens_per_rank * ep <= _MASKED_MAX_N)
         ):
             exchange_n = cfg.max_tokens_per_rank
             if N > exchange_n:
@@ -847,7 +864,9 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         # of the counts it is handed, so it must receive the ALIGNED counts —
         # raw counts would let consecutive experts overlap each other's padding
         # rows and the GEMM would read garbage.
-        aligned_counts_list = [align(c, _GROUPED_ALIGNMENT) for c in num_recv.cpu().tolist()]
+        aligned_counts_list = [
+            align(c, _GROUPED_ALIGNMENT) for c in num_recv.cpu().tolist()
+        ]
         all_tokens = sum(aligned_counts_list)
         if all_tokens == 0:
             # No token on this rank routes to a local expert. Legal under EP.
@@ -885,7 +904,9 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         m_indices.clamp_(min=0, max=E - 1)
         del a_fp8, a_scale
 
-        gate_up = torch.empty(all_tokens, 2 * inter, device=device, dtype=torch.bfloat16)
+        gate_up = torch.empty(
+            all_tokens, 2 * inter, device=device, dtype=torch.bfloat16
+        )
         m_grouped_fp8_gemm_nt_contiguous(
             (scatter_out, scatter_out_scale),
             (self._w13, self._s13),
@@ -1115,9 +1136,7 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             num_local_experts=E,
         )
 
-        uniform_counts = torch.full(
-            (E,), max_m, dtype=torch.int32, device=device
-        )
+        uniform_counts = torch.full((E,), max_m, dtype=torch.int32, device=device)
         # zeros, not empty, for the same reason the contiguous path zeroes its scale: the
         # masked GEMM computes whole 64-row tiles, so rows between ``num_recv[e]`` and the
         # end of the tile are read. They are discarded downstream -- ep_gather only visits
@@ -1154,7 +1173,10 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
         gate_up = torch.empty(E, max_m, 2 * inter, device=device, dtype=torch.bfloat16)
         gate_up[:, :t_rows].zero_()
         m_grouped_fp8_gemm_nt_masked(
-            (scatter_out.view(E, max_m, D), scatter_out_scale.view(E, max_m, D // FP8_BLOCK)),
+            (
+                scatter_out.view(E, max_m, D),
+                scatter_out_scale.view(E, max_m, D // FP8_BLOCK),
+            ),
             (self._w13, self._s13),
             gate_up,
             num_recv,
@@ -1178,8 +1200,10 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             if limit > 0:
                 gate = gate.clamp(max=limit)
                 up = up.clamp(min=-limit, max=limit)
-            hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16).reshape(
-                E * t_rows, inter
+            hidden = (
+                (F.silu(gate.float()) * up.float())
+                .to(torch.bfloat16)
+                .reshape(E * t_rows, inter)
             )
             del gu, gate, up
             h_fp8, h_scale = sgl_per_token_group_quant_fp8(
@@ -1298,8 +1322,10 @@ class GroupedFP8Strategy(RoutedExpertsStrategy):
             if limit > 0:
                 gate = gate.clamp(max=limit)
                 up = up.clamp(min=-limit, max=limit)
-            hidden = (F.silu(gate.float()) * up.float()).to(torch.bfloat16).reshape(
-                E * rows, inter
+            hidden = (
+                (F.silu(gate.float()) * up.float())
+                .to(torch.bfloat16)
+                .reshape(E * rows, inter)
             )
             del gate, up
             h_fp8, h_scale = sgl_per_token_group_quant_fp8(

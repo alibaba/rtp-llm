@@ -196,7 +196,11 @@ class ConvertScriptEndToEndTest(unittest.TestCase):
         _write_safetensors(
             os.path.join(root, shard),
             {
-                "layers.0.ffn.experts.0.w1.weight": ("I8", [_N, _K_PACKED], weight_bytes),
+                "layers.0.ffn.experts.0.w1.weight": (
+                    "I8",
+                    [_N, _K_PACKED],
+                    weight_bytes,
+                ),
                 "layers.0.ffn.experts.0.w1.scale": (
                     "F8_E8M0",
                     [_N, _K_GROUPS],
@@ -260,9 +264,7 @@ class ConvertScriptEndToEndTest(unittest.TestCase):
             config = self._read_json(os.path.join(dst, "config.json"))
             self.assertEqual(config["expert_dtype"], "fp8")
 
-            index = self._read_json(
-                os.path.join(dst, "model.safetensors.index.json")
-            )
+            index = self._read_json(os.path.join(dst, "model.safetensors.index.json"))
             # Recomputed from the output, not the copied FP4 figure.
             self.assertNotEqual(index["metadata"]["total_size"], 1)
             self.assertGreater(index["metadata"]["total_size"], _N * _K)
@@ -297,9 +299,7 @@ class ConvertScriptEndToEndTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             config = self._read_json(os.path.join(dst, "config.json"))
             self.assertNotIn("expert_dtype", config)
-            index = self._read_json(
-                os.path.join(dst, "model.safetensors.index.json")
-            )
+            index = self._read_json(os.path.join(dst, "model.safetensors.index.json"))
             self.assertEqual(index["metadata"]["total_size"], 1)
 
 
