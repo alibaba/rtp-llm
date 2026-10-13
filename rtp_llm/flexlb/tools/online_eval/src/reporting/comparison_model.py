@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import copy
 import json
-from pathlib import Path
 from typing import Optional
 
 from reporting.spec import validate
@@ -118,14 +117,6 @@ class FrozenReport:
                    tuple(copy.deepcopy(spec.get('sections', []))), tuple(copy.deepcopy(spec.get('kpis', []))),
                    axis.get('min'), axis.get('max'), metadata,
                    ComparisonControls.read(metadata['comparison_controls']))
-
-
-@dataclass(frozen=True)
-class FrozenRun:
-    directory: Path
-    analysis: dict
-    report: FrozenReport
-    manifest_sha256: str
 
 
 def measurement_signature(panel):

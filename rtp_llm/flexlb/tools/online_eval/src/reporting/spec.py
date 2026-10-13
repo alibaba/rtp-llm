@@ -32,6 +32,11 @@ def validate(spec, *, versioned=False):
             raise ValueError("duplicate panel id: " + identity)
         ids.add(identity)
         _validate_events(panel.get("events", []))
+        if panel.get("timeAxis") is not None:
+            axis = panel["timeAxis"]
+            if (not isinstance(axis, dict) or not _finite(axis.get("min"))
+                    or not _finite(axis.get("max")) or axis["min"] >= axis["max"]):
+                raise ValueError("invalid panel timeAxis: " + identity)
         kind = panel.get("type", "line")
         if kind not in {"line", "bar", "scatter"}:
             raise ValueError("unsupported panel type")

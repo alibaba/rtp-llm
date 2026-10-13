@@ -39,7 +39,7 @@ class ReportComparisonTest(unittest.TestCase):
                                        series=[dict(name='bar', points=[dict(x='x', y=2)])]))
         return write_bundle(self.root/name, 'run', 'fixture', result, spec,
                             meta=run_meta(dict(id=name), configuration=configuration or dict(scheduler='same'),
-                                          workload=dict(sha256='same'), environment=dict(fetch=True)),
+                                          workload=dict(sha256='same'), environment=dict(fetch=True), clock={'origin_kind': 'run_start'}),
                             producer='fixture')
 
     def output(self, name='comparison'):
@@ -65,9 +65,40 @@ class ReportComparisonTest(unittest.TestCase):
             self.assertNotIn(token, json.dumps(result))
         self.assertEqual(len(self.spec()['panels']), 1)
         self.assertEqual(self.spec()['panels'][0]['timeX'], True)
-        styles = [s['dash'] for s in self.spec()['panels'][0]['series']]
-        self.assertEqual(len({tuple(style) for style in styles}), 3)
+        curves = self.spec()['panels'][0]['series']
+        self.assertTrue(all(s['dash'] == [] for s in curves))
+        self.assertEqual(len({s['point_style'] for s in curves}), 3)
+        self.assertEqual(len({s['color'] for s in curves}), 3)
         read_bundle(self.output()/'reports/comparison/runs')
+
+    def test_run_colors_keep_metric_hue_and_increase_lightness(self):
+        import colorsys
+        from reporting.comparison import _run_color, RUN_MARKERS
+        self.assertEqual(len(set(RUN_MARKERS)), len(RUN_MARKERS))
+        for base in ('#eab308', '#123456', '#dc2626', '#22c55e80'):
+            colors = [_run_color(base, i, 4) for i in range(4)]
+            self.assertEqual(len(set(colors)), 4)
+            from reporting.comparison_colors import to_oklab
+            import math
+            labs = [to_oklab(c) for c in colors]
+            self.assertGreaterEqual(labs[0][0], .535)
+            distances = [math.sqrt(sum((a-b)**2 for a,b in zip(x,y))) for x,y in zip(labs,labs[1:])]
+            self.assertLess(max(distances)-min(distances), .005)
+            hues = [math.atan2(v[2], v[1]) for v in labs]
+            self.assertLess(max(hues)-min(hues), .04)
+            for color in colors:
+                rgb = [int(color[n:n+2], 16)/255 for n in (1, 3, 5)]
+                linear = [v/12.92 if v <= .04045 else ((v+.055)/1.055)**2.4 for v in rgb]
+                luminance = sum(v*w for v, w in zip(linear, (.2126, .7152, .0722)))
+                self.assertGreaterEqual(1.05/(luminance+.05), 3)
+
+    def test_near_metric_hues_are_separated_and_shared_metrics_keep_color(self):
+        from reporting.comparison import _metric_colors
+        a = dict(metric_id='a', name='a', points=[], color='#dd1111')
+        b = dict(metric_id='b', name='b', points=[], color='#dc1511')
+        colors = _metric_colors([dict(id='one', series=[a, b]), dict(id='two', series=[b])])
+        self.assertNotEqual(colors['one', 1], b['color'])
+        self.assertEqual(colors['one', 1], colors['two', 0])
 
     def test_explicit_event_shifts_only_copies_and_preserves_gaps(self):
         a, b = self.bundle('a', event=10), self.bundle('b', event=15)
@@ -78,7 +109,7 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual([p['x'] for p in panels[0]['series'][0]['points']], [-5, 0, 15])
         self.assertEqual([p['x'] for p in panels[0]['series'][1]['points']], [-10, -5, 10])
         self.assertIsNone(panels[0]['series'][0]['points'][1]['y'])
-        self.assertEqual(self.spec()['timeAxis']['min'], -15)
+        self.assertEqual(self.spec()['timeAxis']['min'], -10)
         self.assertEqual(json.loads((a/'report-spec.json').read_text()), original)
 
     def test_differences_missing_panels_and_invalid_runs_are_not_execution_errors(self):
@@ -124,7 +155,8 @@ class ReportComparisonTest(unittest.TestCase):
                 id='metric', title='metric', timeX=True, axes={'y': dict(title='count')},
                 series=[dict(name='metric', metric_id='metric', points=[dict(x=t,y=v) for t,v in zip(times,[3,None,4])])],
             )])
-            paths.append(write_bundle(self.root/name, 'run', name, {}, spec))
+            paths.append(write_bundle(self.root/name, 'run', name, {}, spec,
+                meta=run_meta({'id': name}, clock={'origin_kind': 'run_start'})))
         compare(paths, self.output())
         series = self.spec()['panels'][0]['series']
         self.assertEqual([p['x'] for p in series[0]['points']], [1, 2, 12])

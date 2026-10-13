@@ -1,7 +1,7 @@
 """Compare frozen bundles and experiment ZIPs without rerunning gates."""
 import argparse
 import copy
-import hashlib
+import colorsys
 import json
 import math
 from pathlib import Path
@@ -13,7 +13,34 @@ from reporting.core import table
 from reporting.catalog import series_color
 from reporting.comparison_inputs import load_snapshot
 from reporting.comparison_model import ChartSeries
-from reporting.pairing import event_anchor, paired_overlay, shifted_panel
+from reporting.comparison_colors import run_color as _run_color
+from reporting.pairing import event_anchor, shifted_panel
+
+# Hue identifies the metric; lightness and sparse point shapes identify runs.
+RUN_MARKERS = ('circle', 'rect', 'triangle', 'rectRot', 'star', 'cross', 'crossRot')
+
+
+def _metric_colors(panels):
+    """Keep existing metric hues where possible; separate near hues within a plot."""
+    registry, colors = {}, {}
+    for panel in panels:
+        used = []
+        for n, curve in enumerate(panel.get('series', [])):
+            identity = json.dumps(ChartSeries.read(curve, panel.get('unit')).signature(), sort_keys=True)
+            if identity == 'null':
+                identity = (panel['id'], n)
+            color = registry.get(identity) or curve.get('color') or series_color(curve.get('tone'), n)
+            value = color.lstrip('#')
+            hue, lightness, saturation = colorsys.rgb_to_hls(*(int(value[k:k+2], 16)/255 for k in (0, 2, 4)))
+            distance = lambda h: min((min(abs(h-u), 1-abs(h-u)) for u in used), default=1)
+            if identity not in registry and saturation >= .10 and distance(hue) < .07:
+                hue = max(((hue + k/24) % 1 for k in range(24)), key=distance)
+                color = '#' + ''.join(f'{round(v*255):02x}' for v in colorsys.hls_to_rgb(hue, lightness, saturation))
+            registry.setdefault(identity, color)
+            colors[panel['id'], n] = color
+            if saturation >= .10:
+                used.append(hue)
+    return colors
 
 
 def _leaves(value, prefix=''):
@@ -22,6 +49,20 @@ def _leaves(value, prefix=''):
             yield from _leaves(item, prefix + '/' + key.replace('~', '~0').replace('/', '~1'))
     else:
         yield prefix, value
+
+
+def _original_result(run):
+    """Read the frozen gate and validity separately from execution status."""
+    analysis, execution = run.analysis, run.execution
+    outcome = analysis.get('outcome') or {}
+    executed = execution.get('outcome') or {}
+    workload = analysis.get('workload') or {}
+    return dict(
+        verdict=outcome.get('gate') or executed.get('gate') or analysis.get('verdict'),
+        validity=outcome.get('validity') or executed.get('validity') or
+                 analysis.get('runtime_validity') or workload.get('runtime_validity') or
+                 execution.get('workload', {}).get('runtime_validity'),
+        status=execution.get('status') or analysis.get('status'))
 
 
 def _matrix(runs, labels):
@@ -50,75 +91,112 @@ def _series_key(panel, series, origin):
                       sort_keys=True, allow_nan=False)
 
 
-def _pair(prepared, labels, origins, *, include_original_panels):
-    groups, unique, ambiguous = {}, {}, set()
-    for run_index, panels in enumerate(prepared):
-        for panel_index, panel in enumerate(panels):
-            for series_index, series in enumerate(panel['series']):
-                key = _series_key(panel, series, origins[run_index])
-                identity = (run_index, key)
-                if key is None or identity in ambiguous:
-                    continue
-                if identity in unique:
-                    if unique[identity]['points'] != series['points'] or unique[identity].get('statistics_points') != series.get('statistics_points'):
-                        ambiguous.add(identity)
-                        groups[key] = [entry for entry in groups[key] if entry[0] != run_index]
-                    continue
-                unique[identity] = series
-                groups.setdefault(key, []).append((run_index, panel_index, series_index))
-    overlays, pairing, paired = [], [], set()
-    for key, entries in groups.items():
-        if len(entries) < 2:
+def _time_origin(run, index):
+    """Use frozen clock semantics, never infer identity from a display label."""
+    clock = run.report.run_meta.get('clock') or {}
+    if isinstance(clock, dict):
+        timeline = clock.get('report') or {}
+        if not isinstance(timeline, dict):
+            timeline = {}
+        if timeline.get('status') == 'AVAILABLE' and timeline.get('origin', {}).get('selector'):
+            return json.dumps(timeline['origin']['selector'], sort_keys=True)
+        if isinstance(clock.get('origin_kind'), str) and clock['origin_kind'].strip():
+            return json.dumps({'kind': clock['origin_kind'], 'unit': clock.get('unit', 'seconds')}, sort_keys=True)
+    return f'unknown-origin-{index}'
+
+
+def _pair(prepared, labels, origins, *, baseline_index, include_original_panels):
+    """Preserve the reference layout; match series only inside the same panel ID."""
+    overlays, pairing, consumed = [], [], set()
+    metric_colors = _metric_colors(prepared[baseline_index])
+    for original in prepared[baseline_index]:
+        if original.get('type', 'line') != 'line' or not original.get('timeX'):
             continue
-        first_run, first_panel, first_series = entries[0]
-        original = prepared[first_run][first_panel]
-        metric = original['series'][first_series].get('metric_id')
+        candidates = []
+        for i, panels in enumerate(prepared):
+            for panel in panels:
+                if panel['id'] == original['id']:
+                    candidates.append((i, panel))
+        # A repeated metric with different data inside one panel is ambiguous.
+        maps = {}
+        for i, panel in candidates:
+            mapping = {}
+            for n, curve in enumerate(panel['series']):
+                key = _series_key(panel, curve, origins[i])
+                if key is not None:
+                    mapping.setdefault(key, []).append(n)
+            maps[i] = mapping
+        entries, records = [], []
+        for n, curve in enumerate(original['series']):
+            key = _series_key(original, curve, origins[baseline_index])
+            base_matches = maps[baseline_index].get(key, [])
+            matched = [(baseline_index, original, n)]
+            if key is not None and len(base_matches) == 1:
+                for i, panel in candidates:
+                    if i == baseline_index:
+                        continue
+                    matches = maps[i].get(key, [])
+                    if len(matches) == 1:
+                        matched.append((i, panel, matches[0]))
+            entries.extend(matched)
+            records.append(dict(metric=curve.get('metric_id'), runs=[labels[i] for i, _, _ in matched],
+                missing_runs=[label for label in labels if label not in [labels[i] for i, _, _ in matched]]))
+        if not any(len(record['runs']) > 1 for record in records):
+            continue
         panel = copy.deepcopy(original)
-        panel.update(id='overlay:' + hashlib.sha256(key.encode()).hexdigest()[:16],
-                     title='对比 · ' + original['series'][first_series]['name'],
-                     presets={}, events=[])
-        axis = original['series'][first_series].get('axis', 'y')
-        panel['axes'] = {axis: copy.deepcopy(original['axes'][axis])}
-        small_panels, selected_labels = [], []
-        for i, p, s in entries:
-            source = prepared[i][p]
-            curve = source['series'][s]
-            small_panels.append(dict(series=[curve], presets={}))
-            selected_labels.append(labels[i])
-            panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name'])
-                                   for e in source.get('events', []))
-            paired.add((i, key))
-        panel['series'], _ = paired_overlay(small_panels, selected_labels,
-            color_for=lambda name, label, original_color: series_color(None, labels.index(label)))
-        for index, curve in enumerate(panel['series']):
-            run_index = labels.index(selected_labels[index])
-            curve['dash'] = [] if run_index == 0 else [4 + run_index * 2, 3]
-            curve['hidden'] = False
-            curve['group'] = selected_labels[index]
-            panel['presets'][selected_labels[index]] = [curve['name']]
-        missing = [label for label in labels if label not in selected_labels]
-        panel['caption'] = '同测量口径；保留各 run 的采样时间与缺口。' + (
-            ' 未配对：' + '、'.join(missing) if missing else '')
+        panel.update(id='overlay:' + original['id'], title='对比 · ' + original.get('title', original['id']),
+                     series=[], events=[], presets={}, timeSelectionKey='comparison-reference')
+        metric_names = {}
+        for i, source, n in entries:
+            curve = copy.deepcopy(source['series'][n])
+            name = curve['name']
+            curve['name'] = labels[i] + ' · ' + name
+            curve['dash'] = []
+            curve['point_style'] = RUN_MARKERS[i % len(RUN_MARKERS)]
+            curve['marker_count'] = 12
+            curve['group'] = labels[i]
+            # Metric colors and visibility follow the reference report.
+            key = _series_key(source, curve, origins[i])
+            reference = next((c for c in original['series']
+                if key is not None and _series_key(original, c, origins[baseline_index]) == key), None)
+            if reference is not None:
+                curve['color'] = metric_colors[original['id'], original['series'].index(reference)]
+                curve['hidden'] = reference.get('hidden', False)
+            curve['color'] = _run_color(curve.get('color') or series_color(None, n), i, len(labels))
+            panel['series'].append(curve)
+            panel['presets'].setdefault('run · ' + labels[i], []).append(curve['name'])
+            metric_names.setdefault(name, []).append(curve['name'])
+            consumed.add((i, source['id'], n))
+        for name, selection in metric_names.items():
+            panel['presets']['指标 · ' + name] = selection
+        for preset, names in original.get('presets', {}).items():
+            panel['presets']['原预设 · ' + preset] = [curve['name'] for curve in panel['series']
+                if any(curve['name'] == label + ' · ' + name for label in labels for name in names)]
+        for i, source in candidates:
+            if any(entry[0] == i for entry in entries):
+                panel['events'].extend(dict(e, name=labels[i] + ' · ' + e['name']) for e in source.get('events', []))
+        panel['caption'] = original.get('caption', '') + ' 指标用色相区分，图内相近色自动拉开；run 按输入顺序由深到浅，辅以稀疏形状标记，全部为连续实线。保留基准报告的指标组合、轴和显示范围；未兼容的其他 run 曲线单独展示。'
         overlays.append(panel)
-        pairing.append(dict(metric=metric, panel=original['id'], status='PAIRED',
-                            runs=selected_labels, missing_runs=missing))
+        pairing.append(dict(panel=original['id'], status='PAIRED', metrics=records))
     separate = []
     for i, panels in enumerate(prepared):
-        for panel in panels:
-            kept = [s for s in panel['series']
-                    if include_original_panels or (i, _series_key(panel, s, origins[i])) not in paired]
-            if kept:
-                panel = copy.deepcopy(panel)
-                panel['series'] = kept
-                names = {s['name'] for s in kept}
-                panel['presets'] = {name: [n for n in choices if n in names]
-                                    for name, choices in panel.get('presets', {}).items()}
-                panel['id'] = f'run-{i + 1}:' + panel['id']
-                panel['title'] = labels[i] + ' · ' + panel.get('title', '')
-                separate.append(panel)
-                pairing.append(dict(panel=panel['id'], status='SEPARATE', runs=[labels[i]],
-                    reasons=['ORIGINAL_REQUESTED' if include_original_panels else
-                             'NO_COMPATIBLE_PEER_OR_UNKNOWN_MEASUREMENT']))
+        for source in panels:
+            kept = [curve for n, curve in enumerate(source['series'])
+                    if include_original_panels or (i, source['id'], n) not in consumed]
+            if not kept:
+                continue
+            panel = copy.deepcopy(source)
+            panel['series'] = kept
+            names = {curve['name'] for curve in kept}
+            panel['presets'] = {name: [n for n in choices if n in names]
+                                for name, choices in panel.get('presets', {}).items()}
+            panel['timeSelectionKey'] = f'run-{i + 1}'
+            panel['id'] = f'run-{i + 1}:' + source['id']
+            panel['title'] = labels[i] + ' · ' + source.get('title', source['id'])
+            separate.append(panel)
+            pairing.append(dict(panel=panel['id'], status='SEPARATE', runs=[labels[i]],
+                reasons=['ORIGINAL_REQUESTED' if include_original_panels else
+                         'PANEL_OR_MEASUREMENT_OR_CLOCK_NOT_COMPATIBLE']))
     return overlays + separate, pairing
 
 
@@ -161,7 +239,8 @@ def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, 
     comparisons = {label: compare_controls(reference, control,
         required=('/configuration', '/workload', '/environment', '/criteria', '/implementation'))
         for label, control in zip(labels, controls) if label != baseline}
-    sources, attachments, sections, prepared, bounds, kpis, overview = {}, {}, [], [], [], [], []
+    sources, attachments, sections, prepared, kpis, overview = {}, {}, [], [], [], []
+    ranges = []
     for i, (label, run, anchor) in enumerate(zip(labels, loaded, anchors)):
         spec = run.report
         shift = anchor if aligned else None
@@ -181,31 +260,35 @@ def compare(paths, output, *, alignment_event=None, labels=None, baseline=None, 
                 continue
             if len(json.dumps(section, ensure_ascii=False)) <= 65536:
                 sections.append(dict(copy.deepcopy(section), title=label + ' · ' + section.get('title', '')))
-        kpis.append(dict(label=label + ' · 原始判定',
-                         value=run.analysis.get('verdict') or run.execution.get('status') or '未知'))
+        original = _original_result(run)
+        kpis.append(dict(label=label + ' · 原始判定', value=original['verdict'] or '未知'))
         overview.append([label, spec.run_meta.get('identity'), run.input_kind, run.view,
-                         run.analysis.get('verdict'), run.analysis.get('runtime_validity') or run.execution.get('workload', {}).get('runtime_validity'),
-                         run.execution.get('status'), run.execution.get('duration_ms'), run.execution.get('cleanup'), list(spec.kpis)])
+                         original['verdict'], original['validity'], original['status'],
+                         run.execution.get('duration_ms'), run.execution.get('cleanup'), list(spec.kpis)])
         panels = [shifted_panel(panel.to_dict(), shift) for panel in spec.panels]
+        display = dict(min=spec.time_min - (shift or 0), max=spec.time_max - (shift or 0)) if (
+            spec.time_min is not None and spec.time_max is not None) else None
+        ranges.append(display)
         for panel in panels:
             panel['caption'] = panel.get('caption', '') + ' ' + caption
-            if panel.get('timeX'):
-                bounds.extend(p['x'] for s in panel.get('series', []) for p in s['points'])
-        for value in (spec.time_min, spec.time_max):
-            if type(value) in (int, float) and math.isfinite(value):
-                bounds.append(value - (shift or 0))
+            if display is not None:
+                panel['timeAxis'] = copy.deepcopy(display)
         prepared.append(panels)
     origins = ['EVENT_ALIGNED'] * len(loaded) if aligned else [
-        run.report.time_origin_label or f'unknown-origin-{i}' for i, run in enumerate(loaded)]
-    panels, pairing = _pair(prepared, labels, origins, include_original_panels=include_original_panels)
+        _time_origin(run, i) for i, run in enumerate(loaded)]
+    baseline_index = labels.index(baseline)
+    panels, pairing = _pair(prepared, labels, origins, baseline_index=baseline_index,
+                            include_original_panels=include_original_panels)
+    time_alignment['display_ranges'] = dict(zip(labels, ranges))
+    time_alignment['origins'] = dict(zip(labels, origins))
+    display = ranges[baseline_index] or dict(min=0, max=1)
     result = dict(purpose='OBSERVATION_ONLY', sources=sources,
         runs={label: run.analysis for label, run in zip(labels, loaded)},
         executions={label: run.execution for label, run in zip(labels, loaded)},
         controls=dict(reference=baseline, values=dict(zip(labels, controls)), comparisons=comparisons),
         time_alignment=time_alignment, pairing=pairing)
-    minimum, maximum = min(bounds, default=0), max(bounds, default=1)
     spec = dict(title='运行报告对照', subtitle='各 run 保留独立判定；差异不自动解释为因果。' + caption,
-        timeOriginLabel=caption, timeAxis=dict(min=minimum, max=max(maximum, minimum + 1)),
+        timeOriginLabel=(caption if aligned else loaded[baseline_index].report.time_origin_label), timeAxis=display,
         events=[dict(id=alignment_event, name=alignment_event, t=0)] if aligned else [],
         panels=panels, kpis=kpis,
         summary_sections=[table('运行清单', ['名称', '实验身份', '输入', '视图', '原始 verdict',
