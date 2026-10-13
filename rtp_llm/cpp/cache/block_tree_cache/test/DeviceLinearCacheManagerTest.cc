@@ -463,6 +463,71 @@ TEST_F(DeviceLinearCacheManagerTest, ReclaimRespectsModelTailPolicyAndPartialChe
     EXPECT_EQ(group.historyReclaimEnd(-1), 0u);
 }
 
+TEST_F(DeviceLinearCacheManagerTest, HistoryForecastBoundsDecodeButPreservesPrefillPeak) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, std::numeric_limits<int>::max());
+    ASSERT_TRUE(group.init());
+    const int short_peak = group.estimateInitialBatchPeakNeedBlocks(8, 8, 128, 0, true, 1, true);
+    const int long_peak  = group.estimateInitialBatchPeakNeedBlocks(8, 8, 4096, 0, true, 1, true);
+    EXPECT_EQ(short_peak, long_peak);
+    EXPECT_LE(long_peak, 5);
+    // Since #1574 both forecasts bound the same retained-decode window, so
+    // the reclaim forecast may tie but must never exceed the plain forecast.
+    EXPECT_LE(long_peak, group.estimateInitialBatchPeakNeedBlocks(8, 8, 4096, 0, true, 1, false));
+    // A long prompt must be materialized before any decode checkpoint can retire.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(128, 128, 0, 0, true, 1, true), 32);
+    EXPECT_GE(group.estimateInitialBatchPeakNeedBlocks(128, 128, 4096, 0, true, 1, true), 32);
+    // Forecasting history reclaim must not change the off path or batch expansion.
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(8, 8, 128, 0, true, 2, true),
+              group.estimateInitialBatchPeakNeedBlocks(8, 8, 128, 0, true, 2, false));
+}
+
+TEST_F(DeviceLinearCacheManagerTest, HistoryForecastCoversRealAllocationWithPinnedInitialBlocks) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    // The prefill materialization window (main #1574's tail_blocks) replaces
+    // the retired linear_step reclaim stride as the sizing knob under test.
+    for (const int window : {1, 2, 3}) {
+        for (const int tail : {1, 3}) {
+            auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+            policy.active_tail_blocks = tail;
+            DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, window, policy);
+            ASSERT_TRUE(group.init());
+            for (const int reserve : {0, 2}) {
+                for (const int initial : {3, 4, 5}) {
+                    SCOPED_TRACE(::testing::Message() << "window=" << window << " tail=" << tail
+                                                      << " reserve=" << reserve << " initial=" << initial);
+                    BlockIds blocks;
+                    ASSERT_TRUE(group.malloc(blocks, initial, true, reserve));
+                    BlockIndicesType pinned;
+                    for (auto block : blocks.blocks()) {
+                        if (!isNullBlockIdx(block)) {
+                            pinned.push_back(block);
+                        }
+                    }
+                    group.reference(pinned);
+                    const int baseline = static_cast<int>(pool->referencedBlocksNum());
+                    const int forecast =
+                        group.estimatePeakNeedBlocks(initial, blocks.blocks(), 128, reserve, true, true);
+                    int observed_peak = baseline;
+                    for (int length = initial + 1; length <= initial + 128; ++length) {
+                        group.reclaimHistory(blocks, group.historyReclaimEnd(length - 1));
+                        ASSERT_TRUE(group.malloc(blocks, length, true, reserve));
+                        observed_peak = std::max(observed_peak, static_cast<int>(pool->referencedBlocksNum()));
+                        group.removeSkippedBlocks(blocks, true, reserve);
+                    }
+                    EXPECT_GE(forecast, observed_peak - baseline);
+                    EXPECT_LE(forecast, 7);
+                    group.unreference(blocks.blocks());
+                    group.unreference(pinned);
+                    EXPECT_EQ(pool->freeBlocksNum(), 9u);
+                }
+            }
+        }
+    }
+}
+
 TEST_F(DeviceLinearCacheManagerTest, TailIsClampedOnlyForReusablePrefill) {
     for (const int tail : {1, 2, 3, 5, std::numeric_limits<int>::max()}) {
         for (const bool reuse : {false, true}) {
@@ -534,6 +599,93 @@ TEST_F(DeviceLinearCacheManagerTest, DecodeReserveAndReadStateDoNotDependOnPrefi
     }
 }
 
+TEST_F(DeviceLinearCacheManagerTest, PrefillAllocatesOnlyTailAfterReuseHit) {
+    for (const int tail : {1, 3, std::numeric_limits<int>::max()}) {
+        for (const int reuse_slots : {1, 2, 3, 4, 5, 6}) {
+            for (const bool remote_load : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << tail << " reuse=" << reuse_slots << " remote=" << remote_load);
+                auto pool = createDeviceBlockPool();
+                ASSERT_TRUE(pool->init());
+                DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, tail);
+                ASSERT_TRUE(group.init());
+                BlockIds blocks;
+                blocks.resize(reuse_slots);
+                RequiredPositions required;
+                BlockIdxType      reused = NULL_BLOCK_IDX;
+                if (remote_load) {
+                    required.insert(reuse_slots - 1);
+                } else {
+                    const auto allocated = pool->malloc(1).value();
+                    pool->incRef(allocated);
+                    reused = allocated.front();
+                    blocks.setAt(reuse_slots - 1, reused);
+                }
+                const int  new_blocks = std::min(tail, 6 - reuse_slots);
+                const auto need       = group.getNeedBlocks(24, 24, 4, reuse_slots, true, required);
+                EXPECT_EQ(need.common_blocks, new_blocks + static_cast<int>(remote_load));
+                EXPECT_EQ(need.extra_blocks, 0);
+                ASSERT_TRUE(group.malloc(blocks, 24, true, 4, nullptr, required));
+                EXPECT_EQ(blocks.blocksNum(), 6u);
+                EXPECT_EQ(pool->referencedBlocksNum(), static_cast<size_t>(new_blocks + 1));
+                for (int pos = 0; pos < 6; ++pos) {
+                    EXPECT_EQ(!isNullBlockIdx(blocks.blocks()[pos]), pos == reuse_slots - 1 || pos >= 6 - new_blocks);
+                }
+                if (!remote_load) {
+                    EXPECT_EQ(blocks.blocks()[reuse_slots - 1], reused);
+                }
+                group.unreference(blocks.blocks());
+                EXPECT_EQ(pool->freeBlocksNum(), 9u);
+            }
+        }
+    }
+}
+
+TEST_F(DeviceLinearCacheManagerTest, TailRetentionDoesNotChangeTransferPolicy) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 10000);
+    EXPECT_EQ(group.activeTailBlocks(), 1u);
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(20, 20, 0, 0, true, 1), 5);
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(20, 20, 0, 0, false, 1), 1);
+}
+
+TEST_F(DeviceLinearCacheManagerTest, NonReusableGroupIgnoresPrefillTailConfig) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.enable_prefix_reuse = false;
+    policy.active_tail_blocks  = 2;
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 10000, policy);
+    BlockIds                 blocks;
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(20, 20, 0, 4, true, 1), 2);
+    const auto need = group.getNeedBlocks(20, 20, 4, 0, true);
+    EXPECT_EQ(need.common_blocks + need.extra_blocks, 2);
+    ASSERT_TRUE(group.malloc(blocks, 20, true, 4));
+    EXPECT_EQ(pool->referencedBlocksNum(), 2u);
+    ASSERT_TRUE(group.mallocForDecode(blocks, 24, true));
+    group.removeSkippedBlocks(blocks, true);
+    EXPECT_EQ(pool->referencedBlocksNum(), 2u);
+    group.unreference(blocks.blocks());
+}
+
+TEST_F(DeviceLinearCacheManagerTest, SmallPrefillTailPreservesActiveBlocksThroughFirstDecode) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto policy               = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.active_tail_blocks = 2;
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 1, policy);
+    BlockIds                 blocks;
+    ASSERT_TRUE(group.malloc(blocks, 21, true));
+    ASSERT_EQ(pool->referencedBlocksNum(), 2u);
+    const auto prefill_blocks = blocks.blocks();
+    EXPECT_EQ(group.getNeedBlocks(21, 21, 0, 0, true).common_blocks, 2);
+    EXPECT_EQ(group.estimatePeakNeedBlocks(21, blocks.blocks(), 1, 0, true), 0);
+    EXPECT_EQ(group.estimateInitialBatchPeakNeedBlocks(21, 21, 1, 0, true, 1), 2);
+    ASSERT_TRUE(group.mallocForDecode(blocks, 22, true));
+    EXPECT_EQ(blocks.blocks(), prefill_blocks);
+    group.removeSkippedBlocks(blocks, true);
+    EXPECT_EQ(pool->referencedBlocksNum(), 2u);
+    group.unreference(blocks.blocks());
 }
 
 }  // namespace test

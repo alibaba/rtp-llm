@@ -186,6 +186,9 @@ public:
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;
     int                  estimatePeakNeedBlocks(int remaining_tokens) const;
+    // Scheduler boundary: commit pending output work, then expose reclaimed
+    // history through the allocator's real available-block count for admission.
+    void                 drainLinearHistoryForAdmission();
     void                 setNeedReleaseResource(bool need_release_resource);
     bool                 hasCacheKeys() const;
     const CacheKeysType& cacheKeys(int32_t batch_id = 0) const;
