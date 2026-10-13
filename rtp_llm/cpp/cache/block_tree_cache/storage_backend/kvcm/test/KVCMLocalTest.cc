@@ -389,7 +389,7 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
 }
 
-TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesDestinationBlock) {
+TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesOnlyDestinationBlock) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_read_timeout");
     auto client_wrapper = std::make_shared<MockClientWrapper>();
     auto metrics_reporter =
@@ -421,14 +421,31 @@ TEST(KVCMLocalTest, PayloadReadTimeoutQuarantinesDestinationBlock) {
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
 
-    EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
-    const auto blocked_read = readResult(*backend.backend, makeStorageRequest(environment), nullptr);
-    EXPECT_EQ(blocked_read.code(), ErrorCode::EXECUTION_EXCEPTION);
+    ScopedReferencedBlocks healthy_blocks(environment.device_pool, 1);
+    auto                   healthy_request =
+        makeStorageRequest(environment, /*keys=*/{202}, /*local_matched_blocks=*/0, /*block_ids=*/healthy_blocks.get());
+
+    kv_cache_manager::Locations healthy_locations{
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "healthy_read_uri"}}};
+    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, healthy_locations)));
+    auto healthy_observation = match(*backend.backend, healthy_request);
+    ASSERT_TRUE(healthy_observation.success);
+    ASSERT_NE(healthy_observation.match_meta, nullptr);
+
+    client_wrapper->load_status = kv_cache_manager::ClientErrorCode::ER_OK;
+    EXPECT_TRUE(read(*backend.backend, healthy_request, std::move(healthy_observation.match_meta)));
+
+    kv_cache_manager::WriteLocation empty_write_location;
+    EXPECT_CALL(*client_wrapper, getWriteLocation(_, _, _, _, _, _))
+        .WillOnce(Return(std::make_pair(true, empty_write_location)));
+    auto write_task = backend.backend->prepareWrite(healthy_request);
+    ASSERT_TRUE(write_task);
+    EXPECT_TRUE(backend.backend->write(std::move(write_task)));
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
-    EXPECT_CALL(*client_wrapper, match(_, _, _, _, _, _)).Times(0);
-    const auto blocked_match = match(*backend.backend, makeStorageRequest(environment));
-    EXPECT_FALSE(blocked_match.success);
-    EXPECT_EQ(blocked_match.matched_blocks_num, 0u);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
 
     backend.backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);

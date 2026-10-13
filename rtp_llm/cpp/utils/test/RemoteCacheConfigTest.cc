@@ -5,14 +5,12 @@
 namespace rtp_llm {
 namespace {
 
-TEST(RemoteCacheConfigTest, ParsesBooleanSpellingsWithoutProcessEnvironment) {
-    for (const auto value : {"1", "true", "TRUE", "yes", "on", "enable", "enabled", "  On  "}) {
-        ASSERT_EQ(parseRemoteCacheGdrEnabled(value), std::optional<bool>(true)) << value;
-    }
-    for (const auto value : {"0", "false", "FALSE", "no", "off", "disable", "disabled", "  Off  "}) {
-        ASSERT_EQ(parseRemoteCacheGdrEnabled(value), std::optional<bool>(false)) << value;
-    }
+TEST(RemoteCacheConfigTest, ParsesBinaryFlag) {
+    EXPECT_EQ(parseRemoteCacheGdrEnabled("1"), std::optional<bool>(true));
+    EXPECT_EQ(parseRemoteCacheGdrEnabled("0"), std::optional<bool>(false));
     EXPECT_EQ(parseRemoteCacheGdrEnabled(""), std::nullopt);
+    EXPECT_EQ(parseRemoteCacheGdrEnabled("true"), std::nullopt);
+    EXPECT_EQ(parseRemoteCacheGdrEnabled(" 1 "), std::nullopt);
     EXPECT_EQ(parseRemoteCacheGdrEnabled("unexpected"), std::nullopt);
     EXPECT_EQ(parseRemoteCacheGdrEnabled("2"), std::nullopt);
 }
