@@ -4,6 +4,7 @@ load("@pip_dsv4_test//:requirements.bzl", test_requirement = "requirement")
 package(default_visibility = ["//visibility:public"])
 
 _TESTS = [
+    "test_dspark_commit_wkv",
     "mega_moe_static_buf_test",
     "test_dspark_cuda_graph_contract",
     "test_engram_cpu",
