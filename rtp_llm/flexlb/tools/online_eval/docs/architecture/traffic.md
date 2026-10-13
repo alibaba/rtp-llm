@@ -5,7 +5,7 @@
 | 层 | 允许 | 禁止与校验 |
 |---|---|---|
 | 解码 | 按 manifest 版本校验 SHA、块大小和 DAG 引用，恢复规范事件及匿名标签 | 不按长度筛选、不重采样输出、不决定条数或节奏。版本/块大小由 `traffic.codecs` 与各 codec 拒绝不匹配输入。 |
-| 转换 | 在完整展开后做输入长度**过滤**、输出分布采样、请求条数限制，或为 Java 夹具做输入长度**截断** | 不改写源 `.xz`；`lineage_transforms` 校验参数并保留被排除父请求的标签，`derive_master_templates` 对截断量计数。新增变换须记录源 SHA、参数、选中/排除或截断量。 |
+| 转换 | 在完整展开后做输入长度**过滤**、输出分布采样、请求条数限制，或为派生匿名模板做输入长度**截断** | 不改写源 `.xz`；`lineage_transforms` 校验参数并保留被排除父请求的标签，`derive_master_templates` 对截断量计数。新增变换须记录源 SHA、参数、选中/排除或截断量。 |
 | 播放 | 配置/推演速率和循环；Java 客户端依据摊平 JSONL 控制发送 | 不读 `.xz`/DAG、不按 `il` 或标签改内容。`traffic_source.validate_plan` 校验摊平行，Java `filterAndShard` 只按时长、数量和 shard 控制；新增 Java 内容变换属评审约束，当前无独立静态检查。 |
 
 源 `.xz` 与 sidecar SHA 不可变；场景使用 `path + count` 选择输入，不声明预期 SHA；生成时计算实际源文件摘要并写入 manifest。转换必须保持 `shared ≤ parent.blocks`，先展开所有父事件再过滤，不能把被排除父请求从标签空间删除。`input_length_filter` **丢弃整请求**，不缩短其输入；`fixture_shape_clip` **截断输入**并记录删去 token，二者不可同名混用。`request_limit` 在过滤之后计数，输出长度分布按原始事件索引采样。产物 manifest 的 `transformations` 保留源 SHA、应用项和影响计数；未转换时 `applied: []`。捕获行契约另见 [数据规则](../../data/README.md)。

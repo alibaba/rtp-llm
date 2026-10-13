@@ -13,7 +13,7 @@
 | 开发 | `scripts/commands/format_configs.py --check` | 检查手写 YAML 的字段阅读顺序 |
 | 管线 | `scripts/pipeline/execute_cases.py` | 按 lane 并行执行 case |
 | 管线 | `scripts/pipeline/materialize_traffic.py` | 将流量源物化为请求计划 |
-| 管线 | `scripts/pipeline/derive_master_templates.py` | 从固定模型生成 Java 回归夹具 |
+| 管线 | `scripts/pipeline/derive_master_templates.py` | 从固定模型生成匿名请求模板（不供历史性能 UT 使用） |
 | 分析 | `scripts/commands/compare_traffic.py` | 对比合成流量与真实捕获的统计结构 |
 | 离线 | `scripts/commands/analyze_performance.py` | 从逐请求证据重算单 run 性能结论 |
 | 离线 | `scripts/commands/reinterpret_cache.py` | 显式重判冻结 cache 证据，输出到新目录 |
