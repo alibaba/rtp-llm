@@ -13,17 +13,20 @@ from pathlib import Path
 
 from runtime.observation import SampleBudget
 from runtime.deadline import Deadline
-from monitoring.metric_store import atomic_json
+from artifacts.json_io import write_json
+from monitoring.sources import selected_sources
+from case_api.registry import registry
 
 
 class PrometheusEvidence:
     def __init__(self, path, adapters, *, fields, label, source, session, limits,
-                 timeout_s=.4):
+                 client, timeout_s=.4):
         if not adapters or not fields or not 0 < timeout_s < float('inf'):
             raise ValueError('invalid probe adapters or budget')
         self.path, self.adapters = Path(path), dict(adapters)
         self.fields, self.label, self.source = sorted(fields), label, source
         self.session = session
+        self.client = client
         self.timeout_s = min(timeout_s, session.interval / (len(adapters) + 1))
         self.budget = SampleBudget(limits)
         self.error = None
@@ -139,7 +142,7 @@ class PrometheusEvidence:
                 remaining = deadline.remaining()
                 if remaining <= 0:
                     raise TimeoutError("probe archive exceeded shutdown budget")
-                result = self.session.query(expression, right, timeout=min(5, remaining), deadline=deadline)
+                result = self.client.query(expression, right, timeout=min(5, remaining), deadline=deadline)
                 queries.append(dict(promql=expression, end=right, result=result))
                 for series in result:
                     metric = series['metric']['__name__']
@@ -170,9 +173,20 @@ class PrometheusEvidence:
                       job=self.job, start=self.started, end=self.ended,
                       queries=queries, source_endpoints={name: getattr(read, 'url', None)
                           for name, read in self.adapters.items()}, error=str(self.error) if self.error else None)
-        atomic_json(self.path.with_suffix('.prometheus.json'), frozen)
+        write_json(self.path.with_suffix('.prometheus.json'), frozen)
         with self.path.open('w') as stream:
             for key in sorted(samples):
                 stream.write(json.dumps(samples[key], allow_nan=False) + '\n')
         if failure is not None:
             raise failure
+
+
+def evidence_collector(plan, source, environment, path, **options):
+    selected = selected_sources(plan)
+    if source not in selected:
+        raise ValueError("evidence source is not selected: " + source)
+    capability = registry().sources[source]
+    adapters = capability.factory(environment, set(selected[source]["fields"]))
+    return PrometheusEvidence(path, adapters, fields=selected[source]["fields"],
+                              label=capability.label, source=source,
+                              client=options["session"].client, **options)

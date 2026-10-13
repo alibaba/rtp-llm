@@ -110,9 +110,11 @@ calculation:
 
 只有 `sources` 展开为真实查询，`produced` 即使标为 `source_type: prometheus` 也不会新增查询。`export_metrics` 只转换已归档的查询结果并保留 producer 输出，不发起抓取。查询展开可用 `queries_for_targets` 核对，实际采集清单保存在 `telemetry/<epoch>/queries.json`；报告分类审计区分已展示、门禁证据及显式诊断指标，未分类指标报错。
 
-声明层的 `monitoring.contracts` 校验测量元数据，`monitoring.producer_contract` 解析注册能力的输出契约，不执行 producer 或导入指标存储。`monitoring.producers` 只负责收尾阶段的执行调度。`monitoring.archive` 将查询归档转换成完整的 `MetricStore`，校验成功后才原子替换 `metrics.json`；转换失败保留上一份有效产物。离线报告和有效性检查直接使用 `MetricStore.read(...).series(...)`。
+声明层的 `monitoring.contracts` 提供测量元数据校验和指标异常，`monitoring.producer_contract` 解析注册能力的输出契约，不执行 producer 或导入指标存储。`monitoring.producers` 只负责收尾阶段的执行调度，`monitoring.publication` 校验 producer 输出并附加实现来源。`MetricStore` 负责冻结存储、选择和归约，不解析注册能力。`monitoring.archive` 只将查询归档转换成完整的 `MetricStore`，校验成功后才通过 `artifacts.json_io.write_json` 原子替换 `metrics.json`；转换失败保留上一份有效产物。离线报告和有效性检查直接使用 `MetricStore.read(...).series(...)`。
 
-新建 session 和展开查询时必须显式提供每个 target 的来源种类，不能通过实例名称猜测。旧归档缺少 `target_kinds` 时，名称推断仅保留在归档转换边界。`monitoring.client` 提供 TSDB 查询，`monitoring.session` 管理进程、配置和资源注册，`monitoring.archive` 负责归档。
+新建 session 和展开查询时必须显式提供每个 target 的来源种类，不能通过实例名称猜测。旧归档缺少 `target_kinds` 时，名称推断仅保留在归档转换边界。`monitoring.client.PrometheusClient` 显式接收 URL、冻结计划、来源种类清单及最大采集间隔；清单与资源所有者共享，动态客户端注册后立即可查询。`monitoring.session` 管理进程、配置和资源注册，通过组合持有 `client`；调用方使用 `monitor.client` 读取 TSDB。动态 client 入口为 `add_client_target(s)`，不接受隐式的其他来源种类。
+
+`monitoring.recording` 接收明确的 `ArchiveWindow` 和查询客户端，保留分块结果、观测窗口及错误，写入 `queries.json`；不接收整个 session，也不负责指标转换。session 在同一收尾预算内决定是否调用离线转换。`monitoring.sources` 只选择声明、生成有序清单及入口文件指纹，运行时 `evidence_collector` 位于 `monitoring.probe`。入口模块指纹用于定位实现文件，不等于完整传递依赖的代码版本；完整执行版本仍由运行制品的代码身份记录。
 
 所有 `sources` 查询必须用 `exported_metrics` 列出依赖的物理指标名称；`mode: scrape` 的依赖必须与原始 selector 一致。`environment.metric_whitelist` 是 Java exporter 的暴露过滤器，query plan 是查询选择，两者不合并。编译期检查显式过滤器及其 profile 覆盖不会排除所选查询的依赖；未声明过滤覆盖时保留 Java 策略，运行时仍需按查询的 `required` 和覆盖契约核验实际数据。
 

@@ -19,14 +19,15 @@ from pathlib import Path
 
 from monitoring.query_plan import DEFAULT_PLAN, load_plan, plan_hash
 from monitoring.client import PrometheusClient
-from monitoring.archive import archive_session
+from monitoring.archive import export_metrics
+from monitoring.recording import ArchiveWindow, record_queries
 from runtime.deadline import Deadline
 from runtime.cleanup import cleanup_all
 from runtime.startup import startup_deadline, wait_ready
 from monitoring.collection_plan import scrape_job, collection_plan
 
 
-class PrometheusSession(PrometheusClient):
+class PrometheusSession:
     def __init__(self, directory, targets, interval_s=1, max_gap_s=5, binary=None,
                  query_plan=DEFAULT_PLAN, target_kinds=None, metric_plan=None):
 
@@ -51,7 +52,8 @@ class PrometheusSession(PrometheusClient):
         )
         self.process = None
         self.started = self.monotonic = None
-        self.url = None
+        self.client = PrometheusClient(None, query_plan=self.query_plan,
+                                       target_kinds=self.target_kinds, max_gap_s=self.max_gap)
         self.log = None
         self.target_bounds = {}
         self.closed = False
@@ -60,10 +62,10 @@ class PrometheusSession(PrometheusClient):
     def collects(self, kind):
         return bool(self.query_plan["sources"][kind])
 
-    def add_target(self, name, url, *, deadline=None):
-        self.add_targets({name: url}, deadline=deadline)
+    def add_client_target(self, name, url, *, deadline=None):
+        self.add_client_targets({name: url}, deadline=deadline)
 
-    def add_targets(self, targets, *, deadline=None):
+    def add_client_targets(self, targets, *, deadline=None):
         deadline = startup_deadline(deadline, 20)
         if set(targets) & set(self.targets):
             raise ValueError("duplicate monitor target")
@@ -79,7 +81,7 @@ class PrometheusSession(PrometheusClient):
         self.target_kinds.update({name: "client" for name in targets})
         path.write_text(json.dumps(config))
         request = urllib.request.Request(
-            self.url + "/-/reload", data=b"", method="POST"
+            self.client.url + "/-/reload", data=b"", method="POST"
         )
         with urllib.request.urlopen(request, timeout=min(5, deadline.remaining())):
             pass
@@ -90,7 +92,7 @@ class PrometheusSession(PrometheusClient):
     def add_probe(self, probe, url, *, deadline=None):
         """A registered on-demand adapter shares this run's scheduler and TSDB."""
         deadline = startup_deadline(deadline, 20)
-        if not self.url or self.closed or probe.job in self.probes:
+        if not self.client.url or self.closed or probe.job in self.probes:
             raise ValueError("probe requires a live Prometheus and a unique source")
         parsed = urllib.parse.urlsplit(url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -103,13 +105,13 @@ class PrometheusSession(PrometheusClient):
             metric_relabel_configs=[dict(source_labels=["__name__"], action="keep",
                 regex="(" + "|".join(probe.names.values()) + ")")]))
         path.write_text(json.dumps(config))
-        with urllib.request.urlopen(urllib.request.Request(self.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())):
+        with urllib.request.urlopen(urllib.request.Request(self.client.url + "/-/reload", data=b"", method="POST"), timeout=min(5, deadline.remaining())):
             pass
         self._write_session()
         def ready():
             if probe.error is not None:
                 raise RuntimeError('probe startup failed: ' + str(probe.error)) from probe.error
-            health = self.query('up{job=' + json.dumps(probe.job) + '}', timeout=min(5, deadline.remaining()))
+            health = self.client.query('up{job=' + json.dumps(probe.job) + '}', timeout=min(5, deadline.remaining()))
             return len(health) == 1 and float(health[0]['value'][1]) == 1
         wait_ready(deadline, 'probe/first scrape', ready, interval_s=0.05)
 
@@ -121,7 +123,7 @@ class PrometheusSession(PrometheusClient):
         def ready():
             try:
                 for name in targets:
-                    self.instant(name, timeout=min(5, deadline.remaining()))
+                    self.client.instant(name, timeout=min(5, deadline.remaining()))
                 return True
             except TimeoutError:
                 raise
@@ -146,7 +148,7 @@ class PrometheusSession(PrometheusClient):
         self.directory.mkdir(parents=True, exist_ok=True)
         if (self.directory / "data").exists():
             raise ValueError("Prometheus directory must be fresh")
-        jobs = [scrape_job(self.query_plan, name, url, self.target_kind(name))
+        jobs = [scrape_job(self.query_plan, name, url, self.client.target_kind(name))
                 for name, url in self.targets.items()]
         config = {
             "global": {
@@ -159,7 +161,7 @@ class PrometheusSession(PrometheusClient):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
-        self.url = f"http://127.0.0.1:{port}"
+        self.client.url = f"http://127.0.0.1:{port}"
         self.started, self.monotonic = time.time(), time.monotonic()
         self.log = (self.directory / "prometheus.log").open("w")
         self.process = subprocess.Popen(
@@ -181,7 +183,7 @@ class PrometheusSession(PrometheusClient):
                 if self.process.poll() is not None:
                     raise RuntimeError('Prometheus exited; inspect ' + str(self.directory / 'prometheus.log'))
                 try:
-                    with urllib.request.urlopen(self.url + '/-/ready', timeout=min(1, deadline.remaining())):
+                    with urllib.request.urlopen(self.client.url + '/-/ready', timeout=min(1, deadline.remaining())):
                         return True
                 except TimeoutError:
                     raise
@@ -198,14 +200,28 @@ class PrometheusSession(PrometheusClient):
 
     def _write_session(self):
         (self.directory / "session.json").write_text(json.dumps(dict(
-            backend="prometheus", url=self.url, targets=self.targets,
+            backend="prometheus", url=self.client.url, targets=self.targets,
             collection_plan=self.collection_plan,
             evidence_targets={name: dict(source=probe.source, fields=probe.fields, url=probe.url, path=str(probe.path))
                               for name, probe in self.probes.items()}, started_epoch_s=self.started,
             interval_s=self.interval, retention_time="24h", retention_size="1GB"), indent=2))
 
     def archive(self, *, materialize=True, deadline=None):
-        return archive_session(self, materialize=materialize, deadline=deadline)
+        window = ArchiveWindow(self.directory, self.query_plan_name, self.collection_plan,
+                               self.started, self.interval, dict(self.targets),
+                               {name: list(bounds) for name, bounds in self.target_bounds.items()})
+        result = record_queries(window, self.client, deadline=deadline)
+        if materialize:
+            if deadline is not None:
+                deadline.check()
+            root = self.directory.parent.parent if self.directory.parent.name == "telemetry" else self.directory
+            export_metrics(root)
+            if deadline is not None:
+                deadline.check()
+        if result["errors"]:
+            if deadline is not None:
+                deadline.check()
+            raise RuntimeError("incomplete Prometheus archive")
 
     def stop(self, timeout=10, export=True, *, materialize=True):
         deadline = Deadline(time.monotonic() + timeout)

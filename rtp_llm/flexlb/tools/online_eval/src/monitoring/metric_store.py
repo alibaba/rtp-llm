@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 
 from schema_contract import matches_schema
+from artifacts.json_io import write_json
+from monitoring.contracts import MetricContractError, MetricUnavailable
 
 
 _READ_SESSION = ContextVar('frozen_metric_reads', default=None)
@@ -22,23 +24,6 @@ def frozen_metric_reads():
         yield
     finally:
         _READ_SESSION.reset(token)
-
-
-class MetricContractError(ValueError):
-    """An ID, identity or definition violates the declared metric contract."""
-
-
-class MetricUnavailable(ValueError):
-    """Declared data cannot establish a valid measurement."""
-
-
-def atomic_json(path, data):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(data, ensure_ascii=False, allow_nan=False,
-                                    separators=(",", ":")) + "\n")
-    temporary.replace(path)
 
 
 class MetricStore:
@@ -85,7 +70,7 @@ class MetricStore:
         return store
 
     def save(self, directory):
-        atomic_json(Path(directory) / "metrics.json", self.document)
+        write_json(Path(directory) / "metrics.json", self.document)
 
     def select(self, metric_id, *, labels=None, start=None, end=None,
                source=None, epoch=None, min_samples=1, max_gap_s=None):
@@ -182,59 +167,3 @@ def series_row(points, *, epoch, source, labels):
     if type(source) is not str or not source.strip() or not isinstance(labels, dict):
         raise MetricContractError("produced series requires source identity and labels")
     return dict(epoch=str(epoch), source=source, labels=dict(labels), points=points)
-
-
-def publish(store, metric_id, definition, rows, *, producer, evidence):
-    """A declared Python producer publishes numeric data with explicit provenance."""
-    import hashlib
-    from importlib.util import find_spec
-    from monitoring.producer_contract import output_contract
-    from case_api.registry import registry
-
-    declared = store.document["definitions"].get(metric_id)
-    if declared is None or declared != definition or declared.get("producer") != producer or producer not in registry().producers:
-        raise MetricContractError("undeclared producer or definition mismatch: " + metric_id)
-    try:
-        contract = output_contract(metric_id, definition)
-    except MetricContractError:
-        raise
-    except ValueError as exc:
-        raise MetricContractError(str(exc)) from exc
-    if any(contract.get(key) != definition.get(key) for key in ('measurement', 'collection', 'implementation')):
-        raise MetricContractError('published measurement does not match its implementation: ' + metric_id)
-    calculation_module = contract['implementation']['module']
-    def module_digest(name):
-        try:
-            spec = find_spec(name)
-            if spec is None or spec.origin is None:
-                raise MetricContractError("producer module has no source file: " + name)
-            return hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest()
-        except MetricContractError:
-            raise
-        except (ImportError, ValueError, OSError) as exc:
-            raise MetricContractError("cannot read producer module: " + name) from exc
-
-    calculation_sha256 = module_digest(calculation_module)
-    module = registry().producers[producer].module
-    producer_sha256 = module_digest(module)
-    result, identities = [], set()
-    for row in rows:
-        key = (str(row["epoch"]), row["source"], json.dumps(row["labels"], sort_keys=True))
-        if key in identities:
-            raise MetricContractError("duplicate produced series identity: " + metric_id)
-        identities.add(key)
-        if set(definition["labels"]) - set(row["labels"]):
-            raise MetricContractError("produced metric lacks required labels: " + metric_id)
-        points = row["points"]
-        if any(type(t) not in (int, float) or not math.isfinite(t)
-               or (v is not None and (type(v) not in (int, float) or not math.isfinite(v)))
-               for t, v in points) or any(b[0] <= a[0] for a, b in zip(points, points[1:])):
-            raise MetricContractError("invalid or unordered produced samples: " + metric_id)
-        result.append(dict(metric_id=metric_id, epoch=str(row["epoch"]), source=row["source"],
-            labels=row["labels"], points=points, status="PRESENT" if any(v is not None for _, v in points) else "ABSENT",
-            provenance=dict(source_type=definition["source_type"], producer=producer,
-                            producer_module=module, producer_sha256=producer_sha256,
-                            calculation_module=calculation_module, calculation_sha256=calculation_sha256,
-                            calculation=copy.deepcopy(definition.get("calculation")),
-                            measurement=copy.deepcopy(definition["measurement"]), evidence=evidence)))
-    store.document["metrics"][metric_id] = result

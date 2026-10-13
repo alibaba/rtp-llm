@@ -15,7 +15,7 @@ from scenario.actions import master
 from cases.master_ha_failover import actions as ha
 from scenario.contracts import PlanContext
 from scenario.runtime import Deadline, RuntimeContext
-from monitoring.sources import evidence_collector
+from monitoring.probe import evidence_collector
 from monitoring.query_plan import load_plan
 from cases.master_ha_failover.client import HaReplayClient
 from tests.ha_fixtures import client_resource, replay_source, replay_trace

@@ -7,7 +7,8 @@ from pathlib import Path
 
 from cases.master_ha_failover.analysis import prefill_assignment_windows
 from analysis.time_buckets import TimeBuckets
-from monitoring.metric_store import MetricUnavailable, series_row
+from monitoring.contracts import MetricUnavailable
+from monitoring.metric_store import series_row
 
 STATE_FIELDS = ("http_up", "scheduler_inflight", "prefill_inflight_requests",
                 "decode_master_queued", "decode_confirmed_running")
@@ -86,7 +87,8 @@ def _prefill_balance_series(rows, anchor, fleet_size):
 
 def metric_contract(producer, identity, calculation):
     from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
-    from monitoring.contracts import implementation_measurement, implementation_identity
+    from monitoring.contracts import implementation_measurement
+    from implementation_identity import implementation_identity
     if calculation is not None:
         raise ValueError('HA producer owns its case-specific calculation')
     if producer == 'ha_gates' and identity in {'ha_gate/' + name for name in HA_METRICS}:
@@ -114,7 +116,8 @@ def metric_contract(producer, identity, calculation):
 
 
 def produce(directory, payload):
-    from monitoring.metric_store import MetricStore, publish
+    from monitoring.metric_store import MetricStore
+    from monitoring.publication import publish
     store = MetricStore.read(directory)
     anchor = payload["clock_anchor"]["epoch_s"]
     fields = [field for field in STATE_FIELDS if "ha/" + field in store.document["definitions"]]
@@ -162,7 +165,8 @@ def gate_labels(params):
 
 def produce_gates(directory):
     """Publish completed checks from the persisted run; never re-evaluate a gate."""
-    from monitoring.metric_store import MetricStore, publish
+    from monitoring.metric_store import MetricStore
+    from monitoring.publication import publish
     directory = Path(directory)
     result = json.loads((directory / "result.json").read_text())
     store = MetricStore.read(directory)

@@ -12,7 +12,8 @@ from cases.master_ha_failover.analysis import HA_METRICS, measure_client_metric
 from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 from cases.master_performance.panels import prepare_curves, report_panels
-from monitoring.metric_store import MetricContractError, MetricStore
+from monitoring.contracts import MetricContractError
+from monitoring.metric_store import MetricStore
 from monitoring.query_plan import load_plan, queries_for_targets
 from scenario.errors import ScenarioError
 from reporting.view_config import view

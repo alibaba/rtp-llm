@@ -8,7 +8,7 @@ import pytest
 from case_api.extension_contracts import FinalizationContext
 from case_api.registry import MetricProducer, ProducerPhase
 from monitoring import producers
-from monitoring.metric_store import MetricContractError
+from monitoring.contracts import MetricContractError
 from scenario.program_compiler import _implementation
 
 

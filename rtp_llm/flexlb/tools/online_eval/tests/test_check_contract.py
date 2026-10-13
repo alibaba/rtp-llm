@@ -4,8 +4,10 @@ import copy
 
 import pytest
 
-from analysis.checks import compare, evaluate, check_metric
-from monitoring.metric_store import MetricStore, MetricContractError
+from analysis.checks import compare, evaluate
+from analysis.metric_checks import check_metric
+from monitoring.metric_store import MetricStore
+from monitoring.contracts import MetricContractError
 
 
 def store():

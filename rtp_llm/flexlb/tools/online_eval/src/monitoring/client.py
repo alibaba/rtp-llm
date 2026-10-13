@@ -7,13 +7,21 @@ import urllib.parse
 import urllib.request
 
 from monitoring.query_plan import definitions
-from monitoring.metric_store import MetricContractError
+from monitoring.contracts import MetricContractError
 
 
 class PrometheusClient:
-    """Queries use the owner's current URL, target inventory and frozen plan."""
+    """Query a bound TSDB using an explicitly shared target-kind inventory."""
+
+    def __init__(self, url, *, query_plan, target_kinds, max_gap_s):
+        self.url = url
+        self.query_plan = query_plan
+        self.target_kinds = target_kinds
+        self.max_gap = max_gap_s
 
     def api(self, endpoint, timeout=5, *, deadline=None, **params):
+        if self.url is None:
+            raise RuntimeError("Prometheus client has no bound TSDB URL")
         url = self.url + "/api/v1/" + endpoint + "?" + urllib.parse.urlencode(params)
         if deadline is not None:
             timeout = min(timeout, deadline.remaining())
@@ -32,7 +40,7 @@ class PrometheusClient:
         )["result"]
 
     def selector(self, name):
-        if name not in self.targets:
+        if name not in self.target_kinds:
             raise ValueError("unknown monitored source " + name)
         return "{job=" + json.dumps(name) + "}"
 
@@ -54,18 +62,6 @@ class PrometheusClient:
             if r["values"][-1][0] == latest_scrape
             and not r["metric"]["__name__"].startswith(("up", "scrape_"))
         ]
-
-    def raw(self, name, start, end):
-        # Range-vector queries preserve scrape timestamps; query_range would
-        # repeat old gauges via lookback and hide gaps. Bound each response.
-        cursor = start
-        while cursor < end:
-            right = min(end, cursor + 60)
-            span = max(0.001, right - cursor)
-            yield self.query(
-                f"{self.selector(name)}[{math.ceil(span * 1000)}ms]", right
-            )
-            cursor = right
 
     def metric_definition(self, metric_id):
         definition = definitions(self.query_plan).get(metric_id)
@@ -111,6 +107,6 @@ class PrometheusClient:
         return result
 
     def target_kind(self, source):
-        if source not in self.targets:
+        if source not in self.target_kinds:
             raise ValueError("unknown monitored source: " + source)
         return self.target_kinds[source]

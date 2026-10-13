@@ -4,7 +4,6 @@ These are workload properties, not a prediction of multi-engine tree eviction,
 Memory handover, admission, pinned blocks or in-flight publication semantics.
 """
 
-import argparse
 from collections import OrderedDict, Counter
 import hashlib
 import json
@@ -75,18 +74,3 @@ def profile(path, capacities=(128, 256, 512, 1024)):
         realism="NOT_VALIDATED",
         semantics=__doc__,
     )
-
-
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("trace", type=Path)
-    p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--capacities", type=int, nargs="+", default=[128, 256, 512, 1024])
-    a = p.parse_args()
-    if any(n < 1 for n in a.capacities):
-        p.error("capacities must be positive")
-    a.output.write_text(json.dumps(profile(a.trace, a.capacities), indent=2) + "\n")
-
-
-if __name__ == "__main__":
-    main()

@@ -52,7 +52,7 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session = PrometheusSession(tmp, {"mock": "http://unused/metrics"}, target_kinds={'mock': 'mock'})
             session.started = time.time() - 1
-            with patch.object(session, "api", return_value={"result": []}):
+            with patch.object(session.client, "api", return_value={"result": []}):
                 with self.assertRaisesRegex(RuntimeError, "incomplete Prometheus archive"):
                     session.archive()
             queries = json.loads((Path(tmp) / "queries.json").read_text())["queries"]
@@ -67,7 +67,7 @@ class ContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session = PrometheusSession(tmp, {"master": "http://unused/prometheus"}, target_kinds={'master': 'master'})
             session.started = time.time() - 1
-            with patch.object(session, "api", return_value={"result": [{"metric": {}, "values": []}]}):
+            with patch.object(session.client, "api", return_value={"result": [{"metric": {}, "values": []}]}):
                 session.archive()
             queries = json.loads((Path(tmp) / "queries.json").read_text())["queries"]
             self.assertNotIn("master/completions_qps", queries)
@@ -81,7 +81,7 @@ class ContractTest(unittest.TestCase):
                                     query_plan="cache_scale_in.yaml", target_kinds={'mock': 'mock'})
         labels = dict(role="prefill", engine_name="P0", engine_incarnation="one",
                       engine_ip="127.0.0.1", grpc_port="7000")
-        monitor.instant = Mock(return_value=[
+        monitor.client.instant = Mock(return_value=[
             dict(metric=dict(labels, __name__="rtp_llm_running_stream_size"), value=[1, "2"]),
             dict(metric=dict(labels, __name__="rtp_llm_wait_stream_size"), value=[1, "128"]),
             dict(metric=dict(labels, __name__="mock_engine_running"), value=[1, "130"]),
@@ -89,8 +89,8 @@ class ContractTest(unittest.TestCase):
         fields = {name: dict(metric="mock/"+name, labels=dict(role="prefill")) for name in ("running", "waiting")}
         row = engine_metric_snapshot(monitor, fields)["P0"]
         self.assertEqual((row["running"], row["waiting"]), (2, 128))
-        monitor.instant.assert_called_once_with("mock", 5)
-        del monitor.instant.return_value[0]["metric"]["engine_incarnation"]
+        monitor.client.instant.assert_called_once_with("mock", 5)
+        del monitor.client.instant.return_value[0]["metric"]["engine_incarnation"]
         with self.assertRaisesRegex(ValueError, "labels"):
             engine_metric_snapshot(monitor, fields)
 
@@ -99,7 +99,7 @@ class ContractTest(unittest.TestCase):
         from unittest.mock import Mock
         monitor = PrometheusSession("unused", {"mock": "http://unused/metrics"},
                                     query_plan="cache_scale_in.yaml", target_kinds={'mock': 'mock'})
-        monitor.instant = Mock(return_value=[])
+        monitor.client.instant = Mock(return_value=[])
         with self.assertRaisesRegex(ValueError, "undeclared"):
             engine_metric_snapshot(monitor, {"running": dict(metric="mock/unknown", labels=dict(role="prefill"))})
         with self.assertRaisesRegex(ValueError, "incomplete"):
@@ -172,37 +172,37 @@ class RealPrometheusTest(unittest.TestCase):
                     session.start()
                     time.sleep(0.5)
                     self.assertTrue(any(row["metric"]["__name__"] == "rtp_llm_running_stream_size"
-                                        for row in session.instant("mock")))
-                    self.assertEqual(session.query('unused_large_metric{job="mock"}'), [])
+                                        for row in session.client.instant("mock")))
+                    self.assertEqual(session.client.query('unused_large_metric{job="mock"}'), [])
                     self.assertFalse(any(row["metric"]["__name__"] == "unused_large_metric"
-                                         for row in session.instant("mock")))
-                    self.assertTrue(session.query('up{job="mock"}'))
+                                         for row in session.client.instant("mock")))
+                    self.assertTrue(session.client.query('up{job="mock"}'))
                     session.query_plan["sources"]["mock"]["raw_context_tps"] = dict(
                         promql="rtp_llm_context_tps${selector}", mode="scrape", unit="tokens/s",
                         value_kind="gauge", labels=["role", "engine_name", "engine_incarnation"],
                         exported_metrics=["rtp_llm_context_tps"])
                     from monitoring.query_plan import plan_hash
                     session.query_plan_sha256 = plan_hash(session.query_plan)
-                    raw = session.metric_rows("mock/raw_context_tps", source="mock",
+                    raw = session.client.metric_rows("mock/raw_context_tps", source="mock",
                                               start=session.started, end=time.time())
                     self.assertTrue(raw)
                     self.assertTrue(all(float(value) == 9 for row in raw for _, value in row["values"]))
-                    self.assertTrue(session.metric_snapshot(["mock/raw_context_tps"], source="mock"))
+                    self.assertTrue(session.client.metric_snapshot(["mock/raw_context_tps"], source="mock"))
                     for row in raw:
                         stamps = [stamp for stamp, _ in row["values"]]
                         self.assertEqual(stamps, sorted(set(stamps)))
-                    session.add_targets({"client-0": url, "client-1": url})
+                    session.add_client_targets({"client-0": url, "client-1": url})
                     self.assertEqual(
                         set(session.target_bounds), {"client-0", "client-1"}
                     )
-                    self.assertTrue(session.instant("client-0"))
-                    self.assertTrue(session.instant("client-1"))
+                    self.assertTrue(session.client.instant("client-0"))
+                    self.assertTrue(session.client.instant("client-1"))
                     with self.assertRaisesRegex(ValueError, "duplicate"):
-                        session.add_target("client-0", url)
+                        session.add_client_target("client-0", url)
                     state["bad"] = True
                     time.sleep(0.5)
                     with self.assertRaisesRegex(RuntimeError, "unavailable"):
-                        session.instant("mock")
+                        session.client.instant("mock")
                     session.archive()
                     series, sources, gaps, errors = MetricStore.read(tmp).series(session.started)
                     self.assertTrue(gaps)
@@ -227,8 +227,8 @@ class RealPrometheusTest(unittest.TestCase):
 def test_archive_can_defer_numeric_conversion_to_finalization(tmp_path):
     session = PrometheusSession(tmp_path, {'mock': 'http://unused/metrics'}, target_kinds={'mock': 'mock'})
     session.started = time.time() - 1
-    with patch.object(session, 'api', return_value={'result': [{'metric': {}, 'values': []}]}), \
-         patch('monitoring.archive.export_metrics', side_effect=AssertionError('conversion during cleanup')):
+    with patch.object(session.client, 'api', return_value={'result': [{'metric': {}, 'values': []}]}), \
+         patch('monitoring.session.export_metrics', side_effect=AssertionError('conversion during cleanup')):
         session.archive(materialize=False)
     assert (tmp_path / 'queries.json').is_file()
     assert not (tmp_path / 'metrics.json').exists()

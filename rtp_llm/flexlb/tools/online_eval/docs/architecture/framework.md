@@ -70,11 +70,14 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 | `runtime/` | deadline、进程、网络、通用端口区间检查、有界采样与时钟计算 |
 | `adapters/` | 服务与客户端协议、请求账本、Fetch 流消费、环境生命周期、Java mock 资源布局及具体取证适配 |
 | `workload/` | 持续测量策略、请求与 engine 证据关联、采集有效性 |
-| `analysis/` | 可复用统计、只读检查及输入保真度分析，不定义某个 case 的门槛 |
+| `analysis/` | 可复用统计、标量裁决、冻结指标检查桥接及输入保真度计算，不定义某个 case 的门槛 |
+| `diagnostics/` | 离线诊断的文件发现、输入审计、拟合与生产生成器编排 |
 | `monitoring/`、`reporting/` | 指标查询/归档与图表/spec/bundle 的公共能力 |
 | `traffic/`、`artifacts/` | 流量构造与播放；制品管理、启动记录及冻结证据格式读写 |
 
 归属由语义决定，不由文件名或当前调用数决定：包含特定阶段、门槛、指标输出或报告身份的代码属于 case；同一合同能被不同 case 使用的能力才放在公共组件。注册表可以指向专属实现，公共执行器不按 case 名分支。
+
+文件摘要统一由 `file_digest.sha256_file` 计算；字段与格式头校验分别由 `input_contract`、`schema_contract` 提供，执行实现身份由 `implementation_identity` 描述。这些基础件不依赖业务包。`analysis.checks` 提供通用检查和裁决，`analysis.metric_checks` 负责冻结 MetricStore 的检查桥接。
 
 运行底座只依赖标准库和包内机制。`runtime.network` 提供通用 HTTP 传输和端口探测，Master 的 info、inflight 控制路由由 `adapters.master_control.master_url` 统一定义。具体客户端等待调用 `runtime.startup.wait_ready`，协议状态与进程退出码由 `adapters.flow_control.wait_flow_started` 解释；`artifacts.startup.startup_phase` 使用同一 deadline 保存启动耗时。`runtime.resource_plan` 检查通用端口区间，`adapters.java_mock_resources` 定义 Java mock 的保留端口、累计扩容容量、子进程环境及租约投影。
 

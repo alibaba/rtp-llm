@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from monitoring.archive import export_metrics
-from monitoring.metric_store import MetricStore, MetricContractError, atomic_json
+from monitoring.metric_store import MetricStore
+from monitoring.contracts import MetricContractError
+from artifacts.json_io import write_json
 from monitoring.query_plan import load_plan, queries_for_targets
 from monitoring.session import PrometheusSession
 from runtime.deadline import Deadline
@@ -29,17 +31,59 @@ assert 'monitoring.session' not in sys.modules
                     "import sys; import monitoring.metric_store; "
                     "assert 'case_api.registry' not in sys.modules; "
                     "assert 'monitoring.query_plan' not in sys.modules"], check=True)
+    subprocess.run([sys.executable, '-c',
+                    "import sys; import monitoring.client; "
+                    "assert 'monitoring.metric_store' not in sys.modules; "
+                    "assert 'monitoring.session' not in sys.modules; "
+                    "assert 'monitoring.probe' not in sys.modules"], check=True)
+
+
+def test_query_client_is_independent_and_sees_registered_sources():
+    from monitoring.client import PrometheusClient
+    kinds = {'first': 'mock'}
+    client = PrometheusClient('http://owned-tsdb', query_plan=load_plan('default.yaml'),
+                              target_kinds=kinds, max_gap_s=5)
+    kinds['later'] = 'client'
+    assert client.target_kind('later') == 'client'
+    assert client.selector('later') == '{job="later"}'
+    with patch.object(client, 'api', return_value={'result': []}) as api:
+        assert client.query('up', when=12) == []
+    assert api.call_args.kwargs['time'] == 12
+
+
+def test_source_selection_is_independent_of_definition_order():
+    from monitoring.sources import selected_sources
+    plan = load_plan('master_ha_failover.yaml')
+    before = selected_sources(plan)
+    plan['produced'] = dict(reversed(list(plan['produced'].items())))
+    assert selected_sources(plan) == before
+
+
+def test_recording_needs_only_a_window_and_query_client(tmp_path):
+    from monitoring.recording import ArchiveWindow, record_queries
+    from monitoring.client import PrometheusClient
+    plan = load_plan('default.yaml')
+    client = PrometheusClient('http://owned-tsdb', query_plan=plan,
+                              target_kinds={'worker': 'mock'}, max_gap_s=5)
+    window = ArchiveWindow(tmp_path, 'default.yaml', {}, 1, 1,
+                           {'worker': 'http://exporter/metrics'}, {'worker': [1, 2]})
+    with patch.object(client, 'api', return_value={'result': []}):
+        result = record_queries(window, client)
+    assert result['errors']
+    assert result['target_bounds'] == {'worker': [1, 2]}
+    assert json.loads((tmp_path / 'queries.json').read_text()) == result
+    assert not (tmp_path / 'metrics.json').exists()
 
 
 def test_probe_failed_export_retains_completed_chunks(tmp_path):
     from monitoring.probe import PrometheusEvidence
     session = Mock(interval=1)
-    session.query.side_effect = [
+    session.client.query.side_effect = [
         [dict(metric={'__name__': 'online_eval_debug_alive', 'host': 'a'},
               values=[[10, '1']])], TimeoutError('budget exhausted')]
     probe = PrometheusEvidence(tmp_path / 'samples.jsonl', {'a': Mock(url='http://unused/status')},
                                fields=['alive'], label='host', source='debug',
-                               session=session, limits={'max_samples': 100, 'max_bytes': 10000})
+                               session=session, limits={'max_samples': 100, 'max_bytes': 10000}, client=session.client)
     probe.started, probe.ended = 0, 120
     with pytest.raises(TimeoutError, match='budget exhausted'):
         probe._export(Deadline(float('inf')))
@@ -52,7 +96,7 @@ def test_probe_failed_export_retains_completed_chunks(tmp_path):
 def test_invalid_conversion_preserves_previous_frozen_artifact(tmp_path):
     previous = dict(metrics_schema_version=1, definitions={}, metrics={},
                     collection_gaps={}, errors=[], run={'identity': 'previous'})
-    atomic_json(tmp_path / 'metrics.json', previous)
+    write_json(tmp_path / 'metrics.json', previous)
     before = (tmp_path / 'metrics.json').read_bytes()
     (tmp_path / 'queries.json').write_text(json.dumps(dict(
         start=1, end=2, step=1, targets={},
@@ -71,7 +115,7 @@ def test_new_targets_require_explicit_source_kind(tmp_path):
         queries_for_targets(plan, {'arbitrary-name': ''}, lambda _: '{}', 1)
     session = PrometheusSession(tmp_path, {'arbitrary-name': 'http://unused/metrics'},
                                 metric_plan=plan, target_kinds={'arbitrary-name': 'mock'})
-    assert session.target_kind('arbitrary-name') == 'mock'
+    assert session.client.target_kind('arbitrary-name') == 'mock'
 
 
 def test_archive_budget_keeps_partial_queries_and_still_reaps_process(tmp_path):
@@ -90,7 +134,7 @@ def test_archive_budget_keeps_partial_queries_and_still_reaps_process(tmp_path):
         now[0] += .6
         return {'result': []}
     with patch('monitoring.session.Deadline', return_value=deadline), \
-         patch.object(session, 'api', side_effect=query):
+         patch.object(session.client, 'api', side_effect=query):
         with pytest.raises(TimeoutError):
             session.stop(materialize=False)
     assert len(calls) == 2  # Later chunks and queries do not get fresh budgets.
@@ -105,11 +149,11 @@ def test_archive_budget_keeps_partial_queries_and_still_reaps_process(tmp_path):
 
 def test_query_http_timeout_is_bounded_by_remaining_budget(tmp_path):
     session = PrometheusSession(tmp_path, {}, metric_plan=load_plan('default.yaml'))
-    session.url = 'http://owned-tsdb'
+    session.client.url = 'http://owned-tsdb'
     deadline = Deadline(.2, clock=lambda: 0)
     with patch('monitoring.client.urllib.request.urlopen',
                return_value=BytesIO(b'{"status":"success","data":{"result":[]}}')) as request:
-        assert session.api('query', timeout=5, deadline=deadline, query='up') == {'result': []}
+        assert session.client.api('query', timeout=5, deadline=deadline, query='up') == {'result': []}
     assert request.call_args.kwargs['timeout'] == .2
 
 

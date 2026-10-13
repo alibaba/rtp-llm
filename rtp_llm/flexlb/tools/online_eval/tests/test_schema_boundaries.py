@@ -9,7 +9,8 @@ import pytest
 import yaml
 
 from scenario.program_compiler import configure_program
-from monitoring.metric_store import MetricContractError, MetricStore
+from monitoring.contracts import MetricContractError
+from monitoring.metric_store import MetricStore
 from monitoring.query_plan import load_plan
 from reporting import load_analysis, read_bundle, write_bundle
 from reporting.spec import validate

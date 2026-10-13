@@ -8,7 +8,8 @@ import pytest
 
 from scenario.program_compiler import configure_program
 from case_api.metric_inputs import metric_fields
-from monitoring.metric_store import MetricStore, publish
+from monitoring.metric_store import MetricStore
+from monitoring.publication import publish
 from monitoring.archive import export_metrics
 from monitoring.producers import produce
 from monitoring.query_plan import definitions, load_plan, validate_export_filter

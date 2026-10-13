@@ -20,8 +20,10 @@ def validate_measurement(value, path):
         raise ValueError(f"{path}: invalid measurement semantics")
 
 
-def implementation_identity(function):
-    """Execution identity is independent of human-readable measurement semantics."""
-    if not callable(function):
-        raise ValueError("implementation requires a callable")
-    return dict(module=function.__module__, function=function.__name__)
+
+class MetricContractError(ValueError):
+    """An ID, identity or definition violates the declared metric contract."""
+
+
+class MetricUnavailable(ValueError):
+    """Declared data cannot establish a valid measurement."""

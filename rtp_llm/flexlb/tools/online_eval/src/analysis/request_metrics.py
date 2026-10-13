@@ -8,7 +8,7 @@ from typing import Callable
 
 from analysis.statistics import percentile_nr
 from input_contract import finite_number, mapping_fields
-from monitoring.contracts import implementation_identity
+from implementation_identity import implementation_identity
 
 
 @dataclass(frozen=True)

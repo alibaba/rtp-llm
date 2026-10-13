@@ -2,7 +2,8 @@
 
 from analysis.request_metrics import RequestLedger, describe_calculation
 from cases.master_performance.analysis import analyze, engine_tps_checks
-from monitoring.contracts import implementation_measurement, implementation_identity
+from monitoring.contracts import implementation_measurement
+from implementation_identity import implementation_identity
 from monitoring.metric_store import series_row
 
 
@@ -62,7 +63,9 @@ def values(evidence, definitions=None):
 
 
 def produce(directory, evidence, result):
-    from monitoring.metric_store import MetricContractError, MetricStore, publish
+    from monitoring.contracts import MetricContractError
+    from monitoring.metric_store import MetricStore
+    from monitoring.publication import publish
     from monitoring.archive import export_metrics
     from pathlib import Path
     if not (Path(directory) / "metrics.json").is_file():
