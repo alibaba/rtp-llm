@@ -16,14 +16,22 @@ from traffic.synthetic.generator import iter_requests
 
 @pytest.mark.parametrize('raw', [
     {'SEND_MODE': 'uniform', 'SEND_MODE_QPS': 'nan'},
-    {'REPLAY_SPEED': '-1'}, {'BURST_FACTOR': '.5'}, {'BURST_DUTY': '1'},
-    {'DIURNAL_AMPLITUDE': 'nan'}, {'MAX_LAPS': '-1'}, {'MAX_LAPS': str(2**31)},
-    {'PLAYBACK_SEED': str(2**63)}, {'LAP_IDENTITY': 'unknown'},
-    {'LAP_RETAIN_PROBABILITY': '.5'}, {'LOOP': 'true'},
+    {'REPLAY_SPEED': '-1'}, {'MAX_LAPS': '-1'}, {'MAX_LAPS': str(2**31)},
+    {'LAP_IDENTITY': 'unknown'}, {'LOOP': 'true'},
 ])
 def test_raw_environment_has_the_same_scalar_admission(raw):
     with pytest.raises(ValueError):
         normalize(raw)
+
+
+@pytest.mark.parametrize('raw', [
+    {'BURST_FACTOR': '.5'}, {'BURST_DUTY': '1'}, {'DIURNAL_AMPLITUDE': 'nan'},
+    {'PLAYBACK_SEED': str(2**63)}, {'LAP_RETAIN_PROBABILITY': '.5'},
+])
+def test_unknown_playback_fields_are_rejected_at_client_admission(raw):
+    from adapters.load_client import validate_environment
+    with pytest.raises(ValueError, match='unknown Java client configuration names'):
+        validate_environment(raw)
 
 
 def test_playback_value_object_and_complete_projection():
