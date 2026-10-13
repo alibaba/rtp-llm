@@ -87,10 +87,7 @@
           const t=inside?chart.scales.x.getValueForPixel(event.x):a?datasets[a.datasetIndex].data[a.index].x:null;
           const close=a&&(!a.element||!Number.isFinite(event.x)||Math.hypot(a.element.x-event.x,a.element.y-event.y)<=20);
           focus(close?a.datasetIndex:null);fillHover(t,close?a.datasetIndex:null);},
-        plugins:{legend:{display:false},tooltip:{enabled:false,callbacks:{
-          title:items=>items.length?'t = '+items[0].parsed.x.toFixed(1)+' s':'',
-          label:item=>item.dataset.label+': '+number(item.parsed.y)+(item.dataset.unit?' '+item.dataset.unit:'')
-        }}}
+        plugins:{legend:{display:false},tooltip:{enabled:false}}
       }
     });
     const inputs=[], legendLabels=[], plottedLabels=[], groups=[]; let lastGroup=null;
