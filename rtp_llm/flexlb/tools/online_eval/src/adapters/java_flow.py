@@ -163,7 +163,10 @@ class JavaFlowGroup:
             and s["process_returncode"] is not None,
             deadline,
             "flow did not drain and exit",
+            observe=self.control_status,
         )
+        # The producer has exited: both its final control state and journals are stable.
+        state = self.status()
         if getattr(self, "monitor", None) is not None:
             self.monitor.end_target(
                 self.monitor_target,

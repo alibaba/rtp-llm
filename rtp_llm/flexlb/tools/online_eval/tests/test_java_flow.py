@@ -25,6 +25,7 @@ class JavaFlowTest(unittest.TestCase):
             flow.status = Mock(side_effect=AssertionError("stop must not parse the journal"))
             flow.stop_sending(Deadline(1))
             self.assertTrue((flow.control / "stop.json").exists())
+            flow.control_status = Mock(return_value=drained)
             flow.status = Mock(return_value=drained)
             self.assertEqual(flow.drain(Deadline(1))["terminal"], 1)
             for invalid in (dict(drained, observed_terminal=0),
@@ -33,6 +34,20 @@ class JavaFlowTest(unittest.TestCase):
                 flow.status.return_value = invalid
                 with self.assertRaises(RuntimeError):
                     flow.drain(Deadline(1))
+
+    def test_drain_waits_for_exit_before_reading_request_journal(self):
+        from unittest.mock import Mock
+        flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=0.001)
+        draining = dict(**flow.identity, state="DRAINING", process_returncode=None)
+        drained = dict(**flow.identity, state="DRAINED", submitted=1, terminal=1,
+                       process_returncode=0, observed_terminal=1, unfinished_ids=[])
+        def final_journal():
+            self.assertEqual(flow.control_status.call_count, 2)
+            return drained
+        flow.control_status = Mock(side_effect=[draining, drained])
+        flow.status = Mock(side_effect=final_journal)
+        self.assertEqual(flow.drain(Deadline(1))["state"], "DRAINED")
+        flow.status.assert_called_once()
 
     def test_unacknowledged_stop_requires_explicit_natural_completion(self):
         from adapters.flow_control import validate_drain
