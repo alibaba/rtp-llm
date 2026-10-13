@@ -351,8 +351,10 @@ class Mamba2Mixer(nn.Module):
         if ssm_states is not None:
             # varlen_states carries per-chunk states (nchunks, H, V, K);
             # the last chunk of each sequence holds its final state.
-            h = varlen_states
-            final_state = varlen_states[chunk_meta.last_chunk_indices]
+            # The FLA storage kernel accumulates at the loaded dtype and
+            # asserts fp32 sources; cast lower-precision scan outputs.
+            h = varlen_states.float()
+            final_state = varlen_states[chunk_meta.last_chunk_indices].float()
             store_ssm_state_to_block_map(
                 h,
                 final_state,
@@ -412,7 +414,7 @@ class Mamba2Mixer(nn.Module):
             .clamp(max=block_map.shape[1] - 1)
             .unsqueeze(1),
         ).squeeze(1)
-        write_positions = lengths + torch.arange(
+        write_positions = lengths[:, None] + torch.arange(
             seq, device=x.device, dtype=torch.long
         ).unsqueeze(0).expand(num_requests, -1)
         write_ids = block_map.gather(
@@ -550,12 +552,19 @@ class NemotronHMoEBlock(nn.Module):
             enable_cuda_graph,
             hw_kernel_config=hw_kernel_config,
         )
-        self.shared_expert = SharedExpertMLP(
-            config, parallelism_config, weights, config.quant_config, hw_kernel_config
+        self.shared_expert = (
+            SharedExpertMLP(
+                config, parallelism_config, weights, config.quant_config, hw_kernel_config
+            )
+            if config.n_shared_experts > 0
+            else None
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self.routed_moe(hidden_states) + self.shared_expert(hidden_states)
+        routed = self.routed_moe(hidden_states)
+        if self.shared_expert is not None:
+            return routed + self.shared_expert(hidden_states)
+        return routed
 
 
 class NemotronHDecoderLayer(nn.Module):
@@ -773,14 +782,21 @@ class NemotronHModel(GptModelBase):
             # carry no cache group tags at all.  Only attention blocks select
             # an FMHA implementation.
             layer_is_attention = decoder_layer.block_type == "attention"
+            # Warmup/profile runs may lack a cache manager; fall back to the
+            # primary attention inputs and the passed-in fmha_impl so the
+            # layers still execute with valid (if dummy) metadata.
             layer_attention_inputs = (
                 select_attention_inputs_for_layer(inputs, self.kv_cache, i)
                 if self.kv_cache is not None and decoder_layer.block_type != "moe"
+                else get_primary_attention_inputs(inputs, self.kv_cache)
+                if decoder_layer.block_type != "moe"
                 else None
             )
             layer_fmha_impl = (
                 select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
                 if self.kv_cache is not None and layer_is_attention
+                else fmha_impl
+                if layer_is_attention
                 else None
             )
             hidden_states, residual = decoder_layer(
