@@ -7,6 +7,8 @@ import math
 import copy
 import re
 import string
+from typing import Mapping
+from reporting.values import freeze, thaw
 
 
 def mapping(value, required, allowed, message):
@@ -45,23 +47,28 @@ class SectionPresentation:
 @dataclass(frozen=True)
 class SubtitleTemplate:
     template: str
-    cache_behavior: bool = False
+    fields: frozenset[str] = frozenset()
 
     def __post_init__(self):
         if not text(self.template):
             raise ValueError('subtitle is required')
         allowed = {'verdict', 'monitoring_status'}
-        if self.cache_behavior:
-            allowed.update({'expected_behavior', 'observed_behavior'})
+        if not isinstance(self.fields, (set, frozenset, tuple, list)):
+            raise ValueError('subtitle fields must be a collection of field names')
+        object.__setattr__(self, 'fields', frozenset(self.fields))
+        if any(type(name) is not str or not re.fullmatch(r'[a-z][a-z0-9_]*', name) for name in self.fields):
+            raise ValueError('invalid subtitle fields')
+        allowed.update(self.fields)
         for _, field, spec, conversion in string.Formatter().parse(self.template):
             if field is not None and field not in allowed:
                 raise ValueError('unknown subtitle placeholder')
             if field is not None and (spec or conversion):
                 raise ValueError('subtitle placeholders do not accept format specs or conversions')
 
-    def render(self, *, verdict, monitoring_status=None, expected_behavior=None, observed_behavior=None):
-        return self.template.format(verdict=verdict, monitoring_status=monitoring_status,
-                                    expected_behavior=expected_behavior, observed_behavior=observed_behavior)
+    def render(self, *, verdict, monitoring_status=None, **values):
+        if values.keys() - self.fields:
+            raise ValueError("undeclared subtitle values")
+        return self.template.format(verdict=verdict, monitoring_status=monitoring_status, **values)
 
 
 @dataclass(frozen=True)
@@ -271,18 +278,22 @@ class MetricSelection:
 
 @dataclass(frozen=True)
 class ChartDefinition:
-    curves: dict[str, CurvePresentation]
+    curves: Mapping[str, CurvePresentation]
     panels: tuple[PanelPresentation, ...]
-    events: dict
+    events: Mapping
     event_ids: tuple[str, ...]
     detail_labels: tuple[str, ...] = ()
     summaries: tuple[str, ...] = ()
     default_visible: tuple[str, ...] = ()
     max_points_per_series: int = 256
-    default_presets: dict = field(default_factory=dict)
+    default_presets: Mapping = field(default_factory=dict)
+
+    def __post_init__(self):
+        for name in ('curves', 'events', 'default_presets'):
+            object.__setattr__(self, name, freeze(getattr(self, name)))
 
     def to_dict(self, kind):
-        result = dict(events=copy.deepcopy(self.events), event_ids=list(self.event_ids))
+        result = dict(events=thaw(self.events), event_ids=list(self.event_ids))
         if kind == 'default':
             result.update(group_by=['epoch', 'source', 'metric'], detail_labels=list(self.detail_labels),
                 summaries=list(self.summaries), default_visible=list(self.default_visible),
@@ -300,11 +311,14 @@ class ViewDefinition:
     report: ReportPresentation
     metrics: MetricSelection | None
     charts: ChartDefinition
-    sections: dict[str, SectionPresentation]
+    sections: Mapping[str, SectionPresentation]
     subtitle: SubtitleTemplate
 
+    def __post_init__(self):
+        object.__setattr__(self, "sections", freeze(self.sections))
+
     @classmethod
-    def read(cls, data):
+    def read(cls, data, *, subtitle_fields=()):
         charts, report = data['charts'], data['report']
         return cls(kind=data['kind'],
             report=ReportPresentation(report['subtitle'], report.get('id'), report.get('producer')),
@@ -319,7 +333,7 @@ class ViewDefinition:
                 max_points_per_series=charts.get('max_points_per_series', 256),
                 default_presets={key:tuple(values) for key,values in charts.get('presets', {}).items()}),
             sections={key: _read_at(SectionPresentation, value, 'sections.'+key) for key, value in data.get('sections', {}).items()},
-            subtitle=SubtitleTemplate(report['subtitle'], cache_behavior=report.get('producer') == 'cache-gate'))
+            subtitle=SubtitleTemplate(report['subtitle'], fields=subtitle_fields))
 
     def to_dict(self):
         result = dict(report_view_schema_version=1, kind=self.kind, report=self.report.to_dict())

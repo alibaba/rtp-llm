@@ -206,9 +206,11 @@ def render(spec):
     chartjs = (resource_dir / "chart.umd.min.js").read_text(encoding="utf-8")
     overlay = (resource_dir / "multi_curve.js").read_text(encoding="utf-8")
     interaction = (resource_dir / "legend_interaction.js").read_text(encoding="utf-8")
+    controller = (resource_dir / "report_controller.js").read_text(encoding="utf-8")
     template = (resource_dir / "report.html").read_text(encoding="utf-8")
     for name, color in RENDERER_THEME.items():
         template = template.replace("__REPORT_" + name + "__", color)
+        controller = controller.replace("__REPORT_" + name + "__", color)
     return (
         template.replace("__SECTIONS__", render_sections(sections))
         .replace("__CONTEXT__", render_context(spec) + render_sections(spec.get("summary_sections", [])))
@@ -218,6 +220,7 @@ def render(spec):
             json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c"),
         )
         .replace("__CHARTJS_JS__", chartjs)
+        .replace("__REPORT_CONTROLLER_JS__", controller)
         .replace("__LEGEND_INTERACTION_JS__", interaction)
         .replace("__MULTI_CURVE_JS__", overlay)
     )

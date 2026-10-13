@@ -52,7 +52,7 @@ class CacheGateTest(unittest.TestCase):
                         monitoring_status="OK", monitor_warnings=[])
         evidence = self.evidence()
         with tempfile.TemporaryDirectory() as d, mock.patch(
-            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template)
+            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"})
         ):
             spec = metric_spec(d, evidence, analyze(evidence), prepared)
         self.assertEqual(spec["panels"][0]["series"][0]["name"], "YAML survivor")
@@ -92,7 +92,7 @@ class CacheGateTest(unittest.TestCase):
             monitor_warnings=[],
         )
         with tempfile.TemporaryDirectory() as d, mock.patch(
-            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template)
+            "cases.cache_scale_in.report.view", return_value=ViewDefinition.read(template, subtitle_fields={"expected_behavior", "observed_behavior"})
         ):
             evidence = self.evidence()
             spec = metric_spec(d, evidence, analyze(evidence), prepared)

@@ -1,6 +1,6 @@
 """Render declared section labels and open state without interpreting results."""
 
-from reporting.core import details, table
+from reporting.components import details, table
 
 
 def view_details(view, key, value):

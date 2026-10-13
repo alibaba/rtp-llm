@@ -83,7 +83,7 @@ def test_all_section_labels_and_open_states_use_common_components():
     data['sections']['audit'].update(title='YAML audit', columns=['a', 'b', 'c', 'd'], opened=False)
     data['sections']['measurement'].update(title='YAML evidence', opened=True)
     from reporting.view_model import ViewDefinition
-    compiled = ViewDefinition.read(data)
+    compiled = ViewDefinition.read(data, subtitle_fields={"expected_behavior", "observed_behavior"})
     table = view_table(compiled, 'audit', (row for row in [[1, 2, 3, 4]]))
     detail = view_details(compiled, 'measurement', {'source': 'frozen'})
     assert table['title'] == 'YAML audit'

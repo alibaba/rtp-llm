@@ -12,6 +12,7 @@ from reporting import table
 from reporting.catalog import series_color
 from reporting.comparison_inputs import load_snapshot
 from reporting.report_model import MeasurementIdentity
+from reporting.values import thaw
 from reporting.comparison_colors import metric_colors, curve_style
 from reporting.pairing import event_anchor, shifted_panel
 
@@ -44,7 +45,7 @@ def _matrix(runs, labels):
         values.append(dict(_leaves(dict(identity=meta.get('identity'),
             implementation=meta.get('implementation'), configuration=meta.get('configuration'),
             workload=meta.get('workload'), environment=meta.get('environment'),
-            clock=meta.get('clock'), criteria=run.report.controls.criteria))))
+            clock=meta.get('clock'), criteria=thaw(run.report.controls.criteria)))))
     rows = []
     for key in sorted(set().union(*(v.keys() for v in values))):
         cells = [v.get(key) for v in values]

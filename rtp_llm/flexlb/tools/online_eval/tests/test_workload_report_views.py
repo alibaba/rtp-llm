@@ -211,7 +211,8 @@ class WorkloadReportViewsTest(unittest.TestCase):
             registered = registry.registry().cases['cache_scale_in']
             definition = replace(registered.definition, report_views={
                 'cache_scale_in.yaml': registry.ReportView(
-                    registered.definition.report_views['cache_scale_in.yaml'].validator, gate.render),
+                    registered.definition.report_views['cache_scale_in.yaml'].validator, gate.render,
+                    registered.definition.report_views['cache_scale_in.yaml'].subtitle_fields),
             })
             with mock.patch.object(registry, '_snapshot', snapshot(
                 entry(registered.name, definition, registered.module, registered.path), include_existing=True)):

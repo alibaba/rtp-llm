@@ -10,9 +10,10 @@ from reporting import details, write_bundle
 from reporting.run_context import canonical_spec, provenance_from
 from reporting.view_config import DEFAULT_VIEW, view
 from reporting.workload_panels import build_panels
+from reporting.run_model import RunPresentation
 
 
-def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None):
+def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None, run=None):
     presentation = view(name) if presentation is None else presentation
     series = payload["series"]
     spec = dict(
@@ -28,16 +29,17 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None):
         spec["sections"].append(details("未生成的报告视角", payload["unavailable_report_views"]))
     attach_events(spec, presentation, origin=payload["clock_anchor"]["epoch_s"],
                   phases=payload.get("phases", []), events=payload.get("events", []))
-    return canonical_spec(spec, payload)
+    return canonical_spec(spec, payload, run=run)
 
 
 def write_report(directory, analysis, *, name=DEFAULT_VIEW):
     payload = dict(analysis)
     payload["report_view"] = name
     identity = payload["id"]
+    run = RunPresentation.read(payload)
     return write_bundle(directory, "run", identity, payload,
-                        build_spec(analysis, directory, name=name),
-                        meta=provenance_from(payload), producer="workload")
+                        build_spec(analysis, directory, name=name, run=run),
+                        meta=provenance_from(payload, run=run), producer="workload")
 
 
 def _write_views(directory, analysis, names=None):

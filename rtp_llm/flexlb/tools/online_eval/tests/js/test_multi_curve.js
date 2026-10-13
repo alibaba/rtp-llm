@@ -27,6 +27,7 @@ global.Chart = class {
   update() {}
   draw() {}
 };
+require('../../src/reporting/assets/report_controller');
 require('../../src/reporting/assets/multi_curve');
 const root=new Element('root');
 const points=[{x:0,y:70},{x:1,y:null},{x:3,y:20}];

@@ -7,7 +7,8 @@ from pathlib import Path
 import zipfile
 
 from artifacts.experiment import ExperimentReader
-from reporting.core import load_analysis, read_bundle, render
+from reporting.core import load_analysis, read_bundle
+from reporting.renderer import render
 from reporting.comparison_model import FrozenReport
 
 

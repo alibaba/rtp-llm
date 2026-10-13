@@ -1,6 +1,7 @@
 """Project HA request and Master-state evidence into the case-selected view."""
 
 from reporting import write_bundle
+from reporting.run_model import RunPresentation
 from reporting.curves import materialize, project_panels
 from reporting.view_sections import view_details
 from reporting.run_context import title, KPI_LABELS, canonical_spec, provenance_from
@@ -51,11 +52,12 @@ def build_spec(payload, presentation):
 
 
 def write_report(directory, payload, presentation):
-    spec = canonical_spec(build_spec(payload, presentation), payload)
+    run = RunPresentation.read(payload)
+    spec = canonical_spec(build_spec(payload, presentation), payload, run=run)
     bundle = write_bundle(
         directory, "run", payload["id"] + "-" + presentation.report.identity,
         dict(payload, report_view="master_ha_failover.yaml"),
-        spec, meta=provenance_from(payload), producer=presentation.report.producer,
+        spec, meta=provenance_from(payload, run=run), producer=presentation.report.producer,
     )
     return bundle / "report.html"
 

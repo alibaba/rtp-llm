@@ -2,13 +2,11 @@
 
 import math
 import re
-from scenario.loader import ScenarioError
+from document_io import DocumentError as ScenarioError
+from input_contract import fail
 
 ID = re.compile(r"[a-z][a-z0-9_]*\Z")
 
-
-def fail(path, message):
-    raise ScenarioError(f"{path}: {message}")
 
 
 def mapping(value, path, allowed, required=()):

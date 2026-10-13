@@ -75,7 +75,7 @@ from cases.cache_scale_in.analysis import analyze
 from cases.cache_scale_in.metrics import produce
 
 GATE = GatePlugin('cache', analyze, produce, write_report)
-REPORT_VIEWS = {'cache_scale_in.yaml': ReportView(validate_view, GATE.render)}
+REPORT_VIEWS = {'cache_scale_in.yaml': ReportView(validate_view, GATE.render, frozenset({"expected_behavior", "observed_behavior"}))}
 
 
 from case_api.registry import CaseDefinition

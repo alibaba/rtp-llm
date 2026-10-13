@@ -5,7 +5,7 @@ from reporting.events import attach_events
 
 import copy
 
-from reporting.core import run_meta, table, details
+from reporting.components import run_meta, table, details
 from reporting.run_model import RunPresentation
 
 
@@ -17,8 +17,8 @@ def title(identity):
     return " : ".join(str(identity).split("::"))
 
 
-def provenance_from(analysis, inherited=None):
-    run = RunPresentation.read(analysis)
+def provenance_from(analysis, inherited=None, *, run=None):
+    run = RunPresentation.read(analysis) if run is None else run
     meta = copy.deepcopy(inherited or {})
     configuration = copy.deepcopy(meta.get("configuration") or {})
     for name, value in (("declared", run.configuration), ("sha256", run.configuration_sha256),
@@ -58,8 +58,8 @@ def validity_section(analysis):
     return details("有效性与证据完整性", run.validity.to_dict(), identity="run.validity")
 
 
-def canonical_spec(spec, analysis):
-    run = RunPresentation.read(analysis)
+def canonical_spec(spec, analysis, *, run=None):
+    run = RunPresentation.read(analysis) if run is None else run
     result = dict(spec)
     result.update(run_id=run.identity, title=title(run.identity))
     common = {"execution": run.status, "validity": run.validity.runtime_validity}
@@ -71,8 +71,8 @@ def canonical_spec(spec, analysis):
         if section.get("id") not in {"run.checks", "run.validity", "case.checks"}]
     return apply(result, analysis)
 
-def selected_spec(spec, analysis, presentation):
-    result = canonical_spec(spec, analysis)
+def selected_spec(spec, analysis, presentation, *, run=None):
+    result = canonical_spec(spec, analysis, run=run)
     if (analysis.get('report_timeline') or {}).get('status') == 'UNAVAILABLE':
         return result
     return attach_events(result, presentation,

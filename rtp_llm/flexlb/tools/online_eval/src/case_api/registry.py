@@ -29,6 +29,15 @@ class ProducerPhase(str, Enum):
 class ReportView:
     validator: ViewValidator
     renderer: ViewRenderer
+    subtitle_fields: frozenset[str] = frozenset()
+
+    def __post_init__(self):
+        if not isinstance(self.subtitle_fields, (set, frozenset, tuple, list)):
+            raise ValueError("subtitle_fields must be a collection of field names")
+        fields = frozenset(self.subtitle_fields)
+        if any(type(name) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in fields):
+            raise ValueError("invalid registered subtitle field")
+        object.__setattr__(self, "subtitle_fields", fields)
 
 
 @dataclass(frozen=True)

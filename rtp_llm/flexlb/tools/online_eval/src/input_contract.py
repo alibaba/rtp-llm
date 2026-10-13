@@ -3,6 +3,11 @@
 import math
 from dataclasses import dataclass, replace
 from typing import Optional
+from document_io import DocumentError
+
+
+def fail(path, message):
+    raise DocumentError(f"{path}: {message}")
 
 
 class FieldSetError(ValueError):

@@ -7,101 +7,11 @@ from pathlib import Path
 from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
 from reporting.report_model import ExperimentConditions
 from reporting.renderer import render
+from reporting.components import run_meta
 from reporting.evidence_archive import project, restore, verify_references
 from artifacts.archive import file_digest
 from artifacts.file_io import write_text
 from schema_contract import matches_schema
-
-
-def details(title, value, *, opened=False, identity=None):
-    return dict(type="details", id=identity, title=title, value=value, opened=opened)
-
-
-def table(title, columns, rows, *, opened=True, identity=None):
-    return dict(type="table", id=identity, title=title, columns=list(columns), rows=list(rows), opened=opened)
-
-
-def links(title, items):
-    return dict(type="links", title=title, items=list(items))
-
-
-def run_meta(
-    identity,
-    *,
-    implementation=None,
-    workload=None,
-    configuration=None,
-    environment=None,
-    clock=None,
-    evidence=None,
-    runs=None,
-):
-    """None means unknown, never proof of matching experiment conditions."""
-    metadata = dict(
-        run_meta_schema_version=1,
-        identity=identity,
-        implementation=implementation,
-        workload=workload,
-        configuration=configuration,
-        environment=environment,
-        clock=clock,
-        evidence=evidence,
-    )
-    if runs is not None:
-        metadata["runs"] = runs
-    return metadata
-
-
-def compare_controls(left, right, *, required=(), allowed=()):
-    """Compare all control leaves, except explicitly varied experiment subtrees.
-
-    required/allowed paths use JSON Pointer syntax. Missing required evidence is
-    unknown even when both sides omit it. Unknown added controls are compared.
-    """
-    missing = object()
-    differences = []
-
-    def at(value, pointer):
-        for part in pointer.strip("/").split("/"):
-            key = part.replace("~1", "/").replace("~0", "~")
-            if not isinstance(value, dict) or key not in value:
-                return missing
-            value = value[key]
-        return value
-
-    def walk(a, b, path):
-        if any(path == p or path.startswith(p + "/") for p in allowed):
-            return
-        if isinstance(a, dict) and isinstance(b, dict):
-            for key in sorted(set(a) | set(b)):
-                walk(
-                    a.get(key, missing),
-                    b.get(key, missing),
-                    path + "/" + key.replace("~", "~0").replace("/", "~1"),
-                )
-        elif a is missing or b is missing or a != b:
-            differences.append(
-                dict(
-                    path=path,
-                    status="MISSING" if a is missing or b is missing else "DIFFERENT",
-                    baseline=None if a is missing else a,
-                    candidate=None if b is missing else b,
-                )
-            )
-
-    walk(left, right, "")
-    absent = [
-        p
-        for p in required
-        if any(at(v, p) is missing or at(v, p) is None for v in (left, right))
-    ]
-    return dict(
-        status="UNKNOWN" if absent else "DIFFERENT" if differences else "ALIGNED",
-        aligned=not absent and not differences,
-        missing=absent,
-        differences=differences,
-        allowed=list(allowed),
-    )
 
 
 def _slug(identity):

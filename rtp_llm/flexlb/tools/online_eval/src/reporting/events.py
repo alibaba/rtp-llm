@@ -71,7 +71,7 @@ def attach_events(spec, presentation, *, origin, phases=(), events=()):
 
 def validate_stage_sources(presentation, stage_ids, path):
     """A missing runtime occurrence is allowed; an unknown configured stage is not."""
-    from scenario.validation import fail
+    from input_contract import fail
     for identity, declaration in presentation.charts.events.items():
         if declaration['source'] == 'stage' and declaration['stage'] not in stage_ids:
             fail(path, 'event ' + identity + ' references unknown stage ' + declaration['stage'])

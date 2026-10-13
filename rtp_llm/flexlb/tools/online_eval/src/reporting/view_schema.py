@@ -131,37 +131,6 @@ def validate_section_contract(path, data, expected, fail):
             fail(str(path) + ".sections." + key, f"table requires {column_count} columns")
 
 
-def validate_bindings(path, data, query_plan, fail):
-    from monitoring.query_plan import definitions
-
-    declared = definitions(query_plan)
-    for curve_id, binding in data.charts.curves.items():
-        if binding.metric_id not in declared or binding.labels is None:
-            fail(path, "curve must bind a declared metric id and labels: " + curve_id)
-
-
-def validate_monitoring_policy(path, data, query_plan, fail):
-    policy = data["metrics"]
-    if "diagnostic_only" not in policy:
-        fail(path, "selected views must classify diagnostic_only metrics explicitly")
-    metrics = data["charts"]["curves"]
-    if any(
-        not {"unit", "color", "hidden"} <= set(style)
-        for style in metrics.values()
-    ):
-        fail(path, "classified monitoring styles require unit, color and hidden")
-    diagnostic = policy.get("diagnostic_only", [])
-    from monitoring.query_plan import definitions
-
-    known = {identity: definition for identity, definition in definitions(query_plan).items()
-             if not ("promql" in definition and identity.split('/')[-1] == 'up')}
-    if not isinstance(diagnostic, list) or any(
-        type(identity) is not str or identity not in known for identity in diagnostic
-    ) or len(diagnostic) != len(set(diagnostic)):
-        fail(path, "invalid diagnostic_only metrics")
-
-
-
 def validate_text(path, data, fail):
     subtitle = data["report"]["subtitle"]
     if type(subtitle) is not str or not subtitle.strip():

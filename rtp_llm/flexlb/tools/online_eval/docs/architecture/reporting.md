@@ -123,10 +123,16 @@ ZIP 使用 Deflate level 3，已压缩文件直接存储；请求流水、日志
 
 `RunPresentation` 在运行分析进入展示层时解析 identity、validity、检查树和 provenance；内部通过属性访问。公共 `ExperimentConditions` 和 `MeasurementIdentity` 位于 `report_model.py`，发布层不依赖对照模块；测量身份包含指标、标签、单位、缩放、计算口径和来源，计算身份不访问点数组。`FrozenReport` 与 `ChartPanel` 在归档进入对照时解析报告契约，原始 case analysis 只作为附件展示。外部 YAML/JSON 在入口严格校验，序列化保持 JSON 工件格式。
 
-`view_config.view()` 在加载边界校验并一次解码为 `ViewDefinition`，生产器通过 `presentation.report`、`presentation.charts`、`presentation.metrics` 和 `presentation.sections` 访问已解析对象。曲线、面板、章节和字幕不在投影或渲染中重复解码；`to_dict()` 只用于工件冻结或显式编辑配置。`view_model.py` 定义曲线、面板、坐标轴、预设选择、章节和字幕模板对象，渲染组件通过这些对象访问展示字段。坐标轴上下界必须有限且 `min < max`，一个面板不能重复选择同一曲线；字幕只允许 `{verdict}`、`{monitoring_status}` 普通占位符，不接受格式规格或转换。视图文件和报告产物仍采用数据格式，测量值与门禁结论不由展示模型改变。
+`view_config.view()` 在加载边界校验并一次解码为 `ViewDefinition`，生产器通过 `presentation.report`、`presentation.charts`、`presentation.metrics` 和 `presentation.sections` 访问已解析对象。曲线、面板、章节和字幕不在投影或渲染中重复解码；`to_dict()` 只用于工件冻结或显式编辑配置。`view_model.py` 定义曲线、面板、坐标轴、预设选择、章节和字幕模板对象，渲染组件通过这些对象访问展示字段。坐标轴上下界必须有限且 `min < max`，一个面板不能重复选择同一曲线；字幕内建 `{verdict}`、`{monitoring_status}` 普通占位符，其他字段由 `ReportView.subtitle_fields` 显式注册；通用模型不按 producer 名称推断业务字段，不接受格式规格或转换。视图文件和报告产物仍采用数据格式，测量值与门禁结论不由展示模型改变。
 
 默认视图负责归档序列分组与同时间汇总，专属视图负责指标绑定与业务附录；两者共享 `panel_document` 的轴约束与最终面板合同，以及 `resolve_presets` 的选择规则。默认曲线冻结指标 ID、完整标签、采集 epoch/source 和结构化聚合口径；预设通过聚合方法和曲线角色选择，不解析描述文案。`detail_labels` 是配置中的标签名，不使用引擎或 Pod 名称白名单；epoch/source/metric 分组保留来源隔离。
 
 预设可以使用 `ids` 选择稳定 `curve_id`，显示名称变化不影响选择。`visible`、`names`、`contains`、`groups` 为显式展示选择，`roles`、`aggregations` 为结构化角色和聚合选择。默认面板投影必须显式接收已解码视图，不读 YAML；HTML 的降采样不改变完整统计样本或归档证据。
 
 在线门禁使用 `write_gate_report(..., run=...)` 装配运行信息，离线发布使用 `write_archived_gate_report` 读取冻结时钟；两者共享 bundle 发布。公共原子文本写入由 `artifacts.file_io.write_text` 提供，工件模块不引用报告模块私有写入函数。发布层遍历报告协议中的 run/runs 节点，证据编解码器只处理单个节点，不推断对照布局。
+
+公共输入解析由 `document_io.load_document` 提供，错误由 `DocumentError` 表示；scenario 保留场景编译入口，报告加载不依赖场景加载器。`view_schema` 只校验展示结构，`monitoring.view_binding` 在集成边界核对查询定义、曲线绑定和诊断分类。
+
+`components.py` 提供纯组件和元数据构造，`report_model.py` 提供实验条件及比较，`core.py` 管理 bundle 发布、核验和发现；公共入口由 `reporting` 包导出。视图配置与共享测量身份持有递归只读映射和元组；`to_dict()` 返回独立可编辑的数据树，显式复制不改变共享值对象。发布一次解析 `RunPresentation`，标题、检查与 provenance 复用该上下文。
+
+`assets/report.html` 提供布局和样式，并将冻结 payload 交给 `report_controller.js`。页面控制器分派时序、散点和分类图；时序交互由 `multi_curve.js` 承担，坐标轴设置共用 `FlexReport.axisOptions`。这些脚本由 renderer 内联，HTML 无需服务器或网络资源。

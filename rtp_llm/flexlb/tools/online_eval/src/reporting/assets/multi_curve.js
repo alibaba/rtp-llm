@@ -43,10 +43,7 @@
       tension:0, spanGaps:false}));
     datasets.forEach((dataset,i)=>dataset.statistics=statistics(dataset.data,panel.series[i].statistics_samples));
     const scales = {x:{type:'linear',min:context.timeAxis.min,max:context.timeAxis.max,title:{display:true,text:'时间 / 秒'}}};
-    Object.entries(panel.axes).forEach(([key,axis]) => {
-      scales[key] = {type:'linear',position:axis.position || 'left',beginAtZero:true,
-        min:axis.min,max:axis.max,grid:{drawOnChartArea:key==='ratio'||key==='queue'},title:{display:true,text:axis.title}};
-    });
+    Object.assign(scales, FlexReport.axisOptions(panel.axes, key=>key==='ratio'||key==='queue'));
     let brush=null,lastHover=null;
     const events = {id:'multiCurveEvents',afterDraw(chart) {
       const {ctx,chartArea:a,scales:{x}} = chart; ctx.save(); ctx.font='11px sans-serif';

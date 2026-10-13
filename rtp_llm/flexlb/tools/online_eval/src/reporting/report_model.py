@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import copy
 import json
+from typing import Mapping
+from reporting.values import freeze, thaw
 
 
 @dataclass(frozen=True)
@@ -13,6 +15,10 @@ class ExperimentConditions:
     criteria: object
     statistic_sources: object
 
+    def __post_init__(self):
+        for name in ("configuration", "workload", "environment", "criteria", "statistic_sources"):
+            object.__setattr__(self, name, freeze(getattr(self, name)))
+
     @classmethod
     def read(cls, metadata):
         return cls(configuration=copy.deepcopy(metadata.get('configuration')),
@@ -22,21 +28,25 @@ class ExperimentConditions:
                    statistic_sources=copy.deepcopy(metadata.get('statistic_sources')))
 
     def to_dict(self):
-        return dict(configuration=self.configuration, workload=self.workload,
+        return thaw(dict(configuration=self.configuration, workload=self.workload,
                     environment=self.environment, criteria=self.criteria,
-                    statistic_sources=self.statistic_sources)
+                    statistic_sources=self.statistic_sources))
 
 
 @dataclass(frozen=True)
 class MeasurementIdentity:
     metric_id: str | None
-    labels: dict
+    labels: Mapping
     measurement: object
     calculation: object
     axis: str
     unit: str | None
     scale: float
     source_type: str | None
+
+    def __post_init__(self):
+        for name in ("labels", "measurement", "calculation"):
+            object.__setattr__(self, name, freeze(getattr(self, name)))
 
     @classmethod
     def read(cls, data, panel_unit=None):
@@ -50,9 +60,9 @@ class MeasurementIdentity:
     def signature(self):
         if self.metric_id is None:
             return None
-        return json.dumps(dict(metric_id=self.metric_id, labels=self.labels,
+        return json.dumps(thaw(dict(metric_id=self.metric_id, labels=self.labels,
             measurement=self.measurement, calculation=self.calculation, axis=self.axis,
-            unit=self.unit, scale=self.scale, source_type=self.source_type),
+            unit=self.unit, scale=self.scale, source_type=self.source_type)),
             sort_keys=True, allow_nan=False)
 
 
@@ -64,3 +74,54 @@ def panel_document(*, identity, title, axes, series, caption, presets=None):
     if presets is not None:
         result['presets'] = presets
     return result
+
+def compare_controls(left, right, *, required=(), allowed=()):
+    """Compare all control leaves, except explicitly varied experiment subtrees.
+
+    required/allowed paths use JSON Pointer syntax. Missing required evidence is
+    unknown even when both sides omit it. Unknown added controls are compared.
+    """
+    missing = object()
+    differences = []
+
+    def at(value, pointer):
+        for part in pointer.strip("/").split("/"):
+            key = part.replace("~1", "/").replace("~0", "~")
+            if not isinstance(value, dict) or key not in value:
+                return missing
+            value = value[key]
+        return value
+
+    def walk(a, b, path):
+        if any(path == p or path.startswith(p + "/") for p in allowed):
+            return
+        if isinstance(a, dict) and isinstance(b, dict):
+            for key in sorted(set(a) | set(b)):
+                walk(
+                    a.get(key, missing),
+                    b.get(key, missing),
+                    path + "/" + key.replace("~", "~0").replace("/", "~1"),
+                )
+        elif a is missing or b is missing or a != b:
+            differences.append(
+                dict(
+                    path=path,
+                    status="MISSING" if a is missing or b is missing else "DIFFERENT",
+                    baseline=None if a is missing else a,
+                    candidate=None if b is missing else b,
+                )
+            )
+
+    walk(left, right, "")
+    absent = [
+        p
+        for p in required
+        if any(at(v, p) is missing or at(v, p) is None for v in (left, right))
+    ]
+    return dict(
+        status="UNKNOWN" if absent else "DIFFERENT" if differences else "ALIGNED",
+        aligned=not absent and not differences,
+        missing=absent,
+        differences=differences,
+        allowed=list(allowed),
+    )
