@@ -336,7 +336,14 @@ class QwenAgentRenderer(CustomChatRenderer):
                 total_tokens=input_token_length + output_token_length,
                 completion_tokens=output_token_length,
             ),
-            aux_info=output.aux_info if request.aux_info else None,
+            aux_info=(
+                output.aux_info
+                if request.aux_info
+                or (
+                    output.aux_info is not None and output.aux_info.nan_info is not None
+                )
+                else None
+            ),
         )
 
     def get_renderer_info(self) -> RendererInfo:

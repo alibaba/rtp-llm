@@ -14,6 +14,12 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     RMSNorm,
 )
+from rtp_llm.models_py.utils.nan_check import (
+    NanCheckMetadata,
+    NanCheckStage,
+    detect_nan,
+    finish_nan_check,
+)
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -30,6 +36,7 @@ class Qwen3DecoderLayer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
     ):
         super().__init__()
+        self.layer_idx = layer_idx
         attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         self.self_attn = CausalAttention(
             attn_configs,
@@ -59,6 +66,7 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
@@ -68,12 +76,22 @@ class Qwen3DecoderLayer(nn.Module):
             fmha_impl=fmha_impl,
             kv_cache=kv_cache,
         )
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.ATTENTION),
+            )
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.FFN),
+            )
         hidden_states = residual + hidden_states
 
         return hidden_states
@@ -148,9 +166,14 @@ class Qwen3Model(GptModelBase):
                 hidden_states,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             capture.capture_layer(i, hidden_states)
-        return capture.finalize(hidden_states)
+        return finish_nan_check(
+            capture.finalize(hidden_states),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )
 
 
 __all__ = [

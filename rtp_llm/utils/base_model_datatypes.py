@@ -119,6 +119,15 @@ class GenerateInput:
 
 
 @dataclass
+class NumericNanInfo:
+    layer_id: int = 0
+    stage: int = 0
+    token_index: int = 0
+    element_index: int = 0
+    kind: int = 0
+
+
+@dataclass
 class AuxInfo:
     cost_time: float = 0
     iter_count: int = 0
@@ -160,6 +169,7 @@ class AuxInfo:
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""
+    nan_info: Optional[NumericNanInfo] = None
 
 
 @dataclass

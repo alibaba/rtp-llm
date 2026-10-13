@@ -48,6 +48,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     MMUrlType,
+    NumericNanInfo,
 )
 from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
 from rtp_llm.utils.util import has_overlap_kmp
@@ -634,7 +635,7 @@ class CustomChatRenderer:
         prob_return_num = status.request.top_logprobs or 1
         all_probs = output.all_probs
         output_id = output.output_ids
-        if output_id == None:
+        if output_id is None or output_id.numel() == 0:
             return None
         selected_id = output_id[-1].item()
         if all_probs == None:
@@ -1096,7 +1097,8 @@ class CustomChatRenderer:
                 multimodal_lengths = buffer.output.aux_info.multimodal_lengths
                 aux_info = (
                     buffer.output.aux_info
-                    if request.aux_info and buffer.has_real_aux_info
+                    if (request.aux_info and buffer.has_real_aux_info)
+                    or buffer.output.aux_info.nan_info is not None
                     else None
                 )
             output_token_length += buffer.output.aux_info.output_len
@@ -1263,7 +1265,7 @@ class CustomChatRenderer:
         prob_return_num = status.request.top_logprobs or 1
         all_probs = all_probs
         output_id = output_ids
-        if output_id == None:
+        if output_id is None or output_id.numel() == 0:
             return None
         selected_id = output_id[-1].item()
         if all_probs == None:
@@ -1454,11 +1456,11 @@ class CustomChatRenderer:
         output_len_list,
         reuse_len_list,
         custom_output=None,
+        nan_info: Optional[Dict[str, int]] = None,
     ):
         input_token_length = 0
         output_token_length = 0
         reuse_length = 0
-        aux_info = None
         for i, (buffer, input_len, output_len, reuse_len) in enumerate(
             zip(buffer_list, input_len_list, output_len_list, reuse_len_list)
         ):
@@ -1469,6 +1471,16 @@ class CustomChatRenderer:
                 input_token_length = input_len
                 reuse_length = reuse_len
             output_token_length += output_len
+        aux_info = (
+            AuxInfo(
+                input_len=input_token_length,
+                output_len=output_token_length,
+                reuse_len=reuse_length,
+                nan_info=NumericNanInfo(**nan_info),
+            )
+            if nan_info is not None
+            else None
+        )
         return StreamResponseObject(
             choices=[
                 ChatCompletionResponseStreamChoice(
@@ -1592,9 +1604,15 @@ class CustomChatRenderer:
         output_len_list,
         reuse_len_list,
         custom_output=None,
+        nan_info: Optional[Dict[str, int]] = None,
     ):
         stream_response = self._generate_final_sync(
-            status_list, input_len_list, output_len_list, reuse_len_list, custom_output
+            status_list,
+            input_len_list,
+            output_len_list,
+            reuse_len_list,
+            custom_output,
+            nan_info,
         )
         chat_response = ChatCompletionStreamResponse(
             choices=stream_response.choices,
@@ -1679,9 +1697,15 @@ class CustomChatRenderer:
         output_len_list,
         reuse_len_list,
         custom_output=None,
+        nan_info: Optional[Dict[str, int]] = None,
     ):
         stream_response = self._generate_final_sync(
-            status_list, input_len_list, output_len_list, reuse_len_list, custom_output
+            status_list,
+            input_len_list,
+            output_len_list,
+            reuse_len_list,
+            custom_output,
+            nan_info,
         )
         return stream_response
 

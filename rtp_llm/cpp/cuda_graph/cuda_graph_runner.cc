@@ -1185,7 +1185,14 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
             outputs.mtp_target_hidden_states = mtp_target_hidden_states.slice(0, 0, state.seq_len_sum);
         }
     }
-    // record forward done event
+    if (check_nan_) {
+        const int key  = is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
+        const int rows = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+        // Replay writes fixed storage. Snapshot on its stream before the next
+        // reset, including when the output dispatcher consumes this asynchronously.
+        outputs.nan_metadata = graph_instances_[key].mem_hold_.py_model_inputs_.nan_metadata.narrow(0, 0, rows).clone();
+    }
+    // record forward done event after the metadata snapshot
     forward_event_.record(cuda_graph::graphGetCurrentStream());
     RTP_LLM_LOG_DEBUG("Replay End");
     return outputs;
@@ -1835,6 +1842,9 @@ void CudaGraphRunner::initCapture() {
         // owns only attention metadata and must not replace this tensor because
         // the captured graph retains its address.
         inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
+        if (check_nan_) {
+            inputs.nan_metadata = torch::zeros({max_num_token_, 4}, options_cuda_int32_.dtype(torch::kInt64));
+        }
         // input_hidden_size_ is the width of one input_hiddens row. PyWrappedModel sets it
         // to hidden_size * hc_mult for regular (MTP) graphs and to
         // len(target_layer_ids) * hidden_size for a DSpARK draft graph, so it must be used
@@ -1993,7 +2003,13 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
+        if (check_nan_) {
+            inputs.nan_metadata.zero_();
+        }
         py_forward_method_(inputs, attn_pyobj);
+        if (check_nan_) {
+            inputs.nan_metadata.zero_();
+        }
         py_forward_method_(inputs, attn_pyobj);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("WarmUp forward failed for %s %d: %s", key_type, key, e.what());
@@ -2027,6 +2043,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::graphCaptureBegin(graph, shared_graph_pool_);
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
+            if (check_nan_) {
+                inputs.nan_metadata.zero_();
+            }
             try {
                 auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
                 outputs             = py_outputs_obj.cast<PyModelOutputs>();
@@ -2084,6 +2103,9 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     const bool fixed_capacity_draft_prefill = usesFixedCapacityMtpDraftPrefillCudaGraph();
     const int  token_slice_len = fixed_capacity_draft_prefill ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    if (check_nan_) {
+        inputs.nan_metadata = capture_mem_hold_.py_model_inputs_.nan_metadata.narrow(0, 0, token_slice_len);
+    }
     if (isGenerationPrefillCudaGraph()) {
         // Generation prefill builds embeddings from input_ids. Keep this
         // transport-only tensor empty, matching initCapture(), instead of

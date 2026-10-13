@@ -66,6 +66,12 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
+from rtp_llm.models_py.utils.nan_check import (
+    NanCheckMetadata,
+    NanCheckStage,
+    detect_nan,
+    finish_nan_check,
+)
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
     AttentionConfigs,
@@ -1460,6 +1466,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -1471,9 +1478,19 @@ class Qwen3NextDecoderLayer(nn.Module):
             attn_meta=attn_meta,
         )
 
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.ATTENTION),
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.FFN),
+            )
 
         return hidden_states, residual
 
@@ -1791,6 +1808,7 @@ class Qwen3NextModel(GptModelBase):
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
                 attn_meta=attn_meta,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             if i in self._mtp_aux_capture_layer_id_set:
                 self.capture_aux_hidden(i, hidden_states, residual)
@@ -1804,7 +1822,9 @@ class Qwen3NextModel(GptModelBase):
         if capture_aux_hidden:
             assert self._mtp_target_hidden_states is not None
             outputs.mtp_target_hidden_states = self._mtp_target_hidden_states
-        return outputs
+        return finish_nan_check(
+            outputs, getattr(inputs, "nan_metadata", None), self.layer_num
+        )
 
 
 class Qwen35Model(Qwen3NextModel):

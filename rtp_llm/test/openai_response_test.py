@@ -62,6 +62,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateInput,
     GenerateOutput,
     GenerateOutputs,
+    NumericNanInfo,
 )
 
 
@@ -622,6 +623,138 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 self.assertEqual(generate_config.is_streaming, stream)
                 self.assertFalse(generate_config.aux_info)
                 self.assertFalse(request.aux_info)
+
+    async def test_nan_terminal_without_tokens_preserves_aux_info(self):
+        tokenizer, renderer, _ = self._create_base_thinking_endpoint("disabled")
+        nan_info = NumericNanInfo(2, 1, 3, 17, 1)
+
+        class NanBackend:
+            async def enqueue(self, generate_input):
+                async def outputs():
+                    yield GenerateOutputs(
+                        generate_outputs=[
+                            GenerateOutput(
+                                output_ids=torch.empty((1, 0), dtype=torch.int32),
+                                input_ids=generate_input.token_ids.reshape(1, -1),
+                                finished=True,
+                                aux_info=AuxInfo(input_len=7, nan_info=nan_info),
+                            )
+                        ]
+                    )
+
+                return outputs()
+
+        for stream, logprobs in (
+            (True, False),
+            (True, True),
+            (False, False),
+            (False, True),
+        ):
+            with self.subTest(stream=stream, logprobs=logprobs):
+                request = ChatCompletionRequest(
+                    messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                    stream=stream,
+                    aux_info=False,
+                    logprobs=logprobs,
+                )
+                self.assertIsNone(
+                    renderer._generate_log_probs_sync(
+                        custom_renderer.StreamStatusSync(request),
+                        None,
+                        torch.empty((1, 0), dtype=torch.int32),
+                    )
+                )
+                choices = renderer.generate_choice(
+                    request_id=1,
+                    input_ids=[1] * 7,
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(aux_info=False, is_streaming=stream),
+                    backend_rpc_server_visitor=NanBackend(),
+                    request=request,
+                )
+                responses = OpenaiEndpoint._complete_stream_response(
+                    choices, None, tokenizer
+                )
+                chunks = [chunk async for chunk in responses]
+                final = await responses.gen_complete_response_once()
+                self.assertEqual(chunks[-1].aux_info.nan_info, nan_info)
+                self.assertEqual(final.aux_info.nan_info, nan_info)
+                self.assertEqual(final.choices[0].finish_reason, FinisheReason.stop)
+                self.assertEqual(final.usage.completion_tokens, 0)
+                self.assertEqual(final.usage.prompt_tokens, 7)
+
+    async def test_prefill_nan_wire_terminal_preserves_beam_choices(self):
+        from rtp_llm.cpp.model_rpc.model_rpc_client import StreamState, trans_output
+        from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+            GenerateOutputsPB,
+            TensorPB,
+        )
+
+        tokenizer, renderer, _ = self._create_base_thinking_endpoint("disabled")
+        expected_choices = 3
+
+        class NanBackend:
+            async def enqueue(self, generate_input):
+                async def outputs():
+                    wire = GenerateOutputsPB()
+                    flat = wire.flatten_output
+                    flat.finished.extend([True] * expected_choices)
+                    flat.output_ids.data_type = TensorPB.INT32
+                    flat.output_ids.shape.extend([expected_choices, 1, 0])
+                    for _ in range(expected_choices):
+                        aux = flat.aux_info.add()
+                        aux.input_len = 7
+                        aux.nan_info.layer_id = 2
+                        aux.nan_info.stage = 1
+                        aux.nan_info.token_index = 3
+                        aux.nan_info.element_index = 17
+                        aux.nan_info.kind = 1
+                    yield trans_output(generate_input, wire, StreamState())
+
+                return outputs()
+
+        for stream in (True, False):
+            for variable_beams in ([], [3], [2, 3]):
+                with self.subTest(stream=stream, variable_beams=variable_beams):
+                    request = ChatCompletionRequest(
+                        messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+                        n=1,
+                        stream=stream,
+                        aux_info=False,
+                        logprobs=True,
+                    )
+                    config = GenerateConfig(
+                        aux_info=False,
+                        is_streaming=stream,
+                        num_return_sequences=1,
+                        num_beams=1 if variable_beams else expected_choices,
+                        variable_num_beams=variable_beams,
+                    )
+                    responses = OpenaiEndpoint._complete_stream_response(
+                        renderer.generate_choice(
+                            request_id=1,
+                            input_ids=[1] * 7,
+                            mm_inputs=[],
+                            generate_config=config,
+                            backend_rpc_server_visitor=NanBackend(),
+                            request=request,
+                        ),
+                        None,
+                        tokenizer,
+                    )
+                    chunks = [chunk async for chunk in responses]
+                    final = await responses.gen_complete_response_once()
+                    self.assertEqual(len(final.choices), expected_choices)
+                    self.assertEqual(len(chunks[-1].choices), expected_choices)
+                    self.assertTrue(
+                        all(
+                            choice.finish_reason == FinisheReason.stop
+                            for choice in final.choices
+                        )
+                    )
+                    self.assertEqual(final.aux_info.nan_info.element_index, 17)
+                    self.assertEqual(final.usage.prompt_tokens, 7)
+                    self.assertEqual(final.usage.completion_tokens, 0)
 
     async def test_aux_info_false_preserves_length_limits_and_usage(self):
         for termination in ("max_tokens", "max_seq_len"):
@@ -3177,6 +3310,70 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             self.assertEqual(
                 json.loads(response)["extra_outputs"]["custom_output"], values
             )
+
+    def test_native_chat_final_preserves_nan_diagnostic_with_aux_disabled(self):
+        _, renderer = self._create_adaptive_qwen_renderer()
+        status = [
+            custom_renderer.StreamStatusSync(
+                ChatCompletionRequest(messages=[], aux_info=False)
+            )
+        ]
+        nan_info = {
+            "layer_id": 3,
+            "stage": 2,
+            "token_index": 7,
+            "element_index": 2**32 + 5,
+            "kind": 1,
+        }
+        args = (status, [7], [0], [0])
+        final = renderer.render_stream_response_final_blocking(*args, nan_info=nan_info)
+        for response in (
+            renderer.render_stream_response_final(*args, nan_info=nan_info),
+            renderer.collect_complete_response([final]),
+        ):
+            payload = json.loads(response)
+            self.assertEqual(payload["aux_info"]["nan_info"], nan_info)
+            self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
+            self.assertEqual(payload["usage"]["prompt_tokens"], 7)
+            self.assertEqual(payload["usage"]["completion_tokens"], 0)
+        clean = json.loads(renderer.render_stream_response_final(*args))
+        self.assertNotIn("aux_info", clean)
+
+    def test_native_chat_prefill_nan_terminal_preserves_beam_rows(self):
+        _, renderer, _ = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(messages=[], aux_info=False, logprobs=True, n=3)
+        statuses = [custom_renderer.StreamStatusSync(request) for _ in range(3)]
+        lengths = ([7] * 3, [0] * 3, [0] * 3)
+        probs = [torch.empty(0) for _ in range(3)]
+        token_ids = [torch.empty((1, 0), dtype=torch.int32) for _ in range(3)]
+        first = renderer.render_stream_response_first_blocking(3)
+        update = renderer.render_stream_response_blocking(
+            statuses, *lengths, probs, token_ids, 16, [], False
+        )
+        flush = renderer.render_stream_response_flush_blocking(
+            statuses, *lengths, probs, token_ids, [], False
+        )
+        final = renderer.render_stream_response_final_blocking(
+            statuses,
+            *lengths,
+            nan_info={
+                "layer_id": 2,
+                "stage": 1,
+                "token_index": 3,
+                "element_index": 17,
+                "kind": 1,
+            },
+        )
+        response = json.loads(
+            renderer.collect_complete_response([first, update, flush, final])
+        )
+        self.assertEqual(len(response["choices"]), 3)
+        self.assertTrue(
+            all(choice["finish_reason"] == "stop" for choice in response["choices"])
+        )
+        self.assertEqual(response["aux_info"]["nan_info"]["element_index"], 17)
+        self.assertEqual(response["usage"]["prompt_tokens"], 7)
+        self.assertEqual(response["usage"]["completion_tokens"], 0)
 
     async def test_debug_info_with_output_ids_and_raw_output(self):
         """Test that debug_info includes output_ids and raw_output when debug_info=True (non-streaming)"""

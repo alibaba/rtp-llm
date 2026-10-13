@@ -6,6 +6,7 @@ py_library(
         "utils/*.py",
     ]),
     visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/models_py/triton_kernels:common"],
 )
 
 # CPU-only subset of the DSv4 decode package: pure-torch modules plus the

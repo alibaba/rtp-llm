@@ -32,6 +32,14 @@ namespace rtp_llm {
 
 namespace {
 
+void detectNanTensor(const torch::Tensor& tensor, const torch::Tensor& metadata, int64_t layer, int64_t stage) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    py::module_::import("rtp_llm.models_py.utils.nan_check").attr("detect_nan_tensor")(tensor, metadata, layer, stage);
+}
+
 // Pairs init() with a full drain on exceptional exits. DSpark's normal path
 // finishes only writer submissions here and leaves actual publication for the
 // executor's pre-dispatch barrier, preserving overlap with draft computation.
@@ -547,6 +555,47 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
     return bert_embedding_inputs;
 }
 
+GptModelOutputs
+PyWrappedModel::finishNanCheck(GptModelOutputs outputs, const GptModelInputs& inputs, torch::Tensor metadata) {
+    if (!check_nan_) {
+        return outputs;
+    }
+    const auto rows  = metadata.size(0);
+    const auto layer = static_cast<int64_t>(layer_num_);
+    if (outputs.all_hidden_states.defined() && outputs.all_hidden_states.size(0) == rows) {
+        detectNanTensor(outputs.all_hidden_states, metadata, layer, 3);
+    }
+
+    const auto& logits = outputs.all_logits.defined() ? outputs.all_logits : outputs.logits;
+    if (logits.defined()) {
+        const bool selected_rows     = logits.size(0) != rows;
+        auto       indexes           = selected_rows ?
+                                           inputs.lm_output_indexes.to(metadata.options(), /*non_blocking=*/true).reshape({-1}) :
+                                           torch::Tensor();
+        auto       selected_metadata = selected_rows ? metadata.index_select(0, indexes) : metadata;
+        if (outputs.hidden_states.defined() && outputs.hidden_states.size(0) == logits.size(0)) {
+            detectNanTensor(outputs.hidden_states, selected_metadata, layer, 3);
+        }
+        detectNanTensor(logits, selected_metadata, layer, 4);
+        if (selected_rows) {
+            metadata.index_copy_(0, indexes, selected_metadata);
+        }
+        // Keep invalid values out of sampling. The original token records are
+        // retained so verification can ignore unaccepted speculative positions.
+        auto safe_logits =
+            torch::where(selected_metadata.select(1, 3).eq(0).unsqueeze(1), logits, torch::zeros_like(logits));
+        if (outputs.all_logits.defined()) {
+            outputs.all_logits = safe_logits;
+            outputs.logits     = safe_logits.index_select(
+                0, inputs.lm_output_indexes.to(metadata.options(), /*non_blocking=*/true).reshape({-1}));
+        } else {
+            outputs.logits = safe_logits;
+        }
+    }
+    outputs.nan_metadata = std::move(metadata);
+    return outputs;
+}
+
 // Helper function to call forwardPostLayers with common parameters
 GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidden_states,
                                                       const GptModelInputs& inputs,
@@ -711,6 +760,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               attention_inputs_by_tag,
                                               bert_embedding_inputs});
         input_list.back().capture_hidden_states = capture_hidden_states;
+        if (check_nan_) {
+            input_list.back().nan_metadata =
+                torch::zeros({token_ids.numel(), 4}, token_ids.options().dtype(torch::kInt64));
+        }
     }
 
     const bool has_cache_store_work = !inputs.warmup && !inputs.skip_lm_head && inputs.pd_separation;
@@ -779,6 +832,17 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     cache_store_write_cycle.finish();
 
+    torch::Tensor nan_metadata;
+    if (check_nan_) {
+        std::vector<torch::Tensor> records;
+        const size_t               real_lanes = micro_batch_plan.enable ? input_list.size() : 1;
+        for (size_t i = 0; i < real_lanes; ++i) {
+            records.push_back(py_model_outputs[i].nan_metadata.defined() ? py_model_outputs[i].nan_metadata :
+                                                                           input_list[i].nan_metadata);
+        }
+        nan_metadata = torch::cat(records, 0);
+    }
+
     // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
     if (!micro_batch_plan.enable) {
@@ -827,11 +891,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                                                            inputs.combo_tokens.numel(),
                                                                            "captured hidden-state",
                                                                            input_list.front().input_ids.device());
-        return callForwardPostLayers(last_hidden_states, inputs, true, last_hidden_states.size(0));
+        return finishNanCheck(callForwardPostLayers(last_hidden_states, inputs, true, last_hidden_states.size(0)),
+                              inputs,
+                              std::move(nan_metadata));
     }
     // Python forward_micro_batch already applies the final normalization.
     // Skip the C++ final layernorm so non-capture hidden states are not normalized twice.
-    return callForwardPostLayers(hidden_states, inputs, true);
+    return finishNanCheck(callForwardPostLayers(hidden_states, inputs, true), inputs, std::move(nan_metadata));
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
@@ -992,6 +1058,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
     const auto capture_input_ids     = capture_hidden_states ? inputs.combo_tokens : torch::Tensor();
 
     const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+    const int64_t original_token_count = inputs.combo_tokens.numel();
     // Packed hidden-state collection is eager, not a generation-prefill graph attempt.
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
         !capture_hidden_states && owns_generation_prefill_cuda_graph_ && !is_prefill_cuda_graph_mode_
@@ -1106,6 +1173,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
+            if (check_nan_) {
+                py_model_inputs.nan_metadata =
+                    torch::zeros({token_ids.numel(), 4}, token_ids.options().dtype(torch::kInt64));
+            }
             DevicePerfWrapper wrapper(enable_device_perf_, "normal forward");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
                               py_model_inputs.attention_inputs.is_target_verify,
@@ -1127,9 +1198,23 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
-        auto attach_mtp_target_hidden_states = [&py_model_outputs](GptModelOutputs outputs) {
+        auto attach_mtp_target_hidden_states = [&](GptModelOutputs outputs) {
             if (py_model_outputs.mtp_target_hidden_states.defined()) {
                 outputs.mtp_target_hidden_states = py_model_outputs.mtp_target_hidden_states;
+            }
+            if (check_nan_) {
+                auto metadata = py_model_outputs.nan_metadata.defined() ? py_model_outputs.nan_metadata :
+                                                                          py_model_inputs.nan_metadata;
+                if (device_props_.enable_prefill_cp && has_context_request) {
+                    // Restore every token's first layer record, including rows
+                    // omitted by the last-hidden optimization. The existing
+                    // selected-row CP path has one owner per token and avoids
+                    // the full-output path's CUDA nonzero host synchronization.
+                    GptModelInputs metadata_inputs;
+                    metadata_inputs.lm_output_indexes = torch::arange(original_token_count, metadata.options());
+                    context_parallel_processor_->handleOutputsLastHidden(metadata, metadata_inputs, cp_params);
+                }
+                outputs = finishNanCheck(std::move(outputs), inputs, std::move(metadata));
             }
             return outputs;
         };
@@ -1412,10 +1497,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     logits.dim() > 1 ? logits.size(1) : -1);
             logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
         }
-        if (check_nan_) {
-            RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
-            RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
-        }
         outputs.logits            = logits;
         outputs.hidden_states     = last_hidden;
         outputs.all_hidden_states = hidden;
@@ -1466,10 +1547,6 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
-    }
-    if (check_nan_) {
-        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
-        RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
     }
     // 3rd field (all_hidden_states) is the small [num_lm, hidden_size] — the whole
     // point of this path is to never materialize the full [seq, hidden] sequence.

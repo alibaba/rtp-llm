@@ -697,6 +697,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
             sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
             sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+            if (!generate_request.propose_nan_metadata().empty()) {
+                std::vector<int64_t> records(generate_request.propose_nan_metadata().begin(),
+                                             generate_request.propose_nan_metadata().end());
+                sp_output_buffer->proposal_nan_metadata =
+                    torch::tensor(records, torch::kInt64).reshape({-1, 4}).to(torch::kCUDA);
+            }
 
             auto propose_tokens_gpu              = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
             auto accept_len                      = torch::ones({1}, cuda_i32);
@@ -728,6 +734,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                     .draft_all_probs_gpu          = sp_output_buffer->all_probs,
                     .previous_seq_len_upper_bound = generate_stream->seqLength(),
                     .next_seq_len_upper_bound     = generate_stream->seqLength(),
+                    .proposal_nan_metadata        = sp_output_buffer->proposal_nan_metadata,
                 });
             }
         }

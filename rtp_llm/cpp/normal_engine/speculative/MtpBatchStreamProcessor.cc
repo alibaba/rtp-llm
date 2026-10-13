@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/NanDetection.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalInputUtils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
@@ -936,6 +937,7 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
         if (is_dspark_) {
             for (auto& update_info : spec_update_infos) {
                 update_info.draft_token_gpu = torch::Tensor();
+                update_info.proposal_nan_metadata = torch::Tensor();
             }
         }
         return;
@@ -959,10 +961,24 @@ void MtpBatchStreamProcessor::updateProposeTokens(const StreamGroups&           
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
     int stream_idx    = 0;
+    int64_t token_offset  = 0;
 
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
+
+        const auto&   nan_metadata  = draft_prefill_output.model_output.nan_metadata;
+        const int64_t valid_tokens  = stream_groups.contextStreams().empty() ?
+                                          spec_update_infos[stream_idx].num_new_tokens :
+                                          stream->currentExecuteTokenSize();
+        const int64_t stored_tokens = !stream_groups.contextStreams().empty() ?
+                                          valid_tokens :
+                                          ((is_dspark_ || useMtpDeviceState()) ? propose_step_ + 1 : valid_tokens);
+        if (nan_metadata.defined()) {
+            spec_update_infos[stream_idx].proposal_nan_metadata =
+                nan_metadata.narrow(0, token_offset + valid_tokens - 1, 1);
+        }
+        token_offset += stored_tokens;
 
         // GPU slice for next-step propose tokens: [next_batch_size, token_stride].
         // Readers select the last column for one-step decode, or the full row
@@ -1634,6 +1650,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
 
+    const auto target_nan_cpu = prefill_output.model_output.nan_metadata.defined() ?
+                                    prefill_output.model_output.nan_metadata.cpu().contiguous() :
+                                    torch::Tensor();
+    const auto draft_nan_cpu  = draft_model_output.nan_metadata.defined() ?
+                                    draft_model_output.nan_metadata.cpu().contiguous() :
+                                    torch::Tensor();
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
     int token_offset  = 0;
@@ -1648,6 +1670,21 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         for (size_t i = 0; i < next_batch_size; ++i) {
             new_tokens.data_ptr<int32_t>()[i] =
                 new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+        }
+
+        auto nan_info = firstNanInfo(target_nan_cpu, token_offset, token_size, stream->prefixLength());
+        // Draft prefill consumes shifted tokens in ordinary MTP; its last
+        // logits predict a future proposal and are considered only if accepted.
+        keepFirstNanInfo(
+            nan_info,
+            firstNanInfo(draft_nan_cpu, token_offset, token_size, stream->prefixLength() + (is_dspark_ ? 0 : 1), 0, 3));
+        if (nan_info.has_value()) {
+            stream->finishWithNan(*nan_info);
+            spec_update_infos.push_back({new_tokens, 1, -1, {}, {}});
+            batch_idx_in += cur_batch_size;
+            batch_idx_out += next_batch_size;
+            token_offset += token_size;
+            continue;
         }
 
         for (int i = 0; i < cur_batch_size; ++i) {
@@ -1696,6 +1733,15 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     const auto& draft_model_output   = draft_prefill_output.model_output;
     const auto& draft_sampler_output = draft_prefill_output.sampler_output;
 
+    const auto verify_nan_cpu   = spec_decode_output.verify_nan_metadata.defined() ?
+                                      spec_decode_output.verify_nan_metadata.cpu().contiguous() :
+                                      torch::Tensor();
+    const auto proposal_nan_cpu = spec_decode_output.proposal_nan_metadata.defined() ?
+                                      spec_decode_output.proposal_nan_metadata.cpu().contiguous() :
+                                      torch::Tensor();
+    const auto draft_nan_cpu    = draft_model_output.nan_metadata.defined() ?
+                                      draft_model_output.nan_metadata.cpu().contiguous() :
+                                      torch::Tensor();
     int batch_idx_in  = 0;
     int batch_idx_out = 0;
     int token_offset  = 0;
@@ -1716,8 +1762,29 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // after replacing .item() with a device-side index.
         int cur_accept_len = accept_len[batch_idx_out].item<int>();
 
+        // Verify row 0 consumes the last committed token; proposal row 0
+        // predicts the first speculative token. The bonus/replacement token
+        // never makes an additional draft proposal eligible.
+        auto nan_info = firstNanInfo(proposal_nan_cpu,
+                                     batch_idx_out * propose_step_,
+                                     std::max(0, cur_accept_len - 1),
+                                     stream->seqLength(),
+                                     0,
+                                     4,
+                                     !is_dspark_);
+        keepFirstNanInfo(
+            nan_info,
+            firstNanInfo(verify_nan_cpu, batch_idx_out * (propose_step_ + 1), cur_accept_len, stream->seqLength() - 1));
+        keepFirstNanInfo(
+            nan_info,
+            firstNanInfo(
+                draft_nan_cpu, token_offset, cur_accept_len, stream->seqLength() - (is_dspark_ ? 1 : 0), 0, 3));
+        if (nan_info.has_value()) {
+            stream->finishWithNan(*nan_info);
+        }
+
         torch::Tensor last_hidden_states;
-        if (propose_step_ > 1 && !is_dspark_) {
+        if (propose_step_ > 1 && !is_dspark_ && !nan_info.has_value()) {
             last_hidden_states =
                 cloneHiddenSlice(draft_model_output.all_hidden_states, token_offset + cur_accept_len - 1, 1);
         }
@@ -1739,7 +1806,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         // Draft hidden layout differs per mode: the device-state path keeps a
         // dense (propose_step_+1) rows/stream layout, while the default sync
         // path compacts draft inputs (and thus hidden rows) to accept_len.
-        token_offset += useMtpDeviceState() ? (propose_step_ + 1) : cur_accept_len;
+        token_offset += (is_dspark_ || useMtpDeviceState()) ? (propose_step_ + 1) : cur_accept_len;
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
     }

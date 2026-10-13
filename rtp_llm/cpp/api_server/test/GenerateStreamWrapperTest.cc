@@ -146,6 +146,28 @@ TEST_F(GenerateStreamWrapperTest, formatResponse_NumBeams) {
     ASSERT_EQ(res.aux_info[0].beam_responses, beam_responses);
 }
 
+TEST_F(GenerateStreamWrapperTest, formatResponse_NanDiagnosticWithAuxDisabled) {
+    auto config      = std::make_shared<GenerateConfig>();
+    config->aux_info = false;
+    GenerateOutput terminal;
+    terminal.finished   = true;
+    terminal.output_ids = torch::empty({1, 0}, torch::kInt32);
+    GenerateOutputs outputs;
+    outputs.generate_outputs.push_back(terminal);
+
+    auto clean = GenerateStreamWrapper::formatResponse({""}, outputs, config, torch::Tensor());
+    EXPECT_TRUE(clean.finished);
+    EXPECT_TRUE(clean.aux_info.empty());
+
+    outputs.generate_outputs.front().aux_info.nan_info = NumericNanInfo{3, 2, 17, 4294967301LL, 1};
+    auto result = GenerateStreamWrapper::formatResponse({""}, outputs, config, torch::Tensor());
+    EXPECT_TRUE(result.finished);
+    ASSERT_EQ(result.aux_info.size(), 1);
+    ASSERT_TRUE(result.aux_info.front().nan_info.has_value());
+    EXPECT_EQ(result.aux_info.front().nan_info->layer_id, 3);
+    EXPECT_EQ(result.aux_info.front().nan_info->element_index, 4294967301LL);
+}
+
 TEST_F(GenerateStreamWrapperTest, formatResponse_Logits) {
     torch::Tensor input_ids;
 

@@ -264,7 +264,8 @@ void registerPyOpDefs(pybind11::module& m) {
             "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
         .def_readwrite("capture_hidden_states",
                        &PyModelInputs::capture_hidden_states,
-                       "Capture configured hidden states for this homogeneous target-prefill batch");
+                       "Capture configured hidden states for this homogeneous target-prefill batch")
+        .def_readwrite("nan_metadata", &PyModelInputs::nan_metadata, "Optional int64 per-token non-finite records");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -276,7 +277,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
         .def_readwrite("mtp_target_hidden_states",
                        &PyModelOutputs::mtp_target_hidden_states,
-                       "Optional target features consumed by speculative decoding");
+                       "Optional target features consumed by speculative decoding")
+        .def_readwrite("nan_metadata", &PyModelOutputs::nan_metadata, "Optional int64 per-token non-finite records");
 }
 
 }  // namespace torch_ext

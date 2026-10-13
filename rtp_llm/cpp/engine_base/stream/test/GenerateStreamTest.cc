@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -42,10 +43,9 @@ public:
             /*layer_num=*/3, /*block_num=*/9, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_INT8);
     }
 
-    GenerateStreamPtr createContextStream(std::vector<int> input_ids) {
+    GenerateStreamPtr createContextStream(std::vector<int> input_ids, const ResourceContext& resource_context = {}) {
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -134,6 +134,130 @@ void updateOneToken(const GenerateStreamPtr& stream, int token_id) {
                     torch::Tensor(),
                     torch::Tensor(),
                     torch::Tensor()});
+}
+
+TEST_F(GenerateStreamTest, nanFinishesNormallyWithEmptyOutputAndKeepsFirstRecord) {
+    GenerateStreamBuilder builder;
+    ResourceContext       resource;
+    resource.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+    ASSERT_TRUE(resource.cache_manager->init());
+    auto stream = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createContextStream({1, 2, 3}, resource));
+    stream->generateConfig()->aux_info       = false;
+    stream->generateConfig()->max_new_tokens = 10;
+    stream->setReturnAllProbs(ReturnAllProbsMode::DEFAULT);
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+
+    stream->finishWithNan({2, 1, 1, 37, 1});
+    stream->finishWithNan({0, 2, 2, 9, 2});
+    updateOneToken(stream, 7);  // A queued async update must not append tokens.
+    ASSERT_FALSE(stream->hasError());
+    EXPECT_EQ(stream->seqLength(), 3);
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    const auto& terminal = output.value().generate_outputs[0];
+    EXPECT_TRUE(terminal.finished);
+    EXPECT_EQ(terminal.output_ids.numel(), 0);
+    EXPECT_EQ(terminal.aux_info.input_len, 3);
+    EXPECT_EQ(terminal.aux_info.output_len, 0);
+    EXPECT_EQ(terminal.aux_info.step_output_len, 0);
+    ASSERT_TRUE(terminal.aux_info.nan_info.has_value());
+    EXPECT_EQ(terminal.aux_info.nan_info->layer_id, 2);
+    EXPECT_EQ(terminal.aux_info.nan_info->element_index, 37);
+    EXPECT_EQ(terminal.aux_info.nan_info->kind, 1);
+    EXPECT_FALSE(stream->hasOutput());
+}
+
+TEST_F(GenerateStreamTest, nanBeforeBeamExpansionReturnsConfiguredTerminalWidth) {
+    for (bool variable : {false, true}) {
+        ModelConfig model;
+        model.max_seq_len                            = 16;
+        model.vocab_size                             = 32;
+        auto input                                   = std::make_shared<GenerateInput>();
+        input->input_ids                             = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config                       = std::make_shared<GenerateConfig>();
+        input->generate_config->max_new_tokens       = 5;
+        input->generate_config->num_beams            = variable ? 1 : 3;
+        input->generate_config->variable_num_beams   = variable ? std::vector<int>{2, 3} : std::vector<int>{};
+        input->generate_config->num_return_sequences = 1;
+        input->generate_config->aux_info             = false;
+        ResourceContext resource;
+        resource.cache_manager = std::make_shared<KVCacheManager>(GenerateStreamBuilder().init_config());
+        ASSERT_TRUE(resource.cache_manager->init());
+        auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resource, nullptr);
+        stream->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        ASSERT_EQ(stream->currentBatchSize(), 1);
+        stream->finishWithNan({1, 2, 0, 9, 1});
+        auto result = stream->nextOutput();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result.value().generate_outputs.size(), 3);
+        for (const auto& output : result.value().generate_outputs) {
+            EXPECT_TRUE(output.finished);
+            EXPECT_EQ(output.output_ids.numel(), 0);
+            ASSERT_TRUE(output.aux_info.nan_info.has_value());
+            EXPECT_EQ(output.aux_info.nan_info->token_index, 0);
+            EXPECT_EQ(output.aux_info.input_len, 3);
+            EXPECT_EQ(output.aux_info.output_len, 0);
+        }
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_EQ(stream->currentBatchSize(), 1);
+        EXPECT_EQ(stream->seqLength(), 3);
+        EXPECT_FALSE(stream->hasOutput());
+    }
+}
+
+TEST_F(GenerateStreamTest, nanDuringVariableBeamDecodePreservesHealthyTokenHistory) {
+    for (const auto& widths : {std::vector<int>{2, 3}, std::vector<int>{3, 2}}) {
+        SCOPED_TRACE(::testing::Message() << "initial=" << widths.front() << " final=" << widths.back());
+        ModelConfig model;
+        model.max_seq_len                          = 16;
+        model.vocab_size                           = 32;
+        auto input                                 = std::make_shared<GenerateInput>();
+        input->input_ids                           = torch::tensor({1, 2, 3}, torch::kInt32);
+        input->generate_config                     = std::make_shared<GenerateConfig>();
+        input->generate_config->variable_num_beams = widths;
+        input->generate_config->max_new_tokens     = 5;
+        input->generate_config->aux_info           = false;
+        input->generate_config->is_streaming       = false;
+        ResourceContext resource;
+        resource.cache_manager = std::make_shared<KVCacheManager>(GenerateStreamBuilder().init_config());
+        ASSERT_TRUE(resource.cache_manager->init());
+        auto stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, resource, nullptr);
+        stream->reportEvent(StreamEvents::CanRun);
+        ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+        auto healthy_tokens = torch::tensor({{1, 2, 3, 7}, {1, 2, 3, 8}, {1, 2, 3, 9}}, torch::kInt32)
+                                  .narrow(0, 0, widths.front())
+                                  .contiguous();
+        stream->update({healthy_tokens, 1, {}, {}, {}, {}, {}, {}, {}, {}});
+        ASSERT_FALSE(stream->hasError());
+        ASSERT_FALSE(stream->hasOutput());
+        ASSERT_EQ(stream->currentBatchSize(), widths.front());
+        ASSERT_EQ(stream->seqLength(), 4);
+        stream->finishWithNan({1, 2, 3, 9, 1});
+        auto result = stream->nextOutput();
+        ASSERT_TRUE(result.ok());
+        ASSERT_EQ(result.value().generate_outputs.size(), widths.back());
+        for (int row = 0; row < widths.back(); ++row) {
+            const auto& output = result.value().generate_outputs[row];
+            EXPECT_TRUE(output.finished);
+            ASSERT_EQ(output.output_ids.numel(), 1);
+            EXPECT_EQ(output.output_ids[0][0].item<int32_t>(), 7 + std::min(row, widths.front() - 1));
+            ASSERT_TRUE(output.aux_info.nan_info.has_value());
+            EXPECT_EQ(output.aux_info.output_len, 1);
+            EXPECT_EQ(output.aux_info.step_output_len, 1);
+        }
+        // Expansion/selection affects only the response. Even a beam omitted
+        // by the configured final width keeps its committed token history.
+        EXPECT_EQ(stream->currentBatchSize(), widths.front());
+        EXPECT_EQ(stream->seqLength(), 4);
+        for (int row = 0; row < widths.front(); ++row) {
+            EXPECT_EQ(stream->getCompleteTokenIds()->completeTokenIdsVec(row), (std::vector<int>{1, 2, 3, 7 + row}));
+        }
+        EXPECT_FALSE(stream->hasError());
+        EXPECT_FALSE(stream->hasOutput());
+    }
 }
 
 TEST_F(GenerateStreamTest, testConstruct) {

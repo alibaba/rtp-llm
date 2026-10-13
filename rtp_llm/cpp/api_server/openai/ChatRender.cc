@@ -42,6 +42,22 @@ std::optional<th::Tensor> getCustomOutput(const GenerateOutputs& outputs) {
     return outputs.generate_outputs.empty() ? std::nullopt : outputs.generate_outputs.back().custom_output;
 }
 
+py::object getNanInfo(const GenerateOutputs& outputs) {
+    for (const auto& output : outputs.generate_outputs) {
+        if (output.aux_info.nan_info.has_value()) {
+            const auto& info = *output.aux_info.nan_info;
+            py::dict    result;
+            result["layer_id"]      = info.layer_id;
+            result["stage"]         = info.stage;
+            result["token_index"]   = info.token_index;
+            result["element_index"] = info.element_index;
+            result["kind"]          = info.kind;
+            return result;
+        }
+    }
+    return py::none();
+}
+
 void RenderContext::render_stream_response_first_blocking(int n) {
     py::gil_scoped_acquire acquire;
     auto                   response = render_->attr("render_stream_response_first_blocking")(n);
@@ -84,8 +100,12 @@ void RenderContext::render_stream_response_flush_blocking(const GenerateOutputs&
 void RenderContext::render_stream_response_final_blocking(const GenerateOutputs& outputs) {
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
-    auto response = render_->attr("render_stream_response_final_blocking")(
-        *status_list_, input_len_list, output_len_list, reuse_len_list, getCustomOutput(outputs));
+    auto response = render_->attr("render_stream_response_final_blocking")(*status_list_,
+                                                                           input_len_list,
+                                                                           output_len_list,
+                                                                           reuse_len_list,
+                                                                           getCustomOutput(outputs),
+                                                                           py::arg("nan_info") = getNanInfo(outputs));
     complete_responses_->append(response);
 }
 
@@ -148,8 +168,12 @@ std::string RenderContext::render_stream_response_flush(const GenerateOutputs&  
 std::string RenderContext::render_stream_response_final(const GenerateOutputs& outputs) {
     py::gil_scoped_acquire acquire;
     auto [input_len_list, output_len_list, reuse_len_list, all_probs_list, output_ids_list] = getArgs(outputs);
-    auto json_response = render_->attr("render_stream_response_final")(
-        *status_list_, input_len_list, output_len_list, reuse_len_list, getCustomOutput(outputs));
+    auto json_response = render_->attr("render_stream_response_final")(*status_list_,
+                                                                       input_len_list,
+                                                                       output_len_list,
+                                                                       reuse_len_list,
+                                                                       getCustomOutput(outputs),
+                                                                       py::arg("nan_info") = getNanInfo(outputs));
     auto res = py::cast<std::string>(json_response);
     return res;
 }

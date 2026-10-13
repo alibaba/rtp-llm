@@ -134,6 +134,9 @@ struct GptModelOutputs {
     torch::Tensor custom_output;
     // The dispatcher turns handler failures into per-stream execution errors.
     std::string custom_output_error;
+    // Packed model-input token order, including all target-verify positions.
+    // The executor filters speculative rows using the accepted token lengths.
+    torch::Tensor nan_metadata;
 };
 
 struct CopyParams {

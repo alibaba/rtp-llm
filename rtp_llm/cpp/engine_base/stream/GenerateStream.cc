@@ -1067,6 +1067,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // already covers stop/EOS/max-token boundaries.
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
+    if (nan_info_.has_value()) {
+        return;
+    }
     RTP_LLM_LOG_DEBUG("stream [%s] spec update", streamLogTag().c_str());
     is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
@@ -1145,6 +1148,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+    if (update_info.proposal_nan_metadata.has_value()) {
+        sp_output_buffer_->proposal_nan_metadata = *update_info.proposal_nan_metadata;
+    }
     // Apply the explicit tri-state proposal update. PD partial updates use
     // nullopt to preserve the handoff proposal; GPU/CPU proposal producers use
     // a defined/undefined Tensor respectively to replace or clear the mirror.
@@ -1196,9 +1202,35 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   update_info.force_update_info});
 }
 
+void GenerateStream::finishWithNan(const NumericNanInfo& nan_info) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (nan_info_.has_value() || hasErrorWithoutLock() || generate_status_->checkFinished()) {
+        return;
+    }
+    nan_info_ = nan_info;
+    // updateOutput owns the ordinary completion queue and notification. Do not
+    // pass through token-history/sampler bookkeeping for this terminal update.
+    auto             empty_tokens = torch::empty({static_cast<int64_t>(currentBatchSize()), 0}, torch::kInt32);
+    StreamUpdateInfo terminal_update{empty_tokens,
+                                     0,
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     /*update_remote_generate=*/false};
+    updateOutput(terminal_update);
+}
+
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
+    if (nan_info_.has_value()) {
+        return;
+    }
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
     is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {

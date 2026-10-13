@@ -50,3 +50,17 @@ py_test (
     },
     tags = ["L20_CU13"],
 )
+py_test(
+    name = "nan_check_test",
+    srcs = ["nan_check_test.py"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py:utils",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
+)

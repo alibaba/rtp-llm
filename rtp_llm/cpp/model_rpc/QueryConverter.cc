@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 
+#include <algorithm>
 #include <optional>
 
 #include <numeric>
@@ -420,9 +421,13 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
         return;
     }
     FlattenOutputPB* flatten_output = outputs->mutable_flatten_output();
+    const bool       include_aux_info =
+        dump_aux_info || std::any_of(source_outputs.begin(), source_outputs.end(), [](const auto& output) {
+            return output.aux_info.nan_info.has_value();
+        });
     for (const auto& response : source_outputs) {
         flatten_output->add_finished(response.finished);
-        if (dump_aux_info) {
+        if (include_aux_info) {
             auto* aux_info = flatten_output->add_aux_info();
             aux_info->set_cost_time_us(response.aux_info.cost_time_us);
             aux_info->set_first_token_cost_time_us(response.aux_info.first_token_cost_time_us);
@@ -453,6 +458,15 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
                 aux_info->add_speculative_accepted_tokens_per_pos(accepted_tokens);
             }
             aux_info->set_generation_prefill_cuda_graph_status(response.aux_info.generation_prefill_cuda_graph_status);
+            if (response.aux_info.nan_info.has_value()) {
+                const auto& nan_info = *response.aux_info.nan_info;
+                auto*       nan_pb   = aux_info->mutable_nan_info();
+                nan_pb->set_layer_id(nan_info.layer_id);
+                nan_pb->set_stage(nan_info.stage);
+                nan_pb->set_token_index(nan_info.token_index);
+                nan_pb->set_element_index(nan_info.element_index);
+                nan_pb->set_kind(nan_info.kind);
+            }
             aux_info->set_aux_string(aux_string);
             auto* mm_map = aux_info->mutable_multimodal_lengths();
             for (const auto& [key, value] : response.aux_info.multimodal_lengths) {

@@ -963,6 +963,41 @@ class TpSyncModelInputsIntegrationTest(unittest.TestCase):
 
 
 class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM", "isolated ROCm module stubs"
+    )
+    def test_nan_metadata_maps_selected_cp_and_prefill_rows(self) -> None:
+        hidden = torch.zeros((3, 2), dtype=torch.float16, device="cuda")
+        logits = torch.ones((3, 2), dtype=torch.float32, device="cuda")
+        hidden[0, 1] = float("nan")
+        logits[1, 0] = float("inf")
+        metadata = torch.zeros((7, 4), dtype=torch.int64, device="cuda")
+        indexes = torch.tensor([1, 4, 6], dtype=torch.int32).pin_memory()
+        records, safe_logits = _extension.run_nan_metadata_mapping(
+            CacheStoreForwardModel(hidden_size=2), hidden, logits, metadata, indexes
+        )
+        records = records.cpu()
+        torch.testing.assert_close(records[1], torch.tensor([1, 3, 1, 1]))
+        torch.testing.assert_close(records[4], torch.tensor([1, 4, 0, 2]))
+        self.assertEqual(records[:, 3].count_nonzero().item(), 2)
+        torch.testing.assert_close(safe_logits[:2], torch.zeros_like(safe_logits[:2]))
+        torch.testing.assert_close(safe_logits[2], logits[2])
+
+    @unittest.skipIf(
+        os.environ.get("TEST_USING_DEVICE") == "ROCM", "isolated ROCm module stubs"
+    )
+    def test_nan_metadata_post_layers_preserve_earlier_site(self) -> None:
+        hidden = torch.zeros((2, 2), dtype=torch.float16, device="cuda")
+        logits = torch.full((2, 2), float("nan"), dtype=torch.float32, device="cuda")
+        metadata = torch.zeros((2, 4), dtype=torch.int64, device="cuda")
+        metadata[0] = torch.tensor([0, 2, 5, 3], device="cuda")
+        indexes = torch.arange(2, dtype=torch.int32).pin_memory()
+        records, _ = _extension.run_nan_metadata_mapping(
+            CacheStoreForwardModel(hidden_size=2), hidden, logits, metadata, indexes
+        )
+        torch.testing.assert_close(records[0].cpu(), torch.tensor([0, 2, 5, 3]))
+        torch.testing.assert_close(records[1].cpu(), torch.tensor([1, 4, 0, 1]))
+
     def test_successful_generation_prefill_capture_does_not_reserve_request_blocks(
         self,
     ) -> None:

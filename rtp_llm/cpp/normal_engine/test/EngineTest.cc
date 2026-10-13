@@ -1,6 +1,7 @@
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 
 #define private public
@@ -644,6 +645,166 @@ protected:
     // Keep torch and pybind interpreter state alive across all selector cases.
     inline static std::unique_ptr<py::scoped_interpreter> interpreter_;
 };
+
+// Exercise the production Python detector inside a model forward and let the
+// normal engine carry its result through sampling, dispatch and terminal output.
+struct NumericProbeObservations {
+    std::atomic<int> prefill_forwards{0};
+    std::atomic<int> pure_decode_forwards{0};
+};
+
+class NumericProbeModel: public MockModel {
+public:
+    NumericProbeModel(size_t                                    vocab_size,
+                      float                                     value,
+                      bool                                      prefill,
+                      std::shared_ptr<NumericProbeObservations> observations):
+        MockModel(vocab_size), value_(value), prefill_(prefill), observations_(std::move(observations)) {}
+
+    GptModelOutputs forward(const GptModelInputs& inputs) override {
+        auto outputs = MockModel::forward(inputs);
+        if (!outputs.logits.defined()) {
+            return outputs;
+        }
+        const auto tokens      = inputs.combo_tokens.to(torch::kCUDA);
+        const auto rows        = torch::arange(tokens.numel(), tokens.options().dtype(torch::kInt64));
+        const auto decode_rows = inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
+        if (tokens.numel() > decode_rows) {
+            ++observations_->prefill_forwards;
+        } else if (decode_rows > 0) {
+            ++observations_->pure_decode_forwards;
+        }
+        const auto indexes  = inputs.lm_output_indexes.to(tokens.device(), torch::kInt64);
+        auto       affected = tokens.eq(99) & (prefill_ ? rows.ge(decode_rows) : rows.lt(decode_rows));
+        if (prefill_) {
+            const auto starts =
+                torch::cat({torch::zeros({1}, indexes.options()), indexes.narrow(0, 0, indexes.numel() - 1) + 1});
+            auto first_rows = torch::zeros_like(tokens, tokens.options().dtype(torch::kBool));
+            first_rows.index_fill_(0, starts, true);
+            affected &= first_rows;
+        }
+        auto hidden = torch::zeros({tokens.numel(), 4}, outputs.logits.options());
+        hidden.select(1, 2).masked_fill_(affected, value_);
+        outputs.nan_metadata = torch::zeros({tokens.numel(), 4}, tokens.options().dtype(torch::kInt64));
+        {
+            py::gil_scoped_acquire acquire;
+            auto                   detector = py::module_::import("rtp_llm.models_py.utils.nan_check");
+            auto                   metadata = detector.attr("NanCheckMetadata")(outputs.nan_metadata, 1, 1);
+            detector.attr("detect_nan")(hidden, metadata);
+        }
+        // Keep request identities stable in decode without exposing nonfinite
+        // values to the sampler: the model's hidden state is the injected site.
+        const auto selected = tokens.index_select(0, indexes).to(torch::kInt64);
+        outputs.logits.fill_(-100.0f);
+        outputs.logits.scatter_(1, selected.reshape({-1, 1}), 100.0f);
+        return outputs;
+    }
+
+private:
+    float                                     value_;
+    bool                                      prefill_;
+    std::shared_ptr<NumericProbeObservations> observations_;
+};
+
+TEST_F(NormalEngineCustomOutputTest, NumericDetectorFinishesOnlyAffectedRequest) {
+    const std::vector<float> values = {std::numeric_limits<float>::quiet_NaN(),
+                                       std::numeric_limits<float>::infinity(),
+                                       -std::numeric_limits<float>::infinity()};
+    for (bool prefill : {true, false}) {
+        for (size_t kind = 0; kind < values.size(); ++kind) {
+            SCOPED_TRACE(::testing::Message() << "prefill=" << prefill << " kind=" << kind + 1);
+            ModelConfig   model;
+            RuntimeConfig runtime;
+            KVCacheConfig cache;
+            CustomConfig  config;
+            config.output_dispatcher_worker_count = 2;
+            auto params                           = createEngineInitParams(config, model, runtime, cache);
+            auto observations                     = std::make_shared<NumericProbeObservations>();
+            NormalExecutor::test_model_factory    = [&](const GptModelInitParams&) {
+                return std::make_unique<NumericProbeModel>(model.vocab_size, values[kind], prefill, observations);
+            };
+            struct FactoryResetGuard {
+                ~FactoryResetGuard() {
+                    NormalExecutor::test_model_factory = nullptr;
+                }
+            } guard;
+            auto  engine   = std::make_shared<NormalEngine>(params, nullptr);
+            auto* executor = dynamic_cast<NormalExecutor*>(engine->executor_.get());
+            ASSERT_NE(executor, nullptr);
+            const char* async_env = std::getenv("RTP_LLM_STREAM_ASYNC");
+            EXPECT_EQ(executor->useStreamAsync(), async_env != nullptr && std::string(async_env) == "1");
+            auto bad                               = makeQuery(3, 99);
+            bad->input_ids                         = torch::tensor({99, 99, 99, 99}, torch::kInt32);
+            auto healthy                           = makeQuery(3);
+            bad->generate_config->is_streaming     = true;
+            healthy->generate_config->is_streaming = true;
+            bad->generate_config->aux_info         = false;
+            // Python-owned engine/parameter objects are created with the GIL.
+            // Stop the loop before reacquiring it, including fatal-test exits.
+            py::gil_scoped_release release;
+            struct StopBeforeGilRestore {
+                std::shared_ptr<NormalEngine> engine;
+                bool                          stopped = false;
+                ~StopBeforeGilRestore() {
+                    if (!stopped) {
+                        (void)engine->stop();
+                    }
+                }
+            } stop_guard{engine};
+            auto [success, streams] = engine->enqueueMultiple({bad, healthy});
+            ASSERT_EQ(success, (std::vector<bool>{true, true}));
+            ASSERT_EQ(streams.size(), 2);
+            for (size_t request = 0; request < streams.size(); ++request) {
+                int  emitted = 0;
+                bool done    = false;
+                for (int frame = 0; frame < 4 && !done; ++frame) {
+                    auto result = streams[request]->nextOutput(30000);
+                    ASSERT_TRUE(result.ok());
+                    ASSERT_EQ(result.value().generate_outputs.size(), 1);
+                    const auto& output = result.value().generate_outputs[0];
+                    emitted += output.output_ids.numel();
+                    done = output.finished;
+                    if (request == 0 && done) {
+                        EXPECT_EQ(output.output_ids.numel(), 0);
+                        EXPECT_EQ(output.aux_info.input_len, 4);
+                        EXPECT_EQ(output.aux_info.output_len, prefill ? 0 : 1);
+                        EXPECT_EQ(output.aux_info.step_output_len, 0);
+                        ASSERT_TRUE(output.aux_info.nan_info.has_value());
+                        EXPECT_EQ(output.aux_info.nan_info->kind, kind + 1);
+                        EXPECT_EQ(output.aux_info.nan_info->layer_id, 1);
+                        EXPECT_EQ(output.aux_info.nan_info->stage, 1);
+                        EXPECT_EQ(output.aux_info.nan_info->element_index, 2);
+                        EXPECT_EQ(output.aux_info.nan_info->token_index, prefill ? 0 : 4);
+                    } else {
+                        EXPECT_FALSE(output.aux_info.nan_info.has_value());
+                    }
+                }
+                EXPECT_TRUE(done);
+                EXPECT_FALSE(streams[request]->hasError());
+                EXPECT_EQ(emitted, request == 0 ? (prefill ? 0 : 1) : 3);
+            }
+            // Check the request's terminal state before engine shutdown, which
+            // cancels streams that the scheduler has not removed yet.
+            for (const auto& stream : streams) {
+                EXPECT_FALSE(stream->hasOutput());
+                auto after_terminal = stream->nextOutput(1000);
+                EXPECT_FALSE(after_terminal.ok());
+                EXPECT_EQ(after_terminal.status().code(), ErrorCode::FINISHED);
+                EXPECT_FALSE(stream->hasError());
+            }
+            const auto stop_status = engine->stop();
+            stop_guard.stopped     = true;
+            ASSERT_TRUE(stop_status.ok());
+            EXPECT_GT(observations->prefill_forwards.load(), 0);
+            EXPECT_GT(observations->pure_decode_forwards.load(), 0);
+            // Joining the engine drains pending async bookkeeping. Any stale
+            // update that appended another terminal frame is now observable.
+            for (const auto& stream : streams) {
+                EXPECT_FALSE(stream->hasOutput());
+            }
+        }
+    }
+}
 
 TEST_F(NormalEngineCustomOutputTest, testCustomOutputSelectedOnceBeforeSystemPrefix) {
     CustomConfig config;

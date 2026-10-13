@@ -13,7 +13,7 @@ import json
 import logging
 import struct
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from enum import IntEnum
 from functools import cache
 from itertools import chain
@@ -34,7 +34,7 @@ from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
 
 if TYPE_CHECKING:
     from rtp_llm.config.generate_config import GenerateConfig
-    from rtp_llm.utils.base_model_datatypes import MMUrlType
+    from rtp_llm.utils.base_model_datatypes import AuxInfo, MMUrlType
 
 _INT32_MIN = -2_147_483_648
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -1471,6 +1471,18 @@ def _append_aux_info_metrics_outputs(
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
     _append_int32_scalar_output(infer, "prompt_cached_token_num", reuse_len)
     _append_prompt_cache_usage_parameters(infer, input_len, reuse_len)
+    _update_nan_info_parameter(infer, ax)
+
+
+def _update_nan_info_parameter(
+    infer: predict_v2_pb2.ModelInferResponse, ax: AuxInfo | None
+) -> None:
+    if ax is not None and ax.nan_info is not None:
+        infer.parameters["aux_info"].string_param = json.dumps(
+            {"nan_info": asdict(ax.nan_info)}, separators=(",", ":")
+        )
+    elif "aux_info" in infer.parameters:
+        del infer.parameters["aux_info"]
 
 
 def build_stream_response_from_generate_outputs(
@@ -1711,6 +1723,7 @@ class StreamResponseBuilder:
         response = predict_v2_pb2.ModelStreamInferResponse()
         response.CopyFrom(self._template)
         infer = response.infer_response
+        _update_nan_info_parameter(infer, aux_info)
 
         generated_raw = (
             struct.pack("<%di" % len(generated_ids), *generated_ids)

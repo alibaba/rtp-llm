@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc import codec
+from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DASH_ERROR_ABORT,
     DASH_ERROR_CAPACITY,
@@ -40,6 +40,7 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutput,
     GenerateOutputs,
     MMUrlType,
+    NumericNanInfo,
 )
 
 
@@ -1478,6 +1479,73 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             4,
         )
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 10)
+
+    def test_nan_termination_keeps_normal_response_and_diagnostic(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.empty(0, dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(nan_info=NumericNanInfo(3, 2, 17, 51, 1)),
+        )
+        response = StreamResponseBuilder(
+            dash_sc_request_id="nan-request",
+            model_name="model",
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="nan"),
+        ).build(GenerateOutputs(generate_outputs=[out]))
+
+        self.assertFalse(response.error_message)
+        diagnostic = json.loads(
+            response.infer_response.parameters["aux_info"].string_param
+        )["nan_info"]
+        self.assertEqual(diagnostic["layer_id"], 3)
+        self.assertEqual(diagnostic["stage"], 2)
+        self.assertEqual(diagnostic["token_index"], 17)
+        self.assertEqual(diagnostic["element_index"], 51)
+        self.assertEqual(diagnostic["kind"], 1)
+
+    def test_nan_terminal_updates_cached_healthy_response(self) -> None:
+        builder = StreamResponseBuilder(
+            dash_sc_request_id="nan-decode-request",
+            model_name="model",
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="nan"),
+        )
+        healthy = builder.build(
+            GenerateOutputs(
+                generate_outputs=[
+                    GenerateOutput(
+                        output_ids=torch.tensor([[7]], dtype=torch.int32),
+                        finished=False,
+                        aux_info=AuxInfo(input_len=5, output_len=1),
+                    )
+                ]
+            )
+        )
+        self.assertNotIn("aux_info", healthy.infer_response.parameters)
+        terminal = builder.build(
+            GenerateOutputs(
+                generate_outputs=[
+                    GenerateOutput(
+                        output_ids=torch.empty((1, 0), dtype=torch.int32),
+                        finished=True,
+                        aux_info=AuxInfo(
+                            input_len=5,
+                            output_len=1,
+                            nan_info=NumericNanInfo(3, 2, 5, 51, 1),
+                        ),
+                    )
+                ]
+            )
+        )
+
+        self.assertFalse(terminal.error_message)
+        infer = terminal.infer_response
+        diagnostic = json.loads(infer.parameters["aux_info"].string_param)
+        self.assertEqual(diagnostic["nan_info"]["token_index"], 5)
+        outputs = {out.name: index for index, out in enumerate(infer.outputs)}
+        self.assertEqual(list(infer.outputs[outputs["generated_ids"]].shape), [1, 0])
+        self.assertEqual(infer.raw_output_contents[outputs["finished"]], b"\x01")
+        self.assertEqual(len(infer.outputs), len(healthy.infer_response.outputs))
+        self.assertEqual(len(outputs), len(infer.outputs))
+        self.assertNotIn("aux_info", healthy.infer_response.parameters)
 
     def test_dash_error_response_uses_inner_error_fields(self) -> None:
         resp = build_dash_error_response(

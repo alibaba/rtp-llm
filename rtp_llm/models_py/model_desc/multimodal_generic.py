@@ -5,6 +5,7 @@ import torch
 from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
 from rtp_llm.models_py.modules import MultimodalEmbeddingInjector
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 
 
@@ -41,10 +42,15 @@ class MultimodalGenericModel(GenericMoeModel):
                 residual,
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             hidden_states = output.hidden_states
             residual = output.residual
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states)
+        return finish_nan_check(
+            PyModelOutputs(hidden_states),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )

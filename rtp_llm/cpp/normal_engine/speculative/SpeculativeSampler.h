@@ -20,6 +20,10 @@ public:
     torch::Tensor accept_tokens_cpu;
     torch::Tensor accept_len_cpu;
 
+    // Keep per-token records until rejection sampling has selected the committed prefix.
+    torch::Tensor verify_nan_metadata;
+    torch::Tensor proposal_nan_metadata;
+
     std::shared_ptr<torch::Event> transfer_done_event;
 
     // Per-stream verify errors from SpecLogitsVerifyRunner (main #1006 contract).

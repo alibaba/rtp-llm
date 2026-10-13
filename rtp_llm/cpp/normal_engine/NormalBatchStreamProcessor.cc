@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/normal_engine/NanDetection.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 
 namespace rtp_llm {
@@ -56,9 +57,31 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
     return output_dispatcher_->dispatch(stream_groups, merge_outputs);
 }
 
-absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
-    const StreamGroups& stream_groups, GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status) const {
+absl::Status
+NormalBatchStreamProcessor::dispatchPrefillOnly(const StreamGroups&              stream_groups,
+                                                GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status,
+                                                const torch::Tensor&             nan_metadata,
+                                                const torch::Tensor&             draft_nan_metadata,
+                                                int                              draft_token_shift) const {
+    const auto metadata_cpu = nan_metadata.defined() ? nan_metadata.cpu().contiguous() : torch::Tensor();
+    const auto draft_cpu    = draft_nan_metadata.defined() ? draft_nan_metadata.cpu().contiguous() : torch::Tensor();
+    int64_t    token_offset = 0;
     for (const auto& stream : stream_groups.allStreams()) {
+        const auto token_size = stream->currentExecuteTokenSize();
+        auto       nan_info   = firstNanInfo(
+            metadata_cpu, token_offset, token_size, stream->prefixLength(), token_size / stream->currentBatchSize());
+        keepFirstNanInfo(nan_info,
+                         firstNanInfo(draft_cpu,
+                                      token_offset,
+                                      token_size,
+                                      stream->prefixLength() + draft_token_shift,
+                                      token_size / stream->currentBatchSize(),
+                                      3));
+        token_offset += token_size;
+        if (nan_info.has_value()) {
+            stream->finishWithNan(*nan_info);
+            continue;
+        }
         auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
         stream->update({empty_token_ids,
                         /*num_new_tokens=*/0,

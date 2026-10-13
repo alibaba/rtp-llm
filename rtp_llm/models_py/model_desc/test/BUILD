@@ -3,6 +3,18 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "nan_check_test",
+    srcs = ["nan_check_test.py"],
+    deps = py_test_deps,
+    env = {"GPU_COUNT": "1"},
+    tags = ["L20_CU13"],
+    exec_properties = {
+        "gpu": "L20_CU13",
+        "gpu_count": "1",
+    },
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

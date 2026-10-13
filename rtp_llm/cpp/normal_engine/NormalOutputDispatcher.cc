@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalOutputDispatcher.h"
+#include "rtp_llm/cpp/normal_engine/NanDetection.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -170,6 +171,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                need_d2h_sync = false;
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    const torch::Tensor nan_metadata_cpu = copyToPinnedCpuAsync(merge_outputs.model_output.nan_metadata, need_d2h_sync);
     const torch::Tensor custom_output_cpu =
         copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
@@ -228,6 +230,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  new_tokens_all,
                                  token_ids_cpu,
                                  success_cpu,
+                                 nan_metadata_cpu,
                                  custom_output_cpu,
                                  custom_output_batch_idx);
         };
@@ -268,6 +271,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
                                                   const torch::Tensor& success_cpu,
+                                                  const torch::Tensor& nan_metadata_cpu,
                                                   const torch::Tensor& custom_output_cpu,
                                                   int                  custom_output_batch_idx) const {
 
@@ -279,6 +283,13 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
     auto cur_batch_size  = stream->currentBatchSize();
     auto next_batch_size = stream->nextBatchSize();
     auto token_size      = stream->currentExecuteTokenSize();
+
+    const auto tokens_per_sequence = token_size / cur_batch_size;
+    const auto token_base          = stream->isContextStream() ? stream->prefixLength() : stream->seqLength() - 1;
+    if (auto nan_info = firstNanInfo(nan_metadata_cpu, token_offset, token_size, token_base, tokens_per_sequence)) {
+        stream->finishWithNan(*nan_info);
+        return;
+    }
 
     // Only uncached selected tokens occupy rows in the custom output batch.
     torch::Tensor batch_custom_output;

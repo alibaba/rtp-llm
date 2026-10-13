@@ -123,6 +123,7 @@ from rtp_llm.models_py.modules.factory.attention.common import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     synchronized_moe_chunk_plan,
 )
+from rtp_llm.models_py.utils.nan_check import finish_nan_check
 from rtp_llm.ops import ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     KVCache,
@@ -342,6 +343,7 @@ def forward_layers(
     attention_inputs: Any = None,
     prepare_hidden_fn: Optional[Any] = None,
     capture_context: Optional[Any] = None,
+    nan_metadata: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -632,6 +634,9 @@ def forward_layers(
                 if prefill_fast_layer_calls is not None
                 else v4.layers
             )
+            nan_kwargs = (
+                {"nan_metadata": nan_metadata} if nan_metadata is not None else {}
+            )
             for layer_idx, layer_call in enumerate(layer_calls):
                 with layer_forward_range(layer_idx):
                     h = layer_call(
@@ -641,6 +646,7 @@ def forward_layers(
                         cu_seqlens,  # [B+1]
                         kv_cache=kv_cache,
                         block_tables_by_type=block_tables_by_type,
+                        **nan_kwargs,
                     )  # [T, hc, dim]
                     if layer_idx in capture_ids:
                         v4.capture_aux_hidden(layer_idx, h)
@@ -941,6 +947,9 @@ def forward_prefill(
         attn_inputs=attn,
         attention_inputs=attn_inputs,
         prepare_hidden_fn=prepare_hidden_fn,
+        nan_metadata=getattr(inputs, "nan_metadata", None),
         capture_context=capture_context,
     )  # [T_total, dim] or [T_total, (num_capture_layers + 1) * dim]
-    return PyModelOutputs(hidden)
+    return finish_nan_check(
+        PyModelOutputs(hidden), getattr(inputs, "nan_metadata", None), len(v4.layers)
+    )

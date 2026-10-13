@@ -149,6 +149,17 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
 }
 
+TEST(InferenceDataTypeTest, NanInfoOnlyWhenPresent) {
+    AuxInfo info;
+    EXPECT_EQ(ToJsonString(AuxInfoAdapter(info), true).find("nan_info"), std::string::npos);
+    info.nan_info   = NumericNanInfo{4, 1, 23, 51, 3};
+    const auto json = ToJsonString(AuxInfoAdapter(info), true);
+    EXPECT_NE(json.find(R"("nan_info":{)"), std::string::npos);
+    EXPECT_NE(json.find(R"("layer_id":4)"), std::string::npos);
+    EXPECT_NE(json.find(R"("token_index":23)"), std::string::npos);
+    EXPECT_NE(json.find(R"("kind":3)"), std::string::npos);
+}
+
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {
     MultiSeqsResponse res;
     res.response.push_back("fake response 1");

@@ -33,6 +33,12 @@ from rtp_llm.models_py.modules import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
+from rtp_llm.models_py.utils.nan_check import (
+    NanCheckMetadata,
+    NanCheckStage,
+    detect_nan,
+    finish_nan_check,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -346,6 +352,7 @@ class GenericMoeDecoderLayer(nn.Module):
         residual: torch.Tensor,
         fmha_impl: Any,
         kv_cache: Optional[LayerKVCache] | Mapping[str, Optional[LayerKVCache]] = None,
+        nan_metadata: Optional[torch.Tensor] = None,
     ) -> DecodeLayerOutput:
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -355,9 +362,19 @@ class GenericMoeDecoderLayer(nn.Module):
             kv_cache=kv_cache,
         )
 
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.ATTENTION),
+            )
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         hidden_states = self.mlp(hidden_states)
+        if nan_metadata is not None:
+            detect_nan(
+                hidden_states,
+                NanCheckMetadata(nan_metadata, self.layer_idx, NanCheckStage.FFN),
+            )
 
         return DecodeLayerOutput(hidden_states, residual)
 
@@ -546,12 +563,17 @@ class GenericMoeModel(GptModelBase):
                 residual,
                 layer_fmha_impl,
                 kv_cache=layer_kv_cache,
+                nan_metadata=getattr(inputs, "nan_metadata", None),
             )
             hidden_states = output.hidden_states
             residual = output.residual
             capture.capture_layer(i, hidden_states, residual)
 
-        return capture.finalize(hidden_states, residual)
+        return finish_nan_check(
+            capture.finalize(hidden_states, residual),
+            getattr(inputs, "nan_metadata", None),
+            self.layer_num,
+        )
 
 
 __all__ = [

@@ -116,6 +116,14 @@ public:
     }
 };
 
+struct NumericNanInfo {
+    int64_t layer_id      = 0;
+    int64_t stage         = 0;
+    int64_t token_index   = 0;
+    int64_t element_index = 0;
+    int64_t kind          = 0;
+};
+
 struct AuxInfo {
     int32_t                      cost_time_us             = 0;
     int32_t                      iter_count               = 0;
@@ -149,6 +157,7 @@ struct AuxInfo {
     std::optional<torch::Tensor> all_probs;
     std::optional<torch::Tensor> softmax_probs;
     std::map<int, int>           multimodal_lengths = {};
+    std::optional<NumericNanInfo> nan_info;
 };
 
 struct PromptLogitsOutput {

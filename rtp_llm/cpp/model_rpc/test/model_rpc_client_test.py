@@ -270,6 +270,30 @@ class BatchedTerminalOutputTest(TestCase):
         ):
             self.assertTrue(_engine_reported_finished(result))
 
+    def test_prefill_nan_terminal_keeps_all_beams_and_diagnostics(self):
+        flat = self.pb.flatten_output
+        flat.output_ids.Clear()
+        flat.output_ids.data_type = TensorPB.INT32
+        flat.output_ids.shape.extend([4, 1, 0])
+        for _ in range(4):
+            aux = flat.aux_info.add()
+            aux.input_len = 2
+            aux.nan_info.layer_id = 1
+            aux.nan_info.stage = 2
+            aux.nan_info.token_index = 0
+            aux.nan_info.element_index = 5
+            aux.nan_info.kind = 1
+
+        result = trans_output(self.input, self.pb, StreamState())
+
+        self.assertIsInstance(result.generate_outputs, list)
+        self.assertEqual(len(result.generate_outputs), 4)
+        self.assertTrue(_engine_reported_finished(result))
+        for row in result.generate_outputs:
+            self.assertEqual(tuple(row.output_ids.shape), (1, 0))
+            self.assertEqual(row.aux_info.input_len, 2)
+            self.assertEqual(row.aux_info.nan_info.element_index, 5)
+
     def test_empty_responses_preserve_terminal_batching(self):
         state = StreamState()
         for _ in range(2):
@@ -1219,6 +1243,42 @@ class ModelRpcClientTest(TestCase):
         actual = outputs.generate_outputs[0].aux_info
         self.assertEqual(actual.speculative_draft_rounds, 7)
         self.assertEqual(actual.speculative_accepted_tokens_per_pos, [6, 4, 2])
+
+    def test_trans_output_nan_termination_preserves_row_and_aux_disabled(self):
+        for requested in (True, False):
+            with self.subTest(aux_info=requested):
+                input_py = GenerateInput(
+                    token_ids=torch.tensor([1, 2], dtype=torch.int32),
+                    generate_config=GenerateConfig(aux_info=requested),
+                    request_id=1,
+                    mm_inputs=[],
+                )
+                outputs_pb = GenerateOutputsPB()
+                flattened = outputs_pb.flatten_output
+                flattened.finished.extend([True, True])
+                flattened.aux_info.add()
+                nan_info = flattened.aux_info.add().nan_info
+                nan_info.layer_id = 3
+                nan_info.stage = 2
+                nan_info.token_index = 17
+                nan_info.element_index = 2**32 + 5
+                nan_info.kind = 1
+
+                outputs = trans_output(input_py, outputs_pb, StreamState())
+
+                self.assertEqual(len(outputs.generate_outputs), 2)
+                healthy, stopped = outputs.generate_outputs
+                self.assertTrue(stopped.finished)
+                if requested:
+                    self.assertIsNone(healthy.aux_info.nan_info)
+                else:
+                    self.assertIsNone(healthy.aux_info)
+                actual = stopped.aux_info.nan_info
+                self.assertEqual(actual.layer_id, 3)
+                self.assertEqual(actual.stage, 2)
+                self.assertEqual(actual.token_index, 17)
+                self.assertEqual(actual.element_index, 2**32 + 5)
+                self.assertEqual(actual.kind, 1)
 
     def test_trans_output_generation_prefill_cuda_graph_status_compatibility(self):
         input_py = GenerateInput(

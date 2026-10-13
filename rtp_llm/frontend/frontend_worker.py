@@ -28,6 +28,7 @@ from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
     BatchedTerminalOutputs,
     CustomOutput,
     GenerateResponse,
@@ -36,6 +37,17 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 from rtp_llm.utils.prompt_logits_utils import build_prompt_logits_dict
+
+
+def _response_aux_info(aux: Optional[AuxInfo], requested: bool) -> Dict[str, Any]:
+    if aux is None:
+        return {}
+    if requested:
+        result = asdict(aux)
+        if aux.nan_info is None:
+            result.pop("nan_info")
+        return result
+    return {"nan_info": asdict(aux.nan_info)} if aux.nan_info is not None else {}
 
 
 class PipelineResponse(BaseModel):
@@ -168,12 +180,11 @@ class FrontendWorker:
         for gen_response in responses:
             out = gen_response.generate_outputs.generate_outputs[0]
             generate_texts = gen_response.generate_texts
-            aux_info_dict: Dict[str, Any] = {}
             if gc.aux_info:
                 aux = out.aux_info
                 if gc.has_num_beams():
                     aux.beam_responses = generate_texts
-                aux_info_dict = asdict(aux)
+            aux_info_dict = _response_aux_info(out.aux_info, gc.aux_info)
             prompt_logits_dict = (
                 build_prompt_logits_dict(out.prompt_logits)
                 if gc.return_prompt_logits
@@ -279,8 +290,8 @@ class FrontendWorker:
     ) -> Dict[str, Any]:
         generate_texts = gen_responses.generate_texts
         finished = gen_responses.generate_outputs.generate_outputs[0].finished
+        aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
         if generate_config.aux_info:
-            aux_info = gen_responses.generate_outputs.generate_outputs[0].aux_info
             if generate_config.has_num_beams():
                 aux_info.beam_responses = generate_texts
         hidden_states = gen_responses.generate_outputs.generate_outputs[0].hidden_states
@@ -302,7 +313,7 @@ class FrontendWorker:
         response = PipelineResponse(
             response=generate_texts[0],
             finished=finished,
-            aux_info=asdict(aux_info) if generate_config.aux_info else {},
+            aux_info=_response_aux_info(aux_info, generate_config.aux_info),
             hidden_states=(
                 hidden_states.tolist()
                 if generate_config.return_hidden_states and hidden_states is not None
@@ -357,10 +368,15 @@ class FrontendWorker:
                     for seq in outputs
                 ]
             aux_info = []
-            if generate_config.aux_info:
-                aux_info = []
+            if generate_config.aux_info or (
+                not isinstance(outputs, BatchedTerminalOutputs)
+                and any(
+                    seq.aux_info is not None and seq.aux_info.nan_info is not None
+                    for seq in outputs
+                )
+            ):
                 for seq in gen_responses.generate_outputs.generate_outputs:
-                    info = asdict(seq.aux_info)
+                    info = _response_aux_info(seq.aux_info, generate_config.aux_info)
                     aux_info.append(info)
             sequences_pipeline_response = MultiSequencesPipelineResponse(
                 response=generate_texts,
