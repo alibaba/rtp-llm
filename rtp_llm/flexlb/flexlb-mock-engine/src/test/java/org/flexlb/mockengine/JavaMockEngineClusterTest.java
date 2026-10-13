@@ -44,8 +44,8 @@ class JavaMockEngineClusterTest {
         MockPerformanceModel model = model(
                 "10 + 5*batchSize + 0.01*sum(computeTokens)", 1.0);
         MockLruBlockCache cache = new MockLruBlockCache(100);
-        MockPerformanceModel.RequestShape first = model.shape(input(1, 100), cache);
-        MockPerformanceModel.RequestShape second = model.shape(input(2, 100), cache);
+        MockPerformanceModel.RequestShape first = model.shape(input("1", 100), cache);
+        MockPerformanceModel.RequestShape second = model.shape(input("2", 100), cache);
 
         long singleMs = model.prefillMs(List.of(first));
         long batchMs = model.prefillMs(List.of(first, second));
@@ -59,9 +59,9 @@ class JavaMockEngineClusterTest {
         JavaMockEngineCluster.FastRpcService service = service(model("180", 1.0));
 
         EngineRpcService.EnqueueBatchResponsePB firstAck = enqueue(
-                service, batch(11, slot(0, input(1, 100), input(2, 200))));
+                service, batch(11, slot(0, input("1", 100), input("2", 200))));
         EngineRpcService.EnqueueBatchResponsePB secondAck = enqueue(
-                service, batch(12, slot(0, input(3, 300), input(4, 400), input(5, 500))));
+                service, batch(12, slot(0, input("3", 300), input("4", 400), input("5", 500))));
 
         assertEquals(2, firstAck.getSuccessesCount());
         assertEquals(3, secondAck.getSuccessesCount());
@@ -101,8 +101,8 @@ class JavaMockEngineClusterTest {
         JavaMockEngineCluster.FastRpcService service = service(model("100*batchSize", 1.0));
 
         enqueue(service, batch(21,
-                slot(0, input(1, 100)),
-                slot(1, input(2, 100))));
+                slot(0, input("1", 100)),
+                slot(1, input("2", 100))));
 
         EngineRpcService.WorkerStatusPB finished = awaitStatus(service,
                 status -> status.getFinishedTaskListCount() == 2,

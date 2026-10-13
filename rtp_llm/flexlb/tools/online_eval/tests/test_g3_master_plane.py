@@ -35,7 +35,7 @@ T0 = 1_788_283_848_000  # epoch ms anchor (== first client send)
 
 ARR_BASE = "flexlb_auto_tpm_request_count_total"
 QPS_BASE = "flexlb_app_engine_balancing_master_all_qps_total"
-SCHED_BASE = "flexlb_app_flexlb_scheduler_inflight_size"
+SCHED_BASE = 'flexlb_app_flexlb_tracked_request_count{role="PREFILL",engineIp="scheduler"}'
 PB_BASE = "flexlb_app_flexlb_inflight_batch_count"
 PR_BASE = "flexlb_app_flexlb_inflight_request_count"
 DRV_BASE = "flexlb_auto_tpm_decode_reserved_count"

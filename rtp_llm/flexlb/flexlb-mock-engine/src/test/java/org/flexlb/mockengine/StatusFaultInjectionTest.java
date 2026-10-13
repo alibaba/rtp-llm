@@ -388,16 +388,18 @@ class StatusFaultInjectionTest {
         assertEquals(1, prefill.getCompletedCount(),
                 "the request DID complete internally");
 
-        // The report keeps it RUNNING forever and never publishes finished.
+        long cursor = 0L;
+        // The first report publishes the real terminal; later reports retain
+        // only the stale RUNNING entry after the caller advances its cursor.
         for (int i = 0; i < 3; i++) {
-            EngineRpcService.WorkerStatusPB status = workerStatus(prefill, 0);
+            EngineRpcService.WorkerStatusPB status = workerStatus(prefill, cursor);
             assertEquals(1, status.getRunningTaskInfoCount(),
                     "zombie must stay in runningTaskInfo (poll " + i + ")");
             assertEquals(51, status.getRunningTaskInfo(0).getRequestId());
-            assertEquals(0, status.getFinishedTaskListCount(),
-                    "zombie must never appear in finishedTaskList (poll " + i + ")");
-            assertEquals(0, status.getLatestFinishedVersion(),
-                    "no completion version is ever published (poll " + i + ")");
+            assertEquals(i == 0 ? 1 : 0, status.getFinishedTaskListCount(),
+                    "the completion must be published exactly once to this cursor");
+            assertTrue(status.getLatestFinishedVersion() > 0L);
+            cursor = status.getLatestFinishedVersion();
             Thread.sleep(50);
         }
 
@@ -420,15 +422,16 @@ class StatusFaultInjectionTest {
 
         // One decode step (1ms) finishes internally.
         Thread.sleep(150);
+        long cursor = 0L;
         for (int i = 0; i < 3; i++) {
-            EngineRpcService.WorkerStatusPB status = workerStatus(decode, 0);
+            EngineRpcService.WorkerStatusPB status = workerStatus(decode, cursor);
             assertEquals(1, status.getRunningTaskInfoCount(),
                     "decode zombie must stay in runningTaskInfo (poll " + i + ")");
             assertEquals(61, status.getRunningTaskInfo(0).getRequestId());
-            assertEquals(0, status.getFinishedTaskListCount(),
-                    "decode zombie must never appear in finishedTaskList (poll " + i + ")");
-            assertEquals(0, status.getLatestFinishedVersion(),
-                    "no decode completion version is published (poll " + i + ")");
+            assertEquals(i == 0 ? 1 : 0, status.getFinishedTaskListCount(),
+                    "the decode completion must be published exactly once to this cursor");
+            assertTrue(status.getLatestFinishedVersion() > 0L);
+            cursor = status.getLatestFinishedVersion();
             Thread.sleep(50);
         }
         assertEquals(0, decode.getInflightCount(),
@@ -597,13 +600,13 @@ class StatusFaultInjectionTest {
         EngineRpcService.WorkerStatusPB decodeDone = awaitFinished(decode, 0, 2, 5_000);
         assertEquals(2, decodeDone.getFinishedTaskListCount(),
                 "exactly the two survivors complete decode");
-        List<Long> decodeRids = new ArrayList<>();
+        List<String> decodeRids = new ArrayList<>();
         for (EngineRpcService.TaskInfoPB task : decodeDone.getFinishedTaskListList()) {
-            decodeRids.add(task.getRequestId());
+            decodeRids.add(Long.toString(task.getRequestId()));
         }
-        assertTrue(decodeRids.contains(202L) && decodeRids.contains(203L),
+        assertTrue(decodeRids.contains("202") && decodeRids.contains("203"),
                 "decode completions are the survivors: " + decodeRids);
-        assertFalse(decodeRids.contains(201L),
+        assertFalse(decodeRids.contains("201"),
                 "the failed member never reaches decode: " + decodeRids);
 
         // No leaked slots on either engine (the failed member's P-side lease
@@ -670,9 +673,9 @@ class StatusFaultInjectionTest {
         StreamCollector failedStream = new StreamCollector();
         StreamCollector survivorStream = new StreamCollector();
         prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                .setRequestId(401).build(), failedStream.observer());
+                .setRequestId(401L).build(), failedStream.observer());
         prefill.fetchResponse(EngineRpcService.FetchRequestPB.newBuilder()
-                .setRequestId(402).build(), survivorStream.observer());
+                .setRequestId(402L).build(), survivorStream.observer());
 
         EngineRpcService.EnqueueBatchResponsePB ack =
                 enqueue(prefill, batch(7401, slot(0, input(401, 10), input(402, 10))));
@@ -820,8 +823,7 @@ class StatusFaultInjectionTest {
     }
 
     /** First finished-task entry matching {@code rid} (null if absent). */
-    private static EngineRpcService.TaskInfoPB findByRid(
-            EngineRpcService.WorkerStatusPB status, long rid) {
+    private static EngineRpcService.TaskInfoPB findByRid(EngineRpcService.WorkerStatusPB status, long rid) {
         for (EngineRpcService.TaskInfoPB task : status.getFinishedTaskListList()) {
             if (task.getRequestId() == rid) {
                 return task;

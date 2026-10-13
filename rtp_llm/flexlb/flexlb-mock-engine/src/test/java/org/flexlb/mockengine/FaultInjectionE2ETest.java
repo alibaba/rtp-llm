@@ -308,7 +308,7 @@ class FaultInjectionE2ETest {
 
             AutoTpmE2EHarness.await(prefill::isStopped, 2_000,
                     "the first enqueue must trigger the configured engine crash");
-            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 1
+            AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 1
                             && prefillEndpoint.getInflightBatchCount() == 1
                             && prefillEndpoint.getLocallyOwnedRequestCount() == 1,
                     2_000, "missing ACK must retain scheduler and Prefill accounting");
@@ -319,7 +319,7 @@ class FaultInjectionE2ETest {
                     "missing ACK stays pending before the request inactivity deadline");
             assertFalse(crashed.isDone(), "the unconfirmed request stays incomplete before TTL");
             if (clientCancellation) {
-                h.scheduler.cancelRequest(9902L, 0L, CancelReason.CLIENT_CANCELLED);
+                h.scheduler.cancelRequest("9902", 0L, CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(0L, engineCancelCalls(prefill),
                     "uncertain delivery and ordinary cancellation must not send Engine Cancel");
@@ -341,7 +341,7 @@ class FaultInjectionE2ETest {
                     ? CancelReason.CLIENT_CANCELLED.getMessage() : "REQUEST_INACTIVE"));
             assertEquals(0, prefillEndpoint.getInflightBatchCount());
             assertEquals(0, prefillEndpoint.getLocallyOwnedRequestCount());
-            AutoTpmE2EHarness.await(() -> h.scheduler.getInflightSize() == 0
+            AutoTpmE2EHarness.await(() -> h.scheduler.getTrackedRequestCount() == 0
                             && h.decodeEndpoint(0).getInflightCount() == 0,
                     2_000, "TTL must release the crashed request's scheduler and Decode accounting");
             assertTrue(prefill.isStopped(), "cleanup cannot depend on the crashed Engine returning");
