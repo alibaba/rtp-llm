@@ -235,6 +235,19 @@ class FlexlbConfigSchedulingModeTest {
     }
 
     @Test
+    void encoder_limit_is_optional_and_requires_a_positive_integer() {
+        assertEquals(Integer.MAX_VALUE,
+                parse("QUEUE", "NON_BATCH", "").getDispatcher().getMaxInflightPerEncoderWorker());
+        assertEquals(3,
+                parse("QUEUE", "NON_BATCH", ",\"maxInflightPerEncoderWorker\":3")
+                        .getDispatcher().getMaxInflightPerEncoderWorker());
+        for (String value : new String[]{"0", "-1", "1.5", "\"2\"", "true", "null", "[]", "{}"}) {
+            assertThrows(ConfigValidationException.class,
+                    () -> parse("QUEUE", "NON_BATCH", ",\"maxInflightPerEncoderWorker\":" + value), value);
+        }
+    }
+
+    @Test
     void limits_require_positive_integers_without_json_coercion() {
         for (String type : new String[]{"BATCH", "NON_BATCH"}) {
             for (String value : new String[]{"0", "-1", "1.5", "\"2\"", "true", "null", "[]", "{}", "2147483648"}) {

@@ -76,7 +76,7 @@ class FlexlbTraceTest {
             assertNull(FlexlbTrace.startClient("client", context));
             assertNull(FlexlbTrace.startInternal("internal", context));
             assertEquals(context, FlexlbTrace.withSpan(Span.getInvalid(), context));
-            FlexlbTrace.setRequestAttributes(owner, 42L);
+            FlexlbTrace.setRequestAttributes(owner, "42");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.stringKey("mode"), "BATCH");
             FlexlbTrace.setScheduleAttribute(context, AttributeKey.booleanKey("batch"), true);
             FlexlbTrace.markBusinessError(context, 500, "FLEXLB_INTERNAL_ERROR");
@@ -166,7 +166,7 @@ class FlexlbTraceTest {
         Tracer tracer = GlobalOpenTelemetry.getTracer("test");
         Span root = tracer.spanBuilder("root").setSpanKind(SpanKind.SERVER).startSpan();
         try {
-            FlexlbTrace.setRequestAttributes(root, 3540218608800727041L);
+            FlexlbTrace.setRequestAttributes(root, "3540218608800727041");
         } finally {
             root.end();
         }

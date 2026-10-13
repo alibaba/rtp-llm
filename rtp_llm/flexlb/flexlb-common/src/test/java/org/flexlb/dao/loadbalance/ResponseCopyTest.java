@@ -86,6 +86,22 @@ class ResponseCopyTest {
     }
 
     @Test
+    void copiesSelectedLogicalEngineIdentity() {
+        ServerStatus sourceStatus = new ServerStatus();
+        sourceStatus.setServerIp("10.0.0.8");
+        sourceStatus.setHttpPort(8080);
+        sourceStatus.setSelectedEngineIndex(1, 2);
+        Response source = new Response();
+        source.setServerStatus(java.util.List.of(sourceStatus));
+
+        ServerStatus copy = Response.copyOf(source).getServerStatus().getFirst();
+
+        assertEquals(1, copy.getEngineIndex());
+        assertEquals(2, copy.getRoutingMultiEngineNum());
+        assertEquals("10.0.0.8:8080@1", copy.getLogicalIpPort());
+    }
+
+    @Test
     void preservesNullSourcesAndNestedValues() {
         assertNull(Response.copyOf(null));
         assertNull(ServerStatus.copyOf(null));
