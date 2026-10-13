@@ -64,7 +64,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["CP_FORCE_SINGLE_PREFILL"] = "0"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
-        os.environ["REMOTE_JIT_DIR"] = "dfs://bucket/jit"
+        os.environ["JIT_REMOTE_PATH"] = "oss://bucket/jit"
         os.environ["LOCAL_JIT_DIR"] = "/dev/shm/rtp-llm/.jit_cache"
         os.environ["JIT_CACHE_SETUP_TIMEOUT_S"] = "60"
         os.environ["MANAGE_JIT_CACHE"] = "1"
@@ -138,7 +138,7 @@ class ServerArgsSetTest(TestCase):
         # It will be set when ModelConfig is created from model_args
         self.assertEqual(
             py_env_configs.jit_config.remote_jit_dir,
-            "dfs://bucket/jit",
+            "oss://bucket/jit",
         )
         self.assertEqual(py_env_configs.jit_config.jit_cache_setup_timeout_s, 60)
         self.assertTrue(py_env_configs.jit_config.manage_jit_cache)
@@ -149,10 +149,13 @@ class ServerArgsSetTest(TestCase):
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
         os.environ["LOCAL_JIT_DIR"] = "/ignored/env/cache"
+        os.environ["JIT_REMOTE_PATH"] = "oss://bucket/env-cache"
         sys.argv = [
             "prog",
             "--local_jit_dir",
             "/dev/shm/cli-cache",
+            "--remote_jit_dir",
+            "oss://bucket/cli-cache",
             "--model_type",
             "llama",
             "--checkpoint_path",
@@ -196,6 +199,9 @@ class ServerArgsSetTest(TestCase):
         # Verify model_args
         self.assertEqual(py_env_configs.model_args.model_type, "llama")
         self.assertEqual(py_env_configs.jit_config.local_jit_dir, "/dev/shm/cli-cache")
+        self.assertEqual(
+            py_env_configs.jit_config.remote_jit_dir, "oss://bucket/cli-cache"
+        )
         self.assertEqual(
             py_env_configs.model_args.ckpt_path, "/path/to/llama/checkpoint"
         )

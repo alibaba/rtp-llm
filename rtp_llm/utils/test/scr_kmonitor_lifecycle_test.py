@@ -18,6 +18,54 @@ reporters = importlib.import_module(
 
 
 class ScrKmonitorLifecycleTest(unittest.TestCase):
+
+    def test_restore_resets_metric_window_and_drops_seed_samples_only_once(self):
+        from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.acc_metric import (
+            AccMetric,
+        )
+        from rtp_llm.aios.kmonitor.python_client.kmonitor.metrics.gauge_metric import (
+            GaugeMetric,
+        )
+
+        for phase, resumed_at in (
+            ("checkpoint", 2000.0),
+            ("restore", 50.0),
+            ("normal", 2000.0),
+        ):
+            with self.subTest(phase=phase), mock.patch.dict(
+                os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": phase}, clear=True
+            ), mock.patch.object(
+                reporters.ReportWorker, "start"
+            ) as start, mock.patch.object(
+                reporters.HippoHelper, "is_hippo_env", return_value=False
+            ), mock.patch.object(
+                reporters.time, "time", return_value=100.0
+            ) as clock:
+                worker = reporters.ReportWorker()
+                acc = AccMetric("restore.qps", {})
+                gauge = GaugeMetric("restore.gauge", {})
+                worker.register_metric(acc)
+                worker.register_metric(gauge)
+                acc.report(50)
+                gauge.report(99)
+                clock.return_value = resumed_at
+                worker.start_after_restore()
+                self.assertIs(worker.metrics[acc.name], acc)
+                self.assertEqual(
+                    acc.last_report_time, 100.0 if phase == "normal" else resumed_at
+                )
+                clock.return_value = resumed_at + 1
+                acc.report(10)
+                # Repeated release must not erase new serving samples.
+                worker.start_after_restore()
+                expected = 60 / (resumed_at + 1 - 100) if phase == "normal" else 10
+                self.assertAlmostEqual(acc.fetch_reported_data()[0].value, expected)
+                self.assertEqual(
+                    [p.value for p in gauge.fetch_reported_data()],
+                    [99] if phase == "normal" else [],
+                )
+                start.assert_called_once_with()
+
     def test_non_scr_hippo_transport_still_starts_eagerly(self):
         with mock.patch.object(
             reporters.HippoHelper, "is_hippo_env", return_value=True
@@ -145,7 +193,7 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                 retained.report(2)
                 monitor.register_gauge_metric("fresh.metric").report(3)
                 events = worker.get_report_events()
-                self.assertEqual(len(events), 3)
+                self.assertEqual(len(events), 2)
                 for event in events:
                     message = event.body.decode()
                     for tag in (

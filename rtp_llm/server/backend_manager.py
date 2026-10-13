@@ -187,7 +187,8 @@ class BackendManager(object):
             self.engine.task_type,
         )
         get_template_lifecycle().register_fixup(f"backend-endpoints:{id(self)}", self)
-        kmonitor.start_serving_when_ready()
+        if not defer_service_start:
+            kmonitor.start_serving_when_ready()
 
     def restore_fixup(self, context: RestoreContext) -> None:
         if self._engine_config is None or self._world_info is None:
@@ -219,6 +220,7 @@ class BackendManager(object):
         start_service = getattr(self.engine, "start_service", None)
         if start_service is not None:
             start_service()
+            kmonitor.start_serving_when_ready()
 
     def serve_forever(self):
         """Enter service loop to keep the process alive until shutdown is requested"""

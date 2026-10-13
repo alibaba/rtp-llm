@@ -38,9 +38,90 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
                 self.assertIsNot(event, previous)
                 self.assertFalse(event.is_set())
                 for starter in starters:
-                    self.assertIs(starter.call_args.args[-1], event)
+                    self.assertIs(starter.call_args.args[-2], event)
                 event.set()
                 previous = event
+
+
+class StartupTimingTest(unittest.TestCase):
+    def test_startup_clock_scope(self):
+        # Simulate a long stored checkpoint and a destination with a smaller
+        # monotonic origin. A stale checkpoint phase must still reset timing.
+        for phase, saved_start, returned, finish, expected in (
+            (None, 100.0, None, 151.0, "51.00s"),
+            ("normal", 100.0, 999.0, 151.0, "51.00s"),
+            (
+                "checkpoint",
+                100.0,
+                1818.0,
+                2069.0,
+                "251.00s (timing_scope=post_scr_barrier)",
+            ),
+            (
+                "restore",
+                10000.0,
+                10.0,
+                261.0,
+                "251.00s (timing_scope=post_scr_barrier)",
+            ),
+        ):
+            with self.subTest(phase=phase), ExitStack() as stack:
+                configs = Mock()
+                configs.parallelism_config.dp_size = 1
+                stack.enter_context(
+                    patch.dict(
+                        os.environ,
+                        {
+                            "RTPLLM_ENABLE_SCR": "1" if phase else "0",
+                            "SCR_PHASE": phase or "normal",
+                        },
+                    )
+                )
+                for name in (
+                    "init_controller",
+                    "_sync_server_shutdown_timeout",
+                    "_setup_startup_warmup_health_gate",
+                    "_maybe_run_startup_real_warmup",
+                    "_mark_startup_warmup_health_gate_ready",
+                    "_start_parent_scr_arrival",
+                    "start_backend_server_impl",
+                    "start_frontend_server_impl",
+                    "start_dash_sc_server_impl",
+                ):
+                    stack.enter_context(patch.object(start_server, name))
+                stack.enter_context(
+                    patch.object(
+                        start_server,
+                        "_build_scr_participant_manifest",
+                        return_value=Mock() if phase else None,
+                    )
+                )
+                manager = stack.enter_context(
+                    patch.object(start_server, "ProcessManager")
+                )
+                barrier_clock = stack.enter_context(
+                    patch.object(
+                        start_server,
+                        "get_scr_barrier_return_time",
+                        return_value=returned,
+                    )
+                )
+                clock = stack.enter_context(patch.object(start_server, "time"))
+                wall_clock = clock.time
+                wall_clock.side_effect = [saved_start, finish]
+                monotonic_clock = clock.monotonic
+                monotonic_clock.return_value = finish
+                log = stack.enter_context(patch.object(start_server.logging, "info"))
+                start_server.start_server(configs)
+                log.assert_any_call("start server took " + expected)
+                manager.return_value.request_failure_shutdown.assert_not_called()
+                if phase in ("checkpoint", "restore"):
+                    self.assertEqual(wall_clock.call_count, 1)
+                    monotonic_clock.assert_called_once_with()
+                else:
+                    self.assertEqual(wall_clock.call_count, 2)
+                    monotonic_clock.assert_not_called()
+                    barrier_clock.assert_not_called()
 
 
 class StartupRealWarmupTokenLensTest(unittest.TestCase):
