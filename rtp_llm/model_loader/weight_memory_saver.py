@@ -133,6 +133,7 @@ _SPLIT_CAP_KEY: str = "max_split_size_mb"
 # enough to strand hundreds of MiB when a resident weight splits one.
 _INIT_SPLIT_CAP_MB: int = 256
 _split_cap_live: bool = False
+_non_sleep_split_cap_live: bool = False
 # A user-specified large segment size belongs to runtime allocations, not the
 # non-expandable weight-loading phase. Explicitly restore the native default
 # there: unlike max_split_size_mb, torch keeps large_segment_size_mb across
@@ -397,9 +398,13 @@ def _apply_live_alloc_conf(expandable: bool, split_cap: bool) -> None:
     nature. Prefers the current ``torch._C._accelerator_setAllocatorSettings`` and
     falls back to the deprecated ``torch.cuda.memory._set_allocator_settings``.
     """
+    full = _compose_live_alloc_conf(expandable, split_cap)
+    _set_allocator_conf(full)
+
+
+def _set_allocator_conf(full: str) -> None:
     import torch
 
-    full = _compose_live_alloc_conf(expandable, split_cap)
     setter = getattr(torch._C, "_accelerator_setAllocatorSettings", None)
     if setter is not None:
         setter(full)
@@ -542,7 +547,7 @@ def enable_runtime_expandable() -> None:
         )
 
 
-def limit_init_segment_splitting() -> None:
+def limit_init_segment_splitting(*, for_fastsafetensors: bool = False) -> None:
     """Stop init-phase transients from becoming permanently-stranded segments.
 
     THE PROBLEM. Weight loading allocates and frees ~1 GiB GPU staging buffers
@@ -567,14 +572,34 @@ def limit_init_segment_splitting() -> None:
     is scoped rather than set through the env var: as a process-global setting it
     would trade permanent serving-time fragmentation for a sleep-only gain.
 
-    Call before any weight allocation. No-op unless sleep mode is on (the gain only
-    exists at sleep, and the non-sleep load path stays byte-for-byte unchanged).
+    Sleep enables this before any weight allocation. AutoLoader also uses large
+    staging buffers without sleep: opt that path in until engine readiness, but
+    leave explicit allocator configurations and non-native/CUDA backends alone.
+    Non-sleep must not use the sleep config composer, which owns expandable state.
     """
-    global _split_cap_live
-    if not is_enabled() or _split_cap_live:
+    global _split_cap_live, _non_sleep_split_cap_live
+    if _split_cap_live:
         return
+    non_sleep = not is_enabled()
+    if non_sleep:
+        if not for_fastsafetensors or any(
+            os.environ.get(key)
+            for key in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")
+        ):
+            return
+        import torch
+
+        if (
+            torch.version.hip is not None
+            or not torch.cuda.is_available()
+            or torch.cuda.memory.get_allocator_backend() != "native"
+        ):
+            return
     try:
-        _apply_live_alloc_conf(_expandable_live, True)
+        if non_sleep:
+            _set_allocator_conf(f"{_SPLIT_CAP_KEY}:{_INIT_SPLIT_CAP_MB}")
+        else:
+            _apply_live_alloc_conf(_expandable_live, True)
     except Exception:
         # Setter unavailable: keep torch's default splitting. Costs the sleeping
         # residual gain, breaks nothing.
@@ -585,6 +610,7 @@ def limit_init_segment_splitting() -> None:
         )
         return
     _split_cap_live = True
+    _non_sleep_split_cap_live = non_sleep
     logging.info(
         "WeightMemorySaver: capped max_split_size_mb=%d for the init phase so "
         "load-time staging segments are not split by resident weights",
@@ -601,11 +627,16 @@ def release_init_segment_splitting() -> None:
     unsplit shape while runtime allocations recover the requested segment size
     and max_split_size_mb (or torch's default when no user cap was specified).
     """
-    global _split_cap_live
+    global _split_cap_live, _non_sleep_split_cap_live
     if not _split_cap_live:
         return
     try:
-        _apply_live_alloc_conf(_expandable_live, False)
+        if _non_sleep_split_cap_live:
+            # This path only opts in with the default allocator configuration.
+            # Reset max_split_size_mb rather than forcing expandable_segments off.
+            _set_allocator_conf("")
+        else:
+            _apply_live_alloc_conf(_expandable_live, False)
     except Exception:
         # Leave the cap live rather than a half-applied config: it is a
         # fragmentation trade-off at worst, not a correctness problem.
@@ -616,6 +647,7 @@ def release_init_segment_splitting() -> None:
         )
         return
     _split_cap_live = False
+    _non_sleep_split_cap_live = False
     logging.info(
         "WeightMemorySaver: restored requested segment settings for runtime "
         "allocations (engine ready)"
@@ -879,7 +911,7 @@ def _reset_for_testing() -> None:
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
     global _expandable_disable_depth, _expandable_restore_on_exit
-    global _base_conf_captured, _split_cap_live
+    global _base_conf_captured, _split_cap_live, _non_sleep_split_cap_live
     global _scratch_pools, _scratch_pool_owners, _model_scope_global
     with _lock:
         _scratch_pools = threading.local()
@@ -901,6 +933,7 @@ def _reset_for_testing() -> None:
         _expandable_base_conf = ""
         _base_conf_captured = False
         _split_cap_live = False
+        _non_sleep_split_cap_live = False
     _region_depth.value = 0
     _region_suppressed.value = False
     _model_scope.value = None

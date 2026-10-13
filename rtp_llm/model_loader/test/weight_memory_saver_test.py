@@ -783,6 +783,71 @@ class InitSegmentSplitCapTest(WeightMemorySaverTestBase):
         # expandable_segments is owned by the deferral logic, never replayed raw.
         self.assertNotIn("expandable_segments:True", wms._expandable_base_conf)
 
+    def test_non_sleep_fastsafetensors_default_cap_restores_default(self) -> None:
+        os.environ[wms.ENV_SWITCH] = "0"
+        fake_torch = sys.modules["torch"]
+        fake_torch.version = types.SimpleNamespace(hip=None)
+        fake_torch.cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            memory=types.SimpleNamespace(get_allocator_backend=lambda: "native"),
+        )
+        with mock.patch.dict(os.environ, {}, clear=True):
+            wms.limit_init_segment_splitting()
+            self.assertEqual(self.applied, [])
+            wms.limit_init_segment_splitting(for_fastsafetensors=True)
+            wms.limit_init_segment_splitting(for_fastsafetensors=True)
+            self.assertEqual(self.applied, [self._CAP])
+            self.assertFalse(wms._expandable_requested)
+            wms.release_init_segment_splitting()
+            wms.release_init_segment_splitting()
+            self.assertEqual(self.applied, [self._CAP, ""])
+            self.assertFalse(wms._split_cap_live)
+
+    def test_non_sleep_preserves_explicit_allocator_config(self) -> None:
+        for key in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF"):
+            with (
+                self.subTest(key=key),
+                mock.patch.dict(os.environ, {key: self._CONF}, clear=True),
+            ):
+                wms.limit_init_segment_splitting(for_fastsafetensors=True)
+                wms.release_init_segment_splitting()
+                self.assertEqual(self.applied, [])
+                self.assertEqual(os.environ[key], self._CONF)
+
+    def test_non_sleep_leaves_non_cuda_native_backends_alone(self) -> None:
+        fake_torch = sys.modules["torch"]
+        for hip, available, backend in (
+            ("7.0", True, "native"),
+            (None, False, "native"),
+            (None, True, "cudaMallocAsync"),
+        ):
+            with self.subTest(hip=hip, available=available, backend=backend):
+                fake_torch.version = types.SimpleNamespace(hip=hip)
+                fake_torch.cuda = types.SimpleNamespace(
+                    is_available=lambda: available,
+                    memory=types.SimpleNamespace(get_allocator_backend=lambda: backend),
+                )
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    wms.limit_init_segment_splitting(for_fastsafetensors=True)
+                    self.assertEqual(self.applied, [])
+
+    def test_failed_non_sleep_setter_does_not_claim_live_cap(self) -> None:
+        fake_torch = sys.modules["torch"]
+        fake_torch.version = types.SimpleNamespace(hip=None)
+        fake_torch.cuda = types.SimpleNamespace(
+            is_available=lambda: True,
+            memory=types.SimpleNamespace(get_allocator_backend=lambda: "native"),
+        )
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(
+                wms, "_set_allocator_conf", side_effect=RuntimeError("unavailable")
+            ),
+        ):
+            wms.limit_init_segment_splitting(for_fastsafetensors=True)
+            self.assertFalse(wms._split_cap_live)
+            self.assertFalse(wms._non_sleep_split_cap_live)
+
     def test_cap_survives_expandable_toggles(self) -> None:
         # expandable and the cap share one setter; flipping expandable must not
         # silently drop the cap (the whole init phase depends on it staying on).

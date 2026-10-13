@@ -22,6 +22,7 @@ from rtp_llm.model_loader.model_weight_info import (
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
 from rtp_llm.model_loader.weight_memory_saver import (
     is_enabled,
+    limit_init_segment_splitting,
     sleep_mode_level,
     weights_region,
 )
@@ -425,6 +426,10 @@ class ModelLoader:
         return isinstance(weight.kernel, MoeAtomicWeight) and weight.scale is not None
 
     def _load_from_fastsafetensor(self, device: str):
+        if device.startswith("cuda"):
+            # Keep AutoLoader's staging segments reusable across main/MTP loading.
+            # BackendManager restores the runtime allocator once init completes.
+            limit_init_segment_splitting(for_fastsafetensors=True)
         model_weights = self._create_model_weights(device)
         # Only single-rank loading may retain raw shard views as final weights.
         # Split/clone outputs are tagged by WeightModule; raw shards stay transient.
