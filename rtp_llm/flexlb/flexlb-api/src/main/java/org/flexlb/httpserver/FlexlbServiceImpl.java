@@ -270,7 +270,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                         .setRequestId(requestId)
                         .setReason(reason);
         if (phase == RequestPhase.ENCODER) {
-            cancelRequest.setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER);
+            cancelRequest.setRole(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER);
         }
         try {
             Context.ROOT.call(() -> grpcForwarder.forwardCompensatingCancelToMaster(
@@ -412,8 +412,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     /**
-     * Returns the Encoder or Generation request record selected by phase.
-     * An omitted phase reads Generation for existing callers.
+     * Returns the Encoder or Generation request record selected by role.
+     * ENCODER reads the Encoder record; every other role, including an omitted one,
+     * reads the Generation record.
      */
     @Override
     public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
@@ -422,7 +423,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         RequestPhase phase;
         try {
             requestId = RequestId.parse(request);
-            phase = requestPhase(request.getPhase());
+            phase = requestPhase(request.getRole());
         } catch (IllegalArgumentException error) {
             responseObserver.onError(Status.INVALID_ARGUMENT
                     .withDescription(error.getMessage()).withCause(error).asRuntimeException());
@@ -450,7 +451,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     /**
      * Reduce one Encoder or Generation request record into its cancellation lifecycle.
-     * An omitted phase cancels Generation for existing callers.
+     * ENCODER cancels the Encoder record; every other role, including an omitted one,
+     * cancels the Generation record.
      *
      * <p>Every node first checks its local lifecycle ownership. A found response
      * is authoritative even after leadership changes. Only a hop-zero miss on a
@@ -469,7 +471,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         RequestPhase phase;
         try {
             requestId = RequestId.parse(request);
-            phase = requestPhase(request.getPhase());
+            phase = requestPhase(request.getRole());
         } catch (IllegalArgumentException error) {
             responseObserver.onError(Status.INVALID_ARGUMENT
                     .withDescription(error.getMessage()).withCause(error).asRuntimeException());
@@ -1069,11 +1071,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
     }
 
-    private static RequestPhase requestPhase(FlexlbScheduleProtocol.RequestPhasePB phase) {
-        return switch (phase) {
-            case REQUEST_PHASE_ENCODER -> RequestPhase.ENCODER;
-            case REQUEST_PHASE_GENERATION, REQUEST_PHASE_UNSPECIFIED -> RequestPhase.GENERATION;
-            default -> throw new IllegalArgumentException("Unsupported request phase: " + phase);
+    private static RequestPhase requestPhase(FlexlbScheduleProtocol.ScheduleRolePB role) {
+        return switch (role) {
+            case SCHEDULE_ROLE_ENCODER -> RequestPhase.ENCODER;
+            case SCHEDULE_ROLE_UNSPECIFIED, SCHEDULE_ROLE_PREFILL,
+                 SCHEDULE_ROLE_DECODE, SCHEDULE_ROLE_PDFUSION -> RequestPhase.GENERATION;
+            default -> throw new IllegalArgumentException("Unsupported request role: " + role);
         };
     }
 

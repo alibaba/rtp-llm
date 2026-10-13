@@ -9,8 +9,8 @@ Encoder 批量派发，也不调用 Encoder Cancel RPC。Encoder QUEUE 只在模
 `running + waiting + 本地待观察请求` 数量。WorkerStatus 更新、请求结束和 endpoint 退役会唤醒等待的
 Encoder 请求；队列超时和取消按 Encoder 阶段独立清理。Generation 沿用原调度流程及独立队列。
 
-`Cancel` 和 `GetRequestState` 可传 `phase` 查找对应阶段；省略或传默认值时定位
-Generation，以兼容旧客户端。常见 EPD 调用先单独决策 Encoder，处理完成后再以同一个
+`Cancel` 和 `GetRequestState` 通过 `role` 选择请求记录：`ENCODER` 定位 Encoder，
+`PREFILL`、`DECODE`、`PDFUSION` 以及省略或传默认值时都定位 Generation。常见 EPD 调用先单独决策 Encoder，处理完成后再以同一个
 业务 ID 决策 Prefill、Prefill + Decode 或 PDFusion。混合阶段角色同时请求不在当前
 验证流程内，也没有专门的角色组合白名单。
 

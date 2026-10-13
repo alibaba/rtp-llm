@@ -318,14 +318,14 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void encoderPhaseStateAndCancelUseSeparateLifecycleKey() {
+    void encoderRoleStateAndCancelUseEncoderLifecycleKey() {
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
                 .setRequestId("two-stage-request")
-                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
+                .setRole(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .build(), mock(StreamObserver.class));
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
                 .setRequestId("two-stage-request")
-                .setPhase(FlexlbScheduleProtocol.RequestPhasePB.REQUEST_PHASE_ENCODER)
+                .setRole(FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_ENCODER)
                 .build(), mock(StreamObserver.class));
 
         verify(routeService).getRequestState("two-stage-request", 0L, RequestPhase.ENCODER);
@@ -334,25 +334,32 @@ class FlexlbServiceImplTest {
     }
 
     @Test
-    void omittedPhaseContinuesToUseGenerationLifecycle() {
-        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId("two-stage-request").build(), mock(StreamObserver.class));
-        service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId("two-stage-request").build(), mock(StreamObserver.class));
+    void nonEncoderRolesUseGenerationLifecycleKey() {
+        for (FlexlbScheduleProtocol.ScheduleRolePB role : List.of(
+                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_UNSPECIFIED,
+                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PREFILL,
+                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_DECODE,
+                FlexlbScheduleProtocol.ScheduleRolePB.SCHEDULE_ROLE_PDFUSION)) {
+            String requestId = "generation-" + role.name();
+            service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                    .setRequestId(requestId).setRole(role).build(), mock(StreamObserver.class));
+            service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
+                    .setRequestId(requestId).setRole(role).build(), mock(StreamObserver.class));
 
-        verify(routeService).getRequestState("two-stage-request", 0L);
-        verify(routeService).cancelRequest("two-stage-request", 0L, CancelReason.CLIENT_CANCELLED);
+            verify(routeService).getRequestState(requestId, 0L);
+            verify(routeService).cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
+        }
     }
 
     @Test
-    void rejectsUnknownLifecyclePhaseBeforeReadingOrCancellingState() {
+    void rejectsUnknownLifecycleRoleBeforeReadingOrCancellingState() {
         StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> stateObserver = mock(StreamObserver.class);
         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> cancelObserver = mock(StreamObserver.class);
 
         service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
-                .setRequestId("two-stage-request").setPhaseValue(99).build(), stateObserver);
+                .setRequestId("two-stage-request").setRoleValue(99).build(), stateObserver);
         service.cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB.newBuilder()
-                .setRequestId("two-stage-request").setPhaseValue(99).build(), cancelObserver);
+                .setRequestId("two-stage-request").setRoleValue(99).build(), cancelObserver);
 
         ArgumentCaptor<Throwable> stateError = ArgumentCaptor.forClass(Throwable.class);
         ArgumentCaptor<Throwable> cancelError = ArgumentCaptor.forClass(Throwable.class);
