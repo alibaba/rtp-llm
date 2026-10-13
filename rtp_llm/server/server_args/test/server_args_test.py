@@ -221,6 +221,33 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class PDLinearTailArgumentsTest(TestCase):
+    def test_default_env_cli_and_pickle(self):
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True):
+            default = server_args.setup_args([]).pd_separation_config
+            self.assertFalse(default.decode_linear_tail_only)
+            enabled = server_args.setup_args(
+                ["--decode_linear_tail_only", "true"]
+            ).pd_separation_config
+            self.assertTrue(enabled.decode_linear_tail_only)
+            self.assertTrue(pickle.loads(pickle.dumps(enabled)).decode_linear_tail_only)
+            config_type = type(enabled)
+            legacy = config_type.__new__(config_type)
+            legacy.__setstate__(enabled.__getstate__()[:19])
+            self.assertFalse(legacy.decode_linear_tail_only)
+            self.assertEqual(legacy.role_type, enabled.role_type)
+
+        with patch.dict(os.environ, {"DECODE_LINEAR_TAIL_ONLY": "1"}, clear=True):
+            from_env = server_args.setup_args([]).pd_separation_config
+            overridden = server_args.setup_args(
+                ["--decode_linear_tail_only", "false"]
+            ).pd_separation_config
+            self.assertTrue(from_env.decode_linear_tail_only)
+            self.assertFalse(overridden.decode_linear_tail_only)
+
+
 class DynamicDecodeArgumentsTest(TestCase):
     def test_dynamic_decode_backend_parser_and_default(self):
         from rtp_llm.server.server_args import server_args

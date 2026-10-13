@@ -537,6 +537,19 @@ public:
         }
     }
 
+    bool requestsOnlyFullGroups(const StorageRequest& request) const {
+        bool has_full_group = false;
+        for (const auto& handles : request.handles) {
+            for (const auto& handle : handles) {
+                if (cache_config_.group(handle.tag).policy.group_type != CacheGroupType::FULL) {
+                    return false;
+                }
+                has_full_group = true;
+            }
+        }
+        return has_full_group;
+    }
+
     StorageMatchResult match(const StorageRequest& request) {
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata match must run on tp rank 0, got %ld",
@@ -595,7 +608,8 @@ public:
             return {request.local_matched_blocks_num + meta->locations.size(), std::move(meta)};
         }
         kvcm::LocationsView locations_view;
-        if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
+        if (!group_policy_->filterNeedLoadLocations(
+                locations, locations_view, /*block_mask=*/0, requestsOnlyFullGroups(request))) {
             throw std::runtime_error("KVCM returned an invalid location shape");
         }
         if (locations_view.size() > keys.size() - request.local_matched_blocks_num) {
@@ -663,9 +677,11 @@ public:
                 }
             }
         } else {
-            RTP_LLM_CHECK_WITH_INFO(
-                group_policy_->filterNeedLoadLocations(meta->locations, locations_view, /*block_mask=*/0),
-                "KVCM read location filtering failed");
+            RTP_LLM_CHECK_WITH_INFO(group_policy_->filterNeedLoadLocations(meta->locations,
+                                                                          locations_view,
+                                                                          /*block_mask=*/0,
+                                                                          requestsOnlyFullGroups(request)),
+                                   "KVCM read location filtering failed");
         }
         const size_t remote_blocks = request.handles.size() - request.local_matched_blocks_num;
         RTP_LLM_CHECK_WITH_INFO(locations_view.size() == remote_blocks,
