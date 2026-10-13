@@ -52,11 +52,11 @@ _CUDA = torch.cuda.is_available()
 _IMPORT_ERROR = None
 try:
     from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
+    from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
     from rtp_llm.models_py.modules.dsv4.moe.strategies.grouped_fp8 import (
         _ROWS_PER_E_FLAT,
         _silu_mul_quant_fp32scale,
     )
-    from rtp_llm.models_py.kernels.cuda.quant_layouts import FP8_BLOCK
 except Exception as exc:  # noqa: BLE001 - re-raised as a failure below
     _IMPORT_ERROR = exc
 

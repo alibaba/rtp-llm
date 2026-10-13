@@ -27,8 +27,6 @@ FLASH_MLA_IMPORT_ERROR: BaseException | None = None
 try:
     from rtp_llm.models_py.utils.flash_mla_legacy import (  # type: ignore[import-not-found]  # noqa: F401
         flash_mla_with_kvcache,
-    )
-    from rtp_llm.models_py.utils.flash_mla_legacy import (  # type: ignore[import-not-found]  # noqa: F401
         get_mla_metadata,
     )
 
