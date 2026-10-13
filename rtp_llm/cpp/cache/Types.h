@@ -68,6 +68,9 @@ struct MallocInfo {
     // Original request input length. Used by device-cache metrics to align with rtp_llm_input_token_length.
     int input_token_length = -1;
 
+    // Initial chunk admission reserves fixed sparse banks for this maximum grant.
+    int max_chunk_tokens = 0;
+
     int incrSeqLen() const;
 };
 

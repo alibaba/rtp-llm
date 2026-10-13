@@ -704,7 +704,7 @@ MallocStatus HybridPoolKVCacheAllocator::evaluateInitCapacity(const MallocInfo& 
         const int  group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, group_type, raw_seq_len);
         const int  group_reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, gid) : 0;
         const auto need                   = kv_cache_groups_[static_cast<size_t>(gid)]->getNeedBlocks(
-            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled);
+            group_common_seq, group_seq_len, reserve_step, group_reuse_blocks_len, reuse_enabled, chunkRequiredPositions(malloc_info, gid));
         const int need_blocks = need.common_blocks + batch_size * need.extra_blocks;
         if (need_blocks <= 0) {
             continue;

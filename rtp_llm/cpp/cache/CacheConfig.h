@@ -115,6 +115,25 @@ struct CacheConfig {
 
     CacheConfig() {}
 
+    bool sharedChunkState(size_t group_id) const {
+        return group_id < group_region_names.size() && group_region_names[group_id] == KVCacheRegionName::HCA_STATE;
+    }
+
+    size_t chunkCacheBlockCount(size_t group_id, int prompt_tokens, int chunk_tokens,
+                               bool reuse_cache, int reserve_tokens) const {
+        const auto type = group_id < group_types.size() ? group_types[group_id] : CacheGroupType::FULL;
+        if (prompt_tokens <= 0 || chunk_tokens <= 0 || type == CacheGroupType::FULL
+            || sharedChunkState(group_id) || reuse_cache) {
+            return 0;
+        }
+        const size_t block_tokens = cache_specs.at(group_id)->seq_size_per_block;
+        const auto pages = [block_tokens](size_t tokens) { return (tokens + block_tokens - 1) / block_tokens; };
+        // Existing SWA groups retain two native blocks; LINEAR retains the previous state.
+        const size_t history = type == CacheGroupType::SWA ? 2 : 1;
+        const size_t banks = pages(static_cast<size_t>(chunk_tokens) + std::max(reserve_tokens, 0)) + history;
+        return std::min(pages(prompt_tokens), banks);
+    }
+
     int groupNums() const {
         return std::max<int>(1, static_cast<int>(cache_specs.size()));
     }

@@ -289,6 +289,41 @@ void StreamCacheResource::init(int batch_size) {
     resource_released_ = false;
 }
 
+bool StreamCacheResource::copyChunkKernelBlocks(int batch, int group_id, int32_t* dst) const {
+    if (!stream_->useChunkWindow() || stream_->isFakeStream()) {
+        return false;
+    }
+    const auto& context = resource_context_;
+    const auto& config = context.cache_manager->cacheConfig();
+    const auto block_size = config.cache_specs.at(group_id)->seq_size_per_block;
+    const auto tail = static_cast<size_t>(stream_->seqLength() - 1) / block_size;
+    const auto& ids = batch_kv_cache_resource_->mutableBlockIds(batch, group_id);
+    if (config.sharedChunkState(group_id)) {
+        // HCA has no overlap. Aligned chunks start a new 128-token compression interval.
+        RTP_LLM_CHECK_WITH_INFO(stream_->seqSizePerBlock() % 128 == 0 && stream_->prefixLength() % 128 == 0
+                                    && block_size % 128 == 0,
+                                "shared HCA state requires compression-aligned chunks");
+        // Completed intervals use this forward's raw KV; only the tail needs persistent state.
+        const auto chunk_tail =
+            static_cast<size_t>(stream_->prefixLength() + stream_->currentChunkLen() - 1) / block_size;
+        ids.copySharedKernelBlocks(tail, chunk_tail, dst);
+        return true;
+    }
+    const bool reuse = reuseCache();
+    const auto banks =
+        config.chunkCacheBlockCount(group_id, stream_->seqLength(), stream_->maxChunkSize(), reuse, stream_->reserveStep());
+    if (banks == 0) {
+        return false;
+    }
+    RTP_LLM_CHECK_WITH_INFO(
+        stream_->prefixLength() % block_size == 0 && stream_->currentChunkLen() <= stream_->maxChunkSize()
+            && (!stream_->isMiddleChunk()
+                || (stream_->prefixLength() + stream_->currentChunkLen()) % block_size == 0),
+        "cyclic chunk cache requires aligned prefixes and bounded grants");
+    ids.copyCyclicKernelBlocks(tail, banks, dst);
+    return true;
+}
+
 void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
@@ -417,6 +452,8 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     }
 
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.max_chunk_tokens =
+        stream_->chunkedPrefillEnabled() && stream_->isContextStream() ? stream_->maxChunkSize() : 0;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -464,7 +501,7 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step, int seq_len_o
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
     malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
-    malloc_info.enable_remove_skipped_blocks = true;
+    malloc_info.enable_remove_skipped_blocks = !(stream_->chunkedPrefillEnabled() && stream_->isContextStream());
     malloc_info.incr_seq_len_override        = seq_len_override;
 
     malloc_info.complete_token_ids->setReserveStep(reserve_step);

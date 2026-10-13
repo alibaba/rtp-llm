@@ -114,6 +114,60 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
 }
 
+TEST(BlockIdsTest, SharedKernelBlocksReuseStateWithoutChangingOwningRows) {
+    BlockIds state;
+    state.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, 8});
+    const auto       owning = state.blocks();
+    BlockIndicesType execution(state.kernelBlocks().size(), 42);
+    // Only each chunk's last logical block writes; the speculative reserve stays distinct.
+    state.copySharedKernelBlocks(3, 0, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{7, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 8}));
+    state.copySharedKernelBlocks(3, 1, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 8}));
+    state.copySharedKernelBlocks(3, 3, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, 8}));
+    EXPECT_EQ(state.blocks(), owning);
+    EXPECT_EQ(state.kernelBlocks(), owning);
+}
+
+TEST(BlockIdsTest, CyclicKernelBlocksKeepHistoryDistinctAndPreserveCanonicalTail) {
+    BlockIds state;
+    state.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, 8, 9, 10});
+    const auto&     kernel = state.kernelBlocks();
+    BlockIndicesType execution(kernel.size());
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{7, 8, 9, 7, 8, 9, 10}));
+    EXPECT_EQ(kernel, execution);  // The existing kernel row holds the cached execution mapping.
+    EXPECT_EQ(state.blocks(), (BlockIndicesType{-1, -1, -1, 7, 8, 9, 10}));
+    EXPECT_EQ(state.kernelBlocks(), state.blocks());
+    std::fill(execution.begin(), execution.end(), 42);
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{7, 8, 9, 7, 8, 9, 10}));
+    state.copyCyclicKernelBlocks(5, 2, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{8, 9, 8, 9, 8, 9, 10}));
+    state.copyCyclicKernelBlocks(4, 2, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{8, 7, 8, 7, 8, 9, 10}));
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    state.setAt(4, 11);
+    EXPECT_EQ(kernel, state.blocks());  // A mutation restores the whole ordinary row.
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{7, 11, 9, 7, 11, 9, 10}));
+    EXPECT_EQ(state.popBack(), 10);
+    std::fill(execution.begin(), execution.end(), 42);
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{7, 11, 9, 7, 11, 9, 42}));
+    state.add({12});
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    state.resize(6);
+    std::fill(execution.begin(), execution.end(), 42);
+    state.copyCyclicKernelBlocks(5, 3, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{7, 11, 9, 7, 11, 9, 42}));
+    state.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, 8, 9});
+    execution.resize(state.kernelBlocks().size());
+    state.copyCyclicKernelBlocks(4, 2, execution.data());
+    EXPECT_EQ(execution, (BlockIndicesType{8, 7, 8, 7, 8, 9}));
+}
+
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     CacheConfig config;
     config.seq_size_per_block        = 1;

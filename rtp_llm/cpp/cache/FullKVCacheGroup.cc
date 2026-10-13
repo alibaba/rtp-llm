@@ -8,7 +8,9 @@ int FullKVCacheGroup::needBlocksNum(int seq_len, int current_blocks, int reserve
 }
 
 NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled,
+    const RequiredPositions& required_positions) const {
+    (void)required_positions;
     NeedBlocksInfo info;
     const int      common_slots        = needBlocksNum(common_seq_len, /*current_blocks=*/0);
     const int      total_slots         = needBlocksNum(seq_len, /*current_blocks=*/0, reserve_step);
@@ -18,7 +20,9 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool FullKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step,
+                             const RequiredPositions& required_positions) {
+    (void)required_positions;
     (void)enable_reuse_cache;
     return mallocBlocks(block_ids, seq_len, reserve_step, block_ids.blocks().empty() ? 0 : block_ids.blocks().back());
 }

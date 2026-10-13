@@ -37,7 +37,8 @@ bool LinearKVCacheGroup::shouldMaterializeBlock(int pos, int seq_len, int reserv
 }
 
 NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
-    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled) const {
+    int common_seq_len, int seq_len, int reserve_step, int reuse_blocks_len, bool reuse_enabled,
+    const RequiredPositions& required_positions) const {
     NeedBlocksInfo info;
 
     // common_slots: blocks for common_seq_len (no reserve)
@@ -70,6 +71,18 @@ NeedBlocksInfo LinearKVCacheGroup::getNeedBlocks(
         }
     }
 
+    for (size_t position : required_positions) {
+        if (position >= static_cast<size_t>(total_slots)) {
+            continue;
+        }
+        if (position < static_cast<size_t>(common_slots)) {
+            if (!common_required(position) || static_cast<int>(position) == reused_tail_pos) {
+                ++info.common_blocks;
+            }
+        } else if (!final_required(position)) {
+            ++info.extra_blocks;
+        }
+    }
     info.common_blocks = std::max(info.common_blocks, 0);
     info.extra_blocks  = std::max(info.extra_blocks, 0);
     return info;
@@ -93,7 +106,8 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step,
+                               const RequiredPositions& required_positions) {
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);
@@ -107,7 +121,8 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
         const bool is_seq_tail = (seq_slots > 0) && (pos >= std::max(0, seq_slots - 2)) && (pos < seq_slots);
         const bool is_reserve  = (reserve_step > 0) && (pos >= seq_slots) && (pos < total_slots);
         const bool step_hit    = (((pos + 1) % step) == 0);
-        return is_reserve || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
+        return required_positions.count(pos) || is_reserve
+               || (enable_reuse_cache ? (step_hit || is_seq_tail) : is_seq_tail);
     };
 
     std::vector<size_t> positions_to_backfill;

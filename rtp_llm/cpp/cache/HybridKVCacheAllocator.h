@@ -48,6 +48,7 @@ protected:
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false)            = 0;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
+    RequiredPositions chunkRequiredPositions(const MallocInfo& malloc_info, int gid) const;
     bool         skipReuseCacheGroup(int gid) const;
     bool         cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const;
     void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);

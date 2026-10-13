@@ -127,7 +127,8 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
                                    int                         stream_batch_idx,
                                    int                         model_batch_idx,
                                    size_t                      max_blocks_num,
-                                   size_t                      kernel_blocks_per_kv_block) {
+                                   size_t                      kernel_blocks_per_kv_block,
+                                   const GenerateStreamPtr&    stream) {
     if (!model_input.kv_cache_kernel_block_id.defined() || max_blocks_num == 0) {
         return;
     }
@@ -179,7 +180,10 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
         int32_t* kernel_dst =
             kernel_dst_base
             + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * kernel_capacity;
-        std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+        const bool borrowed = stream->streamCacheResource().copyChunkKernelBlocks(stream_batch_idx, gid, kernel_dst);
+        if (!borrowed) {
+            std::memcpy(kernel_dst, kernel_blocks.data(), kernel_blocks.size() * sizeof(int32_t));
+        }
 
         auto& physical_blocks = kv_cache.blocks(stream_batch_idx, gid);
         RTP_LLM_CHECK_WITH_INFO(physical_blocks.size() <= store_capacity,
@@ -190,7 +194,11 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
                                 store_capacity);
         int32_t* store_dst =
             store_dst_base + (static_cast<size_t>(gid) * batch + static_cast<size_t>(model_batch_idx)) * store_capacity;
-        std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
+        if (borrowed && stream->isMiddleChunk()) {
+            std::fill_n(store_dst, physical_blocks.size(), NULL_BLOCK_IDX);
+        } else {
+            std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
+        }
     }
 }
 
@@ -483,7 +491,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 }
             }
             copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block, stream);
             ctx.batch_idx += 1;
         }
         addCacheUpdateCopy(ctx, stream->streamCacheResource().getKVBlockUpdateMapping());
@@ -561,7 +569,7 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
 
             copyKvCacheBlocksToModelInput(
-                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
+                model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block, stream);
 
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())

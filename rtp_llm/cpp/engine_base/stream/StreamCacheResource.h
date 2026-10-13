@@ -52,6 +52,9 @@ public:
     BatchKVCacheResource&       kvCacheMutable();
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
 
+    // Returns false when the ordinary kernel block table should be used.
+    bool copyChunkKernelBlocks(int batch, int group_id, int32_t* dst) const;
+
     // Rebuild KV block ownership for beam/multiple-return sequences.
     // This records copy mappings; caller must execute them via
     // getKVBlockUpdateMapping/KVCacheManager::blockBatchCopy before reuse.

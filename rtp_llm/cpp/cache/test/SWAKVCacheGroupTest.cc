@@ -190,14 +190,37 @@ TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_ReuseFullOverlap) {
     EXPECT_EQ(need.extra_blocks, 0);
 }
 
-TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenIgnored) {
+TEST_F(SWAKVCacheGroupTest, GetNeedBlocks_CommonSeqLenMatchesAllocation) {
     auto group = makeGroup(4);
     auto need1 = group.getNeedBlocks(0, 20, 0, 0, false);
     auto need2 = group.getNeedBlocks(20, 20, 0, 0, false);
     auto need3 = group.getNeedBlocks(100, 20, 0, 0, false);
-    EXPECT_EQ(need1.extra_blocks, need2.extra_blocks);
-    EXPECT_EQ(need2.extra_blocks, need3.extra_blocks);
+    EXPECT_EQ(need1.extra_blocks, need2.common_blocks);
+    EXPECT_EQ(need2.common_blocks, need3.common_blocks);
     EXPECT_EQ(need1.common_blocks, 0);
+    EXPECT_EQ(need2.extra_blocks, 0);
+    EXPECT_EQ(need3.extra_blocks, 0);
+    BlockIds blocks;
+    const auto before = group.freeBlocksNum();
+    ASSERT_TRUE(group.malloc(blocks, 20, false));
+    EXPECT_EQ(before - group.freeBlocksNum(), need2.common_blocks);
+    group.free(blocks.blocks());
+}
+
+TEST_F(SWAKVCacheGroupTest, ChunkBanksBackfillNullBlocksAndRecoverAfterFree) {
+    auto group = makeGroup(4);
+    BlockIds blocks;
+    const auto before = group.freeBlocksNum();
+    ASSERT_TRUE(group.malloc(blocks, 32, false));
+    const RequiredPositions banks{4, 5, 6, 7};
+    ASSERT_TRUE(group.malloc(blocks, 32, false, 0, banks));
+    EXPECT_EQ(validBlockCount(blocks.blocks()), banks.size());
+    EXPECT_EQ(before - group.freeBlocksNum(), banks.size());
+    const auto need = group.getNeedBlocks(32, 32, 0, 0, false, banks);
+    EXPECT_EQ(need.common_blocks, banks.size());
+    EXPECT_EQ(need.extra_blocks, 0);
+    group.free(blocks.blocks());
+    EXPECT_EQ(group.freeBlocksNum(), before);
 }
 
 // ==================== match ====================

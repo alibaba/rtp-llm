@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -22,6 +23,7 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 
 using CacheKeysType    = std::vector<CacheKeyType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
+using RequiredPositions = std::set<size_t>;
 
 struct BlockDependency {
     bool         has_parent{false};
@@ -40,7 +42,14 @@ public:
 
     const BlockIndicesType& blocks() const;
 
+    // Return the ordinary kernel mapping, restoring it if a cyclic mapping was cached.
     const BlockIndicesType& kernelBlocks() const;
+
+    // Borrow the prompt state at the chunk tail; keep speculative reserve blocks distinct.
+    void copySharedKernelBlocks(size_t prompt_tail, size_t chunk_tail, BlockIdxType* destination) const;
+
+    // Cache the cyclic execution mapping and copy it without changing ownership or reserve IDs.
+    void copyCyclicKernelBlocks(size_t prompt_tail, size_t bank_count, BlockIdxType* destination) const;
 
     size_t kernelBlocksPerKvBlock() const;
 
@@ -63,16 +72,18 @@ public:
 
 private:
     // Update the kernel slots that correspond to physical block position `pos`.
-    void updateKernelSlotAt(size_t pos, BlockIdxType val);
+    void updateKernelSlotAt(size_t pos, BlockIdxType val) const;
     // Update all kernel slots
-    void syncKernelBlocks();
+    void syncKernelBlocks() const;
 
     BlockIndicesType block_indices;
-    // Kernel-granularity block IDs, always maintained.
+    // Kernel-granularity block IDs, also used to cache the cyclic execution mapping.
     // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
-    // When kernel_blocks_per_kv_block_ == 1, kernel_block_indices_ mirrors block_indices.
-    BlockIndicesType kernel_block_indices_;
-    size_t           kernel_blocks_per_kv_block_ = 1;
+    mutable BlockIndicesType kernel_block_indices_;
+    size_t                   kernel_blocks_per_kv_block_ = 1;
+    mutable size_t           cyclic_prompt_tail_ = 0;
+    // Zero means the kernel row contains the ordinary mapping.
+    mutable size_t           cyclic_bank_count_  = 0;
 };
 
 using GroupBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
