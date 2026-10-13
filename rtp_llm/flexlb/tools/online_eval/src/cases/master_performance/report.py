@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from reporting import run_meta
-from reporting.gate_report import write_gate_report
+from reporting.gate_report import write_gate_report, write_archived_gate_report
 from reporting.run_context import title
 from reporting.view_sections import view_details, view_table
 
@@ -22,7 +22,7 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
     spec = dict(
         run_id=p["instance"],
         title=title(p["instance"]),
-        subtitle=presentation["report"]["subtitle"].format(verdict=result["verdict"]),
+        subtitle=presentation.subtitle.render(verdict=result["verdict"]),
         timeAxis=dict(min=0, max=evidence.get("criteria", {}).get("measure_s", 1)),
         panels=panels,
         sections=[
@@ -51,6 +51,9 @@ def write_report(directory, evidence, result, *, run=None, presentation=None):
         implementation=p.get("master_artifact"), workload=p.get("trace"), configuration=p,
         evidence=dict(file="performance-gate-evidence.json"),
     )
+    if run is None:
+        return write_archived_gate_report(directory, result, presentation, spec,
+            identity="master-performance", producer="performance-gate", meta=meta)
     return write_gate_report(directory, result, presentation, spec,
         identity="master-performance", producer="performance-gate", meta=meta, run=run)
 

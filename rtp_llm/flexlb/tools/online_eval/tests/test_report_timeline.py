@@ -139,6 +139,8 @@ def test_offline_publication_uses_frozen_clock_and_event_records(tmp_path):
     MetricStore(dict(metrics_schema_version=1, definitions={}, metrics={}, run=context)).save(tmp_path)
     presentation = dict(charts=dict(events={'fault': dict(label='Fault', source='case', event='fault_injected')},
                                     event_ids=['fault']))
+    from reporting.view_model import ViewDefinition
+    presentation = ViewDefinition.read(dict(kind="default", report={"subtitle":"test"}, **presentation))
     source = spec()
     original = copy.deepcopy(source)
     result = archived(source, tmp_path, presentation, status='PASS')

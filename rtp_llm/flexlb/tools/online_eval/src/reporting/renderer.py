@@ -8,6 +8,8 @@ selection; generic bars/scatter use the same point contract. No format adapters.
 
 from __future__ import annotations
 
+from reporting.spec import validate
+
 import html
 import json
 from pathlib import Path
@@ -128,7 +130,6 @@ def _statistics_samples(points):
 
 def render(spec):
     """Return complete HTML for a validated spec."""
-    from reporting.spec import validate
 
     validate(spec)
     run_id = spec.get("run_id", "")

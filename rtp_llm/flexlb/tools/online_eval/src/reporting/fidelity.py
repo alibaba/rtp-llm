@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 
 from artifacts.json_io import write_json
-from reporting.core import details, table, render as render_spec, _atomic
+from reporting import details, table, render as render_spec
+from artifacts.file_io import write_text
 from reporting.catalog import ACCENT_COLORS
 
 METHOD_LABELS = {'real': '真实输入', 'independent': '独立采样', 'joint': '联合采样'}
@@ -147,5 +148,5 @@ def write(report, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     write_json(directory / 'fidelity.json', report, indent=2)
-    _atomic(directory / 'fidelity.md', markdown(report))
-    _atomic(directory / 'fidelity.html', render(report))
+    write_text(directory / 'fidelity.md', markdown(report))
+    write_text(directory / 'fidelity.html', render(report))

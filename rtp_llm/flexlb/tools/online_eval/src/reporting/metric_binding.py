@@ -2,18 +2,18 @@
 
 
 def bindings(presentation, metric_id, labels):
-    return [(curve_id, style) for curve_id, style in presentation["charts"]["curves"].items()
-            if style["metric_id"] == metric_id
-            and all(labels.get(key) == value for key, value in style["labels"].items())]
+    return [(curve_id, style) for curve_id, style in presentation.charts.curves.items()
+            if style.metric_id == metric_id
+            and all(labels.get(key) == value for key, value in style.labels)]
 
 
 
 def metric_classification(identity, definition, presentation):
     """Plotted curves, explicit diagnosis, and registered gate scalars are distinct."""
-    plotted = {style["metric_id"] for style in presentation["charts"]["curves"].values()}
+    plotted = {style.metric_id for style in presentation.charts.curves.values()}
     if identity in plotted:
         return "PLOTTED"
-    if identity in presentation["metrics"]["diagnostic_only"]:
+    if identity in presentation.metrics.diagnostic_only:
         return "DIAGNOSTIC_ONLY"
     if definition.get("producer") and definition.get("value_kind") == "scalar":
         from case_api.registry import registry

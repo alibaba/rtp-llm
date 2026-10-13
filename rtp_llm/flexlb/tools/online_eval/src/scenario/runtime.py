@@ -23,7 +23,7 @@ class ScenarioRunner:
         from reporting.view_config import view, DEFAULT_VIEW
         ctx.experiment_definition = dict(experiment_definition_schema_version=1,
             plan=plan.to_dict(), dependencies=dependency_files(),
-            views={name: view(name) for name in dict.fromkeys(
+            views={name: view(name).to_dict() for name in dict.fromkeys(
                 [DEFAULT_VIEW, *ctx.instance.get('reports', [])])}
             if ctx.instance.get('test_kind') == 'workload' else {})
         write_json(ctx.artifact_dir / 'experiment-definition.json', ctx.experiment_definition)

@@ -13,12 +13,12 @@ def prepare_curves(directory, evidence, presentation):
     curves, audit = [], []
 
     def add(curve_id, points, description, *, name=None, labels=None, provenance=None):
-        style = presentation["charts"]["curves"][curve_id]
+        style = presentation.charts.curves[curve_id]
         curves.append(materialize(
             curve_id, style, points, name=name, labels=labels,
-            unit=store.document["definitions"][style["metric_id"]]["unit"],
+            unit=store.document["definitions"][style.metric_id]["unit"],
             description=description, provenance=provenance,
-            color_index=list(presentation["charts"]["curves"]).index(curve_id),
+            color_index=list(presentation.charts.curves).index(curve_id),
         ))
 
     from monitoring.metric_store import MetricStore
@@ -47,7 +47,7 @@ def prepare_curves(directory, evidence, presentation):
         selected = bindings(presentation, identity, labels)
         residual = {k:v for k,v in labels.items() if k != "role"}
         for curve_id, style in selected:
-            name = style["name"]
+            name = style.name
             if residual:
                 name += " · " + ", ".join(f"{k}={v}" for k, v in sorted(residual.items()))
             if any(c["name"] == name for c in curves):
@@ -67,19 +67,19 @@ def report_panels(curves, criteria, presentation):
         "mock/rtp_llm_context_tps_with_cache_engine_mean/P": "mock/rtp_llm_context_tps_with_cache",
         "mock/mock_decode_wall_tps_engine_mean/D": "mock/mock_decode_wall_tps",
     }
-    for panel, descriptor in zip(panels, presentation["charts"]["panels"]):
+    for panel, descriptor in zip(panels, presentation.charts.panels):
         selected = panel["series"]
-        if descriptor["id"] == "engine-tps":
+        if descriptor.id == "engine-tps":
             floors = criteria.get("engine_tps", {})
-            for metric_id in descriptor["curve_ids"]:
+            for metric_id in descriptor.curve_ids:
                 metric = floor_metrics[metric_id]
                 if metric in floors:
                     source = next((curve for curve in selected if curve["curve_id"] == metric_id), None)
-                    name = presentation["charts"]["curves"][metric_id]["name"]
+                    name = presentation.charts.curves[metric_id].name
                     selected.append(dict(
                         curve_id=metric_id + "/gate_floor", source_type="configuration",
                         name=name + " 门禁线", group="门禁", axis="forward",
-                        unit="执行 tok/s", color=source["color"] if source else presentation["charts"]["curves"][metric_id].get("color") or PALETTE[len(selected) % len(PALETTE)],
+                        unit="执行 tok/s", color=source["color"] if source else presentation.charts.curves[metric_id].color or PALETTE[len(selected) % len(PALETTE)],
                         dash=[6, 4], hidden=False,
                         points=[dict(x=t, y=floors[metric]) for t in (0, duration)],
                         description="场景配置中的绝对下界；不是实测值",

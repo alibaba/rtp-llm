@@ -3,7 +3,6 @@
 import re
 
 from schema_contract import matches_schema
-from reporting.view_model import SectionPresentation, SubtitleTemplate, CurvePresentation, PanelPresentation
 
 CURVES = frozenset({"mean", "max", "detail"})
 
@@ -32,7 +31,7 @@ def validate_structure(path, data, fail):
             location = str(path) + ".sections." + str(key)
             if type(key) is not str or not re.fullmatch(r"[a-z][a-z0-9_]*", key):
                 fail(location, "invalid section fields")
-            _decode(SectionPresentation, section, location, fail)
+
 
 
 def validate_default(path, data, fail):
@@ -47,7 +46,7 @@ def validate_default(path, data, fail):
         fail(path, "default view must retain metric identity")
     labels = charts["detail_labels"]
     if not isinstance(labels, list) or not labels or any(
-        type(x) is not str or x not in {"engine_name", "pod", "engine"} for x in labels
+        type(x) is not str or not x.strip() for x in labels
     ) or len(set(labels)) != len(labels):
         fail(path, "invalid detail_labels")
     for field in ("summaries", "default_visible"):
@@ -70,35 +69,26 @@ def validate_default(path, data, fail):
         fail(path, "invalid presets")
 
 
-def _decode(model, value, path, fail):
-    try:
-        return model.read(value)
-    except ValueError as exc:
-        fail(path, str(exc))
-
-
 def validate_curves(path, data, fail):
     metrics = data.get("curves", {})
     if not isinstance(metrics, dict):
         fail(path, "metrics must be a mapping")
-    for identity, style in metrics.items():
+    for identity in metrics:
         if type(identity) is not str or not re.fullmatch(
                 r"[a-z][a-z0-9_]*(/[A-Za-z][A-Za-z0-9_]*)*", identity):
             fail(path, "invalid metric presentation " + str(identity))
-        _decode(CurvePresentation, style, str(path)+'.curves.'+identity, fail)
+
     return metrics
 
 
-def validate_panels(path, data, metrics, fail):
-    panels = data.get("panels")
-    if not isinstance(panels, list) or not panels:
-        fail(path, "invalid panels")
-    curves = {identity: CurvePresentation.read(style) for identity, style in metrics.items()}
+def validate_panels(path, data, fail):
+    panels, curves = data.charts.panels, data.charts.curves
+    if not panels:
+        fail(path, 'invalid panels')
     ids, selected = set(), set()
-    for value in panels:
-        panel = _decode(PanelPresentation, value, path, fail)
+    for panel in panels:
         if panel.id in ids:
-            fail(path, "invalid panel id")
+            fail(path, 'invalid panel id')
         ids.add(panel.id)
         try:
             panel.validate_bindings(curves)
@@ -106,7 +96,7 @@ def validate_panels(path, data, metrics, fail):
             fail(path, str(exc))
         selected.update(panel.curve_ids)
     if set(curves)-selected:
-        fail(path, "curve declarations must be referenced by a panel")
+        fail(path, 'curve declarations must be referenced by a panel')
 
 
 def validate_selected(path, data, fail):
@@ -123,17 +113,17 @@ def validate_selected(path, data, fail):
     if (not {"curves", "panels"} <= charts.keys()
             or charts.keys() - {"curves", "panels", "events", "event_ids"}):
         fail(str(path) + ".charts", "invalid selected chart fields")
-    metrics = validate_curves(path, charts, fail)
-    validate_panels(path, charts, metrics, fail)
+    validate_curves(path, charts, fail)
+
 
 
 def validate_section_contract(path, data, expected, fail):
     """Python owns section contents; YAML only names, labels and opens them."""
-    sections = data["sections"]
+    sections = data.sections
     if sections.keys() != expected.keys():
         fail(str(path) + ".sections", "unexpected or missing sections")
     for key, column_count in expected.items():
-        columns = SectionPresentation.read(sections[key]).columns
+        columns = sections[key].columns
         if column_count is None:
             if columns is not None:
                 fail(str(path) + ".sections." + key, "detail section cannot declare columns")
@@ -145,8 +135,7 @@ def validate_bindings(path, data, query_plan, fail):
     from monitoring.query_plan import definitions
 
     declared = definitions(query_plan)
-    for curve_id, style in data["charts"]["curves"].items():
-        binding = CurvePresentation.read(style)
+    for curve_id, binding in data.charts.curves.items():
         if binding.metric_id not in declared or binding.labels is None:
             fail(path, "curve must bind a declared metric id and labels: " + curve_id)
 
@@ -177,9 +166,3 @@ def validate_text(path, data, fail):
     subtitle = data["report"]["subtitle"]
     if type(subtitle) is not str or not subtitle.strip():
         fail(path, "subtitle is required")
-    if data["kind"] != "selected":
-        return
-    try:
-        SubtitleTemplate(subtitle, cache_behavior=data["report"].get("producer") == "cache-gate")
-    except ValueError as exc:
-        fail(path, str(exc))

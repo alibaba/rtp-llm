@@ -141,7 +141,7 @@ def test_registered_view_extension_needs_no_workload_case_branch():
         root = Path(directory)
         from reporting.view_config import view
         import yaml
-        definition = view('master_ha_failover.yaml')
+        definition = view('master_ha_failover.yaml').to_dict()
         (root/'another.yaml').write_text(yaml.safe_dump(definition))
         module = SimpleNamespace(REPORT_VIEWS={
             'another.yaml': registry.ReportView(validator, render)})

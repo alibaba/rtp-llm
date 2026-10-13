@@ -1,7 +1,6 @@
 """Compare frozen bundles and experiment ZIPs without rerunning gates."""
 import argparse
 import copy
-import colorsys
 import json
 import math
 from pathlib import Path
@@ -9,39 +8,12 @@ import sys
 import zipfile
 
 from reporting import bundle_path, compare_controls, details, links, run_meta, write_bundle
-from reporting.core import table
+from reporting import table
 from reporting.catalog import series_color
 from reporting.comparison_inputs import load_snapshot
-from reporting.comparison_model import ChartSeries
-from reporting.comparison_colors import run_color as _run_color
+from reporting.report_model import MeasurementIdentity
+from reporting.comparison_colors import metric_colors, curve_style
 from reporting.pairing import event_anchor, shifted_panel
-
-# Hue identifies the metric; lightness and sparse point shapes identify runs.
-RUN_MARKERS = ('circle', 'rect', 'triangle', 'rectRot', 'star', 'cross', 'crossRot')
-
-
-def _metric_colors(panels):
-    """Keep existing metric hues where possible; separate near hues within a plot."""
-    registry, colors = {}, {}
-    for panel in panels:
-        used = []
-        for n, curve in enumerate(panel.get('series', [])):
-            identity = json.dumps(ChartSeries.read(curve, panel.get('unit')).signature(), sort_keys=True)
-            if identity == 'null':
-                identity = (panel['id'], n)
-            color = registry.get(identity) or curve.get('color') or series_color(curve.get('tone'), n)
-            value = color.lstrip('#')
-            hue, lightness, saturation = colorsys.rgb_to_hls(*(int(value[k:k+2], 16)/255 for k in (0, 2, 4)))
-            distance = lambda h: min((min(abs(h-u), 1-abs(h-u)) for u in used), default=1)
-            if identity not in registry and saturation >= .10 and distance(hue) < .07:
-                hue = max(((hue + k/24) % 1 for k in range(24)), key=distance)
-                color = '#' + ''.join(f'{round(v*255):02x}' for v in colorsys.hls_to_rgb(hue, lightness, saturation))
-            registry.setdefault(identity, color)
-            colors[panel['id'], n] = color
-            if saturation >= .10:
-                used.append(hue)
-    return colors
-
 
 def _leaves(value, prefix=''):
     if isinstance(value, dict) and value:
@@ -83,7 +55,7 @@ def _matrix(runs, labels):
 
 
 def _series_key(panel, series, origin):
-    signature = ChartSeries.read(series, panel.get('unit')).signature()
+    signature = MeasurementIdentity.read(series, panel.get('unit')).signature()
     if signature is None or panel.get('type', 'line') != 'line' or not panel.get('timeX'):
         return None
     # Keep worker labels, aggregation and measurement semantics; visual titles/IDs may differ.
@@ -108,7 +80,9 @@ def _time_origin(run, index):
 def _pair(prepared, labels, origins, *, baseline_index, include_original_panels):
     """Preserve the reference layout; match series only inside the same panel ID."""
     overlays, pairing, consumed = [], [], set()
-    metric_colors = _metric_colors(prepared[baseline_index])
+    colors = metric_colors(prepared[baseline_index])
+    keys = {(i, p['id'], n): _series_key(p, c, origins[i])
+            for i, panels in enumerate(prepared) for p in panels for n, c in enumerate(p['series'])}
     for original in prepared[baseline_index]:
         if original.get('type', 'line') != 'line' or not original.get('timeX'):
             continue
@@ -122,13 +96,13 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
         for i, panel in candidates:
             mapping = {}
             for n, curve in enumerate(panel['series']):
-                key = _series_key(panel, curve, origins[i])
+                key = keys[i, panel['id'], n]
                 if key is not None:
                     mapping.setdefault(key, []).append(n)
             maps[i] = mapping
         entries, records = [], []
         for n, curve in enumerate(original['series']):
-            key = _series_key(original, curve, origins[baseline_index])
+            key = keys[baseline_index, original['id'], n]
             base_matches = maps[baseline_index].get(key, [])
             matched = [(baseline_index, original, n)]
             if key is not None and len(base_matches) == 1:
@@ -151,18 +125,16 @@ def _pair(prepared, labels, origins, *, baseline_index, include_original_panels)
             curve = copy.deepcopy(source['series'][n])
             name = curve['name']
             curve['name'] = labels[i] + ' · ' + name
-            curve['dash'] = []
-            curve['point_style'] = RUN_MARKERS[i % len(RUN_MARKERS)]
-            curve['marker_count'] = 12
             curve['group'] = labels[i]
             # Metric colors and visibility follow the reference report.
-            key = _series_key(source, curve, origins[i])
-            reference = next((c for c in original['series']
-                if key is not None and _series_key(original, c, origins[baseline_index]) == key), None)
+            key = keys[i, source['id'], n]
+            reference_indices = maps[baseline_index].get(key, [])
+            reference = original['series'][reference_indices[0]] if len(reference_indices) == 1 else None
+            metric_color = curve.get('color') or series_color(None, n)
             if reference is not None:
-                curve['color'] = metric_colors[original['id'], original['series'].index(reference)]
+                metric_color = colors[original['id'], original['series'].index(reference)]
                 curve['hidden'] = reference.get('hidden', False)
-            curve['color'] = _run_color(curve.get('color') or series_color(None, n), i, len(labels))
+            curve.update(curve_style(metric_color, i, len(labels)))
             panel['series'].append(curve)
             panel['presets'].setdefault('run · ' + labels[i], []).append(curve['name'])
             metric_names.setdefault(name, []).append(curve['name'])

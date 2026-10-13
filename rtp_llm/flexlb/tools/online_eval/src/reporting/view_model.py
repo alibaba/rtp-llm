@@ -1,9 +1,10 @@
 """Presentation value objects; mappings are decoded only at the view boundary."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, field
 from enum import Enum
 import math
+import copy
 import re
 import string
 
@@ -34,6 +35,12 @@ class SectionPresentation:
             raise ValueError('invalid section columns')
         return cls(value['title'], value['opened'], tuple(columns) if columns is not None else None)
 
+    def to_dict(self):
+        result = dict(title=self.title, opened=self.opened)
+        if self.columns is not None:
+            result['columns'] = list(self.columns)
+        return result
+
 
 @dataclass(frozen=True)
 class SubtitleTemplate:
@@ -52,7 +59,7 @@ class SubtitleTemplate:
             if field is not None and (spec or conversion):
                 raise ValueError('subtitle placeholders do not accept format specs or conversions')
 
-    def render(self, *, verdict, monitoring_status, expected_behavior=None, observed_behavior=None):
+    def render(self, *, verdict, monitoring_status=None, expected_behavior=None, observed_behavior=None):
         return self.template.format(verdict=verdict, monitoring_status=monitoring_status,
                                     expected_behavior=expected_behavior, observed_behavior=observed_behavior)
 
@@ -93,6 +100,14 @@ class CurvePresentation:
         return cls(**{key: val for key, val in value.items() if key != 'labels'},
                    labels=tuple(labels.items()) if labels is not None else None)
 
+    def to_dict(self):
+        result = dict(name=self.name, group=self.group, axis=self.axis, hidden=self.hidden, scale=self.scale)
+        for key, value in (('source_unit', self.source_unit), ('unit', self.unit), ('color', self.color),
+                           ('metric_id', self.metric_id), ('labels', dict(self.labels) if self.labels is not None else None)):
+            if value is not None:
+                result[key] = value
+        return result
+
 
 @dataclass(frozen=True)
 class AxisPresentation:
@@ -124,6 +139,9 @@ class AxisPresentation:
 
 
 class SelectionKind(str, Enum):
+    IDS = 'ids'
+    ROLES = 'roles'
+    AGGREGATIONS = 'aggregations'
     VISIBLE = 'visible'
     NAMES = 'names'
     CONTAINS = 'contains'
@@ -152,7 +170,16 @@ class PresetSelection:
             raise ValueError('invalid panel presets')
         return cls(kind, tuple(items))
 
-    def matches(self, *, name, group, hidden):
+    def to_dict(self):
+        return {self.kind.value: True if self.kind == SelectionKind.VISIBLE else list(self.values)}
+
+    def matches(self, *, name, group, hidden, curve_id=None, role=None, aggregation=None):
+        if self.kind == SelectionKind.IDS:
+            return curve_id in self.values
+        if self.kind == SelectionKind.ROLES:
+            return role in self.values
+        if self.kind == SelectionKind.AGGREGATIONS:
+            return aggregation in self.values
         if self.kind == SelectionKind.VISIBLE:
             return not hidden
         if self.kind == SelectionKind.NAMES:
@@ -171,7 +198,7 @@ class PanelPresentation:
     presets: tuple[tuple[str, PresetSelection], ...]
     caption: str = ''
     empty_caption: str = '没有有效观测数据；缺失值不补零。'
-    event_ids: tuple[str, ...] = ()
+    event_ids: tuple[str, ...] | None = None
 
     @classmethod
     def read(cls, value):
@@ -189,13 +216,25 @@ class PanelPresentation:
             raise ValueError('invalid panel axes')
         if not isinstance(presets, dict) or not all(map(text, presets)):
             raise ValueError('invalid panel presets')
-        events = value.get('event_ids', [])
-        if not isinstance(events, list) or not all(map(text, events)) or len(set(events)) != len(events):
+        events = value.get('event_ids')
+        if events is not None and (not isinstance(events, list) or not all(map(text, events)) or len(set(events)) != len(events)):
             raise ValueError('invalid panel event_ids')
         return cls(value['id'], value['title'], tuple(curves),
             tuple((key, AxisPresentation.read(axis)) for key, axis in axes.items()),
             tuple((key, PresetSelection.read(selector)) for key, selector in presets.items()),
-            value.get('caption', ''), value.get('empty_caption', cls.empty_caption), tuple(events))
+            value.get('caption', ''), value.get('empty_caption', cls.empty_caption), tuple(events) if events is not None else None)
+
+    def to_dict(self):
+        result = dict(id=self.id, title=self.title, curve_ids=list(self.curve_ids),
+            axes={key: axis.to_dict() for key, axis in self.axes},
+            empty_caption=self.empty_caption)
+        if self.caption:
+            result['caption'] = self.caption
+        if self.presets:
+            result['presets'] = {key: value.to_dict() for key, value in self.presets}
+        if self.event_ids is not None:
+            result['event_ids'] = list(self.event_ids)
+        return result
 
     def validate_bindings(self, curves):
         axes = dict(self.axes)
@@ -204,3 +243,96 @@ class PanelPresentation:
                 raise ValueError('invalid panel metric_ids')
             if curves[identity].axis not in axes:
                 raise ValueError('panel metric axis is not declared')
+
+
+@dataclass(frozen=True)
+class ReportPresentation:
+    subtitle: str
+    identity: str | None = None
+    producer: str | None = None
+
+    def to_dict(self):
+        result = dict(subtitle=self.subtitle)
+        if self.identity is not None:
+            result['id'] = self.identity
+        if self.producer is not None:
+            result['producer'] = self.producer
+        return result
+
+
+@dataclass(frozen=True)
+class MetricSelection:
+    query_plan: str
+    diagnostic_only: tuple[str, ...]
+
+    def to_dict(self):
+        return dict(query_plan=self.query_plan, diagnostic_only=list(self.diagnostic_only))
+
+
+@dataclass(frozen=True)
+class ChartDefinition:
+    curves: dict[str, CurvePresentation]
+    panels: tuple[PanelPresentation, ...]
+    events: dict
+    event_ids: tuple[str, ...]
+    detail_labels: tuple[str, ...] = ()
+    summaries: tuple[str, ...] = ()
+    default_visible: tuple[str, ...] = ()
+    max_points_per_series: int = 256
+    default_presets: dict = field(default_factory=dict)
+
+    def to_dict(self, kind):
+        result = dict(events=copy.deepcopy(self.events), event_ids=list(self.event_ids))
+        if kind == 'default':
+            result.update(group_by=['epoch', 'source', 'metric'], detail_labels=list(self.detail_labels),
+                summaries=list(self.summaries), default_visible=list(self.default_visible),
+                max_points_per_series=self.max_points_per_series,
+                presets={key:list(values) for key,values in self.default_presets.items()})
+        else:
+            result.update(curves={key: value.to_dict() for key, value in self.curves.items()},
+                          panels=[value.to_dict() for value in self.panels])
+        return result
+
+
+@dataclass(frozen=True)
+class ViewDefinition:
+    kind: str
+    report: ReportPresentation
+    metrics: MetricSelection | None
+    charts: ChartDefinition
+    sections: dict[str, SectionPresentation]
+    subtitle: SubtitleTemplate
+
+    @classmethod
+    def read(cls, data):
+        charts, report = data['charts'], data['report']
+        return cls(kind=data['kind'],
+            report=ReportPresentation(report['subtitle'], report.get('id'), report.get('producer')),
+            metrics=MetricSelection(data['metrics']['query_plan'], tuple(data['metrics'].get('diagnostic_only', [])))
+                    if 'metrics' in data else None,
+            charts=ChartDefinition(
+                curves={key: CurvePresentation.read(value) for key, value in charts.get('curves', {}).items()},
+                panels=tuple(PanelPresentation.read(value) for value in charts.get('panels', [])),
+                events=copy.deepcopy(charts.get('events', {})), event_ids=tuple(charts.get('event_ids', [])),
+                detail_labels=tuple(charts.get('detail_labels', [])), summaries=tuple(charts.get('summaries', [])),
+                default_visible=tuple(charts.get('default_visible', [])),
+                max_points_per_series=charts.get('max_points_per_series', 256),
+                default_presets={key:tuple(values) for key,values in charts.get('presets', {}).items()}),
+            sections={key: _read_at(SectionPresentation, value, 'sections.'+key) for key, value in data.get('sections', {}).items()},
+            subtitle=SubtitleTemplate(report['subtitle'], cache_behavior=report.get('producer') == 'cache-gate'))
+
+    def to_dict(self):
+        result = dict(report_view_schema_version=1, kind=self.kind, report=self.report.to_dict())
+        if self.metrics is not None:
+            result['metrics'] = self.metrics.to_dict()
+        result['charts'] = self.charts.to_dict(self.kind)
+        if self.kind == 'selected':
+            result['sections'] = {key: value.to_dict() for key, value in self.sections.items()}
+        return result
+
+
+def _read_at(model, value, location):
+    try:
+        return model.read(value)
+    except ValueError as exc:
+        raise ValueError(location + ': ' + str(exc)) from exc

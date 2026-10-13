@@ -53,7 +53,7 @@ def test_synthetic_domain_is_immutable_and_not_a_mapping():
 
 @pytest.mark.parametrize('subtitle', ['{verdict:{unknown}}', '{verdict:d}', '{verdict!r}', '{verdict.name}'])
 def test_subtitle_templates_fail_when_loaded(subtitle):
-    data = copy.deepcopy(view('cache_scale_in.yaml'))
+    data = view('cache_scale_in.yaml').to_dict()
     data['report']['subtitle'] = subtitle
     with patch('reporting.view_config.load_document', return_value=data):
         with pytest.raises(ScenarioError):
@@ -67,7 +67,7 @@ def test_subtitle_template_uses_only_frozen_result_fields():
 
 @pytest.mark.parametrize('mutation', ['reversed_bounds', 'equal_bounds', 'duplicate_curve'])
 def test_panel_relations_fail_at_admission(mutation):
-    data = copy.deepcopy(view('cache_scale_in.yaml'))
+    data = view('cache_scale_in.yaml').to_dict()
     panel = data['charts']['panels'][0]
     if mutation == 'duplicate_curve':
         panel['curve_ids'].append(panel['curve_ids'][0])

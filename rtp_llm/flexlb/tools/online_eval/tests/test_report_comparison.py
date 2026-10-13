@@ -73,10 +73,10 @@ class ReportComparisonTest(unittest.TestCase):
 
     def test_run_colors_keep_metric_hue_and_increase_lightness(self):
         import colorsys
-        from reporting.comparison import _run_color, RUN_MARKERS
+        from reporting.comparison_colors import run_color, RUN_MARKERS
         self.assertEqual(len(set(RUN_MARKERS)), len(RUN_MARKERS))
         for base in ('#eab308', '#123456', '#dc2626', '#22c55e80'):
-            colors = [_run_color(base, i, 4) for i in range(4)]
+            colors = [run_color(base, i, 4) for i in range(4)]
             self.assertEqual(len(set(colors)), 4)
             from reporting.comparison_colors import to_oklab
             import math
@@ -93,10 +93,10 @@ class ReportComparisonTest(unittest.TestCase):
                 self.assertGreaterEqual(1.05/(luminance+.05), 3)
 
     def test_near_metric_hues_are_separated_and_shared_metrics_keep_color(self):
-        from reporting.comparison import _metric_colors
+        from reporting.comparison_colors import metric_colors
         a = dict(metric_id='a', name='a', points=[], color='#dd1111')
         b = dict(metric_id='b', name='b', points=[], color='#dc1511')
-        colors = _metric_colors([dict(id='one', series=[a, b]), dict(id='two', series=[b])])
+        colors = metric_colors([dict(id='one', series=[a, b]), dict(id='two', series=[b])])
         self.assertNotEqual(colors['one', 1], b['color'])
         self.assertEqual(colors['one', 1], colors['two', 0])
 

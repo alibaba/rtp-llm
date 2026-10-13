@@ -1,4 +1,6 @@
 """Freeze a run's configured display clock, independent of gate windows."""
+from reporting.events import attach_events
+
 
 import copy
 import math
@@ -136,7 +138,6 @@ def archived(spec, directory, presentation, *, status):
     context = MetricStore.read(directory).document.get('run', {})
     result = apply(spec, dict(context, status=status))
     if (context.get('report_timeline') or {}).get('status') == 'AVAILABLE':
-        from reporting.events import attach_events
-        attach_events(result, presentation, origin=result['timeOriginEpochS'],
+            attach_events(result, presentation, origin=result['timeOriginEpochS'],
                       events=context['events'], phases=context['phases'])
     return result

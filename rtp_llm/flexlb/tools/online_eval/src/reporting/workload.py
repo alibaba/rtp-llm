@@ -1,4 +1,7 @@
 """Publish selected case views or the default view of all archived metrics."""
+from reporting.events import attach_events
+from reporting.evidence_archive import archive_session
+
 
 
 from case_api.registry import view_capabilities
@@ -13,7 +16,7 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None):
     presentation = view(name) if presentation is None else presentation
     series = payload["series"]
     spec = dict(
-        subtitle=presentation["report"]["subtitle"],
+        subtitle=presentation.report.subtitle,
         timeOriginLabel="秒；t=0 为 workload 运行开始",
         kpis=[],
         panels=build_panels(series, payload.get("statistic_sources", {}), presentation),
@@ -23,7 +26,6 @@ def build_spec(payload, directory, *, name=DEFAULT_VIEW, presentation=None):
     )
     if payload.get("unavailable_report_views"):
         spec["sections"].append(details("未生成的报告视角", payload["unavailable_report_views"]))
-    from reporting.events import attach_events
     attach_events(spec, presentation, origin=payload["clock_anchor"]["epoch_s"],
                   phases=payload.get("phases", []), events=payload.get("events", []))
     return canonical_spec(spec, payload)
@@ -58,7 +60,7 @@ def _write_views(directory, analysis, names=None):
             if analysis["status"] not in {"FAIL", "ERROR", "TIMEOUT", "BLOCKED"}:
                 raise
             analysis.setdefault("unavailable_report_views", []).append(dict(
-                view=name, producer=presentation["report"]["producer"], status="NOT_PRODUCED",
+                view=name, producer=presentation.report.producer, status="NOT_PRODUCED",
                 reason="专属门禁证据未完成；保留失败与证据，不补算结论。",
             ))
     for name in names:
@@ -75,6 +77,5 @@ def _write_views(directory, analysis, names=None):
 
 def write_views(directory, analysis, names=None):
     from monitoring.metric_store import frozen_metric_reads
-    from reporting.evidence_archive import archive_session
     with frozen_metric_reads(), archive_session():
         return _write_views(directory, analysis, names)

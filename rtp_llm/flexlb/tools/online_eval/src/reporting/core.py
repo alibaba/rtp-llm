@@ -5,6 +5,11 @@ import re
 from pathlib import Path
 
 from reporting.spec import REPORT_SPEC_SCHEMA_VERSION, validate
+from reporting.report_model import ExperimentConditions
+from reporting.renderer import render
+from reporting.evidence_archive import project, restore, verify_references
+from artifacts.archive import file_digest
+from artifacts.file_io import write_text
 from schema_contract import matches_schema
 
 
@@ -115,19 +120,8 @@ def bundle_path(root, kind, identity):
     return Path(root) / "reports" / kind / _slug(identity)
 
 
-def render(spec):
-    from reporting.renderer import render as render_html
-    return render_html(spec)
-
-
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
-
-
-def _atomic(path, content):
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(content, encoding="utf-8")
-    temporary.replace(path)
 
 
 def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=None, role=None, attachments=None):
@@ -144,8 +138,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
         dict(id=str(identity), kind=kind),
         clock=dict(axis=spec.get("timeAxis"), origin=spec.get("timeOriginLabel")),
     ))
-    from reporting.comparison_model import ComparisonControls
-    controls = ComparisonControls(
+    controls = ExperimentConditions(
         spec["run_meta"].get("configuration"), spec["run_meta"].get("workload"),
         spec["run_meta"].get("environment"), analysis.get("criteria"), analysis.get("statistic_sources"),
     )
@@ -153,9 +146,8 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     _validate_run_meta(spec["run_meta"])
     directory = bundle_path(root, kind, identity)
     directory.mkdir(parents=True, exist_ok=True)
-    from reporting.evidence_archive import project
     files = {}
-    archived_analysis = project(root, directory, analysis, files)
+    archived_analysis = _analysis_nodes(analysis, lambda node: project(root, directory, node, files))
     result = dict(
         report_analysis_schema_version=1,
         kind=kind,
@@ -168,14 +160,14 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
                           ("report-spec.json", lambda: _json(spec)),
                           ("report.html", lambda: render(spec))):
         content = produce()
-        _atomic(directory / name, content)
+        write_text(directory / name, content)
         files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
         del content
     for name, content in (attachments or {}).items():
         if (not isinstance(name, str) or not name or Path(name).name != name
                 or name in files or "\\" in name or name in {".", "..", "manifest.json"}):
             raise ValueError("invalid report attachment path")
-        _atomic(directory / name, content)
+        write_text(directory / name, content)
         files[name] = dict(path=name, sha256=hashlib.sha256(content.encode()).hexdigest())
     manifest = dict(
         report_manifest_schema_version=1,
@@ -188,7 +180,7 @@ def write_bundle(root, kind, identity, analysis, spec, *, meta=None, producer=No
     )
     if role is not None:
         manifest["role"] = role
-    _atomic(directory / "manifest.json", _json(manifest))
+    write_text(directory / "manifest.json", _json(manifest))
     return directory
 
 
@@ -220,8 +212,6 @@ def read_bundle(path):
     if (not isinstance(files, dict) or not required <= files.keys()
             or any(files[name].get("path") != name for name in required)):
         raise ValueError("report manifest lacks required bundle files")
-    from artifacts.archive import file_digest
-    from reporting.evidence_archive import verify_references
     for entry in files.values():
         target = directory / entry["path"]
         if target.resolve().parent != directory.resolve():
@@ -235,7 +225,7 @@ def read_bundle(path):
     if not matches_schema(analysis, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(analysis.get("run_meta"))
-    verify_references(analysis["result"], files)
+    _analysis_nodes(analysis["result"], lambda node: verify_references(node, files) or node)
     return directory
 
 
@@ -259,5 +249,14 @@ def load_analysis(path):
     if not matches_schema(value, "report_analysis_schema_version", 1):
         raise ValueError("unsupported report analysis version")
     _validate_run_meta(value.get("run_meta"))
-    from reporting.evidence_archive import restore
-    return restore(path.parent, value["result"])
+    return _analysis_nodes(value["result"], lambda node: restore(path.parent, node))
+
+
+def _analysis_nodes(analysis, operation):
+    """The publication contract owns run envelopes; the codec handles one node."""
+    result = operation(analysis)
+    if isinstance(result.get('run'), dict):
+        result['run'] = _analysis_nodes(result['run'], operation)
+    if isinstance(result.get('runs'), dict):
+        result['runs'] = {label: _analysis_nodes(run, operation) for label, run in result['runs'].items()}
+    return result

@@ -59,7 +59,7 @@ def test_performance_public_scalars_have_checks_or_coverage_consumers():
     produced = load_plan('master_performance.yaml')['produced']
     assert {identity for identity, spec in produced.items() if spec['value_kind'] == 'scalar'} == consumed | coverage
     presentation = view('master_performance.yaml')
-    plotted = {spec['metric_id'] for spec in presentation['charts']['curves'].values()}
+    plotted = {spec.metric_id for spec in presentation.charts.curves.values()}
     assert {identity for identity, spec in produced.items() if spec['value_kind'] == 'gauge'} <= plotted
 
 
@@ -101,7 +101,7 @@ def test_missing_prometheus_keeps_qps_empty_even_with_a_complete_journal(tmp_pat
     panels = report_panels(curves, data['criteria'], presentation)
     qps = next(panel for panel in panels if panel['id'] == 'client-qps')
     assert qps['series'] == []
-    assert qps['caption'] == presentation['charts']['panels'][1]['empty_caption']
+    assert qps['caption'] == presentation.charts.panels[1].empty_caption
     assert any(curve['metric_id'] == 'request/ttft_p99_ms' for curve in curves)
     assert analyze(data)['verdict'] == 'PASS'
 

@@ -307,7 +307,8 @@ class ExperimentReader:
         return spec
 
     def render(self, name, output):
-        from reporting.core import render, _atomic
+        from reporting import render
+        from artifacts.file_io import write_text
         output = Path(output)
         output.parent.mkdir(parents=True, exist_ok=True)
         if name in self.views:
@@ -315,10 +316,11 @@ class ExperimentReader:
         elif name == 'default.yaml' and 'analysis.json' in self.entries:
             from reporting.workload import build_spec
             definition = self.read_json('experiment.json')
-            spec = build_spec(self.analysis(), None, presentation=definition['views'][name])
+            from reporting.view_model import ViewDefinition
+            spec = build_spec(self.analysis(), None, presentation=ViewDefinition.read(definition['views'][name]))
         else:
             raise ValueError('view was not frozen in this experiment: ' + name)
-        _atomic(output, render(spec))
+        write_text(output, render(spec))
         return output
 
     @property

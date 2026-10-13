@@ -194,6 +194,11 @@ class MetricArtifactTest(unittest.TestCase):
     def test_view_has_local_curve_ids_and_independent_label_filters(self):
         presentation=dict(charts=dict(curves={"p_curve":dict(metric_id="mock/temperature",labels={"role":"prefill"},color="red"),
                                   "d_curve":dict(metric_id="mock/temperature",labels={"role":"decode"},color="blue")}))
+        from reporting.view_model import ViewDefinition
+        for key, curve in presentation["charts"]["curves"].items():
+            curve.update(name=key, group="temperature", axis="y")
+        presentation.update(kind="selected", report={"subtitle":"test"}, sections={})
+        presentation = ViewDefinition.read(presentation)
         self.assertEqual([key for key,_ in bindings(presentation,"mock/temperature",{"role":"prefill"})],["p_curve"])
         self.assertEqual(bindings(presentation,"mock/temperature",{"role":"unknown"}),[])
 

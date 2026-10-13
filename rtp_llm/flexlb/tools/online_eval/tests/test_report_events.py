@@ -1,3 +1,4 @@
+from reporting.view_model import ViewDefinition
 """Events are frozen observations, with shared selection and clock semantics."""
 
 import copy
@@ -20,13 +21,13 @@ from monitoring.metric_store import MetricStore
 
 
 def presentation():
-    return dict(charts=dict(events={
+    return ViewDefinition.read(dict(kind="selected", report={"subtitle":"test"}, sections={},charts=dict(events={
         'shutdown': dict(label='服务停止', source='stage', stage='stop', boundary='end'),
         'withdraw': dict(label='开始撤出', source='case', event='withdraw_start'),
     }, event_ids=['shutdown'], panels=[
-        dict(id='selected', event_ids=['withdraw']), dict(id='hidden', event_ids=[]),
-        dict(id='inherited'),
-    ]))
+        dict(id='selected', title='selected', curve_ids=['observed'], axes={'y':{'title':'count','position':'left'}}, event_ids=['withdraw']), dict(id='hidden', title='hidden', curve_ids=['observed'], axes={'y':{'title':'count','position':'left'}}, event_ids=[]),
+        dict(id='inherited', title='inherited', curve_ids=['observed'], axes={'y':{'title':'count','position':'left'}}),
+    ])))
 
 
 def test_stage_boundary_and_custom_event_use_recorded_times_and_explicit_panel_selection():
@@ -56,7 +57,7 @@ def test_invalid_recorded_time_fails_instead_of_becoming_zero(epoch):
 
 @pytest.mark.parametrize('mutation', ['unknown', 'duplicate', 'bad_boundary', 'timestamp', 'wrong_source'])
 def test_event_declarations_are_validated_in_shared_loader(mutation):
-    data = copy.deepcopy(view('master_ha_failover.yaml'))
+    data = view('master_ha_failover.yaml').to_dict()
     if mutation == 'unknown':
         data['charts']['panels'][0]['event_ids'] = ['missing']
     elif mutation == 'duplicate':
@@ -130,7 +131,7 @@ def test_frozen_inventory_includes_python_producer_metrics():
 
 @pytest.mark.parametrize('legacy', ['ha', 'produced', 'checks'])
 def test_view_kind_is_shared_instead_of_case_specific(legacy):
-    data = copy.deepcopy(view('master_ha_failover.yaml'))
+    data = view('master_ha_failover.yaml').to_dict()
     assert data['kind'] == 'selected'
     data['kind'] = legacy
     with patch('reporting.view_config.load_document', return_value=data):
@@ -143,9 +144,9 @@ def test_compilation_rejects_event_stage_typo_before_execution():
     from scenario.loader import load_document
     from reporting.view_config import VIEWS
     config = load_document(VIEWS.parent/'scenarios/master_ha_failover.yaml')
-    data = copy.deepcopy(view('master_ha_failover.yaml'))
+    data = view('master_ha_failover.yaml').to_dict()
     data['charts']['events']['kill_a']['stage'] = 'unknown_stage'
-    with patch('reporting.view_config.view', return_value=data):
+    with patch('reporting.view_config.view', return_value=ViewDefinition.read(data)):
         with pytest.raises(ScenarioError, match='references unknown stage'):
             configure_program(config, 'fixture')
 
