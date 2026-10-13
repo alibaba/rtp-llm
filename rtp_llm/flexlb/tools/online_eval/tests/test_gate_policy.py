@@ -1,5 +1,4 @@
 import unittest
-from unittest import mock
 from types import SimpleNamespace
 
 from cases.master_ha_failover.actions import _client_check

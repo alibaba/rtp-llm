@@ -86,6 +86,10 @@ class CheckSet:
         return {"checks." + name + ".expected": spec.number for name, spec in self.specs.items()}
 
     @property
+    def input_fields(self):
+        return {name: {'expected': spec.number} for name, spec in self.specs.items()}
+
+    @property
     def fields(self):
         return frozenset(spec.key for spec in self.specs.values())
 

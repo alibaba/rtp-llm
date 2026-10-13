@@ -1,8 +1,6 @@
 """Counterexamples for offline batch evidence and owned master recovery."""
 
-import json
 import unittest
-from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 

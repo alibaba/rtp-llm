@@ -1,7 +1,6 @@
 """Selected reports preserve missing-data semantics independently of case logic."""
 
 import copy
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -140,8 +139,6 @@ def test_catalog_additions_do_not_force_unused_collection(name):
 
 @pytest.mark.parametrize('name', ['cache_scale_in', 'master_performance', 'master_ha_failover'])
 def test_frozen_archive_cannot_silently_discard_unclassified_queries(name, tmp_path):
-    from monitoring.archive import export_metrics
-    from monitoring.query_plan import load_plan
     from reporting.metric_binding import monitoring_audit
     from reporting.view_config import view
 
@@ -197,7 +194,6 @@ def test_performance_presets_include_configuration_lines_without_validating_miss
 def test_unused_produced_capability_is_omitted_and_frozen_unclassified_output_rejected(name, tmp_path):
     from monitoring.query_plan import load_plan
     from reporting.view_config import view
-    from document_io import DocumentError as ScenarioError
 
     plan = load_plan(name + '.yaml')
     definition = next(d for d in plan['produced'].values() if d['value_kind'] == 'gauge')

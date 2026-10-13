@@ -64,7 +64,6 @@ def test_every_case_requires_root_default_even_with_variants(program):
 
 def test_variants_cannot_replace_a_missing_python_default(monkeypatch):
     from cases.master_ha_failover import program as master_ha_failover
-    data = load_document(ROOT / 'config/scenarios/master_ha_failover.yaml')
     from dataclasses import replace
     from case_api import registry
     case = registry.registry().cases['master_ha_failover']

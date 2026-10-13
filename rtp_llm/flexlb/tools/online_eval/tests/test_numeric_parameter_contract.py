@@ -4,7 +4,6 @@ import copy
 import math
 from dataclasses import asdict, replace
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -17,7 +16,6 @@ from case_api.numeric_parameters import NONNEGATIVE
 from case_api.numeric_parameters import OFFSET
 from case_api.numeric_parameters import POSITIVE_COUNT
 from case_api.numeric_parameters import PRIORITY
-from case_api.numeric_parameters import NumberRule
 from case_api.numeric_parameters import narrow_parameters
 from case_api.numeric_parameters import parameter_rules
 from document_io import DocumentError as ScenarioError

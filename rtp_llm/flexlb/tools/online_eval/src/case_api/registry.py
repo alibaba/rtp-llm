@@ -160,11 +160,11 @@ class CaseRegistry:
                     raise ValueError(case.module + ': actions must contain StageHandler capabilities')
                 validate_call(action.validate, 2, case.module + '.actions.' + action.name + '.validate')
                 validate_call(action.execute, 3, case.module + '.actions.' + action.name + '.execute')
-            for field, expected, count in (("snapshot_sources", SnapshotSource, 2), ("clients", ClientFactory, 3)):
-                for name, capability in getattr(definition, field).items():
+            for collection, expected, count in (("snapshot_sources", SnapshotSource, 2), ("clients", ClientFactory, 3)):
+                for name, capability in getattr(definition, collection).items():
                     if not re.fullmatch(r'[a-z][a-z0-9_]*', name) or not isinstance(capability, expected):
-                        raise ValueError("invalid " + field + " capability: " + name)
-                    validate_call(capability.factory, count, case.module + "." + field + "." + name)
+                        raise ValueError("invalid " + collection + " capability: " + name)
+                    validate_call(capability.factory, count, case.module + "." + collection + "." + name)
             for name, capability in definition.clients.items():
                 if capability.evidence is not None:
                     validate_call(capability.evidence, 3, case.module + ".clients." + name + ".evidence")
@@ -235,10 +235,3 @@ def registry():
 
 def view_capabilities():
     return registry().views
-
-
-def produce_gate_metrics(program, directory):
-    case = registry().cases[program]
-    for producer in case.definition.producers.values():
-        if producer.phase is ProducerPhase.GATE:
-            producer.execute(directory)

@@ -9,16 +9,25 @@ from monitoring.metric_store import MetricStore
 from monitoring.contracts import MetricContractError
 
 
-def produce(directory, context, *, deadline=None):
+def produce(directory, context, *, phase=ProducerPhase.FINALIZE, deadline=None):
+    if not isinstance(phase, ProducerPhase):
+        raise MetricContractError('producer phase must be ProducerPhase')
     store = MetricStore.read(directory)
     selected = {definition["producer"] for definition in store.document["definitions"].values()
                 if "producer" in definition}
-    if selected - set(registry().producers):
-        raise MetricContractError("unknown metric producers: " + ", ".join(sorted(selected - set(registry().producers))))
+    capabilities = registry().producers
+    if selected - set(capabilities):
+        raise MetricContractError("unknown metric producers: " + ", ".join(sorted(selected - set(capabilities))))
     context["metric_directory"] = str(directory)
     for name in sorted(selected):
-        capability = registry().producers[name]
-        if capability.phase is ProducerPhase.FINALIZE:
+        capability = capabilities[name]
+        if capability.phase is not phase:
+            continue
+        if deadline is not None:
+            deadline.check()
+        if phase is ProducerPhase.GATE:
+            capability.execute(directory)
+        else:
             snapshot = FinalizationContext.snapshot(directory, context, deadline)
             if deadline is not None:
                 deadline.check()
@@ -29,3 +38,5 @@ def produce(directory, context, *, deadline=None):
                 raise MetricContractError(name + ': finalize producer must return metadata mapping')
             json.dumps(metadata, allow_nan=False)
             context.setdefault("producer_results", {})[name] = metadata
+        if deadline is not None:
+            deadline.check()

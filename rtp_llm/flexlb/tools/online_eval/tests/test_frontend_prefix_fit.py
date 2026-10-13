@@ -1,7 +1,6 @@
 """Exercise the capture -> fit -> scenario source boundary with branched prefixes."""
 
 import gzip
-import hashlib
 import json
 import lzma
 import subprocess

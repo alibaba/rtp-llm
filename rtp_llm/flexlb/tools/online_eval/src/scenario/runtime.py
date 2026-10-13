@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from runtime.deadline import Deadline, StageTimeout, interruptible
+from runtime.deadline import Deadline as Deadline, StageTimeout as StageTimeout, interruptible as interruptible
 from scenario.context import RuntimeContext
 from scenario.stage_execution import StageExecutor
 from scenario.finalization import RunFinalizer

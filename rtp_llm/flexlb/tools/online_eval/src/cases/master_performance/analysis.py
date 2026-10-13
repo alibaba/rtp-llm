@@ -7,7 +7,7 @@ from schema_contract import matches_schema
 from analysis.checks import compare, CheckResult, evaluate
 from analysis.gates import gate_checks
 from analysis.statistics import percentile_nr
-from cases.master_performance.inputs import validate
+from cases.master_performance.inputs import INPUTS
 from input_contract import finite_number as finite
 
 
@@ -88,7 +88,7 @@ def analyze(evidence):
         if not isinstance(evidence.get("errors", []), list):
             raise ValueError("errors must be a list")
         errors.extend(evidence.get("errors", []))
-        c = validate(evidence["criteria"], evidence.get("gate_input"))
+        c = INPUTS.admit_projection(evidence["criteria"], evidence.get("gate_input"))
         if not matches_schema(evidence, "performance_evidence_schema_version", 2):
             raise ValueError("unsupported evidence version")
         from artifacts.provenance import validate_gate_provenance

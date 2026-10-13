@@ -191,7 +191,6 @@ def test_unrendered_default_view_uses_frozen_declaration_and_metrics(tmp_path):
     from reporting.view_config import view
     from reporting.workload import build_spec
     from test_workload_report_views import payload
-    from reporting import run_meta
 
     key = '1/mock/count/{}'
     store = MetricStore(dict(metrics_schema_version=1,

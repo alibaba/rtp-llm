@@ -6,12 +6,11 @@ from cases.cache_scale_in.report import validate_view, write_report
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
 from case_api.builder import output
-from cases.cache_scale_in.inputs import INPUTS, NUMERIC_PARAMETERS
+from cases.cache_scale_in.inputs import INPUTS
 from traffic.playback.configuration import normalize
 from cases.cache_scale_in.inputs import (
-    engine_counters, ENGINE_FIELDS, PROCEDURE_FIELDS, OBSERVATION_FIELDS, RULES, compile_checks, observation_contract,
+    engine_counters, ENGINE_FIELDS, OBSERVATION_FIELDS, compile_checks, observation_contract,
 )
-from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 from traffic.contracts import driver, uniform_gate_flow
 from case_api.metric_inputs import bind_mock_engine_metrics
 

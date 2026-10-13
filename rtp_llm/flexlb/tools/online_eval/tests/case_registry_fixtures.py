@@ -1,5 +1,4 @@
 """Inject immutable registries without maintaining a framework case-name list."""
-from dataclasses import replace
 from pathlib import Path
 from case_api import registry
 

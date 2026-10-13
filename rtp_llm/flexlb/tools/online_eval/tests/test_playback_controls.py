@@ -1,15 +1,12 @@
 from traffic.lineage_transforms import LineageProjector
 from traffic.codecs import codec_for_version
-import hashlib
 import json
-import math
 import tempfile
 import unittest
 from pathlib import Path
 
 from traffic.playback.configuration import normalize
 from traffic.output_sampling import output_sampler
-from traffic.randomness import event_uniform
 from traffic import prefix_lineage, prefix_lineage_v3
 
 

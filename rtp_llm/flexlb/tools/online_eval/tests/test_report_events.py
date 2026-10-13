@@ -1,7 +1,6 @@
 from reporting.view_model import ViewDefinition
 """Events are frozen observations, with shared selection and clock semantics."""
 
-import copy
 import json
 from unittest.mock import patch
 

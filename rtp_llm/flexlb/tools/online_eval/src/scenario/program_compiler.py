@@ -5,7 +5,6 @@ from dataclasses import asdict
 import hashlib
 import json
 from monitoring.identity import NAME
-from pathlib import Path
 
 from document_io import DocumentError as ScenarioError
 from scenario.config_data import merge_data

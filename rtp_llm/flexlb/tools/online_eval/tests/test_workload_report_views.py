@@ -1,4 +1,3 @@
-import copy
 import json
 import tempfile
 import unittest
@@ -6,7 +5,7 @@ from pathlib import Path
 from unittest import mock
 
 from scenario.program_compiler import configure_program
-from reporting import discover_reports, load_analysis, read_bundle, write_bundle
+from reporting import load_analysis, read_bundle
 from reporting.view_config import DEFAULT_VIEW, declaration, view
 from document_io import DocumentError as ScenarioError
 from document_io import load_document
@@ -79,8 +78,6 @@ class WorkloadReportViewsTest(unittest.TestCase):
             from reporting.timeline import freeze
             declaration = load_document(ROOT / "config/scenarios/master_ha_failover.yaml")["reporting"]
             analysis["report_timeline"] = freeze(declaration, events=analysis["events"], phases=analysis["phases"])
-            from monitoring.archive import export_metrics
-            from monitoring.query_plan import load_plan
             from monitoring.producers import produce
             from metric_fixtures import freeze_metrics
             freeze_metrics(root, "master_ha_failover")

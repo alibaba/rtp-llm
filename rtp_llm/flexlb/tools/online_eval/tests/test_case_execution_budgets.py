@@ -7,7 +7,8 @@ import pytest
 import yaml
 
 from case_api.builder import CaseBuilder
-from cases.master_performance.program import default, NUMERIC_PARAMETERS
+from cases.master_performance.program import default
+from cases.master_performance.inputs import INPUTS
 from cases.cache_scale_in.inputs import validate_criteria
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def build(parameters):
-    case = CaseBuilder({}, parameters, number_rules=NUMERIC_PARAMETERS, profiles=("single-nonbatch", "batch-window"))
+    case = CaseBuilder({}, parameters, number_rules=INPUTS.numeric_parameters, profiles=("single-nonbatch", "batch-window"))
     case.validate_numbers()
     default(case)
     return {step['id']: step for step in case.steps}

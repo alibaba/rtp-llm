@@ -72,7 +72,6 @@ class ReportComparisonTest(unittest.TestCase):
         read_bundle(self.output()/'reports/comparison/runs')
 
     def test_run_colors_keep_metric_hue_and_increase_lightness(self):
-        import colorsys
         from reporting.comparison_colors import run_color, RUN_MARKERS
         self.assertEqual(len(set(RUN_MARKERS)), len(RUN_MARKERS))
         for base in ('#eab308', '#123456', '#dc2626', '#22c55e80'):

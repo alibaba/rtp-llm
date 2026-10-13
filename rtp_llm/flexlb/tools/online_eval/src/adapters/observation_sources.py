@@ -3,7 +3,6 @@ import json
 import time
 import urllib.request
 
-from schema_contract import matches_schema
 from adapters.debug_client import DebugClient, DebugUnavailable
 from runtime.observation import FrozenSnapshot
 

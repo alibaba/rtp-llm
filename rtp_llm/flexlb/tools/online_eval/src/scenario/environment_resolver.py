@@ -9,6 +9,7 @@ from document_io import DocumentError as ScenarioError
 from scenario.validation import fail, mapping
 from scenario.master_patch import MasterPatch
 from scenario.environment_declaration import EnvironmentDeclaration
+from scenario.environment_snapshot import EnvironmentSnapshot
 
 CAPABILITIES = set().union(*PROFILE_CAPS.values()) | {
     "priority",

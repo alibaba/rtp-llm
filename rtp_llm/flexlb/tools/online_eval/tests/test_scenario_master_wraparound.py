@@ -3,13 +3,10 @@
 import json
 import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
 
-from scenario import compile_scenarios, load_scenarios
 from scenario.actions import master
-from scenario.catalog import handlers
 from scenario.runtime import (
     Deadline,
     RuntimeContext,

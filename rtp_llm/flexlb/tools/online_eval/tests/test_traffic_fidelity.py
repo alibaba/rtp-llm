@@ -50,7 +50,6 @@ class TrafficFidelityTest(unittest.TestCase):
                     shared+=1
                 expected=max(expected,shared)
             self.assertEqual(expected,index.observe(row),row);seen.append(row)
-        events=decode(self.raw)[1]
         self.assertEqual(sorted(Counter(r.block_labels[:8] for r in LineageExpander(LineageModel.from_wire(*decode(self.raw)))).values(),reverse=True),model_shape(LineageModel.from_wire(*decode(self.raw)))['families'])
 
     def test_joint_uses_depth_and_is_repeatable(self):

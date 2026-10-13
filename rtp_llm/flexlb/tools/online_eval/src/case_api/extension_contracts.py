@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from copy import deepcopy
 from pathlib import Path
 from types import MappingProxyType
-from inspect import signature
+from case_api.call_contract import validate_call as validate_call
 from typing import TYPE_CHECKING, Callable, Mapping, Protocol
 
 if TYPE_CHECKING:
@@ -71,13 +71,6 @@ class FinalizeProducer(Protocol):
 class SourceFactory(Protocol):
     def __call__(self, environment: object, fields: set[str]) -> dict: ...
 
-
-def validate_call(function, argument_count, path):
-    """Reject incompatible positional calls at discovery, never run user code."""
-    try:
-        signature(function).bind(*(object() for _ in range(argument_count)))
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{path}: callable must accept {argument_count} positional arguments: {exc}") from exc
 
 
 class SnapshotReader(Protocol):

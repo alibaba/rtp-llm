@@ -18,67 +18,39 @@ from case_api.numeric_parameters import NONNEGATIVE
 from case_api.numeric_parameters import number_fields
 
 
-NUMERIC_PARAMETERS = {
-    **SOURCE_NUMBERS,
-    **OUTPUT_DISTRIBUTION_NUMBERS,
-    **CAPTURE_NUMBERS,
-    **number_fields(FRACTION,
-        'checks.a_balance.expected',
-        'checks.a_route.expected',
-        'checks.a_success.expected',
-        'checks.b_balance.expected',
-        'checks.b_route.expected',
-        'checks.b_success.expected',
-        'checks.baseline_success.expected',
-        'checks.both_balance.expected',
-        'checks.both_success.expected',
-        'checks.outage_terminal.expected',
-    ),
-    **number_fields(POSITIVE_COUNT,
-        'checks.a_balance.min_samples',
-        'checks.a_route.min_samples',
-        'checks.a_success.min_samples',
-        'checks.b_balance.min_samples',
-        'checks.b_route.min_samples',
-        'checks.b_success.min_samples',
-        'checks.baseline_success.min_samples',
-        'checks.both_balance.min_samples',
-        'checks.both_success.min_samples',
-        'checks.handover_errors.min_samples',
-        'checks.late_errors.min_samples',
-        'checks.outage_failures.min_samples',
-        'checks.outage_no_master.min_samples',
-        'checks.outage_terminal.min_samples',
-        'checks.rolling_errors.min_samples',
-        'checks.unique_requests.min_samples',
-    ),
-    **number_fields(COUNT,
-        'checks.handover_errors.expected',
-        'checks.late_errors.expected',
-        'checks.outage_failures.expected',
-        'checks.outage_no_master.expected',
-        'checks.rolling_errors.expected',
-        'checks.unique_requests.expected',
-        'traffic.max_concurrency',
-        'traffic.max_requests',
-        'traffic.replay_speed',
-        'traffic.timeout_ms',
-    ),
-    **number_fields(OFFSET,
-        'observation.windows.baseline.until.offset_s',
-    ),
-    **number_fields(NONNEGATIVE,
-        'procedure.baseline_wait.wait_s',
-        'procedure.both_wait.wait_s',
-        'procedure.finish_timeout_s',
-        'procedure.outage_wait.wait_s',
-        'procedure.restart_timeout_s',
-        'procedure.settle.wait_s',
-        'procedure.setup_timeout_s',
-        'procedure.survivor_wait.wait_s',
-        'traffic.duration_s',
-    ),
+from case_api.input_contract import InputContract, section_fields
+
+# Each check declares its numeric leaves once. Adding a check derives both
+# section admission and numeric validation, including the common sample floor.
+CHECK_INPUTS = {
+    **dict.fromkeys(('a_balance', 'a_route', 'a_success', 'b_balance', 'b_route',
+                    'b_success', 'baseline_success', 'both_balance', 'both_success',
+                    'outage_terminal'), FRACTION),
+    **dict.fromkeys(('handover_errors', 'late_errors', 'outage_failures',
+                    'outage_no_master', 'rolling_errors', 'unique_requests'), COUNT),
 }
+INPUTS = InputContract.from_fields({
+    'traffic': section_fields('traffic',
+        {'kind', 'source', 'duration_s', 'timeout_ms', 'replay_speed', 'loop',
+         'max_concurrency', 'max_requests', 'fallback'}, {
+            **SOURCE_NUMBERS, **OUTPUT_DISTRIBUTION_NUMBERS,
+            **number_fields(COUNT, 'traffic.max_concurrency', 'traffic.max_requests',
+                            'traffic.replay_speed', 'traffic.timeout_ms'),
+            'traffic.duration_s': NONNEGATIVE,
+        }),
+    'procedure': {
+        **dict.fromkeys(('setup_timeout_s', 'restart_timeout_s', 'finish_timeout_s'), NONNEGATIVE),
+        **dict.fromkeys(('kill_a', 'kill_b', 'b_ready', 'a_ready')),
+        **{name: {'wait_s': NONNEGATIVE} for name in
+           ('baseline_wait', 'settle', 'survivor_wait', 'outage_wait', 'both_wait')},
+    },
+    'observation': {
+        'windows': {'baseline': {'until': {'offset_s': OFFSET}}},
+        'capture': section_fields('observation', {'capture'}, CAPTURE_NUMBERS)['capture'],
+    },
+    'checks': {name: {'expected': rule, 'min_samples': POSITIVE_COUNT}
+               for name, rule in CHECK_INPUTS.items()},
+})
 
 
 def validate_client_criterion(params, *, path="client criterion"):
@@ -120,18 +92,7 @@ def read_cycle(case):
 
     if isinstance(case.parameters.get("procedure"), dict) and "restart_mode" in case.parameters["procedure"]:
         raise ScenarioError("restart_mode is owned by flow identity, not parameters")
-    data = case.inputs(
-        traffic={"kind", "source", "duration_s", "timeout_ms", "replay_speed", "loop",
-                 "max_concurrency", "max_requests", "fallback"},
-        procedure={"setup_timeout_s", "kill_a", "kill_b", "b_ready", "a_ready",
-                   "restart_timeout_s", "finish_timeout_s",
-                   "baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait"},
-        observation={"windows", "capture"},
-        checks={"baseline_success", "b_success", "b_route", "b_balance", "outage_failures",
-                "outage_no_master", "outage_terminal", "a_success", "a_route", "a_balance",
-                "both_success", "both_balance", "handover_errors", "late_errors",
-                "rolling_errors", "unique_requests"},
-    )
+    data = case.bind(INPUTS)
     from runtime.observation import capture_limits
     capture_limits(data.observation["capture"], "parameters.observation.capture")
     for name in ("baseline_wait", "settle", "survivor_wait", "outage_wait", "both_wait"):

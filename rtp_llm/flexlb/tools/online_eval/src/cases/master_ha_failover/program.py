@@ -6,7 +6,7 @@ from cases.master_ha_failover.report import validate_view, write_report
 from cases.master_ha_failover.actions import HANDLERS as ACTION_HANDLERS
 
 from case_api.builder import output
-from cases.master_ha_failover.inputs import NUMERIC_PARAMETERS
+from cases.master_ha_failover.inputs import INPUTS
 from cases.master_ha_failover.inputs import read_cycle
 from document_io import DocumentError as ScenarioError
 from traffic.contracts import driver
@@ -114,7 +114,7 @@ from cases.master_ha_failover.observation import master_adapters, STATE_FIELDS
 
 CASE = CaseDefinition(
     builders={"default": rolling, "non_rolling": non_rolling},
-    numeric_parameters=NUMERIC_PARAMETERS,
+    input_contract=INPUTS,
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     producers={

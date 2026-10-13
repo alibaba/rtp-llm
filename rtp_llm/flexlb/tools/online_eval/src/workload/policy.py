@@ -279,12 +279,10 @@ class WorkloadPolicy:
             report_timeline=timeline, phases=self.events, events=events)
         metric_store.save(ctx.artifact_dir)
         result["workload"]["metrics"] = str(ctx.artifact_dir / "metrics.json")
-        program = ctx.instance.get("implementation", {}).get("program")
-        if program is not None:
-            from case_api.registry import produce_gate_metrics
-            produce_gate_metrics(program, ctx.artifact_dir)
-        analysis = analyze_report(ctx.artifact_dir, result, payload)
         from monitoring.producers import produce
+        from case_api.registry import ProducerPhase
+        produce(ctx.artifact_dir, {}, phase=ProducerPhase.GATE, deadline=deadline)
+        analysis = analyze_report(ctx.artifact_dir, result, payload)
         produce(ctx.artifact_dir, analysis, deadline=deadline)
         from monitoring.metric_store import MetricStore
         analysis["series"], analysis["statistic_sources"], _, _ = MetricStore.read(ctx.artifact_dir).series(

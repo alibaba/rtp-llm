@@ -7,7 +7,6 @@ references and incarnation history stay on that environment for cleanup.
 from __future__ import annotations
 import json
 import hashlib
-import os
 import time
 import urllib.request
 from pathlib import Path

@@ -1,7 +1,6 @@
 """New case folders register complete capabilities without editing common lists."""
 import importlib
 import sys
-from pathlib import Path
 from dataclasses import replace
 from unittest import mock
 

@@ -2,7 +2,7 @@
 
 from scenario.contracts import StageHandler, StageOutput
 from scenario.parameters import validate_fields
-from cases.master_performance.inputs import validate, for_profile
+from cases.master_performance.inputs import INPUTS, effective_profile
 from artifacts.json_io import write_json
 from artifacts.gate_inputs import compact_flow, new_evidence
 from artifacts.gate import gate_check
@@ -15,7 +15,7 @@ def observe_validate(params, plan):
     fields = {"flow", "criteria", "gate_input", "observation"}
     p = validate_fields(params, plan, fields, fields)
     plan.reference(p["flow"], "java_flow")
-    validate(p["criteria"], p["gate_input"])
+    INPUTS.admit_projection(p["criteria"], p["gate_input"])
     from cases.master_performance.inputs import observation_contract
     durations = observation_contract(p["observation"])
     if any(p["criteria"][key] != value for key, value in durations.items()):
@@ -28,7 +28,7 @@ def observe_validate(params, plan):
 
 def provenance(ctx, flow):
     from artifacts.provenance import gate_provenance
-    from cases.master_performance import analysis, inputs
+    from cases.master_performance import analysis
     return gate_provenance(ctx, flow,
         source_files=ctx.services.source_files(),
         analyzer_file=analysis.__file__)
@@ -36,7 +36,7 @@ def provenance(ctx, flow):
 
 def observe(ctx, p, deadline):
     flow = ctx.resource(p["flow"], "java_flow")
-    c = for_profile(p["criteria"], ctx.instance["profile"], p["gate_input"])
+    c = effective_profile(p["criteria"], ctx.instance["profile"])
     clock = ctx.start_observation()
     origin = clock.origin_epoch_s * 1000
     lo = origin + c["warmup_s"] * 1000

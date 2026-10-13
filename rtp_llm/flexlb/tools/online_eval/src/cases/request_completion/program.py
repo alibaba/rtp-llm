@@ -10,28 +10,22 @@ from case_api.numeric_parameters import COUNT
 from case_api.numeric_parameters import NONNEGATIVE
 from case_api.numeric_parameters import POSITIVE_COUNT
 from case_api.numeric_parameters import JAVA_LENGTH
-from case_api.numeric_parameters import number_fields
 
 
-NUMERIC_PARAMETERS = {
-    **number_fields(COUNT,
-        'checks.no_errors.expected',
-    ),
-    **number_fields(NONNEGATIVE,
-        'procedure.setup_timeout_s',
-    ),
-    'traffic.count': replace(POSITIVE_COUNT, maximum=10000),
-    **number_fields(JAVA_LENGTH,
-        'traffic.input_len',
-        'traffic.output_len',
-    ),
-}
+
+from case_api.input_contract import InputContract
+
+INPUTS = InputContract.from_fields({
+    'traffic': {'kind': None, 'count': replace(POSITIVE_COUNT, maximum=10000),
+                'input_len': JAVA_LENGTH, 'output_len': JAVA_LENGTH},
+    'procedure': {'setup_timeout_s': NONNEGATIVE},
+    'checks': {'completed': None, 'no_errors': {'expected': COUNT}},
+})
 
 
 def default(case):
     """Submitted requests must reach a business terminal without stream errors."""
-    data = case.inputs(traffic={"kind", "input_len", "output_len", "count"},
-                       procedure={"setup_timeout_s"}, checks={"completed", "no_errors"})
+    data = case.bind(INPUTS)
     request = {name: case.number("traffic." + name) for name in driver(data.traffic, "request_batch")}
     for name, criterion in data.checks.items():
         fields(criterion, {"windows", "output", "unit", "op", "expected"}, f"parameters.checks.{name}")
@@ -58,10 +52,8 @@ def default(case):
 
 
 from case_api.registry import CaseDefinition
-from case_api.registry import MetricProducer
-from case_api.registry import ProducerPhase
 
 CASE = CaseDefinition(
     builders={"default": default},
-    numeric_parameters=NUMERIC_PARAMETERS,
+    input_contract=INPUTS,
 )

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from reporting import discover_reports, load_analysis, read_bundle, render, table, write_bundle
+from reporting import discover_reports, load_analysis, read_bundle, render, table
 from reporting.run_context import canonical_spec, provenance_from
 from reporting.workload import write_views
 from artifacts.provenance import collect

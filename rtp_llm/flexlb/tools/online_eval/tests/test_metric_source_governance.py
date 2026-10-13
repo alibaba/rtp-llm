@@ -13,7 +13,6 @@ from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce
 from cases.master_performance.panels import prepare_curves, report_panels
 from monitoring.contracts import MetricContractError
-from monitoring.metric_store import MetricStore
 from monitoring.query_plan import load_plan, queries_for_targets
 from document_io import DocumentError as ScenarioError
 from reporting.view_config import view

@@ -1,7 +1,6 @@
 """Extension trials execute the public contracts, including ownership and cleanup."""
 import json
 import time
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 import pytest

@@ -1,8 +1,6 @@
 """Child public protocol and real process ownership cleanup."""
 
 import json
-import os
-import signal
 import subprocess
 import sys
 import tempfile

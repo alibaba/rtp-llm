@@ -89,7 +89,7 @@ def observe(ctx, p, deadline):
         post_end=0,
         max_pacing_lag_ms=None,
     )
-    from cases.cache_scale_in import analysis as cache_gate, inputs
+    from cases.cache_scale_in import analysis as cache_gate
     path = ctx.artifact_dir / "cache-gate-evidence.json"
 
     def event(name, row=None):

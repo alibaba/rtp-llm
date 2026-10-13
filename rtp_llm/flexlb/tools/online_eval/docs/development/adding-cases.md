@@ -17,16 +17,20 @@ YAML 定义输入，注册的 Python program 定义流程。只改变拓扑、�
 ```python
 from case_api.builder import output
 from case_api.inputs import fields
+from case_api.input_contract import InputContract
 from case_api.numeric_parameters import JAVA_LENGTH, POSITIVE_COUNT, NONNEGATIVE, COUNT
 from case_api.registry import CaseDefinition
 from traffic.contracts import driver
 
+INPUTS = InputContract.from_fields({
+    'traffic': {'kind': None, 'input_len': JAVA_LENGTH,
+                'output_len': JAVA_LENGTH, 'count': POSITIVE_COUNT},
+    'procedure': {'setup_timeout_s': NONNEGATIVE},
+    'checks': {'no_errors': {'expected': COUNT}},
+})
 
 def default(case):
-    data = case.inputs(
-        traffic={"kind", "input_len", "output_len", "count"},
-        procedure={"setup_timeout_s"}, checks={"no_errors"},
-    )
+    data = case.bind(INPUTS)
     criterion = data.checks["no_errors"]
     fields(criterion, {"output", "unit", "windows", "op", "expected"},
            "parameters.checks.no_errors")
@@ -46,11 +50,7 @@ def default(case):
 
 CASE = CaseDefinition(
     builders={"default": default},
-    numeric_parameters={
-        "traffic.input_len": JAVA_LENGTH, "traffic.output_len": JAVA_LENGTH,
-        "traffic.count": POSITIVE_COUNT, "procedure.setup_timeout_s": NONNEGATIVE,
-        "checks.no_errors.expected": COUNT,
-    },
+    input_contract=INPUTS,
 )
 ```
 

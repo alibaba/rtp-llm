@@ -59,10 +59,10 @@ class SubtitleTemplate:
         if any(type(name) is not str or not re.fullmatch(r'[a-z][a-z0-9_]*', name) for name in self.fields):
             raise ValueError('invalid subtitle fields')
         allowed.update(self.fields)
-        for _, field, spec, conversion in string.Formatter().parse(self.template):
-            if field is not None and field not in allowed:
+        for _, placeholder, spec, conversion in string.Formatter().parse(self.template):
+            if placeholder is not None and placeholder not in allowed:
                 raise ValueError('unknown subtitle placeholder')
-            if field is not None and (spec or conversion):
+            if placeholder is not None and (spec or conversion):
                 raise ValueError('subtitle placeholders do not accept format specs or conversions')
 
     def render(self, *, verdict, monitoring_status=None, **values):

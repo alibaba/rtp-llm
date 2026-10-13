@@ -3,7 +3,7 @@
 保留完整块共享、真实到达时间与精确总长度；残缺尾块不参与匹配。
 """
 
-import argparse, collections, gzip, lzma, hashlib, json, math, time, sys
+import argparse, collections, gzip, lzma, hashlib, json, sys
 from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))

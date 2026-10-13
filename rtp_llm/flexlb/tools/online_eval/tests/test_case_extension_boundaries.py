@@ -45,6 +45,39 @@ def test_invalid_metadata_is_not_published(monkeypatch, tmp_path, metadata):
     assert canonical['verdict'] == 'FAIL'
 
 
+def test_both_phases_use_selected_metric_definitions(monkeypatch, tmp_path):
+    calls = []
+    capabilities = {
+        'selected_gate': MetricProducer(lambda *args: {}, lambda directory: calls.append('gate'), ProducerPhase.GATE),
+        'unused_gate': MetricProducer(lambda *args: {}, lambda directory: calls.append('unused'), ProducerPhase.GATE),
+        'selected_finalize': MetricProducer(lambda *args: {},
+            lambda directory, context: calls.append(context.run['verdict']) or {'done': True}, ProducerPhase.FINALIZE),
+    }
+    monkeypatch.setattr(producers, 'registry', lambda: SimpleNamespace(producers=capabilities))
+    monkeypatch.setattr(producers.MetricStore, 'read', lambda _: SimpleNamespace(document={'definitions': {
+        'trial/gate': {'producer': 'selected_gate'},
+        'trial/gate_duplicate': {'producer': 'selected_gate'},
+        'trial/finalize': {'producer': 'selected_finalize'},
+    }}))
+    producers.produce(tmp_path, {}, phase=ProducerPhase.GATE)
+    canonical = {'verdict': 'FAIL'}
+    producers.produce(tmp_path, canonical)
+    assert calls == ['gate', 'FAIL']
+    assert canonical['producer_results'] == {'selected_finalize': {'done': True}}
+
+
+def test_gate_phase_obeys_deadline_before_callback(monkeypatch, tmp_path):
+    def expired():
+        raise TimeoutError('expired')
+    callbacks = []
+    prepare(monkeypatch, lambda directory: callbacks.append(directory))
+    monkeypatch.setattr(producers, 'registry', lambda: SimpleNamespace(producers={
+        'example': MetricProducer(lambda *args: {}, lambda directory: callbacks.append(directory), ProducerPhase.GATE)}))
+    with pytest.raises(TimeoutError):
+        producers.produce(tmp_path, {}, phase=ProducerPhase.GATE, deadline=SimpleNamespace(check=expired))
+    assert not callbacks
+
+
 def test_case_fingerprint_covers_business_modules_and_is_deterministic(tmp_path):
     program = tmp_path / 'program.py'
     program.write_text('CASE = None\n')

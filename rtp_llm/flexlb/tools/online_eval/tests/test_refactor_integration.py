@@ -1,5 +1,4 @@
 """Preserve the validated workload controls across the execution refactor."""
-import copy
 from pathlib import Path
 from unittest.mock import patch
 import pytest

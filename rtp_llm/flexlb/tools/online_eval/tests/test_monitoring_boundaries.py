@@ -126,7 +126,6 @@ def test_archive_budget_keeps_partial_queries_and_still_reaps_process(tmp_path):
     session.process.poll.return_value = None
     session.log = Mock()
     now = [0.0]
-    deadline = Deadline(1.0, clock=lambda: now[0])
     calls = []
     def query(endpoint, **kwargs):
         calls.append(kwargs)

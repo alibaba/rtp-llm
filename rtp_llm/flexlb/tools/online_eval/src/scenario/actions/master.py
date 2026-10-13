@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from adapters.master_evidence import endpoint_loads as read_endpoint_loads, scheduler_inflight, zero_owner_loads, worker_counts

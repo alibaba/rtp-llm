@@ -2,7 +2,6 @@
 
 import json
 import threading
-from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
@@ -183,7 +182,6 @@ def test_elected_master_invokes_production_online_hook(tmp_path):
 
 def test_zookeeper_helper_keeps_stdin_open(tmp_path):
     from adapters.environment import EnvManager
-    from adapters.zookeeper_config import ZooKeeperConfig
     proc = NS(pid=100, alive=lambda: True)
     env = NS(zk_helper=None, run_dir=tmp_path, zk_launch_argv=['java', 'launcher'])
     with patch('adapters.environment.ProcessOps.start', return_value=proc) as start, patch(

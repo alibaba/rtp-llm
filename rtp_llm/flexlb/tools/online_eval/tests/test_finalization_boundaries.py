@@ -2,11 +2,10 @@
 
 import json
 import time
-from pathlib import Path
 from unittest import mock
 import pytest
 from scenario import compile_scenarios
-from scenario.runtime import RuntimeContext, Deadline, execute_instance
+from scenario.runtime import RuntimeContext, Deadline
 from workload.policy import execute_workload, WorkloadPolicy
 from case_api.extension_contracts import ResourceEvidence
 from test_scenario_runtime import Clock, Backend, source

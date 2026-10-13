@@ -1,6 +1,5 @@
 """Compilation selects consumers; archived producers cannot expand the catalog."""
 import copy
-import json
 from pathlib import Path
 from unittest.mock import patch
 

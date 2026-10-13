@@ -8,3 +8,6 @@ __pycache__/
 results/
 reports/
 /artifacts/
+
+.ruff_cache/
+.import_linter_cache/

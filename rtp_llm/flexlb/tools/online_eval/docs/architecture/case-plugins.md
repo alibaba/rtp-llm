@@ -120,4 +120,10 @@ FINALIZE producer 接收 `FinalizationContext(directory, run)`，而非可写的
 
 分阶段检查的发布使用 `StagedGateProjection(action, project)`：公共层只读取 result.json、筛选已完成检查和保存指标，case 回调负责标签、时间与投影口径。它不重新执行判定。`ProducerDescriptions` 提供 `(producer, metric)` 表驱动口径，复杂动态口径仍可提供 describe 回调。
 
+`InputContract.from_fields()` 接受嵌套字段声明，同时派生顶层字段准入与数值叶子规则；`None` 表示没有数值约束。共享数值路径通过 `section_fields()` 组合，检查阈值通过 `CheckSet.input_fields` 组合。嵌套声明不替代数据所有者的形状、单位和跨字段校验。新增数值输入只需要一处契约声明、业务消费及 YAML 值，不再维护独立的数值路径表或字段集。`optional` 可以指定字段或数值叶子路径，缺省不会隐式消费参数。
+
+case 可以在契约的 `projection` 注册 `(value, context)` 校验函数，使用 `admit_projection()` 准入投影后的阶段参数或离线证据。编译阶段与冻结计划读入复用这一权威函数；进程内转换消费已经准入的数据。离线证据仍是外部输入，必须重新准入，不能用“已校验”的布尔开关绕过检查。
+
+`monitoring.producers.produce(..., phase=ProducerPhase.GATE/FINALIZE)` 两个阶段都从冻结指标定义选择 producer，同名 producer 在单次调度中只执行一次。GATE 在整轮分析前发布已提交判定，FINALIZE 在分析后消费隔离快照并返回 metadata；两者都受收尾 deadline 约束。新增执行策略须复用该调度器，不另外从 program 查找或遍历 producer。
+
 任意指标命名空间使用 `bind_metrics()`，显式提供 labels、mode 与可选 namespace；`bind_mock_engine_metrics()` 明确限定 mock scrape 的引擎身份维度。profile 阈值从选中的 `case.profiles` 校验，其他维度须显式传给 `metric_criterion(..., dimensions=...)`。`TimestampOutput` 集中声明时间输出字段和 epoch 秒域，窗口不依赖字段必须命名为 epoch_s。

@@ -2,7 +2,6 @@
 
 from cases.cache_scale_in.constants import SHARED_WARMUP_AFFINITY_MS
 
-import math
 from input_contract import finite_number, NumberRule
 from case_api.numeric_parameters import SOURCE_NUMBERS
 from case_api.numeric_parameters import JAVA_FLOW_NUMBERS
@@ -11,14 +10,18 @@ from case_api.numeric_parameters import FRACTION
 from case_api.numeric_parameters import NONNEGATIVE
 from case_api.numeric_parameters import COUNT
 from case_api.numeric_parameters import OFFSET
-from case_api.numeric_parameters import number_fields
 from scenario.parameters import validate_fields
 from case_api.metric_inputs import metric_fields
 
-PROCEDURE_FIELDS = frozenset({"target_p", "removal_mode", "drain_timeout_ms", "topology_timeout_s", "warmup_min_s", "post_affinity_ms"})
-OBSERVATION_FIELDS = frozenset({"warmup_timeout_s", "sample_s",
-                               "window_s", "step_s", "max_gap_s"})
-
+PROCEDURE_INPUTS = {
+    'target_p': COUNT, 'removal_mode': None, 'drain_timeout_ms': COUNT,
+    'topology_timeout_s': NONNEGATIVE, 'warmup_min_s': NONNEGATIVE,
+    'post_affinity_ms': NumberRule(integer=True, minimum=0, maximum=9223372036854775807),
+    'analysis_timeout_s': NONNEGATIVE, 'startup_timeout_s': NONNEGATIVE,
+}
+OBSERVATION_INPUTS = dict.fromkeys(('warmup_timeout_s', 'sample_s', 'window_s', 'step_s', 'max_gap_s'), NONNEGATIVE)
+PROCEDURE_FIELDS = frozenset(PROCEDURE_INPUTS) - {'analysis_timeout_s', 'startup_timeout_s'}
+OBSERVATION_FIELDS = frozenset(OBSERVATION_INPUTS)
 
 
 ENGINE_FIELDS = {"running": "requests", "waiting": "requests", "cache_evictions": "events",
@@ -26,40 +29,6 @@ ENGINE_FIELDS = {"running": "requests", "waiting": "requests", "cache_evictions"
         "hit_tokens_total": "tokens", "context_tokens_total": "tokens", "context_requests_total": "requests",
         "cache_key_hits": "keys", "cache_keys_requested": "keys", "admission_open": "boolean",
         "admitted_rpcs_total": "requests", "rejected_rpcs_total": "requests"}
-
-
-NUMERIC_PARAMETERS = {
-    **SOURCE_NUMBERS,
-    "procedure.post_affinity_ms": NumberRule(integer=True, minimum=0, maximum=9223372036854775807),
-    "traffic.max_requests": NumberRule(integer=True, minimum=1, maximum=1000000),
-    **JAVA_FLOW_NUMBERS,
-    **CAPTURE_NUMBERS,
-    **number_fields(NONNEGATIVE,
-        'checks.collapse.expected',
-        'analysis.collapse.absolute_min_hit',
-        'analysis.collapse.max_drop',
-        'analysis.collapse.sustain_s',
-        'observation.max_gap_s',
-        'observation.sample_s',
-        'observation.step_s',
-        'observation.warmup_timeout_s',
-        'observation.window_s',
-        'procedure.analysis_timeout_s',
-        'procedure.topology_timeout_s',
-        'procedure.warmup_min_s',
-        'procedure.startup_timeout_s',
-    ),
-    **number_fields(COUNT,
-        'procedure.drain_timeout_ms',
-        'procedure.target_p',
-    ),
-    **number_fields(OFFSET,
-        'observation.windows.baseline.from.offset_s',
-        'observation.windows.baseline.until.offset_s',
-        'observation.windows.post.from.offset_s',
-        'observation.windows.post.until.offset_s',
-    ),
-}
 
 
 def engine_counters(spec):
@@ -81,7 +50,6 @@ def engine_counters(spec):
     return spec
 
 
-
 from case_api.check_inputs import CheckSet, CheckSpec
 
 CHECKS = CheckSet('cache_gate', {
@@ -91,7 +59,6 @@ CHECKS = CheckSet('cache_gate', {
     'completed': CheckSpec('min_completed', 'min_window_completed', 'ge', 'requests', ('baseline', 'post'), number=COUNT),
 })
 RULES = CHECKS.rules
-NUMERIC_PARAMETERS.update(CHECKS.numeric_parameters)
 
 CHECK_FIELDS = CHECKS.fields | {'sustain_s', 'absolute_min_hit', 'max_drop'}
 
@@ -99,7 +66,6 @@ CHECK_FIELDS = CHECKS.fields | {'sustain_s', 'absolute_min_hit', 'max_drop'}
 def compile_checks(case, checks, policy):
     from case_api.inputs import fields
     from case_api.check_inputs import metric_criterion
-    from case_api.check_inputs import compile_metric_checks
 
     fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
     fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.analysis.collapse')
@@ -191,13 +157,20 @@ def validate_criteria(params, plan):
     return p
 
 
-from case_api.input_contract import InputContract, InputGroup, numeric_fields
+from case_api.input_contract import InputContract, section_fields
 from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 
-INPUTS = InputContract({
-    'traffic': InputGroup(JAVA_FLOW_INPUT_FIELDS | {"kind", "max_requests"}),
-    'procedure': InputGroup(PROCEDURE_FIELDS | {"analysis_timeout_s", "startup_timeout_s"}),
-    'observation': InputGroup(OBSERVATION_FIELDS | {"inputs", "windows", "capture"}),
-    'analysis': InputGroup({"collapse"}),
-    'checks': InputGroup(set(RULES) | {"collapse"}),
-}, numeric_fields(NUMERIC_PARAMETERS))
+INPUTS = InputContract.from_fields({
+    'traffic': section_fields('traffic', JAVA_FLOW_INPUT_FIELDS | {'kind', 'max_requests'},
+        {**SOURCE_NUMBERS, **JAVA_FLOW_NUMBERS,
+         'traffic.max_requests': NumberRule(integer=True, minimum=1, maximum=1000000)}),
+    'procedure': PROCEDURE_INPUTS,
+    'observation': {
+        **OBSERVATION_INPUTS, 'inputs': None,
+        'windows': {name: {boundary: {'offset_s': OFFSET} for boundary in ('from', 'until')}
+                    for name in ('baseline', 'post')},
+        'capture': section_fields('observation', {'capture'}, CAPTURE_NUMBERS)['capture'],
+    },
+    'analysis': {'collapse': dict.fromkeys(('absolute_min_hit', 'max_drop', 'sustain_s'), NONNEGATIVE)},
+    'checks': {**CHECKS.input_fields, 'collapse': {'expected': NONNEGATIVE}},
+})

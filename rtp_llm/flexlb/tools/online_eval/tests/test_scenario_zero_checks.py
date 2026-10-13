@@ -1,6 +1,5 @@
 """A successful setup is not a successful validation."""
 
-import copy
 import tempfile
 import unittest
 

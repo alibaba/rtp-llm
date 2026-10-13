@@ -4,7 +4,6 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import gzip
-import hashlib
 import json
 import os
 import re

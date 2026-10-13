@@ -14,9 +14,7 @@ from scenario.contracts import (
     StageOutput,
 )
 from scenario.runtime import (
-    Deadline,
     RuntimeContext,
-    StageTimeout,
     execute_instance,
 )
 

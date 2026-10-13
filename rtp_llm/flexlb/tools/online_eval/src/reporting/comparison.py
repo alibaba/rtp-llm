@@ -2,7 +2,6 @@
 import argparse
 import copy
 import json
-import math
 from pathlib import Path
 import sys
 import zipfile

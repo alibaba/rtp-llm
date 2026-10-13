@@ -1,7 +1,7 @@
 """Aggregate typed checks without acquiring evidence or presenting reports."""
 
 from dataclasses import asdict
-from analysis.checks import CheckResult, invalid_check, check_verdict
+from analysis.checks import invalid_check, check_verdict
 
 
 def gate_checks(checks, errors):

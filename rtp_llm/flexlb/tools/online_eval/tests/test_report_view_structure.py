@@ -1,6 +1,5 @@
 """All views share a bounded hierarchy and section presentation contract."""
 
-import copy
 from pathlib import Path
 from unittest.mock import patch
 

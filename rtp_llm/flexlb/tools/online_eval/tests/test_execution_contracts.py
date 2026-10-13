@@ -1,6 +1,5 @@
 """Input mutations, clock jumps and acquisition failures must remain visible."""
 
-import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace as NS

@@ -1,5 +1,4 @@
 """Admission failures and seeded generation across data boundaries."""
-import copy
 import hashlib
 import json
 from unittest.mock import patch

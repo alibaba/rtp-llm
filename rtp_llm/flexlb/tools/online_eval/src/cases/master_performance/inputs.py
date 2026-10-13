@@ -10,37 +10,9 @@ from case_api.numeric_parameters import NONNEGATIVE
 from case_api.numeric_parameters import FRACTION
 from case_api.numeric_parameters import COUNT
 from case_api.numeric_parameters import OFFSET
-from case_api.numeric_parameters import number_fields
 
-OBSERVATION_FIELDS = frozenset({"sample_s", "max_gap_s"})
-
-
-
-NUMERIC_PARAMETERS = {
-    **SOURCE_NUMBERS,
-    **OUTPUT_DISTRIBUTION_NUMBERS,
-    **JAVA_FLOW_NUMBERS,
-    **CAPTURE_NUMBERS,
-    **number_fields(NONNEGATIVE,
-        'procedure.analysis_timeout_s',
-        'checks.engine_tps.rtp_llm_context_tps.expected',
-        'checks.engine_tps.rtp_llm_context_tps_with_cache.expected',
-        'checks.engine_tps.mock_decode_wall_tps.expected',
-        'observation.max_gap_s',
-        'observation.sample_s',
-        'traffic.client.playback.ramp_up_seconds',
-    ),
-    **number_fields(COUNT,
-        'analysis.slo.e2e_ms',
-        'analysis.slo.tpot_ms',
-        'analysis.slo.ttft_ms',
-        'traffic.source.parameters.max_input_tokens',
-    ),
-    **number_fields(OFFSET,
-        'observation.windows.measurement.from.offset_s',
-        'observation.windows.measurement.until.offset_s',
-    ),
-}
+OBSERVATION_INPUTS = {'sample_s': NONNEGATIVE, 'max_gap_s': NONNEGATIVE}
+OBSERVATION_FIELDS = frozenset(OBSERVATION_INPUTS)
 
 
 def engine_tps(spec, bounds=None):
@@ -86,7 +58,6 @@ CHECKS = CheckSet('performance_gate', {
     'inflight_growth': CheckSpec('max_inflight_growth_rps', 'inflight_growth_rps', 'le', 'requests/s', ('measurement',), number=NONNEGATIVE),
 })
 RULES = CHECKS.rules
-NUMERIC_PARAMETERS.update(CHECKS.numeric_parameters)
 
 CHECK_FIELDS = CHECKS.fields | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
 
@@ -94,7 +65,6 @@ CHECK_FIELDS = CHECKS.fields | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
 def compile_checks(case, checks, inputs):
     from case_api.inputs import fields
     from case_api.check_inputs import metric_criterion
-    from case_api.check_inputs import compile_metric_checks
 
     bindings = metric_fields(engine_tps(inputs))
     fields(checks, set(RULES) | {'engine_tps'}, 'parameters.checks')
@@ -184,22 +154,37 @@ def validate(criteria, gate_input=None):
 
 
 def for_profile(criteria, profile, gate_input=None):
+    return effective_profile(INPUTS.admit_projection(criteria, gate_input), profile)
+
+
+def effective_profile(criteria, profile):
     """Freeze effective floors before observation and evidence collection."""
     import copy
-    result = copy.deepcopy(validate(criteria, gate_input))
+    result = copy.deepcopy(criteria)
     overrides = result.pop("engine_tps_by_profile", {})
     if profile in overrides:
         result["engine_tps"].update(overrides[profile])
-    return validate(result, gate_input)
+    return result
 
 
-from case_api.input_contract import InputContract, InputGroup, numeric_fields
+from case_api.input_contract import InputContract, section_fields
 from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
 
-INPUTS = InputContract({
-    'traffic': InputGroup(JAVA_FLOW_INPUT_FIELDS | {"kind"}),
-    'procedure': InputGroup({"analysis_timeout_s"}),
-    'observation': InputGroup(OBSERVATION_FIELDS | {"inputs", "windows", "capture"}),
-    'analysis': InputGroup({"slo"}),
-    'checks': InputGroup(set(RULES) | {"engine_tps"}),
-}, numeric_fields(NUMERIC_PARAMETERS))
+INPUTS = InputContract.from_fields({
+    'traffic': section_fields('traffic', JAVA_FLOW_INPUT_FIELDS | {'kind'}, {
+        **SOURCE_NUMBERS, **OUTPUT_DISTRIBUTION_NUMBERS, **JAVA_FLOW_NUMBERS,
+        'traffic.client.playback.ramp_up_seconds': NONNEGATIVE,
+        'traffic.source.parameters.max_input_tokens': COUNT,
+    }),
+    'procedure': {'analysis_timeout_s': NONNEGATIVE},
+    'observation': {
+        **OBSERVATION_INPUTS, 'inputs': None,
+        'windows': {'measurement': {boundary: {'offset_s': OFFSET} for boundary in ('from', 'until')}},
+        'capture': section_fields('observation', {'capture'}, CAPTURE_NUMBERS)['capture'],
+    },
+    'analysis': {'slo': dict.fromkeys(('ttft_ms', 'e2e_ms', 'tpot_ms'), COUNT)},
+    'checks': {**CHECKS.input_fields, 'engine_tps': {
+        name: {'expected': NONNEGATIVE} for name in
+        ('rtp_llm_context_tps', 'rtp_llm_context_tps_with_cache', 'mock_decode_wall_tps')
+    }},
+}, projection=validate)

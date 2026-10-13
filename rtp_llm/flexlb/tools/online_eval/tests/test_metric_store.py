@@ -1,6 +1,5 @@
 """Metric identity, frozen provenance and invalid-data contracts."""
 
-import copy
 import json
 import tempfile
 import unittest
@@ -11,7 +10,7 @@ from monitoring.metric_store import MetricStore
 from monitoring.contracts import MetricContractError, MetricUnavailable
 from monitoring.publication import publish
 from monitoring.archive import export_metrics
-from monitoring.query_plan import load_plan, plan_hash, definitions
+from monitoring.query_plan import load_plan, plan_hash
 from reporting.metric_binding import bindings
 from document_io import DocumentError as ScenarioError
 
@@ -104,7 +103,6 @@ class MetricPlanTest(unittest.TestCase):
 
 class MetricArtifactTest(unittest.TestCase):
     def test_ha_windows_keep_their_own_source_provenance(self):
-        from types import SimpleNamespace
         from cases.master_ha_failover.metrics import produce_gates, gate_labels
         from monitoring.archive import export_metrics
         with tempfile.TemporaryDirectory() as d:

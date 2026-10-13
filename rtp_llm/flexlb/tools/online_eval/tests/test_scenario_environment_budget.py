@@ -1,6 +1,5 @@
 """Compiler/parent/child agree on maximum fresh topology across clean epochs."""
 
-import copy
 import json
 import tempfile
 import time
@@ -15,9 +14,7 @@ from adapters.java_mock_resources import (
 )
 from scenario import compile_scenarios
 from scenario.backend import BoundedOps, JavaMockBackend
-from scenario.backend_spec import make_env_spec
 from scenario.catalog import handlers
-from scenario.compiler import environment
 from scenario.contracts import StageHandler
 from scenario.lease import validate_lease
 from scenario.runtime import Deadline, RuntimeContext

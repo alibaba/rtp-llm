@@ -5,7 +5,6 @@ import gzip
 import hashlib
 import io
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -13,8 +12,7 @@ import unittest
 from pathlib import Path
 
 from dataclasses import fields
-from traffic.capture_model import CaptureRecord, SCHEMA_VERSION
-from traffic.lineage_model import DEFAULT_PREFIX_BLOCK_SIZE as BLOCK_SIZE
+from traffic.capture_model import CaptureRecord
 from scripts.pipeline.capture_frontend_prefix import capture, parser
 
 ROOT = Path(__file__).resolve().parents[1]

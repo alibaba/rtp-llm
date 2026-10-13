@@ -8,7 +8,7 @@ from pathlib import Path
 
 from traffic import datasets, prefix_lineage, prefix_lineage_v3
 from traffic.synthetic.derivation import derive_parameters
-from traffic.codecs import decode, decode_model
+from traffic.codecs import decode_model
 from scripts.pipeline.derive_master_templates import derive
 from scripts.pipeline.materialize_traffic import main as materialize_main
 

@@ -2,7 +2,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 
 from tests.ha_fixtures import client_resource
 from workload.validity import analyze_report as read_analysis

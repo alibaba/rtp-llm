@@ -12,7 +12,6 @@ from adapters.load_client import client_environment
 from traffic.traffic_source import materialize, SourceSpecification
 from traffic.contracts import java_client_priority
 
-from adapters.java_client import ClientOps
 from scenario.contracts import CheckResult, StageHandler, StageOutput
 from scenario.parameters import validate_fields
 from adapters.mock_control import engine_snapshot

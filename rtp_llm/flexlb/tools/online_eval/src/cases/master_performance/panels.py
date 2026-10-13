@@ -21,7 +21,6 @@ def prepare_curves(directory, evidence, presentation):
             color_index=list(presentation.charts.curves).index(curve_id),
         ))
 
-    from monitoring.metric_store import MetricStore
     store = MetricStore.read(directory)
     from reporting.metric_binding import monitoring_audit
     inventory = monitoring_audit(store, presentation)

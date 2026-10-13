@@ -14,7 +14,7 @@ from cases.master_performance.metrics import produce, values
 from monitoring.contracts import MetricContractError
 from monitoring.metric_store import MetricStore, series_row
 from monitoring.publication import publish
-from monitoring.query_plan import definitions, load_plan
+from monitoring.query_plan import load_plan
 from document_io import DocumentError as ScenarioError
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -55,11 +55,15 @@ class InputContract:
     groups: Mapping
     numbers: tuple = ()
     decode: object = None
+    projection: object = None
 
     def __post_init__(self):
         if self.decode is not None:
-            from case_api.extension_contracts import validate_call
+            from case_api.call_contract import validate_call
             validate_call(self.decode, 1, "input_contract.decode")
+        if self.projection is not None:
+            from case_api.call_contract import validate_call
+            validate_call(self.projection, 2, "input_contract.projection")
         groups = dict(self.groups)
         if any(type(name) is not str or not name.isidentifier() or
                not isinstance(group, InputGroup) for name, group in groups.items()):
@@ -77,22 +81,46 @@ class InputContract:
         object.__setattr__(self, 'numbers', numbers)
 
     @classmethod
-    def from_fields(cls, sections, *, optional=(), decode=None):
-        """One field declaration derives required names and numeric paths."""
+    def from_fields(cls, sections, *, optional=(), decode=None, projection=None):
+        """Derive section names and numeric leaves from one nested declaration.
+
+        Nested mappings declare numeric paths; domain owners retain their nested
+        shape validators. None denotes a field without a numeric constraint.
+        """
         optional = frozenset(optional)
-        paths = {group + '.' + name for group, fields in sections.items() for name in fields}
+        paths = set()
+        numbers = []
+
+        def visit(definitions, prefix, required=True):
+            for name, rule in definitions.items():
+                if type(name) is not str or not name or '.' in name:
+                    raise ValueError('invalid input field name')
+                path = prefix + '.' + name
+                paths.add(path)
+                required_here = required and path not in optional
+                if isinstance(rule, Mapping):
+                    visit(rule, path, required_here)
+                elif rule is not None:
+                    numbers.append(InputField(path, rule, required_here))
+
+        for group, definitions in sections.items():
+            visit(definitions, group)
         if optional - paths:
             raise ValueError('optional inputs are not declared')
-        groups, numbers = {}, []
+        groups = {}
         for group, definitions in sections.items():
             required, omitted = set(), set()
-            for name, rule in definitions.items():
+            for name in definitions:
                 path = group + '.' + name
                 (omitted if path in optional else required).add(name)
-                if rule is not None:
-                    numbers.append(InputField(path, rule, path not in optional))
             groups[group] = InputGroup(required, omitted)
-        return cls(groups, tuple(numbers), decode)
+        return cls(groups, tuple(numbers), decode, projection)
+
+    def admit_projection(self, value, context=None):
+        """Admit projected stage/evidence data using the same owner contract."""
+        if self.projection is None:
+            raise ValueError('input contract has no projection validator')
+        return self.projection(value, context)
 
     @property
     def numeric_parameters(self):
@@ -114,3 +142,24 @@ class InputContract:
 
 def numeric_fields(rules, *, optional=()):
     return tuple(InputField(path, rule, path not in optional) for path, rule in rules.items())
+
+
+def section_fields(section, names, numbers):
+    """Compose existing shared numeric contracts into an owned section."""
+    result = dict.fromkeys(names)
+    for path, rule in numbers.items():
+        group, _, rest = path.partition('.')
+        if group != section:
+            continue
+        parts = rest.split('.')
+        if parts[0] not in result:
+            raise ValueError('numeric field is outside its input section: ' + path)
+        target = result
+        for name in parts[:-1]:
+            if target.get(name) is None:
+                target[name] = {}
+            if not isinstance(target[name], dict):
+                raise ValueError('conflicting nested input: ' + path)
+            target = target[name]
+        target[parts[-1]] = rule
+    return result

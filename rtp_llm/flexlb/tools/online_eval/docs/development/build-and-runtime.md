@@ -14,6 +14,16 @@
 
 ## 编译
 
+修改 Python 前，在独立虚拟环境安装质量检查依赖，并从 `tools/online_eval` 运行：
+
+```bash
+python3 -m pip install -r requirements-quality.txt
+python3 scripts/commands/check_quality.py
+PYTHONPATH=src:. python3 -m pytest -q tests/test_quality_boundaries.py
+```
+
+Ruff 检查源码、脚本及测试的语法、未定义名称、未使用导入和变量。`.importlinter` 检查四条直接及间接依赖边界：分析不得依赖报表；case 输入不得依赖编译器；`case_api` 不得依赖业务 case 或 workload；scenario 库不得依赖命令脚本。case 模块使用通配匹配，新增 case 不修改边界名单。`online-eval-quality` 工作流在相关 push、PR 和手动触发时执行这些检查。运行场景 CI 之前也应执行同一入口。
+
 ```bash
 ./mvnw -P'opensource,!internal' \
   -pl flexlb-api,flexlb-mock-engine -am package -DskipTests
