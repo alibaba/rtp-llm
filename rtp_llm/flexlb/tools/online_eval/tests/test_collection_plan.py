@@ -3,7 +3,7 @@
 import json
 from io import BytesIO
 from types import SimpleNamespace as NS
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -12,7 +12,7 @@ from monitoring.probe import PrometheusEvidence
 from monitoring.collection_plan import collection_plan, physical_metrics, scrape_job
 from monitoring.query_plan import load_plan
 from monitoring.session import PrometheusSession
-from monitoring.sources import evidence_collector
+from monitoring.probe import evidence_collector
 from scenario.loader import ScenarioError
 
 
@@ -55,8 +55,8 @@ def test_unused_targets_are_not_scraped_or_waited_on(tmp_path):
     session = PrometheusSession(tmp_path, {'mock': 'http://local:1/metrics',
         'master-A': 'http://unused:2/metrics'}, query_plan='master_ha_failover.yaml', target_kinds={'mock': 'mock', 'master-A': 'master'})
     assert set(session.targets) == {'mock'}
-    with patch.object(session, 'instant') as read, patch('urllib.request.urlopen') as http:
-        session.add_targets({'client-unused': 'http://unused:3/metrics'})
+    with patch.object(session.client, 'instant') as read, patch('urllib.request.urlopen') as http:
+        session.add_client_targets({'client-unused': 'http://unused:3/metrics'})
     read.assert_not_called()
     http.assert_not_called()
     assert not session.target_bounds
@@ -114,12 +114,12 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
     plan['produced'] = {'ha/http_up': plan['produced']['ha/http_up']}
     env = NS(master_specs=dict(A=NS(bind_ip='localhost', http_port=123)))
     collector = evidence_collector(plan, 'master_inflight', env, tmp_path/'states.jsonl',
-                                  session=NS(interval=1), limits=dict(max_samples=10, max_bytes=10000))
+                                  session=NS(interval=1, client=Mock()), limits=dict(max_samples=10, max_bytes=10000))
     with patch('urllib.request.urlopen', return_value=BytesIO(b'{}')):
         assert collector.adapters['A'](timeout=.1) == {'master': 'A', 'http_up': 1}
     plan['produced']['ha/scheduler_inflight'] = load_plan('master_ha_failover.yaml')['produced']['ha/scheduler_inflight']
     collector = evidence_collector(plan, 'master_inflight', env, tmp_path/'states.jsonl',
-                                  session=NS(interval=1), limits=dict(max_samples=10, max_bytes=10000))
+                                  session=NS(interval=1, client=Mock()), limits=dict(max_samples=10, max_bytes=10000))
     with patch('urllib.request.urlopen', return_value=BytesIO(b'{}')):
         with pytest.raises(ValueError, match='required ledger'):
             collector.adapters['A'](timeout=.1)
@@ -128,15 +128,15 @@ def test_registered_projection_reads_only_selected_fields(tmp_path):
 def test_unselected_adapter_cannot_start(tmp_path):
     with pytest.raises(ValueError, match='not selected'):
         evidence_collector(load_plan('master_performance.yaml'), 'master_inflight', object(),
-                           tmp_path/'states.jsonl', session=NS(interval=1), limits=dict(max_samples=10, max_bytes=10000))
+                           tmp_path/'states.jsonl', session=NS(interval=1, client=Mock()), limits=dict(max_samples=10, max_bytes=10000))
     assert not list(tmp_path.iterdir())
 
 
 def test_probe_registration_does_not_read_and_only_scrapes_collect():
     calls = []
     probe = PrometheusEvidence('unused.jsonl', {'one': lambda **kw: calls.append(kw) or {'target': 'one', 'queue': 0}},
-        fields={'queue'}, label='target', source='example', session=NS(interval=1),
-        limits=dict(max_samples=1, max_bytes=1000))
+        fields={'queue'}, label='target', source='example', session=NS(interval=1, client=Mock()),
+        limits=dict(max_samples=1, max_bytes=1000), client=NS(interval=1, client=Mock()).client)
     assert probe.describe() == [] and calls == []
     assert list(probe.collect())[0].samples[0].value == 0
     assert len(calls) == 1
@@ -149,8 +149,8 @@ def test_probe_registration_does_not_read_and_only_scrapes_collect():
 @pytest.mark.parametrize('row', [{'target': 'wrong', 'queue': 1}, {'target': 'one', 'queue': float('nan')}])
 def test_bad_probe_data_is_not_published_as_partial_or_zero(row):
     probe = PrometheusEvidence('unused.jsonl', {'one': lambda **kw: row},
-        fields={'queue'}, label='target', source='example', session=NS(interval=1),
-        limits=dict(max_samples=1, max_bytes=1000))
+        fields={'queue'}, label='target', source='example', session=NS(interval=1, client=Mock()),
+        limits=dict(max_samples=1, max_bytes=1000), client=NS(interval=1, client=Mock()).client)
     with pytest.raises(ValueError):
         list(probe.collect())
     assert probe.error is not None

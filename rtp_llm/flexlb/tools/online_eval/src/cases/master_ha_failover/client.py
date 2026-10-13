@@ -7,7 +7,8 @@ import uuid
 from pathlib import Path
 
 from cases.master_ha_failover.analysis import row_ts_ms
-from monitoring.sources import evidence_collector, selected_sources
+from monitoring.probe import evidence_collector
+from monitoring.sources import selected_sources
 from adapters.java_client import ClientOps
 from traffic.contracts import source_priority
 

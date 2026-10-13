@@ -26,6 +26,8 @@ def selected_sources(plan):
             source["fields"].append(dependency["field"])
         source["metric_ids"].append(identity)
     for name, spec in selected.items():
+        spec["fields"] = sorted(spec["fields"])
+        spec["metric_ids"] = sorted(spec["metric_ids"])
         capability = registry().sources[name]
         path = Path(inspect.getfile(capability.factory))
         spec["implementation"] = dict(module=capability.factory.__module__, factory=capability.factory.__name__,
@@ -33,14 +35,3 @@ def selected_sources(plan):
                                       collector_sha256=hashlib.sha256(Path(__file__).with_name("probe.py").read_bytes()).hexdigest(),
                                       sha256=hashlib.sha256(path.read_bytes()).hexdigest())
     return selected
-
-
-def evidence_collector(plan, source, environment, path, **options):
-    from monitoring.probe import PrometheusEvidence
-    selected = selected_sources(plan)
-    if source not in selected:
-        raise ValueError("evidence source is not selected: " + source)
-    capability = registry().sources[source]
-    adapters = capability.factory(environment, set(selected[source]["fields"]))
-    return PrometheusEvidence(path, adapters, fields=selected[source]["fields"],
-                              label=capability.label, source=source, **options)

@@ -2,7 +2,8 @@
 
 from cases.cache_scale_in.analysis import analyze
 from artifacts.gate_inputs import evidence_origin
-from monitoring.metric_store import MetricStore, publish, series_row
+from monitoring.metric_store import MetricStore, series_row
+from monitoring.publication import publish
 from monitoring.archive import export_metrics
 
 

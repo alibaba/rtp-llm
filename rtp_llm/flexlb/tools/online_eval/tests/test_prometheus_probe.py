@@ -8,7 +8,7 @@ import pytest
 from monitoring.collection_plan import select_plan
 from monitoring.query_plan import load_plan
 from monitoring.session import PrometheusSession
-from monitoring.sources import evidence_collector
+from monitoring.probe import evidence_collector
 
 
 def wait_for(predicate):
@@ -33,13 +33,13 @@ def test_standard_probe_archives_scrape_times_and_preserves_master_outage(tmp_pa
         return {'master': 'A', 'http_up': state['up']}
     probe = PrometheusEvidence(tmp_path/'states.jsonl', {'A': read}, fields={'http_up'},
                 label='master', source='master_inflight', session=session,
-                limits=dict(max_samples=1000, max_bytes=100000))
+                limits=dict(max_samples=1000, max_bytes=100000), client=session.client)
     try:
         probe.start()
         wait_for(lambda: len(calls) >= 3)
         state['up'] = 0
         wait_for(lambda: any(float(row['value'][1]) == 0 for row in
-                            session.query('online_eval_master_inflight_http_up{job="probe-master_inflight"}')))
+                            session.client.query('online_eval_master_inflight_http_up{job="probe-master_inflight"}')))
         probe.stop()
         rows = [json.loads(line) for line in probe.path.read_text().splitlines()]
         assert {row['http_up'] for row in rows} == {0, 1}
@@ -68,7 +68,7 @@ def test_standard_probe_bad_payload_survives_sdk_http_error_as_run_failure(tmp_p
         raise ValueError('missing required debug field')
     probe = PrometheusEvidence(tmp_path/'bad.jsonl', {'A': invalid}, fields={'http_up'},
             label='master', source='master_inflight', session=session,
-            limits=dict(max_samples=100, max_bytes=10000))
+            limits=dict(max_samples=100, max_bytes=10000), client=session.client)
     try:
         with pytest.raises(RuntimeError, match="missing required debug field"):
             probe.start()

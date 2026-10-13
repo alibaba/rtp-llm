@@ -101,7 +101,7 @@ class JavaFlowGroup:
                 deadline,
                 "client monitor endpoint absent",
             )
-            self.monitor.add_target(
+            self.monitor.add_client_target(
                 self.monitor_target, json.loads(target_path.read_text())["url"], deadline=deadline
             )
             (self.directory / "metrics-ready").write_text(

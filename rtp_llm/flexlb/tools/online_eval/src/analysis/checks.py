@@ -77,7 +77,7 @@ def check_metric(store, identity, metric_id, *, reduction, op, expected,
     MetricStore's inclusive sample window is distinct from request-cohort windows.
     Invalid observations become ERROR; definition/selector contract errors raise.
     """
-    from monitoring.metric_store import MetricUnavailable
+    from monitoring.contracts import MetricUnavailable
 
     validate_comparison(op, expected)
     selection = dict(labels=labels, start=start, end=end, source=source, epoch=epoch,

@@ -40,7 +40,7 @@ def test_insufficient_ha_samples_survive_runtime_contract_without_a_fake_number(
 def test_ha_decision_needs_neither_a_metric_store_nor_a_monitor(tmp_path):
     ctx = RuntimeContext(dict(profile="batch-window"), None, tmp_path, lambda: 0, lambda _: None)
     rows = ctx.register_resource("ha_rows", [dict(status="ok", send_start_epoch_ms=1000)])
-    with patch("monitoring.metric_store.publish", side_effect=AssertionError("publish during gate")):
+    with patch("monitoring.publication.publish", side_effect=AssertionError("publish during gate")):
         output = _client_check(ctx, dict(rows=rows, metric="ha_gate/success_rate", min_samples=1,
             expected=1, op="eq"), Deadline(10, lambda: 0))
     _validate_output(ctx, output, {"actual": "nullable_number"}, {"criterion"})

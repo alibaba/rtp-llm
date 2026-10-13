@@ -37,7 +37,8 @@ def test_percentile_uses_nearest_rank(values, p, expected):
 @pytest.mark.parametrize("timestamp", ["bad", None, True, float("nan"),
                                       float("inf"), -float("inf")])
 def test_metric_timestamp_is_validated_before_window_filter(timestamp):
-    from monitoring.metric_store import MetricStore, MetricUnavailable
+    from monitoring.metric_store import MetricStore
+    from monitoring.contracts import MetricUnavailable
     row = dict(metric_id="x", source="P", epoch="1", status="PASS",
                labels={}, provenance={}, points=[[10, 2], [timestamp, 3]])
     store = MetricStore(dict(metrics_schema_version=1,
@@ -49,7 +50,8 @@ def test_metric_timestamp_is_validated_before_window_filter(timestamp):
 @pytest.mark.parametrize("field", ["labels", "provenance", "evidence",
                                   "collection_gaps", "errors"])
 def test_metric_artifact_rejects_null_metadata(field):
-    from monitoring.metric_store import MetricStore, MetricContractError
+    from monitoring.metric_store import MetricStore
+    from monitoring.contracts import MetricContractError
     row = dict(metric_id="x", source="P", epoch="1", status="PASS",
                labels={}, provenance={}, points=[[10, 2]])
     document = dict(metrics_schema_version=1, definitions={"x": dict(unit="count")},
@@ -112,9 +114,9 @@ def test_https_probe_keeps_scheme_host_port_and_path(tmp_path,monkeypatch):
     from unittest.mock import Mock,MagicMock
     from types import SimpleNamespace
     from monitoring.session import PrometheusSession
-    session=object.__new__(PrometheusSession)
-    session.url="http://prometheus";session.closed=False;session.probes={};session.directory=tmp_path
-    session.query=Mock(return_value=[{"value":[1,"1"]}]);session._write_session=Mock()
+    session=PrometheusSession(tmp_path, {})
+    session.client.url="http://prometheus";session.closed=False;session.probes={};session.directory=tmp_path
+    session.client.query=Mock(return_value=[{"value":[1,"1"]}]);session._write_session=Mock()
     (tmp_path/"prometheus.json").write_text(json.dumps({"scrape_configs":[]}))
     monkeypatch.setattr("urllib.request.urlopen",Mock(return_value=MagicMock()))
     probe=SimpleNamespace(job="probe",names={"up":"probe_up"},error=None)
@@ -127,7 +129,8 @@ def test_https_probe_keeps_scheme_host_port_and_path(tmp_path,monkeypatch):
 def test_invalid_survivor_measurement_cannot_be_selected(tmp_path):
     from metric_fixtures import freeze_metrics
     from cases.cache_scale_in.metrics import produce
-    from monitoring.metric_store import MetricStore,MetricUnavailable
+    from monitoring.metric_store import MetricStore
+    from monitoring.contracts import MetricUnavailable
     freeze_metrics(tmp_path,"cache_scale_in")
     evidence=dict(provenance=dict(env_epoch=1),clock=dict(origin_epoch_s=100),survivors=["p"])
     result=dict(verdict="INVALID",windows=[dict(end=10,hit=.9,errors=[])],gate_metrics={})
@@ -142,10 +145,11 @@ def test_producer_source_without_file_has_clear_error(tmp_path,monkeypatch,spec)
     from types import SimpleNamespace
     from case_api.registry import registry
     from metric_fixtures import freeze_metrics
-    from monitoring.metric_store import publish,MetricContractError
+    from monitoring.publication import publish
+    from monitoring.contracts import MetricContractError
     store=freeze_metrics(tmp_path,"cache_scale_in")
     module = registry().producers["cache_windows"].module
-    monkeypatch.setattr("importlib.util.find_spec",lambda name:
+    monkeypatch.setattr("monitoring.publication.find_spec",lambda name:
         (None if spec is None else SimpleNamespace(**spec)) if name == module else find_spec(name))
     definition=store.document["definitions"]["derived/survivor_hit_ratio"]
     with pytest.raises(MetricContractError,match="producer module.*" + module):
@@ -177,7 +181,8 @@ def metric_document():
 @pytest.mark.parametrize("field", ["metric_id", "source", "epoch", "status", "points"])
 @pytest.mark.parametrize("bad", [None, "missing", 7])
 def test_metric_row_fields_are_contract_checked(metric_document, field, bad):
-    from monitoring.metric_store import MetricStore, MetricContractError
+    from monitoring.metric_store import MetricStore
+    from monitoring.contracts import MetricContractError
     row = metric_document["metrics"]["x"][0]
     if bad == "missing":
         del row[field]
@@ -189,7 +194,8 @@ def test_metric_row_fields_are_contract_checked(metric_document, field, bad):
 
 @pytest.mark.parametrize("points", [[[11, 2], [10, 3]], [[10, 2], [10, 3]], [[10]]])
 def test_metric_selection_and_projection_reject_unordered_or_malformed_points(metric_document, points):
-    from monitoring.metric_store import MetricStore, MetricUnavailable
+    from monitoring.metric_store import MetricStore
+    from monitoring.contracts import MetricUnavailable
     metric_document["metrics"]["x"][0]["points"] = points
     store = MetricStore(metric_document)
     for read in (lambda: store.reduce("x", op="first"), lambda: store.series(0)):
@@ -198,7 +204,8 @@ def test_metric_selection_and_projection_reject_unordered_or_malformed_points(me
 
 
 def test_failed_samples_are_not_rescued_by_a_large_coverage_budget(metric_document):
-    from monitoring.metric_store import MetricStore, MetricUnavailable
+    from monitoring.metric_store import MetricStore
+    from monitoring.contracts import MetricUnavailable
     metric_document["metrics"]["x"][0]["points"] = [[10, 2], [11, None], [12, 3]]
     with pytest.raises(MetricUnavailable, match="missing/invalid samples"):
         MetricStore(metric_document).select("x", start=10, end=12, max_gap_s=10)
@@ -222,14 +229,15 @@ def test_metric_store_preserves_and_copies_recorded_diagnostics():
 @pytest.mark.parametrize("kind", ["mismatch", "value_error", "contract_error"])
 def test_published_contract_errors_keep_the_original_cause(tmp_path,monkeypatch,kind):
     from metric_fixtures import freeze_metrics
-    from monitoring.metric_store import publish,MetricContractError
+    from monitoring.publication import publish
+    from monitoring.contracts import MetricContractError
     store=freeze_metrics(tmp_path,"cache_scale_in")
     definition=store.document["definitions"]["derived/survivor_hit_ratio"]
     failure=ValueError("bad calculation") if kind=="value_error" else MetricContractError("bad contract")
     def contract(*args):
         if kind=="mismatch":return {}
         raise failure
-    monkeypatch.setattr("monitoring.producer_contract.output_contract",contract)
+    monkeypatch.setattr("monitoring.publication.output_contract",contract)
     with pytest.raises(MetricContractError) as raised:
         publish(store,"derived/survivor_hit_ratio",definition,[],producer="cache_windows",evidence={})
     if kind=="value_error":

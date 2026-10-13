@@ -2,13 +2,14 @@
 
 import json
 import math
-import time
 from pathlib import Path
 import copy
 
 from monitoring.identity import SOURCE_KINDS
-from monitoring.metric_store import MetricStore, MetricContractError, atomic_json
-from monitoring.query_plan import definitions, plan_hash, queries_for_targets
+from monitoring.metric_store import MetricStore
+from monitoring.contracts import MetricContractError
+from artifacts.json_io import write_json
+from monitoring.query_plan import definitions, plan_hash
 
 
 def _finite(value):
@@ -196,78 +197,5 @@ def export_metrics(directory, plan=None, *, archive_directory=None):
     document = dict(metrics_schema_version=1, run=metadata, plans=plans, definitions=declared,
                     metrics=observations, collection_gaps=gaps, errors=errors)
     store = MetricStore(document)
-    atomic_json(destination, store.document)
+    write_json(destination, store.document)
     return store
-
-
-def archive_session(session, *, materialize=True, deadline=None):
-    end = time.time()
-
-    queries, required_queries = queries_for_targets(
-        session.query_plan, session.targets, session.selector, session.interval,
-        session.target_kinds,
-    )
-    result = dict(
-        missing_queries=[],
-        query_plan=session.query_plan_name,
-        query_plan_sha256=session.query_plan_sha256,
-        backend="prometheus",
-        metric_plan=session.query_plan,
-        collection_plan=session.collection_plan,
-        target_kinds={source: session.target_kind(source) for source in session.targets},
-        start=session.started,
-        end=end,
-        step=session.interval,
-        targets=session.targets,
-        target_bounds=session.target_bounds,
-        queries={},
-        errors=[],
-    )
-    for key, expression in queries.items():
-        rows = []
-        # API query_range has a maximum point count; chunk long experiments.
-        start, target_end = session.target_bounds.get(
-            key.split("/", 1)[0], [session.started, end]
-        )
-        query_end = target_end or end
-        cursor = start
-        try:
-            while cursor <= query_end:
-                if deadline is not None:
-                    deadline.check()
-                right = min(query_end, cursor + session.interval * 1000)
-                source, metric = key.split("/", 1)
-                definition = session.query_plan["sources"][session.target_kind(source)].get(metric, {})
-                if definition.get("mode") == "scrape":
-                    if right <= cursor:
-                        break
-                    rows.extend(session.metric_rows(session.target_kind(source) + "/" + metric,
-                                                 source=source, start=cursor, end=right, deadline=deadline))
-                else:
-                    data = session.api("query_range", query=expression, start=cursor,
-                                    end=right, step=session.interval,
-                                       **({"deadline": deadline} if deadline is not None else {}))
-                    rows.extend(data["result"])
-                cursor = right if definition.get("mode") == "scrape" and right < query_end else right + session.interval
-            result["queries"][key] = dict(promql=expression, result=rows)
-            if not rows:
-                result["missing_queries"].append(key)
-                if key in required_queries:
-                    result["errors"].append(
-                        dict(query=key, error="required monitor series absent")
-                    )
-        except Exception as exc:
-            result["queries"][key] = dict(promql=expression, result=rows)
-            result["errors"].append(dict(query=key, error=str(exc)))
-    atomic_json(session.directory / "queries.json", result)
-    root = session.directory.parent.parent if session.directory.parent.name == "telemetry" else session.directory
-    if materialize:
-        if deadline is not None:
-            deadline.check()
-        export_metrics(root)
-        if deadline is not None:
-            deadline.check()
-    if result["errors"]:
-        if deadline is not None:
-            deadline.check()
-        raise RuntimeError("incomplete Prometheus archive")

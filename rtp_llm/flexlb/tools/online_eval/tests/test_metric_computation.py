@@ -8,7 +8,9 @@ from analysis.time_buckets import TimeBuckets
 from cases.master_ha_failover.analysis import row_ts_ms
 from cases.master_ha_failover.metrics import _request_series, produce as produce_ha
 from cases.master_performance.metrics import produce as produce_performance, values
-from monitoring.metric_store import MetricContractError, MetricStore, MetricUnavailable, publish, series_row
+from monitoring.contracts import MetricContractError, MetricUnavailable
+from monitoring.metric_store import MetricStore, series_row
+from monitoring.publication import publish
 from monitoring.archive import export_metrics
 from monitoring.query_plan import definitions, load_plan, queries_for_targets
 

@@ -11,7 +11,9 @@ import pytest
 from analysis.request_metrics import RequestLedger, describe_calculation
 from cases.master_performance.analysis import analyze
 from cases.master_performance.metrics import produce, values
-from monitoring.metric_store import MetricContractError, MetricStore, publish, series_row
+from monitoring.contracts import MetricContractError
+from monitoring.metric_store import MetricStore, series_row
+from monitoring.publication import publish
 from monitoring.query_plan import definitions, load_plan
 from scenario.loader import ScenarioError
 

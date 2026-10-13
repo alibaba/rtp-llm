@@ -107,7 +107,7 @@ def finish(ctx, p, deadline):
             e["engine_tps_samples"] = []
             names = engine_roles(e["gate_input"], e["criteria"]["engine_tps"])
             for metric_id in names:
-                e["engine_tps_samples"].extend(ctx.monitor.metric_rows(
+                e["engine_tps_samples"].extend(ctx.monitor.client.metric_rows(
                     metric_id, source="mock", start=e["window"]["start_epoch_ms"] / 1000,
                     end=e["window"]["end_epoch_ms"] / 1000))
         except Exception as exc:

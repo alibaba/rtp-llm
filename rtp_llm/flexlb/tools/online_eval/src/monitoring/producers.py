@@ -5,7 +5,8 @@ from case_api.extension_contracts import FinalizationContext
 
 from case_api.registry import registry
 from case_api.registry import ProducerPhase
-from monitoring.metric_store import MetricStore, MetricContractError
+from monitoring.metric_store import MetricStore
+from monitoring.contracts import MetricContractError
 
 
 def produce(directory, context):

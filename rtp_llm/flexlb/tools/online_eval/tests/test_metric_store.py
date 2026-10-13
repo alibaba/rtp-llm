@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from monitoring.metric_store import (
-    MetricStore, MetricContractError, MetricUnavailable, publish,
-)
+from monitoring.metric_store import MetricStore
+from monitoring.contracts import MetricContractError, MetricUnavailable
+from monitoring.publication import publish
 from monitoring.archive import export_metrics
 from monitoring.query_plan import load_plan, plan_hash, definitions
 from reporting.metric_binding import bindings
@@ -90,16 +90,16 @@ class MetricPlanTest(unittest.TestCase):
                                     query_plan="master_performance.yaml", target_kinds={'mock': 'mock'})
         row = dict(metric=dict(__name__="rtp_llm_context_tps", role="prefill",
                               engine_name="P0", engine_incarnation="one"), values=[[1.7, "9"]])
-        with patch.object(session, "query", return_value=[row]) as query:
-            result = session.metric_rows("mock/rtp_llm_context_tps", source="mock", start=1, end=2)
+        with patch.object(session.client, "query", return_value=[row]) as query:
+            result = session.client.metric_rows("mock/rtp_llm_context_tps", source="mock", start=1, end=2)
             self.assertEqual(result[0]["values"], [[1.7,"9"]])
             self.assertEqual(result[0]["metric_id"], "mock/rtp_llm_context_tps")
             self.assertEqual(query.call_args.args, ('rtp_llm_context_tps{job="mock"}[1000ms]', 2))
         with self.assertRaisesRegex(ValueError, "undeclared"):
-            session.metric_rows("mock/missing", source="mock", start=1, end=2)
+            session.client.metric_rows("mock/missing", source="mock", start=1, end=2)
         del row["metric"]["engine_incarnation"]
-        with patch.object(session,"query",return_value=[row]), self.assertRaisesRegex(ValueError,"labels"):
-            session.metric_rows("mock/rtp_llm_context_tps", source="mock", start=1, end=2)
+        with patch.object(session.client, "query",return_value=[row]), self.assertRaisesRegex(ValueError,"labels"):
+            session.client.metric_rows("mock/rtp_llm_context_tps", source="mock", start=1, end=2)
 
 
 class MetricArtifactTest(unittest.TestCase):

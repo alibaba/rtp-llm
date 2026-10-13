@@ -186,7 +186,7 @@ class PerformanceGateTest(unittest.TestCase):
         flow = mock.Mock()
         flow.evidence_snapshot.return_value = snapshot
         monitor = mock.Mock()
-        monitor.metric_rows.side_effect = lambda identity, **kw: [row for row in raw if row["metric_id"] == identity]
+        monitor.client.metric_rows.side_effect = lambda identity, **kw: [row for row in raw if row["metric_id"] == identity]
         with tempfile.TemporaryDirectory() as d:
             flow.directory = Path(d)
             (flow.directory/"client_lifecycle.jsonl").write_text("journal retained")
@@ -201,9 +201,9 @@ class PerformanceGateTest(unittest.TestCase):
             self.assertEqual(analyze(archived)["metrics"], analyze(dict(e, flow=snapshot))["metrics"])
             self.assertEqual(len(archived["flow"]["journal"]["sha256"]), 64)
             self.assertEqual(archived["engine_tps_samples"], raw)
-            self.assertEqual([call.args[0] for call in monitor.metric_rows.call_args_list], [b["metric"] for b in e["gate_input"]["fields"].values()])
+            self.assertEqual([call.args[0] for call in monitor.client.metric_rows.call_args_list], [b["metric"] for b in e["gate_input"]["fields"].values()])
             monitor.archive.assert_not_called()
-            monitor.query.assert_not_called()
+            monitor.client.query.assert_not_called()
             monitor.raw.assert_not_called()
 
     def engine_evidence(self):

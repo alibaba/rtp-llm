@@ -62,7 +62,9 @@ def values(evidence, definitions=None):
 
 
 def produce(directory, evidence, result):
-    from monitoring.metric_store import MetricContractError, MetricStore, publish
+    from monitoring.contracts import MetricContractError
+    from monitoring.metric_store import MetricStore
+    from monitoring.publication import publish
     from monitoring.archive import export_metrics
     from pathlib import Path
     if not (Path(directory) / "metrics.json").is_file():
