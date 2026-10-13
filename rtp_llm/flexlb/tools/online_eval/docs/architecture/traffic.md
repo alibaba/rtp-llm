@@ -162,7 +162,7 @@ A/B 检查 codec、realism、tail、arrival 与身份策略，不一致时提示
 
 `traffic/playback/` 负责回放配置与强度模型。`PlaybackConfigurationCodec` 将 YAML 或 Java 环境变量解析为同一个 `PlaybackConfiguration`，统一校验数值、枚举、圈数及随机种子；Java 环境与归档描述都是该对象的边界投影。Java 仍负责实际发送、节奏与循环。
 
-捕获、谱系编码及投影模块保留在 `traffic/`，按输入契约、格式版本和转换职责划分；模块大小不决定是否单独拆文件。`analysis/workload_profile.py` 提供离线前缀/LRU 计算，命令入口为 `scripts/commands/profile_workload.py`；`analysis/traffic_fidelity.py` 提供纯保真度计算，`diagnostics/traffic_fidelity.py` 负责文件发现、来源审计与拟合生成编排，`reporting/fidelity.py` 负责保真度报告渲染。命令入口和库调用都是有效依赖，不能只根据运行时导入数判断文件是否无用。
+捕获、谱系编码及投影模块保留在 `traffic/`，按输入契约、格式版本和转换职责划分；模块大小不决定是否单独拆文件。`traffic/token_plan.py` 流式读取 token plan，并统一显式 token 与紧凑块的完整块前缀身份；`analysis/workload_profile.py` 只对规范化请求迭代器计算前缀/LRU，`diagnostics/workload_profile.py` 连接文件读取与分析，命令入口为 `scripts/commands/profile_workload.py`；`analysis/traffic_fidelity.py` 提供纯保真度计算，`diagnostics/traffic_fidelity.py` 负责文件发现、来源审计与拟合生成编排，`reporting/fidelity.py` 负责保真度报告渲染。命令入口和库调用都是有效依赖，不能只根据运行时导入数判断文件是否无用。
 
 ## 类型化标定与准入复用
 

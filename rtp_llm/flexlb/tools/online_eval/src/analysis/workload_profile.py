@@ -5,58 +5,41 @@ Memory handover, admission, pinned blocks or in-flight publication semantics.
 """
 
 from collections import OrderedDict, Counter
-import hashlib
-import json
-from pathlib import Path
-import struct
 
 
-def profile(path, capacities=(128, 256, 512, 1024)):
+def profile(requests, capacities=(128, 256, 512, 1024)):
     caches = {n: OrderedDict() for n in capacities}
     hit_tokens = dict.fromkeys(capacities, 0)
     seen, families, gaps, last = set(), Counter(), [], {}
     count = tokens = potential = 0
     previous_ts = None
-    with Path(path).open() as source:
-        for line in source:
-            row = json.loads(line)
-            count += 1
-            tokens += row["il"]
-            families[row.get("family", "unknown")] += 1
-            key, keys = b"", []
-            block = row["cache_key_block_size"]
-            if 'input_token_blocks' in row:
-                physical = row['input_token_blocks'][:row['il']//block]
-                blocks = (v if isinstance(v,list) else [v]*block for v in physical)
-            else:
-                blocks = (row['input_ids'][offset:offset+block] for offset in range(0,len(row['input_ids'])-block+1,block))
-            for values in blocks:
-                key = hashlib.sha256(
-                    key + struct.pack("<" + "i" * block, *values)
-                ).digest()
-                keys.append(key)
+    for row in requests:
+        count += 1
+        tokens += row.input_tokens
+        families[row.family] += 1
+        keys = row.prefix_keys
+        for key in keys:
+            if key not in seen:
+                break
+            potential += row.block_size
+        for capacity, cache in caches.items():
             for key in keys:
-                if key not in seen:
+                if key not in cache:
                     break
-                potential += block
-            for capacity, cache in caches.items():
-                for key in keys:
-                    if key not in cache:
-                        break
-                    hit_tokens[capacity] += block
-                for key in keys:
-                    cache[key] = None
-                    cache.move_to_end(key)
-                    while len(cache) > capacity:
-                        cache.popitem(last=False)
+                hit_tokens[capacity] += row.block_size
             for key in keys:
-                if key in last:
-                    gaps.append(row["ts"] - last[key])
-                last[key] = row["ts"]
-            seen.update(keys)
-            if previous_ts is not None and row["ts"] < previous_ts:
-                raise ValueError("unordered trace")
-            previous_ts = row["ts"]
+                cache[key] = None
+                cache.move_to_end(key)
+                while len(cache) > capacity:
+                    cache.popitem(last=False)
+        for key in keys:
+            if key in last:
+                gaps.append(row.arrival_ms - last[key])
+            last[key] = row.arrival_ms
+        seen.update(keys)
+        if previous_ts is not None and row.arrival_ms < previous_ts:
+            raise ValueError("unordered trace")
+        previous_ts = row.arrival_ms
     gaps.sort()
     return dict(
         requests=count,

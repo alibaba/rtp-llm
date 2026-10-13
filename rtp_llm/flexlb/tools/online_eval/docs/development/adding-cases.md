@@ -236,7 +236,7 @@ Prometheus 优先适用于监控指标；请求是否完成、RPC 是否符合�
 
 handler 用 `StageHandler` 声明参数、输出、能力与检查 ID。未知字段、类型错误和非法引用在启动前拒绝；所有等待使用剩余 deadline，后台资源立即登记清理，异常保留已获得证据。需要导出证据的资源在 `register_resource(..., evidence=exporter)` 显式登记适配器；`exporter(value, collection_profile)` 返回 `ResourceEvidence`，声明请求记录、完整性错误、生产者身份和预期中断。公共策略通过 `export_evidence` 枚举声明，不猜测资源方法或 case 名。每个场景至少声明一个检查。执行器的预算与资源规则见[框架结构](../architecture/framework.md)。
 
-基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`analysis.metric_checks.check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查结果保留定义、来源、实际窗口和样本信息；观测不足统一通过 `invalid_check` 返回 ERROR，并将 `validity: INVALID` 放在 `evidence`，不当作实际测量值；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
+基础 `check` 与业务分析复用 `analysis.checks` 的标量比较。`analysis.metric_checks.check_metric` 只读取冻结的 `MetricStore`，显式指定指标、标签、时窗、归约和覆盖要求，不发起采集或填补缺失值。归约必须选中一条 series；跨 worker 聚合由 PromQL 或明确的 Python 测量计算负责。检查桥接通过 `MetricStore.reduce_with_evidence` 一次选择并归约，取得独立的定义与观察证据，不直接访问 store 的文档结构。检查结果保留定义、来源、实际窗口和样本信息；观测不足统一通过 `invalid_check` 返回 ERROR，并将 `validity: INVALID` 放在 `evidence`，不当作实际测量值；有效数据越过门槛为 FAIL，缺少有效观测为 ERROR/INVALID，契约错误直接报错，advisory 只改变普通阈值失败。
 
 请求集合采用哪个时间字段、如何归属节点、如何判定终态，以及持续异常等业务计算留在 case。请求集合的半开时窗与指标采样点的闭区间选择分别声明，不互相推断；报告展示既定结果，不重新计算门禁。
 

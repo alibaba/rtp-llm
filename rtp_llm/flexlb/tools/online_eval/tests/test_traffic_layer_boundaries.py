@@ -45,3 +45,39 @@ def test_java_playback_evidence_checks_launch_and_preserves_reproduction_fields(
             path.write_text(json.dumps(dict(row, **{field: value})))
             with pytest.raises(ValueError):
                 PlaybackEvidence.read(path, 'frozen', {})
+
+
+def test_fidelity_refits_the_loaded_snapshot_after_capture_changes(tmp_path):
+    from diagnostics.traffic_fidelity import calibrate_capture
+    from traffic.prefix_lineage import encode
+    path = tmp_path / 'capture.xz'
+    path.write_bytes(encode([[0, 512, -1, 0], [1, 1024, -1, 0]], {}))
+    capture = load_capture(path)
+    expected = calibrate_capture(capture)
+    path.write_bytes(encode([[0, 1024, -1, 0], [1, 2048, -1, 0]], {}))
+    assert calibrate_capture(capture) == expected
+    path.unlink()
+    assert calibrate_capture(capture) == expected
+
+
+def test_token_plan_normalizes_compact_and_explicit_blocks_identically(tmp_path):
+    from traffic.token_plan import read_token_plan
+    from analysis.workload_profile import profile
+    path = tmp_path / 'tokens.jsonl'
+    rows = [dict(ts=0, il=5, cache_key_block_size=2, input_ids=[1, 1, 2, 2, 3]),
+            dict(ts=1, il=5, cache_key_block_size=2, input_token_blocks=[1, [2, 2], 3])]
+    path.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    first, second = read_token_plan(path)
+    assert first.prefix_keys == second.prefix_keys
+    assert first.family == second.family == 'unknown'
+    # The partial final block contributes input tokens, but no cache-key hit.
+    assert profile(iter([first, second]), (2,))['lru_hit_by_capacity']['2'] == .4
+
+
+def test_analysis_profiles_a_one_pass_iterator_without_a_file():
+    from traffic.token_plan import TokenPlanRequest
+    from analysis.workload_profile import profile
+    requests = iter([TokenPlanRequest(0, 4, 2, (b'a', b'b'), 'shared'),
+                     TokenPlanRequest(1, 4, 2, (b'a', b'b'), 'shared')])
+    assert profile(requests, (2,))['infinite_cache_potential_hit'] == .5
+    assert list(requests) == []
