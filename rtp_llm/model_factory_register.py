@@ -343,6 +343,11 @@ def _register_builtin_lazy_models() -> None:
         ["KimiLinearForCausalLM"],
     )
     register_lazy_model(
+        "lfm2_vl",
+        "rtp_llm.models.lfm2.lfm2",
+        ["Lfm2VlForConditionalGeneration"],
+    )
+    register_lazy_model(
         "gpt_bigcode", "rtp_llm.models.starcoder", ["GPTBigCodeForCausalLM"]
     )
     register_lazy_model("wizardcoder", "rtp_llm.models.starcoder")

@@ -27,6 +27,12 @@ py_test(
 )
 
 py_test(
+    name = "lfm2_config_test",
+    srcs = ["lfm2_config_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)
+
+py_test(
     name = "moe_cuda13_config_propagation_test",
     srcs = ["moe_cuda13_config_propagation_test.py"],
     deps = ["//rtp_llm:testlib"],

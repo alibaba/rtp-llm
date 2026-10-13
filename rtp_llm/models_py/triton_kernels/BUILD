@@ -48,6 +48,13 @@ py_library(
 )
 
 py_library(
+    name = "gated_causal_conv1d",
+    srcs = glob(["gated_causal_conv1d/*.py"]),
+    deps = [":causal_conv1d"],
+    visibility = ["//visibility:public"]
+)
+
+py_library(
     name = "moe",
     srcs = glob(["moe/*.py"]),
     deps = ["//rtp_llm/models_py:utils"],
@@ -74,6 +81,7 @@ py_library(
         ":fla",
         ":kimi_kda",
         ":causal_conv1d",
+        ":gated_causal_conv1d",
         ":moe",
         ":common",
         ":sparse_mla",

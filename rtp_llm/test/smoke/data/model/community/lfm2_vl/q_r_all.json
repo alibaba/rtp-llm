@@ -1,0 +1,229 @@
+{
+  "model_type": "lfm2_vl",
+  "model_path": "/mnt/fuse/smoke-test/hf/LiquidAI--d1-3B--051bcc464b01b9f92942b364d9586b0ef5912432",
+  "query_result": [
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Write a haiku about the ocean."
+          }
+        ],
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Blue waves crash on shore,\nSalt kisses the sandy beach,\nWind whispers to the sea.",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 17,
+          "total_tokens": 38,
+          "completion_tokens": 21,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "debug_info": null,
+        "aux_info": {
+          "iter_count": 21,
+          "input_len": 17,
+          "output_len": 21,
+          "step_output_len": 21,
+          "pd_sep": false,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "Explain why the sky is blue in two sentences."
+          }
+        ],
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Sunlight contains all colors of the rainbow, but when it passes through Earth's atmosphere, molecules scatter shorter blue wavelengths more than longer red ones. This scattered blue light reaches our eyes from all directions, making the sky appear blue during the day.",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 19,
+          "total_tokens": 69,
+          "completion_tokens": 50,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "debug_info": null,
+        "aux_info": {
+          "iter_count": 50,
+          "input_len": 19,
+          "output_len": 50,
+          "step_output_len": 50,
+          "pd_sep": false,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": "1 + 1 = ? Answer with the number only."
+          }
+        ],
+        "max_tokens": 64,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "2",
+              "partial": false
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 21,
+          "total_tokens": 23,
+          "completion_tokens": 2,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "debug_info": null,
+        "aux_info": {
+          "iter_count": 2,
+          "input_len": 21,
+          "output_len": 2,
+          "step_output_len": 2,
+          "pd_sep": false,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0
+        }
+      }
+    },
+    {
+      "endpoint": "/v1/chat/completions",
+      "query": {
+        "messages": [
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "image_url",
+                "image_url": {
+                  "url": "data/model/qwen_vl/1.jpeg"
+                }
+              },
+              {
+                "type": "text",
+                "text": "Describe this image."
+              }
+            ]
+          }
+        ],
+        "max_tokens": 96,
+        "temperature": 0.0,
+        "top_p": 0,
+        "top_k": 1
+      },
+      "result": {
+        "id": "chat-",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "Golden Hour Beach Connection\n\nA golden retriever sits on the sand, wearing a colorful harness, with its front paw raised to gently touch the hand of a smiling woman. She sits cross-legged on the beach, her long hair flowing in the breeze. The sun is setting, casting a warm glow over the scene, with the ocean waves gently lapping at the shore. The sand is dotted with footprints, and the woman holds a small treat in her other hand.",
+              "partial": false
+            },
+            "finish_reason": "length"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 1796,
+          "total_tokens": 1892,
+          "completion_tokens": 96,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": null,
+            "image_tokens": 1783,
+            "video_tokens": null
+          }
+        },
+        "debug_info": null,
+        "aux_info": {
+          "iter_count": 96,
+          "input_len": 1796,
+          "output_len": 96,
+          "step_output_len": 96,
+          "pd_sep": false,
+          "reuse_len": 0,
+          "local_reuse_len": 0,
+          "remote_reuse_len": 0,
+          "memory_reuse_len": 0,
+          "multimodal_lengths": {
+            "1": 1783
+          }
+        }
+      }
+    }
+  ]
+}

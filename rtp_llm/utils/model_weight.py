@@ -296,6 +296,22 @@ def sp_id(t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any) -> torch.Tensor
     return t
 
 
+def sp_conv_in_proj(
+    t: torch.Tensor, tp: int, tp_rank: int, **kwargs: Any
+) -> torch.Tensor:
+    """Shard the LFM2 conv in_proj (already transposed to [hidden, 3*hidden]).
+
+    The three gate chunks (in_gate, out_gate, value) must each keep a full
+    channel shard so every rank owns complete (B, C, x) triples for its own
+    channels; a naive last-dim split would straddle gate boundaries.
+    """
+    chunks = torch.chunk(t, 3, dim=1)
+    per_chunk = chunks[0].shape[1] // tp
+    return torch.cat(
+        [torch.split(chunk, per_chunk, dim=1)[tp_rank] for chunk in chunks], dim=1
+    )
+
+
 def sp_moe_neg1(
     t: torch.Tensor,
     tp: int,
@@ -1207,6 +1223,11 @@ class W:
     linear_attn_out_w = "linear_attn.out_proj.weight"
     linear_attn_out_s = "linear_attn.out_proj.scale"
 
+    # LFM2 short-conv operator (gated depthwise causal conv)
+    conv_in_proj_w = "conv_weights.in_proj.weight"
+    conv_w = "conv_weights.conv.weight"
+    conv_out_proj_w = "conv_weights.out_proj.weight"
+
     # KDA (Kimi Delta Attention) specific weights
     linear_attn_qkv_w = "linear_attn.in_proj_qkv.weight"
     # b_proj: [hidden] -> [num_heads], beta gate
@@ -1530,6 +1551,12 @@ class W:
         attn_o_z: sp_0,
         attn_o_s: sp_0,
         attn_o_b: sp_id,
+        # LFM2 short-conv operator: in_proj shards each gate's channels,
+        # depthwise taps shard with the channel dim, out_proj shards its
+        # input (channel) dim like attn_o_w.
+        conv_in_proj_w: sp_conv_in_proj,
+        conv_w: sp_0,
+        conv_out_proj_w: sp_0,
         attn_i_smoother: sp_0,
         attn_o_smoother: sp_0,
         attn_o_shift: sp_0,
