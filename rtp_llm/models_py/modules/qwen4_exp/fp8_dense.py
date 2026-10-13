@@ -1,6 +1,7 @@
 """Graph-compatible consumers for hard-quantized dense Qwen parameters."""
 
 import copy
+import os
 
 import torch
 from torch import nn
@@ -59,6 +60,21 @@ class Qwen4Fp8Linear(nn.Module):
         rows = x.reshape(-1, x.shape[-1])
         if rows.shape[0] == 0:
             return x.new_empty((*x.shape[:-1], self.weight.shape[0]))
+        if (
+            os.environ.get("RTP_LLM_QWEN4_FP8_HC_GEMV_EXPERIMENTAL", "0") == "1"
+            and rows.shape[0] <= 4
+            and tuple(self.weight.shape) == (10240, 320)
+        ):
+            from rtp_llm.models_py.modules.qwen4_exp.fp8_dense_gemv_triton import (
+                fp8_hc_gemv,
+                is_supported,
+            )
+
+            if is_supported(rows, self.weight, self.scale):
+                out = fp8_hc_gemv(rows, self.weight, self.scale).reshape(
+                    *x.shape[:-1], self.weight.shape[0]
+                )
+                return out if self.bias is None else (out + self.bias).to(x.dtype)
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
             scaled_fp8_per_tensor_quant,
         )
