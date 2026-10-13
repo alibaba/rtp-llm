@@ -82,7 +82,7 @@ public:
                                int                            reserve_step,
                                bool                           enable_reuse_cache,
                                int                            target_batch_size,
-                               bool                           reclaim_history = false) const;
+                               LinearCachePolicy linear_cache_policy = LinearCachePolicy::KEEP_HISTORY) const;
 
     // 块操作相关
     void blockCopy(int src_block_index, int dest_block_index);

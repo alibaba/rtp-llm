@@ -125,6 +125,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               tierName(target_tier));
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
+                insert_info.pd_decode_linear_tail_only = pd_decode_linear_tail_only_;
                 size_t     resident_prefix_length = 0;
                 resource_context_.cache_manager->insertIntoCache(insert_info, resident_prefix_length);
             }
@@ -159,7 +160,18 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    reserve_step,
                                                                    reuseCache(),
                                                                    target_batch_size,
-                                                                   canReclaimLinearHistory(target_batch_size));
+                                                                   linearCachePolicy(target_batch_size));
+}
+
+LinearCachePolicy StreamCacheResource::linearCachePolicy(int target_batch_size) const {
+    // A verified P->D handoff owns a tail-only layout even while the stream is
+    // still marked as context/Fusion. Admission must match its initial allocator,
+    // and committed-history publication must never run on that sparse layout.
+    if (pd_decode_linear_tail_only_) {
+        return LinearCachePolicy::TAIL_ONLY;
+    }
+    return canReclaimLinearHistory(target_batch_size) ? LinearCachePolicy::RECLAIM_COMMITTED :
+                                                        LinearCachePolicy::KEEP_HISTORY;
 }
 
 void StreamCacheResource::publishReuseLengths(int total, int host, int disk, int backend) {
@@ -200,6 +212,7 @@ absl::Status StreamCacheResource::initKVBlock() {
         malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
+    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
 
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
@@ -398,6 +411,7 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
     malloc_info.incr_seq_len_override        = seq_len_override;
+    malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
@@ -432,7 +446,8 @@ bool StreamCacheResource::canReclaimLinearHistory(int target_batch_size) const {
         || fake_inited_ || resource_released_ || !need_release_resource_ || allocator_load_context_
         || stream_->hasErrorWithoutLock() || stream_->hasNumBeams() || batch_kv_cache_resource_->batchSize() != 1
         || target_batch_size != 1 || stream_->maxBatchSize() != 1 || !block_update_mapping_.empty()
-        || resource_context_.role_type != RoleType::PDFUSION || stream_->queryPdSep() || pd_kvcache_ref_) {
+        || pd_decode_linear_tail_only_ || resource_context_.role_type != RoleType::PDFUSION || stream_->queryPdSep()
+        || pd_kvcache_ref_) {
         return false;
     }
     // DEVICE publication acquires tree references synchronously. Lower-tier

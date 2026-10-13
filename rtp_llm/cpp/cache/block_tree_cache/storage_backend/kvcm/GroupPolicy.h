@@ -72,7 +72,8 @@ public:
 
     virtual bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                          LocationsView&                     locations_view,
-                                         kv_cache_manager::BlockMaskOffset  block_mask = 0) const = 0;
+                                         kv_cache_manager::BlockMaskOffset  block_mask = 0,
+                                         bool                               full_only  = false) const = 0;
 
     virtual bool getNeedWriteGroups(const StorageRequest&     request,
                                     size_t                    valid_keys_size,
@@ -147,7 +148,8 @@ public:
 
     virtual bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                          LocationsView&                     locations_view,
-                                         kv_cache_manager::BlockMaskOffset  block_mask = 0) const override;
+                                         kv_cache_manager::BlockMaskOffset  block_mask = 0,
+                                         bool                               full_only  = false) const override;
 
     bool getNeedWriteGroups(const StorageRequest&     request,
                             size_t                    valid_keys_size,
@@ -240,7 +242,8 @@ public:
 
     bool filterNeedLoadLocations(const kv_cache_manager::Locations& locations,
                                  LocationsView&                     locations_view,
-                                 kv_cache_manager::BlockMaskOffset  block_mask = 0) const override;
+                                 kv_cache_manager::BlockMaskOffset  block_mask = 0,
+                                 bool                               full_only  = false) const override;
 
 private:
     std::string GetOtherGroupPrefixName() const override {

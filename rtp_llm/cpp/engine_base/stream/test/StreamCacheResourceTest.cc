@@ -550,7 +550,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeFor
     ASSERT_TRUE(stream_->isContextStream());
     ASSERT_EQ(resource.curBlocksNum(), 0);
     const int legacy = cache_manager_->estimatePeakNeedBlocks(
-        resource.batch_kv_cache_resource_, 2, 2, 40, 0, true, 1, /*reclaim_history=*/false);
+        resource.batch_kv_cache_resource_, 2, 2, 40, 0, true, 1, LinearCachePolicy::KEEP_HISTORY);
     EXPECT_LT(stream_->estimatePeakNeedBlocks(40), legacy);
     EXPECT_EQ(stream_->estimateInitialNeedBlocks(), 1);
 }
@@ -612,7 +612,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastPreservesUnsupportedOwn
                                                                   0,
                                                                   resource.reuseCache(),
                                                                   target,
-                                                                  false);
+                                                                  LinearCachePolicy::KEEP_HISTORY);
         EXPECT_EQ(stream_->estimatePeakNeedBlocks(40), legacy);
         stream_->generateConfig()->num_return_sequences = 1;
         stream_->generateConfig()->variable_num_beams.clear();
@@ -626,6 +626,91 @@ TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastPreservesUnsupportedOwn
         resource.resource_context_.enable_memory_cache = false;
         resource.resource_context_.role_type           = RoleType::PDFUSION;
         stream_->releaseResource();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, PDLinearTailHandoffKeepsInitialAdmissionEqualToAllocationWhenReclaimEnabled) {
+    for (bool enable_reclaim : {false, true}) {
+        SCOPED_TRACE(enable_reclaim);
+        auto config                        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
+        config.linear_step                 = 1;
+        config.enable_linear_cache_reclaim = enable_reclaim;
+        prepareResourceWithCacheConfig(
+            config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, RoleType::PDFUSION, {}, 1, 32);
+        auto& resource                                 = stream_->streamCacheResource();
+        resource.resource_context_.enable_device_cache = true;
+        stream_->generateConfig()->reuse_cache         = true;
+        // The verified P->D handoff is authoritative even before the surrounding
+        // role/context transition. Both switches must use the tail allocator's
+        // demand, rather than charging a Fusion prefill that will never run.
+        resource.setPDDecodeLinearTailOnly(true);
+        ASSERT_TRUE(stream_->isContextStream());
+        const int    predicted   = stream_->estimatePeakNeedBlocks(/*remaining_tokens=*/0);
+        const size_t free_before = cache_manager_->freeBlocksNum();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        const int allocated = static_cast<int>(free_before - cache_manager_->freeBlocksNum());
+        EXPECT_EQ(allocated, 7);  // Six Full blocks and one Linear handoff state.
+        EXPECT_EQ(predicted, allocated);
+        EXPECT_FALSE(resource.canReclaimLinearHistory(/*target_batch_size=*/1));
+        const auto& linear = resource.kvCache().blocks(0, "linear");
+        ASSERT_EQ(linear.size(), 6u);
+        EXPECT_TRUE(std::all_of(linear.begin(), linear.end() - 1, isNullBlockIdx));
+        EXPECT_FALSE(isNullBlockIdx(linear.back()));
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LinearCacheSwitchCombinationsPreserveRoleOwnershipAndRelease) {
+    for (const auto role : {RoleType::PDFUSION, RoleType::PREFILL, RoleType::DECODE}) {
+        for (bool enable_reclaim : {false, true}) {
+            for (bool enable_tail_only : {false, true}) {
+                SCOPED_TRACE(testing::Message() << "role=" << roleTypeToString(role) << " reclaim=" << enable_reclaim
+                                                << " tail=" << enable_tail_only);
+                auto config        = test::makeSimpleHybridMhaCacheConfig(4, 64, 2, DataType::TYPE_FP16);
+                config.linear_step = 1;
+                config.enable_linear_cache_reclaim = enable_reclaim;
+                prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, true, role, {}, 1, 64);
+                auto& resource                                 = stream_->streamCacheResource();
+                resource.resource_context_.enable_device_cache = true;
+                stream_->generateConfig()->reuse_cache         = true;
+                stream_->generateConfig()->ignore_eos          = true;
+                stream_->vocab_size_                           = 1024;
+                // Only DecodeRpcServer applies the global tail-only switch to a
+                // verified handoff. Ordinary Fusion/P requests keep their policy.
+                const bool handoff = role == RoleType::DECODE && enable_tail_only;
+                resource.setPDDecodeLinearTailOnly(handoff);
+                const int    peak_before = stream_->estimatePeakNeedBlocks(/*remaining_tokens=*/0);
+                const size_t free_before = cache_manager_->freeBlocksNum();
+                ASSERT_TRUE(resource.initKVBlock().ok());
+                EXPECT_EQ(peak_before, static_cast<int>(free_before - cache_manager_->freeBlocksNum()));
+                const auto original_full  = resource.kvCache().blocks(0, "full1");
+                const bool reclaim_fusion = role == RoleType::PDFUSION && enable_reclaim;
+                for (int step = 0; step < 16; ++step) {
+                    commitLinearHistoryToken();
+                    ASSERT_TRUE(resource.incrKVBlock().ok());
+                    const auto& linear = resource.kvCache().blocks(0, "linear");
+                    const auto  live =
+                        std::count_if(linear.begin(), linear.end(), [](int block) { return !isNullBlockIdx(block); });
+                    if (handoff || reclaim_fusion) {
+                        EXPECT_LE(live, 3);
+                        EXPECT_TRUE(isNullBlockIdx(linear.front()));
+                    } else {
+                        EXPECT_EQ(live, linear.size());
+                    }
+                    const auto& full = resource.kvCache().blocks(0, "full1");
+                    ASSERT_GE(full.size(), original_full.size());
+                    EXPECT_TRUE(std::equal(original_full.begin(), original_full.end(), full.begin()));
+                    EXPECT_EQ(resource.mallocFailedTimes(), 0);
+                }
+                // Cancellation must retire the active tail exactly once, also
+                // when pending Fusion publication and the PD flag are both on.
+                stream_->reportError(ErrorCode::CANCELLED, "test cancellation");
+                stream_->releaseResource();
+                EXPECT_EQ(resource.curBlocksNum(), 0);
+                for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools()) {
+                    EXPECT_EQ(pool->referencedBlocksNum(), 0u);
+                }
+            }
+        }
     }
 }
 
@@ -1187,6 +1272,64 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
 
     // No allocator-owned load context is in flight.
     ASSERT_FALSE(resource.asyncLoadCache());
+}
+
+TEST_F(StreamCacheResourceTest, PDLinearTailPolicyPersistsThroughAllocationAndRelease) {
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource                                 = stream_->streamCacheResource();
+    resource.resource_context_.enable_device_cache = true;
+    resource.setPDDecodeLinearTailOnly(true);
+    // PD handoff allocation happens before the stream becomes a decode stream.
+    ASSERT_TRUE(stream_->isContextStream());
+
+    auto allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_TRUE(info.pd_decode_linear_tail_only);
+            EXPECT_TRUE(info.reuse_cache);
+            EXPECT_TRUE(info.enable_cache_lookup);
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .Times(2)
+        .WillRepeatedly(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_TRUE(info.pd_decode_linear_tail_only);
+            EXPECT_TRUE(info.reuse_cache);
+            for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
+                info.batch_kv_cache_resource->mutableBlockIds(b, "linear").assign({NULL_BLOCK_IDX, 1});
+            }
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, insertIntoCache(testing::_, testing::_))
+        .WillOnce(testing::Invoke([](const InsertInfo& info, size_t&) {
+            EXPECT_TRUE(info.pd_decode_linear_tail_only);
+            EXPECT_EQ(info.target_tier, Tier::DEVICE);
+        }));
+
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+    stream_->generate_status_->status = StreamState::FINISHED;
+    resource.releaseResource();
+}
+
+TEST_F(StreamCacheResourceTest, DecodeRoleAloneDoesNotEnableLinearTailPolicy) {
+    prepareHybridResource(/*reuse_cache=*/true, RoleType::DECODE);
+    auto& resource  = stream_->streamCacheResource();
+    auto  allocator = std::make_shared<testing::NiceMock<MockCoordinatorCacheManager>>(cache_manager_->config_);
+    cache_manager_->coordinator_manager_ = allocator;
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.pd_decode_linear_tail_only);
+            return {true, 0};
+        }));
+    EXPECT_CALL(*allocator, incrMalloc(testing::_))
+        .WillOnce(testing::Invoke([](const MallocInfo& info) -> MallocResult {
+            EXPECT_FALSE(info.pd_decode_linear_tail_only);
+            return {true, 0};
+        }));
+    ASSERT_TRUE(resource.initKVBlock().ok());
 }
 
 TEST_F(StreamCacheResourceTest, testLoadCacheDone_NoContext_ReturnsTrue) {
