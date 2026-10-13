@@ -18,7 +18,7 @@ from scenario import (
     load_scenarios,
 )
 from scenario.suites import classify, preselect_documents
-from scripts.pipeline.selection import add_selection_arguments, resolve_selection
+from scenario.selection_cli import add_selection_arguments, resolve_selection
 from scenario.catalog import handlers
 from scenario.compiler import plan_counts
 from scenario.lease import validate_lease

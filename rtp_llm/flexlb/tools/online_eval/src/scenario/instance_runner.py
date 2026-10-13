@@ -1,15 +1,13 @@
 """Parallel orchestration over scenario_runner's compiled instance protocol v1.
 
-Compilation and stage execution belong to scenario_runner. This module owns
-selection, lane assignment, port reservations and result completeness only.
+Compilation and stage execution belong to the child. This module coordinates
+selection, lane scheduling, child ownership, validated aggregation and delivery.
 """
 
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
-import math
 import os
 import signal
 import subprocess
@@ -22,7 +20,6 @@ from concurrent.futures import ThreadPoolExecutor
 from artifacts.json_io import write_json
 from pathlib import Path
 
-from schema_contract import matches_schema
 
 from reporting.view_config import DEFAULT_VIEW
 from scenario.instance_plan import (
@@ -33,9 +30,12 @@ from scenario.instance_plan import (
     select_instances,
 )
 from runtime.resource_plan import ResourcePlanError, plan_lane_leases
+from runtime import port_windows
 
 SCENARIO_RUNNER = Path(__file__).resolve().parents[2] / "scripts/commands/list_cases.py"
-from runtime.outcome import TERMINAL_STATUSES as STATUSES, RunOutcome
+from runtime.outcome import TERMINAL_STATUSES as STATUSES
+from scenario.result_validation import error_result, read_results
+from scenario.timing_store import timing_path, read_timings, write_timings
 
 
 class ChildProcesses:
@@ -108,7 +108,7 @@ class ChildProcesses:
 
 
 def _catalog(args):
-    from scripts.pipeline.selection import selection_arguments
+    from scenario.selection_cli import selection_arguments
     instances = []
     if not SCENARIO_RUNNER.is_file():
         raise InstancePlanError(
@@ -145,216 +145,6 @@ def _catalog(args):
         raise InstancePlanError("scenario list grade does not match requested grade")
     instances.extend(compiled)
     return instances
-
-
-def _timing_path():
-    return Path(
-        os.environ.get(
-            "FLEXLB_FT_INSTANCE_TIMING_BASELINE",
-            "/tmp/flexlb_ft_instance_timing_v1.json",
-        )
-    )
-
-
-def _read_timings(path):
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text())
-        if not matches_schema(data, "timings_schema_version", 1) or not isinstance(
-            data.get("instances"), list
-        ):
-            raise ValueError("expected versioned instance timings")
-        timings = {}
-        for row in data["instances"]:
-            duration = row.get("duration_ms")
-            if (
-                isinstance(row.get("id"), str)
-                and type(duration) in (int, float)
-                and math.isfinite(duration)
-                and (duration > 0)
-            ):
-                timings[row["id"]] = duration / 1000
-        return timings
-    except (OSError, ValueError, TypeError, AttributeError) as exc:
-        print(
-            f"warning: cannot use instance timings {path}: {exc}; using static estimates",
-            file=sys.stderr,
-        )
-        return {}
-
-
-def _write_timings(rows):
-    path = _timing_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + ".lock"), "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        merged = _read_timings(path)
-        for row in rows:
-            if (
-                row["status"] not in {"ERROR", "TIMEOUT"}
-                and type(row.get("duration_ms")) in (int, float)
-                and math.isfinite(row["duration_ms"])
-                and (row["duration_ms"] > 0)
-            ):
-                merged[row["id"]] = row["duration_ms"] / 1000
-        doc = {
-            "timings_schema_version": 1,
-            "instances": [
-                {"id": key, "duration_ms": value * 1000}
-                for (key, value) in sorted(merged.items())
-            ],
-        }
-        write_json(path, doc)
-
-
-def _error(instance, message):
-    return {
-        **instance.metadata,
-        "status": "ERROR",
-        "duration_ms": 0,
-        "stages": [],
-        "cleanup": [],
-        "error": message,
-    }
-
-
-def _execution_issues(row):
-    """Validate nested evidence before accepting a child's success classification."""
-    issues = []
-    (stages, cleanup) = (row.get("stages", []), row.get("cleanup", []))
-    if not isinstance(stages, list) or not isinstance(cleanup, list):
-        return ["stages and cleanup must be arrays"]
-    for item in cleanup:
-        if (
-            not isinstance(item, dict)
-            or item.get("status") != "PASS"
-            or item.get("error")
-        ):
-            issues.append("cleanup did not complete successfully")
-    for phase in row.get("finalization", []):
-        if not isinstance(phase, dict) or phase.get("status") != "PASS" or phase.get("error"):
-            issues.append("finalization did not complete successfully")
-    failed_checks = set()
-    green = row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}
-    for stage in stages:
-        if not isinstance(stage, dict):
-            issues.append("stage must be an object")
-            continue
-        status = stage.get("status")
-        if status not in {"PASS", "FAIL", "BLOCKED", "SKIP"} or stage.get("error"):
-            issues.append("stage has an execution error or unknown status")
-        checks = stage.get("checks", [])
-        if not isinstance(checks, list):
-            issues.append("stage checks must be an array")
-            continue
-        failures = []
-        for check in checks:
-            if (
-                not isinstance(check, dict)
-                or check.get("status") not in {"PASS", "FAIL", "SKIP", "WARNING"}
-                or check.get("error")
-            ):
-                issues.append("check has an execution error or unknown status")
-                continue
-            if check["status"] == "FAIL":
-                failures.append(check)
-                failed_checks.add(f"{stage.get('id')}.{check.get('id')}")
-        if status == "PASS" and failures:
-            issues.append("PASS stage contains a failed check")
-        if status in {"BLOCKED", "SKIP"} and (checks or green):
-            issues.append("unexecuted stage contradicts successful instance")
-        if green and status == "FAIL" and (not failures):
-            issues.append("failed stage has no failed check evidence")
-    if row["status"] in {"PASS", "FINDING-RESOLVED"} and failed_checks:
-        issues.append("successful instance contains failed checks")
-    if row["status"] == "FINDING-CONFIRMED":
-        confirmed = row.get("finding_confirmed", [])
-        if (
-            not isinstance(confirmed, list)
-            or any((not isinstance(x, str) for x in confirmed))
-            or (not failed_checks)
-            or (set(confirmed) != failed_checks)
-        ):
-            issues.append(
-                "finding classification does not match explicit failed checks"
-            )
-    if "outcome" in row:
-        from dataclasses import asdict
-        try:
-            outcome = RunOutcome.from_result(row)
-            if row["outcome"] != asdict(outcome) or row["status"] != outcome.status:
-                issues.append("result outcome disagrees with execution evidence")
-        except (ValueError, TypeError, KeyError) as exc:
-            issues.append("invalid result outcome: " + str(exc))
-    return issues
-
-
-def _read_results(path, group):
-    """Missing, duplicated, unexpected or malformed rows cannot become a green run."""
-    expected = {instance.id: instance for instance in group}
-    try:
-        data = json.loads(path.read_text())
-        if (
-            not matches_schema(data, "scenario_results_schema_version", 1)
-            or (not isinstance(data.get("instances"), list))
-        ):
-            raise ValueError("unsupported scenario result schema")
-        rows = data["instances"]
-        if not isinstance(rows, list):
-            raise ValueError("result rows must be an array")
-        by_id = {}
-        for row in rows:
-            if not isinstance(row, dict):
-                raise ValueError("result row must be an object")
-            identity = row.get("id")
-            if identity not in expected or identity in by_id:
-                raise ValueError(f"unexpected or duplicate result: {identity!r}")
-            if row.get("status") not in STATUSES:
-                raise ValueError(f"unsupported result status: {row.get('status')!r}")
-            if row.get("profile") != expected[identity].profile:
-                raise ValueError(f"result profile mismatch: {identity}")
-            if expected[identity].metadata.get("grade") is not None:
-                if row.get("grade") != expected[identity].metadata["grade"]:
-                    raise ValueError(f"result grade mismatch: {identity}")
-            row = dict(row)
-            failures = _execution_issues(row)
-            if (row.get("error") or failures) and row["status"] not in {
-                "ERROR",
-                "TIMEOUT",
-            }:
-                row["original_status"] = row["status"]
-                row["status"] = "ERROR"
-                row["error"] = (
-                    row.get("error")
-                    or "; ".join(failures)
-                    or "stage/cleanup error cannot be classified as a finding"
-                )
-            if row["status"] in {"PASS", "FINDING-CONFIRMED", "FINDING-RESOLVED"}:
-                stages = row.get("stages", [])
-                executed_checks = [
-                    check
-                    for stage in stages
-                    if isinstance(stage, dict)
-                    and stage.get("status") in {"PASS", "FAIL"}
-                    for check in stage.get("checks", [])
-                    if isinstance(check, dict)
-                    and check.get("status") in {"PASS", "FAIL", "WARNING"}
-                ]
-                if not executed_checks:
-                    row["original_status"] = row["status"]
-                    row["status"] = "ERROR"
-                    row["error"] = "successful instance has no executed checks"
-            by_id[identity] = {**row, **expected[identity].metadata, "id": identity}
-        return [
-            by_id.get(identity) or _error(instance, "missing instance result")
-            for (identity, instance) in expected.items()
-        ]
-    except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
-        return [
-            _error(instance, f"invalid child result {path}: {exc}")
-            for instance in group
-        ]
 
 
 def _run_segment(index, part, group, lease, args, out, children):
@@ -412,10 +202,10 @@ def _run_segment(index, part, group, lease, args, out, children):
             timeout=timeout,
             cleanup_timeout=cleanup_timeout,
         )
-        rows = _read_results(result_path, group)
+        rows = read_results(result_path, group)
     except Exception as exc:
         rc = 1
-        rows = [_error(instance, f"child launch failed: {exc}") for instance in group]
+        rows = [error_result(instance, f"child launch failed: {exc}") for instance in group]
     results.extend(({**row, "lane": index} for row in rows))
     segments.append(
         {
@@ -434,7 +224,7 @@ def _run_segment(index, part, group, lease, args, out, children):
 def _run_lane(index, lane, lease, args, out, children, dispatch=None):
     """One lease, one child per instance; failed cleanup retires this lane."""
     from scenario.lane_safety import cleanup_failure
-    from scripts.pipeline.execute_cases import _busy_ports
+    from runtime.port_windows import busy_ports
     results, segments = [], []
     pending = iter(lane)
     failure = None
@@ -446,10 +236,10 @@ def _run_lane(index, lane, lease, args, out, children, dispatch=None):
             instance = dispatch.get_nowait() if dispatch is not None else next(pending)
         except (queue.Empty, StopIteration):
             break
-        busy = _busy_ports(lease.ports())
+        busy = busy_ports(lease.ports())
         if busy:
             failure = "lane ports still occupied: " + str(busy)
-            results.append(dict(_error(instance, failure), not_started=True, lane=index))
+            results.append(dict(error_result(instance, failure), not_started=True, lane=index))
             break
         part = _run_segment(index, len(segments), [instance], lease, args, out, children)
         results.extend(part["instances"])
@@ -460,13 +250,13 @@ def _run_lane(index, lane, lease, args, out, children, dispatch=None):
             failure = "child exit code disagrees with successful execution result"
         if part["segments"][0]["watchdog_timeout"]:
             failure = "child watchdog expired; lane cannot be reused"
-        busy = _busy_ports(lease.ports())
+        busy = busy_ports(lease.ports())
         if busy:
             failure = "lane ports not released: " + str(busy)
         if failure:
             break
     if failure and dispatch is None:
-        results.extend(dict(_error(instance, failure), not_started=True, lane=index)
+        results.extend(dict(error_result(instance, failure), not_started=True, lane=index)
                        for instance in pending)
     return {"lane": index, "segments": segments, "instances": results,
             "reusable": failure is None, "retirement_reason": failure}
@@ -539,9 +329,9 @@ def _print_generated_reports(rows):
         }, ensure_ascii=False))
 
 
-def run_structured(args: argparse.Namespace, ports) -> int:
+def run_structured(args: argparse.Namespace) -> int:
     """Keep window -> output lock -> child list -> lane execution ordering."""
-    ports._resolve_port_bases(args)
+    port_windows.resolve_port_bases(args)
     stamp = uuid.uuid4().hex
     out = (
         Path(args.out_dir).resolve()
@@ -550,13 +340,13 @@ def run_structured(args: argparse.Namespace, ports) -> int:
     )
     if not args.dry_run:
         out.mkdir(parents=True, exist_ok=True)
-        ports._acquire_run_lock(out)
+        port_windows.acquire_run_lock(out)
     try:
         instances = select_instances(
             _catalog(args), exact_ids=args.instances, categories=args.categories
         )
-        timings = _read_timings(
-            Path(args.timing_json) if args.timing_json else _timing_path()
+        timings = read_timings(
+            Path(args.timing_json) if args.timing_json else timing_path()
         )
         lanes = plan_instances(instances, args.parallel, timings)
         scheduling = getattr(args, "scheduling", "dynamic")
@@ -568,16 +358,16 @@ def run_structured(args: argparse.Namespace, ports) -> int:
                    [[instance.budget for instance in lane] for lane in lanes])
         leases = plan_lane_leases(
             budgets,
-            master_base=ports._master_base(),
-            mock_base=ports._mock_base(),
+            master_base=port_windows.master_base(),
+            mock_base=port_windows.mock_base(),
             mock_stride=args.mock_stride,
         )
         for i, lease in enumerate(leases):
-            if list(lease.ports()) != ports._lane_ports(
-                i, args.mock_stride, ports._master_base(), ports._mock_base()
+            if list(lease.ports()) != port_windows.lane_ports(
+                i, args.mock_stride, port_windows.master_base(), port_windows.mock_base()
             ):
                 raise ResourcePlanError("resource planner and port preflight disagree")
-            if lease.child_env() != ports.lane_env(i, args.mock_stride):
+            if lease.child_env() != port_windows.lane_env(i, args.mock_stride):
                 raise ResourcePlanError(
                     "resource planner and child environment disagree"
                 )
@@ -648,7 +438,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
                 instance = dispatch.get_nowait()
             except queue.Empty:
                 break
-            blocked = _error(instance, "no reusable lane remains: " + reasons)
+            blocked = error_result(instance, "no reusable lane remains: " + reasons)
             results[0]["instances"].append(dict(blocked, not_started=True, lane=None))
     payload = _aggregate(results, instances, args, time.monotonic() - started)
     payload["scheduling"] = scheduling
@@ -675,7 +465,7 @@ def run_structured(args: argparse.Namespace, ports) -> int:
         )
         print(f"experiment archive: {args.archive}")
     try:
-        _write_timings(payload["instances"])
+        write_timings(payload["instances"])
     except OSError as exc:
         print(f"warning: instance timing update failed: {exc}", file=sys.stderr)
     print(f"instance results: {target} exit_code={payload['summary']['exit_code']}")

@@ -12,14 +12,13 @@ def fail(path, message):
 
 
 def mapping(value, path, allowed, required=()):
-    if not isinstance(value, dict):
-        fail(path, "expected mapping")
-    if any(not isinstance(key, str) for key in value):
-        fail(path, "mapping keys must be strings")
-    extra, missing = set(value) - set(allowed), set(required) - set(value)
-    if extra or missing:
-        fail(path, f"unknown fields {sorted(extra)}, missing fields {sorted(missing)}")
-    return value
+    from input_contract import FieldSetError, mapping_fields
+    try:
+        return mapping_fields(value, allowed, path, required=required)
+    except FieldSetError as exc:
+        raise ScenarioError(f"{path}: unknown fields {exc.extra}, missing fields {exc.missing}") from exc
+    except ValueError as exc:
+        raise ScenarioError(str(exc)) from exc
 
 
 def identifier(value, path):

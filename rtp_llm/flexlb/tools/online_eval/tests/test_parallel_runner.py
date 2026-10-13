@@ -16,7 +16,7 @@ from unittest import mock
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 
-from scripts.pipeline import execute_cases as parallel_runner
+from runtime import port_windows as parallel_runner
 
 PARALLEL_RUNNER = TOOLS_DIR / "scripts/pipeline/execute_cases.py"
 
@@ -141,8 +141,8 @@ class LaneEnvTest(unittest.TestCase):
         ):
             footprints = []
             for i in range(parallel_runner.max_lanes(2000, 50000)):
-                m = parallel_runner._master_base() + 10 * i
-                base = parallel_runner._mock_base() + 2000 * i
+                m = parallel_runner.master_base() + 10 * i
+                base = parallel_runner.mock_base() + 2000 * i
                 ports = set(range(m, m + 6)) | set(range(base - 1, base + 152))
                 footprints.append(ports)
         for i in range(len(footprints)):
@@ -158,10 +158,10 @@ class LaneEnvTest(unittest.TestCase):
             os.environ, {"FLEXLB_FT_PARALLEL_MASTER_BASE": "not-a-port"}
         ):
             with self.assertRaises(SystemExit):
-                parallel_runner._master_base()
+                parallel_runner.master_base()
         with mock.patch.dict(os.environ, {"FLEXLB_FT_PARALLEL_MOCK_BASE": "0"}):
             with self.assertRaises(SystemExit):
-                parallel_runner._mock_base()
+                parallel_runner.mock_base()
 
 
 class MockStrideTest(unittest.TestCase):
@@ -204,7 +204,7 @@ class MockStrideTest(unittest.TestCase):
 
 
 class LanePortsTest(unittest.TestCase):
-    """_lane_ports: the fixed 159-port per-lane window."""
+    """lane_ports: the fixed 159-port per-lane window."""
 
     def test_every_lane_covers_exactly_159_ports(self):
         # 6 master-group ports + the full 153-port mock window
@@ -216,21 +216,21 @@ class LanePortsTest(unittest.TestCase):
             (2, 2000, 20080, 50000),
         ]
         for lane, stride, m, b in cases:
-            ports = parallel_runner._lane_ports(lane, stride, m, b)
+            ports = parallel_runner.lane_ports(lane, stride, m, b)
             self.assertEqual(159, len(ports), (lane, stride, m, b))
             self.assertEqual(len(ports), len(set(ports)), "duplicates")
 
     def test_lanes_never_overlap(self):
         for stride, m, b in ((500, 18080, 55151), (2000, 20080, 50000)):
             windows = [
-                set(parallel_runner._lane_ports(i, stride, m, b)) for i in range(6)
+                set(parallel_runner.lane_ports(i, stride, m, b)) for i in range(6)
             ]
             for i in range(len(windows)):
                 for j in range(i + 1, len(windows)):
                     self.assertEqual(set(), windows[i] & windows[j], (stride, i, j))
 
     def test_matches_lane_env_offsets(self):
-        # _lane_ports is the port-set twin of lane_env: master head
+        # lane_ports is the port-set twin of lane_env: master head
         # m..m+5 and mock window base-1..base+151 at the SAME offsets
         # the env overlay pins per lane (a mismatch would make the
         # preflight probe different ports than the lanes actually bind).
@@ -241,12 +241,12 @@ class LanePortsTest(unittest.TestCase):
                 b = int(env["FLEXLB_FT_MOCK_BASE_GRPC_PORT"])
                 self.assertEqual(
                     set(range(m, m + 6)) | set(range(b - 1, b + 152)),
-                    set(parallel_runner._lane_ports(lane, stride, 18080, 55151)),
+                    set(parallel_runner.lane_ports(lane, stride, 18080, 55151)),
                 )
 
 
 class PortPreflightResolveTest(unittest.TestCase):
-    """_resolve_port_bases: default auto-shift vs explicit contract.
+    """resolve_port_bases: default auto-shift vs explicit contract.
 
     port_in_use is ALWAYS mocked (never bind the real 18080/55151 band)
     and the lock dir is always an isolated temp dir — the only real
@@ -277,7 +277,7 @@ class PortPreflightResolveTest(unittest.TestCase):
                 parallel_runner, "port_in_use", return_value=False
             ) as probe:
                 args = self._args()
-                parallel_runner._resolve_port_bases(args)
+                parallel_runner.resolve_port_bases(args)
             self.assertNotIn("FLEXLB_FT_PARALLEL_MASTER_BASE", os.environ)
             self.assertNotIn("FLEXLB_FT_PARALLEL_MOCK_BASE", os.environ)
         self.assertEqual("default 18080/55151", args.port_provenance)
@@ -294,7 +294,7 @@ class PortPreflightResolveTest(unittest.TestCase):
                 buf = io.StringIO()
                 with contextlib.redirect_stderr(buf):
                     args = self._args()
-                    parallel_runner._resolve_port_bases(args)
+                    parallel_runner.resolve_port_bases(args)
                 # k=1: master 18080-10*6, mock 55151-500*6.
                 self.assertEqual("18020", os.environ["FLEXLB_FT_PARALLEL_MASTER_BASE"])
                 self.assertEqual("52151", os.environ["FLEXLB_FT_PARALLEL_MOCK_BASE"])
@@ -322,7 +322,7 @@ class PortPreflightResolveTest(unittest.TestCase):
             with mock.patch.object(parallel_runner, "port_in_use", side_effect=busy):
                 args = self._args()
                 with self.assertRaises(SystemExit) as caught:
-                    parallel_runner._resolve_port_bases(args)
+                    parallel_runner.resolve_port_bases(args)
                 # The contract env survives verbatim — never shifted,
                 # never rewritten.
                 self.assertEqual(
@@ -339,7 +339,7 @@ class PortPreflightResolveTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             with mock.patch.object(parallel_runner, "port_in_use", return_value=True):
                 with self.assertRaises(SystemExit) as caught:
-                    parallel_runner._resolve_port_bases(self._args())
+                    parallel_runner.resolve_port_bases(self._args())
         message = str(caught.exception)
         self.assertIn("no usable port window", message)
         self.assertIn("k=0 bases 18080/55151", message)
@@ -354,7 +354,7 @@ class PortPreflightResolveTest(unittest.TestCase):
                 buf = io.StringIO()
                 with contextlib.redirect_stderr(buf):
                     args = self._args(mock_stride=2000)
-                    parallel_runner._resolve_port_bases(args)
+                    parallel_runner.resolve_port_bases(args)
                 self.assertEqual("43151", os.environ["FLEXLB_FT_PARALLEL_MOCK_BASE"])
                 self.assertEqual("18020", os.environ["FLEXLB_FT_PARALLEL_MASTER_BASE"])
         self.assertIn("auto", args.port_provenance)
@@ -376,7 +376,7 @@ class PortPreflightResolveTest(unittest.TestCase):
                 buf = io.StringIO()
                 with contextlib.redirect_stderr(buf):
                     args = self._args()
-                    parallel_runner._resolve_port_bases(args)  # no exit
+                    parallel_runner.resolve_port_bases(args)  # no exit
                 self.assertEqual("62000", os.environ["FLEXLB_FT_PARALLEL_MOCK_BASE"])
         self.assertEqual("explicit 18080/62000", args.port_provenance)
         self.assertIn("lease band", buf.getvalue())
@@ -395,7 +395,7 @@ class PortPreflightResolveTest(unittest.TestCase):
                 buf = io.StringIO()
                 with contextlib.redirect_stderr(buf):
                     args = self._args(dry_run=True)
-                    parallel_runner._resolve_port_bases(args)
+                    parallel_runner.resolve_port_bases(args)
         self.assertIn("BUSY(:18300", args.lane_port_status[0])
         self.assertEqual("FREE", args.lane_port_status[1])
         warning = buf.getvalue()
@@ -497,7 +497,7 @@ class WindowLockTest(unittest.TestCase):
                         args = argparse.Namespace(
                             parallel=6, mock_stride=500, dry_run=True
                         )
-                        parallel_runner._resolve_port_bases(args)
+                        parallel_runner.resolve_port_bases(args)
                     # k=0 is LOCKED → k=1 selected and pinned into env.
                     self.assertEqual(
                         "18020",
@@ -587,7 +587,7 @@ class WindowLockTest(unittest.TestCase):
                 with self.assertRaisesRegex(
                     SystemExit, "explicit port window unusable"
                 ) as ctx:
-                    parallel_runner._resolve_port_bases(args)
+                    parallel_runner.resolve_port_bases(args)
                 self.assertIn("m18080_18085.lock", str(ctx.exception))
                 self.assertEqual("18083", os.environ["FLEXLB_FT_PARALLEL_MASTER_BASE"])
         finally:
@@ -597,7 +597,7 @@ class WindowLockTest(unittest.TestCase):
         code = (
             "import sys\nfrom pathlib import Path\n"
             f"sys.path.insert(0, {str(TOOLS_DIR / 'src')!r})\n"
-            "from scripts.pipeline import execute_cases as p\n"
+            "from runtime import port_windows as p\n"
             f"p.PORT_WINDOW_LOCK_DIR = Path({str(self.lockdir)!r})\n"
             "print('READY', flush=True)\nsys.stdin.readline()\n"
             "h = p._try_window_lock(int(sys.argv[1]), int(sys.argv[2]), 500, int(sys.argv[3]))\n"

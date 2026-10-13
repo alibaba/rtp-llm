@@ -86,7 +86,7 @@ def test_final_effective_mock_settings_are_frozen_before_backend_projection():
 
 def test_each_environment_declaration_loads_preset_once_and_checks_excluded_profile():
     import adapters.perf_presets as presets
-    with patch("scenario.environment_config.load_preset_bundle", wraps=presets.load_preset_bundle) as load:
+    with patch("scenario.environment_resolver.load_preset_bundle", wraps=presets.load_preset_bundle) as load:
         environment(dict(profile_overrides={"single-nonbatch": {"max_requests": 2},
                                             "single-batch": {"max_requests": 3}}), "env", "batch-window")
     assert load.call_count == 1

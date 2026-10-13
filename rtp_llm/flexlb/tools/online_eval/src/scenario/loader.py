@@ -9,7 +9,7 @@ class ScenarioError(ValueError):
     pass
 
 
-def _pairs(pairs):
+def strict_pairs(pairs):
     result = {}
     for key, value in pairs:
         if not isinstance(key, str):
@@ -20,17 +20,17 @@ def _pairs(pairs):
     return result
 
 
-def _tree(value, depth=0):
+def validate_data_tree(value, depth=0):
     if depth > 32:
         raise ScenarioError("document exceeds maximum depth 32")
     if isinstance(value, dict):
         for key, child in value.items():
             if not isinstance(key, str):
                 raise ScenarioError("mapping keys must be strings")
-            _tree(child, depth + 1)
+            validate_data_tree(child, depth + 1)
     elif isinstance(value, list):
         for child in value:
-            _tree(child, depth + 1)
+            validate_data_tree(child, depth + 1)
     elif isinstance(value, float) and not math.isfinite(value):
         raise ScenarioError("NaN and Infinity are not allowed")
     elif value is not None and type(value) not in (str, int, float, bool):
@@ -46,13 +46,13 @@ def load_document(path):
             raise ScenarioError("document exceeds 1 MiB")
         text = raw.decode("utf-8")
         if path.suffix.lower() == ".json":
-            doc = json.loads(text, object_pairs_hook=_pairs)
+            doc = json.loads(text, object_pairs_hook=strict_pairs)
         elif path.suffix.lower() in (".yaml", ".yml"):
             import yaml
 
             class Loader(yaml.SafeLoader):
                 def construct_mapping(self, node, deep=False):
-                    return _pairs(
+                    return strict_pairs(
                         (
                             self.construct_object(k, deep=deep),
                             self.construct_object(v, deep=deep),
@@ -75,7 +75,7 @@ def load_document(path):
             doc = yaml.load(text, Loader=Loader)
         else:
             raise ScenarioError("expected .json, .yaml or .yml")
-        _tree(doc)
+        validate_data_tree(doc)
         if not isinstance(doc, dict):
             raise ScenarioError("document root must be a mapping")
         return doc

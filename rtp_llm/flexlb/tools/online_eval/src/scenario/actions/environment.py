@@ -46,7 +46,7 @@ def mutate_config(config, mutation):
 
 
 def _validate(params, plan, probe=False):
-    from scenario.compiler import environment
+    from scenario.environment_config import environment
 
     required = {"config_overrides", "mutation"} if probe else {"config_overrides"}
     allowed = (

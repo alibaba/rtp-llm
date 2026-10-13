@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from scripts.pipeline import execute_cases as parallel_runner
 from scenario import instance_runner
+from runtime import port_windows
 
 
 class RepositoryLayoutTest(unittest.TestCase):
@@ -22,13 +23,13 @@ class RepositoryLayoutTest(unittest.TestCase):
         ), mock.patch.object(
             instance_runner, "run_structured", return_value=0
         ) as run, mock.patch.object(
-            parallel_runner, "_mock_base", return_value=55151
+            port_windows, "mock_base", return_value=55151
         ), mock.patch.object(
-            parallel_runner, "_master_base", return_value=18080
+            port_windows, "master_base", return_value=18080
         ):
             with mock.patch("os.getcwd", return_value=cwd):
                 self.assertEqual(parallel_runner.main(), 0)
-            args, _ = run.call_args.args
+            (args,) = run.call_args.args
             self.assertEqual(args.source, "yaml")
             self.assertEqual(Path(args.case_dir), ROOT / "config/scenarios")
             self.assertEqual(args.shard, "case")

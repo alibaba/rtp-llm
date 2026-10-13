@@ -12,8 +12,9 @@ from flexlb_cfg import (
     SingleDecision, render_env,
 )
 from scenario import ScenarioError, compile_scenarios, load_scenarios
-from scenario.environment_config import (
-    OPTIONAL_SCALARS, environment, environment_fields, optional_scalars,
+from scenario.environment_config import environment
+from scenario.environment_declaration import (
+    OPTIONAL_SCALARS, environment_fields, optional_scalars,
     variant_environment_fields,
 )
 from scenario.loader import load_document
@@ -220,7 +221,7 @@ def test_environment_vocabulary_is_shared_with_an_explicit_backend_boundary(monk
     from scenario.catalog import handlers
     assert variant_environment_fields() == environment_fields() - {'backend'}
     from dataclasses import fields
-    from scenario.environment_config import EnvironmentDeclaration
+    from scenario.environment_declaration import EnvironmentDeclaration
     assert environment_fields() == {field.name for field in fields(EnvironmentDeclaration)} | {
         'config_overrides', 'profile_overrides'}
     assert environment({'debug_enabled': True}, 'env', 'batch-window')['debug_enabled'] is True

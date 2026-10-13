@@ -7,15 +7,17 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scenario.actions.observation import (
-    CaptureDeadline,
     DebugUnavailable,
-    Observer,
-    Sources,
     execute_observe,
     execute_snapshot,
     validate_observe,
     validate_snapshot,
 )
+
+
+from runtime.sample_worker import CaptureDeadline
+from adapters.observation_sources import Sources
+from adapters.observation_window import Observer
 
 
 class Plan:
@@ -106,7 +108,7 @@ class ObservationTest(unittest.TestCase):
                 {"sources": ["engine_snapshot"], "required": required}, Plan()
             )
             with patch(
-                "scenario.actions.observation._read_json",
+                "adapters.observation_sources._read_json",
                 side_effect=OSError("offline"),
             ):
                 result = execute_snapshot(self.ctx, p, deadline())
@@ -120,7 +122,7 @@ class ObservationTest(unittest.TestCase):
     def test_partial_master_never_complete(self):
         p = validate_snapshot({"sources": ["master_debug"]}, Plan())
         with patch(
-            "scenario.actions.observation.DebugClient"
+            "adapters.observation_sources.DebugClient"
         ) as client:
             client.return_value.snapshot.return_value.payload = {
                 "instanceId": "a",
@@ -136,7 +138,7 @@ class ObservationTest(unittest.TestCase):
         )
         self.ctx.env_epoch += 1
         with patch(
-            "scenario.actions.observation._read_json"
+            "adapters.observation_sources._read_json"
         ) as read:
             result = source.capture(deadline()).to_dict()
         read.assert_not_called()
@@ -152,7 +154,7 @@ class ObservationTest(unittest.TestCase):
             ),
         )
         with patch(
-            "scenario.actions.observation._read_json",
+            "adapters.observation_sources._read_json",
             side_effect=[{"engines": [{"name": "p1"}]}, {"engines": [{"name": "p2"}]}],
         ):
             source.capture(deadline())
@@ -250,7 +252,7 @@ class ObservationTest(unittest.TestCase):
         observer = Observer(self.ctx, params())
         observer.params["interval_s"] = 0.001
         with patch.object(
-            observer.sources, "capture", side_effect=RuntimeError("source failure")
+            observer, "capture", side_effect=RuntimeError("source failure")
         ):
             observer.thread = threading.Thread(target=observer._run)
             observer.thread.start()
@@ -277,7 +279,7 @@ class ObservationTest(unittest.TestCase):
         handlers = {h.name: h for h in HANDLERS}
         for required in (True, False):
             doc = dict(
-                program_schema_version=1,
+                program_schema_version=1, implementation={},
                 id="coverage",
                 description="Source availability",
                 category="status",
@@ -299,7 +301,7 @@ class ObservationTest(unittest.TestCase):
                 doc["findings"] = ["capture.sources"]
             plan = compile_scenarios([("coverage.json", doc)], handlers=handlers)[0]
             with patch(
-                "scenario.actions.observation._read_json",
+                "adapters.observation_sources._read_json",
                 side_effect=OSError("missing"),
             ):
                 result = execute_instance(
@@ -313,7 +315,7 @@ class ObservationTest(unittest.TestCase):
             self.ctx, validate_snapshot({"sources": ["engine_snapshot"]}, Plan())
         )
         with patch(
-            "scenario.actions.observation._read_json"
+            "adapters.observation_sources._read_json"
         ) as read:
             with self.assertRaises(TimeoutError):
                 source.capture(deadline(0))

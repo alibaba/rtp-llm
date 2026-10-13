@@ -17,8 +17,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from scripts.pipeline import execute_cases as ports
+from runtime import port_windows as ports
 from scenario import instance_runner as runner
+from scenario import result_validation, timing_store
 from scenario.instance_plan import parse_catalog
 from test_instance_plan import catalog
 
@@ -135,7 +136,7 @@ class InstanceRunnerTest(unittest.TestCase):
         ) as child, contextlib.redirect_stdout(
             output
         ):
-            rc = runner.run_structured(args, ports)
+            rc = runner.run_structured(args)
         self.stdout = output.getvalue()
         return rc, listing, child
 
@@ -242,7 +243,7 @@ program: default
                 args.dry_run = True
                 captured = io.StringIO()
                 with contextlib.redirect_stdout(captured):
-                    self.assertEqual(0, runner.run_structured(args, ports))
+                    self.assertEqual(0, runner.run_structured(args))
                 manifest = json.loads(
                     captured.getvalue()[captured.getvalue().index("{") :]
                 )
@@ -251,7 +252,7 @@ program: default
                 self.drop_locks()
                 args.dry_run = False
                 with contextlib.redirect_stdout(io.StringIO()):
-                    rc = runner.run_structured(args, ports)
+                    rc = runner.run_structured(args)
                 self.assertEqual(int(expected == "FAIL"), rc)
                 result = json.loads((output / "aggregate.json").read_text())
                 row = result["instances"][0]
@@ -351,7 +352,7 @@ program: default
             [{"id": "unselected", "status": "PASS"}],
         ]:
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": fixture}))
-            result = runner._read_results(path, rows)
+            result = result_validation.read_results(path, rows)
             self.assertEqual(2, len(result))
             self.assertTrue(all(row["status"] == "ERROR" for row in result))
 
@@ -365,7 +366,7 @@ program: default
             "stages": [],
         }
         path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
-        result = runner._read_results(path, rows)
+        result = result_validation.read_results(path, rows)
         self.assertEqual("ERROR", result[0]["status"])
         self.assertEqual("FINDING-CONFIRMED", result[0]["original_status"])
 
@@ -380,7 +381,7 @@ program: default
         ):
             payload = {**rows[0].metadata, "status": "PASS", "stages": stages}
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
-            result = runner._read_results(path, rows)
+            result = result_validation.read_results(path, rows)
             self.assertEqual("ERROR", result[0]["status"])
             self.assertTrue(result[0]["error"])
 
@@ -410,7 +411,7 @@ program: default
                 "cleanup": [],
             }
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
-            result = runner._read_results(path, group)
+            result = result_validation.read_results(path, group)
             self.assertEqual(expected, result[0]["status"])
 
     def test_warning_checks_remain_visible_without_failing_aggregate(self):
@@ -427,7 +428,7 @@ program: default
             payload = copy.deepcopy(base)
             payload["stages"][0]["checks"][0]["error"] = execution_error
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
-            rows = runner._read_results(path, group)
+            rows = result_validation.read_results(path, group)
             self.assertEqual(expected, rows[0]["status"])
             self.assertEqual("WARNING", rows[0]["stages"][0]["checks"][0]["status"])
             aggregate = runner._aggregate(
@@ -468,7 +469,7 @@ program: default
                 path.write_text(
                     json.dumps({"scenario_results_schema_version": 1, "instances": [payload]})
                 )
-                rows = runner._read_results(path, group)
+                rows = result_validation.read_results(path, group)
                 aggregate = runner._aggregate(
                     [{"lane": 0, "instances": rows, "segments": [{"exit_code": 0}]}],
                     group,
@@ -496,13 +497,13 @@ program: default
         }
         path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [payload]}))
         self.assertEqual(
-            "FINDING-CONFIRMED", runner._read_results(path, group)[0]["status"]
+            "FINDING-CONFIRMED", result_validation.read_results(path, group)[0]["status"]
         )
         for bad in ("ERROR", "TIMEOUT"):
             broken = copy.deepcopy(payload)
             broken["stages"][0]["checks"].append({"id": "bad", "status": bad})
             path.write_text(json.dumps({"scenario_results_schema_version": 1, "instances": [broken]}))
-            self.assertEqual("ERROR", runner._read_results(path, group)[0]["status"])
+            self.assertEqual("ERROR", result_validation.read_results(path, group)[0]["status"])
 
     def test_child_nonzero_exit_cannot_be_hidden_by_pass_rows(self):
         def fail(command, env, log, **kwargs):
@@ -515,10 +516,10 @@ program: default
     def test_second_output_owner_fails_before_catalog(self):
         args = self.args()
         Path(args.out_dir).mkdir()
-        ports._acquire_run_lock(Path(args.out_dir))
+        ports.acquire_run_lock(Path(args.out_dir))
         with mock.patch.object(runner, "_catalog") as listing:
             with self.assertRaisesRegex(SystemExit, "held by another"):
-                runner.run_structured(args, ports)
+                runner.run_structured(args)
             listing.assert_not_called()
 
 

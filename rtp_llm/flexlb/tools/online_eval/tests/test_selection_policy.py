@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.pipeline.selection import add_selection_arguments, resolve_selection, selection_arguments
+from scenario.selection_cli import add_selection_arguments, resolve_selection, selection_arguments
 from scripts.commands import run_ci
 from scenario.suites import SuiteCatalog, preselect_documents, classify
 from scenario import load_scenarios, compile_scenarios

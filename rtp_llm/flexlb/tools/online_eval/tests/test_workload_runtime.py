@@ -28,16 +28,11 @@ class WorkloadRuntimeTests(unittest.TestCase):
         doc = source()
         doc["stages"][-1]["purpose"] = "observation" if observation else "operation"
         doc["stages"].append(dict(doc["stages"][-1], id="independent"))
+        doc['variants'] = [dict(id='default', metadata=dict(
+            kind='workload' if workload else 'functional', description=doc['description']),
+            execution=dict(collection='request', monitoring=dict(
+                capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2)))]
         plan = compile_scenarios([("fixture", doc)])[0]
-        plan.update(
-            test_kind="workload" if workload else "functional",
-            workload_runtime={
-                "capture_metrics": False,
-                "sample_interval_s": 1,
-                "collector_shutdown_s": 2,
-            },
-        )
-        plan["execution"]["monitoring"] = dict(plan["workload_runtime"])
         clock = Clock()
         backend = Backend(clock)
         backend.completed = False

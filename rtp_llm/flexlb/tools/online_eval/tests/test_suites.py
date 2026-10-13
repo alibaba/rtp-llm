@@ -22,7 +22,7 @@ class SuiteOwnershipTest(unittest.TestCase):
         self.assertEqual(['default'], [v['id'] for v in functional[0][1]['variants']])
         self.assertEqual([], workload)
         self.assertEqual(docs, original)
-        self.assertEqual(functional[0][1].implementation, docs[0][1].implementation)
+        self.assertEqual(functional[0][1]["implementation"], docs[0][1]["implementation"])
 
     def test_ci_can_select_one_workload_independent_of_directory_or_kind(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -34,10 +34,10 @@ class SuiteOwnershipTest(unittest.TestCase):
             plan = dict(scenario_id='custom', variant_id='load', source_path='/any/core/place.yaml', metadata=metadata, execution=execution)
             self.assertEqual('smoke', default_suite(path))
             self.assertEqual(('smoke',), suite_names(path))
-            self.assertEqual('workload', classify([plan], 'smoke', path)[0]['test_kind'])
+            self.assertEqual('workload', classify([plan], 'smoke', path)[0]['metadata']['kind'])
             self.assertEqual([], classify([plan], catalog=path, kind='functional'))
             plan['source_path'] = '/different/workload/place.yaml'
-            self.assertEqual('workload', classify([plan], 'smoke', path)[0]['test_kind'])
+            self.assertEqual('workload', classify([plan], 'smoke', path)[0]['metadata']['kind'])
             with self.assertRaisesRegex(ScenarioError, 'missing: custom::load'):
                 classify([], 'smoke', path)
             path.write_text(yaml.safe_dump(dict(suite_schema_version=3, default_profile='batch-window', ci_jobs={}, default_suite='smoke',

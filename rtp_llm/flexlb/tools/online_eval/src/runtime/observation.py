@@ -87,3 +87,13 @@ def evidence_origin(evidence):
 
 def verdict_status(verdict):
     return {"INVALID": "ERROR", "PASS": "PASS", "FAIL": "FAIL"}[verdict]
+
+
+@dataclass(frozen=True)
+class FrozenSnapshot:
+    """Serialized canonical payload makes returned dictionaries independent deep copies."""
+
+    encoded: str
+
+    def to_dict(self):
+        return json.loads(self.encoded)

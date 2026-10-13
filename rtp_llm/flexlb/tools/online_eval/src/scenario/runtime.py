@@ -25,7 +25,7 @@ class ScenarioRunner:
             plan=plan.to_dict(), dependencies=dependency_files(),
             views={name: view(name).to_dict() for name in dict.fromkeys(
                 [DEFAULT_VIEW, *ctx.instance.get('reports', [])])}
-            if ctx.instance.get('test_kind') == 'workload' else {})
+            if ctx.instance['metadata']['kind'] == 'workload' else {})
         write_json(ctx.artifact_dir / 'experiment-definition.json', ctx.experiment_definition)
         started = clock()
         end = started + plan.execution.timeout_s

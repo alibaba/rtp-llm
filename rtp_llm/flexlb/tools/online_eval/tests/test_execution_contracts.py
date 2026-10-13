@@ -203,4 +203,4 @@ def test_action_field_error_has_one_location_and_preserves_the_cause():
                 {'id': 'bad', 'action': 'custom', 'params': {'typo': True}}],
                'stages', 10, {'custom': handler})
     assert str(caught.value) == "stages[1].params: unknown configuration fields ['typo']"
-    assert type(caught.value.__cause__) is ValueError
+    assert isinstance(caught.value.__cause__, ValueError)

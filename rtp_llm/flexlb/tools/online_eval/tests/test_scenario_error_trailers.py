@@ -6,7 +6,8 @@ import time
 import unittest
 from types import SimpleNamespace as NS
 
-from scenario.request_batch import RequestBatch, error_trailer_evidence
+from scenario.request_batch import RequestBatch
+from adapters.rpc_error_evidence import error_trailer_evidence
 from scenario.runtime import Deadline, RuntimeContext
 from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
 from test_scenario_backend import Ops, Stream

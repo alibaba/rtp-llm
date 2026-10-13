@@ -7,7 +7,7 @@ from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from scenario.declarations import MonitoringPolicy
-    from scenario.environment_config import EnvironmentDeclaration
+    from scenario.environment_declaration import EnvironmentDeclaration
 
 from flexlb_cfg import PROFILES
 from scenario.environment_snapshot import EnvironmentSnapshot
@@ -105,7 +105,9 @@ class EnvironmentPlan:
 
     @classmethod
     def read(cls, value):
-        from scenario.environment_config import EnvironmentDeclaration, MasterPatch, effective_capabilities
+        from scenario.environment_declaration import EnvironmentDeclaration
+        from scenario.master_patch import MasterPatch
+        from scenario.environment_resolver import effective_capabilities
         extras = {"resolved_config", "rendered", "config_overrides", "effective_axes", "effective_capabilities"}
         allowed = {item.name for item in fields(EnvironmentDeclaration)} | extras
         mapping(value, "environment", allowed, extras | {
@@ -218,13 +220,28 @@ class CompiledInstance:
                                ("effective_capabilities", list(environment.capabilities))):
             if name in value and value[name] != expected:
                 raise ScenarioError("instance capability projection disagrees with environment")
+        from scenario.execution_policy import normalize_metadata, normalize_execution
+        metadata = normalize_metadata(value.get("metadata", {
+            "kind": "functional", "description": value["description"],
+        }))
+        policy = normalize_execution(
+            dict(value["execution"], collection=value["execution"].get("collection", "diagnostic")),
+            kind=metadata["kind"],
+        )
+        projections = dict(test_kind=metadata["kind"], collection_profile=policy["collection"],
+                           workload_runtime=policy["monitoring"] if metadata["kind"] == "workload" else {})
+        for key, expected in projections.items():
+            if key in value and value[key] != expected:
+                raise ScenarioError("instance policy projection disagrees with canonical policy: " + key)
+        attachment_data = {key: value[key] for key in attachments - set(projections) - {"metadata"} if key in value}
+        attachment_data.update(metadata=metadata, **projections)
         resource_budget = JavaMockBudget.from_metadata(value["resource_budget"])
         scalar = {key: value[key] for key in ("id", "scenario_id", "variant_id", "profile", "category",
                   "description", "source", "source_path", "grade", "estimated_duration_s")}
-        return cls(**scalar, environment=environment, execution=ExecutionBudgets.read(value["execution"]),
+        return cls(**scalar, environment=environment, execution=ExecutionBudgets.read(policy),
                    stages=stages, findings=tuple(value["findings"]), requires=tuple(value["requires"]),
                    tags=tuple(value["tags"]), resource_budget=resource_budget,
-                   attachments_json=json_document({key: value[key] for key in attachments if key in value}))
+                   attachments_json=json_document(attachment_data))
 
     def to_dict(self):
         result = {key: getattr(self, key) for key in ("id", "scenario_id", "variant_id", "profile", "category",

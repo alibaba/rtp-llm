@@ -93,12 +93,12 @@ def decode_parameters(action, value):
         mapping(value, "stage.params", set())
         return EmptyParameters()
     if action == "request":
-        from scenario.stage_compiler import _request_params
+        from scenario.request_parameters import normalize_request_parameters
         required = {"input_len", "output_len", "count", "consume"}
         if not required <= set(value):
             raise ScenarioError("compiled request parameters must be complete")
         normalized = dict(value)
-        _request_params(normalized, "stage", {})
+        normalize_request_parameters(normalized, "stage")
         if "block_keys" in normalized:
             normalized["block_keys"] = tuple(normalized["block_keys"])
         return RequestParameters(**normalized)

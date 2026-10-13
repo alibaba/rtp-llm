@@ -2,6 +2,14 @@
 
 import copy
 from scenario.loader import ScenarioError
+from input_contract import mapping_fields
+
+
+def mapping(value, allowed, path, *, required=()):
+    try:
+        return mapping_fields(value, allowed, path, required=required)
+    except ValueError as exc:
+        raise ScenarioError(str(exc)) from exc
 
 
 def merge_data(base, patch):
@@ -13,14 +21,6 @@ def merge_data(base, patch):
         else:
             result[key] = copy.deepcopy(value)
     return result
-
-
-def mapping(value, allowed, path, *, required=()):
-    from input_contract import mapping_fields
-    try:
-        return mapping_fields(value, allowed, path, required=required)
-    except ValueError as exc:
-        raise ScenarioError(str(exc)) from exc
 
 
 def data_only(value, path):

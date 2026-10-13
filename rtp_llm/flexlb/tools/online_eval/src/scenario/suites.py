@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from scenario.loader import ScenarioError, load_document
-from scenario.execution_policy import KINDS, normalize_metadata, normalize_execution
+from scenario.execution_policy import KINDS, normalize_metadata
 from scenario.validation import mapping, names, identifier, number
 from flexlb_cfg import PROFILES
 
@@ -149,11 +149,8 @@ def classify(plans, suite=None, catalog=CATALOG, *, kind=None):
     selected = []
     for plan in plans:
         metadata = normalize_metadata(plan['metadata'])
-        execution = normalize_execution(plan['execution'], kind=metadata['kind'])
         if selection.matches(plan['scenario_id'] + '::' + plan['variant_id'], metadata['kind']):
-            selected.append(dict(plan, metadata=metadata, execution=execution, test_kind=metadata['kind'],
-                                 collection_profile=execution['collection'],
-                                 workload_runtime=execution['monitoring'] if metadata['kind'] == 'workload' else {}))
+            selected.append(copy.deepcopy(plan))
     if selection.members is not None:
         actual = {p['scenario_id'] + '::' + p['variant_id'] for p in selected}
         missing = set(selection.members) - actual

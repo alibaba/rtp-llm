@@ -16,10 +16,6 @@ from scenario.declarations import CaseDeclaration
 from scenario.declarations import VariantDeclaration
 
 
-class ProgramDocument(dict):
-    """An internal Python plan, with provenance kept outside the plan vocabulary."""
-
-
 from case_api.builder import CaseBuilder
 
 
@@ -31,7 +27,7 @@ def program_module(name, source):
 
 
 def configure_program(config, source):
-    """Build an internal plan using an allowlisted Python entry point, without I/O."""
+    """Build an internal plan using an allowlisted Python entry point, without starting services."""
     config = CaseDeclaration.read(config, source)
     name = config.case
     module = program_module(name, source)
@@ -49,8 +45,8 @@ def configure_program(config, source):
         document["variants"].append(_build_variant(
             config, row, identity, module, config.profiles, source, numeric_contracts,
         ))
-    document.implementation = _implementation(config, module, name)
-    document.implementation["numeric_parameters"] = numeric_contracts
+    document["implementation"] = _implementation(config, module, name)
+    document["implementation"]["numeric_parameters"] = numeric_contracts
     return document
 
 
@@ -59,7 +55,7 @@ def _program_document(config, name, source):
     metadata = config.metadata
     if not isinstance(metadata, dict):
         raise ScenarioError(f"{source}.metadata: expected mapping")
-    document = ProgramDocument({
+    document = dict({
         key: copy.deepcopy(value) for key, value in metadata.items() if key != "kind"
     })
     document.update(

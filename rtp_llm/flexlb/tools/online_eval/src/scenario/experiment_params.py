@@ -3,7 +3,7 @@ import copy
 import json
 from dataclasses import dataclass
 
-from scenario.loader import ScenarioError, _pairs, _tree
+from scenario.loader import ScenarioError, strict_pairs, validate_data_tree
 
 
 @dataclass(frozen=True)
@@ -13,8 +13,8 @@ class ExperimentParams:
     @classmethod
     def read(cls, raw=None):
         try:
-            values = json.loads(raw, object_pairs_hook=_pairs) if raw else {}
-            _tree(values)
+            values = json.loads(raw, object_pairs_hook=strict_pairs) if raw else {}
+            validate_data_tree(values)
         except (ValueError, RecursionError) as exc:
             raise ScenarioError("experiment_params must be a JSON object: " + str(exc)) from exc
         if not isinstance(values, dict):

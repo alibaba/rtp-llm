@@ -15,11 +15,12 @@ from test_cache_scale_gate import CacheGateTest
 
 
 def plan():
-    instance = compile_scenarios([("fixture", source())])[0]
-    instance.update(test_kind="workload", workload_runtime=dict(
-        capture_metrics=False, sample_interval_s=1, collector_shutdown_s=2))
-    instance["execution"]["monitoring"] = dict(instance["workload_runtime"])
-    return instance
+    document = source()
+    document['variants'] = [dict(id='default', metadata=dict(
+        kind='workload', description=document['description']), execution=dict(
+            collection='request', monitoring=dict(capture_metrics=False,
+                sample_interval_s=1, collector_shutdown_s=2)))]
+    return compile_scenarios([("fixture", document)])[0]
 
 
 @pytest.mark.parametrize("kind", ["cache", "performance"])

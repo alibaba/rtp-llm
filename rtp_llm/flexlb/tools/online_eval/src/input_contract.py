@@ -5,15 +5,23 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 
+class FieldSetError(ValueError):
+    """Structured field differences let input boundaries keep their diagnostics."""
+    def __init__(self, path, extra, missing):
+        self.extra, self.missing = sorted(extra), sorted(missing)
+        message = (f"{path}: unknown configuration fields {self.extra}" if extra
+                   else f"missing YAML parameter {path}.{self.missing[0]}")
+        super().__init__(message)
+
+
 def mapping_fields(value, allowed, path, *, required=()):
     if not isinstance(value, dict):
         raise ValueError(f"{path}: expected mapping")
-    extra = set(value) - set(allowed)
-    if extra:
-        raise ValueError(f"{path}: unknown configuration fields {sorted(extra)}")
-    missing = set(required) - set(value)
-    if missing:
-        raise ValueError(f"missing YAML parameter {path}.{sorted(missing)[0]}")
+    if any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{path}: mapping keys must be strings")
+    extra, missing = set(value) - set(allowed), set(required) - set(value)
+    if extra or missing:
+        raise FieldSetError(path, extra, missing)
     return value
 
 

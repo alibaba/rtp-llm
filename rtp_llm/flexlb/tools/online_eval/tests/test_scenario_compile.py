@@ -23,6 +23,7 @@ from scenario.loader import load_document
 def scenario():
     return {
         "program_schema_version": 1,
+        "implementation": {},
         "id": "completion",
         "description": "A submitted request reaches terminal state",
         "category": "status",

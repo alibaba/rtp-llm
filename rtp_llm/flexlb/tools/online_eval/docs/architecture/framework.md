@@ -50,6 +50,16 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 版本字段的名称属于格式身份；字段或语义发生不兼容变化时升级该格式，并同步其读写双方，不为数字一致整体替换。配置分层见[新增 case](../development/adding-cases.md)。
 
+## 编译与执行边界
+
+编译按 document、variant、profile 三层展开，读取声明、preset 和实现源码，但不启动服务。环境声明与标量合同由 `environment_declaration` 维护，Master patch 由 `master_patch` 校验，preset、profile 渲染、偏离检查和快照冻结由 `environment_resolver` 负责。
+
+内部 program document 使用显式 `implementation` 字段携带实现与配置来源；普通 mapping 复制和 JSON 序列化必须保留该字段。编译后的 `metadata.kind` 与 `execution` 是执行策略的来源，`test_kind`、`collection_profile`、`workload_runtime` 是 plan 生成并复核的一致性投影。suite 只选择实例，不补齐执行策略。
+
+端口窗口准入、探测与锁由 `runtime.port_windows` 提供，命令入口只解析参数并调用实例编排器。子结果的身份和嵌套证据由 `scenario.result_validation` 复核，耗时缓存由 `scenario.timing_store` 维护。编译、冻结计划读取、lease 校验与父进程结果接收各自保留边界校验，共享字段和参数规则。
+
+后台采样由 `runtime.sample_worker` 管理预算、取消和线程退出；服务协议与 epoch 数据源由 `adapters.observation_sources` 提供，`adapters.observation_window` 在线程 join 后冻结 cohort。action 负责参数、资源归属、检查和产物发布。
+
 ## 代码归属
 
 | 目录 | 内容 |
