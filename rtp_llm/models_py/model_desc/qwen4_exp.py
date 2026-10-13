@@ -170,6 +170,9 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             token_budget=budget,
             compress_ratio=ratio,
             norm_eps=layernorm_eps,
+            projection_scale=weights.get(
+                W.qwen4_indexer_qk_proj_w + ".qwen4_fp8_storage_scale"
+            ),
         )
 
     def _qsa_selected_indices(
@@ -436,6 +439,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             weights[W.qwen4_hc_attn_inject],
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
+            weight_scales=tuple(
+                weights.get(name + ".qwen4_fp8_storage_scale")
+                for name in (
+                    W.qwen4_hc_attn_mix_down,
+                    W.qwen4_hc_attn_mix_up,
+                    W.qwen4_hc_attn_inject,
+                )
+            ),
         )
         self.mlp_hyper_connection = Qwen4ExpGatedResidual(
             weights[W.qwen4_hc_mlp_norm],
@@ -444,6 +455,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             weights[W.qwen4_hc_mlp_inject],
             hc_mult=config.hc_mult,
             norm_eps=config.layernorm_eps,
+            weight_scales=tuple(
+                weights.get(name + ".qwen4_fp8_storage_scale")
+                for name in (
+                    W.qwen4_hc_mlp_mix_down,
+                    W.qwen4_hc_mlp_mix_up,
+                    W.qwen4_hc_mlp_inject,
+                )
+            ),
         )
         if os.environ.get("RTP_LLM_QWEN4_SHARED_HC_WEIGHTS", "0") == "1":
             for unit, down_name, inject_name in (
@@ -529,8 +548,29 @@ class Qwen4ExpModel(Qwen35Model):
     )
 
     def __init__(self, *args, **kwargs):
+        from rtp_llm.models.qwen4_exp.full_fp8_weight import FP8_STORAGE_SCALE_SUFFIX
+        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
+            Qwen4Fp8Linear,
+            compute_weight_view,
+        )
+
+        config = args[0] if args else kwargs["model_config"]
+        weights = args[2] if len(args) > 2 else kwargs["weights"]
+        if getattr(config, "_qwen4_full_fp8_nvfp4", False):
+            view = compute_weight_view(weights)
+            if len(args) > 2:
+                args = (*args[:2], view, *args[3:])
+            else:
+                kwargs["weights"] = view
         super().__init__(*args, **kwargs)
-        if getattr(self.config, "_qwen4_vocab_cpu_offload", False):
+        if getattr(config, "_qwen4_full_fp8_nvfp4", False):
+            self._fp8_lm_head = Qwen4Fp8Linear(
+                weights.global_weights[W.lm_head],
+                weights.global_weights[W.lm_head + FP8_STORAGE_SCALE_SUFFIX],
+            )
+        if getattr(self.config, "_qwen4_vocab_cpu_offload", False) or getattr(
+            self.config, "_qwen4_full_fp8_nvfp4", False
+        ):
             from rtp_llm.models_py.modules.qwen4_exp.vocab_embedding import (
                 Qwen4CpuVocabEmbedding,
             )
@@ -539,6 +579,9 @@ class Qwen4ExpModel(Qwen35Model):
                 self.embed_tokens.weight,
                 self.embed_tokens.tp_size,
                 torch.device("cuda", torch.cuda.current_device()),
+                weight_scale=weights.global_weights.get(
+                    W.embedding + FP8_STORAGE_SCALE_SUFFIX
+                ),
             )
         self.ple_layers = nn.ModuleDict()
         self.requires_cuda_graph_model_input_preparation = (
@@ -552,6 +595,9 @@ class Qwen4ExpModel(Qwen35Model):
         self._capture_mtp_target_hidden = bool(getattr(self.config, "is_mtp", False))
         if getattr(self.config, "enable_qwen4_ple", False):
             self._build_ple_layers()
+
+    def compute_fp8_lm_head(self, hidden):
+        return self._fp8_lm_head(hidden.to(torch.bfloat16)).float()
 
     def initialize(self, init_resource) -> bool:
         initialized = super().initialize(init_resource)
@@ -679,6 +725,10 @@ class Qwen4ExpModel(Qwen35Model):
                 hc_mult=self.config.hc_mult,
                 hidden_size=self.config.hidden_size,
                 conv_kernel_size=int(conv_weight.shape[-1]),
+                projection_scales=tuple(
+                    layer_weights.get(name + ".qwen4_fp8_storage_scale")
+                    for name in (W.qwen4_ple_key_proj_w, W.qwen4_ple_value_proj_w)
+                ),
                 norm_eps=self.config.layernorm_eps,
             )
 
@@ -2008,6 +2058,10 @@ class Qwen4ExpModel(Qwen35Model):
             None,
             hc_mult=model_config.hc_mult,
             norm_eps=model_config.layernorm_eps,
+            weight_scales=tuple(
+                weights.global_weights.get(name + ".qwen4_fp8_storage_scale")
+                for name in (W.qwen4_hc_mixer_mix_down, W.qwen4_hc_mixer_mix_up, "")
+            ),
         )
 
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:

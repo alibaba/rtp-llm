@@ -99,6 +99,13 @@ class ModelLoader:
         descriptors = {
             weight.name: weight for weight in self._model_weights_info.weights
         }
+        descriptors.update(
+            {
+                name: weight
+                for weight in self._model_weights_info.weights
+                for name in getattr(weight, "additional_output_names", ())
+            }
+        )
         descriptor_names = set(descriptors)
         unknown_aliases = set(self._global_weight_aliases) - descriptor_names
         if unknown_aliases:
@@ -109,7 +116,11 @@ class ModelLoader:
             if not isinstance(tensor, torch.Tensor):
                 raise TypeError(f"global weight alias {name!r} is not a torch.Tensor")
             descriptor = descriptors[name]
-            expected_device = torch.device(descriptor.resident_device or device)
+            expected_device = torch.device(
+                getattr(descriptor, "resident_output_devices", {}).get(
+                    name, descriptor.resident_device or device
+                )
+            )
             if tensor.device != expected_device:
                 raise ValueError(
                     f"global weight alias {name!r} is on {tensor.device}, expected {expected_device}"

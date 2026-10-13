@@ -352,6 +352,9 @@ class Qwen4ExpWeight(Qwen35MoeWeight):
                     getattr(self.model_config, "_qwen4_attention_fp8", False)
                 ),
                 gdn_fp8=not bool(getattr(self.model_config, "_qwen4_gdn_bf16", False)),
+                full_fp8=bool(
+                    getattr(self.model_config, "_qwen4_full_fp8_nvfp4", False)
+                ),
             )
         if self._moe_only_fp8:
             from rtp_llm.models.qwen4_exp.moe_fp8 import Qwen4MoeFp8WeightInfo

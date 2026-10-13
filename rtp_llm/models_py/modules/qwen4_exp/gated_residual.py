@@ -5,6 +5,11 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import (
+    dense_projection,
+    make_projection,
+)
+
 
 def grouped_rms_norm(
     x: torch.Tensor, gamma: torch.Tensor, group_size: int, eps: float
@@ -84,6 +89,7 @@ class Qwen4ExpGatedResidual(nn.Module):
         *,
         hc_mult: int,
         norm_eps: float,
+        weight_scales=None,
     ):
         super().__init__()
         hc_hidden = norm_gamma.shape[-1]
@@ -114,6 +120,12 @@ class Qwen4ExpGatedResidual(nn.Module):
         self.mix_down = mix_down
         self.mix_up = mix_up
         self.inject = inject
+        scales = weight_scales or (None, None, None)
+        self.down_projection = make_projection(mix_down, scales[0])
+        self.up_projection = make_projection(mix_up, scales[1])
+        self.inject_projection = (
+            make_projection(inject, scales[2]) if inject is not None else None
+        )
         self.merged_down_inject = None
         merged_enabled = os.environ.get("RTP_LLM_QWEN4_MERGED_DOWN_INJECT", "0").lower()
         if (
@@ -210,8 +222,11 @@ class Qwen4ExpGatedResidual(nn.Module):
                 F.linear(normed, merged), self.mix_down.shape[0], self.hc_mult
             )
         else:
-            mix = F.silu(F.linear(normed, self.mix_down) / self.hc_mult)
-        mix_logits = F.linear(mix, self.mix_up)
+            mix = F.silu(
+                dense_projection(normed, self.mix_down, self.down_projection)
+                / self.hc_mult
+            )
+        mix_logits = dense_projection(mix, self.mix_up, self.up_projection)
         branches = (self.hc_mult, self.hidden_size)
         fused_mix = os.environ.get(
             "RTP_LLM_QWEN4_FUSED_MIX_REDUCE", "1"
@@ -235,6 +250,7 @@ class Qwen4ExpGatedResidual(nn.Module):
             return mixed, hyper_input, None
         if inject_weights is None:
             inject_weights = 2 * torch.sigmoid(
-                F.linear(normed, self.inject) / self.hc_mult
+                dense_projection(normed, self.inject, self.inject_projection)
+                / self.hc_mult
             )
         return mixed, hyper_input, inject_weights

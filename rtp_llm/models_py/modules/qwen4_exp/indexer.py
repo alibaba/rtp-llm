@@ -224,8 +224,10 @@ def build_base_rope(
         index_factor=index_factor,
         device=device,
     )
-    if index_factor == 3 and validate_position_axes and not bool(
-        torch.equal(positions, positions[:, :1].expand_as(positions))
+    if (
+        index_factor == 3
+        and validate_position_axes
+        and not bool(torch.equal(positions, positions[:, :1].expand_as(positions)))
     ):
         raise ValueError(
             "qwen4 QSA Base RoPE factor=3 only supports draft text-only "
@@ -373,6 +375,7 @@ class Qwen4ExpQSAIndexer(nn.Module):
         token_budget: int,
         compress_ratio: int,
         norm_eps: float,
+        projection_scale=None,
     ):
         super().__init__()
         expected = (n_heads + kv_heads) * head_dim
@@ -388,6 +391,9 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 f"compress_ratio {compress_ratio}"
             )
         self.qk_proj = qk_proj
+        from rtp_llm.models_py.modules.qwen4_exp.fp8_dense import make_projection
+
+        self.qk_projection = make_projection(qk_proj, projection_scale)
         self.q_norm_gamma = q_norm_gamma
         self.k_norm_gamma = k_norm_gamma
         self.n_heads = n_heads
@@ -403,7 +409,11 @@ class Qwen4ExpQSAIndexer(nn.Module):
 
     def project(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """``hidden -> (q [B,S,H,D], raw_keys [B,S,D])``, q normed but unrotated."""
-        qk = F.linear(hidden_states, self.qk_proj)
+        qk = (
+            self.qk_projection(hidden_states)
+            if self.qk_projection is not None
+            else F.linear(hidden_states, self.qk_proj)
+        )
         q, token_k = torch.split(
             qk,
             [self.n_heads * self.head_dim, self.kv_heads * self.head_dim],
