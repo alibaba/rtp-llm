@@ -780,6 +780,9 @@ WorkerStatusInfo LocalRpcServer::getWorkerStatusInfo(int64_t latest_finished_ver
         case QuantMethod::W8A8INT8PTPC:
             status_info.precision = "W8A8INT8PTPC";
             break;
+        case QuantMethod::MXFP4:
+            status_info.precision = "MXFP4";
+            break;
         case QuantMethod::None:
             status_info.precision = "FP16";
             break;

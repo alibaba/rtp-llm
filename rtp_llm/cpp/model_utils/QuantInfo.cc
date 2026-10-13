@@ -54,6 +54,10 @@ void QuantAlgo::setQuantAlgo(const std::string& quant_method, int64_t bits, int6
         quant_method_ = QuarkMXFP4;
         weight_bits_  = 4;
         group_size_   = group_size;
+    } else if (quant_method == "mxfp4") {
+        quant_method_ = MXFP4;
+        weight_bits_  = 4;
+        group_size_   = group_size;
     } else if (quant_method == "modelopt_fp4") {
         quant_method_ = ModelOptFP4;
         weight_bits_  = 4;

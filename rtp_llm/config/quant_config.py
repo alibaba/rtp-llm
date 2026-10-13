@@ -721,6 +721,56 @@ class MXFp4QuarkQuantConfig(QuarkQuantConfig):
         return MXFp4QuarkQuantConfig(**config)
 
 
+class MXFP4QuantConfig(QuantizationConfig):
+    """Standard MXFP4 checkpoint scheme (gpt-oss lineage).
+
+    Routed-expert weights ship E2M1 nibble-packed with UE8M0 group-32
+    scales; ``modules_to_not_convert`` tensors (attention, router, embed,
+    lm_head) stay BF16. The routed tensors are declared explicitly by the
+    model weight info (like DeepSeek V4's FP4 experts), so this class only
+    lets the factory lifecycle parse the checkpoint's quantization_config —
+    it does not drive weight dequant paths by itself.
+    """
+
+    def __init__(
+        self,
+        bits: int = 4,
+        group_size: int = 32,
+        is_quanted: bool = True,
+        **kwargs: Any,
+    ):
+        super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
+
+    @classmethod
+    def get_method(cls) -> str:
+        return "mxfp4"
+
+    @classmethod
+    def get_algo(cls) -> str:
+        return "mxfp4"
+
+    def get_supported_act_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_compute_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16]
+
+    def get_supported_kv_cache_dtypes(self) -> List[torch.dtype]:
+        return [torch.float16, torch.bfloat16, torch.float8_e4m3fn]
+
+    @classmethod
+    def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
+        # The checkpoint's quantization_config only names the method; the
+        # loader normalizes absent fields to 0. MXFP4 is definitionally
+        # 4-bit with group-32 scales.
+        cfg = dict(config)
+        if not cfg.get("bits"):
+            cfg["bits"] = 4
+        if not cfg.get("group_size"):
+            cfg["group_size"] = 32
+        return MXFP4QuantConfig(**cfg)
+
+
 class SmoothQuantConfig(QuantizationConfig):
     def __init__(self):
         super().__init__(bits=0, group_size=0, is_quanted=True)

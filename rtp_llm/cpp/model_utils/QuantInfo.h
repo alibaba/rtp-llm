@@ -17,6 +17,7 @@ enum QuantMethod {
     ModelOptFP4      = 10,
     QuarkMXFP4       = 11,
     W8A8INT8PTPC     = 12,
+    MXFP4            = 13,
 };
 
 struct QuantAlgo {
@@ -65,6 +66,11 @@ public:
     }
     bool isQuarkMXFP4() const {
         return group_size_ > 0 && quant_method_ == QuarkMXFP4;
+    }
+    // Standard MXFP4 checkpoint scheme (gpt-oss lineage): E2M1 + UE8M0
+    // group-32 scales on routed experts; distinct from Quark/ModelOpt.
+    bool isMXFP4() const {
+        return group_size_ > 0 && quant_method_ == MXFP4;
     }
     QuantMethod getQuantMethod() const {
         return quant_method_;
