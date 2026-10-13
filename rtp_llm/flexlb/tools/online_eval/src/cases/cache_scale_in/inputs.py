@@ -35,9 +35,6 @@ NUMERIC_PARAMETERS = {
     **JAVA_FLOW_NUMBERS,
     **CAPTURE_NUMBERS,
     **number_fields(FRACTION,
-        'checks.baseline_hit.expected',
-        'checks.baseline_stability.expected',
-        'checks.offered_load.expected',
     ),
     **number_fields(NONNEGATIVE,
         'checks.collapse.expected',
@@ -55,7 +52,6 @@ NUMERIC_PARAMETERS = {
         'procedure.startup_timeout_s',
     ),
     **number_fields(COUNT,
-        'checks.completed.expected',
         'procedure.drain_timeout_ms',
         'procedure.target_p',
     ),
@@ -88,12 +84,16 @@ def engine_counters(spec):
 
 
 
-RULES = {
-    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('baseline', 'post')),
-    'baseline_hit': ('baseline_min_hit', 'baseline_min_half_hit', 'ge', 'ratio', ('baseline',)),
-    'baseline_stability': ('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', ('baseline',)),
-    'completed': ('min_completed', 'min_window_completed', 'ge', 'requests', ('baseline', 'post')),
-}
+from case_api.check_inputs import CheckSet, CheckSpec
+
+CHECKS = CheckSet('cache_gate', {
+    'offered_load': CheckSpec('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('baseline', 'post'), number=FRACTION),
+    'baseline_hit': CheckSpec('baseline_min_hit', 'baseline_min_half_hit', 'ge', 'ratio', ('baseline',), number=FRACTION),
+    'baseline_stability': CheckSpec('baseline_max_spread', 'baseline_half_spread', 'le', 'ratio', ('baseline',), number=FRACTION),
+    'completed': CheckSpec('min_completed', 'min_window_completed', 'ge', 'requests', ('baseline', 'post'), number=COUNT),
+})
+RULES = CHECKS.rules
+NUMERIC_PARAMETERS.update(CHECKS.numeric_parameters)
 
 CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'sustain_s', 'absolute_min_hit', 'max_drop'}
 
@@ -106,7 +106,7 @@ def compile_checks(case, checks, policy):
     fields(checks, set(RULES) | {'collapse'}, 'parameters.checks')
     fields(policy, {'absolute_min_hit', 'max_drop', 'sustain_s'}, 'parameters.analysis.collapse')
     result = dict(policy)
-    result.update(compile_metric_checks(case, checks, RULES, namespace='cache_gate'))
+    result.update(CHECKS.compile(case, checks))
     expected, _ = metric_criterion(case, checks['collapse'], metric='cache_gate/collapse_detected',
         unit='boolean', windows=('post',), op='eq', path='parameters.checks.collapse')
     if type(expected) is not int or expected not in (0, 1):
@@ -180,10 +180,9 @@ def validate_criteria(params, plan):
             or (p["removal_mode"] == "graceful" and p["drain_timeout_ms"] == 0)
             or p["topology_timeout_s"] <= 0):
         raise ValueError("removal must have bounded drain and topology budgets")
-    from scenario.compiler import environment
 
     for profile in plan.profiles:
-        resolved = environment(plan.environment, plan.path, profile)["resolved_config"]
+        resolved = plan.env.resolved_config(profile)
         if resolved["router"]["roles"]["prefill"]["cacheAffinity"]["maxExtraTtftMs"] != SHARED_WARMUP_AFFINITY_MS:
             raise ValueError("shared warmup requires cache affinity 1000000000")
         stale_ms = resolved["workerRegistry"]["health"]["statusStaleAfterMs"]
@@ -192,3 +191,15 @@ def validate_criteria(params, plan):
                 "topology budget must exceed Master status staleness"
             )
     return p
+
+
+from case_api.input_contract import InputContract, InputGroup, numeric_fields
+from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
+
+INPUTS = InputContract({
+    'traffic': InputGroup(JAVA_FLOW_INPUT_FIELDS | {"kind", "max_requests"}),
+    'procedure': InputGroup(PROCEDURE_FIELDS | {"analysis_timeout_s", "startup_timeout_s"}),
+    'observation': InputGroup(OBSERVATION_FIELDS | {"inputs", "windows", "capture"}),
+    'analysis': InputGroup({"collapse"}),
+    'checks': InputGroup(set(RULES) | {"collapse"}),
+}, numeric_fields(NUMERIC_PARAMETERS))

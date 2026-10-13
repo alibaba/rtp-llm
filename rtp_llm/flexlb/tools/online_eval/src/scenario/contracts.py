@@ -57,6 +57,13 @@ class PlanContext:
     environment: dict = field(default_factory=dict)
     profiles: tuple[str, ...] = ()
 
+    @property
+    def env(self):
+        from case_api.environment import EnvironmentView
+        if not hasattr(self, "_environment_view"):
+            self._environment_view = EnvironmentView(self.environment, self.profiles, path=self.path)
+        return self._environment_view
+
     def reference(self, value, expected_kind=None):
         from scenario.references import reference
 

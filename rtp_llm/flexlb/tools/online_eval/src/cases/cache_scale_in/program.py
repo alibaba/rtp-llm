@@ -6,7 +6,7 @@ from cases.cache_scale_in.report import validate_view, write_report
 from cases.cache_scale_in.actions import HANDLERS as ACTION_HANDLERS
 
 from case_api.builder import output
-from cases.cache_scale_in.inputs import NUMERIC_PARAMETERS
+from cases.cache_scale_in.inputs import INPUTS, NUMERIC_PARAMETERS
 from traffic.playback.configuration import normalize
 from cases.cache_scale_in.inputs import (
     engine_counters, ENGINE_FIELDS, PROCEDURE_FIELDS, OBSERVATION_FIELDS, RULES, compile_checks, observation_contract,
@@ -17,13 +17,7 @@ from case_api.metric_inputs import bind_engine_metrics
 
 
 def default(case):
-    data = case.inputs(
-        traffic=JAVA_FLOW_INPUT_FIELDS | {"kind", "max_requests"},
-        procedure=PROCEDURE_FIELDS | {"analysis_timeout_s", "startup_timeout_s"},
-        observation=OBSERVATION_FIELDS | {"inputs", "windows", "capture"},
-        analysis={"collapse"},
-        checks=set(RULES) | {"collapse"},
-    )
+    data = case.bind(INPUTS)
     flow = driver(data.traffic, "java_flow")
     inputs = data.observation["inputs"]
     gate = dict({k: v for k, v in data.procedure.items() if k not in {"analysis_timeout_s", "startup_timeout_s"}},
@@ -85,7 +79,7 @@ from cases.cache_scale_in.metrics import metric_contract
 
 CASE = CaseDefinition(
     builders={"default": default},
-    numeric_parameters=NUMERIC_PARAMETERS,
+    input_contract=INPUTS,
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     producers={

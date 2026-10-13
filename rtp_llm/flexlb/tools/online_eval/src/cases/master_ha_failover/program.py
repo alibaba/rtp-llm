@@ -23,7 +23,7 @@ def non_rolling(case):
 def _cycle(case, restart_mode):
     data, windows = read_cycle(case)
     case.step("setup", "setup", timeout_s=data.procedure["setup_timeout_s"])
-    elected = case.environment.get('master_layout') == 'dual_zookeeper'
+    elected = case.env.master_layout == 'dual_zookeeper'
     if elected:
         case.step('baseline_leadership', 'master_leadership', params={'targets': ['A', 'B']})
     case.step("flow", "master_client_start", params=dict(driver(data.traffic, "ha_replay"), capture=data.observation["capture"]))

@@ -72,12 +72,8 @@ def test_shared_field_cannot_drift_between_programs():
     module = program_module('cache_scale_in', 'fixture')
     declarations = dict(module.definition.numeric_parameters)
     declarations['traffic.source.parameters.priority'] = COUNT
-    from case_api import registry
-    from case_registry_fixtures import snapshot
-    changed = replace(module, definition=replace(module.definition, numeric_parameters=declarations))
-    with patch.object(registry, '_snapshot', snapshot(changed, include_existing=True)):
-        with pytest.raises(ScenarioError, match='conflicting shared numeric field'):
-            configure_program(config('cache_scale_in'), 'case.yaml')
+    with pytest.raises(ValueError, match='conflicting numeric input'):
+        replace(module.definition, numeric_parameters=declarations)
 
 
 def test_program_budget_can_only_narrow_a_shared_field():

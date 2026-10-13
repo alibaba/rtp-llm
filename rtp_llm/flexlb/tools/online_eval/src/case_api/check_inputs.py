@@ -39,3 +39,55 @@ def compile_metric_checks(case, checks, rules, *, namespace, path="parameters.ch
             unit=unit, windows=windows, op=op, path=path + '.' + name,
         )
     return result
+
+
+from dataclasses import dataclass
+from case_api.numeric_parameters import NONNEGATIVE
+
+
+@dataclass(frozen=True)
+class CheckSpec:
+    key: str
+    metric: str
+    op: str
+    unit: str
+    windows: tuple
+    number: object = NONNEGATIVE
+
+    def __post_init__(self):
+        from case_api.numeric_parameters import parameter_rules
+        parameter_rules({"checks.threshold.expected": self.number})
+        if self.op not in {"eq", "ne", "gt", "ge", "lt", "le"}:
+            raise ValueError("invalid check comparison")
+        if not self.key or not self.metric or not self.unit or not self.windows:
+            raise ValueError("check requires key, metric, unit and windows")
+        object.__setattr__(self, "windows", tuple(self.windows))
+
+    @property
+    def rule(self):
+        return self.key, self.metric, self.op, self.unit, self.windows
+
+
+class CheckSet:
+    """Declare threshold type and measurement binding together, once per check."""
+    def __init__(self, namespace, specs):
+        from types import MappingProxyType
+        if not namespace or any(not isinstance(value, CheckSpec) for value in specs.values()):
+            raise ValueError("invalid check declarations")
+        self.namespace = namespace
+        self.specs = MappingProxyType(dict(specs))
+
+    @property
+    def rules(self):
+        return {name: spec.rule for name, spec in self.specs.items()}
+
+    @property
+    def numeric_parameters(self):
+        return {"checks." + name + ".expected": spec.number for name, spec in self.specs.items()}
+
+    @property
+    def fields(self):
+        return frozenset(spec.key for spec in self.specs.values())
+
+    def compile(self, case, checks):
+        return compile_metric_checks(case, checks, self.rules, namespace=self.namespace)

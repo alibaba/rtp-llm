@@ -68,7 +68,19 @@ class CaseDefinition:
     producers: Mapping[str, MetricProducer] = field(default_factory=dict)
     sources: Mapping[str, EvidenceSource] = field(default_factory=dict)
 
+    input_contract: object = None
+
     def __post_init__(self):
+        if self.input_contract is not None:
+            from case_api.input_contract import InputContract
+            if not isinstance(self.input_contract, InputContract):
+                raise ValueError("input_contract must be an InputContract")
+            merged = dict(self.numeric_parameters)
+            for path, rule in self.input_contract.numeric_parameters.items():
+                if path in merged and merged[path] != rule:
+                    raise ValueError("conflicting numeric input: " + path)
+                merged[path] = rule
+            object.__setattr__(self, "numeric_parameters", merged)
         for name in ('builders', 'numeric_parameters', 'report_views', 'producers', 'sources'):
             value = getattr(self, name)
             if not isinstance(value, Mapping):

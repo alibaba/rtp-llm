@@ -112,6 +112,9 @@ def _build_variant(config, row, identity, module, selected_profiles, source, num
         merge_environment(environment, patch),
         merge_data(parameters, variant_parameters),
         number_rules=narrow_parameters(base_rules, row.parameter_schema),
+        profiles=profiles,
+        optional_numbers=(module.definition.input_contract.optional_numbers
+                          if module.definition.input_contract else ()),
     )
     builder.validate_numbers()
     numeric_contracts[identity] = {path: asdict(rule) for path, rule in builder.number_rules.items()}

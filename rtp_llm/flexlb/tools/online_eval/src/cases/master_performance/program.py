@@ -6,7 +6,7 @@ from cases.master_performance.report import validate_view, write_report
 from cases.master_performance.actions import HANDLERS as ACTION_HANDLERS
 
 from case_api.builder import output
-from cases.master_performance.inputs import NUMERIC_PARAMETERS
+from cases.master_performance.inputs import INPUTS, NUMERIC_PARAMETERS
 from traffic.playback.configuration import normalize
 from cases.master_performance.inputs import validate
 from cases.master_performance.inputs import OBSERVATION_FIELDS, RULES, compile_checks, observation_contract
@@ -16,13 +16,7 @@ from case_api.metric_inputs import bind_engine_metrics
 
 
 def default(case):
-    data = case.inputs(
-        traffic=JAVA_FLOW_INPUT_FIELDS | {"kind"},
-        procedure={"analysis_timeout_s"},
-        observation=OBSERVATION_FIELDS | {"inputs", "windows", "capture"},
-        analysis={"slo"},
-        checks=set(RULES) | {"engine_tps"},
-    )
+    data = case.bind(INPUTS)
     from input_contract import finite_number
     analysis_timeout = data.procedure["analysis_timeout_s"]
     if not finite_number(analysis_timeout) or analysis_timeout <= 0:
@@ -84,7 +78,7 @@ from cases.master_performance.metrics import metric_contract
 
 CASE = CaseDefinition(
     builders={"default": default},
-    numeric_parameters=NUMERIC_PARAMETERS,
+    input_contract=INPUTS,
     actions=tuple(ACTION_HANDLERS),
     report_views=REPORT_VIEWS,
     producers={

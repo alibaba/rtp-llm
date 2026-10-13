@@ -23,28 +23,16 @@ NUMERIC_PARAMETERS = {
     **CAPTURE_NUMBERS,
     **number_fields(NONNEGATIVE,
         'procedure.analysis_timeout_s',
-        'checks.e2e.expected',
         'checks.engine_tps.rtp_llm_context_tps.expected',
         'checks.engine_tps.rtp_llm_context_tps_with_cache.expected',
         'checks.engine_tps.mock_decode_wall_tps.expected',
-        'checks.goodput.expected',
-        'checks.inflight_growth.expected',
-        'checks.input_tps.expected',
-        'checks.output_tps.expected',
-        'checks.pacing_lag.expected',
-        'checks.tpot.expected',
-        'checks.ttft.expected',
         'observation.max_gap_s',
         'observation.sample_s',
         'traffic.client.playback.ramp_up_seconds',
     ),
     **number_fields(FRACTION,
-        'checks.errors.expected',
-        'checks.offered_load.expected',
-        'checks.slo_fraction.expected',
     ),
     **number_fields(COUNT,
-        'checks.requests.expected',
         'analysis.slo.e2e_ms',
         'analysis.slo.tpot_ms',
         'analysis.slo.ttft_ms',
@@ -83,20 +71,24 @@ def engine_roles(spec, bounds=None):
 
 # Public comparisons bind exact metrics, units and cohorts. The analyzer keeps
 # its compact numerical criteria; compilation owns this projection.
-RULES = {
-    'offered_load': ('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('measurement',)),
-    'requests': ('min_requests', 'cohort_requests', 'ge', 'requests', ('measurement',)),
-    'pacing_lag': ('max_pacing_lag_ms', 'pacing_lag_max_ms', 'le', 'ms', ('measurement',)),
-    'input_tps': ('min_input_tps', 'input_tps', 'ge', 'tokens/s', ('measurement',)),
-    'output_tps': ('min_output_tps', 'output_tps', 'ge', 'tokens/s', ('measurement',)),
-    'goodput': ('min_goodput_rps', 'goodput_rps', 'ge', 'requests/s', ('measurement',)),
-    'slo_fraction': ('min_slo_fraction', 'slo_fraction', 'ge', 'ratio', ('measurement',)),
-    'errors': ('max_error_rate', 'error_rate', 'le', 'ratio', ('full_run',)),
-    'ttft': ('max_ttft_p99_ms', 'ttft_p99_ms', 'le', 'ms', ('measurement',)),
-    'e2e': ('max_e2e_p99_ms', 'e2e_p99_ms', 'le', 'ms', ('measurement',)),
-    'tpot': ('max_tpot_p99_ms', 'tpot_p99_ms', 'le', 'ms', ('measurement',)),
-    'inflight_growth': ('max_inflight_growth_rps', 'inflight_growth_rps', 'le', 'requests/s', ('measurement',)),
-}
+from case_api.check_inputs import CheckSet, CheckSpec
+
+CHECKS = CheckSet('performance_gate', {
+    'offered_load': CheckSpec('qps_tolerance', 'offered_qps_deviation', 'le', 'ratio', ('measurement',), number=FRACTION),
+    'requests': CheckSpec('min_requests', 'cohort_requests', 'ge', 'requests', ('measurement',), number=COUNT),
+    'pacing_lag': CheckSpec('max_pacing_lag_ms', 'pacing_lag_max_ms', 'le', 'ms', ('measurement',), number=NONNEGATIVE),
+    'input_tps': CheckSpec('min_input_tps', 'input_tps', 'ge', 'tokens/s', ('measurement',), number=NONNEGATIVE),
+    'output_tps': CheckSpec('min_output_tps', 'output_tps', 'ge', 'tokens/s', ('measurement',), number=NONNEGATIVE),
+    'goodput': CheckSpec('min_goodput_rps', 'goodput_rps', 'ge', 'requests/s', ('measurement',), number=NONNEGATIVE),
+    'slo_fraction': CheckSpec('min_slo_fraction', 'slo_fraction', 'ge', 'ratio', ('measurement',), number=FRACTION),
+    'errors': CheckSpec('max_error_rate', 'error_rate', 'le', 'ratio', ('full_run',), number=FRACTION),
+    'ttft': CheckSpec('max_ttft_p99_ms', 'ttft_p99_ms', 'le', 'ms', ('measurement',), number=NONNEGATIVE),
+    'e2e': CheckSpec('max_e2e_p99_ms', 'e2e_p99_ms', 'le', 'ms', ('measurement',), number=NONNEGATIVE),
+    'tpot': CheckSpec('max_tpot_p99_ms', 'tpot_p99_ms', 'le', 'ms', ('measurement',), number=NONNEGATIVE),
+    'inflight_growth': CheckSpec('max_inflight_growth_rps', 'inflight_growth_rps', 'le', 'requests/s', ('measurement',), number=NONNEGATIVE),
+})
+RULES = CHECKS.rules
+NUMERIC_PARAMETERS.update(CHECKS.numeric_parameters)
 
 CHECK_FIELDS = frozenset(rule[0] for rule in RULES.values()) | {'slo_ttft_ms', 'slo_e2e_ms', 'slo_tpot_ms'}
 
@@ -109,7 +101,7 @@ def compile_checks(case, checks, inputs):
     bindings = metric_fields(engine_tps(inputs))
     fields(checks, set(RULES) | {'engine_tps'}, 'parameters.checks')
     result = {}
-    result.update(compile_metric_checks(case, checks, RULES, namespace='performance_gate'))
+    result.update(CHECKS.compile(case, checks))
     fields(checks['engine_tps'], set(bindings), 'parameters.checks.engine_tps')
     floors, overrides = {}, {}
     for name, binding in bindings.items():
@@ -201,3 +193,15 @@ def for_profile(criteria, profile, gate_input=None):
     if profile in overrides:
         result["engine_tps"].update(overrides[profile])
     return validate(result, gate_input)
+
+
+from case_api.input_contract import InputContract, InputGroup, numeric_fields
+from adapters.java_flow import JAVA_FLOW_INPUT_FIELDS
+
+INPUTS = InputContract({
+    'traffic': InputGroup(JAVA_FLOW_INPUT_FIELDS | {"kind"}),
+    'procedure': InputGroup({"analysis_timeout_s"}),
+    'observation': InputGroup(OBSERVATION_FIELDS | {"inputs", "windows", "capture"}),
+    'analysis': InputGroup({"slo"}),
+    'checks': InputGroup(set(RULES) | {"engine_tps"}),
+}, numeric_fields(NUMERIC_PARAMETERS))

@@ -13,10 +13,14 @@ def output(stage, field):
 class CaseBuilder:
     """Python owns ordering, branches and checks; YAML supplies declared parameters."""
 
-    def __init__(self, environment, parameters, *, number_rules):
+    def __init__(self, environment, parameters, *, number_rules, profiles=(), optional_numbers=()):
         self.environment = copy.deepcopy(environment)
         self.parameters = copy.deepcopy(parameters)
         self.number_rules = dict(number_rules)
+        self.profiles = tuple(profiles)
+        self.optional_numbers = frozenset(optional_numbers)
+        from case_api.environment import EnvironmentView
+        self.env = EnvironmentView(environment, self.profiles)
         self.steps = []
         self.read_parameters = set()
         self.metric_dependencies = {}
@@ -35,6 +39,9 @@ class CaseBuilder:
         from case_api.inputs import ProgramInputs
 
         return ProgramInputs.read(self, **contract)
+
+    def bind(self, contract):
+        return contract.bind(self)
 
     def metric(self, identity, *, unit=None, labels=(), mode=None):
         """Declare a numeric dependency; compilation binds it to the selected plan."""
@@ -65,6 +72,17 @@ class CaseBuilder:
         reads = set(self.read_parameters)
         try:
             for name in self.number_rules:
+                if name in self.optional_numbers:
+                    value = self.parameters
+                    for part in name.split("."):
+                        if not isinstance(value, dict):
+                            raise ScenarioError("invalid parameter parent: " + name)
+                        if part not in value:
+                            break
+                        value = value[part]
+                    else:
+                        self.number(name)
+                    continue
                 self.number(name)
         finally:
             self.read_parameters = reads
