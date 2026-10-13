@@ -206,7 +206,7 @@ def render(spec):
         template = template.replace("__REPORT_" + name + "__", color)
     return (
         template.replace("__SECTIONS__", render_sections(sections))
-        .replace("__CONTEXT__", render_context(spec))
+        .replace("__CONTEXT__", render_context(spec) + render_sections(spec.get("summary_sections", [])))
         .replace("__PAGE_TITLE__", page_title)
         .replace(
             "__SPEC_JSON__",

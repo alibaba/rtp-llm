@@ -76,13 +76,24 @@ reporting:
 
 ## 冻结对照
 
-`comparison.py` 接收多个 run bundle，先校验再读取结果与 spec，不导入 case 分析器、不读取原始 evidence、不重建单 run 报告。每侧 verdict、KPI、缺采、说明与原报告链接保留；输入归档应留在原位置。
+`scripts/commands/compare_runs.py` 接收至少两个冻结的 run bundle 目录或 `experiment.eval.zip`，允许混合输入。bundle 通过公共读取器校验清单与全部文件摘要；实验容器通过 `ExperimentReader` 校验所消费的执行记录、冻结布局和数据集。原始附件、普通 HTML、零散 JSON 与 comparison bundle 不能作为单 run 输入。容器缺少主分析时仅保留冻结执行记录，不补造业务结论。
 
-合图只配对面板 ID、metric ID、标签、测量口径、显示缩放、单位及坐标轴一致的时间面板。显示文案不参与测量身份匹配，缺少测量身份时保留独立面板。时间原点不一致时分别展示；指定事件缺失、重复或无效时全部保留原坐标，不推导统计窗口、排名或原因。
+`--label` 按输入顺序重复传入唯一名称；`--baseline` 选择其中一个名称作为条件比较基准，默认第一项。`--view` 按输入顺序指定冻结 ZIP 视图名，`auto` 使用自动选择；bundle 对应项只能为 `auto`。同一冻结输入不能重复当作多个实验。
 
-控制变量在写入归档时冻结为 `ComparisonControls`，对照读取显式契约，不从 case 证据重建。字段缺失标 UNKNOWN，不从两边同时缺失推断一致。对比不产生顶层 verdict，命令退出码只描述读取、校验与写入是否成功；入口见[命令导航](../development/entrypoints.md)。
+```bash
+python3 scripts/commands/compare_runs.py <run-bundle> <experiment.eval.zip> \
+  --label reference --label candidate --baseline reference \
+  --view auto --view <frozen-view.yaml> \
+  --alignment-event <event-id> --output <comparison-output>
+```
 
-离线重判必须显式指定 `--reinterpret`，输出目录位于原证据归档之外且为空。原归档只读；来源证据 SHA 与当前分析器 SHA 写入重判证据，指标物化和报告发布只写新目录。`--json-only` 同样遵守目录保护和溯源规则。
+对照只读取冻结结果，不调用领域分析器、不重跑门禁。各 run 的 verdict、validity、执行与清理记录保持独立，comparison 不产生总体 PASS/FAIL。运行清单和差异矩阵展示实验身份、代码、配置、流量、环境、时间及判定条件；未知字段不能视为相同。存在多个差异时不能将曲线变化自动解释为某一个参数的因果效果。
+
+指标按 ID、标签、单位、测量与计算口径、来源、缩放、轴定义和时间原点配对，不要求图表 ID 或整张图的曲线集合相同。兼容指标至少存在于两个 run 时合图；缺失的 run 明确列出。身份未知、口径不兼容、非时序曲线单独展示。同一 run 同一指标身份对应不同数据时不推断是哪条，保留原曲线。缺采不补零，不插值，不自动合并统计窗口。
+
+`--alignment-event` 使用唯一且有效的事件 ID，将时间曲线和交互统计样本同时平移；任一 run 的事件缺失或重复时，所有 run 保留原时间轴。未请求对齐时仅相同且已知的原点可合图。采样点、窗口长度和各 run 的原判定不因对齐变化。
+
+默认仅展示合图和未配对曲线；`--include-original-panels` 同时保留全部原图。输出包含自包含 `report.html`、冻结比较分析、spec、manifest 和按输入编号保存的单 run HTML 附件；附件同样进入摘要校验。ZIP 原图只从冻结布局重绘，不执行容器中的程序，也不引用原机器。完整比较 bundle 可独立搬迁；单独 HTML 中的图表与表格可离线打开，原图链接需携带附件。
 
 ## 门禁与发布
 

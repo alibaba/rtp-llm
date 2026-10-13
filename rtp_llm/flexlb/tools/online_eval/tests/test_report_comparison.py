@@ -63,7 +63,7 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual(before, [{p.name: p.read_bytes() for p in d.iterdir()} for d in paths])
         for token in ('Tier', 'noise_floor', 'rank_score', 'regression', 'gate passed'):
             self.assertNotIn(token, json.dumps(result))
-        self.assertEqual(len(self.spec()['panels']), 4)
+        self.assertEqual(len(self.spec()['panels']), 1)
         self.assertEqual(self.spec()['panels'][0]['timeX'], True)
         styles = [s['dash'] for s in self.spec()['panels'][0]['series']]
         self.assertEqual(len({tuple(style) for style in styles}), 3)
@@ -75,8 +75,8 @@ class ReportComparisonTest(unittest.TestCase):
         result = compare([a, b], self.output(), alignment_event='checkpoint')
         self.assertEqual(result['time_alignment']['status'], 'ALIGNED')
         panels = self.spec()['panels']
-        self.assertEqual([p['x'] for p in panels[1]['series'][0]['points']], [-5, 0, 15])
-        self.assertEqual([p['x'] for p in panels[2]['series'][0]['points']], [-10, -5, 10])
+        self.assertEqual([p['x'] for p in panels[0]['series'][0]['points']], [-5, 0, 15])
+        self.assertEqual([p['x'] for p in panels[0]['series'][1]['points']], [-10, -5, 10])
         self.assertIsNone(panels[0]['series'][0]['points'][1]['y'])
         self.assertEqual(self.spec()['timeAxis']['min'], -15)
         self.assertEqual(json.loads((a/'report-spec.json').read_text()), original)
@@ -88,10 +88,10 @@ class ReportComparisonTest(unittest.TestCase):
             self.assertEqual(main([str(a), str(b), '--output', str(self.output()),
                                    '--alignment-event', 'checkpoint']), 0)
         result = load_analysis(self.output()/'reports/comparison/runs')
-        self.assertEqual(result['controls']['comparisons']['B']['status'], 'DIFFERENT')
+        self.assertEqual(result['controls']['comparisons']['B']['status'], 'UNKNOWN')
         self.assertEqual(result['time_alignment']['status'], 'UNAVAILABLE')
         self.assertEqual(result['pairing'][1]['status'], 'SEPARATE')
-        self.assertEqual(self.spec()['panels'][1]['series'][0]['points'][0]['x'], 5)
+        self.assertEqual(self.spec()['panels'][0]['series'][0]['points'][0]['x'], 5)
         self.assertIn('latency gap', json.dumps(self.spec()))
 
     def test_incompatible_units_are_displayed_separately(self):
@@ -144,14 +144,19 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual(result['pairing'][0]['status'], 'SEPARATE')
         self.assertEqual(len(self.spec()['panels']), 2)
 
-    def test_relative_run_links_are_rebased_without_copying_or_rebuilding_reports(self):
+    def test_original_reports_are_portable_and_checked_without_reanalysis(self):
         a, b = self.bundle('a'), self.bundle('b')
         compare([a, b], self.output())
         base = self.output()/'reports/comparison/runs'
         sections = self.spec()['sections']
         targets = [(base/item['href']).resolve() for s in sections if s['type'] == 'links'
                    for item in s['items']]
-        self.assertEqual(targets, [(a/'report.html').resolve(), (b/'report.html').resolve()])
+        self.assertEqual(targets, [(base/'original-run-1.html').resolve(), (base/'original-run-2.html').resolve()])
+        self.assertEqual([p.read_bytes() for p in targets], [(p/'report.html').read_bytes() for p in (a, b)])
+        read_bundle(base)
+        targets[0].write_text('corrupt')
+        with self.assertRaises(ValueError):
+            read_bundle(base)
 
     def test_comparison_bundle_cannot_be_reused_as_a_run(self):
         a, b = self.bundle('a'), self.bundle('b')
@@ -172,12 +177,9 @@ class ReportComparisonTest(unittest.TestCase):
         self.assertEqual(list(result['runs'].values()), expected)
         self.assertEqual([v['verdict'] for v in result['runs'].values()], ['PASS', 'FAIL'])
         self.assertTrue(result['controls']['comparisons']['B']['differences'])
-        self.assertEqual(len(self.spec()['panels']), 18)
-        self.assertEqual({panel['id'] for panel in self.spec()['panels']
-                          if panel['id'].startswith('overlay:')},
-                         {'overlay:engine-tps', 'overlay:client-qps',
-                          'overlay:latency', 'overlay:cache-hit',
-                          'overlay:prefill-batch', 'overlay:prefill-state'})
+        self.assertTrue(all(p['series'] for p in self.spec()['panels']))
+        self.assertEqual(len(self.spec()['panels']), 2)
+        self.assertTrue(all(p['id'].startswith('run-') for p in self.spec()['panels']))
 
     def test_cache_outcomes_and_prepared_curves_are_frozen(self):
         paths, expected = [], []
