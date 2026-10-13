@@ -1,0 +1,13 @@
+# This file is copied to the application classpath root as kmonitor.properties
+# only when FLEXLB_MONITOR_PROVIDER=kmonitor-prometheus.
+# FLEXLB_MONITOR_SERVICE_NAME controls the KMonitor service name in FlexLB.
+
+# Expose KMonitor snapshots for Turbo or Prometheus to scrape.
+kmonitor.sink.flexlb-prometheus.class=org.flexlb.monitor.prometheus.KMonitorPrometheusExporter
+kmonitor.sink.flexlb-prometheus.port=4142
+
+# Send FlexLB metrics only to the Prometheus text endpoint.
+kmonitor.instance.flexlb.sinks=org.flexlb.monitor.prometheus.KMonitorPrometheusExporter
+
+# Required only when kmonitor.system.metrics.enable=true and system metrics should also be scraped.
+kmonitor.instance.system_kmonitor.sinks=org.flexlb.monitor.prometheus.KMonitorPrometheusExporter

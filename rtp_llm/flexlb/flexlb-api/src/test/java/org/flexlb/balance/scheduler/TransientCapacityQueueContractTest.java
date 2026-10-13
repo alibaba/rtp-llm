@@ -13,7 +13,10 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeMode;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.DispatcherConfig;
@@ -53,6 +56,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -362,6 +366,20 @@ class TransientCapacityQueueContractTest {
     }
 
     @Test
+    void placementMetricsKeepNonNumericRequestId() {
+        Request request = new Request();
+        request.setRequestId("request-a");
+        BalanceContext context = new BalanceContext(config());
+        context.setRequest(request);
+        PlacementMetrics metrics = new PlacementMetrics();
+
+        metrics.placementStarted(context);
+
+        assertSame(context, metrics.context("request-a"));
+        assertEquals(List.of("request-a"), metrics.requestIdsFrom(0));
+    }
+
+    @Test
     @Timeout(20)
     void higherPriorityTakesQueuedReservationAndVictimReplansWithoutCompletingItsFuture() throws Exception {
         FlexlbConfig config = config();
@@ -376,24 +394,24 @@ class TransientCapacityQueueContractTest {
         try (Fixture fixture = new Fixture(null, config)) {
             var low = fixture.runtime.scheduler().submit(fixture.context(990_001L, 20));
             awaitCondition(() -> fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
-            var oldReservation = fixture.decodeEndpoint.reservationHandle(990_001L);
+            var oldReservation = fixture.decodeEndpoint.reservationHandle("990001");
             var high = fixture.runtime.scheduler().submit(fixture.context(990_002L, 80));
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_002L) != null
-                    && fixture.decodeEndpoint.reservationHandle(990_001L) == null, 2_000L);
+            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990002") != null
+                    && fixture.decodeEndpoint.reservationHandle("990001") == null, 2_000L);
             awaitCapacityWaiters(fixture.runtime.scheduler(), 1);
             assertFalse(low.isDone(), "local preemption must not return NO_AVAILABLE_WORKER");
             assertFalse(high.isDone());
             assertEquals(1, fixture.prefillEndpoint.queuedRequestCount());
             assertEquals(1, fixture.decodeEndpoint.routingView().totalLoad());
-            fixture.runtime.scheduler().cancelRequest(990_002L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("990002", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(high.get(2, TimeUnit.SECONDS).isSuccess());
-            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle(990_001L) != null
+            awaitCondition(() -> fixture.decodeEndpoint.reservationHandle("990001") != null
                     && fixture.prefillEndpoint.queuedRequestCount() == 1, 2_000L);
             assertFalse(low.isDone());
-            assertTrue(fixture.decodeEndpoint.reservationHandle(990_001L).reservationToken()
+            assertTrue(fixture.decodeEndpoint.reservationHandle("990001").reservationToken()
                     != oldReservation.reservationToken());
             assertEquals(List.of(), fixture.submission.requestIds(), "neither queued route was sent to the engine");
-            fixture.runtime.scheduler().cancelRequest(990_001L, 0L, CancelReason.CLIENT_CANCELLED);
+            fixture.runtime.scheduler().cancelRequest("990001", 0L, CancelReason.CLIENT_CANCELLED);
             assertFalse(low.get(2, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, fixture.decodeEndpoint.routingView().totalLoad());
             assertEquals(0, fixture.prefillEndpoint.queuedRequestCount());
@@ -633,7 +651,7 @@ class TransientCapacityQueueContractTest {
             DecodeEndpoint.ReservationHandle settled;
             try (WorkerEndpoint.GenerationPin pin =
                          fixture.decodeEndpoint.tryPinGeneration()) {
-                settled = fixture.decodeEndpoint.reserve(pin, requestId, 128L, 136L, 50);
+                settled = fixture.decodeEndpoint.reserve(pin, Long.toString(requestId), 128L, 136L, 50);
             }
             assertTrue(fixture.decodeEndpoint.release(settled, DecodeEndpoint.ReleaseReason.COUNTERPART_FINISHED).released());
             assertEquals(0, fixture.totalDecodeReservations());
@@ -766,7 +784,7 @@ class TransientCapacityQueueContractTest {
                     fixture.metrics, attemptsBeforeStatus + 1, 5_000));
             assertTrue(awaitPlacementQuiescence(
                     fixture.metrics, 100L, 5_000L));
-            List<Long> capacityRetryOrder =
+            List<String> capacityRetryOrder =
                     fixture.metrics.requestIdsFrom(attemptsBeforeStatus);
             assertFalse(capacityRetryOrder.isEmpty());
             assertEquals(1, fixture.submission.requestIds().size(),
@@ -876,7 +894,7 @@ class TransientCapacityQueueContractTest {
             fixture.releaseCapacity();
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(101L), fixture.submission.requestIds());
+            assertEquals(List.of("101"), fixture.submission.requestIds());
         }
     }
 
@@ -894,7 +912,7 @@ class TransientCapacityQueueContractTest {
             fixture.releaseCapacity();
 
             assertTrue(waiting.get(2, TimeUnit.SECONDS).isSuccess());
-            assertEquals(List.of(201L), fixture.submission.requestIds());
+            assertEquals(List.of("201"), fixture.submission.requestIds());
         }
     }
 
@@ -923,7 +941,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(251L), fixture.submission.requestIds());
+            assertEquals(List.of("251"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -949,7 +967,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(262L), fixture.submission.requestIds());
+            assertEquals(List.of("262"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -968,7 +986,7 @@ class TransientCapacityQueueContractTest {
 
             assertTrue(fixture.submission.awaitCommands(
                     1, 2, TimeUnit.SECONDS));
-            assertEquals(List.of(271L), fixture.submission.requestIds());
+            assertEquals(List.of("271"), fixture.submission.requestIds());
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
         }
@@ -993,7 +1011,7 @@ class TransientCapacityQueueContractTest {
                     1, 2, TimeUnit.SECONDS));
             assertFalse(fixture.submission.awaitCommands(
                     1, 200, TimeUnit.MILLISECONDS));
-            assertEquals(List.of(281L), fixture.submission.requestIds());
+            assertEquals(List.of("281"), fixture.submission.requestIds());
         }
     }
 
@@ -1025,7 +1043,7 @@ class TransientCapacityQueueContractTest {
             assertTrue(response.isSuccess());
             assertEquals("127.0.0.1:18081", decodeAddress(response));
             assertEquals(1, fixture.decodeEndpoint.routingView().engineCapacityUsed());
-            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(301L) : List.of(),
+            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of("301") : List.of(),
                     fixture.submission.requestIds());
         }
     }
@@ -1053,7 +1071,7 @@ class TransientCapacityQueueContractTest {
             assertTrue(response.isSuccess());
             assertEquals("127.0.0.1:18081", decodeAddress(response));
             assertEquals(1, fixture.decodeEndpoint.routingView().engineCapacityUsed());
-            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of(302L) : List.of(),
+            assertEquals(delivery == DispatcherConfig.Type.BATCH ? List.of("302") : List.of(),
                     fixture.submission.requestIds());
         }
     }
@@ -1154,44 +1172,53 @@ class TransientCapacityQueueContractTest {
 
         try (Fixture fixture = new Fixture(null, config)) {
             fixture.submission.blockPreparation();
-            CompletableFuture<Response> waiting =
-                    fixture.runtime.scheduler().submit(
-                            fixture.context(501L, 50, 128_000L));
-            assertTrue(fixture.submission.awaitPreparation(
-                    2, TimeUnit.SECONDS));
+            try {
+                CompletableFuture<Response> waiting =
+                        fixture.runtime.scheduler().submit(
+                                fixture.context(501L, 50, 128_000L));
+                assertTrue(fixture.submission.awaitPreparation(
+                        2, TimeUnit.SECONDS));
+                assertSame(fixture.decodeStatus,
+                        fixture.runtime.endpointRegistry().get(
+                                RoleType.DECODE,
+                                fixture.decodeStatus.getLogicalIpPort())
+                                .getStatus());
 
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 2L, true));
-            WorkerStatus spareStatus = initializedStatus(
-                    RoleType.DECODE, "127.0.0.2", 18_082);
-            DecodeEndpoint spareEndpoint = (DecodeEndpoint)
-                    publishEndpoint(
-                            fixture.runtime.endpointRegistry(),
-                            RoleType.DECODE,
-                            "127.0.0.2:18082",
-                            spareStatus);
+                fixture.runtime.applyStatus(
+                        fixture.decodeStatus,
+                        statusResponse(RoleType.DECODE, 2L, true));
+                WorkerStatus spareStatus = initializedStatus(
+                        RoleType.DECODE, "127.0.0.2", 18_082);
+                DecodeEndpoint spareEndpoint = (DecodeEndpoint)
+                        publishEndpoint(
+                                fixture.runtime.endpointRegistry(),
+                                RoleType.DECODE,
+                                "127.0.0.2:18082",
+                                spareStatus);
 
-            fixture.submission.unblockPreparation();
+                fixture.submission.unblockPreparation();
 
-            assertFalse(fixture.submission.awaitCommands(
-                    1, 200, TimeUnit.MILLISECONDS));
-            assertFalse(waiting.isDone(),
-                    "the committed route waits for its exact Decode capacity");
-            assertEquals(0, spareEndpoint.routingView().engineLoad(),
-                    "a committed route must not switch to a newly idle Decode");
+                assertFalse(fixture.submission.awaitCommands(
+                        1, 200, TimeUnit.MILLISECONDS));
+                assertFalse(waiting.isDone(),
+                        "the committed route waits for its exact Decode capacity");
+                assertEquals(0, spareEndpoint.routingView().engineLoad(),
+                        "a committed route must not switch to a newly idle Decode");
 
-            fixture.runtime.applyStatus(
-                    fixture.decodeStatus,
-                    statusResponse(RoleType.DECODE, 3L, false));
+                fixture.runtime.applyStatus(
+                        fixture.decodeStatus,
+                        statusResponse(RoleType.DECODE, 3L, false));
 
-            Response response = waiting.get(2, TimeUnit.SECONDS);
-            assertTrue(response.isSuccess());
-            assertEquals("127.0.0.1:18081", decodeAddress(response));
-            assertEquals(List.of("127.0.0.1:18081"),
-                    fixture.submission.decodeAddresses());
-            assertEquals(0, spareEndpoint.routingView().engineLoad(),
-                    "a committed route must not switch to a newly idle Decode");
+                Response response = waiting.get(2, TimeUnit.SECONDS);
+                assertTrue(response.isSuccess());
+                assertEquals("127.0.0.1:18081", decodeAddress(response));
+                assertEquals(List.of("127.0.0.1:18081"),
+                        fixture.submission.decodeAddresses());
+                assertEquals(0, spareEndpoint.routingView().engineLoad(),
+                        "a committed route must not switch to a newly idle Decode");
+            } finally {
+                fixture.submission.unblockPreparation();
+            }
         }
     }
 
@@ -1480,8 +1507,9 @@ class TransientCapacityQueueContractTest {
 
             WorkerDirectory workers =
                     new WorkerDirectory(runtime.endpointRegistry());
-            when(cache.findMatchingEngines(any(), any(), any()))
-                    .thenReturn(Map.of());
+            CacheAwareService cache = mock(CacheAwareService.class);
+            when(cache.findMatchingEngines(any()))
+                    .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
             CostBasedPrefillStrategy prefillSelector =
                     new CostBasedPrefillStrategy(
                             workers,
@@ -1496,6 +1524,7 @@ class TransientCapacityQueueContractTest {
                             prefillSelector,
                             decodeSelector,
                             new RandomStrategy(workers),
+                            mock(EncoderStrategy.class),
                             configService,
                             modelMeta(prefillFirst)),
                     metrics));
@@ -1613,7 +1642,7 @@ class TransientCapacityQueueContractTest {
         private BalanceContext context(
                 long requestId, int priority, long sequenceLength) {
             Request request = new Request();
-            request.setRequestId(requestId);
+            request.setRequestId(Long.toString(requestId));
             request.setSeqLen(sequenceLength);
             request.setMaxNewTokens(8);
             request.setPriority(priority);
@@ -1653,6 +1682,7 @@ class TransientCapacityQueueContractTest {
                     mock(CostBasedPrefillStrategy.class),
                     mock(DecodeSelector.class),
                     mock(RandomStrategy.class),
+                    mock(EncoderStrategy.class),
                     mock(ConfigService.class),
                     modelMeta(false));
             this.delegate = delegate;
@@ -1685,18 +1715,18 @@ class TransientCapacityQueueContractTest {
     private static final class PlacementMetrics {
         private final AtomicInteger totalAttempts = new AtomicInteger();
         private final AtomicLong placementWakeups = new AtomicLong();
-        private final Map<Long, AtomicInteger> attemptsByRequest =
+        private final Map<String, AtomicInteger> attemptsByRequest =
                 new ConcurrentHashMap<>();
-        private final Map<Long, BalanceContext> contexts =
+        private final Map<String, BalanceContext> contexts =
                 new ConcurrentHashMap<>();
-        private final Map<Long, Long> deadlines = new ConcurrentHashMap<>();
+        private final Map<String, Long> deadlines = new ConcurrentHashMap<>();
         private final List<Long> placementLatenciesNanos =
                 new CopyOnWriteArrayList<>();
-        private final List<Long> placementRequestIds =
+        private final List<String> placementRequestIds =
                 new CopyOnWriteArrayList<>();
 
         private long placementStarted(BalanceContext context) {
-            long requestId = context.getRequestId();
+            String requestId = context.getRequestId();
             totalAttempts.incrementAndGet();
             placementRequestIds.add(requestId);
             attemptsByRequest.computeIfAbsent(
@@ -1745,11 +1775,11 @@ class TransientCapacityQueueContractTest {
             placementWakeups.set(0L);
         }
 
-        private BalanceContext context(long requestId) {
+        private BalanceContext context(String requestId) {
             return contexts.get(requestId);
         }
 
-        private long deadline(long requestId) {
+        private long deadline(String requestId) {
             return deadlines.getOrDefault(requestId, -1L);
         }
 
@@ -1760,7 +1790,7 @@ class TransientCapacityQueueContractTest {
                     .orElse(0);
         }
 
-        private List<Long> requestIdsFrom(int attemptIndex) {
+        private List<String> requestIdsFrom(int attemptIndex) {
             return List.copyOf(placementRequestIds.subList(
                     Math.min(attemptIndex, placementRequestIds.size()),
                     placementRequestIds.size()));
@@ -1869,14 +1899,16 @@ class TransientCapacityQueueContractTest {
     private static WorkerEndpoint publishEndpoint(
             EndpointRegistry registry,
             RoleType role,
-            String address,
+            String physicalAddress,
             WorkerStatus status) {
+        assertEquals(physicalAddress, status.getPhysicalIpPort());
         WorkerStatusResponse response = statusResponse(role, 1L, false);
         status.lock.lock();
         try {
             WorkerStatus.PreparedStatus prepared = WorkerStatusTestFixtures.prepare(status, WorkerStatusTestFixtures.observation(status, response));
             WorkerEndpoint endpoint = registry
-                    .publishPreparedEndpoint(address, status, prepared)
+                    .publishPreparedEndpoint(
+                            status.getLogicalIpPort(), status, prepared)
                     .endpoint();
             return endpoint;
         } finally {
@@ -1897,7 +1929,7 @@ class TransientCapacityQueueContractTest {
         response.setMaxBatchTokensSize(1_000_000L);
         if (saturated) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(Fixture.EXTERNAL_REQUEST_ID);
+            task.setRequestId(Long.toString(Fixture.EXTERNAL_REQUEST_ID));
             task.setPhase(role == RoleType.PREFILL
                     ? TaskPhase.PENDING : TaskPhase.RUNNING);
             task.setInputLength(128L);
@@ -1920,7 +1952,7 @@ class TransientCapacityQueueContractTest {
         for (int index = 0; index < runningCount; index++) {
             long requestId = Fixture.EXTERNAL_REQUEST_ID + index;
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128L);
             running.put(Long.toString(requestId), task);
@@ -1937,7 +1969,7 @@ class TransientCapacityQueueContractTest {
         Map<String, TaskInfo> running = new LinkedHashMap<>();
         for (long requestId : requestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.PENDING);
             task.setInputLength(128_000L);
             running.put(Long.toString(requestId), task);
@@ -1957,7 +1989,7 @@ class TransientCapacityQueueContractTest {
         Map<String, TaskInfo> finished = new LinkedHashMap<>();
         for (long requestId : finishedRequestIds) {
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128_000L);
             finished.put(Long.toString(requestId), task);
@@ -1966,7 +1998,7 @@ class TransientCapacityQueueContractTest {
         for (int index = 0; index < unknownRunningCount; index++) {
             long requestId = Fixture.EXTERNAL_REQUEST_ID + index;
             TaskInfo task = new TaskInfo();
-            task.setRequestId(requestId);
+            task.setRequestId(Long.toString(requestId));
             task.setPhase(TaskPhase.RUNNING);
             task.setInputLength(128_000L);
             running.put(Long.toString(requestId), task);
@@ -1983,7 +2015,8 @@ class TransientCapacityQueueContractTest {
         private final Map<Long, Long> batchIds = new ConcurrentHashMap<>();
         private final Semaphore commandSignals = new Semaphore(0);
         private final Semaphore preparationSignals = new Semaphore(0);
-        private final Semaphore preparationReleases = new Semaphore(0);
+        private final CountDownLatch preparationReleases =
+                new CountDownLatch(1);
         private final AtomicBoolean holdCompletions = new AtomicBoolean();
         private final AtomicBoolean blockPreparation = new AtomicBoolean();
 
@@ -1992,7 +2025,18 @@ class TransientCapacityQueueContractTest {
                 tryPrepareSubmission() {
             if (blockPreparation.get()) {
                 preparationSignals.release();
-                preparationReleases.acquireUninterruptibly();
+                boolean interrupted = false;
+                while (true) {
+                    try {
+                        preparationReleases.await();
+                        break;
+                    } catch (InterruptedException interruption) {
+                        interrupted = true;
+                    }
+                }
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
             return CapacityBoundary.Attempt.accepted(
                     new BatchDeliveryStrategy.PreparedSubmission() {
@@ -2028,7 +2072,7 @@ class TransientCapacityQueueContractTest {
                     });
         }
 
-        private List<Long> requestIds() {
+        private List<String> requestIds() {
             return submittedItems.stream()
                     .flatMap(List::stream)
                     .map(ScheduledRequest::requestId)
@@ -2055,7 +2099,7 @@ class TransientCapacityQueueContractTest {
 
         private void unblockPreparation() {
             blockPreparation.set(false);
-            preparationReleases.release();
+            preparationReleases.countDown();
         }
 
         private void holdCompletions() {
