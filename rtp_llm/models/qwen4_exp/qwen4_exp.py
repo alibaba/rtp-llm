@@ -247,6 +247,9 @@ class Qwen4Exp(Qwen35Moe):
         config._qwen4_attention_fp8 = str_to_bool(
             os.environ.get("RTP_LLM_QWEN4_ATTENTION_FP8_EXPERIMENTAL", "false")
         )
+        config._qwen4_gdn_bf16 = str_to_bool(
+            os.environ.get("RTP_LLM_QWEN4_GDN_BF16_EXPERIMENTAL", "false")
+        )
         if str_to_bool(os.environ.get(_MOE_FP4_ENV, "false")):
             root = Path(ckpt_path)
             config_json = json.loads((root / "config.json").read_text())

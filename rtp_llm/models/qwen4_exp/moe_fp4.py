@@ -10,10 +10,12 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
     _fp8_attention_weights = frozenset(
         {W.attn_qkv_w, W.attn_o_w, W.linear_attn_qkvz_w, W.linear_attn_out_w}
     )
+    _fp8_gdn_weights = frozenset({W.linear_attn_qkvz_w, W.linear_attn_out_w})
 
-    def __init__(self, *args, attention_fp8=False, **kwargs):
+    def __init__(self, *args, attention_fp8=False, gdn_fp8=True, **kwargs):
         super().__init__(*args, **kwargs)
         self.attention_fp8 = attention_fp8
+        self.gdn_fp8 = gdn_fp8
 
     def to_quant_weight_info(self, quant_config):
         if (
@@ -38,7 +40,11 @@ class Qwen4MoeFp4WeightInfo(ModelWeightInfo):
                         for child in weight.sub_weights.values()
                     ]
                     weight = MoeWeight(sub_weights=children, config=weight.config)
-                elif self.attention_fp8 and weight.name in self._fp8_attention_weights:
+                elif (
+                    self.attention_fp8
+                    and weight.name in self._fp8_attention_weights
+                    and (self.gdn_fp8 or weight.name not in self._fp8_gdn_weights)
+                ):
                     weight = weight.create(
                         weight, Fp8BlockWiseQuantConfig(is_quanted=False)
                     )
