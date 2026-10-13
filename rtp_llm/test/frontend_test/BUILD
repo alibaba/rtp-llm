@@ -48,7 +48,7 @@ py_test(
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
         "//rtp_llm/metrics:metrics",
     ],
-    exec_properties = {'gpu': 'H20'},
+    # Mocked HTTP routes and address discovery need no GPU; inherit the CPU pool.
     tags = ["frontend"],
 )
 
