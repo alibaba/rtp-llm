@@ -20,6 +20,7 @@ def dequantize_parameter(weights, name):
 def compute_weight_view(weights):
     """Norms, biases and convolution kernels compute in BF16; matrices stay FP8."""
     view = copy.copy(weights)
+    view._fp8_storage_owner = weights
 
     def convert(items):
         return {

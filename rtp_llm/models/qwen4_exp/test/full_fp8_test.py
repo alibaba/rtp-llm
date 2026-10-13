@@ -118,6 +118,70 @@ class FullFp8CudaTest(unittest.TestCase):
         self.assertIsNone(module.compute_weight)
         self.assertEqual(module.weight.dtype, torch.float8_e4m3fn)
 
+    def test_ple_pinned_owner_replaces_pageable_storage_inventory(self):
+        import os
+        from unittest.mock import patch
+
+        from torch import nn
+
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
+
+        storage = ModelWeights(1, "cpu", torch.bfloat16)
+        table, scale = quantized(torch.randn(8, 32))
+        name = W.qwen4_ple_ngram_shards + ".0"
+        storage.weights[0] = {
+            name: table,
+            W.qwen4_ple_ngram_scale: scale,
+            W.qwen4_ple_ngram_vocab_sizes: torch.tensor([3, 4], device="cuda"),
+            W.qwen4_ple_ngram_offsets: torch.tensor([0, 4], device="cuda"),
+            W.qwen4_ple_multipliers: torch.tensor([2, 3], device="cuda"),
+            W.qwen4_ple_key_proj_w: torch.zeros(
+                32, 64, device="cuda", dtype=torch.bfloat16
+            ),
+            W.qwen4_ple_value_proj_w: torch.zeros(
+                8, 64, device="cuda", dtype=torch.bfloat16
+            ),
+            W.qwen4_ple_conv_w: torch.zeros(
+                32, 1, 2, device="cuda", dtype=torch.bfloat16
+            ),
+            W.qwen4_ple_norm_key_gamma: torch.zeros(
+                32, device="cuda", dtype=torch.bfloat16
+            ),
+            W.qwen4_ple_norm_query_gamma: torch.zeros(
+                32, device="cuda", dtype=torch.bfloat16
+            ),
+            W.qwen4_ple_norm_conv_gamma: torch.zeros(
+                32, device="cuda", dtype=torch.bfloat16
+            ),
+        }
+        model = Qwen4ExpModel.__new__(Qwen4ExpModel)
+        nn.Module.__init__(model)
+        model.config = SimpleNamespace(
+            _qwen4_ple_layer_ids=[1],
+            _qwen4_split_ngram_parts=1,
+            _qwen4_ngram_size=2,
+            hc_mult=4,
+            hidden_size=8,
+            layernorm_eps=1e-6,
+            special_tokens=SimpleNamespace(eos_token_id=0),
+        )
+        model.parallelism_config = SimpleNamespace(
+            get_attn_tp_size=lambda: 1, get_attn_tp_rank=lambda: 0
+        )
+        model.layers = nn.ModuleList([nn.Identity()])
+        model.ple_layers = nn.ModuleDict()
+        model.weight = compute_weight_view(storage)
+        with patch.dict(
+            os.environ,
+            {"RTP_LLM_QWEN4_PLE_CPU_UVA": "1", "RTP_LLM_QWEN4_PLE_CPU_PREFETCH": "0"},
+        ):
+            model._build_ple_layers()
+        owner = model.ple_layers["0"].ple_embedding.shards[0]
+        self.assertTrue(owner.is_pinned())
+        self.assertIs(storage.weights[0][name], owner)
+        self.assertIs(model.weight.weights[0][name], owner)
+        self.assertNotEqual(owner.data_ptr(), table.data_ptr())
+
     def test_fp8_host_and_device_vocab_graph(self):
         weight, scale = quantized(torch.randn(257, 320))
         ids = torch.tensor([0, 17, 256, -1], dtype=torch.int32, device="cuda")
