@@ -6,6 +6,9 @@ import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
+from rtp_llm.model_loader.per_channel_fp8_quant_weight import (
+    _ckpt_base_matches_quant_exclude,
+)
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
@@ -332,6 +335,18 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         # registry's "must be exactly one match" check passes.
         if is_v4_weight(src_weight_info):
             return False
+        # Checkpoints that keep some modules in BF16 (compressed-tensors
+        # "ignore" / vLLM fp8 "modules_to_not_convert", e.g. MiniCPM-V-4.7-FP8
+        # GDN projections) list them in exclude_modules; the plain loader must
+        # keep those weights so no weight_scale_inv lookup happens.
+        ckpt_weights = src_weight_info.weights
+        if quant_config.exclude_modules and ckpt_weights:
+            for ckpt_w in ckpt_weights:
+                base_name = ckpt_w.name.rsplit(".", 1)[0]
+                if _ckpt_base_matches_quant_exclude(
+                    base_name, quant_config.exclude_modules
+                ):
+                    return False
         return True
 
     def __init__(
