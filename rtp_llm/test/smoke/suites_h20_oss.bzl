@@ -1,4 +1,4 @@
-load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
+load("//rtp_llm/test/smoke:defs.bzl", "custom_smoke_test", "smoke_test")
 load("//rtp_llm/test/smoke:suites_remote_cache.bzl", "REMOTE_CACHE_DEVICE_STORE_ARGS")
 
 def h20_oss_suites():
@@ -760,6 +760,15 @@ def h20_oss_suites():
                 data = native.glob(["data/model/qwen_vl/*.jpeg"]),
             ),
         ],
+    )
+
+    custom_smoke_test(
+        name = "minicpmv4_7_reuse_cache",
+        main = "minicpmv47_reuse_cache_test.py",
+        smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 0 --warm_up 0 --max_seq_len 8192 --reuse_cache 1",
+        data = ["//rtp_llm:sdk"] + native.glob(["data/model/qwen_vl/*.jpeg"]),
+        deps = ["//rtp_llm:transformers"],
+        gpu_type = ["H20_CU13"],
     )
 
     native.test_suite(
