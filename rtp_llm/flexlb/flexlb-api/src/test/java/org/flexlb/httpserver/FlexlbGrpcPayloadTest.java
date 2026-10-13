@@ -8,6 +8,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.mock.TestFlexlbConfigs;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -56,7 +57,7 @@ class FlexlbGrpcPayloadTest {
         NioEventLoopGroup serverGroup = new NioEventLoopGroup(1);
         NioEventLoopGroup clientGroup = new NioEventLoopGroup(1);
         FlexlbGrpcServer server = new FlexlbGrpcServer(service, config, environment, serverGroup,
-                null, new GrpcServerTimingInterceptor(), new GrpcQosHeaderInterceptor());
+                NoOpFlexMonitor.getInstance(), new GrpcServerTimingInterceptor(), new GrpcQosHeaderInterceptor());
         LBStatusConsistencyService election = mock(LBStatusConsistencyService.class);
         FlexlbGrpcForwarder forwarder = new FlexlbGrpcForwarder(election, config,
                 mock(EngineHealthReporter.class), clientGroup, Runnable::run);
