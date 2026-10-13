@@ -126,8 +126,8 @@ def _preload_nvidia_pip_libs() -> None:
     import glob
 
     packages = ("nccl", "cudnn")
-    for sys_path_entry in sys.path:
-        for package in packages:
+    for package in packages:
+        for sys_path_entry in sys.path:
             lib_dir = os.path.join(sys_path_entry, "nvidia", package, "lib")
             if not os.path.isdir(lib_dir):
                 continue
@@ -135,7 +135,9 @@ def _preload_nvidia_pip_libs() -> None:
                 try:
                     cdll.LoadLibrary(so_path)
                 except OSError as e:
-                    logging.info(f"preload {so_path} skipped: {e}")
+                    # Already loaded from a different tree: fine.
+                    logging.debug("preload %s: %s", so_path, e)
+            break  # only first sys.path entry per package
 
 
 _preload_nvidia_pip_libs()
