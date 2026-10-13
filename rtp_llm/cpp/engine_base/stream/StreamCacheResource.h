@@ -41,9 +41,13 @@ public:
     std::optional<absl::Status> pollAllocatorLoad();
     absl::Status                incrKVBlock(int seq_len_override = -1);
     // Called under the owning stream's mutex after token/cache-layout commit.
-    // Record only; the scheduler drains this watermark from incrKVBlock so an
+    // Record only; the scheduler drains this watermark before admission or allocation so an
     // async output worker never mutates the host block table during gather.
     void                        reclaimLinearHistory(int committed_tokens);
+    // Both methods require the owning stream mutex. Eligibility describes
+    // future decode as well as current execution, so a fresh context is allowed.
+    bool                        canReclaimLinearHistory(int target_batch_size) const;
+    void                        drainLinearHistory();
     void                        fakeInitKVBlock(size_t reserved_blocks = 0);
     int                         tryReleaseKVBlock(size_t nums);
     void                        freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
@@ -136,7 +140,6 @@ public:
     }
 
 private:
-    void         drainLinearHistory();
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);

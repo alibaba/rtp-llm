@@ -227,6 +227,14 @@ absl::StatusOr<list<GenerateStreamPtr>> PDFusionRatioScheduler::schedule() {
     const RoundType round = chooseRound();
 
     if (round == RoundType::PREFILL) {
+        // Make committed history genuinely available before building the
+        // forecast and reading capacity; never admit against estimated credit.
+        for (const auto& stream : running_streams_) {
+            stream->drainLinearHistoryForAdmission();
+        }
+        for (const auto& stream : pending_decode_streams_) {
+            stream->drainLinearHistoryForAdmission();
+        }
         const size_t prev_waiting_size = waiting_streams_.size();
         // Build once for this in-flight snapshot, then update for accepted candidates.
         admission_peak_state_.reset();
