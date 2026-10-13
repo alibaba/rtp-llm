@@ -150,6 +150,20 @@ class MegaAttention:
         return MegaAttentionOutput(data, scales)
 
     def project(self, attn, pair, out=None):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant
+        from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
+
+        # Mega Attention already supplies inverse-RoPE FP8 activations. Reuse
+        # the warmed wo_a epilogue directly, with the matching permuted weights;
+        # no BF16 intermediate or second activation-quant kernel is needed.
+        if type(attn.wo_b) is V41MXFP8Linear:
+            with record_function_range("dsv41.attn.mega.wo_a"):
+                quantized = _v41_wo_a_quant.try_grouped_quant(
+                    pair, (self.weight, self.weight_scales)
+                )
+            if quantized is not None:
+                return attn.wo_b.forward_quantized(*quantized, out=out)
+
         import deep_gemm
 
         projected = torch.empty(

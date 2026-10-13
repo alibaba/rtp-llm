@@ -3,7 +3,7 @@
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -21,6 +21,38 @@ from rtp_llm.models_py.modules.dsv4.utils import V41MXFP8Linear
 
 
 class V41MegaAttentionRequirementsCPU(unittest.TestCase):
+    def test_projection_consumes_fused_pair_and_preserves_fallback(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant
+
+        linear = V41MXFP8Linear.__new__(V41MXFP8Linear)
+        torch.nn.Module.__init__(linear)
+        linear.forward = Mock()
+        linear.forward_quantized = Mock()
+        mega = MegaAttention.__new__(MegaAttention)
+        mega.groups, mega.rank = 8, 1024
+        mega.weight, mega.weight_scales = object(), object()
+        pair = SimpleNamespace(data=torch.empty(2, 8, 4096))
+        output, quantized = object(), (object(), object())
+        for result in (quantized, None):
+            with self.subTest(fused=result is not None), patch.object(
+                _v41_wo_a_quant, "try_grouped_quant", return_value=result
+            ) as fused, patch("deep_gemm.fp8_einsum") as gemm:
+                linear.forward.reset_mock()
+                linear.forward_quantized.reset_mock()
+                mega.project(SimpleNamespace(wo_b=linear), pair, out=output)
+                fused.assert_called_once_with(pair, (mega.weight, mega.weight_scales))
+                if result is not None:
+                    linear.forward_quantized.assert_called_once_with(
+                        *result, out=output
+                    )
+                    linear.forward.assert_not_called()
+                    gemm.assert_not_called()
+                else:
+                    gemm.assert_called_once()
+                    linear.forward.assert_called_once()
+                    linear.forward_quantized.assert_not_called()
+                    self.assertIs(linear.forward.call_args.kwargs["out"], output)
+
     @staticmethod
     def _attention(weight):
         linear = V41MXFP8Linear.__new__(V41MXFP8Linear)
@@ -62,8 +94,8 @@ class V41MegaAttentionCUDA(unittest.TestCase):
         self.addCleanup(self.context.__exit__, None, None, None)
 
     @staticmethod
-    def _attention():
-        heads, groups, dimension, rank, q_rank = 64, 8, 512, 64, 128
+    def _attention(rank=64):
+        heads, groups, dimension, q_rank = 64, 8, 512, 128
         q_weight = torch.randn(heads * dimension, q_rank, device="cuda").to(
             torch.float8_e4m3fn
         )
@@ -111,6 +143,51 @@ class V41MegaAttentionCUDA(unittest.TestCase):
         )
         self.assertLess(relative_l2.item(), 0.05)
         self.assertGreater(cosine.item(), 0.999)
+
+    def test_mega_pair_fused_projection_matches_unfused_and_replays(self):
+        from rtp_llm.models_py.modules.dsv4.fp8 import _v41_wo_a_quant
+
+        attn = self._attention(rank=1024)
+        attn.wo_b = V41MXFP8Linear(
+            (torch.randn(5120, 8192, device="cuda") * 0.02).to(torch.float8_e4m3fn),
+            torch.ones(160, 256, device="cuda").to(torch.float8_e8m0fnu),
+        )
+        mega = MegaAttention.create(attn)
+        self.assertTrue(_v41_wo_a_quant.warmup(mega.weight, mega.weight_scales))
+        for rows in (1, 64, 384, 512):
+            with self.subTest(rows=rows):
+                q = torch.randn(rows, 64, 512, device="cuda", dtype=torch.bfloat16)
+                kv = torch.randn(257, 1, 512, device="cuda", dtype=torch.bfloat16)
+                indices = torch.randint(
+                    0, 257, (rows, 1, 128), device="cuda", dtype=torch.int32
+                )
+                indices[:, :, ::17] = -1
+                positions = torch.arange(rows, device="cuda", dtype=torch.int32)
+                lengths = torch.full((rows,), 128, device="cuda", dtype=torch.int32)
+                pair = mega.prefill(attn, q, positions, kv, indices, lengths)
+                self.assertTrue(
+                    _v41_wo_a_quant.is_supported(
+                        pair, (mega.weight, mega.weight_scales)
+                    )
+                )
+                # Compare only this change: identical real FlashMLA outputs
+                # and permuted weights, with/without the restored epilogue.
+                with patch.object(
+                    _v41_wo_a_quant, "try_grouped_quant", return_value=None
+                ):
+                    expected = mega.project(attn, pair)
+                out = torch.empty_like(expected)
+                self.assertIs(mega.project(attn, pair, out=out), out)
+                torch.testing.assert_close(out, expected, rtol=0, atol=0)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    captured = mega.project(attn, pair)
+                # The capture must consume current inputs, not the warmup's.
+                pair.data.zero_()
+                graph.replay()
+                torch.testing.assert_close(
+                    captured, mega.project(attn, pair), rtol=0, atol=0
+                )
 
     def test_prefill_projection_matches_original_with_masks_and_positions(self):
         from flash_mla import flash_mla_sparse_fwd
