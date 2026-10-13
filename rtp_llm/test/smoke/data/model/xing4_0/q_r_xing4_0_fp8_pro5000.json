@@ -1,0 +1,20 @@
+{
+    "model_type": "xing4_0",
+    "model_path": "/mnt/fuse/smoke-test/hf/XingChen-AGI--Xing4.0-29B-A4B-FP8--5080375347768be8f18304df141a1aea5b8416c9",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "<_system><_user>Briefly explain the basic principles of quantum computing.<_bot>MutableThinkBeginToken_26\n",
+                "generate_config": {
+                    "max_new_tokens": 24,
+                    "top_k": 1,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "",
+                "finished": true
+            }
+        }
+    ]
+}

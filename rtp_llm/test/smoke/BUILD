@@ -163,6 +163,49 @@ smoke_test(
     },
 )
 
+smoke_test(
+    name = "xing4_0_fp8_sm103",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_sm103.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1",
+    gpu_type = ["SM103_CU13"],
+)
+
+smoke_test(
+    name = "xing4_0_fp8_reuse_cache_sm103",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_reuse_cache_sm103.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 1 --enable_device_cache 0 --enable_memory_cache 1 --memory_cache_size_mb 2048 --enable_cuda_graph 0 --use_all_gather 1",
+    sleep_time_qr = 10,
+    gpu_type = ["SM103_CU13"],
+)
+
+smoke_test(
+    name = "xing4_0_fp8_mtp_sm103",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_mtp_sm103.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1 --sp_type mtp --sp_model_type xing4_0_mtp --sp_checkpoint_path /mnt/nas1/hf/Xing4.0-29B-A4B-FP8 --sp_act_type BF16 --gen_num_per_cycle 3",
+    gpu_type = ["SM103_CU13"],
+)
+
+smoke_test(
+    name = "xing4_0_fp8_h20",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_h20.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1",
+    gpu_type = ["H20_CU13"],
+)
+
+smoke_test(
+    name = "xing4_0_fp8_pro5000",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_pro5000.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 0 --use_all_gather 1",
+    gpu_type = ["RTX_5000_PRO_CU13"],
+)
+
+smoke_test(
+    name = "xing4_0_fp8_graph_only_sm103",
+    task_info = "data/model/xing4_0/q_r_xing4_0_fp8_graph_only_sm103.json",
+    smoke_args = "--warm_up 0 --act_type BF16 --tp_size 1 --dp_size 1 --ep_size 1 --world_size 1 --seq_size_per_block 64 --kernel_seq_size_per_block 64 --reuse_cache 0 --enable_cuda_graph 1 --decode_capture_config 1,2,4,8 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1",
+    gpu_type = ["SM103_CU13"],
+)
+
 custom_smoke_test(
     name = "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
     main = "deepseek_v41_full_contract_test.py",

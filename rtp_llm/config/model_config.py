@@ -113,6 +113,8 @@ class ModelConfig(CppModelConfig):
         "phy2log_path",
         "lora_infos",
         "headwise_config",
+        "mhc_h_res_clamp_min",
+        "mhc_h_res_clamp_max",
     }
 
     # Known C++ ModelConfig members (from ModelConfig.h)

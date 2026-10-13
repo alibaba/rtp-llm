@@ -27,6 +27,20 @@ py_test(
 )
 
 py_test(
+    name = "xing4_0_config_test",
+    srcs = [
+        "xing4_0_config_test.py",
+    ],
+    data = [
+        "//rtp_llm:sdk",
+        "//rtp_llm/test/model_test/fake_test/testdata",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "slice_stop_word_list_test",
     srcs = [
         "slice_stop_word_list_test.py",
