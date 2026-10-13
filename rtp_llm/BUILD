@@ -489,6 +489,7 @@ py_library(
     srcs = ["frontend/sleep_routes.py"],
     deps = [
         ":fastapi",
+        ":orjson",
         "//rtp_llm/utils/lifecycle:core",
     ],
 )

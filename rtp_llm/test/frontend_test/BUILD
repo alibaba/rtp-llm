@@ -39,6 +39,7 @@ py_test(
         "sleep_routes_test.py",
     ],
     deps = [
+        ":httpx",
         "//rtp_llm:fastapi",
         "//rtp_llm:frontend_sleep_routes",
         "//rtp_llm:frontend_worker_address_utils",
