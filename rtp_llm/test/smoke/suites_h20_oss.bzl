@@ -719,6 +719,46 @@ def h20_oss_suites():
                 gpu_type = ["H20_CU13"],
                 data = native.glob(["data/model/qwen_vl/*.jpeg"]),
             ),
+            # DSpark + decode CUDA graph + async stream pipeline combined: the
+            # MtpExecutor draft-commit graph wrapper and the async env stack
+            # (stream-async / drop-broad-sync / device-input, async-prepare off)
+            # follow the dspark pd_cprr_async precedent in suites_cuda13.bzl.
+            # Graph replay may flip the text query's 0.000-margin greedy tie,
+            # so this case pins its own golden like minicpmv4_7_35b_graph.
+            smoke_test(
+                name = "minicpmv4_7_35b_dspark_graph",
+                task_info = "data/model/minicpmv47/q_r_35b_dspark_graph.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
+                envs = [
+                    "RTP_LLM_STREAM_ASYNC=1",
+                    "RTP_LLM_DROP_BROAD_SYNC=1",
+                    "RTP_LLM_DEVICE_INPUT=1",
+                    "RTP_LLM_MTP_ASYNC_PREPARE=0",
+                ],
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
+            # Full stack: FP8-BLK target + DSpark draft + decode CUDA graph +
+            # async stream pipeline. Draft borrows the target's bf16
+            # embed/lm_head (excluded from quantization), so the alias check
+            # covers the FP8 target data_type contract.  On SM90 the
+            # auto-selected fp8_per_block_no_dp strategy's DeepGemmHybridExecutor
+            # refuses CUDA graph (SM12-only gate), so graph mode needs the
+            # masked executor via an explicit --moe_strategy (same pattern as
+            # the qwen3_moe moe_generation_prefill_cuda_graph case above).
+            smoke_test(
+                name = "minicpmv4_7_35b_fp8_dspark_graph",
+                task_info = "data/model/minicpmv47/q_r_35b_fp8_dspark.json",
+                smoke_args = "--act_type BF16 --use_local 1 --use_local_preprocess 1 --enable_cuda_graph 1 --warm_up 0 --max_seq_len 8192 --seq_size_per_block 2048 --concurrency_limit 8 --reserver_runtime_mem_mb 12288 --moe_strategy fp8_per_block_no_dp_masked --use_all_gather 1 --sp_type dspark --gen_num_per_cycle 15 --sp_model_type minicpmv4_7_dspark --sp_checkpoint_path /data0/liukan.lk/models/MiniCPM-V-4.7-35B-A3B-DSpark --sp_act_type bf16",
+                envs = [
+                    "RTP_LLM_STREAM_ASYNC=1",
+                    "RTP_LLM_DROP_BROAD_SYNC=1",
+                    "RTP_LLM_DEVICE_INPUT=1",
+                    "RTP_LLM_MTP_ASYNC_PREPARE=0",
+                ],
+                gpu_type = ["H20_CU13"],
+                data = native.glob(["data/model/qwen_vl/*.jpeg"]),
+            ),
         ],
     )
 
