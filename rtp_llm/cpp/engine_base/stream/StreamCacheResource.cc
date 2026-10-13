@@ -151,8 +151,12 @@ int StreamCacheResource::singleBatchNeedBlocks(int seq_len, int reserve_step) co
     return resource_context_.cache_manager->singleBatchNeedBlocks(batch_kv_cache_resource_, seq_len, reserve_step);
 }
 
-int StreamCacheResource::estimatePeakNeedBlocks(
-    int seq_len, int common_seq_len, int remaining_tokens, int reserve_step, int target_batch_size) const {
+int StreamCacheResource::estimatePeakNeedBlocks(int                seq_len,
+                                                int                common_seq_len,
+                                                int                remaining_tokens,
+                                                int                reserve_step,
+                                                int                target_batch_size,
+                                                const std::string& pool_tag) const {
     return resource_context_.cache_manager->estimatePeakNeedBlocks(batch_kv_cache_resource_,
                                                                    seq_len,
                                                                    common_seq_len,
@@ -160,7 +164,8 @@ int StreamCacheResource::estimatePeakNeedBlocks(
                                                                    reserve_step,
                                                                    reuseCache(),
                                                                    target_batch_size,
-                                                                   linearCachePolicy(target_batch_size));
+                                                                   linearCachePolicy(target_batch_size),
+                                                                   pool_tag);
 }
 
 LinearCachePolicy StreamCacheResource::linearCachePolicy(int target_batch_size) const {

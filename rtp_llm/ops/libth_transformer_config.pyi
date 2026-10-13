@@ -753,6 +753,7 @@ class KVCacheConfig:
     kv_cache_mem_mb: int
     linear_step: int
     enable_linear_cache_reclaim: bool
+    kv_cache_pool_block_weights: str
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int

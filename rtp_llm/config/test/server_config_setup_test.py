@@ -382,6 +382,21 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 0)
         self.assertFalse(hasattr(config, "write_cache_sync"))
 
+    @patch.dict(
+        "os.environ",
+        _jit_env(KV_CACHE_POOL_BLOCK_WEIGHTS='{"full":8,"linear":1}'),
+        clear=True,
+    )
+    def test_pool_block_weights_reach_python_runtime_config(self):
+        from_env = setup_args([]).kv_cache_config
+        self.assertEqual(from_env.kv_cache_pool_block_weights, '{"full":8,"linear":1}')
+        raw = '{"full": 3, "linear": 2}'
+        overridden = setup_args(["--kv_cache_pool_block_weights", raw]).kv_cache_config
+        self.assertEqual(overridden.kv_cache_pool_block_weights, raw)
+        disabled = setup_args(["--kv_cache_pool_block_weights", ""]).kv_cache_config
+        self.assertEqual(disabled.kv_cache_pool_block_weights, "")
+        self.assertEqual(PyEnvConfigs().kv_cache_config.kv_cache_pool_block_weights, "")
+
     @patch.dict("os.environ", _jit_env(), clear=True)
     def test_kv_cache_scheduler_reserve_defaults_and_override(self):
         self.assertEqual(setup_args().kv_cache_config.reserve_block_ratio, 5)
@@ -503,8 +518,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 70)
-        self.assertEqual(state[:2], ("KVCacheConfig", 8))
+        self.assertEqual(len(state), 71)
+        self.assertEqual(state[:2], ("KVCacheConfig", 9))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -539,7 +554,7 @@ class GenerateConfigTest(TestCase):
             return value
 
         event_state = state
-        state = (state[0], 6, *state[2:-6])
+        state = (state[0], 6, *state[2:64])
         version_five_state = (state[0], 5, *state[2:], True)
         self.assertEqual(restore(version_five_state).__getstate__(), event_state)
         version_four_state = (state[0], 4, *state[2:50], 123, *state[50:], True)
@@ -604,6 +619,7 @@ class GenerateConfigTest(TestCase):
         from rtp_llm.ops import KVCacheConfig
 
         expected_fields = {
+            "kv_cache_pool_block_weights": "str",
             "enable_linear_cache_reclaim": "bool",
             "block_tree_transfer_worker_count": "int",
             "block_tree_business_queue_max_size": "int",

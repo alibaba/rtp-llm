@@ -141,6 +141,7 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
         << "linear_step: " << linear_step << "\n"
         << "enable_linear_cache_reclaim: " << enable_linear_cache_reclaim << "\n"
+        << "kv_cache_pool_block_weights: " << kv_cache_pool_block_weights << "\n"
         << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "ssm_state_dtype: " << ssm_state_dtype << "\n"
         << "kv_cache_mem_mb: " << kv_cache_mem_mb << "\n"

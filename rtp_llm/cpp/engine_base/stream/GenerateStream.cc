@@ -271,24 +271,26 @@ int GenerateStream::nextNeedBlockNums(int reserve_step) const {
     return stream_cache_resource_->singleBatchNeedBlocks(seqLength(), reserve_step) * nextBatchSize();
 }
 
-int GenerateStream::estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const {
+int GenerateStream::estimateKVNeedBlocks(int                remaining_tokens,
+                                         int                target_batch_size,
+                                         const std::string& pool_tag) const {
     const int reserve_step   = complete_token_ids_->getReserveStep();
     int       common_seq_len = std::min(complete_token_ids_->commonSeqLength(), seqLength());
     if (target_batch_size > 1) {
         common_seq_len = common_seq_len / seqSizePerBlock() * seqSizePerBlock();
     }
     return stream_cache_resource_->estimatePeakNeedBlocks(
-        seqLength(), common_seq_len, remaining_tokens, reserve_step, target_batch_size);
+        seqLength(), common_seq_len, remaining_tokens, reserve_step, target_batch_size, pool_tag);
 }
 
-int GenerateStream::estimateInitialNeedBlocks() const {
+int GenerateStream::estimateInitialNeedBlocks(const std::string& pool_tag) const {
     std::lock_guard<std::mutex> lock(*mutex_);
-    return estimateKVNeedBlocks(/*remaining_tokens=*/0, currentBatchSize());
+    return estimateKVNeedBlocks(/*remaining_tokens=*/0, currentBatchSize(), pool_tag);
 }
 
-int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens) const {
+int GenerateStream::estimatePeakNeedBlocks(int remaining_tokens, const std::string& pool_tag) const {
     std::lock_guard<std::mutex> lock(*mutex_);
-    return estimateKVNeedBlocks(remaining_tokens, maxBatchSize());
+    return estimateKVNeedBlocks(remaining_tokens, maxBatchSize(), pool_tag);
 }
 
 void GenerateStream::drainLinearHistoryForAdmission() {
