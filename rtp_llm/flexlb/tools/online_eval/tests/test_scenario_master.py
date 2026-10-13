@@ -60,7 +60,9 @@ class MasterActionsTest(unittest.TestCase):
         command = json.loads((runner.control / "stop.json").read_text())
         runner.stop_sending()
         self.assertEqual(command, json.loads((runner.control / "stop.json").read_text()))
-        state = dict(runner.flow_identity, state="DRAINED", submitted=2, terminal=2,
+        state = dict(runner.flow_identity, schema_version=1, revision=1, recorded_epoch_ms=1,
+                     state="DRAINED", submitted=2, started=2, terminal=2, outstanding=0,
+                     sending_end_reason="stop_command",
                      applied_command_id=command["command_id"])
         (runner.control / "status.json").write_text(json.dumps(state))
         runner.validate_drain([{}, {}])

@@ -100,7 +100,9 @@ case YAML 通过 `program: default` 生成内部 program document；后者包含
 
 跨阶段后台工作由 context 登记的资源对象持有，action 只负责参数校验、登记、调用与输出。客户端启动、finish、证据快照与 cleanup 使用同一对象，不另外包装第二套生命周期。Java 发流控制复用 `adapters.flow_control` 的原子命令、身份校验和排空计数；发现方式及业务证据校验留在所属能力。独立资源的清理复用 `cleanup_all`，启动失败与清理失败同时存在时保留启动错误及其原因链。
 
-Java 流量在停止发送后的状态中记录 `sending_end_reason`：`stop_command` 表示接受控制命令，`natural` 表示到达自身时长或输入边界。stop 使用轻量控制状态，不解析请求日志；drain 独立校验进程成功退出及所有提交请求的终态完整性。stop 与自然结束并发时，显式自然结束可以替代命令确认；未知结束原因或确认了其他命令仍视为协议错误，不能仅凭进程退出认定排空成功。
+Java 流量控制使用 `FlowState`、`FlowStatus`、`StopCommand` 和 `DrainResult` 表达状态、命令及最终结果，JSON 只用于文件协议和证据输出。Java 按 `STARTING → SENDING → DRAINING → DRAINED / INCOMPLETE` 转换，在进入排空时冻结 `sending_end_reason`：`stop_command` 表示接受控制命令，`natural` 表示到达自身时长或输入边界；排空期间的迟到命令不能改写结束原因。
+
+控制观察先查询进程退出码，再读取状态文件，确保已退出进程对应最终状态。生命周期等待只读轻量控制状态；明确需要请求计数的 checkpoint 才读日志。drain 确认进程退出后读取稳定日志，校验提交、启动、终态计数和命令确认。成功结果不可变，重复 drain 或 cleanup 直接返回，失败不缓存并允许继续收尾。stop 与自然结束并发时，显式自然结束可以替代命令确认；未知结束原因、错误确认、非正常退出或不完整请求均失败。
 
 ## 收尾与持久化
 

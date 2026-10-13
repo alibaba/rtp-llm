@@ -314,7 +314,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     System.getenv().getOrDefault("FLOW_RUN_ID", ""),
                     System.getenv().getOrDefault("FLOW_GROUP_ID", ""),
                     System.getenv().getOrDefault("FLOW_PHASE_ID", ""));
-            flowControl.publish("STARTING", 0, 0, 0);
+            flowControl.starting();
         }
         startMetricsServer();
         if (metricsServer != null) {
@@ -376,7 +376,7 @@ public final class JavaLoadClient implements AutoCloseable {
         int loopIdx = 0;
         Playback.Clock playbackClock = playback.new Clock();
 
-        if (flowControl != null) flowControl.publish("SENDING", 0, 0, 0);
+        if (flowControl != null) flowControl.sending();
         sending:
         while (true) {
             int sourceIndex = -1;
@@ -516,7 +516,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     + " requests, elapsed " + (System.nanoTime() - replayStartedNanos) / 1_000_000_000L + "s");
         }
 
-        if (flowControl != null) flowControl.publish("DRAINING", sentCount,
+        if (flowControl != null) flowControl.beginDrain(sentCount,
                 actualSentCount.get(), responseCount.get());
         sendEndNanos = System.nanoTime();
         double sendDurationS = (sendEndNanos - sendStartNanos) / 1_000_000_000.0;
@@ -550,9 +550,7 @@ public final class JavaLoadClient implements AutoCloseable {
         JsonNode serverLatency = config.skipServerLatency ? MAPPER.createObjectNode() : fetchServerLatency();
         writePerRequestResults();
         writeServerLatencySnapshot(serverLatency);
-        if (flowControl != null) flowControl.publish(
-                responseCount.get() == sentCount ? "DRAINED" : "INCOMPLETE",
-                sentCount, actualSentCount.get(), responseCount.get());
+        if (flowControl != null) flowControl.finishDrain(sentCount, actualSentCount.get(), responseCount.get());
         stopPushgateway();
     }
 

@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+from adapters.flow_control import FlowControlProtocol, FlowStatus, DrainResult
+
 from adapters.client_journal import LiveClientEvents
 from traffic.traffic_source import sha256_file
 from adapters.load_client import client_environment, collection_environment, bind_environment
@@ -48,11 +50,13 @@ class JavaFlowGroup:
         self.poll_s = poll_s
         self.proc = None
         self.control = self.directory / "control"
+        self.control_protocol = FlowControlProtocol(self.control, self.identity)
         self.journal = LiveClientEvents(
             self.directory / "client_lifecycle.jsonl", max_events=max_events
         )
         self.stop_command = None
         self.trace_manifest = None
+        self._drain_result = None
 
     def start(self, trace, environment, deadline, *, target):
         if self.proc is not None or self.directory.exists():
@@ -89,8 +93,8 @@ class JavaFlowGroup:
         )
         if self.monitor is not None:
             target_path = self.directory / "metrics-target.json"
-            self._wait(
-                lambda state: target_path.exists(),
+            self._wait_control(
+                lambda observation: target_path.exists(),
                 deadline,
                 "client monitor endpoint absent",
             )
@@ -104,11 +108,15 @@ class JavaFlowGroup:
         with startup_phase(self.directory, 'client/sending', deadline):
             return wait_flow_started(self.control, self.identity, self.proc, deadline)
 
+    def observe_control(self):
+        return self.control_protocol.observe(self.proc)
+
     def control_status(self):
-        """Cheap process/control observation; request accounting remains in status()."""
-        from adapters.flow_control import read_status
-        state = read_status(self.control, self.identity)
-        state["process_returncode"] = None if self.proc is None else self.proc.proc.poll()
+        """Serialized control observation for experiment evidence consumers."""
+        observation = self.observe_control()
+        state = (dict(self.identity, **observation.status.encode())
+                 if observation.status is not None else {})
+        state["process_returncode"] = observation.process_returncode
         return state
 
     def status(self):
@@ -132,9 +140,9 @@ class JavaFlowGroup:
         )
         return state
 
-    def _wait(self, predicate, deadline, message, *, observe=None):
+    def _wait_evidence(self, predicate, deadline, message):
         while True:
-            state = (observe or self.status)()
+            state = self.status()
             if predicate(state):
                 return state
             if state["process_returncode"] is not None:
@@ -144,47 +152,54 @@ class JavaFlowGroup:
                 raise TimeoutError(message + ": " + str(state))
             time.sleep(min(self.poll_s, remaining))
 
+    def _wait_control(self, predicate, deadline, message):
+        while True:
+            observation = self.observe_control()
+            if observation.status is not None and predicate(observation):
+                return observation
+            if observation.process_returncode is not None:
+                raise RuntimeError(message + ": client exited before final control state")
+            deadline.check()
+            time.sleep(min(self.poll_s, deadline.remaining()))
+
     def stop_sending(self, deadline):
-        state = self.control_status()
-        if state.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"}:
-            return state
-        from adapters.flow_control import stop_sending
-        self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
-        return self._wait(
-            lambda s: s.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"},
-            deadline,
-            "flow did not stop accepting new trace records",
-            observe=self.control_status,
-        )
+        if self._drain_result is not None:
+            return self._drain_result.encode(self.identity)
+        observation = self.observe_control()
+        if observation.status is None or not observation.status.state.sending_finished:
+            from adapters.flow_control import stop_sending
+            self.stop_command = stop_sending(self.control, self.identity, self.stop_command)
+            observation = self._wait_control(
+                lambda o: o.status.state.sending_finished,
+                deadline, "flow did not stop accepting new trace records",
+            )
+        return dict(self.identity, **observation.status.encode(),
+                    process_returncode=observation.process_returncode)
 
     def drain(self, deadline):
-        state = self._wait(
-            lambda s: s.get("state") in {"DRAINED", "INCOMPLETE"}
-            and s["process_returncode"] is not None,
-            deadline,
-            "flow did not drain and exit",
-            observe=self.control_status,
+        if self._drain_result is not None:
+            return self._drain_result.encode(self.identity)
+        self._wait_control(
+            lambda o: o.status.state.terminal and o.process_returncode is not None,
+            deadline, "flow did not drain and exit",
         )
-        # The producer has exited: both its final control state and journals are stable.
+        # Read evidence once after the producer has exited; failures remain retryable.
         state = self.status()
-        if getattr(self, "monitor", None) is not None:
+        result = DrainResult(
+            FlowStatus.decode(state), state["process_returncode"],
+            state["observed_started"], state["observed_terminal"],
+            tuple(state["unfinished_ids"]),
+        )
+        result.validate(self.stop_command)
+        if self.monitor is not None:
             self.monitor.end_target(
-                self.monitor_target,
-                state.get("recorded_epoch_ms", time.time() * 1000) / 1000,
+                self.monitor_target, result.status.recorded_epoch_ms / 1000,
             )
-        if state["state"] != "DRAINED" or state["process_returncode"] != 0:
-            raise RuntimeError("flow drain incomplete: " + str(state))
-        if state["submitted"] != state["observed_terminal"] or state["unfinished_ids"]:
-            raise RuntimeError(
-                "flow drain journal does not account for every submission"
-            )
-        from adapters.flow_control import validate_drain
-        validate_drain(state, self.identity, terminal_count=state["observed_terminal"],
-                       command_id=self.stop_command)
-        return state
+        self._drain_result = result
+        return self._drain_result.encode(self.identity)
 
     def checkpoint(self, label, deadline, predicate):
-        state = self._wait(predicate, deadline, "flow checkpoint failed: " + label)
+        state = self._wait_evidence(predicate, deadline, "flow checkpoint failed: " + label)
         record = dict(label=label, epoch_s=time.time(), **self.identity, state=state)
         with (self.directory / "checkpoints.jsonl").open("a") as out:
             out.write(json.dumps(record) + "\n")

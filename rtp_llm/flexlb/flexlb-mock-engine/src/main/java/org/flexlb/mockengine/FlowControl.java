@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.Locale;
 
 /** Optional per-process flow-group control. Business requests never cross this channel. */
 final class FlowControl {
@@ -16,7 +17,10 @@ final class FlowControl {
     private final String groupId;
     private final String phaseId;
     private String stopCommand;
-    private String state = "STARTING";
+    enum State { STARTING, SENDING, DRAINING, DRAINED, INCOMPLETE }
+    enum EndReason { NATURAL, STOP_COMMAND }
+    private State state = State.STARTING;
+    private EndReason endReason;
     private long revision;
     private long lastProgressNanos;
 
@@ -35,6 +39,9 @@ final class FlowControl {
     }
 
     synchronized boolean stopRequested() throws IOException {
+        if (state == State.DRAINING || state == State.DRAINED || state == State.INCOMPLETE) {
+            return stopCommand != null;
+        }
         Path path = directory.resolve("stop.json");
         if (!Files.exists(path)) return false;
         JsonNode command = JSON.readTree(path.toFile());
@@ -57,25 +64,52 @@ final class FlowControl {
         return !stopRequested();
     }
 
-    synchronized void publish(String nextState, int submitted, int started, int terminal) throws IOException {
+    synchronized void starting() throws IOException {
+        require(State.STARTING);
+        publish(State.STARTING, 0, 0, 0);
+    }
+
+    synchronized void sending() throws IOException {
+        require(State.STARTING);
+        publish(State.SENDING, 0, 0, 0);
+    }
+
+    synchronized void beginDrain(int submitted, int started, int terminal) throws IOException {
+        require(State.SENDING);
+        endReason = stopCommand == null ? EndReason.NATURAL : EndReason.STOP_COMMAND;
+        publish(State.DRAINING, submitted, started, terminal);
+    }
+
+    synchronized void finishDrain(int submitted, int started, int terminal) throws IOException {
+        require(State.DRAINING);
+        publish(submitted == started && started == terminal ? State.DRAINED : State.INCOMPLETE,
+                submitted, started, terminal);
+    }
+
+    private void require(State expected) {
+        if (state != expected) throw new IllegalStateException("flow state " + state + ", expected " + expected);
+    }
+
+    private void publish(State nextState, int submitted, int started, int terminal) throws IOException {
+        if (submitted < 0 || started < 0 || terminal < 0 || terminal > submitted || started > submitted) {
+            throw new IllegalArgumentException("invalid flow counters");
+        }
         state = nextState;
         ObjectNode row = JSON.createObjectNode();
         row.put("schema_version", 1);
         row.put("run_id", runId);
         row.put("group_id", groupId);
         row.put("phase_id", phaseId);
-        row.put("state", state);
+        row.put("state", state.name());
         row.put("revision", ++revision);
         row.put("recorded_epoch_ms", System.currentTimeMillis());
         row.put("submitted", submitted);
         row.put("started", started);
         row.put("terminal", terminal);
         row.put("outstanding", Math.max(0, submitted - terminal));
-        if (!"SENDING".equals(state) && !"STARTING".equals(state)) {
-            row.put("sending_end_reason", stopCommand == null ? "natural" : "stop_command");
-        }
-        if (!"SENDING".equals(state) && !"STARTING".equals(state) && stopCommand != null) {
-            row.put("applied_command_id", stopCommand);
+        if (endReason != null) {
+            row.put("sending_end_reason", endReason.name().toLowerCase(Locale.ROOT));
+            if (endReason == EndReason.STOP_COMMAND) row.put("applied_command_id", stopCommand);
         }
         Path temporary = directory.resolve("status.json.tmp");
         Files.writeString(temporary, row.toString());
@@ -84,6 +118,7 @@ final class FlowControl {
     }
 
     synchronized void progress(int submitted, int started, int terminal) throws IOException {
+        require(State.SENDING);
         long now = System.nanoTime();
         if (now - lastProgressNanos >= 100_000_000L) {
             publish(state, submitted, started, terminal);

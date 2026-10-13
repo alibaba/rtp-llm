@@ -40,7 +40,9 @@ def test_control_commands_are_idempotent_and_drain_requires_identity_and_ack(tmp
     first = (tmp_path / 'stop.json').read_bytes()
     assert stop_sending(tmp_path, identity, command) == command
     assert (tmp_path / 'stop.json').read_bytes() == first
-    state = dict(identity, state='DRAINED', submitted=2, terminal=2, applied_command_id=command)
+    state = dict(identity, schema_version=1, revision=1, recorded_epoch_ms=1,
+                 state='DRAINED', submitted=2, started=2, terminal=2, outstanding=0,
+                 sending_end_reason='stop_command', applied_command_id=command)
     (tmp_path / 'status.json').write_text(json.dumps(state))
     validate_drain(read_status(tmp_path, identity), identity, terminal_count=2, command_id=command)
     for patch in (dict(terminal=True), dict(submitted=3), dict(applied_command_id='other'),

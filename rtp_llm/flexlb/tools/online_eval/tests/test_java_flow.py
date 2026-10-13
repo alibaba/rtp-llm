@@ -1,5 +1,6 @@
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,24 @@ from types import SimpleNamespace
 from scenario.runtime import Deadline
 from adapters.java_flow import JavaFlowGroup
 from traffic.synthetic.generator import write_trace
+
+from adapters.flow_control import FlowObservation, FlowStatus
+
+
+def control_row(**fields):
+    row = dict(schema_version=1, revision=1, recorded_epoch_ms=1,
+               submitted=0, started=0, terminal=0, outstanding=0)
+    row.update(fields)
+    row["started"] = fields.get("started", row["submitted"])
+    row["observed_started"] = fields.get("observed_started", row["started"])
+    row["outstanding"] = fields.get("outstanding", row["submitted"] - row["terminal"])
+    if row.get("state") in {"DRAINING", "DRAINED", "INCOMPLETE"}:
+        row.setdefault("sending_end_reason", "natural")
+    return row
+
+
+def observation(row):
+    return FlowObservation(FlowStatus.decode(control_row(**row)), row["process_returncode"])
 
 
 class JavaFlowTest(unittest.TestCase):
@@ -21,19 +40,21 @@ class JavaFlowTest(unittest.TestCase):
                            submitted=1, terminal=1, process_returncode=0,
                            observed_terminal=1, unfinished_ids=[])
             # The producer finishes after the first observation but before reading stop.json.
-            flow.control_status = Mock(side_effect=[sending, drained])
+            flow.observe_control = Mock(side_effect=[observation(sending), observation(drained)])
             flow.status = Mock(side_effect=AssertionError("stop must not parse the journal"))
-            flow.stop_sending(Deadline(1))
+            flow.stop_sending(Deadline(time.monotonic() + 1))
             self.assertTrue((flow.control / "stop.json").exists())
-            flow.control_status = Mock(return_value=drained)
-            flow.status = Mock(return_value=drained)
-            self.assertEqual(flow.drain(Deadline(1))["terminal"], 1)
+            flow.observe_control = Mock(return_value=observation(drained))
+            flow.status = Mock(return_value=control_row(**drained))
+            self.assertEqual(flow.drain(Deadline(time.monotonic() + 1))["terminal"], 1)
             for invalid in (dict(drained, observed_terminal=0),
                             dict(drained, unfinished_ids=["pending"]),
                             dict(drained, process_returncode=1)):
-                flow.status.return_value = invalid
+                flow = JavaFlowGroup(None, d, run_id="r", group_id="g", phase_id="p", poll_s=0.01)
+                flow.observe_control = Mock(return_value=observation(drained))
+                flow.status = Mock(return_value=control_row(**invalid))
                 with self.assertRaises(RuntimeError):
-                    flow.drain(Deadline(1))
+                    flow.drain(Deadline(time.monotonic() + 1))
 
     def test_drain_waits_for_exit_before_reading_request_journal(self):
         from unittest.mock import Mock
@@ -42,25 +63,74 @@ class JavaFlowTest(unittest.TestCase):
         drained = dict(**flow.identity, state="DRAINED", submitted=1, terminal=1,
                        process_returncode=0, observed_terminal=1, unfinished_ids=[])
         def final_journal():
-            self.assertEqual(flow.control_status.call_count, 2)
-            return drained
-        flow.control_status = Mock(side_effect=[draining, drained])
+            self.assertEqual(flow.observe_control.call_count, 2)
+            return control_row(**drained)
+        flow.observe_control = Mock(side_effect=[observation(draining), observation(drained)])
         flow.status = Mock(side_effect=final_journal)
-        self.assertEqual(flow.drain(Deadline(1))["state"], "DRAINED")
+        self.assertEqual(flow.drain(Deadline(time.monotonic() + 1))["state"], "DRAINED")
         flow.status.assert_called_once()
+
+    def test_process_exit_is_observed_before_reading_final_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            flow = JavaFlowGroup(None, d, run_id="r", group_id="g", phase_id="p", poll_s=0.01)
+            flow.control.mkdir()
+            path = flow.control / "status.json"
+            path.write_text(json.dumps(control_row(**flow.identity, state="DRAINING")))
+            def exit_and_publish_final():
+                path.write_text(json.dumps(control_row(**flow.identity, state="DRAINED")))
+                return 0
+            flow.proc = SimpleNamespace(proc=SimpleNamespace(poll=exit_and_publish_final))
+            observed = flow.observe_control()
+            self.assertEqual(observed.process_returncode, 0)
+            self.assertEqual(observed.status.state.value, "DRAINED")
+
+    def test_successful_drain_is_immutable_and_idempotent(self):
+        from unittest.mock import Mock
+        flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=0.01)
+        drained = control_row(**flow.identity, state="DRAINED", process_returncode=0,
+                              observed_terminal=0, unfinished_ids=[])
+        flow.observe_control = Mock(return_value=observation(drained))
+        flow.status = Mock(return_value=drained)
+        first = flow.drain(Deadline(time.monotonic() + 1))
+        first["state"] = "corrupted"
+        first["unfinished_ids"].append("corrupted")
+        self.assertEqual(flow.drain(Deadline(0))["state"], "DRAINED")
+        self.assertEqual(flow.stop_sending(Deadline(0))["unfinished_ids"], [])
+        flow.status.assert_called_once()
+        flow.observe_control.assert_called_once()
+
+    def test_failed_drain_can_retry_without_cached_failure(self):
+        from unittest.mock import Mock
+        flow = JavaFlowGroup(None, "/unused", run_id="r", group_id="g", phase_id="p", poll_s=0.01)
+        final = control_row(**flow.identity, state="DRAINED", submitted=1, terminal=1,
+                            process_returncode=0, observed_terminal=1, unfinished_ids=[])
+        flow.observe_control = Mock(return_value=observation(final))
+        flow.status = Mock(side_effect=[dict(final, observed_terminal=0), final])
+        with self.assertRaisesRegex(RuntimeError, "journal"):
+            flow.drain(Deadline(time.monotonic() + 1))
+        self.assertEqual(flow.drain(Deadline(time.monotonic() + 1))["terminal"], 1)
+        self.assertEqual(flow.status.call_count, 2)
+
+    def test_protocol_rejects_invalid_wire_status(self):
+        row = control_row(state="DRAINED")
+        for patch in ({"state": "unknown"}, {"submitted": True}, {"schema_version": 2},
+                      {"outstanding": 1}, {"started": 1},
+                      {"sending_end_reason": "stop_command"}, {"applied_command_id": "foreign"}):
+            with self.assertRaises(ValueError):
+                FlowStatus.decode(dict(row, **patch))
 
     def test_unacknowledged_stop_requires_explicit_natural_completion(self):
         from adapters.flow_control import validate_drain
         identity = dict(run_id="r", group_id="g")
-        state = dict(**identity, state="DRAINED", submitted=1, terminal=1)
-        for extra in ({}, {"sending_end_reason": "stop_command"},
+        state = control_row(**identity, state="DRAINED", submitted=1, terminal=1)
+        for extra in ({"sending_end_reason": None}, {"sending_end_reason": "stop_command"},
                       {"sending_end_reason": "natural", "applied_command_id": "other"}):
-            with self.assertRaisesRegex(ValueError, "accepting the stop"):
+            with self.assertRaises(ValueError):
                 validate_drain(dict(state, **extra), identity, terminal_count=1, command_id="s")
-        validate_drain(dict(state, applied_command_id="s"), identity,
+        validate_drain(dict(state, applied_command_id="s", sending_end_reason="stop_command"), identity,
                        terminal_count=1, command_id="s")
         with self.assertRaisesRegex(ValueError, "retain every"):
-            validate_drain(dict(state, sending_end_reason="natural", terminal=0), identity,
+            validate_drain(dict(state, state="DRAINING", sending_end_reason="natural", terminal=0, outstanding=1), identity,
                            terminal_count=0, command_id="s")
 
     def test_control_observation_does_not_parse_request_journal(self):
@@ -69,7 +139,7 @@ class JavaFlowTest(unittest.TestCase):
             flow = JavaFlowGroup(None, d, run_id="r", group_id="g", phase_id="p", poll_s=1)
             flow.control.mkdir()
             path = flow.control / "status.json"
-            path.write_text(json.dumps(dict(**flow.identity, state="SENDING")))
+            path.write_text(json.dumps(control_row(**flow.identity, state="SENDING")))
             flow.journal.read = Mock(side_effect=ValueError("journal corrupt"))
             self.assertEqual(flow.control_status()["state"], "SENDING")
             flow.journal.read.assert_not_called()
@@ -109,7 +179,7 @@ class JavaFlowTest(unittest.TestCase):
             flow.control.mkdir()
             flow.proc = SimpleNamespace(proc=SimpleNamespace(poll=lambda: None))
             (flow.control / "status.json").write_text(
-                json.dumps(dict(**flow.identity, state="DRAINED", submitted=0))
+                json.dumps(control_row(**flow.identity, state="DRAINED", submitted=0))
             )
             with self.assertRaises(TimeoutError):
                 flow.drain(Deadline(0))
@@ -123,7 +193,7 @@ class JavaFlowTest(unittest.TestCase):
             flow.control.mkdir()
             flow.proc = SimpleNamespace(proc=SimpleNamespace(poll=lambda: None))
             (flow.control / "status.json").write_text(
-                json.dumps(dict(**flow.identity, state="SENDING", submitted=1))
+                json.dumps(control_row(**flow.identity, state="SENDING", submitted=1))
             )
             with self.assertRaises(TimeoutError):
                 flow.stop_sending(Deadline(0))
