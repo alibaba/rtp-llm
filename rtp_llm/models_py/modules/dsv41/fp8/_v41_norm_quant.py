@@ -150,7 +150,7 @@ def rmsnorm_group32_quant(
     their FP32 square sum and BF16 normalized output must not overflow.
     Numerical contract is the CUDA13 native FTZ build; no host tensor reads.
     An omitted quant_kernel honors the existing DSV4_FP8_QUANT_KERNEL setting.
-    auto uses v2 at M*5120 >= 4Mi elements, exactly as V41MXFP8Linear does.
+    auto uses legacy scale semantics at every M, as V41MXFP8Linear does.
     """
     if not is_supported(x, weight):
         return None
@@ -171,7 +171,7 @@ def rmsnorm_group32_quant(
         (40, triton.cdiv(m, 4) * 4), device=x.device, dtype=torch.int32
     ).T[:m]
     if m:
-        legacy = mode == "legacy" or (mode == "auto" and x.numel() < 4 * 1024 * 1024)
+        legacy = mode in ("auto", "legacy")
         _v41_norm_quant_kernel[(m,)](
             x,
             weight,
