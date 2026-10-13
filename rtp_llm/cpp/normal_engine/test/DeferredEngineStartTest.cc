@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
 
@@ -55,6 +57,25 @@ TEST_F(DeferredEngineStartTest, RpcReleaseStartsLeaderAndFollowerWithoutBroadcas
         ASSERT_NO_THROW(server.startDeferredServices());
         EXPECT_EQ(engine->loop_thread_, first_thread);
     }
+}
+
+TEST_F(DeferredEngineStartTest, RemoteReleasePreparesCacheBeforeCacheStoreAndEngine) {
+    auto engine = prepareEngine();
+    RemoteRpcServer server;
+    server.engine_ = engine;
+    server.setDeferServiceStart(true);
+    server.setDeferCacheStore(true);
+    // Fail at CacheStore's role validation, before opening TCP/RDMA resources.
+    server.maga_init_params_.pd_sep_config.role_type = static_cast<RoleType>(-1);
+    EXPECT_EQ(engine->resourceContext().cache_manager->connectorCoordinator(), nullptr);
+    const bool core_dump_on_exception = StaticConfig::user_ft_core_dump_on_exception;
+    StaticConfig::user_ft_core_dump_on_exception = false;
+    EXPECT_THROW(server.startDeferredServices(), std::exception);
+    StaticConfig::user_ft_core_dump_on_exception = core_dump_on_exception;
+    EXPECT_NE(engine->resourceContext().cache_manager->connectorCoordinator(), nullptr);
+    EXPECT_EQ(server.cache_store_, nullptr);
+    EXPECT_EQ(engine->loop_thread_, nullptr);
+    EXPECT_FALSE(engine->running_.load());
 }
 
 TEST_F(DeferredEngineStartTest, AbortedTemplateCanStopBeforeLoopStarts) {

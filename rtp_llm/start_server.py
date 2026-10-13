@@ -30,6 +30,7 @@ from rtp_llm.utils.scr_template_utils import (
 from rtp_llm.utils.scr_template_utils import (
     build_scr_participant_manifest,
     configure_scr_environment,
+    get_scr_barrier_return_time,
     is_scr_template_phase_active,
 )
 
@@ -613,6 +614,7 @@ def main():
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
     start_time = time.time()
+    barrier_return_time = None
     try:
         multiprocessing.set_start_method("spawn")
     except RuntimeError as e:
@@ -681,6 +683,10 @@ def start_server(py_env_configs: PyEnvConfigs):
         # All actual children now have stable identities.  The parent joins
         # the same Epsilon wait_mode=1 quorum; no local UDS/barrier is needed.
         _start_parent_scr_arrival(scr_manifest)
+        if scr_manifest is not None and is_scr_template_phase_active():
+            # Include runtime fixup/release, health checks and real warmup,
+            # but not the checkpoint's saved startup or time in storage.
+            barrier_return_time = get_scr_barrier_return_time()
 
         # Start parallel health checks and wait for completion
         if not process_manager.run_health_checks():
@@ -693,8 +699,14 @@ def start_server(py_env_configs: PyEnvConfigs):
         logging.info(
             f"Backend RPC service is listening on 0.0.0.0, IP/IP range can be customized as needed"
         )
-        consume_s = time.time() - start_time
-        logging.info(f"start server took {consume_s:.2f}s")
+        if barrier_return_time is not None:
+            consume_s = time.monotonic() - barrier_return_time
+            logging.info(
+                f"start server took {consume_s:.2f}s (timing_scope=post_scr_barrier)"
+            )
+        else:
+            consume_s = time.time() - start_time
+            logging.info(f"start server took {consume_s:.2f}s")
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
         # If a SIGTERM/SIGINT already triggered shutdown before this exception,
