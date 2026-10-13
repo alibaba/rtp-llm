@@ -8,6 +8,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.mock.TestFlexlbConfigs;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -70,7 +71,7 @@ class FlexlbGrpcPayloadTest {
                         config,
                         environment,
                         serverGroup,
-                        null,
+                        NoOpFlexMonitor.getInstance(),
                         new GrpcServerTimingInterceptor(),
                         new GrpcQosHeaderInterceptor());
         LBStatusConsistencyService election = mock(LBStatusConsistencyService.class);

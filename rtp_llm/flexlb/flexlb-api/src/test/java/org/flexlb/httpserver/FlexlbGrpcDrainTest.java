@@ -11,9 +11,11 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.DispatcherConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
@@ -47,13 +49,14 @@ class FlexlbGrpcDrainTest {
         var resume = new CountDownLatch(1);
         var timing = new GrpcServerTimingInterceptor();
         var config = mock(ConfigService.class);
-        when(config.loadBalanceConfig())
-                .thenReturn(
-                        ConfigService.parse(
-                                """
+        var routingConfig =
+                ConfigService.parse(
+                        """
                 {"requestLifecycle":{"request":{"timeoutMs":60000}},
                  "grpcServer":{"shutdownQuietPeriodMs":100}}
-                """));
+                """);
+        routingConfig.setDispatcher(DispatcherConfig.nonBatch());
+        when(config.loadBalanceConfig()).thenReturn(routingConfig);
         var routes = mock(RouteService.class);
         var success = new Response();
         success.setSuccess(true);
@@ -101,7 +104,13 @@ class FlexlbGrpcDrainTest {
                         .start();
         var grpc =
                 new FlexlbGrpcServer(
-                        service, config, new MockEnvironment(), null, null, timing, null);
+                        service,
+                        config,
+                        new MockEnvironment(),
+                        null,
+                        NoOpFlexMonitor.getInstance(),
+                        timing,
+                        null);
         ReflectionTestUtils.setField(grpc, "server", server);
         var channel =
                 NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())
@@ -113,7 +122,9 @@ class FlexlbGrpcDrainTest {
                     FlexlbServiceGrpc.newFutureStub(channel)
                             .withDeadlineAfter(8, TimeUnit.SECONDS)
                             .schedule(
-                                    FlexlbScheduleRequestPB.newBuilder().setRequestId(101).build());
+                                    FlexlbScheduleRequestPB.newBuilder()
+                                            .setRequestIdStr("101")
+                                            .build());
             assertTrue(accepted.await(3, TimeUnit.SECONDS));
             drainer.start();
             long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
@@ -215,7 +226,13 @@ class FlexlbGrpcDrainTest {
                                             .formatted(quietMs)));
             grpc =
                     new FlexlbGrpcServer(
-                            null, configService, new MockEnvironment(), null, null, timing, null);
+                            null,
+                            configService,
+                            new MockEnvironment(),
+                            null,
+                            NoOpFlexMonitor.getInstance(),
+                            timing,
+                            null);
             server =
                     NettyServerBuilder.forPort(0)
                             .addService(

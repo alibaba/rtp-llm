@@ -22,9 +22,12 @@ import org.flexlb.balance.scheduler.DefaultBatchDispatcherTestFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeSelector;
+import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.DecisionPolicyConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
@@ -45,8 +48,8 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
-import org.flexlb.service.RecentCacheKeyTraceReporter;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.TheoryCacheHitReporter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
@@ -345,7 +348,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected DefaultRouter createRouter() {
         CacheAwareService cache = mock(CacheAwareService.class, withSettings().stubOnly());
-        when(cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of());
+        when(cache.findMatchingEngines(any()))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.KVCM));
         CostBasedPrefillStrategy prefillSelector =
                 new CostBasedPrefillStrategy(
                         engineWorkerStatus,
@@ -357,6 +361,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 prefillSelector,
                 new DecodeSelector(engineWorkerStatus),
                 new RandomStrategy(engineWorkerStatus),
+                mock(EncoderStrategy.class),
                 configService,
                 modelMeta);
     }
@@ -370,7 +375,9 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         simulatedStatusThread.setDaemon(true);
         simulatedStatusThread.start();
 
-        RouteService routeService = new RouteService(scheduler, new RecentCacheKeyTraceReporter());
+        RouteService routeService =
+                new RouteService(
+                        scheduler, mock(TheoryCacheHitReporter.class, withSettings().stubOnly()));
 
         latencyRecorder = new CompletionCoverageRecorder();
         EngineHealthReporter engineHealthReporter = createNoOpEngineHealthReporter();
@@ -398,7 +405,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                         configService,
                         environment,
                         masterServerEventLoopGroup,
-                        null,
+                        NoOpFlexMonitor.getInstance(),
                         new GrpcServerTimingInterceptor(),
                         new GrpcQosHeaderInterceptor());
         masterServer.start();
@@ -1042,7 +1049,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                     completed,
                     successful,
                     completed - successful,
-                    scheduler.getInflightSize(),
+                    scheduler.getTrackedRequestCount(),
                     scheduler.getQueuedRequestCount(),
                     receivedEngineRequestCount());
             for (int index = 0; index < futures.size(); index++) {
@@ -1053,7 +1060,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 long requestId = firstRequestId + index;
                 System.out.printf(
                         "FlexLB Master exceptional request: request_id=%d state=%s%n",
-                        requestId, scheduler.getRequestState(requestId, 0L));
+                        requestId, scheduler.getRequestState(Long.toString(requestId), 0L));
             }
             throw failure;
         }
@@ -1257,7 +1264,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                                 "completed route must retain its actual worker endpoint: "
                                         + address);
                         TaskInfo task = new TaskInfo();
-                        task.setRequestId(route.requestId());
+                        task.setRequestId(Long.toString(route.requestId()));
                         task.setInputLength(route.accepted().inputLength());
                         task.setBatchId(route.accepted().batchId());
                         task.setDpRank(endpoint.getStatus().getDpRank());
@@ -1303,7 +1310,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         while ((simulatedCompletionCount.get() < expected
                         || !acceptedRequests.isEmpty()
                         || !simulatedCompletions.isEmpty()
-                        || scheduler.getInflightSize() != 0)
+                        || scheduler.getTrackedRequestCount() != 0)
                 && simulatedStatusFailure.get() == null
                 && System.nanoTime() < deadline) {
             TimeUnit.MILLISECONDS.sleep(1);
@@ -1318,7 +1325,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 "every successful route must receive actual-worker completion evidence");
         assertTrue(acceptedRequests.isEmpty(), "accepted batches must all match a published route");
         assertTrue(simulatedCompletions.isEmpty(), "terminal projection queue must be drained");
-        assertEquals(0, scheduler.getInflightSize(), "request lifecycle registry must be drained");
+        assertEquals(
+                0,
+                scheduler.getTrackedRequestCount(),
+                "request lifecycle registry must be drained");
         for (String address : endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL)) {
             PrefillEndpoint endpoint =
                     (PrefillEndpoint) endpointRegistry.get(RoleType.PREFILL, address);
@@ -1480,9 +1490,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     private long assertLatencyCoverage(
             TrafficResult result, long firstRequestId, Map<String, Object> snapshot) {
         int requestCount = result.responses().size();
-        Map<Long, ResponseTiming> timings = Map.copyOf(latencyRecorder.responseTimings);
+        Map<String, ResponseTiming> timings = Map.copyOf(latencyRecorder.responseTimings);
         assertEquals(
-                expectedRequestIds(firstRequestId, requestCount),
+                expectedRequestIds(firstRequestId, requestCount).stream()
+                        .map(Object::toString)
+                        .collect(java.util.stream.Collectors.toSet()),
                 timings.keySet(),
                 "latency observations must cover each measured request exactly once");
         assertEquals(
@@ -1502,7 +1514,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
         long acknowledgedRequests = 0L;
         for (int index = 0; index < requestCount; index++) {
-            long requestId = firstRequestId + index;
+            String requestId = Long.toString(firstRequestId + index);
             ResponseTiming timing = timings.get(requestId);
             if (DELIVERY_MODE == DeliveryMode.NON_BATCH) {
                 assertEquals(
@@ -1951,7 +1963,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
 
     /** Retains request identities to audit stage denominators without changing production telemetry. */
     private static final class CompletionCoverageRecorder extends ServerScheduleLatencyRecorder {
-        private final Map<Long, ResponseTiming> responseTimings = new ConcurrentHashMap<>();
+        private final Map<String, ResponseTiming> responseTimings = new ConcurrentHashMap<>();
         private final AtomicLong duplicateResponses = new AtomicLong();
 
         @Override
