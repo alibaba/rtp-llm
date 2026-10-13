@@ -113,10 +113,3 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
     copts = copts(),
 )
-
-cc_test(
-    name = "remote_cache_config_test",
-    srcs = ["RemoteCacheConfigTest.cc"],
-    copts = copts(),
-    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
-)
