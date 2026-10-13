@@ -1,5 +1,7 @@
 """Java client input validation, runtime-owned settings and launch isolation."""
 
+from traffic.playback.configuration import RETIRED_ENV_FIELDS
+
 LOAD_CLIENT_ENV_VARS = (
     'LIVE_CLIENT_EVENTS',
     'TRACE_FILE',
@@ -26,9 +28,6 @@ LOAD_CLIENT_ENV_VARS = (
     'SKIP_SERVER_LATENCY',
     'MODEL',
     'API_KEY',
-    'GRADIENT',
-    'GRADIENT_START_SPEED',
-    'GRADIENT_MAX_SPEED',
     'MAX_INPUT_LEN',
     'MAX_OUTPUT_LEN',
     'PUSHGATEWAY_URL',
@@ -47,18 +46,8 @@ LOAD_CLIENT_ENV_VARS = (
     'FLOW_PHASE_ID',
     'MAX_LAPS',
     'LAP_IDENTITY',
-    'LAP_RETAIN_PROBABILITY',
-    'PLAYBACK_SEED',
-    'BURST_FACTOR',
-    'BURST_PERIOD_SECONDS',
-    'BURST_DUTY',
-    'DIURNAL_AMPLITUDE',
-    'DIURNAL_PERIOD_SECONDS',
     'COLLECTION_PROFILE',
     'CLIENT_MONITORING',
-    'RATE_CURVE',
-    'ARRIVAL_PROCESS',
-    'LAP_RETAIN_SCHEDULE',
 )
 
 
@@ -87,6 +76,8 @@ def validate_flow_environment(environment):
     import math
 
     env = validate_environment(environment)
+    if any(int(env.get(k, 0)) != 0 for k in ('MAX_INPUT_LEN', 'MAX_OUTPUT_LEN', 'FORCE_PRIORITY')):
+        raise ValueError('scenario request content must be finalized before Java playback')
     if env.get('REPLAY_UNIQUE_PREFIX') != 'false' or env.get('FETCH_OUTPUT_STREAM') != 'true':
         raise ValueError('scenario flow requires faithful prefix replay and response consumption')
     if int(env.get('DURATION_S', 0)) <= 0 or int(env.get('MAX_CONCURRENCY', 0)) <= 0:

@@ -31,7 +31,7 @@ def test_retained_expansion_preserves_full_label_allocation(version, block):
 
 
 def test_java_playback_evidence_checks_launch_and_preserves_reproduction_fields():
-    row = dict(trace_sha256='frozen', offline_plan_supported=True, planner_version='PLAYBACK_LEGACY_V1',
+    row = dict(trace_sha256='frozen', offline_plan_supported=True, planner_version='PLAYBACK_V1',
         token_stride=18, mode='replay', identity='structural-relabel', seed=0, max_laps=1,
         num_shards=1, shard_index=0, duration_seconds=0, limit=0, qps=0, speed=1,
         ramp_up_seconds=0, retain_probability=0, burst_factor=1, burst_period_seconds=10,
@@ -40,7 +40,7 @@ def test_java_playback_evidence_checks_launch_and_preserves_reproduction_fields(
         path = Path(directory) / 'playback.json'
         path.write_text(json.dumps(row))
         assert PlaybackEvidence.read(path, 'frozen', {}).to_dict() == row
-        for field, value in [('trace_sha256', 'different'), ('seed', 5), ('identity', 'none'),
+        for field, value in [('trace_sha256', 'different'), ('max_laps', 5), ('identity', 'none'),
                              ('offline_plan_supported', False), ('token_stride', 0)]:
             path.write_text(json.dumps(dict(row, **{field: value})))
             with pytest.raises(ValueError):

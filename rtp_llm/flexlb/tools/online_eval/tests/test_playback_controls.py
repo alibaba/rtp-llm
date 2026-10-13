@@ -8,54 +8,38 @@ import unittest
 from pathlib import Path
 
 from traffic.playback.configuration import normalize
-from traffic.playback.intensity import integral
 from traffic.output_sampling import output_sampler
 from traffic.randomness import event_uniform
 from traffic import prefix_lineage, prefix_lineage_v3
 
 
 class PlaybackControlsTest(unittest.TestCase):
-    def test_yaml_env_roundtrip(self):
-        p = dict(mode='uniform', qps=100, seed=42, arrival='poisson',
-                 rate_curve=[[0, 1], [10, 3], [20, 1]], identity='partial',
-                 retain_schedule=dict(kind='linear', start=0, end=1, laps=5))
+    def test_bounded_multi_lap_environment_roundtrip(self):
+        p = dict(mode='uniform', qps=100, max_laps=3, identity='structural-relabel', ramp_up_seconds=2)
         env, a = normalize(dict(playback=p))
         _, b = normalize(env)
-        for key in p:
-            self.assertEqual(a[key], b[key])
-        self.assertNotIn('LAP_RETAIN_PROBABILITY', env)
-
-    def test_integrated_curve_counts_and_seeded_poisson_budget(self):
-        curve = [[0, .5], [10, 3], [20, 1]]
-        self.assertEqual(integral(curve, 10), 17.5)
-        self.assertEqual(integral(curve, 20), 37.5)
-        self.assertEqual(integral(curve, 30), 47.5)
-        self.assertAlmostEqual(-math.log1p(-event_uniform(0,42 ^ 0xd1b54a32d192ed03)), 1.5354135069822445, places=8)
-
-    def test_invalid_combinations_fail_before_launch(self):
-        base = dict(mode='uniform', qps=10)
-        for extra in [dict(arrival='possion'), dict(arrival='poisson'),
-                      dict(arrival='poisson', seed=True), dict(arrival='poisson', seed=2**63),
-                      dict(arrival='poisson', seed=1, ramp_up_seconds=1),
-                      dict(rate_curve=[[0, 0]]), dict(rate_curve=[[1, 1]]),
-                      dict(rate_curve=[[0, 1], [0, 2]]), dict(rate_curve=[[0, float('inf')]]),
-                      dict(rate_curve=[[0, 1]], burst_factor=2), dict(rate_curv=[[0, 1]]),
-                      dict(retain_schedule=dict(kind='sequence',values=[0,1]), seed=1),
-                      dict(identity='partial', seed=1, retain_probability=0,
-                           retain_schedule=dict(kind='sequence',values=[0,1])),
-                      dict(identity='partial',seed=1,retain_schedule=dict(kind='linear',start=0,end=1,laps=1)),
-                      dict(identity='partial',seed=1,retain_schedule=dict(kind='sequence',values=[0,1,.5])),
-                      dict(identity='partial',seed=1,retain_schedule=dict(kind='sequence',values=[0,1],typo=1))]:
-            with self.subTest(extra=extra), self.assertRaises(ValueError):
-                normalize(dict(playback=dict(base, **extra)))
+        self.assertEqual(a, b)
+        self.assertEqual(env['MAX_LAPS'], '3')
+        self.assertEqual(env['LOOP'], 'true')
         with self.assertRaises(ValueError):
-            normalize(dict(playback=dict(base), RATE_CURVE='[[0,1]]'))
-        with self.assertRaises(ValueError):
-            normalize(dict(SEND_MODE='uniform', ARRIVAL_PROCESS='poisson'))
-        with self.assertRaises(ValueError):
-            normalize(dict(playback=dict(mode='true-ts', arrival='poisson',seed=1)))
-        normalize(dict(playback=dict(mode='true-ts',rate_curve=[[0,.5],[10,2]])))
+            normalize(dict(playback=dict(mode='uniform', qps=10, max_laps=0)))
 
+    def test_retired_controls_are_rejected_at_both_boundaries(self):
+        from traffic.playback.configuration import RETIRED_ENV_FIELDS
+        for key in ('arrival', 'rate_curve', 'retain_schedule', 'retain_probability',
+                    'seed', 'burst_factor', 'diurnal_amplitude'):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                normalize(dict(playback=dict(mode='uniform', qps=10, **{key: 1})))
+        for key in RETIRED_ENV_FIELDS:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                normalize(dict(SEND_MODE='uniform', SEND_MODE_QPS='10', **{key: '1'}))
+        for mode in ('burst', 'gradient'):
+            with self.assertRaises(ValueError):
+                normalize(dict(playback=dict(mode=mode, qps=10)))
+        with self.assertRaises(ValueError):
+            normalize(dict(playback=dict(mode='uniform', qps=10, identity='partial')))
+        with self.assertRaises(ValueError):
+            normalize(dict(SEND_MODE='uniform', SEND_MODE_QPS='10', MAX_LAPS='3', LOOP='false'))
 
     def test_discrete_lineage_preserves_snapshot_filter_and_original_index(self):
         for version, module in [(2,prefix_lineage),(3,prefix_lineage_v3)]:

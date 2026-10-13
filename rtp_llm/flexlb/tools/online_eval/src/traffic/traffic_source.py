@@ -12,13 +12,6 @@ from traffic.lineage_transforms import LineageProjector, LineageProjection
 from traffic.datasets import CapturedDataset
 from traffic.request_rules import PRIORITY, JAVA_LENGTH
 
-from traffic.synthetic.generator import write_trace as write_realistic
-
-
-# Generator versions describe algorithms; capture codecs come from their data.
-SOURCES = {
-    ("synthetic", "realistic", "1"): write_realistic,
-}
 
 
 def validate_plan(path, namespace=None):
@@ -118,8 +111,8 @@ class SourceSpecification:
                 if not result.version.isdecimal():
                     raise ValueError("unknown source model/version")
                 codec_for_version(int(result.version))
-        elif (result.kind, result.model, result.version) not in SOURCES:
-            raise ValueError("unknown source model/version")
+        else:
+            raise ValueError("scenario source must be trace/prefix_lineage; generate synthetic plans offline")
         return result
 
     @property
@@ -140,12 +133,19 @@ class SourceSpecification:
                 return projector.project_model(path, parameters, namespace, captured.model,
                     source_sha256=captured.sha256, max_requests=max_requests)
             return projector.write_trace(path, self.parameters, namespace, base_dir, max_requests=max_requests)
-        return SOURCES[(self.kind, self.model, self.version)](
-            path, self.parameters, namespace, base_dir, max_requests=max_requests)
+        raise ValueError("scenario source must be trace/prefix_lineage")
 
 
 def materialize(path, specification, namespace, base_dir, *, max_requests=None, captured: CapturedDataset | None = None):
     source = SourceSpecification.read(specification)
+    return publish_plan(path, specification, namespace, base_dir,
+        lambda temporary: source.write_trace(temporary, namespace, base_dir,
+                                              max_requests=max_requests, captured=captured),
+        max_requests=max_requests)
+
+
+def publish_plan(path, specification, namespace, base_dir, writer, *, max_requests=None):
+    """Publish a fully materialized request plan; no generation or playback policy."""
     if max_requests is not None and (type(max_requests) is not int or max_requests < 1):
         raise ValueError("max_requests must be a positive integer")
     path = Path(path)
@@ -153,9 +153,9 @@ def materialize(path, specification, namespace, base_dir, *, max_requests=None, 
         raise ValueError("request plan destination must be fresh")
     temporary = path.with_suffix(path.suffix + ".pending")
     try:
-        semantics = source.write_trace(temporary, namespace, base_dir, max_requests=max_requests, captured=captured)
+        semantics = writer(temporary)
         resolved_source = dict(specification)
-        if source.is_lineage:
+        if "source_codec" in semantics:
             resolved_source["version"] = str(semantics["source_codec"]["version"])
         count = validate_plan(temporary, namespace)
         digest = sha256_file(temporary)

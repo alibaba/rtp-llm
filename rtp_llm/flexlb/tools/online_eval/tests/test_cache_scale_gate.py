@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from traffic.traffic_source import materialize
+from traffic.synthetic.generator import materialize
 from diagnostics.workload_profile import run as profile
 from cases.cache_scale_in.analysis import align_send_counters, analyze
 from cases.cache_scale_in.report import prepare_report as read_report

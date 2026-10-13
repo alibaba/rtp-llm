@@ -17,7 +17,7 @@ from scenario.environment_snapshot import EnvironmentSnapshot
 from scenario.backend_spec import make_env_spec
 from traffic import prefix_lineage, prefix_lineage_v3
 from traffic.lineage_model import LineageExpander, LengthSemantics
-from traffic.playback.intensity import RateCurve, LinearRetentionSchedule, SequenceRetentionSchedule
+
 from test_scenario_runtime import source, Backend, Clock
 
 
@@ -110,18 +110,6 @@ def test_lineage_length_units_and_reserved_partial_labels_stay_distinct():
         list(LineageExpander(exact, label_limit=3))
 
 
-def test_playback_objects_enforce_curve_and_lap_contracts():
-    curve = RateCurve.read([[0, .5], [10, 3], [20, 1]])
-    assert [curve.integral(t) for t in (10, 20, 30)] == [17.5, 37.5, 47.5]
-    linear = LinearRetentionSchedule(0, 1, 3)
-    sequence = SequenceRetentionSchedule((1, .5, 0))
-    assert [linear.probability(lap) for lap in (1, 2, 3, 4)] == [0, .5, 1, 1]
-    assert [sequence.probability(lap) for lap in (1, 2, 3, 4)] == [1, .5, 0, 0]
-    with pytest.raises(ValueError):
-        RateCurve.read([[0, 1], [0, 2]])
-    with pytest.raises(ValueError):
-        sequence.probability(0)
-
 
 def test_freezing_preserves_collection_definition_order(tmp_path):
     from pathlib import Path
@@ -170,10 +158,3 @@ def test_report_adapter_cannot_rewrite_frozen_gate_verdict(tmp_path, fails):
     assert outcome.delivery == "ERROR"
     assert outcome.validity == "VALID"
     assert result.to_dict()["status"] == "ERROR"
-
-
-def test_explicit_null_seed_is_not_treated_as_an_absent_seed():
-    from traffic.playback.intensity import PlaybackIntensity
-    with pytest.raises(ValueError, match="seed"):
-        PlaybackIntensity.read({"arrival": "deterministic", "seed": None}, mode="uniform",
-                               identity="structural-relabel", scalar_present=False, legacy_pacing=False)

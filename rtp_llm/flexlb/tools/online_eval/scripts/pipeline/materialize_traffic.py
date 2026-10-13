@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a Java load-client plan from one of the two registered traffic sources."""
+"""Materialize a captured lineage source into a canonical request plan."""
 
 import argparse
 import json

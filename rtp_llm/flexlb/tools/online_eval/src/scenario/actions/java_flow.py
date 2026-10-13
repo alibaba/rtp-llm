@@ -23,7 +23,7 @@ def _start_validate(params, plan):
     if ("source" in p) == ("trace" in p):
         raise ValueError("specify exactly one traffic source")
     if "trace" in p:
-        raise ValueError("legacy trace shorthand retired; use synthetic/realistic/1")
+        raise ValueError("legacy trace shorthand retired; use trace/prefix_lineage")
     if not all(
         isinstance(p[k], str) and p[k]
         for k in ("group_id", "phase_id", "jvm_xms", "jvm_xmx")
@@ -40,9 +40,7 @@ def _start_validate(params, plan):
     if "max_requests" in p and (type(p["max_requests"]) is not int or not 1 <= p["max_requests"] <= 1000000):
         raise ValueError("max_requests must be a positive bounded request count")
     SourceSpecification.read(p["source"])
-    client, _ = client_environment(java_client_priority(p["source"], p["client"]))
-    if p["source"].get("kind") == "synthetic" and client.get("SEND_MODE") == "replay":
-        raise ValueError("statistical source requires client-paced uniform/burst/gradient playback")
+    client_environment(java_client_priority(p["source"], p["client"]))
     return p
 
 
@@ -65,7 +63,7 @@ def _start(ctx, p, deadline):
             Path(ctx.instance["source_path"]).parent,
             max_requests=p.get("max_requests"),
         )
-    environment, playback = client_environment(java_client_priority(p["source"], p["client"]))
+    environment = java_client_priority(p["source"], p["client"])
     client = ClientOps(ctx.backend.manager, p["jvm_xms"], p["jvm_xmx"])
     # This is a retained-evidence ceiling, not a prediction of Java scheduling.
     # The journal grows on demand and fails explicitly when the ceiling is exceeded.

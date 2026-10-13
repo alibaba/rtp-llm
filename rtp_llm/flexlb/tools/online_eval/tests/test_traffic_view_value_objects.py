@@ -27,14 +27,12 @@ def test_raw_environment_has_the_same_scalar_admission(raw):
 
 
 def test_playback_value_object_and_complete_projection():
-    authored = dict(mode='uniform', qps=13, identity='partial', seed=5,
-                    retain_schedule=dict(kind='sequence', values=[0, .5, 1]))
+    authored = dict(mode='uniform', qps=13, identity='structural-relabel', max_laps=3, ramp_up_seconds=2)
     config = PlaybackConfigurationCodec.decode(authored)
     env, projection = normalize({'playback': authored})
     decoded = PlaybackConfigurationCodec.from_environment(env)
     assert config == decoded
     assert projection == decoded.to_dict()
-    assert config.intensity.retain_schedule.probability(2) == .5
     with pytest.raises(ValueError):
         normalize({'playback': None})
 
@@ -78,9 +76,10 @@ def test_panel_relations_fail_at_admission(mutation):
             view('cache_scale_in.yaml')
 
 
-def test_deterministic_curve_roundtrip_uses_one_seed_default():
-    config = PlaybackConfigurationCodec.decode(dict(mode='uniform', qps=10, rate_curve=[[0, 1], [5, 2]]))
-    assert config == PlaybackConfigurationCodec.from_environment(config.environment())
+def test_timestamp_playback_roundtrip():
+    config = PlaybackConfigurationCodec.decode(dict(mode='true-ts', speed=4, max_laps=3))
+    restored = PlaybackConfigurationCodec.from_environment(config.environment())
+    assert restored.environment() == config.environment()
 
 
 def test_cache_subtitle_fields_are_producer_scoped():

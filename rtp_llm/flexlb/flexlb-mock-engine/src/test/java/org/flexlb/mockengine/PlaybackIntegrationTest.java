@@ -23,8 +23,7 @@ class PlaybackIntegrationTest {
         Files.writeString(trace,rows);
         JavaLoadClient.Config config=new JavaLoadClient.Config(
             trace.toString(),"127.0.0.1:1","127.0.0.1:1",2,64,4.0,1,out.toString(),1,0,0,
-            1000L,500.0,false,false,1,1,0L,2,true,"engine_service","",
-            false,10,1000,0,0,"",false,"",false,0,0,mode,240.0,false);
+            1000L,500.0,false,false,1,1,0L,2,true,"engine_service","",0,0,"",false,"",false,0,0,mode,240.0,false);
         try(JavaLoadClient client=new JavaLoadClient(config)) {
             var field=JavaLoadClient.class.getDeclaredField("scheduleStubs");field.setAccessible(true);
             var stubs=(FlexlbServiceGrpc.FlexlbServiceBlockingStub[])field.get(client);

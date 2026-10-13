@@ -165,7 +165,6 @@ public final class JavaLoadClient implements AutoCloseable {
     private Playback playback;
     private long tokenStride = 1;
     private FlowControl flowControl;
-    private volatile double lastGradientLogS = -10.0;
     final List<String> fallbackPrefillAddrs = new ArrayList<>();
     final List<String> fallbackDecodeAddrs = new ArrayList<>();
     private final AtomicInteger fallbackPrefillRR = new AtomicInteger();
@@ -239,11 +238,6 @@ public final class JavaLoadClient implements AutoCloseable {
                 || config.replayUniquePrefix || config.forcePriority > 0)) {
             throw new IllegalArgumentException("controlled traces forbid truncation, prefix salting and priority overrides");
         }
-        if (playback.controls.enabled() && (config.maxInputLen > 0 || config.maxOutputLen > 0
-                || config.replayUniquePrefix || config.forcePriority > 0 || config.gradient))
-            throw new IllegalArgumentException("advanced playback requires canonical trace without runtime overrides");
-        if (playback.controls.curve != null && !config.isUniform() && config.replaySpeed <= 0)
-            throw new IllegalArgumentException("replay rate_curve requires positive REPLAY_SPEED");
         List<TraceRecord> records = loadTrace(config.traceFile);
         if (records.isEmpty()) {
             throw new RuntimeException("no replayable requests loaded from " + config.traceFile);
@@ -254,7 +248,7 @@ public final class JavaLoadClient implements AutoCloseable {
         // Playback owns wall duration and explicit laps. Source timestamps
         // must not be truncated before replay-speed scaling or sharding.
         boolean cyclic = playback.maxLaps != 1;
-        if (!playback.controls.enabled()) records = filterAndShard(records,
+        records = filterAndShard(records,
                 0,
                 cyclic ? 0 : config.limit,
                 config.numShards, config.shardIndex);
@@ -296,7 +290,7 @@ public final class JavaLoadClient implements AutoCloseable {
         playbackManifest.put("speed", config.replaySpeed);
         playbackManifest.put("ramp_up_seconds", config.rampUpSeconds);
         // Additive evidence also covers output-only trace transformations; scheduling is unchanged.
-        playbackManifest.putIfAbsent("planner_version", "PLAYBACK_LEGACY_V1");
+        playbackManifest.put("planner_version", "PLAYBACK_V1");
         playbackManifest.put("trace_sha256", PlaybackPlan.sha256(Path.of(config.traceFile)));
         playbackManifest.put("num_shards", config.numShards);
         playbackManifest.put("shard_index", config.shardIndex);
@@ -306,7 +300,7 @@ public final class JavaLoadClient implements AutoCloseable {
         playbackManifest.put("trace_span_ms", sourceSpanMs);
         playbackManifest.put("token_stride", tokenStride);
         playbackManifest.put("offline_plan_supported", config.maxInputLen == 0 && config.maxOutputLen == 0
-                && config.forcePriority == 0 && !config.gradient);
+                && config.forcePriority == 0);
         MAPPER.writeValue(Path.of(config.outputDir,"playback.json").toFile(), playbackManifest);
         String controlDirectory = System.getenv("FLOW_CONTROL_DIR");
         if (controlDirectory != null && !controlDirectory.isBlank()) {
@@ -337,24 +331,6 @@ public final class JavaLoadClient implements AutoCloseable {
         long firstTsMs = sourceFirstTsMs;
         long traceSpanMs = sourceSpanMs;
 
-        if (config.gradient && config.isUniform()) {
-            System.out.println("WARNING: GRADIENT is ignored in uniform send mode");
-        }
-        if (!config.isUniform() && config.rampUpSeconds > 0) {
-            System.out.println("WARNING: RAMP_UP_SECONDS is ignored outside "
-                    + "uniform send mode");
-        }
-        if (config.gradient && !config.isUniform() && config.durationS <= 0) {
-            System.out.println("WARNING: GRADIENT requires DURATION_S > 0, "
-                    + "falling back to fixed replay_speed");
-        }
-        if (config.gradient && !config.isUniform() && config.durationS > 0) {
-            int startSpeed = Math.max(1, config.gradientStartSpeed);
-            System.out.println("gradient mode: speed will increase from " + startSpeed
-                    + "x to " + config.gradientMaxSpeed + "x over "
-                    + config.durationS + "s");
-        }
-
         if (config.startAtEpochMs > 0) {
             long waitMs = config.startAtEpochMs - System.currentTimeMillis();
             if (waitMs > 0) {
@@ -374,20 +350,12 @@ public final class JavaLoadClient implements AutoCloseable {
         List<Future<RequestResult>> futures = new ArrayList<>();
         int sentCount = 0;
         int loopIdx = 0;
-        Playback.Clock playbackClock = playback.new Clock();
 
         if (flowControl != null) flowControl.sending();
         sending:
         while (true) {
-            int sourceIndex = -1;
             for (TraceRecord record : records) {
-                sourceIndex++;
-                long globalIndex = playback.controls.enabled() ? (long)loopIdx*records.size()+sourceIndex
-                        : (long)sentCount*config.numShards+config.shardIndex;
-                if (playback.controls.enabled()) {
-                    if (config.limit > 0 && globalIndex >= config.limit) break sending;
-                    if (globalIndex % config.numShards != config.shardIndex) continue;
-                }
+                long globalIndex = (long)sentCount * config.numShards + config.shardIndex;
                 if (flowControl != null && flowControl.stopRequested()) break sending;
                 if (config.durationS > 0) {
                     if ((System.nanoTime() - replayStartedNanos) / 1_000_000_000L >= config.durationS) {
@@ -398,23 +366,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     break;
                 }
 
-                // Parity with Python: gradient mode ramps speed linearly from
-                // start to max over the duration window.
-                double currentSpeed;
-                if (config.gradient && !config.isUniform() && config.durationS > 0) {
-                    double elapsedS = (System.nanoTime() - replayStartedNanos) / 1_000_000_000.0;
-                    currentSpeed = gradientSpeed(elapsedS, config.durationS,
-                            config.gradientStartSpeed, config.gradientMaxSpeed);
-                    double progress = Math.min(elapsedS / config.durationS, 1.0);
-                    if (elapsedS - lastGradientLogS >= 10) {
-                        lastGradientLogS = elapsedS;
-                        System.out.println(String.format(
-                                "gradient speed: %.1fx (progress %.1f%%, elapsed %.1fs/%ds)",
-                                currentSpeed, progress * 100, elapsedS, config.durationS));
-                    }
-                } else {
-                    currentSpeed = config.replaySpeed;
-                }
+                double currentSpeed = config.replaySpeed;
 
                 double dueSeconds = 0;
                 if (config.isUniform()) {
@@ -425,7 +377,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     // linear-QPS-climb schedule (see uniformDueSeconds):
                     // pacing lag keeps measuring send_start against the
                     // ramped ideal schedule, so it is not polluted by ramp.
-                    dueSeconds = playbackClock.due(globalIndex,
+                    dueSeconds = uniformDueSeconds(globalIndex,
                             config.sendModeQps, config.rampUpSeconds);
                     if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
@@ -439,7 +391,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     }
                 } else if (currentSpeed > 0) {
                     long loopOffsetMs = (long) loopIdx * traceSpanMs;
-                    dueSeconds = playback.controls.inverse((record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed);
+                    dueSeconds = (record.tsMs - firstTsMs + loopOffsetMs) / 1000.0 / currentSpeed;
                     if (config.durationS > 0 && dueSeconds >= config.durationS) break sending;
                     long dueNanos = replayStartedNanos + (long) (dueSeconds * 1_000_000_000L);
                     long sleepNanos = dueNanos - System.nanoTime();
@@ -693,7 +645,7 @@ public final class JavaLoadClient implements AutoCloseable {
         Playback policy = playback != null ? playback : new Playback(Map.of("MAX_LAPS","1"), false, config.durationS);
         if (req.tokenIds == null) throw new IllegalArgumentException("lap relabel requires token-backed plans");
         if (playback == null) tokenStride = req.tokenIds.stream().mapToLong(t -> (long)t+1).max().orElse(1);
-        List<Integer> tokens = policy.relabel(req.tokenIds, req.blockKeys, req.cacheKeyBlockSize, loopIdx, tokenStride);
+        List<Integer> tokens = policy.relabel(req.tokenIds, loopIdx, tokenStride);
         List<Long> blockKeys = tokens == req.tokenIds ? req.blockKeys : computeBlockKeys(tokens, req.cacheKeyBlockSize);
         return new TraceRecord(newRequestId, newSourceRid, newTraceId, req.tsMs,
                 req.inputLen, req.outputLen, blockKeys, tokens, req.priority, req.cacheKeyBlockSize, loopIdx);
@@ -1283,8 +1235,7 @@ public final class JavaLoadClient implements AutoCloseable {
     private List<TraceRecord> loadTrace(String path) throws IOException {
         List<TraceRecord> records = new ArrayList<>();
         java.util.Set<Long> controlledIds = new java.util.HashSet<>();
-        boolean strict = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank()
-                || (playback != null && playback.controls.enabled());
+        boolean strict = !System.getenv().getOrDefault("FLOW_CONTROL_DIR", "").isBlank();
         try (java.io.BufferedReader reader = Files.newBufferedReader(Path.of(path))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -1871,16 +1822,6 @@ public final class JavaLoadClient implements AutoCloseable {
     }
 
     /**
-     * Linear gradient replay speed (parity with Python gradient pacing): speed ramps
-     * from max(1, startSpeed) to maxSpeed as elapsed time progresses over duration.
-     */
-    static double gradientSpeed(double elapsedS, int durationS, int gradientStartSpeed, int gradientMaxSpeed) {
-        double progress = Math.min(Math.max(elapsedS, 0.0) / durationS, 1.0);
-        int startSpeed = Math.max(1, gradientStartSpeed);
-        return startSpeed + (gradientMaxSpeed - startSpeed) * progress;
-    }
-
-    /**
      * Ideal send time of the {@code index}-th request (0-based, per shard) in
      * uniform mode with traffic ramp-up.
      *
@@ -2001,9 +1942,6 @@ public final class JavaLoadClient implements AutoCloseable {
         final boolean skipServerLatency;
         final String model;
         final String apiKey;
-        final boolean gradient;
-        final int gradientStartSpeed;
-        final int gradientMaxSpeed;
         final int maxInputLen;
         final int maxOutputLen;
         final String pushgatewayUrl;
@@ -2054,16 +1992,14 @@ public final class JavaLoadClient implements AutoCloseable {
                boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun) {
             this(traceFile, targetAddr, grpcTarget, durationS, maxConcurrency, replaySpeed,
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
                     slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
+                    skipServerLatency, model, apiKey, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, 0, 0, "replay", 0.0,
                     true);
         }
@@ -2075,8 +2011,7 @@ public final class JavaLoadClient implements AutoCloseable {
                boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority) {
@@ -2084,8 +2019,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
                     slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
+                    skipServerLatency, model, apiKey, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
                     0, "replay", 0.0, true);
         }
@@ -2097,8 +2031,7 @@ public final class JavaLoadClient implements AutoCloseable {
                boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority, int forcePriority, String sendMode, double sendModeQps,
@@ -2107,8 +2040,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
                     slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
+                    skipServerLatency, model, apiKey, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
                     forcePriority, sendMode, sendModeQps, 0.0, replayUniquePrefix,
                     List.of());
@@ -2126,8 +2058,7 @@ public final class JavaLoadClient implements AutoCloseable {
                boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority, int forcePriority, String sendMode, double sendModeQps,
@@ -2136,8 +2067,7 @@ public final class JavaLoadClient implements AutoCloseable {
                     loadClientWorkers, outputDir, numShards, shardIndex, limit, timeoutMs,
                     slaTtftMs, fetchOutputStream, loop, nChannels,
                     eventLoopThreads, startAtEpochMs, responseTimeoutSeconds,
-                    skipServerLatency, model, apiKey, gradient,
-                    gradientStartSpeed, gradientMaxSpeed, maxInputLen, maxOutputLen,
+                    skipServerLatency, model, apiKey, maxInputLen, maxOutputLen,
                     pushgatewayUrl, enableFallback, endpointsFile, dryRun, priority,
                     forcePriority, sendMode, sendModeQps, rampUpSeconds,
                     replayUniquePrefix, List.of());
@@ -2150,8 +2080,7 @@ public final class JavaLoadClient implements AutoCloseable {
                boolean fetchOutputStream, boolean loop,
                int nChannels, int eventLoopThreads, long startAtEpochMs,
                int responseTimeoutSeconds, boolean skipServerLatency,
-               String model, String apiKey, boolean gradient,
-               int gradientStartSpeed, int gradientMaxSpeed,
+               String model, String apiKey,
                int maxInputLen, int maxOutputLen, String pushgatewayUrl,
                boolean enableFallback, String endpointsFile, boolean dryRun,
                int priority, int forcePriority, String sendMode, double sendModeQps,
@@ -2180,9 +2109,6 @@ public final class JavaLoadClient implements AutoCloseable {
             this.skipServerLatency = skipServerLatency;
             this.model = model;
             this.apiKey = apiKey;
-            this.gradient = gradient;
-            this.gradientStartSpeed = gradientStartSpeed;
-            this.gradientMaxSpeed = gradientMaxSpeed;
             this.maxInputLen = maxInputLen;
             this.maxOutputLen = maxOutputLen;
             this.pushgatewayUrl = pushgatewayUrl;
@@ -2314,9 +2240,6 @@ public final class JavaLoadClient implements AutoCloseable {
                     envBool("SKIP_SERVER_LATENCY", false),
                     env("MODEL", "engine_service"),
                     env("API_KEY", ""),
-                    envBool("GRADIENT", false),
-                    envInt("GRADIENT_START_SPEED", 10),
-                    envInt("GRADIENT_MAX_SPEED", 1000),
                     envInt("MAX_INPUT_LEN", 0),
                     envInt("MAX_OUTPUT_LEN", 0),
                     env("PUSHGATEWAY_URL", ""),
@@ -2369,9 +2292,6 @@ public final class JavaLoadClient implements AutoCloseable {
             System.out.println("  MODEL=" + model);
             System.out.println("  API_KEY=" + (apiKey.isEmpty() ? "<empty>" : "<set>"));
             System.out.println("  FETCH_OUTPUT_STREAM=" + fetchOutputStream);
-            System.out.println("  GRADIENT=" + gradient);
-            System.out.println("  GRADIENT_START_SPEED=" + gradientStartSpeed);
-            System.out.println("  GRADIENT_MAX_SPEED=" + gradientMaxSpeed);
             System.out.println("  MAX_INPUT_LEN=" + maxInputLen);
             System.out.println("  MAX_OUTPUT_LEN=" + maxOutputLen);
             System.out.println("  PUSHGATEWAY_URL=" + pushgatewayUrl);

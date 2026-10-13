@@ -42,10 +42,14 @@ class TrafficEntrypointTest(unittest.TestCase):
                     suffix_blocks=1, zipf_alpha=1, cold_fraction=0,
                     output_tokens=4))))
             synthetic = directory / "synthetic.jsonl"
-            subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
+            subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/generate_synthetic.py"),
                             "--spec", str(spec), "--namespace", "check",
                             "--max-requests", "2", "--out", str(synthetic)], check=True, capture_output=True)
             self.assertEqual(2, len(synthetic.read_text().splitlines()))
+            failed_source = subprocess.run([sys.executable, str(ROOT / 'scripts/pipeline/materialize_traffic.py'),
+                '--spec', str(spec), '--namespace', 'check', '--out', str(directory / 'rejected.jsonl')], capture_output=True)
+            self.assertNotEqual(0, failed_source.returncode)
+            self.assertFalse((directory / 'rejected.jsonl').exists())
             model.write_bytes(model.read_bytes() + b"tampered")
             failed = subprocess.run([sys.executable, str(ROOT / "scripts/pipeline/materialize_traffic.py"),
                                      "--lineage-model", str(model), "--namespace", "bad",

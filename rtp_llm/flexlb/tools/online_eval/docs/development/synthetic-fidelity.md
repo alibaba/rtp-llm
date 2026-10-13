@@ -1,12 +1,12 @@
 # 合成输入保真度与独立观察工具
 
 参数化合成用于控制变量实验。它保留家族与 Zipf 抽象，不能仅凭输入长度相似就当作真实 cache 工作负载。
-使用 `scripts/commands/compare_traffic.py` 独立对比生产生成器和真实捕获；它输出 HTML、Markdown、JSON，
+使用 `scripts/commands/compare_traffic.py` 独立对比离线生成器和真实捕获；它输出 HTML、Markdown、JSON，
 不会接入实验报告层，也不会在 workload 执行或流量物化时自动生成报告。
 
 ## 采用的方法
 
-生产 `realistic` 现有两种显式采样语义：
+离线 `realistic` 现有两种显式采样语义：
 
 - `sampling: independent`：默认兼容路径，长度经验 ICDF 加固定家族深度。保留旧 seed 的请求字节；只有这一份兼容实现，报告侧不再复制独立采样生成器。
 - `sampling: joint`：从暖请求 `(blocks, shared_blocks)` 联合池采样，并从冷请求长度池采样冷请求。每个家族维护可增长的固定前缀，取联合对指定的深度，再分配私有后缀。允许真实数据中的全长共享。家族首次出现或首次增长的前缀仍是冷的，分析时照实计入。
@@ -16,21 +16,30 @@
 不保存原始文本、token 或事件顺序。schema 1 画像仍支持独立采样；没有联合字段时显式请求 joint 会失败，
 不会静默推断新结构。schema 2 也不会自动切换现有 seed 的采样方法。
 
-两种方法共用生产请求迭代器和写盘实现。长度 CDF 预计算一次，避免每条请求重复构造权重累计数组；
+两种方法共用离线请求迭代器和写盘实现。长度 CDF 预计算一次，避免每条请求重复构造权重累计数组；
 独立采样的 RNG 次序不变。输出长度仍用独立 RNG、由用户指定。joint 不支持 pinned/global prefix/session 生长覆盖，
 也不接受独立长度/深度覆盖，避免混合含义不清的规则。家族数、热度与冷比例仍可作受控实验变量。
 
-合成 source 示例：
+离线 spec 示例（不能写入场景 traffic.source）：
 
 ```json
 {"kind":"synthetic","model":"realistic","version":"1","parameters":{"profile":"<profile-name>","sampling":"joint","seed":42,"count":10000,"output_tokens":420}}
 ```
 
-`traffic.synthetic.derivation` 是类型化统计参数反推库，CLI 位于 `scripts/pipeline/derive_synthetic_profile.py`，导出旧字段与联合池。报告不另写一份参数反推逻辑。
+从 spec 生成标准请求计划与 manifest：
+
+```bash
+python3 scripts/pipeline/generate_synthetic.py --spec <synthetic-spec.json> \
+  --namespace <experiment-id> --out <requests.jsonl>
+```
+
+生成器、profile 标定和保真度对比不参与场景启动。生成的 JSONL 可用于独立诊断或直接启动 Java 客户端，内容规则和输入摘要在 manifest 中记录。
+
+`traffic.synthetic.derivation` 是类型化统计参数反推库，CLI 位于 `scripts/pipeline/derive_synthetic_profile.py`，导出类型化模型的统计参数与联合池。报告不另写一份参数反推逻辑。
 现有 `capture_frontend_prefix`、`fit_frontend_prefix`、`prefix_lineage`、`datasets/describe_traffic` 和
 `scripts/commands/profile_workload.py` 分别承担采集、真实 DAG 拟合、编解码、文件描述和 LRU 诊断，仍有独立用途。
 
-保真度计算由 `analysis.traffic_fidelity` 提供；文件读取、拟合身份审计和生产生成器调用由 `diagnostics.traffic_fidelity` 编排。捕获加载时固定已解码模型和内容 SHA；观察与参数反推共用此快照，不重新读取文件，避免将旧观察与新拟合混用。前缀/LRU 计算由 `analysis.workload_profile.profile` 消费规范化迭代器，`diagnostics.workload_profile.run` 负责读取 token plan，命令入口为 `scripts/commands/profile_workload.py`。
+保真度计算由 `analysis.traffic_fidelity` 提供；文件读取、拟合身份审计和离线生成器调用由 `diagnostics.traffic_fidelity` 编排。捕获加载时固定已解码模型和内容 SHA；观察与参数反推共用此快照，不重新读取文件，避免将旧观察与新拟合混用。前缀/LRU 计算由 `analysis.workload_profile.profile` 消费规范化迭代器，`diagnostics.workload_profile.run` 负责读取 token plan，命令入口为 `scripts/commands/profile_workload.py`。
 
 ## 使用
 
@@ -58,13 +67,13 @@ python3 scripts/commands/compare_traffic.py --profile /path/to/profile.json \
 JSON 保留精确直方计数、未舍入标量、seed、画像和捕获 SHA。相同输入路径与参数输出字节一致；HTML 无外链依赖。
 
 画像审计复用唯一参数反推实现，检查源 SHA、provenance、所有反推参数、targets 及可用的 fit-report digest，
-不会只打印失败却仍退出 0。正常单测发现与 `.github/workflows/traffic-fidelity.yml` 都运行该审计。
+不会只打印失败却仍退出 0。单测覆盖审计计算；离线诊断不属于 workload CI 的运行集。
 手写、未声称来自真实捕获的合成形状不受经验参数等值检查。
 
 ## 指标与结论的边界
 
-共享深度从生产输出的标签与此前所有请求最长公共前缀重算；使用压缩 radix trie，避免保留展开后的每个 token。
-家族统计与真实侧统一按前 8 个 block 聚类。标量分位数使用 `datasets.distribution` 的 nearest-rank；
+共享深度从生成输出的标签与此前所有请求最长公共前缀重算；使用压缩 radix trie，避免保留展开后的每个 token。
+家族统计与真实侧统一按前 8 个 block 聚类。标量分位数使用 `traffic.statistics.distribution` 的 nearest-rank；
 旧画像 targets 审计继续使用原反推的 floor-ICDF 口径，以保持历史声明可重算。
 
 joint TV 使用 log₂(token) 9–21 的 32 桶和共享深度 0–2000 blocks 的 16 桶，越界归入边界桶。

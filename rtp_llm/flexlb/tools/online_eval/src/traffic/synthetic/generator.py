@@ -107,3 +107,14 @@ def write_trace(path, parameters, namespace, base_dir=None, *, max_requests=None
                 arrival='ORDINAL_PACED_BY_CLIENT', tail='EXACT_CONFIGURED_LENGTHS',
                 calibration=derivation, held_out_validated=False, sampling=workload.sampling,
                 output_model='INDEPENDENT_EXPLICIT_DISTRIBUTION')
+
+
+def materialize(path, specification, namespace, base_dir, *, max_requests=None):
+    """Offline-only synthetic plan generation for diagnostics or direct Java use."""
+    from traffic.traffic_source import publish_plan
+    if (not isinstance(specification, dict) or set(specification) != {'kind', 'model', 'version', 'parameters'}
+            or (specification['kind'], specification['model'], specification['version']) != ('synthetic', 'realistic', '1')):
+        raise ValueError('offline generator requires synthetic/realistic/1 specification')
+    return publish_plan(path, specification, namespace, base_dir,
+        lambda temporary: write_trace(temporary, specification['parameters'], namespace,
+                                      base_dir, max_requests=max_requests), max_requests=max_requests)

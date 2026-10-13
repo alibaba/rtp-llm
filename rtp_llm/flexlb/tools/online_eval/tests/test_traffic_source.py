@@ -3,7 +3,8 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from traffic.traffic_source import materialize,validate_plan,SOURCES
+from traffic.traffic_source import materialize,validate_plan,SourceSpecification
+from traffic.synthetic.generator import materialize as generate
 from traffic.prefix_lineage import encode,decode
 from traffic.lineage_model import LineageModel, LineageExpander
 from traffic.playback.configuration import normalize
@@ -11,7 +12,8 @@ from traffic.playback.configuration import normalize
 
 class TrafficSourceTest(unittest.TestCase):
     def test_generator_versions_are_separate_from_capture_codecs(self):
-        self.assertEqual(set(SOURCES),{('synthetic','realistic','1')})
+        with self.assertRaisesRegex(ValueError, 'offline'):
+            SourceSpecification.read(dict(kind='synthetic', model='realistic', version='1', parameters={}))
 
     def test_lineage_true_timestamps_and_old_label_allocation(self):
         events=[[0,1537,-1,0],[51,2050,0,2],[999,1025,1,1],[1000,100,-1,0]]
@@ -60,17 +62,17 @@ class TrafficSourceTest(unittest.TestCase):
                 seed=5,count=30,families=2,prefix_blocks=2,zipf_alpha=1,cold_fraction=0.2,
                 input_distribution=dict(values=[600000],weights=[1]),
                 output_distribution=dict(values=[8,64],weights=[1,1])))
-            one=materialize(Path(d)/'a.jsonl',spec,'r',d)
+            one=generate(Path(d)/'a.jsonl',spec,'r',d)
             rows=[json.loads(l) for l in one.read_text().splitlines()]
             self.assertTrue(all(len(r['input_token_blocks'])>1024 for r in rows))
             self.assertEqual({r['ol'] for r in rows},{8,64})
             spec['parameters']['output_distribution']=dict(values=[1],weights=[1])
-            two=materialize(Path(d)/'b.jsonl',spec,'r',d)
+            two=generate(Path(d)/'b.jsonl',spec,'r',d)
             second=[json.loads(l) for l in two.read_text().splitlines()]
             self.assertEqual([r['input_token_blocks'] for r in rows],[r['input_token_blocks'] for r in second])
 
     def test_playback_explicit_laps_and_no_duplicate_controls(self):
-        env,p=normalize(dict(DURATION_S='60',playback=dict(mode='burst',qps=20,burst_factor=5,max_laps=0)))
+        env,p=normalize(dict(DURATION_S='60',playback=dict(mode='uniform',qps=20,ramp_up_seconds=2,max_laps=0)))
         self.assertEqual(env['LOOP'],'true');self.assertEqual(p['identity'],'structural-relabel')
         with self.assertRaises(ValueError):normalize(dict(playback=dict(mode='uniform',qps=1,max_laps=0)))
         with self.assertRaises(ValueError):normalize(dict(SEND_MODE='uniform',playback=dict(mode='uniform',qps=1)))

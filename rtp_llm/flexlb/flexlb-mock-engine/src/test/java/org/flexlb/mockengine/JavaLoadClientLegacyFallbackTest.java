@@ -61,8 +61,7 @@ class JavaLoadClientLegacyFallbackTest {
                 "trace.jsonl", "127.0.0.1:7001", UNREACHABLE_MASTER,
                 0, 4, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 2_000L, 500.0, fetch, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "",
+                "engine_service", "", 0, 0, "",
                 enableFallback, "", false);
         return new JavaLoadClient(config);
     }

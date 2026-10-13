@@ -6,21 +6,21 @@
 |---|---|---|
 | 解码 | 按 manifest 版本校验 SHA、块大小和 DAG 引用，恢复规范事件及匿名标签 | 不按长度筛选、不重采样输出、不决定条数或节奏。版本/块大小由 `traffic.codecs` 与各 codec 拒绝不匹配输入。 |
 | 转换 | 在完整展开后做输入长度**过滤**、输出分布采样、请求条数限制，或为派生匿名模板做输入长度**截断** | 不改写源 `.xz`；`lineage_transforms` 校验参数并保留被排除父请求的标签，`derive_master_templates` 对截断量计数。新增变换须记录源 SHA、参数、选中/排除或截断量。 |
-| 播放 | 配置/推演速率和循环；Java 客户端依据摊平 JSONL 控制发送 | 不读 `.xz`/DAG、不按 `il` 或标签改内容。`traffic_source.validate_plan` 校验摊平行，Java `filterAndShard` 只按时长、数量和 shard 控制；新增 Java 内容变换属评审约束，当前无独立静态检查。 |
+| 播放 | 配置速率和循环；Java 客户端依据摊平 JSONL 控制发送 | 不读 `.xz`/DAG、不按 `il` 或标签改内容。`traffic_source.validate_plan` 校验摊平行，Java `filterAndShard` 只按时长、数量和 shard 控制；新增 Java 内容变换属评审约束，当前无独立静态检查。 |
 
 源 `.xz` 与 sidecar SHA 不可变；场景使用 `path + count` 选择输入，不声明预期 SHA；生成时计算实际源文件摘要并写入 manifest。转换必须保持 `shared ≤ parent.blocks`，先展开所有父事件再过滤，不能把被排除父请求从标签空间删除。`input_length_filter` **丢弃整请求**，不缩短其输入；`fixture_shape_clip` **截断输入**并记录删去 token，二者不可同名混用。`request_limit` 在过滤之后计数，输出长度分布按原始事件索引采样。产物 manifest 的 `transformations` 保留源 SHA、应用项和影响计数；未转换时 `applied: []`。捕获行契约另见 [数据规则](../../data/README.md)。
 
 ## 源层只生成内容
 
-真实流量通过统一 `trace/prefix_lineage` 入口加载，codec 由数据内容确定；合成流量的版本指定生成算法。功能场景内联 `requests:` 不变。
+场景通过统一 `trace/prefix_lineage` 入口加载真实流量，codec 由数据内容确定。合成生成器只用于离线工具，不注册为场景 source。功能场景内联请求不变。
 
 | 源 | 数据 | 时间字段 | 口径 |
 |---|---|---|---|
 | `trace/prefix_lineage/3` | SHA 固定的 XZ 精确长度模型 | 原始相对毫秒 | 新采集默认；完整块共享，残缺尾块私有，总长精确 |
 | `trace/prefix_lineage/2` | SHA 固定的 XZ 列式模型 | 原始相对毫秒 | 实测前缀结构；token 长度块对齐有损 |
-| `synthetic/realistic/1` | seed、长度分布、族/会话、精确块 | 请求序号 | 参数分布；客户端负责节奏 |
+| 离线 `synthetic/realistic/1` | seed、长度分布、族/会话、精确块 | 请求序号 | 参数分布；客户端负责节奏 |
 
-场景通过 YAML 声明的 source specification 将匿名模型或参数化源物化到运行目录。真实流量只需 `kind`、`model`、`parameters`，不必重复填写数据版本。可选 `version` 是一致性断言：与文件内容不一致即失败，不能强制换解码器。
+场景通过 YAML 声明的 source specification 将匿名模型物化到运行目录。真实流量只需 `kind`、`model`、`parameters`，不必重复填写数据版本。可选 `version` 是一致性断言：与文件内容不一致即失败，不能强制换解码器。
 
 `traffic.codecs.decode_model` 从 v2 二进制 magic 或 v3 envelope 的版本识别格式，并恢复统一 `LineageModel`。不根据文件名、长度是否恰好对齐或解码异常回退猜测。未知版本、损坏数据和 manifest 冲突均拒绝。物化 manifest 同时保存 `requested_source`、包含实际版本的 `source` 和 `source_codec`，自动加载仍保留可复现的格式证据。
 
@@ -95,58 +95,23 @@ python3 scripts/pipeline/derive_synthetic_profile.py --model lineage-model.xz \
 
 ## 播放层
 
-可选曲线、随机到达及逐轮保留计划，见 [播放调节与复现](../development/playback-controls.md)。
+场景 `client.playback` 只声明发送节奏、圈数和跨轮身份。Java 不改变已物化请求的输入长度、输出长度或 priority。操作命令见 [播放与复现](../development/playback-controls.md)。
 
-场景 `client.playback` 显式声明节奏与循环。不能同时混入原始 pacing env。
-原始 Java env 入口仍接受，供直接启动使用；循环须显式声明。场景与 HA 都通过 `adapters.load_client` 校验名称、标量、播放契约及 Fetch/前缀要求，启动边界再次校验。端点、flow 标识、制品目录及采集策略由框架注入；`LIVE_CLIENT_EVENTS`、`COLLECTION_PROFILE`、`CLIENT_MONITORING`、`SKIP_SERVER_LATENCY` 等运行字段不能在 `traffic.client` 声明，即使值与框架相同也报错。有效的最终配置写入 `flow-input.json`，随后直接用于启动。
+- `uniform` 按 QPS 发送，可选 `ramp_up_seconds` 线性升压后保持恒速。
+- `true-ts` 保留真实时间间隔，并用 `speed` 缩放；Java env 对应 `SEND_MODE=replay`。
+- `max_laps` 默认 1；正整数限定圈数，0 表示循环到明确的 `DURATION_S`。uniform 不隐式循环。
+- `identity: structural-relabel` 是默认值；lap 0 保持输入，后续圈对所有 token 加同一圈偏移，再重算块 key。圈内前缀共享不变，各圈 token 区间不相交。
+- `identity: none` 显式保持各圈 token，用于有意测量热缓存。编号空间耗尽时失败，不回绕。
 
-```yaml
-client:
-  DURATION_S: '600'
-  MAX_CONCURRENCY: '8192'
-  FETCH_OUTPUT_STREAM: 'true'
-  REPLAY_UNIQUE_PREFIX: 'false'
-  playback:
-    mode: uniform
-    qps: 240
-    max_laps: 1
-    identity: structural-relabel
-```
+分片按源请求序号固定分配，每圈重复同一子集。uniform 的全局到达序号为 `sent_count × num_shards + shard_index`，各 shard 不把首条请求提前到同一零点。不能整除的分片在多轮下保持各自固定速率；合并后不声明等价于重新全局分片的单客户端序列。LIMIT 保持 Java 发送器的既有条数语义，框架 case 优先在物化时用 `max_requests` 选定输入，不重复设置 LIMIT。
 
-- `uniform`：指定 qps，忽略源时间戳。
-- `true-ts`：仅用于实测源，指定 speed（如 4），保留真实间隔并缩放。
-- `gradient`：指定 qps 与 ramp_up_seconds，线性爬坡后恒速。
-- `burst`：指定 qps、burst_factor、burst_period_seconds、burst_duty，
-  平均周期强度归一化；可叠加 diurnal_amplitude / diurnal_period_seconds。
-  这是确定性周期调制，不冒称已拟合随机 MMPP。
+`DURATION_S` 是墙钟截止，先缩放真实时间再判断。stop/drain 负责停止发行并等待已经发出的请求完成。每条请求证据保留 iteration，不把多轮累计命中率解释为一轮的自然演化。
 
-uniform/gradient 使用积分到达强度的逆函数；burst/节律使用 10ms 积分格，
-在突发边界分段。发送晚到不会改变理想到达时间。多 shard 使用共同 trace
-时间原点和全局序号，分片不能把每个 shard 的首条请求都提前到零时刻。
-DURATION_S 是墙钟截止，先缩放时间再判断，不先截断源时间。
+YAML playback 与裸 pacing env 不能混用；不支持随机到达、任意速率曲线、burst/diurnal 和 partial 身份。无效字段在启动前失败。端点、flow 标识、制品目录及采集策略由框架注入，不能在 `traffic.client` 重复声明。
 
-max_laps 默认 1；0 表示循环到明确的 DURATION_S。没有循环声明就结束，
-uniform 不自动 wrap。每条 issued/terminal/per_request 记录包含 iteration；
-报告列出每轮实际发送窗口，请勿把多轮累计命中率当成一轮的自然演化。
+请求计划 manifest 记录内容变换与 SHA；Java `playback.json` 记录实际发送配置、`PLAYBACK_V1` 和 token stride。框架核对输入 SHA 和启动参数，并将快照嵌入 `flow-input.json` 的 `java_playback`。`PlaybackPlan` 用同一身份映射和发送公式离线重建各圈计划；Python 不实现调度算法。
 
-身份策略：
-
-- `none` 保持 token，用于有意的热缓存上限实验。
-- `structural-relabel` 默认；每轮将 token 映射到不相交的新编号区间，
-  对所有请求和 shard 使用同一映射，再按既有 Java 算法重算所有块 key。消费端的累计前缀/树关系保持，等价保留
-  DAG 共享关系，避免仅改 key[0] 而 token/后续块身份不一致。
-- `partial` 配 retain_probability；每个原始前缀块以可复现概率延续上轮
-  身份。共享块采用相同决策。前面的块变了，后续保留块也未必形成命中，
-  因此 p 是块身份保留率，绝不是跨轮命中率。
-
-token 编号空间耗尽时报错，不能绕回或悄悄碰撞。`REPLAY_UNIQUE_PREFIX` 不用于修改首个 key，场景应使用 playback.identity。
-播放参数写入 flow-input 的 trace manifest 与 Java playback.json。框架在客户端启动后
-校验 Java 快照的输入 SHA、播放参数、planner 版本和 token stride；不一致立即失败。
-快照嵌入 trace manifest 的 `java_playback`，随运行证据保存。多轮 token relabel 由
-Java 执行，离线复现使用 `PlaybackPlan`，不在 Python 中复制该算法。
-
-Python 日志读取器按需保留事件，并以 `MAX_EVIDENCE_EVENTS` 限制证据容量；超出时
-明确失败。该上限不推演 QPS、lap 数或发送时刻，Java 是调度的唯一执行方。
+Python 日志读取器按需保留事件，并以 `MAX_EVIDENCE_EVENTS` 限制证据容量；超出时明确失败。该上限不推演 QPS、lap 数或发送时刻。
 
 ## 比较边界
 
@@ -158,9 +123,9 @@ A/B 检查 codec、realism、tail、arrival 与身份策略，不一致时提示
 
 ## 代码职责
 
-`traffic/synthetic/` 负责统计合成源：`configuration.py` 在 JSON/YAML 输入边界合并画像并解析为 `SyntheticWorkload`，`generator.py` 持有随机流、标签分配器和采样器，`derivation.py` 从固定捕获反推画像参数。独立采样与联合采样使用不同的形状对象；联合池控制长度与深度，独立模式控制固定前缀、会话增长和长度分布。输出采样使用独立随机流。
+`traffic/synthetic/` 负责离线统计合成：`configuration.py` 在离线 JSON 输入边界合并画像并解析为 `SyntheticWorkload`，`generator.py` 持有随机流、标签分配器和采样器，`derivation.py` 从固定捕获反推画像参数。独立采样与联合采样使用不同的形状对象；联合池控制长度与深度，独立模式控制固定前缀、会话增长和长度分布。输出采样使用独立随机流。
 
-`traffic/playback/` 负责回放配置与强度模型。`PlaybackConfigurationCodec` 将 YAML 或 Java 环境变量解析为同一个 `PlaybackConfiguration`，统一校验数值、枚举、圈数及随机种子；Java 环境与归档描述都是该对象的边界投影。Java 仍负责实际发送、节奏与循环。
+`traffic/playback/` 负责回放配置。`PlaybackConfigurationCodec` 将 YAML 或 Java 环境变量解析为同一个 `PlaybackConfiguration`，统一校验数值、枚举、圈数及跨轮身份；Java 环境与归档描述都是该对象的边界投影。Java 仍负责实际发送、节奏与循环。
 
 捕获、谱系编码及投影模块保留在 `traffic/`，按输入契约、格式版本和转换职责划分；模块大小不决定是否单独拆文件。`traffic/token_plan.py` 流式读取 token plan，并统一显式 token 与紧凑块的完整块前缀身份；`analysis/workload_profile.py` 只对规范化请求迭代器计算前缀/LRU，`diagnostics/workload_profile.py` 连接文件读取与分析，命令入口为 `scripts/commands/profile_workload.py`；`analysis/traffic_fidelity.py` 提供纯保真度计算，`diagnostics/traffic_fidelity.py` 负责文件发现、来源审计与拟合生成编排，`reporting/fidelity.py` 负责保真度报告渲染。命令入口和库调用都是有效依赖，不能只根据运行时导入数判断文件是否无用。
 
@@ -168,7 +133,7 @@ A/B 检查 codec、realism、tail、arrival 与身份策略，不一致时提示
 
 `request_rules` 只定义请求数值范围；`contracts` 只做驱动、priority 与门禁覆盖对账。
 合成配置和真实投影不依赖播放配置。`randomness.event_uniform` 是稳定的事件索引随机数
-原语；输出采样和 Java 随机算法对齐使用此口径，不改变已有种子序列。
+原语；输出采样使用此口径，不改变已有种子序列。
 
 `CapturedDataset.read` 校验 sidecar 与文件并返回已解码模型和输入 SHA。
 模板生成、显式 lineage 物化及 profile 标定消费此快照，不再重复读取解压同一标本。

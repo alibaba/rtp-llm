@@ -15,7 +15,7 @@
 
 ## 选择数据
 
-case 在 YAML 的流量源声明中选择 `traffic_trace/` 下的文件。参数化合成使用 `synthetic/realistic/1` 源；
+case 在 YAML 的流量源声明中选择 `traffic_trace/` 下的文件。参数化合成只由离线 `generate_synthetic.py` 工具使用；
 其 `profile` 按 `synthetic_parameters/` 下去掉 `.profile.json` 的文件名选择，也可显式填写生成参数。
 场景在 YAML 中固定输入文件及 SHA，不因目录增加文件而改变默认输入。
 来源、窗口、请求数、统计值、SHA 和反推参数从对应 manifest/profile/config 读取，不在本页列清单。

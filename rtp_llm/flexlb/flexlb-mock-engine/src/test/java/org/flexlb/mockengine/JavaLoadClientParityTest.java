@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Parity tests for JavaLoadClient against the Python reference implementation
- * (the legacy Python load client): shard ordering, gradient pacing,
+ * (the legacy Python load client): shard ordering,
  * length truncation, nearest-rank percentiles, fallback endpoint parsing and
  * pushgateway metric payload format.
  */
@@ -41,8 +41,7 @@ class JavaLoadClientParityTest {
                 "trace.jsonl", "127.0.0.1:7001", "127.0.0.1:7003",
                 0, 16, 10.0, 1, tempDir.resolve("out").toString(), 1, 0, 0,
                 120_000L, 500.0, false, false, 1, 1, 0L, 120, true,
-                "engine_service", "",
-                false, 10, 1000, 0, 0, "", false, "", true);
+                "engine_service", "", 0, 0, "", false, "", true);
         return new JavaLoadClient(config);
     }
 
@@ -198,28 +197,6 @@ class JavaLoadClientParityTest {
         assertEquals(2, shard1.size());
         assertEquals(1, shard1.get(0).requestId);
         assertEquals(5, shard1.get(1).requestId);
-    }
-
-    // ------------------------------------------------------------------
-    // Item 3: gradient pacing — linear ramp from start to max over duration.
-    // ------------------------------------------------------------------
-
-    @Test
-    void gradientSpeedRampsLinearly() {
-        assertEquals(10.0, JavaLoadClient.gradientSpeed(0.0, 60, 10, 1000), 1e-9);
-        assertEquals(1000.0, JavaLoadClient.gradientSpeed(60.0, 60, 10, 1000), 1e-9);
-        // halfway: 10 + (1000 - 10) * 0.5 = 505
-        assertEquals(505.0, JavaLoadClient.gradientSpeed(30.0, 60, 10, 1000), 1e-9);
-    }
-
-    @Test
-    void gradientSpeedClampsProgressAndStartSpeed() {
-        // elapsed beyond duration clamps to max speed
-        assertEquals(1000.0, JavaLoadClient.gradientSpeed(120.0, 60, 10, 1000), 1e-9);
-        // negative elapsed treated as 0
-        assertEquals(10.0, JavaLoadClient.gradientSpeed(-5.0, 60, 10, 1000), 1e-9);
-        // start speed floored at 1 (Python: max(1, gradient_start_speed))
-        assertEquals(1.0, JavaLoadClient.gradientSpeed(0.0, 60, 0, 1000), 1e-9);
     }
 
     // ------------------------------------------------------------------

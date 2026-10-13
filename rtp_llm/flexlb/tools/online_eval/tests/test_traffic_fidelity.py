@@ -68,7 +68,7 @@ class TrafficFidelityTest(unittest.TestCase):
         low=replace(high,shape=JointShape(((20,2),),()))
         self.assertGreater(sum(generated_shape(iter_requests(high,'x'))['shared']),sum(generated_shape(iter_requests(low,'x'))['shared']))
         with tempfile.TemporaryDirectory() as directory:
-            from traffic.traffic_source import materialize
+            from traffic.synthetic.generator import materialize
             root=Path(directory);profile=root/'profile.json';profile.write_text(json.dumps(self.profile))
             with patch('traffic.synthetic.configuration.profile_path',return_value=profile):
                 for name in ('a','b'):
